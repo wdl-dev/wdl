@@ -126,10 +126,10 @@ function throwD1TransportError(err) {
   const timedOut = isD1QueryTimeoutError(err);
   throwD1Payload(
     err instanceof D1ResultUnknownError
-      ? d1ResultUnknownPayload(err.cause)
+      ? d1ResultUnknownPayload()
       : timedOut
         ? d1QueryTimeoutPayload()
-        : d1BackendUnavailablePayload(err),
+        : d1BackendUnavailablePayload(),
     timedOut ? 504 : 503
   );
 }

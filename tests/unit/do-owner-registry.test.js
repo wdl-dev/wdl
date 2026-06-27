@@ -217,7 +217,12 @@ test("DO owner registry: draining task refuses local ownership or takeover", asy
 
   await assert.rejects(
     resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
-    /task-a is draining/
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "task_draining");
+      assert.match(/** @type {Error} */ (err).message, /DO task is draining/);
+      assert.doesNotMatch(/** @type {Error} */ (err).message, /task-a/);
+      return true;
+    }
   );
 });
 

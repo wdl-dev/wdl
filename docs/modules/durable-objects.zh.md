@@ -92,6 +92,7 @@ Generation key 不是 cache，而是 fence。即使过期 Redis owner record 消
 
 - do-runtime internal endpoints 只在 private mesh 内可达，并要求共享的 `WDL_INTERNAL_AUTH_TOKEN` / `x-wdl-internal-auth` 内部认证 header。Health 和 metrics endpoint 例外。
 - Tenant code 只能通过 runtime 生成的 facade 和 frozen metadata 访问 DO。
+- Tenant-visible DO metadata 和 error 不得包含 owner task id、backend endpoint 或原始 transport error 文本。
 - Owner hint 只信任 do-runtime header，并且要通过 endpoint grammar validation。
 - Owner-hint 防御是分层的：忽略 tenant response body，只信任 do-runtime control header，并且必须通过 endpoint grammar / acceptable-address 检查。
 - do-runtime supervisor 必须调用本地 `127.0.0.1:8788` drain/renew endpoint；Service Connect alias 可能打到其他 task。

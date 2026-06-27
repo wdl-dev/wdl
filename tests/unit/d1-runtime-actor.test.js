@@ -411,7 +411,7 @@ test("D1 actor: all-mode fetch returns row/column results without objectifying r
     results: { columns: ["id", "body"], rows: [["m1", "hello"]] },
     meta: {
       duration: 0,
-      served_by: "task-a",
+      served_by: "d1-5830a8b6",
       served_by_region: "local",
       served_by_primary: true,
       timings: { sql_duration_ms: 0 },
@@ -424,6 +424,41 @@ test("D1 actor: all-mode fetch returns row/column results without objectifying r
       total_attempts: 1,
     },
   });
+});
+
+test("D1 actor: served_by is a stable redacted label, never the raw task ARN", async () => {
+  const actor = new D1DatabaseActor({
+    storage: {
+      sql: {
+        get databaseSize() {
+          return 100;
+        },
+        exec() {
+          return { columnNames: ["id"], raw: () => [["m1"]], rowsRead: 1, rowsWritten: 0 };
+        },
+      },
+    },
+  }, {});
+
+  const taskArn = "arn:aws:ecs:example-region-1:123456789012:task/example-cluster/task-abcdef";
+  async function queryServedBy() {
+    const response = await actor.fetch(new Request("http://d1-actor/query", {
+      method: "POST",
+      body: JSON.stringify({
+        mode: "all",
+        owner: { taskId: taskArn },
+        statements: [{ sql: "select id from messages", params: [] }],
+      }),
+    }));
+    return (await readJsonResponse(response, 200)).meta.served_by;
+  }
+
+  const first = await queryServedBy();
+  const second = await queryServedBy();
+
+  assert.match(first, /^d1-[0-9a-f]{8}$/);
+  assert.equal(second, first);
+  assert.doesNotMatch(first, /arn:|123456789012|example-region-1|example-cluster|task-abcdef/);
 });
 
 test("D1 actor: read statement avoids changes/last-row probes", () => {

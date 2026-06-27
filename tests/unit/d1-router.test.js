@@ -76,7 +76,13 @@ export function parseForwardHopCount(value) {
 }
 `);
 const protocolUrl = moduleDataUrl(`
-export class D1ProtocolError extends Error {}
+export class D1ProtocolError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
 export const D1_ACTOR_QUERY_CONTENT_TYPE = "application/" + "x-wdl-d1-actor-query-v1";
 export function classifyD1Error() { return { status: 500, code: "internal-error" }; }
 export function d1ErrorPayload() { return {}; }
@@ -184,6 +190,42 @@ test("D1 router uses takeover owner even after refresh is disabled", async () =>
     delete /** @type {any} */ (globalThis).__d1RouterLeaseExpired;
     delete /** @type {any} */ (globalThis).__d1RouterTakeoverExpiredOwner;
     delete /** @type {any} */ (globalThis).__d1RouterForwardToOwner;
+  }
+});
+
+test("D1 router owner-not-ready errors do not expose owner task identity", async () => {
+  const query = {
+    dbKey: "tenant-a:main",
+    namespace: "tenant-a",
+    databaseId: "main",
+    binding: null,
+    mode: "all",
+    slot: 1,
+    statements: [{ sql: "select 1", params: [] }],
+  };
+  const owner = {
+    dbKey: query.dbKey,
+    taskId: "task-b",
+    endpoint: "task-b:8787",
+    generation: 7,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  /** @type {any} */ (globalThis).__d1RouterProbeOwner = async () => ({ outcome: "stale-generation" });
+  /** @type {any} */ (globalThis).__d1RouterResolveDbOwner = async () => owner;
+  try {
+    await assert.rejects(
+      () => routeQueryToOwner(query, {}, owner, false, "rid", 1),
+      (err) => {
+        assert.ok(err instanceof Error);
+        assert.equal(/** @type {{ code?: unknown }} */ (err).code, "owner-not-ready");
+        assert.match(err.message, /owner is stale-generation/);
+        assert.doesNotMatch(err.message, /\btask-b\b/);
+        return true;
+      }
+    );
+  } finally {
+    delete /** @type {any} */ (globalThis).__d1RouterProbeOwner;
+    delete /** @type {any} */ (globalThis).__d1RouterResolveDbOwner;
   }
 });
 

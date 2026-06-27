@@ -188,7 +188,7 @@ test("D1 forwarded requests still resolve owner and do not execute by header alo
   assertStatus(forged, 200, "forged");
   const body = normalizeD1QueryBody(decodeD1QueryResponse(Buffer.from(forged.bodyB64, "base64")));
   assert.deepEqual(body.results, [{ body: "owner-a" }]);
-  assert.equal(body.meta.served_by, "d1-runtime-a");
+  assert.equal(body.meta.served_by, "d1-30ae925d"); // fnv1a32("d1-runtime-a")
   assert.equal(d1RuntimeProbe("d1-runtime-c", dbKey).owner.taskId, "d1-runtime-a");
 });
 
@@ -306,7 +306,7 @@ test("D1 idle owners are renewed by task heartbeat without health checks", async
   });
   assertStatus(readAfterIdle, 200, "readAfterIdle");
   assert.deepEqual(readAfterIdle.body.results, [{ body: "after-idle" }]);
-  assert.equal(readAfterIdle.body.meta.served_by, "d1-runtime-a");
+  assert.equal(readAfterIdle.body.meta.served_by, "d1-30ae925d"); // fnv1a32("d1-runtime-a")
   assert.equal(d1RuntimeProbe("d1-runtime-b", dbKey).owner.taskId, "d1-runtime-a");
 });
 

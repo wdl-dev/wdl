@@ -50,29 +50,23 @@ export function d1QueryTimeoutPayload() {
   };
 }
 
-/**
- * @param {unknown} err
- * @returns {{ success: false, error: "backend-unavailable", message: string, category: "internal", retryable: true }}
- */
-export function d1BackendUnavailablePayload(err) {
+/** @returns {{ success: false, error: "backend-unavailable", message: string, category: "internal", retryable: true }} */
+export function d1BackendUnavailablePayload() {
   return {
     success: false,
     error: "backend-unavailable",
-    message: `D1 backend is unavailable: ${errorMessage(err)}`,
+    message: "D1 backend is unavailable.",
     category: "internal",
     retryable: true,
   };
 }
 
-/**
- * @param {unknown} err
- * @returns {{ success: false, error: "result-unknown", message: string, category: "result-unknown", retryable: false }}
- */
-export function d1ResultUnknownPayload(err) {
+/** @returns {{ success: false, error: "result-unknown", message: string, category: "result-unknown", retryable: false }} */
+export function d1ResultUnknownPayload() {
   return {
     success: false,
     error: "result-unknown",
-    message: `D1 owner response was lost after the request was sent; outcome may be unknown, do not blindly retry non-idempotent requests: ${errorMessage(err)}`,
+    message: "D1 owner response was lost after the request was sent; outcome may be unknown, do not blindly retry non-idempotent requests.",
     category: "result-unknown",
     retryable: false,
   };

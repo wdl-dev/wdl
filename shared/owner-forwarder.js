@@ -1,4 +1,5 @@
 import { withInternalAuth } from "shared-internal-auth";
+import { errorMessage } from "shared-errors";
 
 export const MAX_OWNER_FORWARD_HOPS = 2;
 
@@ -100,6 +101,11 @@ export async function forwardOwnerRequest({
       throw err;
     }
     metrics.increment(metricName, { service, outcome: "unavailable" });
+    log("warn", logEvent.replace(/_complete$/, "_unavailable"), {
+      request_id: requestId || undefined,
+      ...logFields(),
+      error_message: errorMessage(err),
+    });
     throw unavailableError(err);
   }
 }

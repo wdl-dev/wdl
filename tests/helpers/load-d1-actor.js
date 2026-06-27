@@ -1,4 +1,4 @@
-import { applyModuleReplacements, readRepositoryFile, moduleDataUrl } from "./load-shared-module.js";
+import { applyModuleReplacements, readRepositoryFile, moduleDataUrl, sharedModuleDataUrl } from "./load-shared-module.js";
 
 const protocolUrl = moduleDataUrl(`
 export function classifyD1Error(err) {
@@ -120,6 +120,10 @@ const source = applyModuleReplacements(readRepositoryFile("d1-runtime/actor.js")
   [
     /import \{\n {2}isD1ActorTestHook,\n {2}runD1ActorTestHook,\n\} from "d1-runtime-test-hooks";/,
     `import { isD1ActorTestHook, runD1ActorTestHook } from ${JSON.stringify(testHooksUrl)};`
+  ],
+  [
+    /import \{ fnv1a32Utf8 \} from "shared-fnv1a32";/,
+    `import { fnv1a32Utf8 } from ${JSON.stringify(sharedModuleDataUrl("shared/fnv1a32.js"))};`
   ],
 ]);
 

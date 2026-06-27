@@ -160,7 +160,7 @@ test("D1 binding learns owner after Envoy-routed router forwarding", async () =>
     assert.equal(first.status, 200, firstText);
     const firstBody = responseJson({ body: firstText });
     assert.equal(firstBody.success, true);
-    assert.equal(firstBody.meta.served_by, "d1-runtime-a");
+    assert.equal(firstBody.meta.served_by, "d1-30ae925d"); // fnv1a32("d1-runtime-a")
 
     const afterFirstEnvoy = envoyStat("cluster.d1_router.upstream_rq_total");
     assert.ok(afterFirstEnvoy > beforeEnvoy, "forwarded first call should hit Envoy D1 router");
@@ -170,7 +170,7 @@ test("D1 binding learns owner after Envoy-routed router forwarding", async () =>
     assert.equal(second.status, 200, secondText);
     const secondBody = responseJson({ body: secondText });
     assert.equal(secondBody.success, true);
-    assert.equal(secondBody.meta.served_by, "d1-runtime-a");
+    assert.equal(secondBody.meta.served_by, "d1-30ae925d"); // fnv1a32("d1-runtime-a")
 
     const afterSecondEnvoy = envoyStat("cluster.d1_router.upstream_rq_total");
     assert.equal(

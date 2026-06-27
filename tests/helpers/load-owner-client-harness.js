@@ -43,6 +43,7 @@ export function log(level, event, fields) {
   const errorsUrl = repositoryFileUrl("shared/errors.js");
   const ownerForwarderUrl = repositoryModuleDataUrl("shared/owner-forwarder.js", [
     [/from "shared-internal-auth";/, `from ${JSON.stringify(internalAuthUrl)};`],
+    [/from "shared-errors";/, `from ${JSON.stringify(errorsUrl)};`],
   ]);
 
   return {

@@ -23,6 +23,8 @@ const STALE_OWNER_HINT_ERRORS = [
 const TEST_D1_QUERY_TIMEOUT_LONG_MS = 1234;
 // Short enough to force the transport-timeout branch without slowing the suite.
 const TEST_D1_TRANSPORT_TIMEOUT_SHORT_MS = 10;
+const INTERNAL_OWNER_TASK_ARN = "arn:aws:ecs:example-region-1:123456789012:task/example-cluster/task-abcdef";
+const INTERNAL_OWNER_DETAIL_RE = /arn:|123456789012|example-region-1|example-cluster|task-abcdef|d1-runtime(?:-a:8787)?|internal\/d1\/query/;
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_D1_TIMEOUT_URL = sharedModuleDataUrl("shared/d1-timeout.js");
@@ -226,6 +228,23 @@ test("D1 runtime stub: forwards request id header to backend", async () => {
   await db.query("all", [{ sql: "select 1", params: [] }], "rid-d1");
 
   assert.equal(calls[0].headers["x-request-id"], "rid-d1");
+});
+
+test("D1 runtime stub: backend transport failures do not expose internal details", async () => {
+  const { db } = makeRuntimeDb(() => {
+    throw new Error(`connect ECONNREFUSED http://d1-runtime/internal/d1/query ${INTERNAL_OWNER_TASK_ARN}`);
+  });
+
+  await assert.rejects(
+    () => db.query("all", [{ sql: "select 1", params: [] }], "rid-d1"),
+    (err) => err instanceof Error &&
+      err.name === "D1_ERROR" &&
+      /** @type {{ code?: unknown, category?: unknown, retryable?: unknown }} */ (err).code === "backend-unavailable" &&
+      /** @type {{ code?: unknown, category?: unknown, retryable?: unknown }} */ (err).category === "internal" &&
+      /** @type {{ code?: unknown, category?: unknown, retryable?: unknown }} */ (err).retryable === true &&
+      /D1 backend is unavailable/.test(err.message) &&
+      !INTERNAL_OWNER_DETAIL_RE.test(err.message)
+  );
 });
 
 test("D1 runtime stub: malformed direct router response is result-unknown", async () => {
@@ -586,7 +605,7 @@ test("D1 runtime stub: direct owner transport failures are result-unknown and no
       body: decodeD1QueryRequest(init.body),
       headers: Object.fromEntries(new Headers(init.headers).entries()),
     });
-    throw new Error("connection reset after request");
+    throw new Error(`connection reset after request to http://d1-runtime-a:8787/internal/d1/query ${INTERNAL_OWNER_TASK_ARN}`);
   }, async () => {
     await db.query("all", [{ sql: "select 1", params: [] }], "rid-d1");
     await assert.rejects(
@@ -596,7 +615,8 @@ test("D1 runtime stub: direct owner transport failures are result-unknown and no
         /** @type {{ code?: unknown, category?: unknown, retryable?: unknown }} */ (err).code === "result-unknown" &&
         /** @type {{ code?: unknown, category?: unknown, retryable?: unknown }} */ (err).category === "result-unknown" &&
         /** @type {{ code?: unknown, category?: unknown, retryable?: unknown }} */ (err).retryable === false &&
-        /outcome may be unknown/.test(err.message)
+        /outcome may be unknown/.test(err.message) &&
+        !INTERNAL_OWNER_DETAIL_RE.test(err.message)
     );
 
     assert.equal(directCalls.length, 1);

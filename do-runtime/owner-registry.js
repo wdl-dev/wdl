@@ -292,7 +292,7 @@ export async function resolveDoOwner(env, invoke) {
         return current;
       }
       if (isDraining()) {
-        throw new DoRuntimeError(503, "task_draining", `DO task ${localTask.taskId} is draining`);
+        throw new DoRuntimeError(503, "task_draining", "DO task is draining");
       }
       const alreadyLocal = ownedScopes.has(ownerKey);
       const counter = alreadyLocal ? current.generation : await currentOwnerGenerationCounter(session, generationKey);
@@ -315,7 +315,7 @@ export async function resolveDoOwner(env, invoke) {
     }
 
     if (isDraining()) {
-      throw new DoRuntimeError(503, "task_draining", `DO task ${localTask.taskId} is draining`);
+      throw new DoRuntimeError(503, "task_draining", "DO task is draining");
     }
     const generation = await nextOwnerGeneration(session, generationKey, current?.generation);
     const owner = ownerRecordFor(env, invoke, localTask, generation, nowMs);

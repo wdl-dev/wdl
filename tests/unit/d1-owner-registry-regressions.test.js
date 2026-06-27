@@ -59,6 +59,21 @@ test("D1 owner registry: corrupt generation counter fails closed", async () => {
   );
 });
 
+test("D1 owner registry: draining task errors do not expose task identity", async () => {
+  const identity = { namespace: "tenant-a", databaseId: "db1", dbKey: "tenant-a:db1", slot: 7 };
+  D1_TEST_STATE.draining = true;
+
+  await assert.rejects(
+    () => resolveDbOwner({ REDIS_ADDR: "redis:6379" }, identity),
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /D1 task is draining/);
+      assert.doesNotMatch(err.message, /\btask-a\b/);
+      return true;
+    }
+  );
+});
+
 test("D1 owner registry: same-task hot path does not refresh the owner lease", async () => {
   const identity = { namespace: "tenant-a", databaseId: "db1", dbKey: "tenant-a:db1", slot: 7 };
   const ownerKey = ownerKeyOf(identity.dbKey);
@@ -134,7 +149,12 @@ test("D1 owner registry: lost owner state cannot validate an old owner from anot
       taskId: "task-a",
       generation: 1,
     }),
-    /owned by task-b, not task-a/
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /owned by another task/);
+      assert.doesNotMatch(err.message, /\btask-[ab]\b/);
+      return true;
+    }
   );
 });
 

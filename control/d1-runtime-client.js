@@ -25,7 +25,7 @@ import { validOwnerEndpointForService } from "runtime-owner-endpoint";
 /** @param {unknown} err */
 function d1RuntimeTransportPayload(err) {
   if (isD1QueryTimeoutError(err)) return d1QueryTimeoutPayload();
-  return d1BackendUnavailablePayload(err);
+  return d1BackendUnavailablePayload();
 }
 
 /** @param {Headers} headers */

@@ -195,6 +195,8 @@ commit.
 - do-runtime internal endpoints are private-mesh only and are not
   application-authenticated.
 - Tenant code reaches DOs only through runtime-generated facades and frozen metadata.
+- Tenant-visible DO metadata and errors must not include owner task ids, backend
+  endpoints, or raw transport error text.
 - Owner hints are trusted only when returned by do-runtime headers and validated against
   endpoint grammar.
 - Owner-hint defense is layered: tenant response bodies are ignored, only do-runtime

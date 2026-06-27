@@ -319,7 +319,7 @@ export async function routeQueryToOwner(
       throw new D1ProtocolError(
         503,
         "owner-not-ready",
-        `D1 database ${query.dbKey} owner ${owner.taskId} is ${probe.outcome}`
+        `D1 database ${query.dbKey} owner is ${probe.outcome}`
       );
     }
     if (

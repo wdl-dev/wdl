@@ -24,6 +24,7 @@ import {
   isD1ActorTestHook,
   runD1ActorTestHook,
 } from "d1-runtime-test-hooks";
+import { fnv1a32Utf8 } from "shared-fnv1a32";
 
 const DEFAULT_D1_MAX_RESULT_ROWS = 65_536;
 const DEFAULT_D1_MAX_RESULT_BYTES = 16 * 1024 * 1024;
@@ -454,7 +455,7 @@ export class D1DatabaseActor extends DurableObject {
       results,
       meta: {
         duration,
-        served_by: owner?.taskId || "unknown",
+        served_by: servedByLabel(owner?.taskId),
         served_by_region: "local",
         served_by_primary: true,
         timings: { sql_duration_ms: duration },
@@ -468,6 +469,15 @@ export class D1DatabaseActor extends DurableObject {
       },
     };
   }
+}
+
+// Owner task ids can be infrastructure identifiers. `served_by` is
+// tenant-visible, so expose only a stable redacted correlation label. FNV-1a is
+// not a security boundary.
+/** @param {string | null | undefined} taskId @returns {string} */
+function servedByLabel(taskId) {
+  if (typeof taskId !== "string" || taskId === "") return "unknown";
+  return `d1-${fnv1a32Utf8(taskId).toString(16).padStart(8, "0")}`;
 }
 
 /** @param {D1Ddl} ddl */

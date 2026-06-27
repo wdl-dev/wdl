@@ -41,12 +41,12 @@ function ownerEndpointReturnedUnknownResult(response) {
   return OWNER_UNAVAILABLE_STATUSES.has(response.status) && !isD1QueryResponse(response.headers);
 }
 
-/** @param {D1Query} query @param {D1Owner} owner @param {string} detail */
-function resultUnknownError(query, owner, detail) {
+/** @param {D1Query} query @param {string} detail */
+function resultUnknownError(query, detail) {
   return new D1ProtocolError(
     503,
     "result-unknown",
-    `D1 database ${query.dbKey} owner ${owner.taskId} response was lost after forwarding; outcome may be unknown, do not blindly retry non-idempotent requests: ${detail}`
+    `D1 database ${query.dbKey} owner response was lost after forwarding; outcome may be unknown, do not blindly retry non-idempotent requests: ${detail}`
   );
 }
 
@@ -120,10 +120,10 @@ export async function forwardToOwner(query, env, owner, requestId = null, hopCou
           `D1 database ${query.dbKey} exceeded the maximum forward depth`
         ),
       isTimeoutError: isD1QueryTimeoutError,
-      unavailableError: (err) => resultUnknownError(query, owner, errorMessage(err)),
+      unavailableError: () => resultUnknownError(query, "owner transport failed after forwarding"),
     });
     if (ownerEndpointReturnedUnknownResult(response)) {
-      throw resultUnknownError(query, owner, `owner endpoint returned HTTP ${response.status}`);
+      throw resultUnknownError(query, `owner endpoint returned HTTP ${response.status}`);
     }
     return response;
   } finally {

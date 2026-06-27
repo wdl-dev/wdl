@@ -172,7 +172,7 @@ test("control D1 runtime client query maps transport failure to shared unavailab
   assert.equal(result.body.error, "backend-unavailable");
   assert.equal(result.body.category, "internal");
   assert.equal(result.body.retryable, true);
-  assert.match(result.body.message, /connect ECONNREFUSED/);
+  assert.equal(result.body.message, "D1 backend is unavailable.");
 });
 
 test("control D1 runtime client query treats unsupported response content-type as upstream failure", async () => {

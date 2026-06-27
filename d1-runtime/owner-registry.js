@@ -132,12 +132,12 @@ export function parseOwner(raw) {
   return /** @type {D1Owner | null} */ (parseOwnerRecord(raw));
 }
 
-/** @param {string} dbKey @param {D1Owner | null} owner @param {string} taskId @returns {never} */
-function notOwner(dbKey, owner, taskId) {
+/** @param {string} dbKey @returns {never} */
+function notOwner(dbKey) {
   throw new D1ProtocolError(
     409,
     "not-owner",
-    `D1 database ${dbKey} is owned by ${owner?.taskId || "another task"}, not ${taskId}`
+    `D1 database ${dbKey} is owned by another task`
   );
 }
 
@@ -256,7 +256,7 @@ function cachedObservedOwner(env, identity, localTask, options = {}) {
   }
   if (entry.owner.taskId === localTask.taskId) {
     if (isDraining()) {
-      throw new D1ProtocolError(503, "task-draining", `D1 task ${localTask.taskId} is draining`);
+      throw new D1ProtocolError(503, "task-draining", "D1 task is draining");
     }
     rememberOwner(entry.owner);
     recordOwnerResolution("cached_local");
@@ -485,7 +485,7 @@ export async function releaseOwner(env, owner) {
 export async function takeoverExpiredOwner(env, staleOwner) {
   const localTask = await resolveTaskIdentity(env);
   if (isDraining()) {
-    throw new D1ProtocolError(503, "task-draining", `D1 task ${localTask.taskId} is draining`);
+    throw new D1ProtocolError(503, "task-draining", "D1 task is draining");
   }
   const client = redisClient(env);
   const key = ownerKeyOf(staleOwner.dbKey);
@@ -758,7 +758,7 @@ export async function resolveDbOwner(env, identity, options = {}) {
       return existing;
     }
     if (isDraining()) {
-      throw new D1ProtocolError(503, "task-draining", `D1 task ${taskId} is draining`);
+      throw new D1ProtocolError(503, "task-draining", "D1 task is draining");
     }
     const alreadyLocal = ownedDbs.has(identity.dbKey);
     rememberOwner(existing);
@@ -783,7 +783,7 @@ export async function resolveDbOwner(env, identity, options = {}) {
     return existing;
   }
   if (isDraining()) {
-    throw new D1ProtocolError(503, "task-draining", `D1 task ${taskId} is draining`);
+    throw new D1ProtocolError(503, "task-draining", "D1 task is draining");
   }
 
   try {
@@ -849,7 +849,7 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner) {
   const client = redisClient(env);
   const { owner: current, nowMs } = await readOwnerWithTimeFromClient(client, owner.dbKey);
   if (!current || !ownerFenceMatches(current, owner)) {
-    notOwner(owner.dbKey, current, owner.taskId);
+    notOwner(owner.dbKey);
   }
   const currentOwner = current;
   if (ownerLeaseExpired(currentOwner, nowMs)) {

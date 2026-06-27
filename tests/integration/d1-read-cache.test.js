@@ -486,7 +486,7 @@ test("D1 read cache does not survive ownership rebalance", async () => {
   const readViaA = d1RuntimeQuery("d1-runtime-a", countQuery);
   assertStatus(readViaA, 200, "readViaA");
   assert.deepEqual(readViaA.body.results, [{ n: 2 }]);
-  assert.equal(readViaA.body.meta.served_by, "d1-runtime-c");
+  assert.equal(readViaA.body.meta.served_by, "d1-2eae8f37"); // fnv1a32("d1-runtime-c")
   const movedMetrics = serviceInternalGet("d1-runtime-a", 8787, "/_metrics").body;
   assert.equal(invalidationMetric(movedMetrics, "owner-moved") - beforeOwnerMovedInvalidation, 1);
   assert.equal(d1RuntimeProbe("d1-runtime-b", dbKey).owner.taskId, "d1-runtime-c");

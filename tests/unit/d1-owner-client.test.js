@@ -13,6 +13,8 @@ import { installMockFetch, makeRecordingFetch } from "../helpers/mock-fetch.js";
 const mod = loadD1OwnerClient();
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 const D1_OWNER_CLIENT_TEST_STATE = d1OwnerClientHarnessState();
+const INTERNAL_OWNER_TASK_ARN = "arn:aws:ecs:example-region-1:123456789012:task/example-cluster/task-abcdef";
+const INTERNAL_OWNER_DETAIL_RE = /arn:|123456789012|example-region-1|example-cluster|task-abcdef|d1-runtime-b:8787|internal\/d1\/query/;
 
 let restoreFetch = () => {};
 
@@ -45,6 +47,13 @@ function owner() {
     taskId: "d1-runtime-b",
     generation: 4,
     endpoint: "d1-runtime-b:8787",
+  };
+}
+
+function ownerWithTaskArn() {
+  return {
+    ...owner(),
+    taskId: INTERNAL_OWNER_TASK_ARN,
   };
 }
 
@@ -81,21 +90,38 @@ test("D1 owner client maps post-forward transport failures to result-unknown", a
   restoreFetch();
   restoreFetch = installMockFetch(makeRecordingFetch(D1_OWNER_CLIENT_TEST_STATE.fetches, {
     response: () => {
-      throw new Error("connection reset after request");
+      throw new Error(`connection reset after request to http://d1-runtime-b:8787/internal/d1/query ${INTERNAL_OWNER_TASK_ARN}`);
     },
   }));
 
   await assert.rejects(
-    () => mod.forwardToOwner(query(), env(), owner(), "req-2", 1),
-    (err) => err instanceof Error &&
-      /** @type {{ status?: unknown, code?: unknown }} */ (err).status === 503 &&
-      /** @type {{ status?: unknown, code?: unknown }} */ (err).code === "result-unknown" &&
-      /outcome may be unknown/.test(err.message)
+    () => mod.forwardToOwner(query(), env(), ownerWithTaskArn(), "req-2", 1),
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.equal(/** @type {{ status?: unknown }} */ (err).status, 503);
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "result-unknown");
+      assert.match(err.message, /outcome may be unknown/);
+      assert.doesNotMatch(err.message, INTERNAL_OWNER_DETAIL_RE);
+      return true;
+    }
   );
   assert.equal(D1_OWNER_CLIENT_TEST_STATE.fetches.length, 1);
   assert.deepEqual(D1_OWNER_CLIENT_TEST_STATE.metrics.at(-1), {
     name: "d1_forwards",
     labels: { service: "d1-runtime", outcome: "unavailable" },
+  });
+  assert.deepEqual(D1_OWNER_CLIENT_TEST_STATE.logs.at(-1), {
+    level: "warn",
+    event: "d1_forward_unavailable",
+    fields: {
+      request_id: "req-2",
+      namespace: "tenant",
+      database_id: "main",
+      slot: 3,
+      owner_task_id: INTERNAL_OWNER_TASK_ARN,
+      owner_endpoint: "d1-runtime-b:8787",
+      error_message: `connection reset after request to http://d1-runtime-b:8787/internal/d1/query ${INTERNAL_OWNER_TASK_ARN}`,
+    },
   });
 });
 
@@ -109,11 +135,15 @@ test("D1 owner client maps non-wire owner unavailable responses to result-unknow
   }));
 
   await assert.rejects(
-    () => mod.forwardToOwner(query(), env(), owner(), "req-3", 1),
-    (err) => err instanceof Error &&
-      /** @type {{ status?: unknown, code?: unknown }} */ (err).status === 503 &&
-      /** @type {{ status?: unknown, code?: unknown }} */ (err).code === "result-unknown" &&
-      /HTTP 504/.test(err.message)
+    () => mod.forwardToOwner(query(), env(), ownerWithTaskArn(), "req-3", 1),
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.equal(/** @type {{ status?: unknown }} */ (err).status, 503);
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "result-unknown");
+      assert.match(err.message, /HTTP 504/);
+      assert.doesNotMatch(err.message, INTERNAL_OWNER_DETAIL_RE);
+      return true;
+    }
   );
   assert.equal(D1_OWNER_CLIENT_TEST_STATE.fetches.length, 1);
   assert.deepEqual(D1_OWNER_CLIENT_TEST_STATE.metrics.at(-1), {
