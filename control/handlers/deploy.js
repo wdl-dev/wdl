@@ -605,10 +605,9 @@ async function runDeployPreflight({ redis, ns, name, deployRequest }) {
 }
 
 /**
- * @param {{ redis: RedisClient, env: Record<string, unknown>, ns: string, name: string, meta: PreparedMeta }} args
+ * @param {{ redis: RedisClient | RedisSession, controlEnv: Record<string, string | undefined>, ns: string, name: string, meta: PreparedMeta }} args
  */
-async function validateCommittedEnvBudget({ redis, env, ns, name, meta }) {
-  const controlEnv = stringEnv(env);
+async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta }) {
   const nsEncrypted = await redis.hGetAll(`secrets:${ns}`);
   const workerEncrypted = await redis.hGetAll(`secrets:${ns}:${name}`);
   const [nsSecrets, workerSecrets] = await Promise.all([
@@ -618,7 +617,7 @@ async function validateCommittedEnvBudget({ redis, env, ns, name, meta }) {
   assertWorkerLoaderUserEnvBudget({
     ns,
     worker: name,
-    vars: meta.vars && typeof meta.vars === "object"
+    vars: meta.vars && typeof meta.vars === "object" && !Array.isArray(meta.vars)
       ? /** @type {Record<string, unknown>} */ (meta.vars)
       : null,
     nsSecrets,
@@ -694,16 +693,17 @@ async function uploadDeployAssetsBeforeCommit({
  *   requestId: string,
  *   warnings: DeployWarning[],
  *   log: ControlLogger,
+ *   controlEnv: Record<string, string | undefined>,
  * }} args
  * @returns {Promise<{ response: Response, commitDurationMs?: never } | { response?: never, commitDurationMs: number }>}
  */
 async function commitPreparedDeploy({
-  redis, ns, name, version, prepared, outgoingRefs, d1Refs, uploadedPrefix, requestId, warnings, log,
+  redis, ns, name, version, prepared, outgoingRefs, d1Refs, uploadedPrefix, requestId, warnings, log, controlEnv,
 }) {
   const commitStartedAt = Date.now();
   try {
     await commitWithWatch({
-      redis, ns, name, version, prepared, outgoingRefs, d1Refs,
+      redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv,
     });
   } catch (err) {
     if (uploadedPrefix) {
@@ -725,6 +725,8 @@ async function commitPreparedDeploy({
       });
       return { response: controlAbortResponse(err, warnings.length ? { warnings } : {}) };
     }
+    if (err instanceof WorkerEnvBudgetError) return { response: codedErrorResponse(err, err.code) };
+    if (err instanceof SecretEnvelopeError) return { response: jsonError(503, err.code, err.message) };
     throw err;
   }
   return { commitDurationMs: Date.now() - commitStartedAt };
@@ -769,6 +771,7 @@ export async function handle({ request, env, ns, name, requestId }) {
     outgoingRefs,
     d1Refs,
   } = candidate.committed;
+  const controlEnv = stringEnv(env);
 
   try {
     validateWorkerLoaderCodeBudget({ prepared, ns, name });
@@ -784,7 +787,7 @@ export async function handle({ request, env, ns, name, requestId }) {
   try {
     await validateCommittedEnvBudget({
       redis,
-      env,
+      controlEnv,
       ns,
       name,
       meta: prepared.meta,
@@ -823,6 +826,7 @@ export async function handle({ request, env, ns, name, requestId }) {
     requestId,
     warnings,
     log,
+    controlEnv,
   });
   if (commitResult.response) return commitResult.response;
 
@@ -884,10 +888,10 @@ async function scheduleDeployAbortCleanup({
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, version: string, prepared: PreparedBundle, outgoingRefs: OutgoingRef[], d1Refs: DeployD1Ref[] }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, version: string, prepared: PreparedBundle, outgoingRefs: OutgoingRef[], d1Refs: DeployD1Ref[], controlEnv?: Record<string, string | undefined> | null }} args
  */
 export async function commitWithWatch({
-  redis, ns, name, version, prepared, outgoingRefs, d1Refs,
+  redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv = null,
 }) {
   const vNum = parseVersion(version);
   if (vNum == null) throw new Error(`commitWithWatch: bad version ${version}`);
@@ -901,6 +905,16 @@ export async function commitWithWatch({
     },
   }, async (iso) => {
     await watchCommitKeys(iso, { ns, name, prepared, outgoingRefs, d1Refs });
+    if (controlEnv) {
+      await iso.watch(`secrets:${ns}`, `secrets:${ns}:${name}`);
+      await validateCommittedEnvBudget({
+        redis: iso,
+        controlEnv,
+        ns,
+        name,
+        meta: prepared.meta,
+      });
+    }
 
     const resolvedD1Refs = await resolveD1RefsForCommit(iso, { ns, d1Refs });
     await validateCallerNotDeleting(iso, { ns, name });

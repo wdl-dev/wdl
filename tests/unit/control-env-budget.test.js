@@ -112,3 +112,24 @@ test("worker env budget checks every retained worker version", async () => {
     }
   );
 });
+
+test("worker env budget reports bundle metadata parse context", async () => {
+  const redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      assert.equal(key, "worker:demo:api:v:1");
+      assert.equal(field, "__meta__");
+      return "{not-json";
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkerVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      worker: "api",
+      versions: ["v1"],
+    }),
+    /invalid bundle metadata for demo\/api@v1/
+  );
+});

@@ -199,13 +199,15 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
   return jsonError(405, "method_not_allowed", "Method not allowed for /secrets");
 }
 
-// Secret mutations watch routes + worker-versions because env-budget checks
-// must cover active and retained versions before writing a new secret shape.
+// Secret mutations watch routes, worker-versions, and both secret hashes because
+// env-budget checks must cover active and retained versions before writing a
+// new secret shape.
 /**
  * @param {{ redis: RedisClient, ns: string, name: string, key: string, method: string, value: string | null, plaintext?: string | null, controlEnv: Record<string, string | undefined> }} args
  */
 async function mutateSecret({ redis, ns, name, key, method, value, plaintext = null, controlEnv }) {
   const secretsKey = `secrets:${ns}:${name}`;
+  const nsSecretsKey = `secrets:${ns}`;
   return await runOptimistic(redis, {
     attempts: MAX_SECRET_ATTEMPTS,
     onExhausted: () => {
@@ -214,7 +216,7 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       });
     },
   }, async (iso) => {
-    const watches = [deleteLockKey(ns, name), secretsKey, routesKey(ns), workerVersionsKey(ns, name)];
+    const watches = [deleteLockKey(ns, name), nsSecretsKey, secretsKey, routesKey(ns), workerVersionsKey(ns, name)];
     await iso.watch(...watches);
 
     const callerLock = await iso.get(deleteLockKey(ns, name));
@@ -244,10 +246,10 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       if (method === "PUT" && typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
       const activeVersion = await iso.hGet(routesKey(ns), name);
       const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
-      const nsEncrypted = await iso.hGetAll(`secrets:${ns}`);
+      const nsEncrypted = await iso.hGetAll(nsSecretsKey);
       const workerEncrypted = await iso.hGetAll(secretsKey);
       const [nsSecrets, workerSecrets] = await Promise.all([
-        decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: `secrets:${ns}` }),
+        decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: nsSecretsKey }),
         decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: secretsKey }),
       ]);
       if (method === "PUT") {

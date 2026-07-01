@@ -29,6 +29,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   parsedQueueConsumers: null,
   watchedKeys: null,
   envBudgetError: false,
+  envBudgetCalls: [],
   redis: null,
   logs: [],
   metrics: { increment() {}, observe() {} },
@@ -53,6 +54,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.parsedQueueConsumers = null;
   CONTROL_DEPLOY_TEST_STATE.watchedKeys = null;
   CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
+  CONTROL_DEPLOY_TEST_STATE.envBudgetCalls = [];
   CONTROL_DEPLOY_TEST_STATE.redis = null;
   CONTROL_DEPLOY_TEST_STATE.logs = [];
   CONTROL_DEPLOY_TEST_STATE.metrics = { increment() {}, observe() {} };
@@ -208,6 +210,7 @@ export class WorkerEnvBudgetError extends Error {
   }
 }
 export function assertWorkerLoaderUserEnvBudget() {
+  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.push(Array.from(arguments)[0] || {});
   if (/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError) {
     throw new WorkerEnvBudgetError("env too large");
   }
@@ -361,6 +364,44 @@ test("commitWithWatch re-resolves a D1 alias after a watched recreate race", asy
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("d1:database-name:tenant-a:main"));
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("d1:database:tenant-a:d1_old"));
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("d1:database:tenant-a:d1_new"));
+});
+
+test("commitWithWatch validates deploy env budget under watched secret hashes", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta = null;
+  /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls = [];
+
+  const redis = {
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  await commitWithWatch({
+    redis,
+    ns: "tenant-a",
+    name: "demo",
+    version: "v1",
+    prepared: {
+      meta: {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "esm" } },
+        vars: { TOKEN: "from-vars" },
+      },
+      normalized: [["worker.js", "export default {}"]],
+    },
+    outgoingRefs: [],
+    d1Refs: [],
+    controlEnv: {},
+  });
+
+  assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("secrets:tenant-a"));
+  assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("secrets:tenant-a:demo"));
+  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.length, 1);
+  assert.deepEqual(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[0].vars, { TOKEN: "from-vars" });
 });
 
 test("deploy handler resolves cross-namespace service-binding meta from the target namespace", async () => {

@@ -44,10 +44,15 @@ function envBudgetUrl() {
 }
 
 const controlSharedUrl = controlSharedStubUrl(`
+class WatchError extends Error {}
 export const state = {
   log() {},
   redis: {
+    execCalls: 0,
+    execFailures: 0,
     writes: [],
+    deletes: [],
+    watchedKeys: [],
     async hKeys() { return []; },
     async hGet() { return null; },
     async hGetAll() { return {}; },
@@ -58,6 +63,44 @@ export const state = {
       return 1;
     },
     async hDel() { return 0; },
+    async session(fn) {
+      return await fn({
+        async watch(...keys) {
+          state.redis.watchedKeys.push(...keys);
+        },
+        async hGet(key, field) {
+          return await state.redis.hGet(key, field);
+        },
+        async hGetAll(key) {
+          return await state.redis.hGetAll(key);
+        },
+        async sMembers(key) {
+          return await state.redis.sMembers(key);
+        },
+        async zRange(key, start, stop) {
+          return await state.redis.zRange(key, start, stop);
+        },
+        multi() {
+          return {
+            hSet(key, field, value) {
+              state.redis.writes.push({ key, field, value });
+              return this;
+            },
+            hDel(key, field) {
+              state.redis.deletes.push({ key, field });
+              return this;
+            },
+            async exec() {
+              state.redis.execCalls += 1;
+              if (state.redis.execFailures > 0) {
+                state.redis.execFailures -= 1;
+                throw new WatchError("simulated namespace secret contention");
+              }
+            },
+          };
+        },
+      });
+    },
   },
 };
 `);
@@ -144,6 +187,38 @@ test("namespace secret PUT accepts lowercase secret keys like production", async
   assert.equal(state.redis.writes.at(-1).field, "lowercase");
 });
 
+test("namespace secret PUT runs as a WATCH/MULTI mutation and retries contention", async () => {
+  const { state } = await import(controlSharedUrl);
+  const writesBefore = state.redis.writes.length;
+  const execBefore = state.redis.execCalls;
+  state.redis.execFailures = 1;
+  state.redis.watchedKeys = [];
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/RETRY_TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "RETRY_TOKEN",
+      requestId: "rid-secret-retry",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(state.redis.execCalls - execBefore, 2);
+    assert.equal(state.redis.writes.length - writesBefore, 2);
+    assert.equal(state.redis.writes.at(-1).field, "RETRY_TOKEN");
+    assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
+    assert.ok(state.redis.watchedKeys.includes("routes:demo"));
+    assert.ok(state.redis.watchedKeys.includes("workers:demo"));
+  } finally {
+    state.redis.execFailures = 0;
+  }
+});
+
 test("namespace secret PUT checks retained worker versions before storing", async () => {
   const { state } = await import(controlSharedUrl);
   const original = {
@@ -191,6 +266,58 @@ test("namespace secret PUT checks retained worker versions before storing", asyn
   }
 });
 
+test("namespace secret DELETE checks env revealed by removing a namespace secret", async () => {
+  const { state } = await import(controlSharedUrl);
+  const original = {
+    hGet: state.redis.hGet,
+    hGetAll: state.redis.hGetAll,
+    sMembers: state.redis.sMembers,
+    zRange: state.redis.zRange,
+  };
+  const deletesBefore = state.redis.deletes.length;
+  const encrypted = await encryptSecretValue("small", {
+    env,
+    hashKey: "secrets:demo",
+    fieldName: "TOKEN",
+  });
+  /** @param {string} key */
+  state.redis.hGetAll = async (key) => {
+    if (key === "secrets:demo") return { TOKEN: encrypted };
+    if (key === "routes:demo") return {};
+    return {};
+  };
+  /** @param {string} key */
+  state.redis.sMembers = async (key) => key === "workers:demo" ? ["api"] : [];
+  /** @param {string} key */
+  state.redis.zRange = async (key) => key === "worker-versions:demo:api" ? ["v1"] : [];
+  /** @param {string} key @param {string} field */
+  state.redis.hGet = async (key, field) => {
+    if (key === "worker:demo:api:v:1" && field === "__meta__") {
+      return JSON.stringify({ vars: { TOKEN: "x".repeat(1024 * 1024) } });
+    }
+    return null;
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-delete-budget",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_env_too_large");
+    assert.equal(state.redis.deletes.length, deletesBefore);
+  } finally {
+    Object.assign(state.redis, original);
+  }
+});
+
 const workerControlSharedUrl = controlSharedStubUrl(`
 class WatchError extends Error {}
 export function formatError(err) {
@@ -200,10 +327,13 @@ export const state = {
   log() {},
   redis: {
     execCalls: 0,
+    watchedKeys: [],
     writes: [],
     async session(fn) {
       return await fn({
-        async watch() {},
+        async watch(...keys) {
+          state.redis.watchedKeys.push(...keys);
+        },
         async unwatch() {},
         async get() { return null; },
         async hKeys() { return []; },
@@ -278,6 +408,7 @@ test("worker secret PUT encrypts before WATCH retries and reuses the envelope", 
   assert.equal(response.status, 200);
   const { state } = await import(workerControlSharedUrl);
   assert.equal(state.redis.execCalls, 2);
+  assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
   assert.equal(state.redis.writes.length, 2);
   assert.equal(state.redis.writes[0].key, "secrets:demo:api");
   assert.equal(state.redis.writes[0].field, "TOKEN");

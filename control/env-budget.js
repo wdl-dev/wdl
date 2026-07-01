@@ -137,11 +137,27 @@ export async function assertWorkerVersionsUserEnvBudget({
   // whose command protocol is single-flight even though secret decryption is not.
   for (const version of uniqueVersions) {
     const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
-    const meta = typeof rawMeta === "string" ? JSON.parse(rawMeta) : {};
+    /** @type {Record<string, unknown>} */
+    let meta = {};
+    if (typeof rawMeta === "string") {
+      try {
+        const parsed = JSON.parse(rawMeta);
+        meta = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? /** @type {Record<string, unknown>} */ (parsed)
+          : {};
+      } catch (err) {
+        throw new Error(
+          `invalid bundle metadata for ${ns}/${worker}@${version}: ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err }
+        );
+      }
+    }
     assertWorkerLoaderUserEnvBudget({
       ns,
       worker,
-      vars: meta && typeof meta === "object" ? meta.vars : null,
+      vars: meta.vars && typeof meta.vars === "object" && !Array.isArray(meta.vars)
+        ? /** @type {Record<string, unknown>} */ (meta.vars)
+        : null,
       nsSecrets,
       workerSecrets,
     });
