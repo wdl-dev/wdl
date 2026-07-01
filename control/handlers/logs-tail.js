@@ -360,6 +360,9 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     db: redisDbFromEnv(env, "DATA_REDIS_DB"),
   });
   let sessionOpen = false;
+  let cleanupFinished = false;
+  /** @type {Promise<void> | null} */
+  let sessionClosePromise = null;
   let cancelled = false;
   /** @type {ReadableStreamDefaultController<Uint8Array> | null} */
   let streamController = null;
@@ -375,6 +378,21 @@ export async function handle({ request, env, ctx, ns, requestId }) {
       message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
     }),
   });
+
+  async function closeSessionIfOpen() {
+    if (!sessionOpen) return;
+    sessionClosePromise ??= (async () => {
+      try {
+        await session.close();
+      } catch (err) {
+        log("warn", "tail_session_close_failed", {
+          request_id: requestId, namespace: ns,
+          error_message: errMessage(err),
+        });
+      }
+    })();
+    await sessionClosePromise;
+  }
 
   /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
   function expireSession(controller) {
@@ -404,14 +422,8 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   // promise, the actual close happens here.
   ctx.waitUntil(cancelPromise.then(async () => {
     clearTimeout(expiryTimer);
-    try {
-      if (sessionOpen) await session.close();
-    } catch (err) {
-      log("warn", "tail_session_close_failed", {
-        request_id: requestId, namespace: ns,
-        error_message: errMessage(err),
-      });
-    }
+    await closeSessionIfOpen();
+    cleanupFinished = true;
     log("info", "tail_session_close", {
       request_id: requestId, namespace: ns, worker_count: workers.length,
     });
@@ -441,6 +453,11 @@ export async function handle({ request, env, ctx, ns, requestId }) {
           // it and fail on the first Redis stream read.
           await session.open();
           sessionOpen = true;
+          if (cancelled || cleanupFinished) {
+            await closeSessionIfOpen();
+            try { controller.close(); } catch {}
+            return;
+          }
           bootstrapped = true;
         }
 
