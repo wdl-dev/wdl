@@ -532,6 +532,53 @@ test("RedisSession selects configured DB on its held socket", async () => {
   assert.equal(decode(socket._writes[1]), "*3\r\n$4\r\nHGET\r\n$1\r\nk\r\n$1\r\nf\r\n");
 });
 
+test("RedisSession reports resources while SELECT is still pending", async () => {
+  let releaseSelect = () => {};
+  const writer = {
+    /** @param {Uint8Array} _buf */
+    async write(_buf) {},
+    close() { writer.closed = true; },
+    /** @type {boolean} */
+    closed: false,
+  };
+  const reader = {
+    read() {
+      return new Promise((resolve, reject) => {
+        releaseSelect = () => {
+          if (reader.released) {
+            reject(new Error("reader released"));
+          } else {
+            resolve({ done: false, value: bytes("+OK\r\n") });
+          }
+        };
+      });
+    },
+    releaseLock() { reader.released = true; },
+    /** @type {boolean} */
+    released: false,
+  };
+  const socket = {
+    writable: { getWriter: () => writer },
+    readable: { getReader: () => reader },
+    close() { socket.closed = true; },
+    /** @type {boolean} */
+    closed: false,
+  };
+  const { connect } = scriptedConnect(socket);
+  const session = new RedisSession("x", { connect, db: 1 });
+
+  assert.equal(session.hasOpenResources(), false);
+  const openPromise = session.open();
+  assert.equal(session.hasOpenResources(), true);
+  await Promise.resolve();
+  await session.close();
+  assert.equal(writer.closed, true);
+  assert.equal(reader.released, true);
+  assert.equal(socket.closed, true);
+  releaseSelect();
+  await assert.rejects(openPromise, /reader released/);
+});
+
 test("RedisClient.set supports Valkey IFEQ and delIfEq", async () => {
   const socketA = makeFakeSocket([bytes("+OK\r\n")]);
   const socketB = makeFakeSocket([bytes(":1\r\n")]);

@@ -105,6 +105,30 @@ test("worker env budget counts required caller secret copies in service binding 
   );
 });
 
+test("worker env budget stores required caller secrets in a null-prototype map", () => {
+  const estimated = estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "caller",
+    nsSecrets: JSON.parse('{"__proto__":"secret"}'),
+    meta: {
+      bindings: {
+        PLATFORM: {
+          type: "service",
+          ns: "__platform__",
+          service: "platformApi",
+          version: "v1",
+          requiredCallerSecrets: ["__proto__"],
+        },
+      },
+    },
+  });
+  const callerSecrets = /** @type {any} */ (estimated.PLATFORM).props.callerSecrets;
+
+  assert.equal(Object.getPrototypeOf(callerSecrets), null);
+  assert.equal(Object.hasOwn(callerSecrets, "__proto__"), true);
+  assert.equal(callerSecrets.__proto__, "secret");
+});
+
 test("worker env budget counts configured assets CDN base", () => {
   const meta = {
     vars: { PAD: "" },

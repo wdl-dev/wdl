@@ -22,6 +22,7 @@ function loadLogsTailHandler() {
         }
         async open() {
           this.openStarted = true;
+          this.socket = {};
           this.openPromise = (async () => {
             const state = /** @type {any} */ (globalThis).__tailState;
             if (state.openBlocker) await state.openBlocker;
@@ -31,6 +32,7 @@ function loadLogsTailHandler() {
         }
         async publish(channel, payload) { this.publishCalls.push([channel, payload]); }
         async xRead(...args) { this.xReadCalls.push(args); return null; }
+        hasOpenResources() { return Boolean(this.socket); }
         async close() { this.closed = true; }
       }
       const redisDbFromEnv = (env, name) => Number(env?.[name] || 0);`,
@@ -262,6 +264,41 @@ test("logs tail closes session if watchdog fires while Redis open is pending", a
 
   assert.equal(session.opened, true);
   assert.equal(session.closed, true);
+  assert.match((await pendingRead).text, /session_expired/);
+  await reader.cancel().catch(() => {});
+});
+
+test("logs tail max-session watchdog closes a socket while Redis open is pending", async () => {
+  resetTailState();
+  const state = /** @type {any} */ (globalThis).__tailState;
+  let releaseOpen = () => {};
+  state.openBlocker = new Promise((resolve) => {
+    releaseOpen = () => resolve(undefined);
+  });
+
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "30" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-open-socket-race",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  const pendingRead = readText(reader);
+  const session = /** @type {any} */ (globalThis).__tailSessions[0];
+  await waitUntil("tail Redis open to assign socket", () => session.socket, {
+    timeoutMs: 500, intervalMs: 5,
+  });
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(session.closed, true);
+  releaseOpen();
+  await session.openPromise;
   assert.match((await pendingRead).text, /session_expired/);
   await reader.cancel().catch(() => {});
 });

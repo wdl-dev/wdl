@@ -76,6 +76,10 @@ export class RedisSession {
     return this;
   }
 
+  hasOpenResources() {
+    return Boolean(this.socket || this.writer || this.reader || this.parser);
+  }
+
   async close() {
     if (this._closed) return;
     this._closed = true;

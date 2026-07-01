@@ -380,7 +380,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   });
 
   async function closeSessionIfOpen() {
-    if (!sessionOpen) return;
+    if (!sessionOpen && !session.hasOpenResources()) return;
     sessionClosePromise ??= (async () => {
       try {
         await session.close();

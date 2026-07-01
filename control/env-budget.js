@@ -61,7 +61,7 @@ function stringOrFallback(value, fallback = "") {
 function callerSecretsForBinding({ requiredCallerSecrets, nsSecrets, workerSecrets }) {
   if (!Array.isArray(requiredCallerSecrets) || requiredCallerSecrets.length === 0) return undefined;
   /** @type {Record<string, string>} */
-  const callerSecrets = {};
+  const callerSecrets = Object.create(null);
   for (const key of requiredCallerSecrets) {
     if (typeof key !== "string") continue;
     if (Object.hasOwn(workerSecrets, key)) {
