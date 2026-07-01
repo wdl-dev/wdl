@@ -109,8 +109,10 @@ async function mutateNamespaceSecret({
       return { mutated: false };
     }
 
+    const budgetEncrypted = { ...existingEncrypted };
+    delete budgetEncrypted[secretKey];
     const nsSecrets = await decryptSecretHash({
-      encrypted: existingEncrypted,
+      encrypted: budgetEncrypted,
       env: controlEnv,
       hashKey: nsSecretsKey,
     });

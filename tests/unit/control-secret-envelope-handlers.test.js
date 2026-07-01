@@ -318,6 +318,42 @@ test("namespace secret DELETE checks env revealed by removing a namespace secret
   }
 });
 
+test("namespace secret DELETE skips decrypting the removed corrupt envelope", async () => {
+  const { state } = await import(controlSharedUrl);
+  const original = {
+    hGetAll: state.redis.hGetAll,
+    sMembers: state.redis.sMembers,
+  };
+  const deletesBefore = state.redis.deletes.length;
+  /** @param {string} key */
+  state.redis.hGetAll = async (key) => {
+    if (key === "secrets:demo") return { TOKEN: "WDL-ENC:not-json" };
+    if (key === "routes:demo") return {};
+    return {};
+  };
+  /** @param {string} key */
+  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-delete-corrupt",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(state.redis.deletes.length, deletesBefore + 1);
+    assert.deepEqual(state.redis.deletes.at(-1), { key: "secrets:demo", field: "TOKEN" });
+  } finally {
+    Object.assign(state.redis, original);
+  }
+});
+
 const workerControlSharedUrl = controlSharedStubUrl(`
 class WatchError extends Error {}
 export function formatError(err) {
@@ -390,6 +426,11 @@ const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/w
   [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
 ]);
 const { handle: workerHandle } = await import(moduleDataUrl(workerSrc));
+const {
+  WORKER_LOADER_ENV_MAX_BYTES,
+  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
+  estimatedWorkerLoaderEnv,
+} = await import(envBudgetUrl());
 
 test("worker secret PUT encrypts before WATCH retries and reuses the envelope", async () => {
   const response = await workerHandle({
@@ -503,6 +544,138 @@ test("worker secret DELETE checks env revealed by removing a higher-precedence s
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_env_too_large");
     assert.equal(execCalled, false);
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret PUT budgets the copied active bundle under a future version string", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const baseMeta = {
+    vars: { PAD: "" },
+    workflows: [{
+      binding: "FLOW",
+      name: "flow",
+      className: "Flow",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }],
+  };
+  /** @param {number} padLength @param {string} version */
+  const bytesWithPad = (padLength, version) => Buffer.byteLength(JSON.stringify(estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "api",
+    version,
+    vars: { PAD: "x".repeat(padLength) },
+    workerSecrets: { TOKEN: "plain-secret" },
+    meta: baseMeta,
+  })), "utf8");
+  const padLength = WORKER_LOADER_ENV_MAX_BYTES -
+    bytesWithPad(0, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) +
+    1;
+  assert.ok(bytesWithPad(padLength, "v1") <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(bytesWithPad(padLength, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) > WORKER_LOADER_ENV_MAX_BYTES);
+  let execCalled = false;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => await fn({
+    async watch() {},
+    async unwatch() {},
+    async get() { return null; },
+    async hKeys() { return []; },
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      if (key === "routes:demo" && field === "api") return "v1";
+      if (key === "worker:demo:api:v:1" && field === "__meta__") {
+        return JSON.stringify({
+          ...baseMeta,
+          vars: { PAD: "x".repeat(padLength) },
+        });
+      }
+      return null;
+    },
+    async hGetAll() { return {}; },
+    async zCard() { return 1; },
+    async zRange() { return []; },
+    multi() {
+      return {
+        hSet() {},
+        hDel() {},
+        sAdd() {},
+        sRem() {},
+        async exec() { execCalled = true; },
+      };
+    },
+  });
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-future-version-budget",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_env_too_large");
+    assert.equal(execCalled, false);
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret DELETE skips decrypting the removed corrupt envelope", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  let execCalled = false;
+  let deletedField = null;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => await fn({
+    async watch() {},
+    async unwatch() {},
+    async get() { return null; },
+    async hKeys() { return ["TOKEN"]; },
+    async hGet() { return null; },
+    /** @param {string} key */
+    async hGetAll(key) {
+      if (key === "secrets:demo:api") return { TOKEN: "WDL-ENC:not-json" };
+      return {};
+    },
+    async zCard() { return 0; },
+    async zRange() { return []; },
+    multi() {
+      return {
+        hSet() {},
+        /** @param {string} _key @param {string} field */
+        hDel(_key, field) { deletedField = field; },
+        sAdd() {},
+        sRem() {},
+        async exec() { execCalled = true; },
+      };
+    },
+  });
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-delete-corrupt",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(execCalled, true);
+    assert.equal(deletedField, "TOKEN");
   } finally {
     state.redis.session = originalSession;
   }

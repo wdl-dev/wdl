@@ -605,7 +605,7 @@ async function runDeployPreflight({ redis, ns, name, deployRequest }) {
 }
 
 /**
- * @param {{ redis: RedisClient | RedisSession, controlEnv: Record<string, string | undefined>, ns: string, name: string, meta: PreparedMeta, version?: string }} args
+ * @param {{ redis: RedisClient | RedisSession, controlEnv: Record<string, string | undefined>, ns: string, name: string, meta: PreparedMeta | CommittedMeta, version?: string }} args
  */
 async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta, version = undefined }) {
   const nsEncrypted = await redis.hGetAll(`secrets:${ns}`);
@@ -909,14 +909,6 @@ export async function commitWithWatch({
     await watchCommitKeys(iso, { ns, name, prepared, outgoingRefs, d1Refs });
     if (controlEnv) {
       await iso.watch(`secrets:${ns}`, `secrets:${ns}:${name}`);
-      await validateCommittedEnvBudget({
-        redis: iso,
-        controlEnv,
-        ns,
-        name,
-        meta: prepared.meta,
-        version,
-      });
     }
 
     const resolvedD1Refs = await resolveD1RefsForCommit(iso, { ns, d1Refs });
@@ -933,6 +925,16 @@ export async function commitWithWatch({
       prepared,
       resolvedD1Refs,
     });
+    if (controlEnv) {
+      await validateCommittedEnvBudget({
+        redis: iso,
+        controlEnv,
+        ns,
+        name,
+        meta: committedMeta,
+        version,
+      });
+    }
 
     const multi = iso.multi();
     stageDeployCommit(multi, {

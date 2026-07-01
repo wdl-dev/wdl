@@ -404,6 +404,52 @@ test("commitWithWatch validates deploy env budget under watched secret hashes", 
   assert.deepEqual(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[0].vars, { TOKEN: "from-vars" });
 });
 
+test("commitWithWatch validates env budget against materialized D1 metadata", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map([
+    ["d1:database-name:tenant-a:main", "d1_0123456789abcdef0123456789abcdef"],
+  ]);
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
+    ["d1:database:tenant-a:d1_0123456789abcdef0123456789abcdef", {
+      databaseId: "d1_0123456789abcdef0123456789abcdef",
+      databaseName: "main",
+    }],
+  ]);
+  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls = [];
+
+  const redis = {
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  await commitWithWatch({
+    redis,
+    ns: "tenant-a",
+    name: "demo",
+    version: "v1",
+    prepared: {
+      meta: {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "esm" } },
+        bindings: {
+          DB: { type: "d1", databaseId: "main" },
+        },
+      },
+      normalized: [["worker.js", "export default {}"]],
+    },
+    outgoingRefs: [],
+    d1Refs: [{ binding: "DB", databaseId: "main" }],
+    controlEnv: {},
+  });
+
+  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.length, 1);
+  assert.equal(
+    /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[0].meta.bindings.DB.databaseId,
+    "d1_0123456789abcdef0123456789abcdef"
+  );
+});
+
 test("deploy handler resolves cross-namespace service-binding meta from the target namespace", async () => {
   /** @type {string[]} */
   const metaReads = [];

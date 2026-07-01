@@ -8,6 +8,7 @@ const ESTIMATED_VERSION = "v0000000000";
 const ESTIMATED_DO_STORAGE_ID = "do_00000000000000000000000000000000";
 const ESTIMATED_WORKFLOW_KEY = "wf_00000000000000000000000000000000";
 
+export const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = ESTIMATED_VERSION;
 export const UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES = 1024 * 1024;
 export const WORKER_LOADER_ENV_HEADROOM_BYTES = 8 * 1024;
 export const WORKER_LOADER_ENV_MAX_BYTES =
@@ -318,6 +319,7 @@ export async function decryptSecretHash({ encrypted, env, hashKey }) {
  *   ns: string,
  *   worker: string,
  *   versions: Iterable<string>,
+ *   versionEstimates?: Iterable<{ sourceVersion: string, estimatedVersion: string }>,
  *   nsSecrets?: Record<string, unknown> | null,
  *   workerSecrets?: Record<string, unknown> | null,
  * }} args
@@ -327,19 +329,35 @@ export async function assertWorkerVersionsUserEnvBudget({
   ns,
   worker,
   versions,
+  versionEstimates = [],
   nsSecrets = null,
   workerSecrets = null,
 }) {
-  const uniqueVersions = [...new Set([...versions].filter((version) => typeof version === "string" && version))];
-  if (uniqueVersions.length === 0) {
+  const checks = [
+    ...[...versions]
+      .filter((version) => typeof version === "string" && version)
+      .map((version) => ({ sourceVersion: version, estimatedVersion: version })),
+    ...[...versionEstimates]
+      .filter((entry) =>
+        entry &&
+        typeof entry.sourceVersion === "string" &&
+        entry.sourceVersion &&
+        typeof entry.estimatedVersion === "string" &&
+        entry.estimatedVersion
+      ),
+  ];
+  const uniqueChecks = [...new Map(
+    checks.map((entry) => [`${entry.sourceVersion}\0${entry.estimatedVersion}`, entry])
+  ).values()];
+  if (uniqueChecks.length === 0) {
     assertWorkerLoaderUserEnvBudget({ ns, worker, nsSecrets, workerSecrets });
     return;
   }
 
   // Keep bundle metadata reads sequential: callers may pass a RedisSession,
   // whose command protocol is single-flight even though secret decryption is not.
-  for (const version of uniqueVersions) {
-    const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
+  for (const { sourceVersion, estimatedVersion } of uniqueChecks) {
+    const rawMeta = await redis.hGet(bundleKey(ns, worker, sourceVersion), "__meta__");
     /** @type {Record<string, unknown>} */
     let meta = {};
     if (typeof rawMeta === "string") {
@@ -350,7 +368,7 @@ export async function assertWorkerVersionsUserEnvBudget({
           : {};
       } catch (err) {
         throw new Error(
-          `invalid bundle metadata for ${ns}/${worker}@${version}: ${err instanceof Error ? err.message : String(err)}`,
+          `invalid bundle metadata for ${ns}/${worker}@${sourceVersion}: ${err instanceof Error ? err.message : String(err)}`,
           { cause: err }
         );
       }
@@ -358,7 +376,7 @@ export async function assertWorkerVersionsUserEnvBudget({
     assertWorkerLoaderUserEnvBudget({
       ns,
       worker,
-      version,
+      version: estimatedVersion,
       vars: meta.vars && typeof meta.vars === "object" && !Array.isArray(meta.vars)
         ? /** @type {Record<string, unknown>} */ (meta.vars)
         : null,

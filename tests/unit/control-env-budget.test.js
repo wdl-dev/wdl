@@ -13,6 +13,7 @@ const {
   UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
   WORKER_LOADER_ENV_HEADROOM_BYTES,
   WORKER_LOADER_ENV_MAX_BYTES,
+  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
   assertWorkerVersionsUserEnvBudget,
@@ -179,6 +180,65 @@ test("worker env budget checks retained-version binding env injections", async (
       worker: "caller",
       versions: ["v1"],
       nsSecrets: { API_TOKEN: secret },
+    }),
+    (err) => {
+      assert.equal(err instanceof WorkerEnvBudgetError, true);
+      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      return true;
+    }
+  );
+});
+
+test("worker env budget can estimate a source bundle under a future version string", async () => {
+  const baseMeta = {
+    vars: { PAD: "" },
+    workflows: [{
+      binding: "FLOW",
+      name: "flow",
+      className: "Flow",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }],
+  };
+  /** @param {number} padLength @param {string} version */
+  const bytesWithPad = (padLength, version) => Buffer.byteLength(JSON.stringify(estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "api",
+    version,
+    vars: { PAD: "x".repeat(padLength) },
+    meta: baseMeta,
+  })), "utf8");
+  const padLength = WORKER_LOADER_ENV_MAX_BYTES - bytesWithPad(0, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) + 1;
+  assert.ok(bytesWithPad(padLength, "v1") <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(bytesWithPad(padLength, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) > WORKER_LOADER_ENV_MAX_BYTES);
+
+  const redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      assert.equal(key, "worker:demo:api:v:1");
+      assert.equal(field, "__meta__");
+      return JSON.stringify({
+        ...baseMeta,
+        vars: { PAD: "x".repeat(padLength) },
+      });
+    },
+  };
+
+  await assert.doesNotReject(() => assertWorkerVersionsUserEnvBudget({
+    redis,
+    ns: "demo",
+    worker: "api",
+    versions: ["v1"],
+  }));
+  await assert.rejects(
+    () => assertWorkerVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      worker: "api",
+      versions: [],
+      versionEstimates: [{
+        sourceVersion: "v1",
+        estimatedVersion: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
+      }],
     }),
     (err) => {
       assert.equal(err instanceof WorkerEnvBudgetError, true);

@@ -23,6 +23,7 @@ import { stageWorkerHidden, stageWorkerVisible } from "control-lifecycle-indexes
 import { bumpActiveAndPromote, RoutingError } from "control-routing";
 import {
   WorkerEnvBudgetError,
+  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   assertWorkerVersionsUserEnvBudget,
   decryptSecretHash,
 } from "control-env-budget";
@@ -248,14 +249,14 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
       const nsEncrypted = await iso.hGetAll(nsSecretsKey);
       const workerEncrypted = await iso.hGetAll(secretsKey);
+      const workerBudgetEncrypted = { ...workerEncrypted };
+      delete workerBudgetEncrypted[key];
       const [nsSecrets, workerSecrets] = await Promise.all([
         decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: nsSecretsKey }),
-        decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: secretsKey }),
+        decryptSecretHash({ encrypted: workerBudgetEncrypted, env: controlEnv, hashKey: secretsKey }),
       ]);
       if (method === "PUT") {
         workerSecrets[key] = /** @type {string} */ (plaintext);
-      } else {
-        delete workerSecrets[key];
       }
       await assertWorkerVersionsUserEnvBudget({
         redis: iso,
@@ -265,6 +266,12 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
           ...retainedVersions,
           ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
         ],
+        versionEstimates: typeof activeVersion === "string" && activeVersion
+          ? [{
+              sourceVersion: activeVersion,
+              estimatedVersion: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
+            }]
+          : [],
         nsSecrets,
         workerSecrets,
       });
