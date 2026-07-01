@@ -40,7 +40,7 @@ Tenant 可见 binding 包括 KV、R2、D1、Durable Objects、Queues、ASSETS、
 workerd 提供 isolate、module evaluation、named entrypoint 和 JSRPC 机制。Cloudflare 生产平台通常在外部服务里实现的 binding 后端，则由 WDL 自己补齐。因此 runtime 把 binding 当作 adapter：
 
 - KV、queue producer 这类纯数据 binding 调 colocated redis-proxy sidecar。Loaded worker 看到 Cloudflare-shaped object，但 method call 会先通过 workerd JSRPC 回到 runtime，再经 HTTP 调 redis-proxy。
-- Secret value 也在 cold-load 时经过 redis-proxy。redis-proxy 解密 `WDL-ENC:` value 后，runtime 在 internal load envelope 中收到 plaintext `ns_secrets` 和 `worker_secrets`；tenant-facing `env` 形状保持不变。Env materialization 使用固定优先级：bundle vars，然后 namespace secrets，然后 worker secrets。同名 worker-level secret 覆盖 namespace-level secret，namespace-level secret 覆盖 var。Control 会在 deploy 和 secret mutation 前用留有 headroom 的预算检查这组用户可控 env 是否超过 workerd `workerLoader` 的 serialized env budget，避免超限配置拖到 runtime cold-load 才失败。
+- Secret value 也在 cold-load 时经过 redis-proxy。redis-proxy 解密 `WDL-ENC:` value 后，runtime 在 internal load envelope 中收到 plaintext `ns_secrets` 和 `worker_secrets`；tenant-facing `env` 形状保持不变。Env materialization 使用固定优先级：bundle vars，然后 namespace secrets，然后 worker secrets。同名 worker-level secret 覆盖 namespace-level secret，namespace-level secret 覆盖 var。Control 会在 deploy 和 secret mutation 前用留有 headroom 的预算估算完整 workerLoader env，包括用户 vars/secrets、runtime 注入的 binding/workflow env value，以及 platform/service binding props 中复制的 required caller secret，避免超限配置拖到 runtime cold-load 才失败。
 - D1、Durable Objects、Workflows 这类 stateful binding 调专门 backend service。Hidden backend Fetcher 留在 runtime 内部，并在 tenant code 观察 `env` 前被删除。
 - R2 是 S3-compatible object-storage adapter：runtime 使用平台 credential 签名请求，并发送到配置的 endpoint。
 - ASSETS 是 deploy artifact URL helper：control 在 deploy 时把 assets 上传到 S3-compatible storage；runtime 读取 `__meta__.assets` 和 `ASSETS_CDN_BASE`，只暴露 `env.ASSETS.url(path)` 用来生成 tokenized CDN URL。
@@ -107,7 +107,7 @@ Runtime 为 loading、binding operation、`redis-proxy` call、workflow replay c
 - Runtime 不再为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 仍然注入 `__WdlAbort__`，但当前 bundled workerd baseline 中 `abortIsolate()` 已经不需要该 flag。
 - 移除 loaded worker 的宽泛 `experimental` flag 会有意收紧 tenant 对非 GA experimental-only surface 的访问，例如不可撤销的长期 stub storage。不要为了兼容绕过而重新打开它，除非先完成明确的功能设计。
 - Runtime workerd 进程仍需要进程级 `--experimental`，因为上游 workerd 2026-07-01 仍用它 gate `workerLoader` binding。不要重新给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
-- 上游 workerd 2026-07-01 把 dynamic worker code 限制为 64 MiB、serialized dynamic env 限制为 1 MiB。Control 会在分配 version 前拒绝超过 64 MiB 的 module bodies；vars 加 namespace/worker secrets 会在 control plane 用留有 headroom 的 `workerLoader` env budget 预检，因为 workerd 的最终检查还会把 runtime facade objects 纳入完整 `env` estimate。
+- 上游 workerd 2026-07-01 把 dynamic worker code 限制为 64 MiB、serialized dynamic env 限制为 1 MiB。Control 会在分配 version 前拒绝超过 64 MiB 的 module bodies；vars、namespace/worker secrets、runtime 注入的 binding/workflow env value 会在 control plane 用留有 headroom 的 `workerLoader` env budget 预检，因为 workerd 的最终检查看的是完整 `env` estimate。
 - workerd 升级仍可能改变默认或 compatibility-flagged runtime surface；升级时要审 exposed surface，而不只审 loader/abort path。
 
 ## 保护该模块的测试

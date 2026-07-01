@@ -73,9 +73,10 @@ shared crate `wdl-rust-common`.
   Runtime receives plaintext only in the internal load envelope after redis-proxy
   decrypts during `/runtime/load`. Env materializes in fixed precedence — vars, then
   namespace secrets, then worker secrets — so a worker secret shadows a namespace secret
-  shadows a var on the same key. Control must keep vars plus namespace/worker secrets
-  within WDL's headroomed workerd `workerLoader` serialized env budget before
-  deploy/secret mutation, not let that fail later during cold-load.
+  shadows a var on the same key. Control must keep the estimated full workerLoader env
+  — user vars/secrets plus runtime-injected binding/workflow env values such as
+  required caller secret copies — within WDL's headroomed workerd serialized env budget
+  before deploy/secret mutation, not let that fail later during cold-load.
 - **DB split is intentional.** DB 0 is control metadata, DB 1 is data-plane KV/queue/log
   streams, DB 2 is Workflows. See `docs/redis-key-layout.md`.
 - **D1/DO correctness comes from owner lease + generation fence.** Service DNS only

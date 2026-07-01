@@ -149,7 +149,7 @@ Supported config surfaces:
 | Field | WDL behavior |
 |---|---|
 | `name`, `main`, `compatibility_date`, `compatibility_flags` | Stored in immutable bundle metadata. Control rejects malformed, future, or bundled-workerd-unsupported `compatibility_date` values before commit; module bodies must fit workerd's 64 MiB `workerLoader` code limit. |
-| `[vars]` | String, number, and boolean values are accepted and stringified into `env`; vars plus namespace/worker secrets must fit WDL's headroomed workerd 1 MiB `workerLoader` env budget. |
+| `[vars]` | String, number, and boolean values are accepted and stringified into `env`; vars, namespace/worker secrets, and runtime-injected binding/workflow env values must fit WDL's headroomed workerd 1 MiB `workerLoader` env budget. |
 | `[[kv_namespaces]]` | `id` is a platform-local KV namespace id, not a Cloudflare UUID. |
 | `[[r2_buckets]]` | `binding` plus `bucket_name` become a namespace-scoped virtual R2 bucket under the platform S3 bucket. |
 | `[assets]` | `directory` contents upload to S3-compatible assets storage and auto-inject `ASSETS`. |

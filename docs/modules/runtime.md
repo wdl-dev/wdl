@@ -82,10 +82,11 @@ services. Runtime therefore treats bindings as adapters:
   decrypts `WDL-ENC:` values; tenant-facing `env` shape stays unchanged. Env
   materialization merges in fixed precedence: bundle vars, then namespace secrets, then
   worker secrets. A worker-level secret with the same name wins over a namespace-level
-  secret, which wins over a var. Control enforces a headroomed version of workerd's
-  `workerLoader` serialized env budget on this user-controlled set before deploys and
-  secret mutations, so an over-large env fails in the control plane instead of during
-  runtime cold-load.
+  secret, which wins over a var. Control enforces a headroomed estimate of workerd's
+  `workerLoader` serialized env budget before deploys and secret mutations. That
+  estimate includes user vars/secrets plus runtime-injected binding/workflow env values,
+  including required caller secret copies in platform/service binding props, so an
+  over-large env fails in the control plane instead of during runtime cold-load.
 - Stateful bindings such as D1, Durable Objects, and Workflows call dedicated backend
   services. The hidden backend Fetchers stay in runtime and are removed before tenant
   code observes `env`.
@@ -245,9 +246,9 @@ when a matching active tail session exists.
   WorkerCode unless another upstream API explicitly requires it.
 - Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
   env at 1 MiB. Control rejects module bodies over 64 MiB before version allocation.
-  Vars plus namespace/worker secrets are prechecked against a headroomed `workerLoader`
-  env budget because workerd's final enforcement includes runtime facade objects in the
-  full `env` estimate.
+  Vars, namespace/worker secrets, and runtime-injected binding/workflow env values are
+  prechecked against a headroomed `workerLoader` env budget because workerd's final
+  enforcement includes the full `env` estimate.
 - workerd upgrades can still change default or compatibility-flagged runtime
   surfaces; review the exposed surface, not only the loader/abort path.
 

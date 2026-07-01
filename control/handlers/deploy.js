@@ -605,9 +605,9 @@ async function runDeployPreflight({ redis, ns, name, deployRequest }) {
 }
 
 /**
- * @param {{ redis: RedisClient | RedisSession, controlEnv: Record<string, string | undefined>, ns: string, name: string, meta: PreparedMeta }} args
+ * @param {{ redis: RedisClient | RedisSession, controlEnv: Record<string, string | undefined>, ns: string, name: string, meta: PreparedMeta, version?: string }} args
  */
-async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta }) {
+async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta, version = undefined }) {
   const nsEncrypted = await redis.hGetAll(`secrets:${ns}`);
   const workerEncrypted = await redis.hGetAll(`secrets:${ns}:${name}`);
   const [nsSecrets, workerSecrets] = await Promise.all([
@@ -617,11 +617,13 @@ async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta })
   assertWorkerLoaderUserEnvBudget({
     ns,
     worker: name,
+    version,
     vars: meta.vars && typeof meta.vars === "object" && !Array.isArray(meta.vars)
       ? /** @type {Record<string, unknown>} */ (meta.vars)
       : null,
     nsSecrets,
     workerSecrets,
+    meta,
   });
 }
 
@@ -913,6 +915,7 @@ export async function commitWithWatch({
         ns,
         name,
         meta: prepared.meta,
+        version,
       });
     }
 
