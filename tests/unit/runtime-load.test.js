@@ -1062,7 +1062,7 @@ test("createLoaderCallback: attaches configured tail worker and always wraps mai
       assert.equal(/** @type {any} */ (workerCode.modules)["worker.js"], "export default {};");
       assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class __WdlAbort__/);
       assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \{ WorkerEntrypoint, abortIsolate \} from "cloudflare:workers"/);
-      assert.equal(workerCode.allowExperimental, true);
+      assert.equal("allowExperimental" in workerCode, false);
       assert.deepEqual(workerCode.tails, [{ kind: "tail-fetcher" }]);
       assert.deepEqual(workerCode.globalOutbound, { kind: "public-network" });
       assert.ok(!("meta" in workerCode), "loader callback should not propagate meta into the workerLoader object");

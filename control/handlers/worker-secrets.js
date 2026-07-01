@@ -7,6 +7,8 @@ import {
   requireControlLog,
   requireControlRedis,
   runOptimistic,
+  stringEnv,
+  codedErrorResponse,
 } from "control-shared";
 import {
   deleteLockKey,
@@ -19,6 +21,13 @@ import {
 } from "control-handlers-secret-put";
 import { stageWorkerHidden, stageWorkerVisible } from "control-lifecycle-indexes";
 import { bumpActiveAndPromote, RoutingError } from "control-routing";
+import { bundleKey } from "shared-version";
+import {
+  WorkerEnvBudgetError,
+  assertWorkerLoaderUserEnvBudget,
+  decryptSecretHash,
+} from "control-env-budget";
+import { SecretEnvelopeError } from "shared-secret-envelope";
 
 const MAX_SECRET_ATTEMPTS = 5;
 
@@ -56,6 +65,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
     if (invalidKey) return invalidKey;
 
     let storedValue = null;
+    let putPlaintext = null;
     if (method === "PUT") {
       const put = await readEncryptedSecretPutValue({
         request,
@@ -65,6 +75,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
       });
       if ("response" in put) return put.response;
       storedValue = put.encrypted;
+      putPlaintext = put.plaintext;
     }
 
     let mutationResult;
@@ -72,6 +83,8 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
       mutationResult = await mutateSecret({
         redis, ns, name, key, method,
         value: storedValue,
+        plaintext: putPlaintext,
+        controlEnv: stringEnv(env),
       });
     } catch (err) {
       if (err instanceof SecretAbort) {
@@ -86,6 +99,8 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         });
         return controlAbortResponse(err);
       }
+      if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
+      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
       throw err;
     }
 
@@ -188,9 +203,9 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
 // DELETE extends WATCH to routes + worker-versions so the
 // "last key → SREM workers:<ns>" branch can trust its preconditions.
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, key: string, method: string, value: string | null }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, key: string, method: string, value: string | null, plaintext?: string | null, controlEnv: Record<string, string | undefined> }} args
  */
-async function mutateSecret({ redis, ns, name, key, method, value }) {
+async function mutateSecret({ redis, ns, name, key, method, value, plaintext = null, controlEnv }) {
   const secretsKey = `secrets:${ns}:${name}`;
   return await runOptimistic(redis, {
     attempts: MAX_SECRET_ATTEMPTS,
@@ -231,6 +246,28 @@ async function mutateSecret({ redis, ns, name, key, method, value }) {
     const multi = iso.multi();
     if (method === "PUT") {
       if (typeof value !== "string") throw new Error("PUT secret value missing");
+      if (typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
+      const activeVersion = await iso.hGet(routesKey(ns), name);
+      const nsEncrypted = await iso.hGetAll(`secrets:${ns}`);
+      const workerEncrypted = await iso.hGetAll(secretsKey);
+      const [nsSecrets, workerSecrets] = await Promise.all([
+        decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: `secrets:${ns}` }),
+        decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: secretsKey }),
+      ]);
+      workerSecrets[key] = plaintext;
+      let vars = null;
+      if (typeof activeVersion === "string" && activeVersion) {
+        const rawMeta = await iso.hGet(bundleKey(ns, name, activeVersion), "__meta__");
+        const meta = typeof rawMeta === "string" ? JSON.parse(rawMeta) : {};
+        vars = meta && typeof meta === "object" ? meta.vars : null;
+      }
+      assertWorkerLoaderUserEnvBudget({
+        ns,
+        worker: name,
+        vars,
+        nsSecrets,
+        workerSecrets,
+      });
       multi.hSet(secretsKey, key, value);
       // SADD even on secret-only / pre-deploy workers so they're
       // visible to GET /workers and reachable by whole-delete.

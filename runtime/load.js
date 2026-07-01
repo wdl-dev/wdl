@@ -565,12 +565,9 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
     }, Date.now() - envStartedAt));
 
     // Loaded workers must not inherit runtime's private-reaching
-    // outbound (pinned to PUBLIC_NETWORK). `allowExperimental: true` is
-    // gated by the host carrying `experimental` itself; the loaded
-    // worker needs it for the __WdlAbort__ shim's abortIsolate import.
+    // outbound; pin them to PUBLIC_NETWORK.
     const workerCode = {
       ...codeBase,
-      allowExperimental: true,
       env: workerEnv,
       globalOutbound: env.PUBLIC_NETWORK,
       ...(env.TAIL_WORKER ? { tails: [env.TAIL_WORKER] } : {}),

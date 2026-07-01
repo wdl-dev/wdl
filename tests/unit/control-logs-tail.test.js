@@ -192,6 +192,31 @@ test("logs tail closes after the max session lifetime so reconnect reauthorizes"
   assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_expired"));
 });
 
+test("logs tail max-session watchdog closes even without stream cancel", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "50" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-watchdog",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  assert.match((await readText(reader)).text, /tail-open/);
+  await delay(80);
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].closed, true);
+  assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_expired"));
+  await reader.cancel().catch(() => {});
+});
+
 test("logs tail emits idle keepalives below common proxy idle timeouts", async () => {
   resetTailState();
   const { handle } = await loadLogsTailHandler();

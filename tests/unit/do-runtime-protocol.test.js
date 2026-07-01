@@ -236,7 +236,7 @@ test("normalizes inline workerCode only for test hooks", () => {
   );
   const invoke = normalizeDoInvokeRequest(INLINE_BODY, { allowInlineWorkerCode: true });
   assert.equal(invoke.hostId, CHAT_ROOM_HOST_ID);
-  assert.equal("workerCode" in invoke ? invoke.workerCode.allowExperimental : undefined, true);
+  assert.equal("workerCode" in invoke ? "allowExperimental" in invoke.workerCode : undefined, false);
 });
 
 test("builds forwarded Request for user durable object fetch", async () => {

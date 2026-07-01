@@ -82,7 +82,10 @@ services. Runtime therefore treats bindings as adapters:
   decrypts `WDL-ENC:` values; tenant-facing `env` shape stays unchanged. Env
   materialization merges in fixed precedence: bundle vars, then namespace secrets, then
   worker secrets. A worker-level secret with the same name wins over a namespace-level
-  secret, which wins over a var.
+  secret, which wins over a var. Control enforces a headroomed version of workerd's
+  `workerLoader` serialized env budget on this user-controlled set before deploys and
+  secret mutations, so an over-large env fails in the control plane instead of during
+  runtime cold-load.
 - Stateful bindings such as D1, Durable Objects, and Workflows call dedicated backend
   services. The hidden backend Fetchers stay in runtime and are removed before tenant
   code observes `env`.
@@ -230,11 +233,23 @@ when a matching active tail session exists.
   binding shape changes.
 - Runtime must roll before scheduler/workflows if they depend on a new `:8088` internal
   path or dispatch body.
-- workerd upgrades can change experimental surfaces; runtime currently enables
-  `experimental` because `abortIsolate()` is required for isolate eviction.
-- `experimental` is broader than `abortIsolate()`. Tenants inherit every experimental
-  workerd surface enabled by that flag, so workerd upgrades require review of the
-  exposed surface, not only the loader/abort path.
+- Runtime does not enable workerd's broad `experimental` flag for loaded workers.
+  Historical-version eviction still injects `__WdlAbort__`, but `abortIsolate()` is
+  available without that flag in the bundled workerd baseline.
+- Removing the broad loaded-worker `experimental` flag intentionally removes access to
+  non-GA experimental-only tenant surfaces, such as irrevocable long-term stub storage.
+  Do not re-enable it as a compatibility workaround without an explicit feature design.
+- The runtime workerd processes still run with process-level `--experimental` because
+  upstream workerd 2026-07-01 continues to gate `workerLoader` bindings on that switch.
+  Do not re-add the `experimental` compatibility flag or `allowExperimental` to loaded
+  WorkerCode unless another upstream API explicitly requires it.
+- Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
+  env at 1 MiB. Control rejects module bodies over 64 MiB before version allocation.
+  Vars plus namespace/worker secrets are prechecked against a headroomed `workerLoader`
+  env budget because workerd's final enforcement includes runtime facade objects in the
+  full `env` estimate.
+- workerd upgrades can still change default or compatibility-flagged runtime
+  surfaces; review the exposed surface, not only the loader/abort path.
 
 ## Tests That Protect This Module
 

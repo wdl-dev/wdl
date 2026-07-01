@@ -6,6 +6,7 @@ import { applyModuleReplacements, moduleDataUrl, readRepositoryFile, repositoryF
 import { readJsonResponse } from "../helpers/response-json.js";
 
 const SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
+const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 const env = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
   SECRET_ENVELOPE_KID: "local:test:secret-envelope:v1",
@@ -34,12 +35,21 @@ function secretPutUrl(controlSharedUrl, controlLibUrl) {
   return moduleDataUrl(source);
 }
 
+function envBudgetUrl() {
+  const source = applyModuleReplacements(readRepositoryFile("control/env-budget.js"), [
+    [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
+  ]);
+  return moduleDataUrl(source);
+}
+
 const controlSharedUrl = controlSharedStubUrl(`
 export const state = {
   log() {},
   redis: {
     writes: [],
     async hKeys() { return []; },
+    async hGet() { return null; },
+    async hGetAll() { return {}; },
     async hSet(key, field, value) {
       this.writes.push({ key, field, value });
       return 1;
@@ -53,6 +63,9 @@ const src = applyModuleReplacements(readRepositoryFile("control/handlers/ns-secr
   [/from "control-shared";/, `from ${JSON.stringify(controlSharedUrl)};`],
   [/from "control-lib";/, `from ${JSON.stringify(controlLibStubUrl)};`],
   [/from "control-handlers-secret-put";/, `from ${JSON.stringify(secretPutUrl(controlSharedUrl, controlLibStubUrl))};`],
+  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+  [/from "control-env-budget";/, `from ${JSON.stringify(envBudgetUrl())};`],
+  [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
 ]);
 
 const { handle } = await import(moduleDataUrl(src));
@@ -142,6 +155,7 @@ export const state = {
         async get() { return null; },
         async hKeys() { return []; },
         async hGet() { return null; },
+        async hGetAll() { return {}; },
         async zCard() { return 0; },
         multi() {
           return {
@@ -186,6 +200,9 @@ const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/w
   [/from "control-handlers-secret-put";/, `from ${JSON.stringify(secretPutUrl(workerControlSharedUrl, workerLibStubUrl))};`],
   [/from "control-lifecycle-indexes";/, `from ${JSON.stringify(lifecycleStubUrl)};`],
   [/from "control-routing";/, `from ${JSON.stringify(routingStubUrl)};`],
+  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+  [/from "control-env-budget";/, `from ${JSON.stringify(envBudgetUrl())};`],
+  [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
 ]);
 const { handle: workerHandle } = await import(moduleDataUrl(workerSrc));
 

@@ -17,7 +17,7 @@ resource "aws_ecs_task_definition" "gateway" {
     image       = var.workerd_image
     essential   = true
     entryPoint  = ["workerd"]
-    command     = ["serve", "-b", "/app/dist/workerd-configs/gateway.bin", "--experimental"]
+    command     = ["serve", "-b", "/app/dist/workerd-configs/gateway.bin"]
     stopTimeout = 20
 
     portMappings = [{

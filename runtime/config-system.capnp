@@ -104,9 +104,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "@wdl-dev/aws-sigv4",    esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
-  # `experimental` lets this worker pass `allowExperimental: true` in WorkerCode
-  # so loaded workers can import `abortIsolate` for historical-version eviction.
-  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers", "experimental"],
+  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers"],
   globalOutbound = "network",
   bindings = [
     (name = "SERVICE_NAME", text = "system-runtime"),
@@ -160,6 +158,7 @@ const controlWorker :Workerd.Worker = (
     (name = "control-bundle",        esModule = embed "../control/bundle.js"),
     (name = "control-bindings",      esModule = embed "../control/bindings.js"),
     (name = "control-topology",      esModule = embed "../control/topology.js"),
+    (name = "control-env-budget",    esModule = embed "../control/env-budget.js"),
     (name = "control-lifecycle-indexes", esModule = embed "../control/lifecycle-indexes.js"),
     (name = "control-routing",       esModule = embed "../control/routing.js"),
     (name = "control-routing-route-plan", esModule = embed "../control/routing/route-plan.js"),
@@ -244,6 +243,7 @@ const controlWorker :Workerd.Worker = (
     (name = "ASSETS_CDN_BASE",        fromEnvironment = "ASSETS_CDN_BASE"),
     (name = "PLATFORM_DOMAIN",        fromEnvironment = "PLATFORM_DOMAIN"),
     (name = "LOG_LEVEL",              fromEnvironment = "LOG_LEVEL"),
+    (name = "LOG_TAIL_MAX_SESSION_MS", fromEnvironment = "LOG_TAIL_MAX_SESSION_MS"),
     (name = "SECRET_ENVELOPE_LOCAL_KEY_B64", fromEnvironment = "SECRET_ENVELOPE_LOCAL_KEY_B64"),
     (name = "SECRET_ENVELOPE_KID",    fromEnvironment = "SECRET_ENVELOPE_KID"),
     (name = "TAIL_WORKER",            service = "tail-worker"),

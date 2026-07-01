@@ -240,13 +240,12 @@ pub(crate) fn validate_shutdown_timing(config: &SupervisorConfig) {
     }
 }
 
-pub(crate) fn workerd_args(compiled_config: &str) -> Vec<String> {
-    vec![
-        "serve".into(),
-        "-b".into(),
-        compiled_config.into(),
-        "--experimental".into(),
-    ]
+pub(crate) fn workerd_args(compiled_config: &str, experimental: bool) -> Vec<String> {
+    let mut args = vec!["serve".into(), "-b".into(), compiled_config.into()];
+    if experimental {
+        args.push("--experimental".into());
+    }
+    args
 }
 
 pub(crate) fn pick_do_compiled_config() -> &'static str {
@@ -341,6 +340,23 @@ mod tests {
         assert_eq!(signal_exit_code(libc::SIGINT), 130);
         assert_eq!(signal_exit_code(libc::SIGTERM), 143);
         assert_eq!(signal_exit_code(libc::SIGHUP), 1);
+    }
+
+    #[test]
+    fn workerd_args_adds_experimental_only_when_requested() {
+        assert_eq!(
+            workerd_args("/app/dist/workerd-configs/d1-runtime.bin", false),
+            vec!["serve", "-b", "/app/dist/workerd-configs/d1-runtime.bin"]
+        );
+        assert_eq!(
+            workerd_args("/app/dist/workerd-configs/do-runtime.bin", true),
+            vec![
+                "serve",
+                "-b",
+                "/app/dist/workerd-configs/do-runtime.bin",
+                "--experimental"
+            ]
+        );
     }
 
     #[test]

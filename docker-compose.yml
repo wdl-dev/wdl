@@ -418,7 +418,7 @@ services:
       - ./dist:/app/dist:ro
     entrypoint: ["workerd"]
     command:
-      ["serve", "-b", "/app/dist/workerd-configs/gateway-local.bin", "--experimental"]
+      ["serve", "-b", "/app/dist/workerd-configs/gateway-local.bin"]
     ports:
       - "${WDL_GATEWAY_HOST_PORT:-8080}:8080"
     environment:

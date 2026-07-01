@@ -28,7 +28,7 @@ const NATIVE_DELETE_ALL_PRESERVES_ALARM_FLAG = "delete_all_preserves_alarm";
  * @typedef {{ exports: Record<string, (options: { props: Record<string, unknown> }) => unknown> & { KV(options: { props: Record<string, unknown> }): unknown, Assets(options: { props: Record<string, unknown> }): unknown, QueueProducer(options: { props: Record<string, unknown> }): unknown, D1Database(options: { props: Record<string, unknown> }): unknown, R2Bucket(options: { props: Record<string, unknown> }): unknown, ServiceBinding(options: { props: Record<string, unknown> }): unknown, DurableObjectNamespace(options: { props: Record<string, unknown> }): unknown, DoAlarmBinding(options: { props: Record<string, unknown> }): unknown, InternalAuthBackend(options: { props: Record<string, unknown> }): unknown } }} DoRuntimeContext
  * @typedef {{ name: string, spec: RuntimeBindingSpec }} DoBindingInput
  * @typedef {string | { cjs: string } | { py: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
- * @typedef {{ mainModule: string, modules: Record<string, WorkerModuleValue>, compatibilityFlags?: string[], compatibilityDate?: string, allowExperimental?: boolean, env?: Record<string, unknown>, globalOutbound?: unknown }} WorkerCode
+ * @typedef {{ mainModule: string, modules: Record<string, WorkerModuleValue>, compatibilityFlags?: string[], compatibilityDate?: string, env?: Record<string, unknown>, globalOutbound?: unknown }} WorkerCode
  */
 
 /** @param {DoEnv} env */
@@ -256,7 +256,6 @@ export async function loadDoWorkerCode(env, ctx, invoke, requestId = null) {
     const { meta, ...codeBase } = bundleToWorkerCode(loaded.bundle);
     const workerCode = {
       ...codeBase,
-      allowExperimental: true,
       env: buildDoEnv(
         meta,
         loaded.ns_secrets,

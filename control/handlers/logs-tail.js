@@ -1,7 +1,7 @@
 // SSE handler for `wdl tail`. Pull-based ReadableStream + pre-registered
-// ctx.waitUntil(cancelPromise) so the cancel callback fires reliably on
-// HTTP client disconnect. Push-style intervals have historically failed to
-// propagate disconnect cleanup reliably here.
+// ctx.waitUntil(cancelPromise) keeps cleanup outside the cancel callback.
+// workerd >= 2026-06-19 no longer reliably calls cancel() on client
+// disconnect, so max-session cleanup also has an independent watchdog.
 
 import { RedisSession, redisDbFromEnv } from "shared-redis";
 import { envValueOr } from "shared-env";
@@ -361,13 +361,49 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   });
   let sessionOpen = false;
   let cancelled = false;
+  /** @type {ReadableStreamDefaultController<Uint8Array> | null} */
+  let streamController = null;
+  let expiryLogged = false;
   const { promise: cancelPromise, resolve: resolveCancel } =
     /** @type {PromiseWithResolvers<void>} */ (Promise.withResolvers());
+
+  const sessionExpiredWarning = () => sseEvent({
+    event: "tail_warning",
+    data: JSON.stringify({
+      event: "tail_warning",
+      code: "session_expired",
+      message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
+    }),
+  });
+
+  /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
+  function expireSession(controller) {
+    if (cancelled) return;
+    cancelled = true;
+    if (!expiryLogged) {
+      expiryLogged = true;
+      log("info", "tail_session_expired", {
+        request_id: requestId, namespace: ns, worker_count: workers.length,
+        max_session_ms: maxSessionMs,
+      });
+    }
+    if (controller) {
+      try { controller.enqueue(utf8Encoder.encode(sessionExpiredWarning())); } catch {}
+      try { controller.close(); } catch {}
+    }
+    resolveCancel();
+  }
+
+  const expiryTimer = setTimeout(() => expireSession(streamController), maxSessionMs);
+  if (typeof expiryTimer === "object" && typeof expiryTimer.unref === "function") {
+    expiryTimer.unref();
+  }
 
   // Pre-register cleanup. Per CLAUDE.md gotcha: scheduling waitUntil from
   // inside cancel races IoContext teardown — cancel only resolves the
   // promise, the actual close happens here.
   ctx.waitUntil(cancelPromise.then(async () => {
+    clearTimeout(expiryTimer);
     try {
       if (sessionOpen) await session.close();
     } catch (err) {
@@ -393,7 +429,11 @@ export async function handle({ request, env, ctx, ns, requestId }) {
 
   const stream = new ReadableStream({
     async pull(controller) {
-      if (cancelled) return;
+      streamController = controller;
+      if (cancelled) {
+        try { controller.close(); } catch {}
+        return;
+      }
       try {
         if (!bootstrapped) {
           // Open BEFORE flipping bootstrapped so a session.open() throw
@@ -406,21 +446,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
 
         const remainingMs = maxSessionMs - (Date.now() - sessionStartedAtMs);
         if (remainingMs <= 0) {
-          log("info", "tail_session_expired", {
-            request_id: requestId, namespace: ns, worker_count: workers.length,
-            max_session_ms: maxSessionMs,
-          });
-          controller.enqueue(utf8Encoder.encode(sseEvent({
-            event: "tail_warning",
-            data: JSON.stringify({
-              event: "tail_warning",
-              code: "session_expired",
-              message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
-            }),
-          })));
-          cancelled = true;
-          resolveCancel();
-          controller.close();
+          expireSession(controller);
           return;
         }
 
@@ -458,6 +484,10 @@ export async function handle({ request, env, ctx, ns, requestId }) {
           session,
           Math.min(XREAD_BLOCK_MS, SSE_KEEPALIVE_MS, remainingMs),
         );
+        if (cancelled) {
+          try { controller.close(); } catch {}
+          return;
+        }
 
         if (!batch) {
           // Timed out with no events → SSE comment so intermediaries know
@@ -477,6 +507,10 @@ export async function handle({ request, env, ctx, ns, requestId }) {
           })));
         }
       } catch (err) {
+        if (cancelled) {
+          try { controller.close(); } catch {}
+          return;
+        }
         log("error", "tail_pull_failed", {
           request_id: requestId, namespace: ns,
           error_message: errMessage(err),

@@ -115,7 +115,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "@wdl-dev/aws-sigv4", esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
-  compatibilityFlags = ["nodejs_compat", "experimental"],
+  compatibilityFlags = ["nodejs_compat"],
   globalOutbound = "internal-network",
   # The do-runtime host actor owns many user DO facets behind one stable
   # storage shard. Keep it resident so short idle gaps do not force workerd to

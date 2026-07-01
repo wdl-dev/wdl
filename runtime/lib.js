@@ -122,9 +122,6 @@ function deepFreeze(obj) {
 const DEFAULT_COMPATIBILITY_DATE = "2026-04-24";
 const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
 const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
-// Gate for the __WdlAbort__ shim's abortIsolate import. Paired with
-// `allowExperimental: true` on the WorkerCode.
-const EXPERIMENTAL_FLAG = "experimental";
 const ROUTE_NS_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|__system__)$/;
 const RESERVED_TENANT_NS = new Set(["admin"]);
 const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
@@ -133,10 +130,9 @@ const VERSION_RE = /^v[1-9][0-9]*$/;
 // Loaded workers may declare an older compatibilityDate than the platform
 // workers. Keep enhanced error serialization as a floor only before the date
 // where workerd made it the default; newer dates reject the explicit flag.
-// `experimental` is unconditional — it is the gate for our eviction shim.
 /** @param {string} compatibilityDate */
 function platformFloorCompatFlags(compatibilityDate) {
-  const out = [EXPERIMENTAL_FLAG];
+  const out = [];
   if (compatibilityDate < ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE) {
     out.push(ENHANCED_ERROR_SERIALIZATION_FLAG);
   }

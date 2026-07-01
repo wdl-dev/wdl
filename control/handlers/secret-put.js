@@ -29,7 +29,7 @@ export function invalidSecretMutationKeyResponse(key) {
  *   hashKey: string,
  *   fieldName: string,
  * }} args
- * @returns {Promise<{ response: Response } | { encrypted: string }>}
+ * @returns {Promise<{ response: Response } | { encrypted: string, plaintext: string }>}
  */
 export async function readEncryptedSecretPutValue({ request, env, hashKey, fieldName }) {
   const parsed = await readJsonBody(request, {
@@ -46,6 +46,7 @@ export async function readEncryptedSecretPutValue({ request, env, hashKey, field
   }
   try {
     return {
+      plaintext: body.value,
       encrypted: await encryptSecretValue(body.value, { env: stringEnv(env), hashKey, fieldName }),
     };
   } catch (err) {

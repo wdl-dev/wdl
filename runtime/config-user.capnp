@@ -105,10 +105,7 @@ const loaderWorker :Workerd.Worker = (
   compatibilityDate = "2026-04-24",
   # service_binding_extra_handlers exposes stub.queue()/scheduled() on
   # Fetcher stubs returned by workerLoader.get(). Runtime-only flag.
-  # `experimental` is required so this worker may pass `allowExperimental: true`
-  # in its WorkerCode — loaded workers need that to import `abortIsolate` from
-  # cloudflare:workers for the historical-version eviction shim.
-  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers", "experimental"],
+  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers"],
   globalOutbound = "internal-network",
   bindings = [
     (name = "SERVICE_NAME", text = "user-runtime"),

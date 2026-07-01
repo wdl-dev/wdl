@@ -228,6 +228,10 @@ The EC2 capacity provider uses a fixed Auto Scaling Group:
 Task `cpu` and `memory` values are placement reservations on EC2 launch type, not
 hard per-container caps. CPU is a cgroup share weight. Memory is an ECS placement
 reservation because the containers do not set hard container memory limits.
+This is especially relevant for D1 and Durable Object runtimes on newer workerd
+releases, where SQLite's process hard heap is no longer capped at 512 MiB by
+workerd itself; size task density and host memory with that shared-process
+behavior in mind.
 
 The launch template keeps IMDSv2 enabled for the ECS host agent, sets metadata
 hop limit to 1, and sets `ECS_AWSVPC_BLOCK_IMDS=true` so awsvpc tasks cannot read

@@ -3,11 +3,68 @@ import {
   jsonError,
   requireControlLog,
   requireControlRedis,
+  stringEnv,
+  codedErrorResponse,
 } from "control-shared";
 import {
   invalidSecretMutationKeyResponse,
   readEncryptedSecretPutValue,
 } from "control-handlers-secret-put";
+import { routesKey, bundleKey } from "shared-version";
+import {
+  WorkerEnvBudgetError,
+  assertWorkerLoaderUserEnvBudget,
+  decryptSecretHash,
+} from "control-env-budget";
+import { SecretEnvelopeError } from "shared-secret-envelope";
+
+/**
+ * @param {{
+ *   redis: import("shared-redis").RedisClient,
+ *   env: Record<string, unknown>,
+ *   nsName: string,
+ *   secretKey: string,
+ *   plaintext: string,
+ * }} args
+ */
+async function validateNamespaceSecretBudget({ redis, env, nsName, secretKey, plaintext }) {
+  const controlEnv = stringEnv(env);
+  const nsSecretsKey = `secrets:${nsName}`;
+  const existingEncrypted = await redis.hGetAll(nsSecretsKey);
+  const nsSecrets = await decryptSecretHash({
+    encrypted: existingEncrypted,
+    env: controlEnv,
+    hashKey: nsSecretsKey,
+  });
+  nsSecrets[secretKey] = plaintext;
+
+  const activeRoutes = await redis.hGetAll(routesKey(nsName));
+  const activeEntries = Object.entries(activeRoutes)
+    .filter((entry) => typeof entry[1] === "string" && entry[1] !== "");
+  if (activeEntries.length === 0) {
+    assertWorkerLoaderUserEnvBudget({ ns: nsName, nsSecrets });
+    return;
+  }
+
+  for (const [worker, version] of activeEntries) {
+    const workerSecretsKey = `secrets:${nsName}:${worker}`;
+    const metaRaw = await redis.hGet(bundleKey(nsName, worker, /** @type {string} */ (version)), "__meta__");
+    const workerEncrypted = await redis.hGetAll(workerSecretsKey);
+    const meta = typeof metaRaw === "string" ? JSON.parse(metaRaw) : {};
+    const workerSecrets = await decryptSecretHash({
+      encrypted: workerEncrypted,
+      env: controlEnv,
+      hashKey: workerSecretsKey,
+    });
+    assertWorkerLoaderUserEnvBudget({
+      ns: nsName,
+      worker,
+      vars: meta && typeof meta === "object" ? meta.vars : null,
+      nsSecrets,
+      workerSecrets,
+    });
+  }
+}
 
 /**
  * @param {{
@@ -38,6 +95,19 @@ export async function handle({ request, env, method, nsName, secretKey, requestI
       fieldName: secretKey,
     });
     if ("response" in put) return put.response;
+    try {
+      await validateNamespaceSecretBudget({
+        redis,
+        env,
+        nsName,
+        secretKey,
+        plaintext: put.plaintext,
+      });
+    } catch (err) {
+      if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
+      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+      throw err;
+    }
     const encrypted = put.encrypted;
     await redis.hSet(nsSecretsKey, secretKey, encrypted);
     log("info", "ns_secret_set", { request_id: requestId, namespace: nsName, key: secretKey });

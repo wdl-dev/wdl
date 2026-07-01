@@ -310,7 +310,7 @@ test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date p
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["nodejs_compat", "experimental", "enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, ["nodejs_compat", "enhanced_error_serialization"]);
   assert.deepEqual(/** @type {any} */ (code.meta.bindings), { KV: { type: "kv", id: "x" } });
   assert.deepEqual(code.meta.vars, { G: "hi" });
   assert.ok(Object.isFrozen(code.meta), "meta must be frozen");
@@ -327,7 +327,7 @@ test("bundleToWorkerCode: default compatibilityDate does not inject defaulted pl
     )
   );
   assert.equal(code.compatibilityDate, "2026-04-24");
-  assert.deepEqual(code.compatibilityFlags, ["experimental"]);
+  assert.deepEqual(code.compatibilityFlags, []);
 });
 
 test("bundleToWorkerCode: old compatibilityDate absent flags → floor only", () => {
@@ -341,7 +341,7 @@ test("bundleToWorkerCode: old compatibilityDate absent flags → floor only", ()
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["experimental", "enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization"]);
 });
 
 test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup", () => {
@@ -356,7 +356,7 @@ test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup",
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat", "experimental"]);
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat"]);
 });
 
 test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibilityFlags in bundle bytes", () => {

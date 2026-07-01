@@ -41,7 +41,6 @@ spec:
             - serve
             - -b
             - /app/dist/workerd-configs/gateway.bin
-            - --experimental
           envFrom:
             - configMapRef:
                 name: wdl-config

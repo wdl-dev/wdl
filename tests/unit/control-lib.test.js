@@ -720,7 +720,7 @@ test("validateCompatibilityDate rejects future and unsupported workerd dates", (
     /must not be later than today UTC/
   );
   assert.throws(
-    () => validateCompatibilityDate(unsupportedDate, new Date("2026-06-30T00:00:00Z")),
+    () => validateCompatibilityDate(unsupportedDate, new Date("2026-12-31T00:00:00Z")),
     /newer than bundled workerd supports/
   );
 });

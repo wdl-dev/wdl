@@ -1443,7 +1443,14 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   const integrationCompose = withoutLineComments(readRepoFile("tests/integration/helpers/compose.js"));
   const compileConfigs = withoutLineComments(readRepoFile("scripts/compile-workerd-configs.js"));
   const supervisorConfig = readRepoFile("rust/supervisor/src/config.rs");
+  const supervisorLib = readRepoFile("rust/supervisor/src/lib.rs");
   const dockerfileWorkerd = withoutLineComments(readRepoFile("Dockerfile.workerd"));
+  const kubeGateway = withoutLineComments(readRepoFile("deploy/kubernetes/base/gateway.yaml"));
+  const kubeSystemRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/system-runtime.yaml"));
+  const kubeUserRuntime = withoutLineComments(readRepoFile("deploy/kubernetes/base/user-runtime.yaml"));
+  const terraformGatewayService = withoutLineComments(readRepoFile("terraform/modules/compute/gateway_service.tf"));
+  const terraformRuntimeService = withoutLineComments(readRepoFile("terraform/modules/compute/runtime_service.tf"));
+  const terraformSystemRuntimeService = withoutLineComments(readRepoFile("terraform/modules/compute/system_runtime_service.tf"));
   const packageJson = withoutLineComments(readRepoFile("package.json"));
 
   // Local/integration should mirror production Service Connect for HTTP
@@ -1501,9 +1508,28 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   for (const tier of ["gateway-local", "user-runtime-local", "system-runtime-local"]) {
     assert.match(
       compose,
-      new RegExp(`serve.*workerd-configs/${RegExp.escape(tier)}\\.bin.*--experimental`),
+      new RegExp(`serve.*workerd-configs/${RegExp.escape(tier)}\\.bin`),
     );
   }
+  // workerd 2026-07-01 still gates workerLoader bindings on the process-level
+  // --experimental switch. Keep it only on workerLoader-owning processes, not
+  // on gateway or D1 and not as a Worker compatibility flag.
+  for (const tier of ["user-runtime-local", "system-runtime-local"]) {
+    assert.match(
+      compose,
+      new RegExp(`workerd-configs/${RegExp.escape(tier)}\\.bin", "--experimental"`),
+    );
+  }
+  assert.doesNotMatch(compose, /gateway-local\.bin", "--experimental"/);
+  assert.match(kubeUserRuntime, /user-runtime\.bin[\s\S]*?- --experimental/);
+  assert.match(kubeSystemRuntime, /system-runtime\.bin[\s\S]*?- --experimental/);
+  assert.doesNotMatch(kubeGateway, /--experimental/);
+  assert.match(terraformRuntimeService, /user-runtime\.bin", "--experimental"/);
+  assert.match(terraformSystemRuntimeService, /system-runtime\.bin", "--experimental"/);
+  assert.doesNotMatch(terraformGatewayService, /--experimental/);
+  assert.match(supervisorLib, /workerd_args\(D1_COMPILED_CONFIG, false\)/);
+  assert.match(supervisorLib, /workerd_args\(pick_do_compiled_config\(\), true\)/);
+  assert.match(supervisorConfig, /args\.push\("--experimental"\.into\(\)\)/);
   // The supervisor config owns the local/production .bin choice; only it
   // references do-runtime-local.bin since compose forwards via the
   // supervisor binary, not via raw workerd serve.

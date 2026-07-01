@@ -28,6 +28,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   parsedCrons: null,
   parsedQueueConsumers: null,
   watchedKeys: null,
+  envBudgetError: false,
   redis: null,
   logs: [],
   metrics: { increment() {}, observe() {} },
@@ -51,6 +52,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.parsedCrons = null;
   CONTROL_DEPLOY_TEST_STATE.parsedQueueConsumers = null;
   CONTROL_DEPLOY_TEST_STATE.watchedKeys = null;
+  CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
   CONTROL_DEPLOY_TEST_STATE.redis = null;
   CONTROL_DEPLOY_TEST_STATE.logs = [];
   CONTROL_DEPLOY_TEST_STATE.metrics = { increment() {}, observe() {} };
@@ -197,6 +199,32 @@ export async function resolveDatabaseRefFrom(session, ns, databaseRef) {
 }
 `);
 
+const controlEnvBudgetUrl = moduleDataUrl(`
+export class WorkerEnvBudgetError extends Error {
+  constructor(message) {
+    super(message);
+    this.status = 400;
+    this.code = "worker_env_too_large";
+  }
+}
+export function assertWorkerLoaderUserEnvBudget() {
+  if (/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError) {
+    throw new WorkerEnvBudgetError("env too large");
+  }
+  return 0;
+}
+export async function decryptSecretHash() { return {}; }
+`);
+
+const secretEnvelopeUrl = moduleDataUrl(`
+export class SecretEnvelopeError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+`);
+
 const { commitWithWatch, handle } = await importControlHandler("control/handlers/deploy.js", {
   globalName: "__controlDeployTestState",
   extraSharedSource: controlSharedExtraSource,
@@ -213,6 +241,8 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
     "control-s3": controlS3Url,
     "shared-assets-token": sharedAssetsUrl,
     "control-d1-store": d1StoreUrl,
+    "control-env-budget": controlEnvBudgetUrl,
+    "shared-secret-envelope": secretEnvelopeUrl,
   },
 });
 const { WatchError } = await import(sharedRedisUrl);
@@ -520,6 +550,92 @@ test("deploy handler rejects assets without S3 before allocating a version", asy
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.assetsToUpload = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+  }
+});
+
+test("deploy handler rejects workerLoader env budget violations before allocating a version", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = true;
+
+  const session = makeSession();
+  let incrCalled = false;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      incrCalled = true;
+      return 1;
+    },
+    /** @param {string} key */
+    async hGetAll(key) {
+      return await session.hGetAll(key);
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/env-heavy/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+          vars: { BIG: "x" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "env-heavy",
+      requestId: "rid-env-budget",
+    });
+
+    assert.equal((await readJsonResponse(response, 400)).error, "worker_env_too_large");
+    assert.equal(incrCalled, false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = false;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+  }
+});
+
+test("deploy handler rejects workerLoader code size violations before allocating a version", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
+    meta: {
+      mainModule: "worker.js",
+      modules: { "worker.js": { type: "module" } },
+    },
+    normalized: [["worker.js", new Uint8Array(64 * 1024 * 1024 + 1)]],
+  };
+
+  let incrCalled = false;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      incrCalled = true;
+      return 1;
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/code-heavy/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "code-heavy",
+      requestId: "rid-code-budget",
+    });
+
+    assert.equal((await readJsonResponse(response, 413)).error, "worker_code_too_large");
+    assert.equal(incrCalled, false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
   }
 });

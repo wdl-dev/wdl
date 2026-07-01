@@ -84,6 +84,11 @@ pipe, not durable log storage.
 - Active tail sessions are time-bounded authorization leases and must reconnect through
   normal auth. `LOG_TAIL_MAX_SESSION_MS` sets the control-side maximum; invalid or
   empty values fall back to 15 minutes.
+- workerd issue [#6832](https://github.com/cloudflare/workerd/issues/6832) means
+  client disconnects may not call async response-body `ReadableStream.cancel()`.
+  Control therefore has an independent max-session watchdog; under heavy reconnect
+  churn, set `LOG_TAIL_MAX_SESSION_MS` lower to bound abandoned Redis tail sessions
+  until upstream restores a reliable disconnect hook.
 - Tail events racing activation can be dropped.
 - High QPS or slow SSE readers can miss middle events due to stream caps.
 

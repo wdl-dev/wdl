@@ -481,7 +481,6 @@ function normalizeWorkerCode(value) {
   return {
     compatibilityDate,
     compatibilityFlags,
-    allowExperimental: input.allowExperimental !== false,
     mainModule,
     modules: normalizedModules,
     env,

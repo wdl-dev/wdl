@@ -1,7 +1,7 @@
 import {
   jsonResponse, jsonError, readJsonBody, formatError,
   requireControlLog, requireControlRedis,
-  errMessage, prefixedId,
+  errMessage, prefixedId, stringEnv,
   getControlS3,
   runOptimistic,
   stageBundleCommit, buildS3CleanupTaskId, recordS3CleanupIntent,
@@ -42,9 +42,16 @@ import { isReservedNs, isValidRouteNs, ROUTES_ALLOWED_RESERVED_NS } from "shared
 import { putAsset, inferContentType } from "control-s3";
 import { generateAssetsToken, assetsPrefixFor } from "shared-assets-token";
 import { resolveDatabaseRefFrom } from "control-d1-store";
+import {
+  WorkerEnvBudgetError,
+  assertWorkerLoaderUserEnvBudget,
+  decryptSecretHash,
+} from "control-env-budget";
+import { SecretEnvelopeError } from "shared-secret-envelope";
 
 const MAX_COMMIT_ATTEMPTS = 5;
 const DEPLOY_JSON_BODY_MAX_BYTES = 32 * 1024 * 1024;
+const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 const DEPLOY_ASSET_UPLOAD_CONCURRENCY = 8;
 
 class DeployAbort extends ControlAbort {}
@@ -144,6 +151,28 @@ function deployRequestErrorFromUnknown(err) {
     typeof record.code === "string" ? record.code : "invalid_request",
     typeof record.message === "string" ? record.message : String(err)
   );
+}
+
+/** @param {string | Uint8Array} bytes */
+function moduleBodyByteLength(bytes) {
+  return typeof bytes === "string" ? Buffer.byteLength(bytes, "utf8") : bytes.byteLength;
+}
+
+/**
+ * @param {{ prepared: PreparedBundle, ns: string, name: string }} args
+ */
+function validateWorkerLoaderCodeBudget({ prepared, ns, name }) {
+  let totalBytes = 0;
+  for (const [, bytes] of prepared.normalized) {
+    totalBytes += moduleBodyByteLength(bytes);
+  }
+  if (totalBytes > WORKER_LOADER_CODE_MAX_BYTES) {
+    throw new DeployRequestError(
+      413,
+      "worker_code_too_large",
+      `module bodies for ${ns}/${name} total ${totalBytes} bytes, exceeding workerd workerLoader code limit ${WORKER_LOADER_CODE_MAX_BYTES} bytes`
+    );
+  }
 }
 
 /** @param {BindingMap} [bindings] */
@@ -576,6 +605,28 @@ async function runDeployPreflight({ redis, ns, name, deployRequest }) {
 }
 
 /**
+ * @param {{ redis: RedisClient, env: Record<string, unknown>, ns: string, name: string, meta: PreparedMeta }} args
+ */
+async function validateCommittedEnvBudget({ redis, env, ns, name, meta }) {
+  const controlEnv = stringEnv(env);
+  const nsEncrypted = await redis.hGetAll(`secrets:${ns}`);
+  const workerEncrypted = await redis.hGetAll(`secrets:${ns}:${name}`);
+  const [nsSecrets, workerSecrets] = await Promise.all([
+    decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: `secrets:${ns}` }),
+    decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: `secrets:${ns}:${name}` }),
+  ]);
+  assertWorkerLoaderUserEnvBudget({
+    ns,
+    worker: name,
+    vars: meta.vars && typeof meta.vars === "object"
+      ? /** @type {Record<string, unknown>} */ (meta.vars)
+      : null,
+    nsSecrets,
+    workerSecrets,
+  });
+}
+
+/**
  * @param {{ deployRequest: DeployRequest, ns: string, name: string, mergedBindings: BindingMap }} args
  * @returns {{ response: Response, committed?: never } | { response?: never, committed: CommittedBundle }}
  */
@@ -719,8 +770,29 @@ export async function handle({ request, env, ns, name, requestId }) {
     d1Refs,
   } = candidate.committed;
 
+  try {
+    validateWorkerLoaderCodeBudget({ prepared, ns, name });
+  } catch (err) {
+    if (err instanceof DeployRequestError) return deployRequestErrorResponse(err);
+    throw err;
+  }
+
   if (parsed.deployRequest.assetsToUpload && !s3) {
     return deployAssetsS3NotConfiguredResponse();
+  }
+
+  try {
+    await validateCommittedEnvBudget({
+      redis,
+      env,
+      ns,
+      name,
+      meta: prepared.meta,
+    });
+  } catch (err) {
+    if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
+    if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+    throw err;
   }
 
   const num = await redis.incr(`worker:${ns}:${name}:next_version`);

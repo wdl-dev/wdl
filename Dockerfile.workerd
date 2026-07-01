@@ -86,7 +86,7 @@ RUN ["/usr/local/bin/workerd", "--version"]
 
 # ECS task definitions pick the entry/command:
 #   gateway        : entryPoint ["workerd"]
-#                    command    ["serve", "-b", "/app/dist/workerd-configs/gateway.bin", "--experimental"]
+#                    command    ["serve", "-b", "/app/dist/workerd-configs/gateway.bin"]
 #   user-runtime   : entryPoint ["workerd"]
 #                    command    ["serve", "-b", "/app/dist/workerd-configs/user-runtime.bin", "--experimental"]
 #   system-runtime : entryPoint ["workerd"]
@@ -95,5 +95,6 @@ RUN ["/usr/local/bin/workerd", "--version"]
 #                    stopTimeout >= 20s
 #                    env D1_OWNER_TTL_SECONDS=120 D1_PROBE_TIMEOUT_MS=500 D1_QUERY_TIMEOUT_MS=30000 D1_SHUTDOWN_TIMEOUT_MS=15000
 #   do-runtime     : entryPoint ["do-supervisor"]
+#                    child workerd args include "--experimental" for workerLoader
 #                    stopTimeout >= 20s
 #                    env DO_OWNER_TTL_SECONDS=120 DO_DRAIN_IN_FLIGHT_TIMEOUT_MS=8000
