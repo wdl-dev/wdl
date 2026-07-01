@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { controlSharedStubUrl } from "../helpers/control-shared-stub.js";
-import { decryptSecretValue, isSecretEnvelope } from "../../shared/secret-envelope.js";
+import { decryptSecretValue, encryptSecretValue, isSecretEnvelope } from "../../shared/secret-envelope.js";
 import { applyModuleReplacements, moduleDataUrl, readRepositoryFile, repositoryFileUrl } from "../helpers/load-shared-module.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
@@ -38,6 +38,7 @@ function secretPutUrl(controlSharedUrl, controlLibUrl) {
 function envBudgetUrl() {
   const source = applyModuleReplacements(readRepositoryFile("control/env-budget.js"), [
     [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
+    [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
   ]);
   return moduleDataUrl(source);
 }
@@ -50,6 +51,8 @@ export const state = {
     async hKeys() { return []; },
     async hGet() { return null; },
     async hGetAll() { return {}; },
+    async sMembers() { return []; },
+    async zRange() { return []; },
     async hSet(key, field, value) {
       this.writes.push({ key, field, value });
       return 1;
@@ -58,7 +61,10 @@ export const state = {
   },
 };
 `);
-const controlLibStubUrl = moduleDataUrl(validateSecretKeyStubSource);
+const controlLibStubUrl = moduleDataUrl(`
+${validateSecretKeyStubSource}
+export const workersIndexKey = (ns) => \`workers:\${ns}\`;
+`);
 const src = applyModuleReplacements(readRepositoryFile("control/handlers/ns-secrets.js"), [
   [/from "control-shared";/, `from ${JSON.stringify(controlSharedUrl)};`],
   [/from "control-lib";/, `from ${JSON.stringify(controlLibStubUrl)};`],
@@ -138,6 +144,53 @@ test("namespace secret PUT accepts lowercase secret keys like production", async
   assert.equal(state.redis.writes.at(-1).field, "lowercase");
 });
 
+test("namespace secret PUT checks retained worker versions before storing", async () => {
+  const { state } = await import(controlSharedUrl);
+  const original = {
+    hGet: state.redis.hGet,
+    hGetAll: state.redis.hGetAll,
+    sMembers: state.redis.sMembers,
+    zRange: state.redis.zRange,
+  };
+  const writesBefore = state.redis.writes.length;
+  /** @param {string} key */
+  state.redis.hGetAll = async (key) => {
+    if (key === "routes:demo") return {};
+    return {};
+  };
+  /** @param {string} key */
+  state.redis.sMembers = async (key) => key === "workers:demo" ? ["api"] : [];
+  /** @param {string} key */
+  state.redis.zRange = async (key) => key === "worker-versions:demo:api" ? ["v1"] : [];
+  /** @param {string} key @param {string} field */
+  state.redis.hGet = async (key, field) => {
+    if (key === "worker:demo:api:v:1" && field === "__meta__") {
+      return JSON.stringify({ vars: { BIG: "x".repeat(1024 * 1024) } });
+    }
+    return null;
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-retained",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_env_too_large");
+    assert.equal(state.redis.writes.length, writesBefore);
+  } finally {
+    Object.assign(state.redis, original);
+  }
+});
+
 const workerControlSharedUrl = controlSharedStubUrl(`
 class WatchError extends Error {}
 export function formatError(err) {
@@ -157,6 +210,7 @@ export const state = {
         async hGet() { return null; },
         async hGetAll() { return {}; },
         async zCard() { return 0; },
+        async zRange() { return []; },
         multi() {
           return {
             hSet(key, field, value) {
@@ -181,6 +235,7 @@ ${validateSecretKeyStubSource}
 export const deleteLockKey = (ns, worker) => \`worker-delete-lock:\${ns}:\${worker}\`;
 export const workerVersionsKey = (ns, worker) => \`worker-versions:\${ns}:\${worker}\`;
 export const routesKey = (ns) => \`routes:\${ns}\`;
+export const workersIndexKey = (ns) => \`workers:\${ns}\`;
 `);
 const lifecycleStubUrl = moduleDataUrl(`
 export function stageWorkerHidden() {}
@@ -258,4 +313,66 @@ test("worker secret mutation rejects invalid keys through shared validator", asy
   const body = await readJsonResponse(response, 400);
   assert.equal(body.error, "invalid_request");
   assert.equal(state.redis.writes.length, writesBefore);
+});
+
+test("worker secret DELETE checks env revealed by removing a higher-precedence secret", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const encrypted = await encryptSecretValue("small", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  let execCalled = false;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => await fn({
+    async watch() {},
+    async unwatch() {},
+    async get() { return null; },
+    async hKeys() { return ["TOKEN"]; },
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      if (key === "routes:demo" && field === "api") return "v1";
+      if (key === "worker:demo:api:v:1" && field === "__meta__") {
+        return JSON.stringify({ vars: { TOKEN: "x".repeat(1024 * 1024) } });
+      }
+      return null;
+    },
+    /** @param {string} key */
+    async hGetAll(key) {
+      if (key === "secrets:demo:api") return { TOKEN: encrypted };
+      return {};
+    },
+    async zCard() { return 1; },
+    async zRange() { return ["v1"]; },
+    multi() {
+      return {
+        hSet() {},
+        hDel() {},
+        sAdd() {},
+        sRem() {},
+        async exec() { execCalled = true; },
+      };
+    },
+  });
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-delete-budget",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_env_too_large");
+    assert.equal(execCalled, false);
+  } finally {
+    state.redis.session = originalSession;
+  }
 });

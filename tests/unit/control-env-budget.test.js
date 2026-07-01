@@ -8,17 +8,20 @@ import {
 import { encryptSecretValue } from "../../shared/secret-envelope.js";
 
 const secretEnvelopeUrl = repositoryFileUrl("shared/secret-envelope.js");
+const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 const {
   UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
   WORKER_LOADER_ENV_HEADROOM_BYTES,
   WORKER_LOADER_ENV_MAX_BYTES,
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
+  assertWorkerVersionsUserEnvBudget,
   decryptSecretHash,
   mergedUserEnvStrings,
   userEnvSerializedBytes,
 } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "shared-secret-envelope": secretEnvelopeUrl,
+  "shared-version": sharedVersionUrl,
 }));
 
 const envelopeEnv = {
@@ -80,5 +83,32 @@ test("decryptSecretHash returns plaintext secret values for budget checks", asyn
       })),
     },
     { TOKEN: "plain" }
+  );
+});
+
+test("worker env budget checks every retained worker version", async () => {
+  const redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      assert.equal(field, "__meta__");
+      if (key === "worker:demo:api:v:1") return JSON.stringify({ vars: { SMALL: "ok" } });
+      if (key === "worker:demo:api:v:2") return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES) } });
+      return null;
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkerVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      worker: "api",
+      versions: ["v1", "v2"],
+      nsSecrets: { TOKEN: "secret" },
+    }),
+    (err) => {
+      assert.equal(err instanceof WorkerEnvBudgetError, true);
+      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      return true;
+    }
   );
 });

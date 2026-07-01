@@ -10,10 +10,12 @@ import {
   invalidSecretMutationKeyResponse,
   readEncryptedSecretPutValue,
 } from "control-handlers-secret-put";
-import { routesKey, bundleKey } from "shared-version";
+import { routesKey, workerVersionsKey } from "shared-version";
+import { workersIndexKey } from "control-lib";
 import {
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
+  assertWorkerVersionsUserEnvBudget,
   decryptSecretHash,
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
@@ -38,28 +40,37 @@ async function validateNamespaceSecretBudget({ redis, env, nsName, secretKey, pl
   });
   nsSecrets[secretKey] = plaintext;
 
-  const activeRoutes = await redis.hGetAll(routesKey(nsName));
-  const activeEntries = Object.entries(activeRoutes)
-    .filter((entry) => typeof entry[1] === "string" && entry[1] !== "");
-  if (activeEntries.length === 0) {
+  const [activeRoutes, indexedWorkers] = await Promise.all([
+    redis.hGetAll(routesKey(nsName)),
+    redis.sMembers(workersIndexKey(nsName)),
+  ]);
+  const workerNames = new Set([
+    ...indexedWorkers.filter((worker) => typeof worker === "string" && worker),
+    ...Object.keys(activeRoutes),
+  ]);
+  if (workerNames.size === 0) {
     assertWorkerLoaderUserEnvBudget({ ns: nsName, nsSecrets });
     return;
   }
 
-  for (const [worker, version] of activeEntries) {
+  for (const worker of workerNames) {
     const workerSecretsKey = `secrets:${nsName}:${worker}`;
-    const metaRaw = await redis.hGet(bundleKey(nsName, worker, /** @type {string} */ (version)), "__meta__");
+    const activeVersion = activeRoutes[worker];
+    const retainedVersions = await redis.zRange(workerVersionsKey(nsName, worker), 0, -1);
     const workerEncrypted = await redis.hGetAll(workerSecretsKey);
-    const meta = typeof metaRaw === "string" ? JSON.parse(metaRaw) : {};
     const workerSecrets = await decryptSecretHash({
       encrypted: workerEncrypted,
       env: controlEnv,
       hashKey: workerSecretsKey,
     });
-    assertWorkerLoaderUserEnvBudget({
+    await assertWorkerVersionsUserEnvBudget({
+      redis,
       ns: nsName,
       worker,
-      vars: meta && typeof meta === "object" ? meta.vars : null,
+      versions: [
+        ...retainedVersions,
+        ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
+      ],
       nsSecrets,
       workerSecrets,
     });

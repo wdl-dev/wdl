@@ -21,10 +21,9 @@ import {
 } from "control-handlers-secret-put";
 import { stageWorkerHidden, stageWorkerVisible } from "control-lifecycle-indexes";
 import { bumpActiveAndPromote, RoutingError } from "control-routing";
-import { bundleKey } from "shared-version";
 import {
   WorkerEnvBudgetError,
-  assertWorkerLoaderUserEnvBudget,
+  assertWorkerVersionsUserEnvBudget,
   decryptSecretHash,
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
@@ -200,8 +199,8 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
   return jsonError(405, "method_not_allowed", "Method not allowed for /secrets");
 }
 
-// DELETE extends WATCH to routes + worker-versions so the
-// "last key → SREM workers:<ns>" branch can trust its preconditions.
+// Secret mutations watch routes + worker-versions because env-budget checks
+// must cover active and retained versions before writing a new secret shape.
 /**
  * @param {{ redis: RedisClient, ns: string, name: string, key: string, method: string, value: string | null, plaintext?: string | null, controlEnv: Record<string, string | undefined> }} args
  */
@@ -215,10 +214,7 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       });
     },
   }, async (iso) => {
-    const watches = [deleteLockKey(ns, name), secretsKey];
-    if (method === "DELETE") {
-      watches.push(routesKey(ns), workerVersionsKey(ns, name));
-    }
+    const watches = [deleteLockKey(ns, name), secretsKey, routesKey(ns), workerVersionsKey(ns, name)];
     await iso.watch(...watches);
 
     const callerLock = await iso.get(deleteLockKey(ns, name));
@@ -244,30 +240,36 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
     }
 
     const multi = iso.multi();
-    if (method === "PUT") {
-      if (typeof value !== "string") throw new Error("PUT secret value missing");
-      if (typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
+    if (method === "PUT" || method === "DELETE") {
+      if (method === "PUT" && typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
       const activeVersion = await iso.hGet(routesKey(ns), name);
+      const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
       const nsEncrypted = await iso.hGetAll(`secrets:${ns}`);
       const workerEncrypted = await iso.hGetAll(secretsKey);
       const [nsSecrets, workerSecrets] = await Promise.all([
         decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: `secrets:${ns}` }),
         decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: secretsKey }),
       ]);
-      workerSecrets[key] = plaintext;
-      let vars = null;
-      if (typeof activeVersion === "string" && activeVersion) {
-        const rawMeta = await iso.hGet(bundleKey(ns, name, activeVersion), "__meta__");
-        const meta = typeof rawMeta === "string" ? JSON.parse(rawMeta) : {};
-        vars = meta && typeof meta === "object" ? meta.vars : null;
+      if (method === "PUT") {
+        workerSecrets[key] = /** @type {string} */ (plaintext);
+      } else {
+        delete workerSecrets[key];
       }
-      assertWorkerLoaderUserEnvBudget({
+      await assertWorkerVersionsUserEnvBudget({
+        redis: iso,
         ns,
         worker: name,
-        vars,
+        versions: [
+          ...retainedVersions,
+          ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
+        ],
         nsSecrets,
         workerSecrets,
       });
+    }
+
+    if (method === "PUT") {
+      if (typeof value !== "string") throw new Error("PUT secret value missing");
       multi.hSet(secretsKey, key, value);
       // SADD even on secret-only / pre-deploy workers so they're
       // visible to GET /workers and reachable by whole-delete.

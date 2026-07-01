@@ -1,4 +1,5 @@
 import { decryptSecretValue } from "shared-secret-envelope";
+import { bundleKey } from "shared-version";
 
 export const UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES = 1024 * 1024;
 export const WORKER_LOADER_ENV_HEADROOM_BYTES = 8 * 1024;
@@ -94,11 +95,55 @@ export function assertWorkerLoaderUserEnvBudget({
  * }} args
  */
 export async function decryptSecretHash({ encrypted, env, hashKey }) {
+  const entries = await Promise.all(
+    Object.entries(encrypted || {})
+      .filter((entry) => typeof entry[1] === "string")
+      .map(async ([fieldName, value]) => [
+        fieldName,
+        await decryptSecretValue(/** @type {string} */ (value), { env, hashKey, fieldName }),
+      ])
+  );
   /** @type {Record<string, string>} */
   const out = Object.create(null);
-  for (const [fieldName, value] of Object.entries(encrypted || {})) {
-    if (typeof value !== "string") continue;
-    out[fieldName] = await decryptSecretValue(value, { env, hashKey, fieldName });
-  }
+  for (const [fieldName, value] of entries) out[fieldName] = value;
   return out;
+}
+
+/**
+ * @param {{
+ *   redis: { hGet(key: string, field: string): Promise<string | null | undefined> },
+ *   ns: string,
+ *   worker: string,
+ *   versions: Iterable<string>,
+ *   nsSecrets?: Record<string, unknown> | null,
+ *   workerSecrets?: Record<string, unknown> | null,
+ * }} args
+ */
+export async function assertWorkerVersionsUserEnvBudget({
+  redis,
+  ns,
+  worker,
+  versions,
+  nsSecrets = null,
+  workerSecrets = null,
+}) {
+  const uniqueVersions = [...new Set([...versions].filter((version) => typeof version === "string" && version))];
+  if (uniqueVersions.length === 0) {
+    assertWorkerLoaderUserEnvBudget({ ns, worker, nsSecrets, workerSecrets });
+    return;
+  }
+
+  // Keep bundle metadata reads sequential: callers may pass a RedisSession,
+  // whose command protocol is single-flight even though secret decryption is not.
+  for (const version of uniqueVersions) {
+    const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
+    const meta = typeof rawMeta === "string" ? JSON.parse(rawMeta) : {};
+    assertWorkerLoaderUserEnvBudget({
+      ns,
+      worker,
+      vars: meta && typeof meta === "object" ? meta.vars : null,
+      nsSecrets,
+      workerSecrets,
+    });
+  }
 }
