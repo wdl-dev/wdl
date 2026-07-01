@@ -395,13 +395,17 @@ test("commitWithWatch validates deploy env budget under watched secret hashes", 
     },
     outgoingRefs: [],
     d1Refs: [],
-    controlEnv: {},
+    controlEnv: { ASSETS_CDN_BASE: "https://assets.example/cdn" },
   });
 
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("secrets:tenant-a"));
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("secrets:tenant-a:demo"));
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.length, 1);
   assert.deepEqual(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[0].vars, { TOKEN: "from-vars" });
+  assert.equal(
+    /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[0].assetsCdnBase,
+    "https://assets.example/cdn"
+  );
 });
 
 test("commitWithWatch validates env budget against materialized D1 metadata", async () => {

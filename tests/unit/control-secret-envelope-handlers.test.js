@@ -354,6 +354,84 @@ test("namespace secret DELETE skips decrypting the removed corrupt envelope", as
   }
 });
 
+test("namespace secret DELETE skips other corrupt namespace envelopes for repair", async () => {
+  const { state } = await import(controlSharedUrl);
+  const original = {
+    hGetAll: state.redis.hGetAll,
+    sMembers: state.redis.sMembers,
+  };
+  const deletesBefore = state.redis.deletes.length;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo",
+    fieldName: "TOKEN",
+  });
+  /** @param {string} key */
+  state.redis.hGetAll = async (key) => {
+    if (key === "secrets:demo") return { TOKEN: encrypted, BAD: "WDL-ENC:not-json" };
+    if (key === "routes:demo") return {};
+    return {};
+  };
+  /** @param {string} key */
+  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-delete-other-corrupt",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(state.redis.deletes.length, deletesBefore + 1);
+    assert.deepEqual(state.redis.deletes.at(-1), { key: "secrets:demo", field: "TOKEN" });
+  } finally {
+    Object.assign(state.redis, original);
+  }
+});
+
+test("namespace secret PUT still fails closed on other corrupt namespace envelopes", async () => {
+  const { state } = await import(controlSharedUrl);
+  const original = {
+    hGetAll: state.redis.hGetAll,
+    sMembers: state.redis.sMembers,
+  };
+  const writesBefore = state.redis.writes.length;
+  /** @param {string} key */
+  state.redis.hGetAll = async (key) => {
+    if (key === "secrets:demo") return { BAD: "WDL-ENC:not-json" };
+    if (key === "routes:demo") return {};
+    return {};
+  };
+  /** @param {string} key */
+  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-put-other-corrupt",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "invalid_envelope");
+    assert.equal(state.redis.writes.length, writesBefore);
+  } finally {
+    Object.assign(state.redis, original);
+  }
+});
+
 const workerControlSharedUrl = controlSharedStubUrl(`
 class WatchError extends Error {}
 export function formatError(err) {
@@ -676,6 +754,114 @@ test("worker secret DELETE skips decrypting the removed corrupt envelope", async
     assert.equal(response.status, 200);
     assert.equal(execCalled, true);
     assert.equal(deletedField, "TOKEN");
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret DELETE skips other corrupt worker envelopes for repair", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  let execCalled = false;
+  let deletedField = null;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => await fn({
+    async watch() {},
+    async unwatch() {},
+    async get() { return null; },
+    async hKeys() { return ["TOKEN", "BAD"]; },
+    async hGet() { return null; },
+    /** @param {string} key */
+    async hGetAll(key) {
+      if (key === "secrets:demo:api") return { TOKEN: encrypted, BAD: "WDL-ENC:not-json" };
+      return {};
+    },
+    async zCard() { return 0; },
+    async zRange() { return []; },
+    multi() {
+      return {
+        hSet() {},
+        /** @param {string} _key @param {string} field */
+        hDel(_key, field) { deletedField = field; },
+        sAdd() {},
+        sRem() {},
+        async exec() { execCalled = true; },
+      };
+    },
+  });
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-delete-other-corrupt",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(execCalled, true);
+    assert.equal(deletedField, "TOKEN");
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret PUT still fails closed on other corrupt worker envelopes", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  let hSetCalled = false;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => await fn({
+    async watch() {},
+    async unwatch() {},
+    async get() { return null; },
+    async hKeys() { return ["BAD"]; },
+    async hGet() { return null; },
+    /** @param {string} key */
+    async hGetAll(key) {
+      if (key === "secrets:demo:api") return { BAD: "WDL-ENC:not-json" };
+      return {};
+    },
+    async zCard() { return 0; },
+    async zRange() { return []; },
+    multi() {
+      return {
+        hSet() { hSetCalled = true; },
+        hDel() {},
+        sAdd() {},
+        sRem() {},
+        async exec() {},
+      };
+    },
+  });
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-put-other-corrupt",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "invalid_envelope");
+    assert.equal(hSetCalled, false);
   } finally {
     state.redis.session = originalSession;
   }

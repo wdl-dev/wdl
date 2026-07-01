@@ -105,6 +105,70 @@ test("worker env budget counts required caller secret copies in service binding 
   );
 });
 
+test("worker env budget counts configured assets CDN base", () => {
+  const meta = {
+    vars: { PAD: "" },
+    assets: { prefix: "assets/demo/api/token/" },
+    bindings: {
+      ASSETS: { type: "assets" },
+    },
+  };
+  const assetsCdnBase = `https://${"assets-subdomain-".repeat(600)}example.test`;
+  /** @param {number} padLength @param {string | null | undefined} cdnBase */
+  const bytesWithPad = (padLength, cdnBase) => Buffer.byteLength(JSON.stringify(estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "api",
+    vars: { PAD: "x".repeat(padLength) },
+    meta,
+    assetsCdnBase: cdnBase,
+  })), "utf8");
+  const padLength = WORKER_LOADER_ENV_MAX_BYTES - bytesWithPad(0, assetsCdnBase) + 1;
+
+  assert.ok(bytesWithPad(padLength, null) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(bytesWithPad(padLength, assetsCdnBase) > WORKER_LOADER_ENV_MAX_BYTES);
+  assert.throws(
+    () => assertWorkerLoaderUserEnvBudget({
+      ns: "demo",
+      worker: "api",
+      vars: { PAD: "x".repeat(padLength) },
+      meta,
+      assetsCdnBase,
+    }),
+    (err) => {
+      assert.equal(err instanceof WorkerEnvBudgetError, true);
+      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      return true;
+    }
+  );
+});
+
+test("worker env budget includes do-runtime alarm binding for Durable Object workers", () => {
+  const estimated = estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "api",
+    version: "v12",
+    meta: {
+      bindings: {
+        ROOM: {
+          type: "do",
+          className: "Room",
+          doStorageId: "do_0123456789abcdef0123456789abcdef",
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(estimated.__WDL_DO_ALARMS__, {
+    __wdlBinding: "do-alarms",
+    props: {
+      ns: "demo",
+      worker: "api",
+      version: "v12",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+    },
+  });
+});
+
 test("decryptSecretHash returns plaintext secret values for budget checks", async () => {
   const hashKey = "secrets:demo";
   const encrypted = await encryptSecretValue("plain", {
@@ -119,6 +183,27 @@ test("decryptSecretHash returns plaintext secret values for budget checks", asyn
         encrypted: { TOKEN: encrypted, MISSING: null },
         env: envelopeEnv,
         hashKey,
+      })),
+    },
+    { TOKEN: "plain" }
+  );
+});
+
+test("decryptSecretHash can ignore corrupt envelopes for DELETE repair budgets", async () => {
+  const hashKey = "secrets:demo";
+  const encrypted = await encryptSecretValue("plain", {
+    env: envelopeEnv,
+    hashKey,
+    fieldName: "TOKEN",
+  });
+
+  assert.deepEqual(
+    {
+      ...(await decryptSecretHash({
+        encrypted: { TOKEN: encrypted, BAD: "WDL-ENC:not-json" },
+        env: envelopeEnv,
+        hashKey,
+        ignoreSecretEnvelopeErrors: true,
       })),
     },
     { TOKEN: "plain" }

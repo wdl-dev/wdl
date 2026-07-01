@@ -43,7 +43,11 @@ async function validateNamespaceSecretBudget({ redis, controlEnv, nsName, nsSecr
     ...Object.keys(activeRoutes),
   ]);
   if (workerNames.size === 0) {
-    assertWorkerLoaderUserEnvBudget({ ns: nsName, nsSecrets });
+    assertWorkerLoaderUserEnvBudget({
+      ns: nsName,
+      nsSecrets,
+      assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+    });
     return;
   }
 
@@ -68,6 +72,7 @@ async function validateNamespaceSecretBudget({ redis, controlEnv, nsName, nsSecr
       ],
       nsSecrets,
       workerSecrets,
+      assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
     });
   }
 }
@@ -115,6 +120,7 @@ async function mutateNamespaceSecret({
       encrypted: budgetEncrypted,
       env: controlEnv,
       hashKey: nsSecretsKey,
+      ignoreSecretEnvelopeErrors: method === "DELETE",
     });
     if (method === "PUT") {
       if (typeof encrypted !== "string") throw new Error("PUT namespace secret encrypted value missing");

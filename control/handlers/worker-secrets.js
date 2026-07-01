@@ -253,7 +253,12 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       delete workerBudgetEncrypted[key];
       const [nsSecrets, workerSecrets] = await Promise.all([
         decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: nsSecretsKey }),
-        decryptSecretHash({ encrypted: workerBudgetEncrypted, env: controlEnv, hashKey: secretsKey }),
+        decryptSecretHash({
+          encrypted: workerBudgetEncrypted,
+          env: controlEnv,
+          hashKey: secretsKey,
+          ignoreSecretEnvelopeErrors: method === "DELETE",
+        }),
       ]);
       if (method === "PUT") {
         workerSecrets[key] = /** @type {string} */ (plaintext);
@@ -274,6 +279,7 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
           : [],
         nsSecrets,
         workerSecrets,
+        assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
       });
     }
 

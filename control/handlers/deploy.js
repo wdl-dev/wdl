@@ -624,6 +624,7 @@ async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta, v
     nsSecrets,
     workerSecrets,
     meta,
+    assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
   });
 }
 

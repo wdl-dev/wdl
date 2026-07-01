@@ -1,9 +1,11 @@
-import { decryptSecretValue } from "shared-secret-envelope";
+import { SecretEnvelopeError, decryptSecretValue } from "shared-secret-envelope";
 import { bundleKey } from "shared-version";
 
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
+const DO_ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
+const ESTIMATED_ASSETS_CDN_BASE = "https://assets.invalid";
 const ESTIMATED_VERSION = "v0000000000";
 const ESTIMATED_DO_STORAGE_ID = "do_00000000000000000000000000000000";
 const ESTIMATED_WORKFLOW_KEY = "wf_00000000000000000000000000000000";
@@ -79,11 +81,12 @@ function callerSecretsForBinding({ requiredCallerSecrets, nsSecrets, workerSecre
  *   ns: string,
  *   worker: string,
  *   version: string,
+ *   assetsCdnBase: string,
  *   nsSecrets: Record<string, string>,
  *   workerSecrets: Record<string, string>,
  * }} args
  */
-function estimatedBindingEnvValue({ name, spec, meta, ns, worker, version, nsSecrets, workerSecrets }) {
+function estimatedBindingEnvValue({ name, spec, meta, ns, worker, version, assetsCdnBase, nsSecrets, workerSecrets }) {
   switch (spec.type) {
     case "kv":
       return {
@@ -94,7 +97,7 @@ function estimatedBindingEnvValue({ name, spec, meta, ns, worker, version, nsSec
       return {
         __wdlBinding: "assets",
         props: {
-          cdnBase: "https://assets.invalid",
+          cdnBase: assetsCdnBase,
           prefix: stringOrFallback(objectRecord(meta.assets)?.prefix),
         },
       };
@@ -172,6 +175,7 @@ function estimatedBindingEnvValue({ name, spec, meta, ns, worker, version, nsSec
  *   nsSecrets?: Record<string, unknown> | null,
  *   workerSecrets?: Record<string, unknown> | null,
  *   meta?: Record<string, unknown> | null,
+ *   assetsCdnBase?: string | null,
  * }} args
  */
 export function estimatedWorkerLoaderEnv({
@@ -182,6 +186,7 @@ export function estimatedWorkerLoaderEnv({
   nsSecrets = null,
   workerSecrets = null,
   meta = null,
+  assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
 }) {
   const nsSecretStrings = stringRecord(nsSecrets);
   const workerSecretStrings = stringRecord(workerSecrets);
@@ -195,6 +200,7 @@ export function estimatedWorkerLoaderEnv({
   if (!metaRecord || !worker) return env;
 
   let hasDoBinding = false;
+  let doAlarmStorageId = ESTIMATED_DO_STORAGE_ID;
   let hasWorkflowBinding = false;
   const workflows = Array.isArray(metaRecord.workflows) ? metaRecord.workflows : [];
   for (const workflow of workflows) {
@@ -226,15 +232,25 @@ export function estimatedWorkerLoaderEnv({
         ns,
         worker,
         version,
+        assetsCdnBase: typeof assetsCdnBase === "string" && assetsCdnBase
+          ? assetsCdnBase
+          : ESTIMATED_ASSETS_CDN_BASE,
         nsSecrets: nsSecretStrings,
         workerSecrets: workerSecretStrings,
       });
-      hasDoBinding ||= spec.type === "do";
+      if (spec.type === "do") {
+        hasDoBinding = true;
+        doAlarmStorageId = stringOrFallback(spec.doStorageId, ESTIMATED_DO_STORAGE_ID);
+      }
     }
   }
   if (hasDoBinding) {
     env[DO_BACKEND_BINDING] = { __wdlBinding: "internal", name: "DO_BACKEND" };
     env[DO_OWNER_NETWORK_BINDING] = { __wdlBinding: "internal", name: "DO_OWNER_NETWORK" };
+    env[DO_ALARMS_BINDING] = {
+      __wdlBinding: "do-alarms",
+      props: { ns, worker, version, doStorageId: doAlarmStorageId },
+    };
   }
   if (hasWorkflowBinding) {
     env[WORKFLOWS_BACKEND_BINDING] = { __wdlBinding: "internal", name: "WORKFLOWS_BACKEND" };
@@ -251,6 +267,7 @@ export function estimatedWorkerLoaderEnv({
  *   nsSecrets?: Record<string, unknown> | null,
  *   workerSecrets?: Record<string, unknown> | null,
  *   meta?: Record<string, unknown> | null,
+ *   assetsCdnBase?: string | null,
  * }} args
  */
 export function assertWorkerLoaderUserEnvBudget({
@@ -261,6 +278,7 @@ export function assertWorkerLoaderUserEnvBudget({
   nsSecrets = null,
   workerSecrets = null,
   meta = null,
+  assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
 }) {
   // workerd enforces the full workerLoader env as a Frankenvalue estimate. Control
   // mirrors the user strings plus runtime-injected binding/workflow env shapes as
@@ -273,6 +291,7 @@ export function assertWorkerLoaderUserEnvBudget({
     nsSecrets,
     workerSecrets,
     meta,
+    assetsCdnBase,
   })), "utf8");
   if (bytes > WORKER_LOADER_ENV_MAX_BYTES) {
     const label = worker ? `${ns}/${worker}` : ns;
@@ -296,20 +315,32 @@ export function assertWorkerLoaderUserEnvBudget({
  *   encrypted: Record<string, string | null | undefined>,
  *   env: Record<string, string | undefined>,
  *   hashKey: string,
+ *   ignoreSecretEnvelopeErrors?: boolean,
  * }} args
  */
-export async function decryptSecretHash({ encrypted, env, hashKey }) {
+export async function decryptSecretHash({ encrypted, env, hashKey, ignoreSecretEnvelopeErrors = false }) {
   const entries = await Promise.all(
     Object.entries(encrypted || {})
       .filter((entry) => typeof entry[1] === "string")
-      .map(async ([fieldName, value]) => [
-        fieldName,
-        await decryptSecretValue(/** @type {string} */ (value), { env, hashKey, fieldName }),
-      ])
+      .map(async ([fieldName, value]) => {
+        try {
+          return [
+            fieldName,
+            await decryptSecretValue(/** @type {string} */ (value), { env, hashKey, fieldName }),
+          ];
+        } catch (err) {
+          if (ignoreSecretEnvelopeErrors && err instanceof SecretEnvelopeError) return null;
+          throw err;
+        }
+      })
   );
   /** @type {Record<string, string>} */
   const out = Object.create(null);
-  for (const [fieldName, value] of entries) out[fieldName] = value;
+  for (const entry of entries) {
+    if (!entry) continue;
+    const [fieldName, value] = entry;
+    out[fieldName] = value;
+  }
   return out;
 }
 
@@ -322,6 +353,7 @@ export async function decryptSecretHash({ encrypted, env, hashKey }) {
  *   versionEstimates?: Iterable<{ sourceVersion: string, estimatedVersion: string }>,
  *   nsSecrets?: Record<string, unknown> | null,
  *   workerSecrets?: Record<string, unknown> | null,
+ *   assetsCdnBase?: string | null,
  * }} args
  */
 export async function assertWorkerVersionsUserEnvBudget({
@@ -332,6 +364,7 @@ export async function assertWorkerVersionsUserEnvBudget({
   versionEstimates = [],
   nsSecrets = null,
   workerSecrets = null,
+  assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
 }) {
   const checks = [
     ...[...versions]
@@ -350,7 +383,7 @@ export async function assertWorkerVersionsUserEnvBudget({
     checks.map((entry) => [`${entry.sourceVersion}\0${entry.estimatedVersion}`, entry])
   ).values()];
   if (uniqueChecks.length === 0) {
-    assertWorkerLoaderUserEnvBudget({ ns, worker, nsSecrets, workerSecrets });
+    assertWorkerLoaderUserEnvBudget({ ns, worker, nsSecrets, workerSecrets, assetsCdnBase });
     return;
   }
 
@@ -383,6 +416,7 @@ export async function assertWorkerVersionsUserEnvBudget({
       nsSecrets,
       workerSecrets,
       meta,
+      assetsCdnBase,
     });
   }
 }
