@@ -414,6 +414,62 @@ test("bumpActiveAndPromote also rewrites full queue consumer projection", async 
   });
 });
 
+test("bumpActiveAndPromote runs beforeStageCopy inside the watched copy transaction", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", { queueConsumers: [] });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+  /** @type {unknown} */
+  let seen = null;
+
+  const result = await bumpActiveAndPromote(redis, "demo", "worker", {
+    /** @param {{ iso: any, currentVersion: string, newVersion: string, sourceMeta: any }} context */
+    async beforeStageCopy(context) {
+      const { iso, currentVersion, newVersion, sourceMeta } = context;
+      await iso.watch("secrets:demo", "secrets:demo:worker");
+      seen = {
+        currentVersion,
+        newVersion,
+        route: await iso.hGet("routes:demo", "worker"),
+        queueConsumers: sourceMeta.queueConsumers,
+      };
+    },
+  });
+
+  assert.equal(result.version, "v2");
+  assert.deepEqual(seen, {
+    currentVersion: "v1",
+    newVersion: "v2",
+    route: "v1",
+    queueConsumers: [],
+  });
+  assert.ok(redis.state.watchBatches.some((batch) =>
+    batch.length === 2 &&
+    batch.includes("secrets:demo") &&
+    batch.includes("secrets:demo:worker")
+  ));
+  assert.ok(redis.state.hashes.has("bundle:demo:worker:v2"));
+});
+
+test("bumpActiveAndPromote does not copy or flip routes when beforeStageCopy rejects", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", { queueConsumers: [] });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await assert.rejects(
+    bumpActiveAndPromote(redis, "demo", "worker", {
+      async beforeStageCopy() {
+        throw new Error("budget failed");
+      },
+    }),
+    /budget failed/
+  );
+
+  assert.equal(redis.state.hashes.has("bundle:demo:worker:v2"), false);
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+});
+
 test("bumpActiveAndPromote rejects active routes that no longer declare their hosts", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {

@@ -27,6 +27,7 @@ resource "aws_ecs_task_definition" "d1_runtime" {
     image      = var.workerd_image
     essential  = true
     entryPoint = ["d1-supervisor"]
+    memory     = coalesce(var.d1_runtime_container_memory, var.runtime_memory)
 
     portMappings = [{
       name          = "d1-http"

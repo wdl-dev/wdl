@@ -258,11 +258,44 @@ export function estimatedWorkerLoaderEnv({
   return env;
 }
 
+/** @param {string} value */
+function hasNonLatin1(value) {
+  for (let i = 0; i < value.length; i += 1) {
+    if (value.charCodeAt(i) > 0xff) return true;
+  }
+  return false;
+}
+
+/** @param {string} value */
+function v8TwoByteStringPenalty(value) {
+  if (!hasNonLatin1(value)) return 0;
+  return Math.max(0, (2 * value.length) - Buffer.byteLength(value, "utf8"));
+}
+
+/** @param {unknown} value */
+function v8StringPenalty(value) {
+  if (typeof value === "string") return v8TwoByteStringPenalty(value);
+  if (!value || typeof value !== "object") return 0;
+  let bytes = 0;
+  for (const [key, child] of Object.entries(value)) {
+    bytes += v8TwoByteStringPenalty(key);
+    bytes += v8StringPenalty(child);
+  }
+  return bytes;
+}
+
+/** @param {unknown} value */
+export function estimatedWorkerLoaderEnvBytes(value) {
+  const json = JSON.stringify(value) ?? "null";
+  return Buffer.byteLength(json, "utf8") + v8StringPenalty(value);
+}
+
 /**
  * @param {{
  *   ns: string,
  *   worker?: string,
  *   version?: string,
+ *   sourceVersion?: string | null,
  *   vars?: Record<string, unknown> | null,
  *   nsSecrets?: Record<string, unknown> | null,
  *   workerSecrets?: Record<string, unknown> | null,
@@ -274,6 +307,7 @@ export function assertWorkerLoaderUserEnvBudget({
   ns,
   worker = undefined,
   version = ESTIMATED_VERSION,
+  sourceVersion = null,
   vars = null,
   nsSecrets = null,
   workerSecrets = null,
@@ -282,8 +316,8 @@ export function assertWorkerLoaderUserEnvBudget({
 }) {
   // workerd enforces the full workerLoader env as a Frankenvalue estimate. Control
   // mirrors the user strings plus runtime-injected binding/workflow env shapes as
-  // JSON and leaves headroom for native facade-object overhead and estimator drift.
-  const bytes = Buffer.byteLength(JSON.stringify(estimatedWorkerLoaderEnv({
+  // JSON, then accounts for V8's two-byte representation of non-Latin-1 strings.
+  const bytes = estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
     ns,
     worker,
     version,
@@ -292,14 +326,18 @@ export function assertWorkerLoaderUserEnvBudget({
     workerSecrets,
     meta,
     assetsCdnBase,
-  })), "utf8");
+  }));
   if (bytes > WORKER_LOADER_ENV_MAX_BYTES) {
-    const label = worker ? `${ns}/${worker}` : ns;
+    const label = worker
+      ? `${ns}/${worker}${sourceVersion ? `@${sourceVersion}` : ""}`
+      : ns;
     throw new WorkerEnvBudgetError(
       `estimated workerLoader env for ${label} serializes to ${bytes} bytes, exceeding WDL workerLoader env budget ${WORKER_LOADER_ENV_MAX_BYTES} bytes`,
       {
         namespace: ns,
         ...(worker ? { worker } : {}),
+        ...(sourceVersion ? { source_version: sourceVersion } : {}),
+        ...(sourceVersion && version ? { estimated_version: version } : {}),
         env_bytes: bytes,
         max_env_bytes: WORKER_LOADER_ENV_MAX_BYTES,
         upstream_max_env_bytes: UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
@@ -410,6 +448,7 @@ export async function assertWorkerVersionsUserEnvBudget({
       ns,
       worker,
       version: estimatedVersion,
+      sourceVersion,
       vars: meta.vars && typeof meta.vars === "object" && !Array.isArray(meta.vars)
         ? /** @type {Record<string, unknown>} */ (meta.vars)
         : null,

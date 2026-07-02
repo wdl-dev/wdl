@@ -201,6 +201,26 @@ variable "runtime_memory" {
   default = 768
 }
 
+variable "d1_runtime_container_memory" {
+  type        = number
+  default     = null
+  description = "Optional hard memory limit, in MiB, for the d1-runtime container. Defaults to runtime_memory."
+  validation {
+    condition     = var.d1_runtime_container_memory == null || var.d1_runtime_container_memory > 0
+    error_message = "d1_runtime_container_memory must be null or a positive number of MiB."
+  }
+}
+
+variable "do_runtime_container_memory" {
+  type        = number
+  default     = null
+  description = "Optional hard memory limit, in MiB, for the do-runtime container. Defaults to runtime_memory."
+  validation {
+    condition     = var.do_runtime_container_memory == null || var.do_runtime_container_memory > 0
+    error_message = "do_runtime_container_memory must be null or a positive number of MiB."
+  }
+}
+
 variable "scheduler_desired_count" {
   type        = number
   default     = 1

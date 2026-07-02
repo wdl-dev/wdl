@@ -86,9 +86,13 @@ pipe, not durable log storage.
   empty values fall back to 15 minutes.
 - workerd issue [#6832](https://github.com/cloudflare/workerd/issues/6832) means
   client disconnects may not call async response-body `ReadableStream.cancel()`.
-  Control therefore has an independent max-session watchdog; under heavy reconnect
-  churn, set `LOG_TAIL_MAX_SESSION_MS` lower to bound abandoned Redis tail sessions
-  until upstream restores a reliable disconnect hook.
+  Control therefore has independent watchdogs: a max-session watchdog for
+  reauthorization and an idle-pull watchdog that closes a session when the SSE body has
+  not been pulled for three keepalive intervals. Active clients naturally pull at the
+  keepalive cadence because each heartbeat frees queue space; abandoned clients stop
+  pulling and are cleaned up without waiting for the full session lifetime. A TCP
+  connection that stays open but whose application stops reading for that window may be
+  closed and should reconnect.
 - Tail events racing activation can be dropped.
 - High QPS or slow SSE readers can miss middle events due to stream caps.
 

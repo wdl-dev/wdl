@@ -239,6 +239,22 @@ test("normalizes inline workerCode only for test hooks", () => {
   assert.equal("workerCode" in invoke ? "allowExperimental" in invoke.workerCode : undefined, false);
 });
 
+test("rejects experimental workerd compatibility flags in inline workerCode", () => {
+  assert.throws(
+    () => normalizeDoInvokeRequest({
+      ...INLINE_BODY,
+      workerCode: {
+        ...INLINE_BODY.workerCode,
+        compatibilityFlags: ["nodejs_compat", "unsafe_module"],
+      },
+    }, { allowInlineWorkerCode: true }),
+    (err) => err instanceof DoRuntimeError &&
+      err.status === 400 &&
+      err.code === "experimental_compat_flag_unsupported" &&
+      /"unsafe_module"/.test(err.message)
+  );
+});
+
 test("builds forwarded Request for user durable object fetch", async () => {
   const invoke = withRequestBody(normalizeDoInvokeRequest({
     ...BASE_BODY,

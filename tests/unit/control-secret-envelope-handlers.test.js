@@ -489,8 +489,19 @@ export function stageWorkerVisible(multi, ns, name) {
 `);
 const routingStubUrl = moduleDataUrl(`
 export class RoutingError extends Error {}
-export async function bumpActiveAndPromote() {
-  return { previousVersion: "v1", version: "v2" };
+export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) {
+  return await redis.session(async (iso) => {
+    const currentVersion = await iso.hGet(\`routes:\${ns}\`, workerName) || "v1";
+    const currentNumber = Number(/^v(\\d+)$/.exec(currentVersion)?.[1] || 1);
+    const newVersion = \`v\${currentNumber + 1}\`;
+    await options.beforeStageCopy?.({
+      iso,
+      currentVersion,
+      newVersion,
+      sourceMeta: {},
+    });
+    return { previousVersion: currentVersion, version: newVersion };
+  });
 }
 `);
 const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/worker-secrets.js"), [
@@ -508,6 +519,7 @@ const {
   WORKER_LOADER_ENV_MAX_BYTES,
   WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   estimatedWorkerLoaderEnv,
+  estimatedWorkerLoaderEnvBytes,
 } = await import(envBudgetUrl());
 
 test("worker secret PUT encrypts before WATCH retries and reuses the envelope", async () => {
@@ -640,14 +652,14 @@ test("worker secret PUT budgets the copied active bundle under a future version 
     }],
   };
   /** @param {number} padLength @param {string} version */
-  const bytesWithPad = (padLength, version) => Buffer.byteLength(JSON.stringify(estimatedWorkerLoaderEnv({
+  const bytesWithPad = (padLength, version) => estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
     ns: "demo",
     worker: "api",
     version,
     vars: { PAD: "x".repeat(padLength) },
     workerSecrets: { TOKEN: "plain-secret" },
     meta: baseMeta,
-  })), "utf8");
+  }));
   const padLength = WORKER_LOADER_ENV_MAX_BYTES -
     bytesWithPad(0, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) +
     1;
@@ -702,6 +714,89 @@ test("worker secret PUT budgets the copied active bundle under a future version 
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_env_too_large");
     assert.equal(execCalled, false);
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret PUT rechecks the active bundle copied by bump after the secret write", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const writesBefore = state.redis.writes.length;
+  let sessionCalls = 0;
+  let mutateExecCalled = false;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => {
+    sessionCalls += 1;
+    return await fn({
+      /** @param {...string} keys */
+      async watch(...keys) {
+        state.redis.watchedKeys.push(...keys);
+      },
+      async unwatch() {},
+      async get() { return null; },
+      async hKeys() { return []; },
+      /** @param {string} key @param {string} field */
+      async hGet(key, field) {
+        if (key === "routes:demo" && field === "api") {
+          return sessionCalls === 1 ? "v1" : "v2";
+        }
+        if (key === "worker:demo:api:v:1" && field === "__meta__") {
+          return JSON.stringify({ vars: { SAFE: "ok" } });
+        }
+        if (key === "worker:demo:api:v:2" && field === "__meta__") {
+          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
+        }
+        return null;
+      },
+      /** @param {string} key */
+      async hGetAll(key) {
+        if (key === "secrets:demo:api") {
+          const written = state.redis.writes.at(-1);
+          return written?.key === key ? { [written.field]: written.value } : {};
+        }
+        return {};
+      },
+      async zCard() { return 1; },
+      async zRange() { return []; },
+      multi() {
+        return {
+          /** @param {string} key @param {string} field @param {string} value */
+          hSet(key, field, value) {
+            state.redis.writes.push({ key, field, value });
+          },
+          hDel() {},
+          sAdd() {},
+          sRem() {},
+          async exec() { mutateExecCalled = true; },
+        };
+      },
+    });
+  };
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-bump-recheck",
+    });
+
+    const body = await readJsonResponse(response, 200);
+    assert.equal(mutateExecCalled, true);
+    assert.equal(state.redis.writes.length, writesBefore + 1);
+    assert.equal(body.secretWritten, true);
+    assert.equal(body.reloadForced, false);
+    assert.equal(body.warnings[0].kind, "promote_failed");
+    assert.match(body.warnings[0].reason, /workerLoader env/);
+    assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
+    assert.ok(state.redis.watchedKeys.includes("secrets:demo:api"));
   } finally {
     state.redis.session = originalSession;
   }

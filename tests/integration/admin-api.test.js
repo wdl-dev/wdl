@@ -68,6 +68,25 @@ test("deploy rejects malformed optional metadata instead of silently dropping it
   }
 });
 
+test("deploy rejects workerd 0701 unsupported bundle metadata before cold-load", async () => {
+  const experimental = await adminPost("/ns/test3/worker/unsupported/deploy", {
+    code: "export default { fetch() { return new Response('ok'); } };",
+    compatibilityFlags: ["unsafe_module"],
+  });
+  assert.equal(experimental.status, 400);
+  assert.equal(experimental.json.error, "experimental_compat_flag_unsupported");
+
+  const python = await adminPost("/ns/test3/worker/unsupported/deploy", {
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": "export default {};",
+      "mod.py": { py: "print(1)" },
+    },
+  });
+  assert.equal(python.status, 400);
+  assert.equal(python.json.error, "python_workers_unsupported");
+});
+
 test("deploy rejects invalid namespace", async () => {
   const d = await adminPost("/ns/Bad_NS/worker/x/deploy", { code: "x" });
   assert.equal(d.status, 400);

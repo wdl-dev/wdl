@@ -17,6 +17,7 @@ const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_QUEUE_KEYS_URL = repositoryFileUrl("shared/queue-keys.js");
 const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_WORKERD_COMPAT_FLAGS_URL = repositoryFileUrl("shared/workerd-compat-flags.js");
 
 /**
  * Compile the control/* module graph against shared/* deps. Returns URLs so
@@ -65,6 +66,7 @@ export async function compileControlGraph(opts = {}) {
   );
   const bundleUrl = freshRepositoryModuleDataUrl("control/bundle.js", [
     [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
+    [/from "shared-workerd-compat-flags"/g, `from ${JSON.stringify(SHARED_WORKERD_COMPAT_FLAGS_URL)}`],
     [/from "control-bindings"/g, `from ${JSON.stringify(bindingsUrl)}`],
     [/from "wdl-package-json-source"/g, `from ${JSON.stringify(packageJsonSourceUrl)}`],
   ]);

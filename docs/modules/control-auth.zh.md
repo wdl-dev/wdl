@@ -34,7 +34,7 @@ Worker lifecycle：
 |---|---|---|
 | `GET` | `/ns/<ns>/workers` | 列出有 namespace-owned state 的 worker，包括 deploy-only、active 和 secret-only worker。 |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | 列出 retained versions 和 active status。 |
-| `POST` | `/ns/<ns>/worker/<name>/deploy` | 从 shorthand code 或完整 module manifest 创建新的 immutable version；routes、crons、queue consumers、service refs、platform refs、assets、vars、bindings 和 `exports` 都是 version metadata。 |
+| `POST` | `/ns/<ns>/worker/<name>/deploy` | 从 shorthand code 或完整 module manifest 创建新的 immutable version；routes、crons、queue consumers、service refs、platform refs、assets、vars、bindings 和 `exports` 都是 version metadata。Python modules 和上游 experimental compatibility flags 会在 commit 前被拒绝。 |
 | `POST` | `/ns/<ns>/worker/<name>/promote` | 通过 WATCH/MULTI routing path promote `{"version":"vN"}`。Host declaration 失败是 403；live pattern conflict 是 409；transaction contention 耗尽是 503。 |
 | `DELETE` | `/ns/<ns>/worker/<name>/versions/<version>` | 在 active-route、service-ref、lifecycle 和 delete-lock blocker 全部通过后删除一个 retained non-active version。Referrer redaction 按 principal 决定。 |
 | `POST` | `/ns/<ns>/worker/<name>/delete` | Whole-worker delete。`?dry_run=1` 只返回 computed impact 和 blockers，不写入。Redaction 与 single-version delete 一致。 |
@@ -64,9 +64,9 @@ Host、secret、data 和 auth 操作：
 
 Control lifecycle 操作会拆开处理，确保每个关键 transition 只有一个权威入口：
 
-- Deploy 解析支持的 Wrangler/JSONC 形状，校验 bindings 和 routes，通过 `worker:<ns>:<worker>:next_version` 分配下一个 immutable version，写入 bundle metadata/modules/assets，然后进入 explicit promotion 使用的同一条 promote 路径。
+- Deploy 解析支持的 Wrangler/JSONC 形状，校验 bindings 和 routes，通过 `worker:<ns>:<worker>:next_version` 分配下一个 immutable version，写入 bundle metadata/modules/assets，然后进入 explicit promotion 使用的同一条 promote 路径。分配 version 前，deploy 会检查 workerd 64 MiB dynamic code limit 和候选 metadata 的 headroomed `workerLoader` env budget。
 - Promote 是唯一 active-route flip。它会 WATCH 本次候选需要的 delete lock、bundle metadata、D1 ref、service-binding target ref、queue consumer key、host declaration 和 pattern key。EXEC 在一个受审计的 transition 中更新 active route、host 反向索引、cron/queue projection、lifecycle index 和 invalidation publication。
-- Secret update/delete 会修改 secret store；如果 worker 有 active route，则通过 `bumpActiveAndPromote()` 生成新的 active version。Secret PUT 会先校验 plaintext 大小和形状，在进入 Redis mutation / WATCH retry loop 前加密成 `WDL-ENC:` envelope，并在重试间复用同一个 envelope。Runtime 因此看到新的 immutable version id，而不是原地可变的 secret。
+- Secret update/delete 会修改 secret store；如果 worker 有 active route，则通过 `bumpActiveAndPromote()` 生成新的 active version。Secret PUT 会先校验 plaintext 大小和形状，在进入 Redis mutation / WATCH retry loop 前加密成 `WDL-ENC:` envelope，并在重试间复用同一个 envelope。Runtime 因此看到新的 immutable version id，而不是原地可变的 secret。Namespace-secret mutation 会 WATCH 需要重新估算的 retained worker/version metadata；如果并发 metadata 变化持续使视图失效，control 返回 `namespace_secret_mutation_contention`。
 - Version delete 和 whole-worker delete 都 fail-closed。提交 Redis lifecycle deletion 前，会先收集 active route、retained version、service ref、D1 ref、workflow lifecycle check、queue/cron projection 和 delete lock blocker。S3 object cleanup 只在 Redis commit 成功后 enqueue。
 - Worker delete lock value 和 `s3cleanup:<id>` task id 必须由服务端生成随机值。`x-request-id` 只用于诊断，客户端或重试可能复用它；不能把它用作 lock token 或 cleanup-task id。
 - Auth 不是一层约定俗成的 middleware。`parseControlRoute()` 分配 action，control 把 action 和 namespace 发给 auth，auth 用存储的 token record 对照 `shared/auth-roles.js` 评估权限。Dispatcher 代码不应自己从 URL prefix 推断权限。
@@ -135,6 +135,7 @@ Auth 子合同：
 - Details 可以增加字段，但不能覆盖 `error`、`message` 或 legacy `reason`。Auth reject reason 是 `error` machine code；日志可以把 `reason` 作为诊断上下文。
 - Delegated issue 的 409 reason 有不同 retry 语义：`delegated_issue_busy` 表示 issuer/template lock 清除后可重试；`active_quota_exceeded` 在已有 delegated credential 过期或 revoke 前不应重试；`namespace_collision` 表示 Auth 已耗尽 configured candidate retry budget。
 - Control 5xx response 使用 generic/safe message。Internal exception text、auth Redis diagnostic、backend message 和 provider error 应进入日志；除非 endpoint 明确拥有某个 diagnostic response field，否则不进入客户端 body。
+- Deploy 和 secret mutation 在 tenant module bodies 超过 workerd 64 MiB dynamic code limit 时返回 `worker_code_too_large`，在估算的 `workerLoader` env 超过 WDL headroomed 1 MiB budget 时返回 `worker_env_too_large`。`worker_env_too_large` details 包含 `namespace`、可选 `worker`、`env_bytes`、`max_env_bytes`、`upstream_max_env_bytes` 和 `headroom_bytes`。如果 blocker 是 secret mutation 重新估算到的既有 retained version，details 还会包含 `source_version` 和 `estimated_version`，message 会标出 `<ns>/<worker>@<source_version>`，方便 operator 定位要删除或 redeploy 的 retained version。
 - Control 不直接调用 gateway。它写 Redis 并 publish invalidation message。
 - Control 在进入 Redis mutation loop 前加密 secret PUT value。加密/provider 失败会返回 control error，不写 plaintext fallback。
 - Worker delete 先 commit Redis lifecycle state；异步 S3 cleanup enqueue 是 best-effort，失败时返回 warning。

@@ -259,7 +259,8 @@ function quoteSqlIdentifier(name) {
 function sqlObjectDropStatement(row) {
   const type = String(row.type);
   const name = String(row.name);
-  if (name.startsWith("sqlite_") || name.startsWith("_cf_")) return null;
+  const lowerName = name.toLowerCase();
+  if (lowerName.startsWith("sqlite_") || lowerName.startsWith("_cf_")) return null;
   if (type === "table") return "DROP TABLE IF EXISTS " + quoteSqlIdentifier(name);
   if (type === "view") return "DROP VIEW IF EXISTS " + quoteSqlIdentifier(name);
   if (type === "trigger") return "DROP TRIGGER IF EXISTS " + quoteSqlIdentifier(name);

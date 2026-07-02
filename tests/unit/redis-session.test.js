@@ -572,6 +572,7 @@ test("RedisSession reports resources while SELECT is still pending", async () =>
   assert.equal(session.hasOpenResources(), true);
   await Promise.resolve();
   await session.close();
+  assert.equal(session.hasOpenResources(), false);
   assert.equal(writer.closed, true);
   assert.equal(reader.released, true);
   assert.equal(socket.closed, true);
@@ -663,7 +664,9 @@ test("RedisSession.close is idempotent and blocks further commands", async () =>
   // close() twice and assert the post-close command throws.
   const s = new RedisSession("x", { connect });
   await s.open();
+  assert.equal(s.hasOpenResources(), true);
   await s.close();
+  assert.equal(s.hasOpenResources(), false);
   await s.close(); // idempotent — no throw
   await assert.rejects(() => s.get("k"), /session closed/);
 });

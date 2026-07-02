@@ -63,6 +63,8 @@ function hostDeclarationsKey(host) {
  * @typedef {{ oldRoutes: RoutePattern[], oldQueueConsumers: QueueConsumer[], affectedHosts: Set<string>, hostState: HostState }} PromoteObservedState
  * @typedef {{ newRouteKeys: Set<string>, nsHostsAdd: string[], nsHostsRem: string[], cronKey: string, cronHash: Record<string, string>, cronPlan: CronPlan, queuePlan: QueuePlan }} PromoteStagePlan
  * @typedef {{ log?: (level: string, event: string, fields: Record<string, unknown>) => void, requestId?: string, ns?: string, workerName?: string }} LogContext
+ * @typedef {{ iso: RedisIso, currentVersion: string, newVersion: string, sourceMeta: BundleMeta }} BumpBeforeStageContext
+ * @typedef {LogContext & { beforeStageCopy?: (context: BumpBeforeStageContext) => Promise<void> }} BumpOptions
  * @typedef {{ routes?: RoutePattern[], crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
  * @typedef {Record<string, Record<string, string | null | undefined>>} HostState
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
@@ -680,7 +682,7 @@ export async function promoteWithRoutes(redis, ns, workerName, newVersion, optio
 // "read active" and "promote new" can't silently roll content back.
 // Throws RoutingError(404) when no active version exists to copy;
 // RoutingError(409, "caller_deleting") if a whole-delete is in flight.
-/** @param {RedisClient} redis @param {string} ns @param {string} workerName @param {LogContext} [options] */
+/** @param {RedisClient} redis @param {string} ns @param {string} workerName @param {BumpOptions} [options] */
 export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) {
   const logContext = { ...options, ns, workerName };
   // Avoid burning a version number on the pre-deploy path.
@@ -770,6 +772,15 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     const newVNum = parseVersion(newVersion);
     if (newVNum == null) {
       throw new RoutingError(500, "invalid_generated_version", `bumpActiveAndPromote: bad new version tag ${newVersion}`);
+    }
+
+    if (typeof options.beforeStageCopy === "function") {
+      await options.beforeStageCopy({
+        iso,
+        currentVersion,
+        newVersion,
+        sourceMeta: srcMeta,
+      });
     }
 
     const multi = iso.multi();

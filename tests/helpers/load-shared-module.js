@@ -11,6 +11,9 @@ const REPO_ROOT = path.resolve(__dirname, "../..");
 const SHARED_ENV_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/env.js")).href;
 const SHARED_ERRORS_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/errors.js")).href;
 const SHARED_HEX_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/hex.js")).href;
+const SHARED_WORKERD_COMPAT_FLAGS_URL = pathToFileURL(
+  path.resolve(REPO_ROOT, "shared/workerd-compat-flags.js")
+).href;
 
 /** @typedef {Array<[RegExp | string, string]>} ModuleReplacements */
 
@@ -80,6 +83,12 @@ export function readRepositoryModuleSource(relativePath, replacements = []) {
  */
 export function repositoryModuleDataUrl(relativePath, replacements = []) {
   return moduleDataUrl(readRepositoryModuleSource(relativePath, replacements));
+}
+
+export function runtimeLibModuleDataUrl() {
+  return repositoryModuleDataUrl("runtime/lib.js", importSpecifierReplacements({
+    "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
+  }));
 }
 
 /**

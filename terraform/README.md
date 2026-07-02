@@ -225,13 +225,14 @@ The EC2 capacity provider uses a fixed Auto Scaling Group:
 - spread placement by AZ, then by instance ID
 - ENI trunking enabled with `awsvpcTrunking`
 
-Task `cpu` and `memory` values are placement reservations on EC2 launch type, not
-hard per-container caps. CPU is a cgroup share weight. Memory is an ECS placement
-reservation because the containers do not set hard container memory limits.
-This is especially relevant for D1 and Durable Object runtimes on newer workerd
-releases, where SQLite's process hard heap is no longer capped at 512 MiB by
-workerd itself; size task density and host memory with that shared-process
-behavior in mind.
+Task `cpu` and task-level `memory` values are placement reservations on EC2 launch type;
+CPU is a cgroup share weight. D1 and Durable Object workerd containers also set explicit
+container `memory` hard limits, defaulting to `runtime_memory` and overrideable with
+`d1_runtime_container_memory` / `do_runtime_container_memory`. This matters on EC2
+because newer workerd releases no longer cap SQLite's process hard heap at 512 MiB; the
+container cap keeps a runaway SQLite query from consuming arbitrary host memory. On
+Fargate, task memory is already a hard task ceiling, so the container cap is mostly a
+matching documentation of the intended ceiling.
 
 The launch template keeps IMDSv2 enabled for the ECS host agent, sets metadata
 hop limit to 1, and sets `ECS_AWSVPC_BLOCK_IMDS=true` so awsvpc tasks cannot read

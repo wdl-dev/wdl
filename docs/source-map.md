@@ -43,6 +43,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `control/topology.js` | Route, pattern, cron, queue consumer, and workflow declaration parsing for deploy metadata. |
 | `control/routing.js`, `control/routing/route-plan.js` | Promote, secret bump/promote, host reconcile WATCH/MULTI loops, and pure route/pattern planning helpers. |
 | `control/lifecycle-indexes.js` | Redis mutation helpers for worker lifecycle, cron, queue consumer, and referrer indexes. |
+| `control/env-budget.js` | Control-plane estimate of workerd `workerLoader` env size for deploy and secret mutation guards. |
 | `control/d1-*` | D1 control metadata, store, lifecycle, migration, and d1-runtime client modules. |
 | `control/r2.js` | Control-plane R2 bucket/object API client for the configured S3-compatible store. |
 | `control/s3.js` | S3-compatible ASSETS upload helper. |
@@ -65,6 +66,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/bounded-body.js` | Shared bounded request body byte/text readers; each tier maps limit errors to its own HTTP error contract. |
 | `shared/ns-pattern.js` | Namespace, worker, binding, queue, KV id, module path, reserved object-key, and reserved namespace grammars. |
 | `shared/version.js` | Worker version formatting and bundle key helpers. |
+| `shared/workerd-compat-flags.js` | Pinned mirror of upstream workerd experimental compatibility enable flags used to reject tenant metadata before cold-load. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |
 | `shared/d1-*.js`, `shared/sql-splitter.js` | D1 parameter, data-field, transport, timeout, query-wire, and SQL splitting utilities shared by runtime, d1-runtime, control, and tests. |
@@ -102,6 +104,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `examples/` | Manual demos and reference projects. Tests should not silently depend on them unless the fixture graduates to `test-workers/`. |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner. |
 | `scripts/compile-workerd-configs.js` | Compiles workerd Cap'n Proto configs into `dist/workerd-configs/*.bin`. |
+| `scripts/scan-workerd-0701-metadata.mjs` | Read-only Redis metadata scanner for rollout checks before the workerd 2026-07-01 adaptation: reports retained versions using experimental flags or Python modules. |
 
 ## Infrastructure
 

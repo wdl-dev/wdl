@@ -59,6 +59,8 @@ Ownership 按 shard 划分：
 
 Alarm state 存在 object SQLite。Workflows 接收 do-runtime 的 set/delete 请求，并为每个 pending row 保存一个 internal job。Row token 用于 fence 用户驱动 delete 和 stale backend delivery；Workflows run token 在 DB 2 内 fence dispatch retry 和 completion。
 
+workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespace 下的 object name。`ctx.storage.deleteAll()` 也会大小写不敏感地跳过这些名字，因此 0617 以前可能创建出的 `_CF_*` 这类大小写变体不会让 cleanup 失败。这些 legacy reserved-name object 对 tenant SQL 仍不可访问，应视为升级遗留物，而不是应用表。
+
 `getAlarm()` 会做 alarm-scoped read repair：如果 SQLite 中有 pending alarm row，但 Workflows DB 2 due index 缺失，它会幂等重写 backend due index，而不会给普通 DO fetch 增加 Redis IO。Active/retained alarm 保留调度时的 worker version；旧 version 删除后，只有 `doStorageId` 仍匹配时 alarm dispatch 才 retarget 到当前 active version。逻辑 worker 已消失或指向不同 `doStorageId` 时，alarm 会自清理。
 
 ## Ownership / 并发 / 失败语义

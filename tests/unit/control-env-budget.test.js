@@ -19,6 +19,7 @@ const {
   assertWorkerVersionsUserEnvBudget,
   decryptSecretHash,
   estimatedWorkerLoaderEnv,
+  estimatedWorkerLoaderEnvBytes,
 } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "shared-secret-envelope": secretEnvelopeUrl,
   "shared-version": sharedVersionUrl,
@@ -49,7 +50,7 @@ test("worker env budget counts merged vars and secrets with worker-secret preced
       nsSecrets: { TOKEN: "ns", ONLY_NS: "n" },
       workerSecrets: { TOKEN: "worker" },
     }),
-    Buffer.byteLength(JSON.stringify(estimated), "utf8")
+    estimatedWorkerLoaderEnvBytes(estimated)
   );
 });
 
@@ -105,6 +106,34 @@ test("worker env budget counts required caller secret copies in service binding 
   );
 });
 
+test("worker env budget accounts for V8 two-byte strings on mixed non-Latin-1 env", () => {
+  const mixed = `${"x".repeat(Math.floor(WORKER_LOADER_ENV_MAX_BYTES / 2) + 1)}中`;
+  const estimated = estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "api",
+    vars: { BIG: mixed },
+  });
+  const jsonBytes = Buffer.byteLength(JSON.stringify(estimated), "utf8");
+  const estimatedBytes = estimatedWorkerLoaderEnvBytes(estimated);
+
+  assert.ok(jsonBytes <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(estimatedBytes > WORKER_LOADER_ENV_MAX_BYTES);
+  assert.throws(
+    () => assertWorkerLoaderUserEnvBudget({
+      ns: "demo",
+      worker: "api",
+      vars: { BIG: mixed },
+    }),
+    (err) => {
+      if (!(err instanceof WorkerEnvBudgetError)) return false;
+      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      assert.equal(budgetErr.code, "worker_env_too_large");
+      assert.equal(budgetErr.details.env_bytes, estimatedBytes);
+      return true;
+    }
+  );
+});
+
 test("worker env budget stores required caller secrets in a null-prototype map", () => {
   const estimated = estimatedWorkerLoaderEnv({
     ns: "demo",
@@ -139,13 +168,13 @@ test("worker env budget counts configured assets CDN base", () => {
   };
   const assetsCdnBase = `https://${"assets-subdomain-".repeat(600)}example.test`;
   /** @param {number} padLength @param {string | null | undefined} cdnBase */
-  const bytesWithPad = (padLength, cdnBase) => Buffer.byteLength(JSON.stringify(estimatedWorkerLoaderEnv({
+  const bytesWithPad = (padLength, cdnBase) => estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
     ns: "demo",
     worker: "api",
     vars: { PAD: "x".repeat(padLength) },
     meta,
     assetsCdnBase: cdnBase,
-  })), "utf8");
+  }));
   const padLength = WORKER_LOADER_ENV_MAX_BYTES - bytesWithPad(0, assetsCdnBase) + 1;
 
   assert.ok(bytesWithPad(padLength, null) <= WORKER_LOADER_ENV_MAX_BYTES);
@@ -309,13 +338,13 @@ test("worker env budget can estimate a source bundle under a future version stri
     }],
   };
   /** @param {number} padLength @param {string} version */
-  const bytesWithPad = (padLength, version) => Buffer.byteLength(JSON.stringify(estimatedWorkerLoaderEnv({
+  const bytesWithPad = (padLength, version) => estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
     ns: "demo",
     worker: "api",
     version,
     vars: { PAD: "x".repeat(padLength) },
     meta: baseMeta,
-  })), "utf8");
+  }));
   const padLength = WORKER_LOADER_ENV_MAX_BYTES - bytesWithPad(0, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) + 1;
   assert.ok(bytesWithPad(padLength, "v1") <= WORKER_LOADER_ENV_MAX_BYTES);
   assert.ok(bytesWithPad(padLength, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) > WORKER_LOADER_ENV_MAX_BYTES);
@@ -351,7 +380,11 @@ test("worker env budget can estimate a source bundle under a future version stri
     }),
     (err) => {
       assert.equal(err instanceof WorkerEnvBudgetError, true);
-      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      assert.equal(budgetErr.code, "worker_env_too_large");
+      assert.match(budgetErr.message, /demo\/api@v1/);
+      assert.equal(budgetErr.details.source_version, "v1");
+      assert.equal(budgetErr.details.estimated_version, WORKER_LOADER_ENV_VERSION_PLACEHOLDER);
       return true;
     }
   );

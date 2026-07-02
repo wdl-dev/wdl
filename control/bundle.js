@@ -12,6 +12,7 @@ import {
   isValidJsClassDeclarationName,
   validateModulePath,
 } from "shared-ns-pattern";
+import { firstWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 import { normalizeBindings, validateBindings } from "control-bindings";
 import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
 
@@ -131,11 +132,16 @@ export function normalizeModule(value) {
       return { type: "json", bytes: Buffer.from(JSON.stringify(record.json), "utf8") };
     if (typeof record.cjs === "string")
       return { type: "cjs", bytes: Buffer.from(record.cjs, "utf8") };
-    if (typeof record.py === "string")
-      return { type: "py", bytes: Buffer.from(record.py, "utf8") };
+    if (typeof record.py === "string") {
+      throw new BundleConfigError(
+        400,
+        "python_workers_unsupported",
+        "Python Workers modules are not supported by WDL"
+      );
+    }
   }
   throw new Error(
-    "Unrecognized module value (expected string or {data_b64|wasm_b64|text|json|cjs|py})"
+    "Unrecognized module value (expected string or {data_b64|wasm_b64|text|json|cjs})"
   );
 }
 
@@ -158,6 +164,14 @@ function validateCompatibilityFlags(flags) {
         `compatibilityFlags entries must be non-empty strings, got ${JSON.stringify(f)}`
       );
     }
+  }
+  const experimentalFlag = firstWorkerdExperimentalCompatFlag(flags);
+  if (experimentalFlag) {
+    throw new BundleConfigError(
+      400,
+      "experimental_compat_flag_unsupported",
+      `compatibilityFlags contains experimental workerd flag ${JSON.stringify(experimentalFlag)}, which WDL does not support for tenant workers`
+    );
   }
 }
 

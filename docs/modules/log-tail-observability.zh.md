@@ -64,7 +64,7 @@ Tail streams 使用有界 `MAXLEN ~ 500`，并在写入时刷新 TTL。它们是
 - 结构化 stdout 是持久平台日志的事实来源。
 - 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过 per-event stream append work。
 - Active tail session 是有时限的授权租约，必须通过正常 auth reconnect。`LOG_TAIL_MAX_SESSION_MS` 设置 control-side 最大时长；非法值或空值会回退到 15 分钟。
-- workerd issue [#6832](https://github.com/cloudflare/workerd/issues/6832) 会导致 client disconnect 不一定触发 async response-body `ReadableStream.cancel()`。Control 因此有独立的 max-session watchdog；如果 tail UI 重连抖动明显，可以调低 `LOG_TAIL_MAX_SESSION_MS`，在上游恢复可靠 disconnect hook 前约束遗弃 Redis tail session 的存活时间。
+- workerd issue [#6832](https://github.com/cloudflare/workerd/issues/6832) 会导致 client disconnect 不一定触发 async response-body `ReadableStream.cancel()`。Control 因此有独立 watchdog：max-session watchdog 负责 reauthorization 上界，idle-pull watchdog 在 SSE body 连续三个 keepalive 周期没有被 pull 时关闭 session。活跃客户端会因为每次 heartbeat 腾出 queue 空间而自然按 keepalive 粒度继续 pull；遗弃客户端会停止 pull，因此不需要等完整 session lifetime 才清理。TCP 连接还在但应用层长时间不读的客户端可能被关闭，应自行 reconnect。
 - 与 activation race 的 tail event 可以丢失。
 - 高 QPS 或慢 SSE reader 可能因为 stream cap 丢中间事件。
 

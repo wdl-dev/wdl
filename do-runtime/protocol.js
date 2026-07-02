@@ -13,6 +13,7 @@ import {
 import { DoRuntimeError } from "do-runtime-protocol-errors";
 import { hostIdForObject, shardForObjectName } from "do-runtime-protocol-identity";
 import { formatWorkerId } from "shared-worker-id";
+import { firstWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 import {
   BodyTooLargeError,
   readBoundedBytes as readRequestBoundedBytes,
@@ -477,6 +478,14 @@ function normalizeWorkerCode(value) {
   const compatibilityFlags = Array.isArray(input.compatibilityFlags)
     ? input.compatibilityFlags.map((flag, index) => requireString(flag, `workerCode.compatibilityFlags[${index}]`, { maxBytes: 128 }))
     : ["nodejs_compat"];
+  const experimentalFlag = firstWorkerdExperimentalCompatFlag(compatibilityFlags);
+  if (experimentalFlag) {
+    throw new DoRuntimeError(
+      400,
+      "experimental_compat_flag_unsupported",
+      `workerCode.compatibilityFlags contains experimental workerd flag ${JSON.stringify(experimentalFlag)}, which WDL does not support for tenant workers`
+    );
+  }
   const env = input.env == null ? {} : requireRecord(input.env, "workerCode.env");
   return {
     compatibilityDate,

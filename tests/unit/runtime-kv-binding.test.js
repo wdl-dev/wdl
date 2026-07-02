@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-shared-module.js";
+import {
+  importRepositoryModule,
+  repositoryFileUrl,
+  runtimeLibModuleDataUrl,
+} from "../helpers/load-shared-module.js";
 import { installMockFetch, makeRecordingFetch } from "../helpers/mock-fetch.js";
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { RUNTIME_METRICS_NOOP_URL } from "../helpers/mocks/runtime-metrics.js";
@@ -8,7 +12,7 @@ import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
 
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
-const RUNTIME_LIB_URL = repositoryFileUrl("runtime/lib.js");
+const RUNTIME_LIB_URL = runtimeLibModuleDataUrl();
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 
 /** @param {Array<[RegExp | string, string]>} [replacements] */

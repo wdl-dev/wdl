@@ -3,8 +3,14 @@ import assert from "node:assert/strict";
 import { importRepositoryModuleFresh } from "../helpers/load-shared-module.js";
 import { delay, waitUntil } from "../helpers/timing.js";
 
-function loadLogsTailHandler() {
-  return importRepositoryModuleFresh("control/handlers/logs-tail.js", [
+/** @param {{ keepaliveMs?: number }} [options] */
+function loadLogsTailHandler(options = {}) {
+  /** @type {Array<[RegExp | string, string]>} */
+  const replacements = [];
+  if (options.keepaliveMs) {
+    replacements.push([/const SSE_KEEPALIVE_MS = 5_000;/, `const SSE_KEEPALIVE_MS = ${options.keepaliveMs};`]);
+  }
+  replacements.push(
     [
       /import \{ envValueOr \} from "shared-env";/,
       "const envValueOr = (value, fallback) => value == null || value === '' ? fallback : value;",
@@ -61,7 +67,8 @@ function loadLogsTailHandler() {
        const requireControlLog = () => state.log;
        const controlTailRedis = () => state.dataRedis || state.redis;`,
     ],
-  ]);
+  );
+  return importRepositoryModuleFresh("control/handlers/logs-tail.js", replacements);
 }
 
 function resetTailState() {
@@ -225,6 +232,34 @@ test("logs tail max-session watchdog closes even without stream cancel", async (
   assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
   assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].closed, true);
   assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_expired"));
+  await reader.cancel().catch(() => {});
+});
+
+test("logs tail idle-pull watchdog closes abandoned streams before max-session", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler({ keepaliveMs: 5 });
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "1000" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-idle",
+  });
+
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  assert.match((await readText(reader)).text, /tail-open/);
+  await waitUntil("tail idle watchdog to close session", () =>
+    /** @type {any} */ (globalThis).__tailSessions[0]?.closed === true, {
+      timeoutMs: 500, intervalMs: 5,
+    });
+  await Promise.all(waitUntilPromises);
+
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].closed, true);
+  assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_idle"));
   await reader.cancel().catch(() => {});
 });
 

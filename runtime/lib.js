@@ -1,5 +1,6 @@
-// Pure helpers for the runtime worker. No bare-specifier imports so this
-// file can be loaded both as a workerd embedded module and by node --test.
+// Pure helpers for the runtime worker.
+
+import { firstWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 
 const BASE64_CHUNK_SIZE = 0x8000;
 const utf8Encoder = new TextEncoder();
@@ -160,6 +161,11 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
         `meta.compatibilityFlags entries must be non-empty strings, got ${JSON.stringify(f)}`
       );
     }
+    if (firstWorkerdExperimentalCompatFlag([f])) {
+      throw new Error(
+        `meta.compatibilityFlags contains experimental workerd flag ${JSON.stringify(f)}, which WDL does not support for tenant workers`
+      );
+    }
     out.push(f);
   }
   for (const f of platformFloorCompatFlags(compatibilityDate)) {
@@ -183,14 +189,13 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
  *   exports?: { entrypoint?: unknown }[] | null,
  *   [key: string]: unknown,
  * }} WorkerBundleMeta
- * @typedef {string | { cjs: string } | { py: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
+ * @typedef {string | { cjs: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
  */
 
 /** @type {[string, (bytes: Uint8Array) => WorkerModuleValue][]} */
 const moduleDecoderEntries = [
   ["module", (bytes) => utf8Decoder.decode(bytes)],
   ["cjs", (bytes) => ({ cjs: utf8Decoder.decode(bytes) })],
-  ["py", (bytes) => ({ py: utf8Decoder.decode(bytes) })],
   ["text", (bytes) => ({ text: utf8Decoder.decode(bytes) })],
   ["json", (bytes) => ({ json: JSON.parse(utf8Decoder.decode(bytes)) })],
   ["wasm", (bytes) => ({ wasm: bytes })],
@@ -223,6 +228,9 @@ export function bundleToWorkerCode(hash) {
   for (const [path, info] of Object.entries(meta.modules)) {
     const bytes = hash[path];
     if (!bytes) throw new Error(`Bundle missing module "${path}"`);
+    if (info.type === "py") {
+      throw new Error(`Module "${path}": Python Workers modules are not supported by WDL`);
+    }
     const decoder = typeof info.type === "string" ? moduleDecoders.get(info.type) : undefined;
     if (!decoder) throw new Error(`Module "${path}": unknown type "${info.type}"`);
     modules[path] = decoder(bytes);

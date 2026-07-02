@@ -53,6 +53,14 @@ variable "system_runtime_cpu" { type = number }
 variable "system_runtime_memory" { type = number }
 variable "runtime_cpu" { type = number }
 variable "runtime_memory" { type = number }
+variable "d1_runtime_container_memory" {
+  type    = number
+  default = null
+}
+variable "do_runtime_container_memory" {
+  type    = number
+  default = null
+}
 variable "scheduler_cpu" { type = number }
 variable "scheduler_memory" { type = number }
 variable "workflows_cpu" { type = number }

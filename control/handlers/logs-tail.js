@@ -20,6 +20,8 @@ const TAIL_ACTIVATION_TTL_SECONDS = 30;
 const TAIL_ACTIVATION_MAX_ENTRIES = 10_000;
 const XREAD_BLOCK_MS = 10_000;
 const SSE_KEEPALIVE_MS = 5_000;
+const LOG_TAIL_IDLE_PULL_GRACE_FACTOR = 3;
+export const LOG_TAIL_IDLE_PULL_MS = SSE_KEEPALIVE_MS * LOG_TAIL_IDLE_PULL_GRACE_FACTOR;
 export const LOG_TAIL_MAX_SESSION_MS_DEFAULT = 15 * 60 * 1000;
 const MAX_WORKERS_PER_TAIL_SESSION = 50;
 const JSON_FIELD_BYTES = [0x6a, 0x73, 0x6f, 0x6e]; // "json"
@@ -367,6 +369,8 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   /** @type {ReadableStreamDefaultController<Uint8Array> | null} */
   let streamController = null;
   let expiryLogged = false;
+  let idleLogged = false;
+  let lastPullAtMs = Date.now();
   const { promise: cancelPromise, resolve: resolveCancel } =
     /** @type {PromiseWithResolvers<void>} */ (Promise.withResolvers());
 
@@ -376,6 +380,15 @@ export async function handle({ request, env, ctx, ns, requestId }) {
       event: "tail_warning",
       code: "session_expired",
       message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
+    }),
+  });
+
+  const sessionIdleWarning = () => sseEvent({
+    event: "tail_warning",
+    data: JSON.stringify({
+      event: "tail_warning",
+      code: "session_idle",
+      message: "Tail session stopped receiving client reads; reconnecting closes the abandoned session.",
     }),
   });
 
@@ -412,16 +425,53 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     resolveCancel();
   }
 
+  /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
+  function idleSession(controller) {
+    if (cancelled) return;
+    cancelled = true;
+    if (!idleLogged) {
+      idleLogged = true;
+      log("info", "tail_session_idle", {
+        request_id: requestId, namespace: ns, worker_count: workers.length,
+        idle_pull_ms: Date.now() - lastPullAtMs,
+        idle_limit_ms: LOG_TAIL_IDLE_PULL_MS,
+      });
+    }
+    if (controller) {
+      try { controller.enqueue(utf8Encoder.encode(sessionIdleWarning())); } catch {}
+      try { controller.close(); } catch {}
+    }
+    resolveCancel();
+  }
+
   const expiryTimer = setTimeout(() => expireSession(streamController), maxSessionMs);
   if (typeof expiryTimer === "object" && typeof expiryTimer.unref === "function") {
     expiryTimer.unref();
   }
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let idleTimer = null;
+  function scheduleIdleWatchdog() {
+    const delayMs = Math.max(1, LOG_TAIL_IDLE_PULL_MS - (Date.now() - lastPullAtMs));
+    idleTimer = setTimeout(() => {
+      if (cancelled) return;
+      if (Date.now() - lastPullAtMs >= LOG_TAIL_IDLE_PULL_MS) {
+        idleSession(streamController);
+        return;
+      }
+      scheduleIdleWatchdog();
+    }, delayMs);
+    if (typeof idleTimer === "object" && typeof idleTimer.unref === "function") {
+      idleTimer.unref();
+    }
+  }
+  scheduleIdleWatchdog();
 
   // Pre-register cleanup. Per CLAUDE.md gotcha: scheduling waitUntil from
   // inside cancel races IoContext teardown — cancel only resolves the
   // promise, the actual close happens here.
   ctx.waitUntil(cancelPromise.then(async () => {
     clearTimeout(expiryTimer);
+    if (idleTimer) clearTimeout(idleTimer);
     await closeSessionIfOpen();
     cleanupFinished = true;
     log("info", "tail_session_close", {
@@ -442,6 +492,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   const stream = new ReadableStream({
     async pull(controller) {
       streamController = controller;
+      lastPullAtMs = Date.now();
       if (cancelled) {
         try { controller.close(); } catch {}
         return;

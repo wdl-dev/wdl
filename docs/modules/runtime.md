@@ -183,6 +183,9 @@ Data-plane bindings use their own storage:
 
 Runtime must treat Redis bundle metadata as control-authored, but still revalidates
 reserved runtime entrypoint and binding names when materializing older stored metadata.
+It also fails closed if older metadata contains Python module entries or upstream
+experimental compatibility flags, because those would otherwise reach workerd as
+opaque cold-load failures under the current stock binary.
 
 ## Ownership / Concurrency / Failure Semantics
 
@@ -240,6 +243,17 @@ when a matching active tail session exists.
 - Removing the broad loaded-worker `experimental` flag intentionally removes access to
   non-GA experimental-only tenant surfaces, such as irrevocable long-term stub storage.
   Do not re-enable it as a compatibility workaround without an explicit feature design.
+- Control rejects upstream `$experimental` compatibility enable flags at deploy, and
+  runtime rejects retained metadata that still contains them. Disable-style flags such
+  as `no_*` are not part of that mirror unless upstream marks the enable flag itself
+  experimental.
+- Python Workers modules are not supported. Control rejects new `py` module manifests,
+  and runtime/do-runtime reject retained metadata that contains them instead of letting
+  workerd fail later with a mixed JS/Python bundle error.
+- Before rolling the 2026-07-01 workerd adaptation over an existing Redis DB 0, run
+  `node scripts/scan-workerd-0701-metadata.mjs` against the control Redis database to
+  find retained versions that still contain Python modules or upstream experimental
+  compatibility flags.
 - The runtime workerd processes still run with process-level `--experimental` because
   upstream workerd 2026-07-01 continues to gate `workerLoader` bindings on that switch.
   Do not re-add the `experimental` compatibility flag or `allowExperimental` to loaded
@@ -248,7 +262,13 @@ when a matching active tail session exists.
   env at 1 MiB. Control rejects module bodies over 64 MiB before version allocation.
   Vars, namespace/worker secrets, and runtime-injected binding/workflow env values are
   prechecked against a headroomed `workerLoader` env budget because workerd's final
-  enforcement includes the full `env` estimate.
+  enforcement includes the full `env` estimate. The estimate starts from JSON bytes and
+  adds V8 two-byte string overhead for non-Latin-1 strings, so mixed ASCII plus CJK or
+  emoji secrets do not slip past control and fail later at cold-load.
+- In current stock workerd, a client disconnect during an async `ReadableStream`
+  response body may not call the stream source's `cancel()` callback. Tenant streaming
+  and SSE workers should use their own heartbeat, timeout, or application close path
+  instead of relying on disconnect-driven `cancel()` as the only resource cleanup hook.
 - workerd upgrades can still change default or compatibility-flagged runtime
   surfaces; review the exposed surface, not only the loader/abort path.
 

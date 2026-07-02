@@ -74,7 +74,7 @@ Runtime 通过 `redis-proxy` 从 DB 0 读取不可变 bundle 和 metadata。Data
 - D1 和 DO binding 调用专门 runtime service。
 - R2/ASSETS 使用 S3-compatible object storage。
 
-Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。
+Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。旧 metadata 如果包含 Python module entry 或上游 experimental compatibility flag，也会 fail closed；否则这些形态会在当前 stock workerd binary 下变成 opaque cold-load failure。
 
 ## Ownership / 并发 / 失败语义
 
@@ -106,8 +106,12 @@ Runtime 为 loading、binding operation、`redis-proxy` call、workflow replay c
 - 如果 scheduler/workflows 依赖新的 `:8088` internal path 或 dispatch body，runtime 必须先滚。
 - Runtime 不再为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 仍然注入 `__WdlAbort__`，但当前 bundled workerd baseline 中 `abortIsolate()` 已经不需要该 flag。
 - 移除 loaded worker 的宽泛 `experimental` flag 会有意收紧 tenant 对非 GA experimental-only surface 的访问，例如不可撤销的长期 stub storage。不要为了兼容绕过而重新打开它，除非先完成明确的功能设计。
+- Control 会在 deploy 时拒绝上游 `$experimental` compatibility enable flags，runtime 也会拒绝仍带有这些 flags 的 retained metadata。`no_*` 这类 disable-style flag 不属于这个 mirror，除非上游把对应 enable flag 本身标为 experimental。
+- Python Workers modules 不受支持。Control 会拒绝新的 `py` module manifest，runtime/do-runtime 会拒绝 retained metadata 中的 `py` module，而不是让 workerd 之后抛 mixed JS/Python bundle error。
+- 在已有 Redis DB 0 上 rollout 2026-07-01 workerd 适配前，先对 control Redis database 运行 `node scripts/scan-workerd-0701-metadata.mjs`，找出仍包含 Python modules 或上游 experimental compatibility flags 的 retained versions。
 - Runtime workerd 进程仍需要进程级 `--experimental`，因为上游 workerd 2026-07-01 仍用它 gate `workerLoader` binding。不要重新给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
-- 上游 workerd 2026-07-01 把 dynamic worker code 限制为 64 MiB、serialized dynamic env 限制为 1 MiB。Control 会在分配 version 前拒绝超过 64 MiB 的 module bodies；vars、namespace/worker secrets、runtime 注入的 binding/workflow env value 会在 control plane 用留有 headroom 的 `workerLoader` env budget 预检，因为 workerd 的最终检查看的是完整 `env` estimate。
+- 上游 workerd 2026-07-01 把 dynamic worker code 限制为 64 MiB、serialized dynamic env 限制为 1 MiB。Control 会在分配 version 前拒绝超过 64 MiB 的 module bodies；vars、namespace/worker secrets、runtime 注入的 binding/workflow env value 会在 control plane 用留有 headroom 的 `workerLoader` env budget 预检，因为 workerd 的最终检查看的是完整 `env` estimate。估算以 JSON bytes 为基底，并对非 Latin-1 字符串补上 V8 two-byte string overhead，因此 ASCII 混 CJK 或 emoji 的 secret 不会绕过 control 后在 cold-load 才失败。
+- 当前 stock workerd 中，客户端在 async `ReadableStream` response body 中途断开时，不一定调用 stream source 的 `cancel()`。Tenant streaming/SSE worker 应使用自己的 heartbeat、timeout 或应用层 close path，不要把 disconnect-driven `cancel()` 当成唯一资源清理信号。
 - workerd 升级仍可能改变默认或 compatibility-flagged runtime surface；升级时要审 exposed surface，而不只审 loader/abort path。
 
 ## 保护该模块的测试

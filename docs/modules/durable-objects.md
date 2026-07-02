@@ -93,6 +93,12 @@ do-runtime and stores one internal job per pending row. Row tokens fence user-dr
 delete against stale backend delivery; Workflows run tokens fence dispatch retry and
 completion inside DB 2.
 
+workerd 2026-07-01 rejects SQLite object names under the reserved `_cf_` namespace
+case-insensitively. `ctx.storage.deleteAll()` skips those names case-insensitively as
+well, so old storage created before the stricter check with variants such as `_CF_*`
+does not make cleanup fail. Those legacy reserved-name objects remain inaccessible to
+tenant SQL and should be treated as upgrade debris, not application tables.
+
 `getAlarm()` performs alarm-scoped read repair: if SQLite has a pending alarm row but
 the Workflows DB 2 due index is missing, it idempotently rewrites the backend due index
 without adding Redis IO to ordinary DO fetches. Active and retained alarms keep their

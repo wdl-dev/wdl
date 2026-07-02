@@ -50,6 +50,7 @@ resource "aws_ecs_task_definition" "do_runtime" {
       image      = var.workerd_image
       essential  = true
       entryPoint = ["do-supervisor"]
+      memory     = coalesce(var.do_runtime_container_memory, var.runtime_memory)
 
       dependsOn = [{
         containerName = "redis-proxy"

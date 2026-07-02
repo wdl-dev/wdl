@@ -7,6 +7,7 @@ import {
   moduleDataUrl,
   repositoryFileUrl,
   repositoryModuleDataUrl,
+  runtimeLibModuleDataUrl,
 } from "./load-shared-module.js";
 import { runtimeProxyBindingStubUrl, sharedInternalAuthUrl } from "./runtime-proxy-stub.js";
 
@@ -15,7 +16,7 @@ const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
-const RUNTIME_LIB_URL = repositoryFileUrl("runtime/lib.js");
+const RUNTIME_LIB_URL = runtimeLibModuleDataUrl();
 const METRICS_MOCK_URL = moduleDataUrl(`
 export const metrics = {
   increment() {},

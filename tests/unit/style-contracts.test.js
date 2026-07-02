@@ -1885,6 +1885,26 @@ test("Terraform gates DO test hooks like D1 test hooks", () => {
   assert.match(doService, /!var\.do_test_hooks_enabled \|\| can\(regex\("\(\^\|-\)test\(\$\|-\)", var\.name\)\)/);
 });
 
+test("D1 and DO workerd containers keep explicit memory ceilings", () => {
+  const rootVars = readRepoFile("terraform/variables.tf");
+  const moduleVars = readRepoFile("terraform/modules/compute/variables.tf");
+  const main = readRepoFile("terraform/main.tf");
+  const d1Service = readRepoFile("terraform/modules/compute/d1_runtime_service.tf");
+  const doService = readRepoFile("terraform/modules/compute/do_runtime_service.tf");
+  const d1Kube = readRepoFile("deploy/kubernetes/base/d1-runtime.yaml");
+  const doKube = readRepoFile("deploy/kubernetes/base/do-runtime.yaml");
+
+  for (const name of ["d1_runtime_container_memory", "do_runtime_container_memory"]) {
+    assert.match(rootVars, new RegExp(`variable "${name}"`));
+    assert.match(moduleVars, new RegExp(`variable "${name}"`));
+    assert.match(main, new RegExp(`${name}\\s+=\\s+var\\.${name}`));
+  }
+  assert.match(d1Service, /memory\s+=\s+coalesce\(var\.d1_runtime_container_memory, var\.runtime_memory\)/);
+  assert.match(doService, /memory\s+=\s+coalesce\(var\.do_runtime_container_memory, var\.runtime_memory\)/);
+  assert.match(d1Kube, /name: d1-runtime[\s\S]*?limits:\n\s+memory: 1Gi/);
+  assert.match(doKube, /name: do-runtime[\s\S]*?limits:\n\s+memory: 1Gi/);
+});
+
 test("EC2 capacity hosts block awsvpc task access to host IMDS", () => {
   const terraformCapacity = readRepoFile("terraform/modules/compute/ec2_capacity.tf");
 

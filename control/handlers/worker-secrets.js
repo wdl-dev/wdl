@@ -63,6 +63,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
     const key = subPath[0];
     const invalidKey = invalidSecretMutationKeyResponse(key);
     if (invalidKey) return invalidKey;
+    const controlEnv = stringEnv(env);
 
     let storedValue = null;
     let putPlaintext = null;
@@ -84,7 +85,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         redis, ns, name, key, method,
         value: storedValue,
         plaintext: putPlaintext,
-        controlEnv: stringEnv(env),
+        controlEnv,
       });
     } catch (err) {
       if (err instanceof SecretAbort) {
@@ -121,7 +122,20 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         /** @type {RoutingRedisClient} */ (redis),
         ns,
         name,
-        { log, requestId }
+        {
+          log,
+          requestId,
+          beforeStageCopy: ({ iso, currentVersion, newVersion }) =>
+            assertWorkerSecretBumpEnvBudget({
+              iso,
+              ns,
+              name,
+              currentVersion,
+              newVersion,
+              controlEnv,
+              ignoreWorkerSecretEnvelopeErrors: method === "DELETE",
+            }),
+        }
       );
       log("info", method === "PUT" ? "secret_set" : "secret_deleted", {
         request_id: requestId,
@@ -163,7 +177,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         else payload.deleted = true;
         return jsonResponse(200, payload);
       }
-      if (err instanceof RoutingError) {
+      if (err instanceof RoutingError || err instanceof WorkerEnvBudgetError) {
         // Secret already landed in our own MULTI; bump failure degrades
         // to a deferred reload — the secret is picked up on next natural
         // cold-load, or wiped by a concurrent whole-delete.
@@ -298,5 +312,63 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
 
     await multi.exec();
     return { mutated: true };
+  });
+}
+
+/**
+ * @param {{
+ *   iso: {
+ *     watch: (...keys: string[]) => Promise<unknown>,
+ *     hGet: (key: string, field: string) => Promise<string | null | undefined>,
+ *     hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>,
+ *   },
+ *   ns: string,
+ *   name: string,
+ *   currentVersion: string,
+ *   newVersion: string,
+ *   controlEnv: Record<string, string | undefined>,
+ *   ignoreWorkerSecretEnvelopeErrors?: boolean,
+ * }} args
+ */
+async function assertWorkerSecretBumpEnvBudget({
+  iso,
+  ns,
+  name,
+  currentVersion,
+  newVersion,
+  controlEnv,
+  ignoreWorkerSecretEnvelopeErrors = false,
+}) {
+  const nsSecretsKey = `secrets:${ns}`;
+  const workerSecretsKey = `secrets:${ns}:${name}`;
+  await iso.watch(nsSecretsKey, workerSecretsKey);
+
+  // Keep reads sequential: RedisSession is a single RESP stream.
+  const nsEncrypted = await iso.hGetAll(nsSecretsKey);
+  const workerEncrypted = await iso.hGetAll(workerSecretsKey);
+  const nsSecrets = await decryptSecretHash({
+    encrypted: nsEncrypted,
+    env: controlEnv,
+    hashKey: nsSecretsKey,
+  });
+  const workerSecrets = await decryptSecretHash({
+    encrypted: workerEncrypted,
+    env: controlEnv,
+    hashKey: workerSecretsKey,
+    ignoreSecretEnvelopeErrors: ignoreWorkerSecretEnvelopeErrors,
+  });
+
+  await assertWorkerVersionsUserEnvBudget({
+    redis: iso,
+    ns,
+    worker: name,
+    versions: [],
+    versionEstimates: [{
+      sourceVersion: currentVersion,
+      estimatedVersion: newVersion,
+    }],
+    nsSecrets,
+    workerSecrets,
+    assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
   });
 }

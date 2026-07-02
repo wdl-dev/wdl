@@ -40,6 +40,7 @@
 | `control/topology.js` | Deploy metadata 中 routes、patterns、cron、queue consumer 和 workflow declaration parsing。 |
 | `control/routing.js`、`control/routing/route-plan.js` | Promote、secret bump/promote、host reconcile WATCH/MULTI loops，以及纯 route/pattern planning helpers。 |
 | `control/lifecycle-indexes.js` | Worker lifecycle、cron、queue consumer 和 referrer indexes 的 Redis mutation helpers。 |
+| `control/env-budget.js` | Deploy 和 secret mutation guard 使用的 workerd `workerLoader` env size 控制面估算。 |
 | `control/d1-*` | D1 control metadata、store、lifecycle、migration 和 d1-runtime client modules。 |
 | `control/r2.js` | 面向配置的 S3-compatible store 的 control-plane R2 bucket/object API client。 |
 | `control/s3.js` | S3-compatible ASSETS upload helper。 |
@@ -62,6 +63,7 @@
 | `shared/bounded-body.js` | 共享 bounded request body byte/text readers；各 tier 自己把 limit error 映射为对应 HTTP error contract。 |
 | `shared/ns-pattern.js` | Namespace、worker、binding、queue、KV id、module path、reserved object-key 和 reserved namespace grammars。 |
 | `shared/version.js` | Worker version formatting 和 bundle key helpers。 |
+| `shared/workerd-compat-flags.js` | 上游 workerd experimental compatibility enable flags 的 pinned mirror，用于在 cold-load 前拒绝 tenant metadata。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire 和 SQL splitting utilities。 |
@@ -99,6 +101,7 @@
 | `examples/` | 手工 demo 和 reference projects。测试不应悄悄依赖它们，除非 fixture 明确迁入 `test-workers/`。 |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner。 |
 | `scripts/compile-workerd-configs.js` | 把 workerd Cap'n Proto configs 编译成 `dist/workerd-configs/*.bin`。 |
+| `scripts/scan-workerd-0701-metadata.mjs` | workerd 2026-07-01 适配 rollout 前使用的只读 Redis metadata scanner，报告使用 experimental flags 或 Python modules 的 retained versions。 |
 
 ## Infrastructure
 

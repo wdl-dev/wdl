@@ -91,6 +91,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "shared-observability", esModule = embed "../shared/observability.js"),
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-ns-pattern", esModule = embed "../shared/ns-pattern.js"),
+    (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-respond", esModule = embed "../shared/respond.js"),
     (name = "shared-bounded-body", esModule = embed "../shared/bounded-body.js"),
     (name = "shared-request-scope", esModule = embed "../shared/request-scope.js"),

@@ -90,6 +90,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "shared-version", esModule = embed "../shared/version.js"),
     (name = "shared-d1-timeout", esModule = embed "../shared/d1-timeout.js"),
     (name = "shared-ns-pattern", esModule = embed "../shared/ns-pattern.js"),
+    (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-observability", esModule = embed "../shared/observability.js"),
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-owner-forwarder", esModule = embed "../shared/owner-forwarder.js"),
