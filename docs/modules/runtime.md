@@ -83,7 +83,7 @@ services. Runtime therefore treats bindings as adapters:
   materialization merges in fixed precedence: bundle vars, then namespace secrets, then
   worker secrets. A worker-level secret with the same name wins over a namespace-level
   secret, which wins over a var. Control enforces a headroomed estimate of workerd's
-  `workerLoader` serialized env budget before deploys and secret mutations. That
+  `workerLoader` serialized env budget during deploys and secret mutations. That
   estimate includes user vars/secrets plus runtime-injected binding/workflow env values,
   including required caller secret copies in platform/service binding props, so an
   over-large env fails in the control plane instead of during runtime cold-load.
@@ -267,11 +267,12 @@ when a matching active tail session exists.
   WorkerCode unless another upstream API explicitly requires it.
 - Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
   env at 1 MiB. Control rejects module bodies over 64 MiB before version allocation.
-  Vars, namespace/worker secrets, and runtime-injected binding/workflow env values are
-  prechecked against a headroomed `workerLoader` env budget because workerd's final
-  enforcement includes the full `env` estimate. The estimate starts from JSON bytes and
-  adds V8 two-byte string overhead for non-Latin-1 strings, so mixed ASCII plus CJK or
-  emoji secrets do not slip past control and fail later at cold-load.
+  Vars, namespace/worker secrets, and runtime-injected binding/workflow env values get
+  a fast deploy precheck and an authoritative watched-commit check against a headroomed
+  `workerLoader` env budget because workerd's final enforcement includes the full `env`
+  estimate after metadata materialization. The estimate starts from JSON bytes and adds
+  V8 two-byte string overhead for non-Latin-1 strings, so mixed ASCII plus CJK or emoji
+  secrets do not slip past control and fail later at cold-load.
 - In current stock workerd, a client disconnect during an async `ReadableStream`
   response body may not call the stream source's `cancel()` callback. Tenant streaming
   and SSE workers should use their own heartbeat, timeout, or application close path

@@ -1,6 +1,11 @@
 locals {
-  redis_addr     = "${var.valkey_host}:${var.valkey_port}"
-  data_redis_url = "redis://${local.redis_addr}/1"
+  redis_addr                     = "${var.valkey_host}:${var.valkey_port}"
+  data_redis_url                 = "redis://${local.redis_addr}/1"
+  do_redis_proxy_memory_headroom = 128
+  do_runtime_container_memory = coalesce(
+    var.do_runtime_container_memory,
+    var.runtime_memory - local.do_redis_proxy_memory_headroom,
+  )
 
   # PLATFORM_DOMAIN is the base hostname gateway uses to split ns from host
   # (regex builds "<ns>.<PLATFORM_DOMAIN>"). platform_domain carries a leading

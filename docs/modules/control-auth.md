@@ -79,7 +79,9 @@ Control lifecycle operations are split so each critical transition has one autho
   allocates the next immutable version through `worker:<ns>:<worker>:next_version`,
   writes bundle metadata/modules/assets, then enters the same promote path used by
   explicit promotion. Before allocation, deploy checks the 64 MiB workerd dynamic code
-  limit and the headroomed `workerLoader` env budget for the candidate metadata.
+  limit and runs a fast headroomed `workerLoader` env-budget check for the candidate
+  metadata. The watched commit path rechecks the env budget after metadata
+  materialization, such as resolved D1 database ids, before writing the version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,

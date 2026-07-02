@@ -788,6 +788,8 @@ export async function handle({ request, env, ns, name, requestId }) {
   }
 
   try {
+    // Fast pre-allocation check for obvious env-budget failures. commitWithWatch()
+    // repeats this after materializing watched metadata such as resolved D1 ids.
     await validateCommittedEnvBudget({
       redis,
       controlEnv,

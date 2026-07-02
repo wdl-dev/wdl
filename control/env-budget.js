@@ -137,6 +137,8 @@ function estimatedBindingEnvValue({ name, spec, meta, ns, worker, version, asset
         binding: name,
         className: stringOrFallback(spec.className),
       };
+      // DO bindings intentionally mirror runtime's default/factory output shape:
+      // props are top-level fields, while hostProxy carries the JSRPC namespace.
       return {
         __wdlBinding: "do",
         ...props,

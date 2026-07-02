@@ -50,7 +50,7 @@ resource "aws_ecs_task_definition" "do_runtime" {
       image      = var.workerd_image
       essential  = true
       entryPoint = ["do-supervisor"]
-      memory     = coalesce(var.do_runtime_container_memory, var.runtime_memory)
+      memory     = local.do_runtime_container_memory
 
       dependsOn = [{
         containerName = "redis-proxy"
@@ -105,6 +105,11 @@ resource "aws_ecs_task_definition" "do_runtime" {
   ])
 
   lifecycle {
+    precondition {
+      condition     = local.do_runtime_container_memory > 0 && local.do_runtime_container_memory < var.runtime_memory
+      error_message = "do_runtime_container_memory must leave positive task-level memory headroom for the redis-proxy sidecar."
+    }
+
     precondition {
       condition     = !var.do_test_hooks_enabled || can(regex("(^|-)test($|-)", var.name))
       error_message = "do_test_hooks_enabled may only be enabled for test-named compute stacks."
