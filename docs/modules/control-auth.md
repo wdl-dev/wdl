@@ -79,9 +79,10 @@ Control lifecycle operations are split so each critical transition has one autho
   allocates the next immutable version through `worker:<ns>:<worker>:next_version`,
   writes bundle metadata/modules/assets, then enters the same promote path used by
   explicit promotion. Before allocation, deploy checks the 64 MiB workerd dynamic code
-  limit and runs a fast headroomed `workerLoader` env-budget check for the candidate
-  metadata. The watched commit path rechecks the env budget after metadata
-  materialization, such as resolved D1 database ids, before writing the version.
+  limit and runs an advisory pass over the candidate metadata and current secret
+  envelopes. The watched commit path is the authoritative headroomed `workerLoader`
+  env-budget check after version allocation and metadata materialization, such as
+  resolved D1 database ids, before writing the version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
@@ -92,6 +93,10 @@ Control lifecycle operations are split so each critical transition has one autho
   plaintext size and shape, encrypts it into a `WDL-ENC:` envelope before the Redis
   mutation/WATCH retry loop, and reuses the same envelope across retries. Runtime
   therefore sees a new immutable version id instead of mutable in-place secret changes.
+  Secret DELETE remains a repair surface: when estimating the post-delete env, it skips
+  corrupt envelopes in the other secret scope instead of letting an unrelated bad
+  namespace or worker secret block deletion. Secret PUT still fails closed on corrupt
+  retained envelopes.
   Namespace-secret mutations WATCH the retained worker/version metadata they need to
   re-estimate before commit; if concurrent metadata changes keep invalidating that view,
   control returns `namespace_secret_mutation_contention`.

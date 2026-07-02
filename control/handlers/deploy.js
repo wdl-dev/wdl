@@ -788,8 +788,10 @@ export async function handle({ request, env, ns, name, requestId }) {
   }
 
   try {
-    // Fast pre-allocation check for obvious env-budget failures. commitWithWatch()
-    // repeats this after materializing watched metadata such as resolved D1 ids.
+    // Advisory pre-allocation pass that decrypts current secret envelopes before
+    // assets/version side effects. It uses a conservative version placeholder, so
+    // commitWithWatch() is the only env-budget rejection point after version
+    // allocation and watched metadata materialization such as resolved D1 ids.
     await validateCommittedEnvBudget({
       redis,
       controlEnv,
@@ -798,9 +800,12 @@ export async function handle({ request, env, ns, name, requestId }) {
       meta: prepared.meta,
     });
   } catch (err) {
-    if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
-    if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
-    throw err;
+    if (err instanceof WorkerEnvBudgetError) {
+      // Do not reject here: the placeholder can over-estimate DO/workflow-heavy
+      // bundles. The watched commit check below uses the real version and will
+      // reject true budget failures before the version is written.
+    } else if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+    else throw err;
   }
 
   const num = await redis.incr(`worker:${ns}:${name}:next_version`);

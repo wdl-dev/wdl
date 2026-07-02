@@ -33,9 +33,16 @@ class NamespaceSecretAbort extends ControlAbort {}
  *   controlEnv: Record<string, string | undefined>,
  *   nsName: string,
  *   nsSecrets: Record<string, string>,
+ *   ignoreWorkerSecretEnvelopeErrors?: boolean,
  * }} args
  */
-async function validateNamespaceSecretBudget({ redis, controlEnv, nsName, nsSecrets }) {
+async function validateNamespaceSecretBudget({
+  redis,
+  controlEnv,
+  nsName,
+  nsSecrets,
+  ignoreWorkerSecretEnvelopeErrors = false,
+}) {
   const activeRoutes = await redis.hGetAll(routesKey(nsName));
   const indexedWorkers = await redis.sMembers(workersIndexKey(nsName));
   const workerNames = new Set([
@@ -61,6 +68,7 @@ async function validateNamespaceSecretBudget({ redis, controlEnv, nsName, nsSecr
       encrypted: workerEncrypted,
       env: controlEnv,
       hashKey: workerSecretsKey,
+      ignoreSecretEnvelopeErrors: ignoreWorkerSecretEnvelopeErrors,
     });
     await assertWorkerVersionsUserEnvBudget({
       redis,
@@ -135,6 +143,7 @@ async function mutateNamespaceSecret({
       controlEnv,
       nsName,
       nsSecrets,
+      ignoreWorkerSecretEnvelopeErrors: method === "DELETE",
     });
 
     const multi = iso.multi();

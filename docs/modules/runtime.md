@@ -268,11 +268,11 @@ when a matching active tail session exists.
 - Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
   env at 1 MiB. Control rejects module bodies over 64 MiB before version allocation.
   Vars, namespace/worker secrets, and runtime-injected binding/workflow env values get
-  a fast deploy precheck and an authoritative watched-commit check against a headroomed
+  an advisory deploy pass and an authoritative watched-commit check against a headroomed
   `workerLoader` env budget because workerd's final enforcement includes the full `env`
-  estimate after metadata materialization. The estimate starts from JSON bytes and adds
-  V8 two-byte string overhead for non-Latin-1 strings, so mixed ASCII plus CJK or emoji
-  secrets do not slip past control and fail later at cold-load.
+  estimate after version allocation and metadata materialization. The estimate starts
+  from JSON bytes and adds V8 two-byte string overhead for non-Latin-1 strings, so mixed
+  ASCII plus CJK or emoji secrets do not slip past control and fail later at cold-load.
 - In current stock workerd, a client disconnect during an async `ReadableStream`
   response body may not call the stream source's `cancel()` callback. Tenant streaming
   and SSE workers should use their own heartbeat, timeout, or application close path

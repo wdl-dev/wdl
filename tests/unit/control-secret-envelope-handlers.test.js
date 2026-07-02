@@ -395,6 +395,50 @@ test("namespace secret DELETE skips other corrupt namespace envelopes for repair
   }
 });
 
+test("namespace secret DELETE skips corrupt worker envelopes for repair", async () => {
+  const { state } = await import(controlSharedUrl);
+  const original = {
+    hGetAll: state.redis.hGetAll,
+    sMembers: state.redis.sMembers,
+    zRange: state.redis.zRange,
+  };
+  const deletesBefore = state.redis.deletes.length;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo",
+    fieldName: "TOKEN",
+  });
+  /** @param {string} key */
+  state.redis.hGetAll = async (key) => {
+    if (key === "secrets:demo") return { TOKEN: encrypted };
+    if (key === "routes:demo") return {};
+    if (key === "secrets:demo:api") return { BAD: "WDL-ENC:not-json" };
+    return {};
+  };
+  /** @param {string} key */
+  state.redis.sMembers = async (key) => key === "workers:demo" ? ["api"] : [];
+  state.redis.zRange = async () => [];
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-delete-worker-corrupt",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(state.redis.deletes.length, deletesBefore + 1);
+    assert.deepEqual(state.redis.deletes.at(-1), { key: "secrets:demo", field: "TOKEN" });
+  } finally {
+    Object.assign(state.redis, original);
+  }
+});
+
 test("namespace secret PUT still fails closed on other corrupt namespace envelopes", async () => {
   const { state } = await import(controlSharedUrl);
   const original = {
@@ -906,6 +950,131 @@ test("worker secret DELETE skips other corrupt worker envelopes for repair", asy
     assert.equal(response.status, 200);
     assert.equal(execCalled, true);
     assert.equal(deletedField, "TOKEN");
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret DELETE skips corrupt namespace envelopes for repair", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  let execCalled = false;
+  let deletedField = null;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => await fn({
+    async watch() {},
+    async unwatch() {},
+    async get() { return null; },
+    async hKeys() { return ["TOKEN"]; },
+    async hGet() { return null; },
+    /** @param {string} key */
+    async hGetAll(key) {
+      if (key === "secrets:demo") return { BAD: "WDL-ENC:not-json" };
+      if (key === "secrets:demo:api") return { TOKEN: encrypted };
+      return {};
+    },
+    async zCard() { return 0; },
+    async zRange() { return []; },
+    multi() {
+      return {
+        hSet() {},
+        /** @param {string} _key @param {string} field */
+        hDel(_key, field) { deletedField = field; },
+        sAdd() {},
+        sRem() {},
+        async exec() { execCalled = true; },
+      };
+    },
+  });
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-delete-ns-corrupt",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(execCalled, true);
+    assert.equal(deletedField, "TOKEN");
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret DELETE skips corrupt namespace envelopes during bump repair", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  let sessionCalls = 0;
+  let execCalled = false;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => {
+    sessionCalls += 1;
+    return await fn({
+      async watch() {},
+      async unwatch() {},
+      async get() { return null; },
+      async hKeys() { return ["TOKEN"]; },
+      /** @param {string} key @param {string} field */
+      async hGet(key, field) {
+        if (key === "routes:demo" && field === "api") return "v1";
+        if (key === "worker:demo:api:v:1" && field === "__meta__") return JSON.stringify({ vars: { SAFE: "ok" } });
+        return null;
+      },
+      /** @param {string} key */
+      async hGetAll(key) {
+        if (key === "secrets:demo") return { BAD: "WDL-ENC:not-json" };
+        if (key === "secrets:demo:api" && sessionCalls === 1) return { TOKEN: encrypted };
+        return {};
+      },
+      async zCard() { return 1; },
+      async zRange() { return []; },
+      multi() {
+        return {
+          hSet() {},
+          hDel() {},
+          sAdd() {},
+          sRem() {},
+          async exec() { execCalled = true; },
+        };
+      },
+    });
+  };
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-delete-bump-ns-corrupt",
+    });
+
+    const body = await readJsonResponse(response, 200);
+    assert.equal(execCalled, true);
+    assert.equal(body.deleted, true);
+    assert.equal(body.previousVersion, "v1");
+    assert.equal(body.version, "v2");
   } finally {
     state.redis.session = originalSession;
   }

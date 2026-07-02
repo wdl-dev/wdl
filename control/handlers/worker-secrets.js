@@ -134,6 +134,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
               newVersion,
               controlEnv,
               ignoreWorkerSecretEnvelopeErrors: method === "DELETE",
+              ignoreNamespaceSecretEnvelopeErrors: method === "DELETE",
             }),
         }
       );
@@ -266,7 +267,12 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       const workerBudgetEncrypted = { ...workerEncrypted };
       delete workerBudgetEncrypted[key];
       const [nsSecrets, workerSecrets] = await Promise.all([
-        decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: nsSecretsKey }),
+        decryptSecretHash({
+          encrypted: nsEncrypted,
+          env: controlEnv,
+          hashKey: nsSecretsKey,
+          ignoreSecretEnvelopeErrors: method === "DELETE",
+        }),
         decryptSecretHash({
           encrypted: workerBudgetEncrypted,
           env: controlEnv,
@@ -328,6 +334,7 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
  *   newVersion: string,
  *   controlEnv: Record<string, string | undefined>,
  *   ignoreWorkerSecretEnvelopeErrors?: boolean,
+ *   ignoreNamespaceSecretEnvelopeErrors?: boolean,
  * }} args
  */
 async function assertWorkerSecretBumpEnvBudget({
@@ -338,6 +345,7 @@ async function assertWorkerSecretBumpEnvBudget({
   newVersion,
   controlEnv,
   ignoreWorkerSecretEnvelopeErrors = false,
+  ignoreNamespaceSecretEnvelopeErrors = false,
 }) {
   const nsSecretsKey = `secrets:${ns}`;
   const workerSecretsKey = `secrets:${ns}:${name}`;
@@ -350,6 +358,7 @@ async function assertWorkerSecretBumpEnvBudget({
     encrypted: nsEncrypted,
     env: controlEnv,
     hashKey: nsSecretsKey,
+    ignoreSecretEnvelopeErrors: ignoreNamespaceSecretEnvelopeErrors,
   });
   const workerSecrets = await decryptSecretHash({
     encrypted: workerEncrypted,

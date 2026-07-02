@@ -29,6 +29,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   parsedQueueConsumers: null,
   watchedKeys: null,
   envBudgetError: false,
+  envBudgetFailuresRemaining: 0,
   envBudgetCalls: [],
   redis: null,
   logs: [],
@@ -54,6 +55,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.parsedQueueConsumers = null;
   CONTROL_DEPLOY_TEST_STATE.watchedKeys = null;
   CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
+  CONTROL_DEPLOY_TEST_STATE.envBudgetFailuresRemaining = 0;
   CONTROL_DEPLOY_TEST_STATE.envBudgetCalls = [];
   CONTROL_DEPLOY_TEST_STATE.redis = null;
   CONTROL_DEPLOY_TEST_STATE.logs = [];
@@ -81,14 +83,19 @@ export async function recordS3CleanupIntent(intent) {
 const controlBundleUrl = moduleDataUrl(`
 export function deepFreeze(value) { return value; }
 export function prepareBundle(mainModule, modules, options = {}) {
-  return /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle || {
-    meta: {
-      mainModule,
-      modules,
-      bindings: options.bindings,
-      exports: options.exports,
-      workflows: options.workflows,
-    },
+  if (/** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle) {
+    return /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle;
+  }
+  const meta = {
+    mainModule,
+    modules,
+    bindings: options.bindings,
+    exports: options.exports,
+    workflows: options.workflows,
+  };
+  if (options.vars !== undefined) meta.vars = options.vars;
+  return {
+    meta,
     normalized: Object.entries(modules || {}),
   };
 }
@@ -211,6 +218,10 @@ export class WorkerEnvBudgetError extends Error {
 }
 export function assertWorkerLoaderUserEnvBudget() {
   /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.push(Array.from(arguments)[0] || {});
+  if (/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetFailuresRemaining > 0) {
+    /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetFailuresRemaining -= 1;
+    throw new WorkerEnvBudgetError("env too large");
+  }
   if (/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError) {
     throw new WorkerEnvBudgetError("env too large");
   }
@@ -645,11 +656,13 @@ test("deploy handler rejects assets without S3 before allocating a version", asy
   }
 });
 
-test("deploy handler rejects workerLoader env budget violations before allocating a version", async () => {
+test("deploy handler treats pre-allocation workerLoader env budget failures as advisory", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
-  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = true;
+  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetFailuresRemaining = 1;
+  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta = null;
 
   const session = makeSession();
   let incrCalled = false;
@@ -661,6 +674,10 @@ test("deploy handler rejects workerLoader env budget violations before allocatin
     /** @param {string} key */
     async hGetAll(key) {
       return await session.hGetAll(key);
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(session);
     },
   };
 
@@ -680,11 +697,16 @@ test("deploy handler rejects workerLoader env budget violations before allocatin
       requestId: "rid-env-budget",
     });
 
-    assert.equal((await readJsonResponse(response, 400)).error, "worker_env_too_large");
-    assert.equal(incrCalled, false);
+    const body = await readJsonResponse(response, 201);
+    assert.equal(body.version, "v1");
+    assert.equal(incrCalled, true);
+    assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.length, 2);
+    assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[0].version, undefined);
+    assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[1].version, "v1");
+    assert.deepEqual(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.vars, { BIG: "x" });
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
-    /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = false;
+    /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetFailuresRemaining = 0;
     /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
   }
 });
