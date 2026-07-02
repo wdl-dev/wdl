@@ -2,7 +2,7 @@
  * Mirrors workerd v1.20260701.1 src/workerd/io/compatibility-date.capnp.
  * Regenerate on every workerd pin bump from an upstream workerd source checkout:
  *
- * node --input-type=module -e 'import fs from "node:fs"; const src=fs.readFileSync("src/workerd/io/compatibility-date.capnp","utf8"); const blocks=[]; let cur=[]; for (const line of src.split(/\n/)) { if (/^\s*[A-Za-z][A-Za-z0-9_]*\s+@\d+\s+:Bool/.test(line)) { if (cur.length) blocks.push(cur.join("\n")); cur=[line]; } else if (cur.length) cur.push(line); } if (cur.length) blocks.push(cur.join("\n")); const out=new Set(); for (const b of blocks) { if (!b.includes("$experimental")) continue; for (const m of b.matchAll(/\$compatEnableFlag\("([^"]+)"\)/g)) out.add(m[1]); } console.log([...out].sort().join("\n"));'
+ * node --input-type=module -e 'import fs from "node:fs"; const src=fs.readFileSync("src/workerd/io/compatibility-date.capnp","utf8"); const blocks=[]; let cur=[]; for (const line of src.split(/\n/)) { if (/^\s*[A-Za-z][A-Za-z0-9_]*\s+@\d+\s*:\s*Bool/.test(line)) { if (cur.length) blocks.push(cur.join("\n")); cur=[line]; } else if (cur.length) cur.push(line); } if (cur.length) blocks.push(cur.join("\n")); const out=new Set(); for (const b of blocks) { if (!b.includes("$experimental")) continue; for (const m of b.matchAll(/\$compatEnableFlag\("([^"]+)"\)/g)) out.add(m[1]); } console.log([...out].sort().join("\n"));'
  */
 
 export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260701.1";
@@ -26,7 +26,6 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "kv_direct_binding",
   "memory_cache_delete",
   "new_module_registry",
-  "nonclass_entrypoint_reuses_ctx_across_invocations",
   "precise_timers",
   "python_workers_development",
   "python_workers_durable_objects",
@@ -38,7 +37,6 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "streams_no_default_auto_allocate_chunk_size",
   "tail_worker_user_spans",
   "typescript_strip_types",
-  "unique_ctx_per_invocation",
   "unsafe_module",
   "unsupported_process_actual_platform",
   "webgpu",

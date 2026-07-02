@@ -84,11 +84,13 @@ pipe, not durable log storage.
 - Active tail sessions are time-bounded authorization leases and must reconnect through
   normal auth. `LOG_TAIL_MAX_SESSION_MS` sets the control-side maximum; invalid or
   empty values fall back to 15 minutes.
-- workerd issue [#6832](https://github.com/cloudflare/workerd/issues/6832) means
-  client disconnects may not call async response-body `ReadableStream.cancel()`.
-  Control therefore has independent watchdogs: a max-session watchdog for
-  reauthorization and an idle-pull watchdog that closes a session when the SSE body has
-  not been pulled for three keepalive intervals. Active clients naturally pull at the
+- Current stock workerd behavior, tracked upstream as
+  [#6832](https://github.com/cloudflare/workerd/issues/6832), does not reliably call
+  async response-body `ReadableStream.cancel()` on client disconnect. WDL treats this
+  as a permanent compatibility boundary: Control has independent watchdogs, not a
+  temporary workaround waiting on upstream. The max-session watchdog bounds
+  reauthorization, and the idle-pull watchdog closes a session when the SSE body has not
+  been pulled for three keepalive intervals. Active clients naturally pull at the
   keepalive cadence because each heartbeat frees queue space; abandoned clients stop
   pulling and are cleaned up without waiting for the full session lifetime. A TCP
   connection that stays open but whose application stops reading for that window may be

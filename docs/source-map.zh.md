@@ -101,7 +101,7 @@
 | `examples/` | 手工 demo 和 reference projects。测试不应悄悄依赖它们，除非 fixture 明确迁入 `test-workers/`。 |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner。 |
 | `scripts/compile-workerd-configs.js` | 把 workerd Cap'n Proto configs 编译成 `dist/workerd-configs/*.bin`。 |
-| `scripts/scan-workerd-0701-metadata.mjs` | workerd 2026-07-01 适配 rollout 前使用的只读 Redis metadata scanner，报告使用 experimental flags 或 Python modules 的 retained versions。 |
+| `scripts/scan-workerd-0701-metadata.mjs` | workerd 2026-07-01 适配 rollout 前使用的只读 Redis metadata scanner，报告缺失 metadata、使用 experimental flags、Python modules 或估算 env 超限的 retained versions。 |
 
 ## Infrastructure
 

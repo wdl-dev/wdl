@@ -256,11 +256,11 @@ Auth-specific contract:
   explicitly owns a diagnostic response field.
 - Deploy and secret mutations return `worker_code_too_large` when tenant module bodies
   exceed the workerd 64 MiB dynamic code limit, and `worker_env_too_large` when the
-  estimated `workerLoader` env exceeds WDL's headroomed 1 MiB budget. `worker_env_too_large`
-  details include `namespace`, optional `worker`, `env_bytes`, `max_env_bytes`,
-  `upstream_max_env_bytes`, and `headroom_bytes`. When the blocker is an already-retained
-  version being re-estimated during a secret mutation, details also include
-  `source_version` and `estimated_version`, and the message identifies
+  estimated `workerLoader` env exceeds WDL's headroomed 1 MiB budget.
+  `worker_env_too_large` details include `namespace`, optional `worker`, `env_bytes`,
+  `max_env_bytes`, `upstream_max_env_bytes`, and `headroom_bytes`. When the blocker is an
+  already-retained version being re-estimated during a secret mutation, details also
+  include `source_version` and `estimated_version`, and the message identifies
   `<ns>/<worker>@<source_version>` so operators can find the retained version to delete
   or redeploy.
 - Control never calls gateway directly. It writes Redis and publishes invalidation

@@ -35,6 +35,15 @@ Each row separates four compatibility claims:
 | `nodejs_compat` | Partial | workerd-provided compatibility when the runtime service has the flag enabled. | CLI carries compatibility flags into metadata. | WDL exposes the workerd-enabled compatibility surface rather than a separate Node.js runtime. | This is not a full Node.js platform contract beyond workerd's enabled surface. |
 | Python Workers modules | Not supported | workerd has an experimental Python Workers path. | Control rejects `py` module manifests with `python_workers_unsupported`; runtime and do-runtime also fail closed for retained metadata containing `py` modules. | WDL keeps tenant bundles JavaScript/WebAssembly/data only and does not permit cold-load-time Pyodide bootstrap. | Python Workers and mixed JS/Python bundles are unsupported. |
 
+Node.js TLS behavior follows the bundled workerd binary. With workerd 2026-07-01,
+workers whose compatibility date is at least 2026-06-16 get
+`throw_on_not_implemented_tls_options`: unsupported `node:tls` options such as
+`checkServerIdentity` now throw `ERR_OPTION_NOT_IMPLEMENTED` instead of being silently
+ignored. This can affect already-deployed versions whose date is in the 2026-06-16
+through 2026-06-24 window when WDL upgrades from the 2026-06-17 workerd pin. Separately,
+workerd's `servername` / expected-certificate-hostname behavior changed outside any
+compatibility flag, so certificate hostname validation can change for all dates.
+
 ## Bindings And Storage
 
 | Surface | Status | What workerd provides | Stronger / added in WDL | Different from Cloudflare | Not implemented / gaps |

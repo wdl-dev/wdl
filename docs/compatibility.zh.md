@@ -28,6 +28,8 @@
 | `nodejs_compat` | Partial | runtime service 启用 flag 后由 workerd 提供的兼容 surface。 | CLI 把 compatibility flags 带入 metadata。 | WDL 暴露 workerd 已启用的兼容 surface，而不是单独 Node.js runtime。 | 不承诺超出 workerd 已启用 surface 的完整 Node.js 平台能力。 |
 | Python Workers modules | Not supported | workerd 有 experimental Python Workers 路径。 | Control 用 `python_workers_unsupported` 拒绝 `py` module manifest；runtime 和 do-runtime 对 retained metadata 中的 `py` module 也 fail closed。 | WDL 保持 tenant bundle 只包含 JavaScript/WebAssembly/data，不允许 cold-load 时触发 Pyodide bootstrap。 | 不支持 Python Workers 和 JS/Python 混合 bundle。 |
 
+Node.js TLS 行为跟随 bundled workerd binary。升级到 workerd 2026-07-01 后，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。从 2026-06-17 workerd pin 升级时，这会影响已经部署且日期在 2026-06-16 到 2026-06-24 之间的版本。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此证书 hostname 校验可能对所有日期变化。
+
 ## Bindings 和存储
 
 | Surface | 状态 | workerd 提供什么 | WDL 增强 / 新增什么 | 与 Cloudflare 的模型差异 | 未实现 / 缺口 |

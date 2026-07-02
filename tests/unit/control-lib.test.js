@@ -791,10 +791,16 @@ test("MAX_WORKER_COMPATIBILITY_DATE matches pinned workerd release plus seven da
 });
 
 test("workerd experimental compat flag mirror matches pinned workerd source version", () => {
-  const regenerate = "Regenerate shared/workerd-compat-flags.js from /home/sean/Projects/workerd/src/workerd/io/compatibility-date.capnp using the command in that file header.";
+  const regenerate = "Regenerate shared/workerd-compat-flags.js from an upstream workerd checkout with the command in that file header.";
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION, WORKERD_VERSION, regenerate);
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("experimental"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unsafe_module"));
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 33);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unique_ctx_per_invocation"), false);
+  assert.equal(
+    WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("nonclass_entrypoint_reuses_ctx_across_invocations"),
+    false
+  );
   assert.equal(
     WORKERD_EXPERIMENTAL_COMPAT_FLAGS.some((flag) => flag.startsWith("no_")),
     false,

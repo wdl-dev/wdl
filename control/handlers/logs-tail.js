@@ -1,7 +1,7 @@
 // SSE handler for `wdl tail`. Pull-based ReadableStream + pre-registered
 // ctx.waitUntil(cancelPromise) keeps cleanup outside the cancel callback.
 // workerd >= 2026-06-19 no longer reliably calls cancel() on client
-// disconnect, so max-session cleanup also has an independent watchdog.
+// disconnect, so max-session and idle-pull cleanup use independent watchdogs.
 
 import { RedisSession, redisDbFromEnv } from "shared-redis";
 import { envValueOr } from "shared-env";

@@ -1,6 +1,6 @@
 // Pure helpers for the runtime worker.
 
-import { firstWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
+import { isWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 
 const BASE64_CHUNK_SIZE = 0x8000;
 const utf8Encoder = new TextEncoder();
@@ -161,7 +161,7 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
         `meta.compatibilityFlags entries must be non-empty strings, got ${JSON.stringify(f)}`
       );
     }
-    if (firstWorkerdExperimentalCompatFlag([f])) {
+    if (isWorkerdExperimentalCompatFlag(f)) {
       throw new Error(
         `meta.compatibilityFlags contains experimental workerd flag ${JSON.stringify(f)}, which WDL does not support for tenant workers`
       );

@@ -104,7 +104,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `examples/` | Manual demos and reference projects. Tests should not silently depend on them unless the fixture graduates to `test-workers/`. |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner. |
 | `scripts/compile-workerd-configs.js` | Compiles workerd Cap'n Proto configs into `dist/workerd-configs/*.bin`. |
-| `scripts/scan-workerd-0701-metadata.mjs` | Read-only Redis metadata scanner for rollout checks before the workerd 2026-07-01 adaptation: reports retained versions using experimental flags or Python modules. |
+| `scripts/scan-workerd-0701-metadata.mjs` | Read-only Redis metadata scanner for rollout checks before the workerd 2026-07-01 adaptation: reports retained versions with missing metadata, experimental flags, Python modules, or oversized estimated env. |
 
 ## Infrastructure
 

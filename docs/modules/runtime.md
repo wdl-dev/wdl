@@ -250,10 +250,17 @@ when a matching active tail session exists.
 - Python Workers modules are not supported. Control rejects new `py` module manifests,
   and runtime/do-runtime reject retained metadata that contains them instead of letting
   workerd fail later with a mixed JS/Python bundle error.
-- Before rolling the 2026-07-01 workerd adaptation over an existing Redis DB 0, run
-  `node scripts/scan-workerd-0701-metadata.mjs` against the control Redis database to
-  find retained versions that still contain Python modules or upstream experimental
-  compatibility flags.
+- Before rolling the 2026-07-01 workerd adaptation over an existing Redis DB 0, install
+  `redis-cli` and run `node scripts/scan-workerd-0701-metadata.mjs` against the control
+  Redis database to find retained versions that are missing metadata, contain Python
+  modules or upstream experimental compatibility flags, or exceed the headroomed
+  `workerLoader` env budget under the 2026-07-01 estimator. The scanner is read-only and
+  does not decrypt secrets; it uses encrypted envelope length as a conservative
+  two-byte string upper bound. Treat `worker_env_too_large` findings involving secrets
+  as rollout blockers to review precisely, for example by redeploying or using the
+  normal secret mutation API path that runs the exact decrypting estimator. Set
+  `ASSETS_CDN_BASE` when scanning deployments whose assets CDN base is longer than the
+  default placeholder.
 - The runtime workerd processes still run with process-level `--experimental` because
   upstream workerd 2026-07-01 continues to gate `workerLoader` bindings on that switch.
   Do not re-add the `experimental` compatibility flag or `allowExperimental` to loaded
