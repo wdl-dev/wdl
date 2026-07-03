@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   freshRepositoryModuleDataUrl,
+  importSpecifierReplacements,
   moduleDataUrl,
   readRepositoryFile,
   repositoryFileUrl,
@@ -65,8 +66,10 @@ export async function compileControlGraph(opts = {}) {
     `export default ${JSON.stringify(readRepositoryFile("package.json"))};`
   );
   const bundleUrl = freshRepositoryModuleDataUrl("control/bundle.js", [
-    [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
-    [/from "shared-workerd-compat-flags"/g, `from ${JSON.stringify(SHARED_WORKERD_COMPAT_FLAGS_URL)}`],
+    ...importSpecifierReplacements({
+      "shared-ns-pattern": SHARED_NS_URL,
+      "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
+    }),
     [/from "control-bindings"/g, `from ${JSON.stringify(bindingsUrl)}`],
     [/from "wdl-package-json-source"/g, `from ${JSON.stringify(packageJsonSourceUrl)}`],
   ]);

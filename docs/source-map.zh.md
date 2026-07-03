@@ -41,6 +41,7 @@
 | `control/routing.js`、`control/routing/route-plan.js` | Promote、secret bump/promote、host reconcile WATCH/MULTI loops，以及纯 route/pattern planning helpers。 |
 | `control/lifecycle-indexes.js` | Worker lifecycle、cron、queue consumer 和 referrer indexes 的 Redis mutation helpers。 |
 | `control/env-budget.js` | Deploy 和 secret mutation guard 使用的 workerd `workerLoader` env size 控制面估算。 |
+| `control/worker-code-budget.js` | Deploy guard 使用的最终 WorkerCode size 控制面估算，复用 runtime wrapper/module injection 规则。 |
 | `control/d1-*` | D1 control metadata、store、lifecycle、migration 和 d1-runtime client modules。 |
 | `control/r2.js` | 面向配置的 S3-compatible store 的 control-plane R2 bucket/object API client。 |
 | `control/s3.js` | S3-compatible ASSETS upload helper。 |
@@ -101,6 +102,7 @@
 | `examples/` | 手工 demo 和 reference projects。测试不应悄悄依赖它们，除非 fixture 明确迁入 `test-workers/`。 |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner。 |
 | `scripts/compile-workerd-configs.js` | 把 workerd Cap'n Proto configs 编译成 `dist/workerd-configs/*.bin`。 |
+| `scripts/extract-workerd-experimental-compat-flags.mjs` | pin bump flag 提取脚本。 |
 | `scripts/scan-workerd-0701-metadata.mjs` | workerd 2026-07-01 适配 rollout 前使用的只读 Redis metadata scanner，报告缺失 metadata、使用 experimental flags、Python modules 或估算 env 超限的 retained versions。 |
 
 ## Infrastructure

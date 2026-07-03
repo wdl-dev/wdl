@@ -1900,7 +1900,15 @@ test("D1 and DO workerd containers keep explicit memory ceilings", () => {
     assert.match(moduleVars, new RegExp(`variable "${name}"`));
     assert.match(main, new RegExp(`${name}\\s+=\\s+var\\.${name}`));
   }
-  assert.match(d1Service, /memory\s+=\s+coalesce\(var\.d1_runtime_container_memory, var\.runtime_memory\)/);
+  assert.match(
+    locals,
+    /d1_runtime_container_memory\s+=\s+coalesce\(\s*var\.d1_runtime_container_memory,\s*var\.runtime_memory,\s*\)/
+  );
+  assert.match(d1Service, /memory\s+=\s+local\.d1_runtime_container_memory/);
+  assert.match(
+    d1Service,
+    /local\.d1_runtime_container_memory > 0 &&\s*local\.d1_runtime_container_memory <= var\.runtime_memory/
+  );
   assert.match(locals, /do_redis_proxy_memory_headroom\s+=\s+128/);
   assert.match(locals, /do_runtime_container_memory\s+=\s+coalesce\(\s*var\.do_runtime_container_memory,\s*var\.runtime_memory - local\.do_redis_proxy_memory_headroom,\s*\)/);
   assert.match(doService, /memory\s+=\s+local\.do_runtime_container_memory/);

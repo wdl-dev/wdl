@@ -47,11 +47,14 @@ import {
   assertWorkerLoaderUserEnvBudget,
   decryptSecretHash,
 } from "control-env-budget";
+import {
+  WORKER_LOADER_CODE_MAX_BYTES,
+  estimatePreparedWorkerLoaderCodeBytes,
+} from "control-worker-code-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
 
 const MAX_COMMIT_ATTEMPTS = 5;
 const DEPLOY_JSON_BODY_MAX_BYTES = 32 * 1024 * 1024;
-const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 const DEPLOY_ASSET_UPLOAD_CONCURRENCY = 8;
 
 class DeployAbort extends ControlAbort {}
@@ -153,24 +156,22 @@ function deployRequestErrorFromUnknown(err) {
   );
 }
 
-/** @param {string | Uint8Array} bytes */
-function moduleBodyByteLength(bytes) {
-  return typeof bytes === "string" ? Buffer.byteLength(bytes, "utf8") : bytes.byteLength;
-}
-
 /**
  * @param {{ prepared: PreparedBundle, ns: string, name: string }} args
  */
 function validateWorkerLoaderCodeBudget({ prepared, ns, name }) {
-  let totalBytes = 0;
-  for (const [, bytes] of prepared.normalized) {
-    totalBytes += moduleBodyByteLength(bytes);
+  let totalBytes;
+  try {
+    totalBytes = estimatePreparedWorkerLoaderCodeBytes(prepared);
+  } catch (err) {
+    throw invalidDeployRequest(errMessage(err));
   }
   if (totalBytes > WORKER_LOADER_CODE_MAX_BYTES) {
     throw new DeployRequestError(
       413,
       "worker_code_too_large",
-      `module bodies for ${ns}/${name} total ${totalBytes} bytes, exceeding workerd workerLoader code limit ${WORKER_LOADER_CODE_MAX_BYTES} bytes`
+      `final WorkerCode for ${ns}/${name} totals ${totalBytes} bytes, ` +
+        `exceeding workerd workerLoader code limit ${WORKER_LOADER_CODE_MAX_BYTES} bytes`
     );
   }
 }

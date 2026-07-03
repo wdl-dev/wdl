@@ -27,6 +27,14 @@ const MAX_NS_SECRET_ATTEMPTS = 5;
 
 class NamespaceSecretAbort extends ControlAbort {}
 
+/** @param {unknown} err */
+function namespaceSecretMutationErrorResponse(err) {
+  if (err instanceof NamespaceSecretAbort) return controlAbortResponse(err);
+  if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
+  if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+  return null;
+}
+
 /**
  * @param {{
  *   redis: import("shared-redis").RedisSession,
@@ -197,9 +205,8 @@ export async function handle({ request, env, method, nsName, secretKey, requestI
         plaintext: put.plaintext,
       });
     } catch (err) {
-      if (err instanceof NamespaceSecretAbort) return controlAbortResponse(err);
-      if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
-      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+      const response = namespaceSecretMutationErrorResponse(err);
+      if (response) return response;
       throw err;
     }
     log("info", "ns_secret_set", { request_id: requestId, namespace: nsName, key: secretKey });
@@ -223,9 +230,8 @@ export async function handle({ request, env, method, nsName, secretKey, requestI
         method: "DELETE",
       });
     } catch (err) {
-      if (err instanceof NamespaceSecretAbort) return controlAbortResponse(err);
-      if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
-      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+      const response = namespaceSecretMutationErrorResponse(err);
+      if (response) return response;
       throw err;
     }
     log("info", "ns_secret_deleted", {

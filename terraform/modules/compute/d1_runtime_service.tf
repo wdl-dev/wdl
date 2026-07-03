@@ -27,7 +27,7 @@ resource "aws_ecs_task_definition" "d1_runtime" {
     image      = var.workerd_image
     essential  = true
     entryPoint = ["d1-supervisor"]
-    memory     = coalesce(var.d1_runtime_container_memory, var.runtime_memory)
+    memory     = local.d1_runtime_container_memory
 
     portMappings = [{
       name          = "d1-http"
@@ -75,6 +75,14 @@ resource "aws_ecs_task_definition" "d1_runtime" {
   }])
 
   lifecycle {
+    precondition {
+      condition = (
+        local.d1_runtime_container_memory > 0 &&
+        local.d1_runtime_container_memory <= var.runtime_memory
+      )
+      error_message = "d1_runtime_container_memory must be positive and no greater than runtime_memory."
+    }
+
     precondition {
       condition     = !var.d1_test_hooks_enabled || can(regex("(^|-)test($|-)", var.name))
       error_message = "d1_test_hooks_enabled may only be enabled for test-named compute stacks."

@@ -34,6 +34,26 @@ const MAX_SECRET_ATTEMPTS = 5;
 /**
  * @typedef {import("shared-redis").RedisClient} RedisClient
  * @typedef {import("control-routing").RedisClient} RoutingRedisClient
+ * @typedef {{
+ *   namespace: string,
+ *   name: string,
+ *   key: string,
+ *   version: string,
+ *   previousVersion: string,
+ *   set?: boolean,
+ *   deleted?: boolean,
+ * }} SecretMutationVersionPayload
+ * @typedef {{
+ *   namespace: string,
+ *   name: string,
+ *   key: string,
+ *   secretWritten: boolean,
+ *   reloadForced: boolean,
+ *   effect: string,
+ *   warnings: { kind: string, reason: string, nextPickup: string }[],
+ *   set?: boolean,
+ *   deleted?: boolean,
+ * }} SecretMutationDeferredPayload
  */
 
 class SecretAbort extends ControlAbort {}
@@ -146,7 +166,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         previous_version: result.previousVersion,
         new_version: result.version,
       });
-      /** @type {{ namespace: string, name: string, key: string, version: string, previousVersion: string, set?: boolean, deleted?: boolean }} */
+      /** @type {SecretMutationVersionPayload} */
       const payload = {
         namespace: ns,
         name,
@@ -190,7 +210,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
           status: err.status,
           ...formatError(err),
         });
-        /** @type {{ namespace: string, name: string, key: string, secretWritten: boolean, reloadForced: boolean, effect: string, warnings: { kind: string, reason: string, nextPickup: string }[], set?: boolean, deleted?: boolean }} */
+        /** @type {SecretMutationDeferredPayload} */
         const payload = {
           namespace: ns,
           name,
@@ -219,7 +239,16 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
 // env-budget checks must cover active and retained versions before writing a
 // new secret shape.
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, key: string, method: string, value: string | null, plaintext?: string | null, controlEnv: Record<string, string | undefined> }} args
+ * @param {{
+ *   redis: RedisClient,
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: "PUT" | "DELETE",
+ *   value: string | null,
+ *   plaintext?: string | null,
+ *   controlEnv: Record<string, string | undefined>,
+ * }} args
  */
 async function mutateSecret({ redis, ns, name, key, method, value, plaintext = null, controlEnv }) {
   const secretsKey = `secrets:${ns}:${name}`;
@@ -232,7 +261,13 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       });
     },
   }, async (iso) => {
-    const watches = [deleteLockKey(ns, name), nsSecretsKey, secretsKey, routesKey(ns), workerVersionsKey(ns, name)];
+    const watches = [
+      deleteLockKey(ns, name),
+      nsSecretsKey,
+      secretsKey,
+      routesKey(ns),
+      workerVersionsKey(ns, name),
+    ];
     await iso.watch(...watches);
 
     const callerLock = await iso.get(deleteLockKey(ns, name));
@@ -257,52 +292,50 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       }
     }
 
-    const multi = iso.multi();
-    if (method === "PUT" || method === "DELETE") {
-      if (method === "PUT" && typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
-      const activeVersion = await iso.hGet(routesKey(ns), name);
-      const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
-      const nsEncrypted = await iso.hGetAll(nsSecretsKey);
-      const workerEncrypted = await iso.hGetAll(secretsKey);
-      const workerBudgetEncrypted = { ...workerEncrypted };
-      delete workerBudgetEncrypted[key];
-      const [nsSecrets, workerSecrets] = await Promise.all([
-        decryptSecretHash({
-          encrypted: nsEncrypted,
-          env: controlEnv,
-          hashKey: nsSecretsKey,
-          ignoreSecretEnvelopeErrors: method === "DELETE",
-        }),
-        decryptSecretHash({
-          encrypted: workerBudgetEncrypted,
-          env: controlEnv,
-          hashKey: secretsKey,
-          ignoreSecretEnvelopeErrors: method === "DELETE",
-        }),
-      ]);
-      if (method === "PUT") {
-        workerSecrets[key] = /** @type {string} */ (plaintext);
-      }
-      await assertWorkerVersionsUserEnvBudget({
-        redis: iso,
-        ns,
-        worker: name,
-        versions: [
-          ...retainedVersions,
-          ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
-        ],
-        versionEstimates: typeof activeVersion === "string" && activeVersion
-          ? [{
-              sourceVersion: activeVersion,
-              estimatedVersion: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
-            }]
-          : [],
-        nsSecrets,
-        workerSecrets,
-        assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
-      });
+    if (method === "PUT" && typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
+    const activeVersion = await iso.hGet(routesKey(ns), name);
+    const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
+    const nsEncrypted = await iso.hGetAll(nsSecretsKey);
+    const workerEncrypted = await iso.hGetAll(secretsKey);
+    const workerBudgetEncrypted = { ...workerEncrypted };
+    delete workerBudgetEncrypted[key];
+    const [nsSecrets, workerSecrets] = await Promise.all([
+      decryptSecretHash({
+        encrypted: nsEncrypted,
+        env: controlEnv,
+        hashKey: nsSecretsKey,
+        ignoreSecretEnvelopeErrors: method === "DELETE",
+      }),
+      decryptSecretHash({
+        encrypted: workerBudgetEncrypted,
+        env: controlEnv,
+        hashKey: secretsKey,
+        ignoreSecretEnvelopeErrors: method === "DELETE",
+      }),
+    ]);
+    if (method === "PUT") {
+      workerSecrets[key] = /** @type {string} */ (plaintext);
     }
+    await assertWorkerVersionsUserEnvBudget({
+      redis: iso,
+      ns,
+      worker: name,
+      versions: [
+        ...retainedVersions,
+        ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
+      ],
+      versionEstimates: typeof activeVersion === "string" && activeVersion
+        ? [{
+            sourceVersion: activeVersion,
+            estimatedVersion: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
+          }]
+        : [],
+      nsSecrets,
+      workerSecrets,
+      assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+    });
 
+    const multi = iso.multi();
     if (method === "PUT") {
       if (typeof value !== "string") throw new Error("PUT secret value missing");
       multi.hSet(secretsKey, key, value);

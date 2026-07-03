@@ -5,10 +5,6 @@ import { bundleToWorkerCode } from "runtime-lib";
 import { formatError } from "shared-observability";
 import { withInternalAuth } from "shared-internal-auth";
 import { discardResponseBody } from "shared-respond";
-import {
-  WDL_RESERVED_ENTRYPOINT_RE,
-  isValidJsClassDeclarationName,
-} from "shared-ns-pattern";
 import { parseRuntimeLoadWorkerId } from "shared-worker-id";
 import D1_CLIENT_SOURCE from "runtime-d1-client-source";
 import D1_DATA_FIELD_SOURCE from "runtime-d1-data-field-source";
@@ -24,16 +20,9 @@ import OWNER_HINT_CACHE_SOURCE from "runtime-owner-hint-cache-source";
 import REQUEST_ID_SOURCE from "runtime-request-id-source";
 import WORKFLOWS_CLIENT_SOURCE from "runtime-workflows-client-source";
 import {
-  HOST_BINDING_RESERVED_MODULES,
-  HOST_BINDING_RESERVED_MODULE_NAMES,
-  WORKFLOWS_MODULE_NAME,
-  WORKFLOWS_MODULE_SOURCE,
-  rewriteCloudflareWorkflowsImports,
-} from "runtime-load-module-rewrite";
-import {
-  generateAbortShimWrapperModule,
-  generateHostBindingWrapperModule,
-} from "runtime-load-wrapper-generate";
+  analyzeRuntimeMeta,
+  injectRuntimeModulesForHostBindings,
+} from "runtime-load-code-budget";
 import { buildWorkerEnv } from "runtime-load-env-build";
 export { buildWorkerEnv } from "runtime-load-env-build";
 
@@ -81,95 +70,7 @@ const utf8Decoder = new TextDecoder();
  * }} RuntimeLoaderMetrics
  * @typedef {(options: { props: Record<string, unknown> }) => unknown} RuntimeEntrypointFactory
  * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, DurableObjectNamespace: RuntimeEntrypointFactory, InternalAuthBackend: RuntimeEntrypointFactory } }} RuntimeContext
- * @typedef {[name: string, source: string]} RuntimeModuleInjection
  */
-
-/** @type {RuntimeModuleInjection} */
-const REQUEST_ID_MODULE_INJECTION = ["_wdl-request-id.js", REQUEST_ID_SOURCE];
-const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
-const D1_TRANSPORT_INJECTED_SOURCE = D1_TRANSPORT_SOURCE.replace(
-  /from "shared-d1-data-field";/,
-  `from "./${D1_DATA_FIELD_MODULE_NAME}";`
-);
-/** @type {RuntimeModuleInjection[]} */
-const D1_MODULE_INJECTIONS = [
-  REQUEST_ID_MODULE_INJECTION,
-  [D1_DATA_FIELD_MODULE_NAME, D1_DATA_FIELD_SOURCE],
-  ["_wdl-d1-params.js", D1_PARAMS_SOURCE],
-  ["_wdl-sql-splitter.js", SQL_SPLITTER_SOURCE],
-  ["_wdl-d1-transport.js", D1_TRANSPORT_INJECTED_SOURCE],
-  ["_wdl-d1-client.js", D1_CLIENT_SOURCE],
-];
-/** @type {RuntimeModuleInjection[]} */
-const R2_MODULE_INJECTIONS = [
-  REQUEST_ID_MODULE_INJECTION,
-  ["_wdl-r2-utils.js", R2_UTILS_SOURCE],
-  ["_wdl-r2-client.js", R2_CLIENT_SOURCE],
-];
-/** @type {RuntimeModuleInjection[]} */
-const DO_MODULE_INJECTIONS = [
-  REQUEST_ID_MODULE_INJECTION,
-  ["_wdl-do-transport.js", DO_TRANSPORT_SOURCE],
-  ["_wdl-owner-endpoint.js", OWNER_ENDPOINT_SOURCE],
-  ["_wdl-owner-hint-cache.js", OWNER_HINT_CACHE_SOURCE],
-  ["_wdl-do-client.js", DO_CLIENT_SOURCE],
-];
-/** @type {RuntimeModuleInjection[]} */
-const WORKFLOWS_MODULE_INJECTIONS = [
-  REQUEST_ID_MODULE_INJECTION,
-  ["_wdl-workflows-client.js", WORKFLOWS_CLIENT_SOURCE],
-];
-
-/**
- * @typedef {{
- *   type: string,
- *   modules: RuntimeModuleInjection[],
- *   addBinding(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings">, name: string): void,
- *   bindingNames(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings">): string[],
- * }} HostFacadeBindingDefinition
- */
-
-/** @type {HostFacadeBindingDefinition[]} */
-const HOST_FACADE_BINDING_DEFINITIONS = [
-  {
-    type: "d1",
-    modules: D1_MODULE_INJECTIONS,
-    addBinding(plan, name) { plan.d1Bindings.push(name); },
-    bindingNames(plan) { return plan.d1Bindings; },
-  },
-  {
-    type: "r2",
-    modules: R2_MODULE_INJECTIONS,
-    addBinding(plan, name) { plan.r2Bindings.push(name); },
-    bindingNames(plan) { return plan.r2Bindings; },
-  },
-  {
-    type: "do",
-    modules: DO_MODULE_INJECTIONS,
-    addBinding(plan, name) { plan.doBindings.push(name); },
-    bindingNames(plan) { return plan.doBindings; },
-  },
-];
-
-/** @param {WorkerCodeShape} workerCode @param {RuntimeModuleInjection[]} modules */
-function injectRuntimeModules(workerCode, modules) {
-  for (const [name, source] of modules) workerCode.modules[name] = source;
-}
-
-/**
- * @param {RuntimeMetaPlan} plan
- * @param {RuntimeBindingSpec} spec
- * @param {string} name
- */
-function addHostFacadeBinding(plan, spec, name) {
-  const definition = HOST_FACADE_BINDING_DEFINITIONS.find((entry) => entry.type === spec?.type);
-  if (definition) definition.addBinding(plan, name);
-}
-
-/** @param {RuntimeMetaPlan} plan */
-function hasHostFacadeBindings(plan) {
-  return HOST_FACADE_BINDING_DEFINITIONS.some((entry) => entry.bindingNames(plan).length > 0);
-}
 
 /**
  * Keep the internal auth token in the host loader realm. Generated tenant
@@ -280,128 +181,25 @@ function redisProxyUrl(env) {
   return String(env.REDIS_PROXY_URL).replace(/\/+$/, "");
 }
 
-/** @param {RuntimeBundleMeta} meta */
-function d1ExportedEntrypointNames(meta) {
-  /** @type {string[]} */
-  const out = [];
-  for (const entry of meta.exports || []) {
-    const name = entry?.entrypoint;
-    if (!name || name === "default") continue;
-    if (typeof name !== "string") {
-      throw new Error(`Host binding wrapper requires exported entrypoint names to be strings, got ${JSON.stringify(name)}`);
-    }
-    if (!isValidJsClassDeclarationName(name)) {
-      throw new Error(`Host binding wrapper requires exported entrypoint names to be valid JS class declaration names, got ${JSON.stringify(name)}`);
-    }
-    if (WDL_RESERVED_ENTRYPOINT_RE.test(name)) {
-      throw new Error(`Exported entrypoint targets reserved runtime entrypoint "${name}" (redeploy worker)`);
-    }
-    out.push(name);
-  }
-  return out;
-}
-
-/** @param {RuntimeBundleMeta} meta @param {Array<[string, RuntimeBindingSpec]>} bindingEntries @param {RuntimeWorkflowSpec[]} workflows */
-function hostWrappedClassNames(meta, bindingEntries, workflows) {
-  const out = new Set(d1ExportedEntrypointNames(meta));
-  for (const [, spec] of bindingEntries) {
-    if (spec?.type === "do" && typeof spec.className === "string" && spec.className) {
-      if (!isValidJsClassDeclarationName(spec.className)) {
-        throw new Error(`Host binding wrapper requires Durable Object class names to be valid JS class declaration names, got ${JSON.stringify(spec.className)}`);
-      }
-      if (WDL_RESERVED_ENTRYPOINT_RE.test(spec.className)) {
-        throw new Error(`Durable Object binding targets reserved runtime entrypoint "${spec.className}" (redeploy worker)`);
-      }
-      out.add(spec.className);
-    }
-  }
-  for (const workflow of workflows) {
-    const className = workflow?.className;
-    if (typeof className === "string" && className) {
-      if (!isValidJsClassDeclarationName(className)) {
-        throw new Error(`Host binding wrapper requires Workflow class names to be valid JS class declaration names, got ${JSON.stringify(className)}`);
-      }
-      if (WDL_RESERVED_ENTRYPOINT_RE.test(className)) {
-        throw new Error(`Workflow binding targets reserved runtime entrypoint "${className}" (redeploy worker)`);
-      }
-      out.add(className);
-    }
-  }
-  return [...out];
-}
-
-/** @param {RuntimeBundleMeta} meta @returns {RuntimeMetaPlan} */
-export function analyzeRuntimeMeta(meta) {
-  const bindingEntries = Object.entries(meta.bindings || {});
-  const workflows = Array.isArray(meta.workflows) ? meta.workflows : [];
-  /** @type {RuntimeMetaPlan} */
-  const plan = {
-    bindingEntries,
-    workflows,
-    d1Bindings: [],
-    r2Bindings: [],
-    doBindings: [],
-    workflowBindings: Object.create(null),
-    hostWrappedClassNames: [],
-    needsDoBackend: false,
-    needsWorkflowsBackend: false,
-    needsHostBindingWrapper: false,
-  };
-  for (const [name, spec] of bindingEntries) {
-    addHostFacadeBinding(plan, spec, name);
-  }
-  for (const workflow of workflows) {
-    if (typeof workflow?.binding === "string" && workflow.binding) plan.workflowBindings[workflow.binding] = workflow;
-  }
-  plan.needsDoBackend = plan.doBindings.length > 0;
-  plan.needsWorkflowsBackend = Object.keys(plan.workflowBindings).length > 0;
-  plan.needsHostBindingWrapper = hasHostFacadeBindings(plan) || plan.needsWorkflowsBackend;
-  if (plan.needsHostBindingWrapper) {
-    plan.hostWrappedClassNames = hostWrappedClassNames(meta, bindingEntries, workflows);
-  }
-  return plan;
-}
+const RUNTIME_INJECTION_SOURCES = Object.freeze({
+  d1ClientSource: D1_CLIENT_SOURCE,
+  d1DataFieldSource: D1_DATA_FIELD_SOURCE,
+  d1ParamsSource: D1_PARAMS_SOURCE,
+  sqlSplitterSource: SQL_SPLITTER_SOURCE,
+  d1TransportSource: D1_TRANSPORT_SOURCE,
+  r2ClientSource: R2_CLIENT_SOURCE,
+  r2UtilsSource: R2_UTILS_SOURCE,
+  doClientSource: DO_CLIENT_SOURCE,
+  doTransportSource: DO_TRANSPORT_SOURCE,
+  ownerEndpointSource: OWNER_ENDPOINT_SOURCE,
+  ownerHintCacheSource: OWNER_HINT_CACHE_SOURCE,
+  requestIdSource: REQUEST_ID_SOURCE,
+  workflowsClientSource: WORKFLOWS_CLIENT_SOURCE,
+});
 
 /** @param {WorkerCodeShape} workerCode @param {RuntimeBundleMeta} meta @param {RuntimeMetaPlan} [plan] */
 export function wrapWorkerCodeForHostBindings(workerCode, meta, plan = analyzeRuntimeMeta(meta)) {
-  const { d1Bindings, r2Bindings, doBindings, workflowBindings } = plan;
-  const originalMain = workerCode.mainModule;
-  if (typeof originalMain !== "string" || !originalMain) {
-    throw new Error("Host binding wrapper requires a string mainModule");
-  }
-  rewriteCloudflareWorkflowsImports(workerCode);
-  if (
-    HOST_BINDING_RESERVED_MODULES.has(originalMain) ||
-    [...HOST_BINDING_RESERVED_MODULES].some((name) => workerCode.modules[name])
-  ) {
-    throw new Error(
-      `Host binding wrapper requires reserved module names ${HOST_BINDING_RESERVED_MODULE_NAMES.join(", ")}`
-    );
-  }
-  // Every loaded worker needs the __WdlAbort__ entrypoint for historical
-  // version eviction. Host facade bindings need the heavier request-context
-  // wrapper that swaps loaded-isolate facades into env.
-  for (const definition of HOST_FACADE_BINDING_DEFINITIONS) {
-    if (definition.bindingNames(plan).length > 0) {
-      injectRuntimeModules(workerCode, definition.modules);
-    }
-  }
-  if (plan.needsWorkflowsBackend) {
-    injectRuntimeModules(workerCode, WORKFLOWS_MODULE_INJECTIONS);
-  }
-  workerCode.modules[WORKFLOWS_MODULE_NAME] = WORKFLOWS_MODULE_SOURCE;
-  workerCode.modules["_wdl-wrapper.js"] = plan.needsHostBindingWrapper
-    ? generateHostBindingWrapperModule(
-        originalMain,
-        d1Bindings,
-        r2Bindings,
-        doBindings,
-        workflowBindings,
-        plan.hostWrappedClassNames
-      )
-    : generateAbortShimWrapperModule(originalMain);
-  workerCode.mainModule = "_wdl-wrapper.js";
-  return workerCode;
+  return injectRuntimeModulesForHostBindings(workerCode, meta, RUNTIME_INJECTION_SOURCES, plan);
 }
 
 /** @param {Record<string, unknown>} env @param {string} ns @param {string} worker @param {string} version */

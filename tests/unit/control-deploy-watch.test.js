@@ -6,7 +6,11 @@ import {
 } from "../helpers/control-handler-harness.js";
 import { compileControlGraph } from "../helpers/load-control-lib.js";
 import {
+  importSpecifierReplacements,
   moduleDataUrl,
+  readRepositoryFile,
+  readRepositoryModuleSource,
+  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
@@ -239,6 +243,39 @@ export class SecretEnvelopeError extends Error {
 }
 `);
 
+/** @param {string} path */
+function textModuleUrl(path) {
+  return moduleDataUrl(`export default ${JSON.stringify(readRepositoryFile(path))};`);
+}
+
+const runtimeLoadCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
+  "runtime/load/code-budget.js",
+  importSpecifierReplacements({
+    "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
+    "runtime-load-module-rewrite": repositoryFileUrl("runtime/load/module-rewrite.js"),
+    "runtime-load-wrapper-generate": repositoryFileUrl("runtime/load/wrapper-generate.js"),
+  })
+));
+const controlWorkerCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
+  "control/worker-code-budget.js",
+  importSpecifierReplacements({
+    "runtime-load-code-budget": runtimeLoadCodeBudgetUrl,
+    "runtime-d1-client-source": textModuleUrl("runtime/d1-client.js"),
+    "runtime-d1-data-field-source": textModuleUrl("shared/d1-data-field.js"),
+    "runtime-d1-params-source": textModuleUrl("shared/d1-params.js"),
+    "runtime-sql-splitter-source": textModuleUrl("shared/sql-splitter.js"),
+    "runtime-d1-transport-source": textModuleUrl("shared/d1-transport.js"),
+    "runtime-r2-client-source": textModuleUrl("runtime/r2-client.js"),
+    "runtime-r2-utils-source": textModuleUrl("runtime/r2-utils.js"),
+    "runtime-do-client-source": textModuleUrl("runtime/do-client.js"),
+    "runtime-do-transport-source": textModuleUrl("runtime/_wdl-do-transport.js"),
+    "runtime-owner-endpoint-source": textModuleUrl("runtime/_wdl-owner-endpoint.js"),
+    "runtime-owner-hint-cache-source": textModuleUrl("runtime/_wdl-owner-hint-cache.js"),
+    "runtime-request-id-source": textModuleUrl("runtime/_wdl-request-id.js"),
+    "runtime-workflows-client-source": textModuleUrl("runtime/workflows-client.js"),
+  })
+));
+
 const { commitWithWatch, handle } = await importControlHandler("control/handlers/deploy.js", {
   globalName: "__controlDeployTestState",
   extraSharedSource: controlSharedExtraSource,
@@ -256,6 +293,7 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
     "shared-assets-token": sharedAssetsUrl,
     "control-d1-store": d1StoreUrl,
     "control-env-budget": controlEnvBudgetUrl,
+    "control-worker-code-budget": controlWorkerCodeBudgetUrl,
     "shared-secret-envelope": secretEnvelopeUrl,
   },
 });
@@ -711,15 +749,18 @@ test("deploy handler treats pre-allocation workerLoader env budget failures as a
   }
 });
 
-test("deploy handler rejects workerLoader code size violations before allocating a version", async () => {
+test("deploy handler counts runtime-generated wrapper code before allocating a version", async () => {
+  const oversizedEntrypoint = `Entrypoint${"A".repeat(600 * 1024)}`;
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
     meta: {
       mainModule: "worker.js",
       modules: { "worker.js": { type: "module" } },
+      bindings: { DB: { type: "d1", databaseId: "db" } },
+      exports: [{ entrypoint: oversizedEntrypoint }],
     },
-    normalized: [["worker.js", new Uint8Array(64 * 1024 * 1024 + 1)]],
+    normalized: [["worker.js", new Uint8Array(64 * 1024 * 1024 - 512 * 1024)]],
   };
 
   let incrCalled = false;
@@ -745,7 +786,9 @@ test("deploy handler rejects workerLoader code size violations before allocating
       requestId: "rid-code-budget",
     });
 
-    assert.equal((await readJsonResponse(response, 413)).error, "worker_code_too_large");
+    const body = await readJsonResponse(response, 413);
+    assert.equal(body.error, "worker_code_too_large");
+    assert.match(body.message, /final WorkerCode/);
     assert.equal(incrCalled, false);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;

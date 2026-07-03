@@ -266,8 +266,9 @@ when a matching active tail session exists.
   Do not re-add the `experimental` compatibility flag or `allowExperimental` to loaded
   WorkerCode unless another upstream API explicitly requires it.
 - Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
-  env at 1 MiB. Control rejects module bodies over 64 MiB before version allocation.
-  Vars, namespace/worker secrets, and runtime-injected binding/workflow env values get
+  env at 1 MiB. Control estimates final WorkerCode before version allocation, including
+  runtime-injected wrapper/client modules and workflow import rewrites. Vars,
+  namespace/worker secrets, and runtime-injected binding/workflow env values get
   an advisory deploy pass and an authoritative watched-commit check against a headroomed
   `workerLoader` env budget because workerd's final enforcement includes the full `env`
   estimate after version allocation and metadata materialization. The estimate starts

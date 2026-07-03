@@ -8,6 +8,7 @@ import {
 import { encryptSecretValue } from "../../shared/secret-envelope.js";
 
 const secretEnvelopeUrl = repositoryFileUrl("shared/secret-envelope.js");
+const sharedErrorsUrl = repositoryFileUrl("shared/errors.js");
 const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 const {
   UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
@@ -22,6 +23,7 @@ const {
   estimatedWorkerLoaderEnvBytes,
 } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "shared-secret-envelope": secretEnvelopeUrl,
+  "shared-errors": sharedErrorsUrl,
   "shared-version": sharedVersionUrl,
 }));
 
@@ -289,7 +291,9 @@ test("worker env budget checks every retained worker version", async () => {
     async hGet(key, field) {
       assert.equal(field, "__meta__");
       if (key === "worker:demo:api:v:1") return JSON.stringify({ vars: { SMALL: "ok" } });
-      if (key === "worker:demo:api:v:2") return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES) } });
+      if (key === "worker:demo:api:v:2") {
+        return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES) } });
+      }
       return null;
     },
   };
@@ -428,5 +432,47 @@ test("worker env budget reports bundle metadata parse context", async () => {
       versions: ["v1"],
     }),
     /invalid bundle metadata for demo\/api@v1/
+  );
+});
+
+test("worker env budget fails closed when retained bundle metadata is missing", async () => {
+  const redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      assert.equal(key, "worker:demo:api:v:1");
+      assert.equal(field, "__meta__");
+      return null;
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkerVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      worker: "api",
+      versions: ["v1"],
+    }),
+    /bundle metadata missing for demo\/api@v1/
+  );
+});
+
+test("worker env budget fails closed when retained bundle metadata is not an object", async () => {
+  const redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      assert.equal(key, "worker:demo:api:v:1");
+      assert.equal(field, "__meta__");
+      return "[]";
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkerVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      worker: "api",
+      versions: ["v1"],
+    }),
+    /__meta__ must be a JSON object/
   );
 });

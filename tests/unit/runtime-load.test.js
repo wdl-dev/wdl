@@ -97,6 +97,10 @@ const src = readRepositoryModuleSource("runtime/load.js", [
     'const WORKFLOWS_CLIENT_SOURCE = "export class Workflow { constructor(metadata) { this.metadata = metadata; } }";'
   ],
   [
+    /from "runtime-load-code-budget";/,
+    'from "./load/code-budget.js";'
+  ],
+  [
     /from "runtime-load-module-rewrite";/,
     'from "./load/module-rewrite.js";'
   ],
@@ -118,10 +122,12 @@ const ENV_BUILD_SOURCE = readRepositoryModuleSource("runtime/load/env-build.js",
 }));
 mkdirSync(LOAD_TEST_SUBMODULE_DIR, { recursive: true });
 writeFileSync(path.join(LOAD_TEST_RUNTIME_DIR, "load.js"), src);
-for (const name of ["env-build.js", "module-rewrite.js", "wrapper-generate.js"]) {
+for (const name of ["env-build.js", "code-budget.js", "module-rewrite.js", "wrapper-generate.js"]) {
   const moduleSource = name === "env-build.js"
     ? ENV_BUILD_SOURCE
     : readRepositoryModuleSource(`runtime/load/${name}`, importSpecifierReplacements({
+      "runtime-load-module-rewrite": pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "module-rewrite.js")).href,
+      "runtime-load-wrapper-generate": pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "wrapper-generate.js")).href,
       "shared-ns-pattern": SHARED_NS_PATTERN_URL,
     }));
   writeFileSync(
@@ -132,6 +138,7 @@ for (const name of ["env-build.js", "module-rewrite.js", "wrapper-generate.js"])
 after(() => removeTempDir(LOAD_TEST_DIR));
 
 const mod = await import(pathToFileURL(path.join(LOAD_TEST_RUNTIME_DIR, "load.js")).href);
+const codeBudgetMod = await import(pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "code-budget.js")).href);
 const {
   buildWorkerEnv,
   createLoaderCallback,
@@ -139,6 +146,10 @@ const {
   runtimeLoadContentTypeMatches,
   wrapWorkerCodeForHostBindings,
 } = mod;
+const {
+  estimateFinalWorkerLoaderCodeBytes,
+  injectRuntimeModulesForHostBindings,
+} = codeBudgetMod;
 
 const RUNTIME_LOAD_MAGIC = "WDLLOAD!";
 const RUNTIME_LOAD_CONTENT_TYPE = "application/vnd.wdl.runtime-load";
@@ -1373,6 +1384,66 @@ test("createLoaderCallback: aborts hung redis proxy runtime load requests", asyn
       assert.equal(calls, 3);
     }
   );
+});
+
+const TEST_RUNTIME_INJECTION_SOURCES = Object.freeze({
+  d1ClientSource: "export class D1Database {}",
+  d1DataFieldSource: "export function setDataField() {}",
+  d1ParamsSource: "export function normalizeD1Param(value) { return value; }",
+  sqlSplitterSource: "export function splitSqlStatements(sql) { return [{ sql }]; }",
+  d1TransportSource: 'import { setDataField } from "shared-d1-data-field"; export function decode() { setDataField(); }',
+  r2ClientSource: "export class R2Bucket {}",
+  r2UtilsSource: "export const R2_OBJECT_MAX_BUFFER_BYTES = 1;",
+  doClientSource: "export class DurableObjectNamespace {}",
+  doTransportSource: "export function requestSpec() {}",
+  ownerEndpointSource: "export function validOwnerEndpointForService() { return true; }",
+  ownerHintCacheSource: "export function createOwnerHintCache() { return {}; }",
+  requestIdSource: "export function requestIdFromOptions() { return null; }",
+  workflowsClientSource: "export class Workflow {}",
+});
+
+/** @param {{ modules: Record<string, unknown> }} workerCode */
+function workerCodeModuleBytes(workerCode) {
+  let total = 0;
+  for (const value of Object.values(workerCode.modules)) {
+    assert.equal(typeof value, "string");
+    total += Buffer.byteLength(/** @type {string} */ (value), "utf8");
+  }
+  return total;
+}
+
+test("workerLoader code estimator matches runtime wrapper injection exactly", () => {
+  const entrypoint = `Api${"A".repeat(1024)}`;
+  const source = 'import { WorkflowEntrypoint } from "cloudflare:workflows"; export default {};';
+  const meta = {
+    mainModule: "src/worker.js",
+    modules: { "src/worker.js": { type: "module" } },
+    bindings: { DB: { type: "d1", databaseId: "main" } },
+    exports: [{ entrypoint }],
+    workflows: [{ binding: "FLOW", name: "flow", className: "FlowHandler" }],
+  };
+  /** @type {{ mainModule: string, modules: Record<string, string> }} */
+  const workerCode = {
+    mainModule: meta.mainModule,
+    modules: { "src/worker.js": source },
+  };
+
+  injectRuntimeModulesForHostBindings(workerCode, meta, TEST_RUNTIME_INJECTION_SOURCES);
+
+  assert.equal(
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized: [["src/worker.js", Buffer.from(source)]],
+      meta,
+      runtimeSources: TEST_RUNTIME_INJECTION_SOURCES,
+    }),
+    workerCodeModuleBytes(workerCode)
+  );
+  assert.match(
+    /** @type {string} */ (workerCode.modules["src/worker.js"]),
+    /"\.\.\/_wdl-cloudflare-workflows\.js"/
+  );
+  assert.match(/** @type {string} */ (workerCode.modules["_wdl-wrapper.js"]), new RegExp(entrypoint));
 });
 
 test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserves original main module", () => {

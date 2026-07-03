@@ -1,4 +1,5 @@
 import { SecretEnvelopeError, decryptSecretValue } from "shared-secret-envelope";
+import { errorMessage } from "shared-errors";
 import { bundleKey } from "shared-version";
 
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
@@ -334,7 +335,8 @@ export function assertWorkerLoaderUserEnvBudget({
       ? `${ns}/${worker}${sourceVersion ? `@${sourceVersion}` : ""}`
       : ns;
     throw new WorkerEnvBudgetError(
-      `estimated workerLoader env for ${label} serializes to ${bytes} bytes, exceeding WDL workerLoader env budget ${WORKER_LOADER_ENV_MAX_BYTES} bytes`,
+      `estimated workerLoader env for ${label} serializes to ${bytes} bytes, ` +
+        `exceeding WDL workerLoader env budget ${WORKER_LOADER_ENV_MAX_BYTES} bytes`,
       {
         namespace: ns,
         ...(worker ? { worker } : {}),
@@ -431,21 +433,26 @@ export async function assertWorkerVersionsUserEnvBudget({
   // whose command protocol is single-flight even though secret decryption is not.
   for (const { sourceVersion, estimatedVersion } of uniqueChecks) {
     const rawMeta = await redis.hGet(bundleKey(ns, worker, sourceVersion), "__meta__");
-    /** @type {Record<string, unknown>} */
-    let meta = {};
-    if (typeof rawMeta === "string") {
-      try {
-        const parsed = JSON.parse(rawMeta);
-        meta = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          ? /** @type {Record<string, unknown>} */ (parsed)
-          : {};
-      } catch (err) {
-        throw new Error(
-          `invalid bundle metadata for ${ns}/${worker}@${sourceVersion}: ${err instanceof Error ? err.message : String(err)}`,
-          { cause: err }
-        );
-      }
+    if (typeof rawMeta !== "string") {
+      throw new Error(`bundle metadata missing for ${ns}/${worker}@${sourceVersion}`);
     }
+    /** @type {unknown} */
+    let parsed;
+    try {
+      parsed = JSON.parse(rawMeta);
+    } catch (err) {
+      throw new Error(
+        `invalid bundle metadata for ${ns}/${worker}@${sourceVersion}: ${errorMessage(err)}`,
+        { cause: err }
+      );
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(
+        `invalid bundle metadata for ${ns}/${worker}@${sourceVersion}: ` +
+          "__meta__ must be a JSON object"
+      );
+    }
+    const meta = /** @type {Record<string, unknown>} */ (parsed);
     assertWorkerLoaderUserEnvBudget({
       ns,
       worker,

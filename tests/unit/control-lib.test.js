@@ -791,7 +791,11 @@ test("MAX_WORKER_COMPATIBILITY_DATE matches pinned workerd release plus seven da
 });
 
 test("workerd experimental compat flag mirror matches pinned workerd source version", () => {
-  const regenerate = "Regenerate shared/workerd-compat-flags.js from an upstream workerd checkout with the command in that file header.";
+  const regenerate = [
+    "Regenerate shared/workerd-compat-flags.js from an upstream workerd checkout:",
+    "node scripts/extract-workerd-experimental-compat-flags.mjs",
+    "/path/to/workerd/src/workerd/io/compatibility-date.capnp",
+  ].join(" ");
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION, WORKERD_VERSION, regenerate);
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("experimental"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unsafe_module"));

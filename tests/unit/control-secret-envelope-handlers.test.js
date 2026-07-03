@@ -2,15 +2,101 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { controlSharedStubUrl } from "../helpers/control-shared-stub.js";
 import { decryptSecretValue, encryptSecretValue, isSecretEnvelope } from "../../shared/secret-envelope.js";
-import { applyModuleReplacements, moduleDataUrl, readRepositoryFile, repositoryFileUrl } from "../helpers/load-shared-module.js";
+import {
+  applyModuleReplacements,
+  moduleDataUrl,
+  readRepositoryFile,
+  repositoryFileUrl,
+} from "../helpers/load-shared-module.js";
+import { installMockProperty } from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
 const SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
+const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 const env = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
   SECRET_ENVELOPE_KID: "local:test:secret-envelope:v1",
 };
+
+/** @returns {Record<string, string>} */
+function emptySecretHash() {
+  return {};
+}
+
+/**
+ * @param {string} key
+ * @param {string} field
+ */
+function defaultWorkerSecretBundleMeta(key, field) {
+  return /^worker:[^:]+:[^:]+:v:[1-9][0-9]*$/.test(key) && field === "__meta__"
+    ? "{}"
+    : null;
+}
+
+/**
+ * @param {{
+ *   hKeys?: string[],
+ *   hGet?: (key: string, field: string) => string | null | Promise<string | null>,
+ *   hGetAll?: (key: string) => Record<string, string> | Promise<Record<string, string>>,
+ *   zCard?: number,
+ *   zRange?: string[],
+ *   onHSet?: (key: string, field: string, value: string) => void,
+ *   onHDel?: (key: string, field: string) => void,
+ *   onExec?: () => void | Promise<void>,
+ * }} options
+ */
+function makeWorkerSecretSession({
+  hKeys = [],
+  hGet = defaultWorkerSecretBundleMeta,
+  hGetAll = emptySecretHash,
+  zCard = 0,
+  zRange = [],
+  onHSet = () => {},
+  onHDel = () => {},
+  onExec = () => {},
+} = {}) {
+  return {
+    async watch() {},
+    async unwatch() {},
+    async get() { return null; },
+    async hKeys() { return hKeys; },
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) { return await hGet(key, field); },
+    /** @param {string} key */
+    async hGetAll(key) { return await hGetAll(key); },
+    async zCard() { return zCard; },
+    async zRange() { return zRange; },
+    multi() {
+      return {
+        /** @param {string} key @param {string} field @param {string} value */
+        hSet(key, field, value) { onHSet(key, field, value); },
+        /** @param {string} key @param {string} field */
+        hDel(key, field) { onHDel(key, field); },
+        sAdd() {},
+        sRem() {},
+        async exec() { await onExec(); },
+      };
+    },
+  };
+}
+
+/**
+ * @param {{ redis: Record<string, unknown> }} state
+ * @param {ReturnType<typeof makeWorkerSecretSession>} session
+ * @param {() => unknown | Promise<unknown>} callback
+ */
+async function withWorkerSecretSession(state, session, callback) {
+  const restore = installMockProperty(state.redis, "session",
+    async (/** @type {(session: ReturnType<typeof makeWorkerSecretSession>) => unknown | Promise<unknown>} */ fn) =>
+      await fn(session)
+  );
+  try {
+    return await callback();
+  } finally {
+    restore();
+  }
+}
 
 const validateSecretKeyStubSource = `
 const SECRET_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -38,6 +124,7 @@ function secretPutUrl(controlSharedUrl, controlLibUrl) {
 function envBudgetUrl() {
   const source = applyModuleReplacements(readRepositoryFile("control/env-budget.js"), [
     [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
+    [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
     [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
   ]);
   return moduleDataUrl(source);
@@ -54,7 +141,11 @@ export const state = {
     deletes: [],
     watchedKeys: [],
     async hKeys() { return []; },
-    async hGet() { return null; },
+    async hGet(key, field) {
+      return /^worker:[^:]+:[^:]+:v:[1-9][0-9]*$/.test(key) && field === "__meta__"
+        ? "{}"
+        : null;
+    },
     async hGetAll() { return {}; },
     async sMembers() { return []; },
     async zRange() { return []; },
@@ -495,7 +586,11 @@ export const state = {
         async unwatch() {},
         async get() { return null; },
         async hKeys() { return []; },
-        async hGet() { return null; },
+        async hGet(key, field) {
+          return /^worker:[^:]+:[^:]+:v:[1-9][0-9]*$/.test(key) && field === "__meta__"
+            ? "{}"
+            : null;
+        },
         async hGetAll() { return {}; },
         async zCard() { return 0; },
         async zRange() { return []; },
@@ -548,10 +643,11 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
   });
 }
 `);
+const workerSecretPutUrl = secretPutUrl(workerControlSharedUrl, workerLibStubUrl);
 const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/worker-secrets.js"), [
   [/from "control-shared";/, `from ${JSON.stringify(workerControlSharedUrl)};`],
   [/from "control-lib";/, `from ${JSON.stringify(workerLibStubUrl)};`],
-  [/from "control-handlers-secret-put";/, `from ${JSON.stringify(secretPutUrl(workerControlSharedUrl, workerLibStubUrl))};`],
+  [/from "control-handlers-secret-put";/, `from ${JSON.stringify(workerSecretPutUrl)};`],
   [/from "control-lifecycle-indexes";/, `from ${JSON.stringify(lifecycleStubUrl)};`],
   [/from "control-routing";/, `from ${JSON.stringify(routingStubUrl)};`],
   [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
@@ -848,36 +944,18 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
 
 test("worker secret DELETE skips decrypting the removed corrupt envelope", async () => {
   const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
   let execCalled = false;
+  /** @type {string | null} */
   let deletedField = null;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => await fn({
-    async watch() {},
-    async unwatch() {},
-    async get() { return null; },
-    async hKeys() { return ["TOKEN"]; },
-    async hGet() { return null; },
-    /** @param {string} key */
-    async hGetAll(key) {
+  await withWorkerSecretSession(state, makeWorkerSecretSession({
+    hKeys: ["TOKEN"],
+    hGetAll(key) {
       if (key === "secrets:demo:api") return { TOKEN: "WDL-ENC:not-json" };
-      return {};
+      return emptySecretHash();
     },
-    async zCard() { return 0; },
-    async zRange() { return []; },
-    multi() {
-      return {
-        hSet() {},
-        /** @param {string} _key @param {string} field */
-        hDel(_key, field) { deletedField = field; },
-        sAdd() {},
-        sRem() {},
-        async exec() { execCalled = true; },
-      };
-    },
-  });
-
-  try {
+    onHDel(_key, field) { deletedField = field; },
+    onExec() { execCalled = true; },
+  }), async () => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -893,48 +971,28 @@ test("worker secret DELETE skips decrypting the removed corrupt envelope", async
     assert.equal(response.status, 200);
     assert.equal(execCalled, true);
     assert.equal(deletedField, "TOKEN");
-  } finally {
-    state.redis.session = originalSession;
-  }
+  });
 });
 
 test("worker secret DELETE skips other corrupt worker envelopes for repair", async () => {
   const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo:api",
     fieldName: "TOKEN",
   });
   let execCalled = false;
+  /** @type {string | null} */
   let deletedField = null;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => await fn({
-    async watch() {},
-    async unwatch() {},
-    async get() { return null; },
-    async hKeys() { return ["TOKEN", "BAD"]; },
-    async hGet() { return null; },
-    /** @param {string} key */
-    async hGetAll(key) {
+  await withWorkerSecretSession(state, makeWorkerSecretSession({
+    hKeys: ["TOKEN", "BAD"],
+    hGetAll(key) {
       if (key === "secrets:demo:api") return { TOKEN: encrypted, BAD: "WDL-ENC:not-json" };
-      return {};
+      return emptySecretHash();
     },
-    async zCard() { return 0; },
-    async zRange() { return []; },
-    multi() {
-      return {
-        hSet() {},
-        /** @param {string} _key @param {string} field */
-        hDel(_key, field) { deletedField = field; },
-        sAdd() {},
-        sRem() {},
-        async exec() { execCalled = true; },
-      };
-    },
-  });
-
-  try {
+    onHDel(_key, field) { deletedField = field; },
+    onExec() { execCalled = true; },
+  }), async () => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -950,49 +1008,29 @@ test("worker secret DELETE skips other corrupt worker envelopes for repair", asy
     assert.equal(response.status, 200);
     assert.equal(execCalled, true);
     assert.equal(deletedField, "TOKEN");
-  } finally {
-    state.redis.session = originalSession;
-  }
+  });
 });
 
 test("worker secret DELETE skips corrupt namespace envelopes for repair", async () => {
   const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo:api",
     fieldName: "TOKEN",
   });
   let execCalled = false;
+  /** @type {string | null} */
   let deletedField = null;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => await fn({
-    async watch() {},
-    async unwatch() {},
-    async get() { return null; },
-    async hKeys() { return ["TOKEN"]; },
-    async hGet() { return null; },
-    /** @param {string} key */
-    async hGetAll(key) {
+  await withWorkerSecretSession(state, makeWorkerSecretSession({
+    hKeys: ["TOKEN"],
+    hGetAll(key) {
       if (key === "secrets:demo") return { BAD: "WDL-ENC:not-json" };
       if (key === "secrets:demo:api") return { TOKEN: encrypted };
-      return {};
+      return emptySecretHash();
     },
-    async zCard() { return 0; },
-    async zRange() { return []; },
-    multi() {
-      return {
-        hSet() {},
-        /** @param {string} _key @param {string} field */
-        hDel(_key, field) { deletedField = field; },
-        sAdd() {},
-        sRem() {},
-        async exec() { execCalled = true; },
-      };
-    },
-  });
-
-  try {
+    onHDel(_key, field) { deletedField = field; },
+    onExec() { execCalled = true; },
+  }), async () => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -1008,9 +1046,7 @@ test("worker secret DELETE skips corrupt namespace envelopes for repair", async 
     assert.equal(response.status, 200);
     assert.equal(execCalled, true);
     assert.equal(deletedField, "TOKEN");
-  } finally {
-    state.redis.session = originalSession;
-  }
+  });
 });
 
 test("worker secret DELETE skips corrupt namespace envelopes during bump repair", async () => {
@@ -1082,34 +1118,15 @@ test("worker secret DELETE skips corrupt namespace envelopes during bump repair"
 
 test("worker secret PUT still fails closed on other corrupt worker envelopes", async () => {
   const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
   let hSetCalled = false;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => await fn({
-    async watch() {},
-    async unwatch() {},
-    async get() { return null; },
-    async hKeys() { return ["BAD"]; },
-    async hGet() { return null; },
-    /** @param {string} key */
-    async hGetAll(key) {
+  await withWorkerSecretSession(state, makeWorkerSecretSession({
+    hKeys: ["BAD"],
+    hGetAll(key) {
       if (key === "secrets:demo:api") return { BAD: "WDL-ENC:not-json" };
-      return {};
+      return emptySecretHash();
     },
-    async zCard() { return 0; },
-    async zRange() { return []; },
-    multi() {
-      return {
-        hSet() { hSetCalled = true; },
-        hDel() {},
-        sAdd() {},
-        sRem() {},
-        async exec() {},
-      };
-    },
-  });
-
-  try {
+    onHSet() { hSetCalled = true; },
+  }), async () => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "PUT",
@@ -1126,7 +1143,5 @@ test("worker secret PUT still fails closed on other corrupt worker envelopes", a
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
     assert.equal(hSetCalled, false);
-  } finally {
-    state.redis.session = originalSession;
-  }
+  });
 });

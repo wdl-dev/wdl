@@ -2,6 +2,10 @@ locals {
   redis_addr                     = "${var.valkey_host}:${var.valkey_port}"
   data_redis_url                 = "redis://${local.redis_addr}/1"
   do_redis_proxy_memory_headroom = 128
+  d1_runtime_container_memory = coalesce(
+    var.d1_runtime_container_memory,
+    var.runtime_memory,
+  )
   do_runtime_container_memory = coalesce(
     var.do_runtime_container_memory,
     var.runtime_memory - local.do_redis_proxy_memory_headroom,

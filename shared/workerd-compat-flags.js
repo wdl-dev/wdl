@@ -2,7 +2,8 @@
  * Mirrors workerd v1.20260701.1 src/workerd/io/compatibility-date.capnp.
  * Regenerate on every workerd pin bump from an upstream workerd source checkout:
  *
- * node --input-type=module -e 'import fs from "node:fs"; const src=fs.readFileSync("src/workerd/io/compatibility-date.capnp","utf8"); const blocks=[]; let cur=[]; for (const line of src.split(/\n/)) { if (/^\s*[A-Za-z][A-Za-z0-9_]*\s+@\d+\s*:\s*Bool/.test(line)) { if (cur.length) blocks.push(cur.join("\n")); cur=[line]; } else if (cur.length) cur.push(line); } if (cur.length) blocks.push(cur.join("\n")); const out=new Set(); for (const b of blocks) { if (!b.includes("$experimental")) continue; for (const m of b.matchAll(/\$compatEnableFlag\("([^"]+)"\)/g)) out.add(m[1]); } console.log([...out].sort().join("\n"));'
+ * node scripts/extract-workerd-experimental-compat-flags.mjs \
+ *   /path/to/workerd/src/workerd/io/compatibility-date.capnp
  */
 
 export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260701.1";

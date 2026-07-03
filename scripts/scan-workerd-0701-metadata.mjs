@@ -39,6 +39,7 @@ function repoModuleDataUrl(relativePath, replacements = []) {
 async function importControlEnvBudget() {
   return await import(repoModuleDataUrl("control/env-budget.js", [
     [/from "shared-secret-envelope";/, `from ${JSON.stringify(repoFileUrl("shared/secret-envelope.js"))};`],
+    [/from "shared-errors";/, `from ${JSON.stringify(repoFileUrl("shared/errors.js"))};`],
     [/from "shared-version";/, `from ${JSON.stringify(repoFileUrl("shared/version.js"))};`],
   ]));
 }
@@ -61,7 +62,9 @@ export function redisCli(args, { redisUrl = redisUrlFromEnv(), spawn = spawnSync
   if (result.error) {
     if (/** @type {NodeJS.ErrnoException} */ (result.error).code === "ENOENT") {
       throw new Error(
-        "redis-cli not found. Install redis-cli/redis-tools before running scripts/scan-workerd-0701-metadata.mjs; local compose users can inspect Redis with `docker compose exec -T redis redis-cli`."
+        "redis-cli not found. Install redis-cli/redis-tools before running " +
+          "scripts/scan-workerd-0701-metadata.mjs; local compose users can inspect " +
+          "Redis with `docker compose exec -T redis redis-cli`."
       );
     }
     throw result.error;
@@ -347,9 +350,15 @@ export async function runCli() {
     console.log(JSON.stringify(finding));
   }
   if (findings.length === 0) {
-    console.error(`Scanned ${keysScanned} worker bundle metadata keys; no workerd 0701 blockers found.`);
+    console.error(
+      `Scanned ${keysScanned} worker bundle metadata keys; ` +
+        "no workerd 0701 blockers found."
+    );
   } else {
-    console.error(`Scanned ${keysScanned} worker bundle metadata keys; found ${findings.length} workerd 0701 blocker(s).`);
+    console.error(
+      `Scanned ${keysScanned} worker bundle metadata keys; ` +
+        `found ${findings.length} workerd 0701 blocker(s).`
+    );
     process.exitCode = 1;
   }
 }

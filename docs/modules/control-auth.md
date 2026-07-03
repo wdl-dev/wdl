@@ -78,11 +78,12 @@ Control lifecycle operations are split so each critical transition has one autho
 - Deploy parses the supported Wrangler/JSONC shape, validates bindings and routes,
   allocates the next immutable version through `worker:<ns>:<worker>:next_version`,
   writes bundle metadata/modules/assets, then enters the same promote path used by
-  explicit promotion. Before allocation, deploy checks the 64 MiB workerd dynamic code
-  limit and runs an advisory pass over the candidate metadata and current secret
-  envelopes. The watched commit path is the authoritative headroomed `workerLoader`
-  env-budget check after version allocation and metadata materialization, such as
-  resolved D1 database ids, before writing the version.
+  explicit promotion. Before allocation, deploy estimates final WorkerCode under
+  workerd's 64 MiB limit, including runtime-injected wrapper/client modules and workflow
+  import rewrites, and runs an advisory pass over the candidate metadata and current
+  secret envelopes. The watched commit path is the authoritative headroomed
+  `workerLoader` env-budget check after version allocation and metadata materialization,
+  such as resolved D1 database ids, before writing the version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
@@ -262,8 +263,9 @@ Auth-specific contract:
   diagnostics, backend messages, and provider errors belong in logs unless the endpoint
   explicitly owns a diagnostic response field.
 - Deploy and secret mutations return `worker_code_too_large` when tenant module bodies
-  exceed the workerd 64 MiB dynamic code limit, and `worker_env_too_large` when the
-  estimated `workerLoader` env exceeds WDL's headroomed 1 MiB budget.
+  plus runtime-injected modules exceed workerd's 64 MiB dynamic code limit, and
+  `worker_env_too_large` when the estimated `workerLoader` env exceeds WDL's headroomed
+  1 MiB budget.
   `worker_env_too_large` details include `namespace`, optional `worker`, `env_bytes`,
   `max_env_bytes`, `upstream_max_env_bytes`, and `headroom_bytes`. When the blocker is an
   already-retained version being re-estimated during a secret mutation, details also
