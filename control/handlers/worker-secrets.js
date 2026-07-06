@@ -206,6 +206,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
           appliedValue: storedValue,
           previousExisted: mutationResult.previousExisted,
           previousValue: mutationResult.previousValue,
+          controlEnv,
         });
         log("warn", "secret_bump_budget_rejected", {
           request_id: requestId,
@@ -402,6 +403,7 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
  *   appliedValue: string | null,
  *   previousExisted?: boolean,
  *   previousValue?: string | null,
+ *   controlEnv: Record<string, string | undefined>,
  * }} args
  */
 async function rollbackSecretMutation({
@@ -413,14 +415,22 @@ async function rollbackSecretMutation({
   appliedValue,
   previousExisted = false,
   previousValue = null,
+  controlEnv,
 }) {
+  const nsSecretsKey = `secrets:${ns}`;
   const secretsKey = `secrets:${ns}:${name}`;
   try {
     return await runOptimistic(redis, {
       attempts: MAX_SECRET_ATTEMPTS,
       onExhausted: () => false,
     }, async (iso) => {
-      await iso.watch(deleteLockKey(ns, name), secretsKey, routesKey(ns), workerVersionsKey(ns, name));
+      await iso.watch(
+        deleteLockKey(ns, name),
+        nsSecretsKey,
+        secretsKey,
+        routesKey(ns),
+        workerVersionsKey(ns, name)
+      );
       const callerLock = await iso.get(deleteLockKey(ns, name));
       if (callerLock) return false;
 
@@ -432,9 +442,41 @@ async function rollbackSecretMutation({
       }
 
       const active = await iso.hGet(routesKey(ns), name);
-      const retainedCount = await iso.zCard(workerVersionsKey(ns, name));
+      const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
       const secretKeys = await iso.hKeys(secretsKey);
-      if (!active && retainedCount === 0 && previousExisted) return false;
+      if (!active && retainedVersions.length === 0 && previousExisted) return false;
+
+      const nsEncrypted = await iso.hGetAll(nsSecretsKey);
+      const workerEncrypted = await iso.hGetAll(secretsKey);
+      const workerBudgetEncrypted = { ...workerEncrypted };
+      if (previousExisted && typeof previousValue === "string") {
+        workerBudgetEncrypted[key] = previousValue;
+      } else {
+        delete workerBudgetEncrypted[key];
+      }
+      const nsSecrets = await decryptSecretHash({
+        encrypted: nsEncrypted,
+        env: controlEnv,
+        hashKey: nsSecretsKey,
+      });
+      const workerSecrets = await decryptSecretHash({
+        encrypted: workerBudgetEncrypted,
+        env: controlEnv,
+        hashKey: secretsKey,
+      });
+      await assertWorkerVersionsUserEnvBudget({
+        redis: iso,
+        ns,
+        worker: name,
+        versions: [
+          ...retainedVersions,
+          ...(typeof active === "string" && active ? [active] : []),
+        ],
+        nsSecrets,
+        workerSecrets,
+        assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+      });
+
       const multi = iso.multi();
       if (previousExisted && typeof previousValue === "string") {
         multi.hSet(secretsKey, key, previousValue);
@@ -445,7 +487,7 @@ async function rollbackSecretMutation({
           method === "PUT" &&
           secretKeys.length <= 1 &&
           !active &&
-          retainedCount === 0
+          retainedVersions.length === 0
         ) {
           stageWorkerHidden(multi, ns, name);
         }

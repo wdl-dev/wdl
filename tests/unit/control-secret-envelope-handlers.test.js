@@ -928,7 +928,7 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
       async hGet(key, field) {
         if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
         if (key === "routes:demo" && field === "api") {
-          return sessionCalls === 1 ? "v1" : "v2";
+          return sessionCalls === 2 ? "v2" : "v1";
         }
         if (key === "worker:demo:api:v:1" && field === "__meta__") {
           return JSON.stringify({ vars: { SAFE: "ok" } });
@@ -1013,7 +1013,7 @@ test("worker secret PUT reports budget rollback failure after the secret write",
       /** @param {string} key @param {string} field */
       async hGet(key, field) {
         if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
-        if (key === "routes:demo" && field === "api") return sessionCalls === 1 ? "v1" : "v2";
+        if (key === "routes:demo" && field === "api") return sessionCalls === 2 ? "v2" : "v1";
         if (key === "worker:demo:api:v:1" && field === "__meta__") {
           return JSON.stringify({ vars: { SAFE: "ok" } });
         }
@@ -1072,6 +1072,98 @@ test("worker secret PUT reports budget rollback failure after the secret write",
     assert.equal(state.redis.writes.length, writesBefore + 1);
     assert.equal(rollbackAttempted, true);
     assert.equal(typeof appliedSecret, "string");
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret rollback refuses to reveal an oversized namespace secret", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const writesBefore = state.redis.writes.length;
+  const oversizedNamespaceSecret = await encryptSecretValue("x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1), {
+    env,
+    hashKey: "secrets:demo",
+    fieldName: "TOKEN",
+  });
+  let sessionCalls = 0;
+  let rollbackDeleted = false;
+  /** @type {string | null} */
+  let appliedSecret = null;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => {
+    sessionCalls += 1;
+    return await fn({
+      /** @param {...string} keys */
+      async watch(...keys) {
+        state.redis.watchedKeys.push(...keys);
+      },
+      async unwatch() {},
+      async get() { return null; },
+      async hKeys() { return []; },
+      /** @param {string} key @param {string} field */
+      async hGet(key, field) {
+        if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
+        if (key === "routes:demo" && field === "api") {
+          return sessionCalls === 2 ? "v2" : "v1";
+        }
+        if (key === "worker:demo:api:v:1" && field === "__meta__") {
+          return JSON.stringify({ vars: { SAFE: "ok" } });
+        }
+        if (key === "worker:demo:api:v:2" && field === "__meta__") {
+          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
+        }
+        return null;
+      },
+      /** @param {string} key */
+      async hGetAll(key) {
+        if (key === "secrets:demo") return { TOKEN: oversizedNamespaceSecret };
+        if (key === "secrets:demo:api" && sessionCalls > 1) {
+          const written = state.redis.writes.at(-1);
+          return written?.key === key ? { [written.field]: written.value } : {};
+        }
+        return {};
+      },
+      async zCard() { return 1; },
+      async zRange() { return []; },
+      multi() {
+        return {
+          /** @param {string} key @param {string} field @param {string} value */
+          hSet(key, field, value) {
+            if (key === "secrets:demo:api" && field === "TOKEN") appliedSecret = value;
+            state.redis.writes.push({ key, field, value });
+          },
+          hDel() { rollbackDeleted = true; },
+          sAdd() {},
+          sRem() {},
+          async exec() {},
+        };
+      },
+    });
+  };
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-rollback-reveals-ns",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "secret_mutation_rollback_failed");
+    assert.equal(body.budget_error, "worker_env_too_large");
+    assert.equal(body.secretWritten, true);
+    assert.equal(body.rollbackConfirmed, false);
+    assert.equal(state.redis.writes.length, writesBefore + 1);
+    assert.equal(rollbackDeleted, false);
+    assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
   } finally {
     state.redis.session = originalSession;
   }
