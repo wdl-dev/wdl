@@ -16,6 +16,7 @@ var MANDATORY_SIGNED_HEADERS = /* @__PURE__ */ new Set([
 ]);
 var DEFAULT_UNSIGNABLE_HEADERS = /* @__PURE__ */ new Set([
   AUTHORIZATION_HEADER,
+  "accept-encoding",
   "connection",
   "content-length",
   "expect",
@@ -42,519 +43,188 @@ var HTTP_METHOD_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 var ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/u;
 var SIGNING_DATE_ERROR = "signingDate must be a valid Date, ISO-8601 string, or YYYYMMDDTHHMMSSZ string";
 var IDEMPOTENT_METHODS = /* @__PURE__ */ new Set(["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]);
-var CLIENT_SIGNING_OPTION_KEYS = /* @__PURE__ */ new Set([
-  "service",
-  "region",
-  "signingDate",
-  "unsignedPayload",
-  "signAllHeaders",
-  "unsignableHeaders"
-]);
-var UNSIGNABLE_HEADER_SNAPSHOTS = /* @__PURE__ */ new WeakMap();
-var SigV4Client = class {
-  accessKeyId;
-  secretAccessKey;
-  secretAccessKeyHash;
-  sessionToken;
-  service;
-  region;
-  cache;
-  retries;
-  initialRetryDelayMs;
-  maxRetryDelayMs;
-  unsignedPayload;
-  signAllHeaders;
-  unsignableHeaders;
-  fetchFn;
-  constructor(options) {
-    if (!options || typeof options !== "object") {
-      throw new TypeError("SigV4Client options are required");
-    }
-    requireCredentialComponent(options.accessKeyId, "accessKeyId");
-    requireSecretAccessKey(options.secretAccessKey);
-    requireCredentialComponent(options.service, "service");
-    requireCredentialComponent(options.region, "region");
-    if (options.sessionToken !== void 0) {
-      requireString(options.sessionToken, "sessionToken");
-      rejectControlChars(options.sessionToken, "sessionToken");
-      rejectSurroundingWhitespace(options.sessionToken, "sessionToken");
-    }
-    this.accessKeyId = options.accessKeyId;
-    this.secretAccessKey = options.secretAccessKey;
-    this.sessionToken = options.sessionToken;
-    this.service = options.service;
-    this.region = options.region;
-    this.cache = requireSigningCache(options.cache, "cache") ?? /* @__PURE__ */ new Map();
-    this.retries = requireNonNegativeInteger(options.retries ?? 0, "retries");
-    this.initialRetryDelayMs = requireNonNegativeFiniteNumber(options.initialRetryDelayMs ?? 50, "initialRetryDelayMs");
-    this.maxRetryDelayMs = requireNonNegativeFiniteNumber(options.maxRetryDelayMs ?? 5e3, "maxRetryDelayMs");
-    this.unsignedPayload = optionalBoolean(options.unsignedPayload, "unsignedPayload");
-    this.signAllHeaders = optionalBoolean(options.signAllHeaders, "signAllHeaders");
-    this.unsignableHeaders = normalizeUnsignableHeaders(options.unsignableHeaders, "unsignableHeaders");
-    const fetchFn = options.fetch === void 0 ? globalThis.fetch : options.fetch;
-    if (typeof fetchFn !== "function") {
-      throw new TypeError(options.fetch === void 0 ? "fetch is not available" : "fetch must be a function");
-    }
-    this.fetchFn = bindFetch(fetchFn);
+async function signatureHex(options) {
+  const secretAccessKeyHash = options.secretAccessKeyHash ?? await sha256Hex(options.secretAccessKey);
+  const cacheKey = ["sigv4", secretAccessKeyHash, options.date, options.region, options.service].join(",");
+  let signingKey = options.cache?.get(cacheKey);
+  if (!signingKey) {
+    const kDate = await hmac(`AWS4${options.secretAccessKey}`, options.date);
+    const kRegion = await hmac(kDate, options.region);
+    const kService = await hmac(kRegion, options.service);
+    signingKey = await hmac(kService, AWS_REQUEST);
+    options.cache?.set(cacheKey, signingKey);
   }
-  async sign(input, init = {}) {
-    const requestInit = input instanceof Request ? mergeDefinedRequestInit(requestInitFromRequest(input), init) : { ...init };
-    const signingOptions = normalizeClientSigningOptions(requestInit.signing);
-    delete requestInit.signing;
-    let url;
-    let method = requestInit.method;
-    let headers = requestInit.headers;
-    let body = requestInit.body;
-    if (input instanceof Request) {
-      url = input.url;
-      if (method === void 0)
-        method = input.method;
-      headers = mergeHeaders(input.headers, headers);
-      if (body === void 0 && input.body) {
-        body = input.clone().body;
-      }
-    } else {
-      url = input;
-    }
-    const normalizedMethod = normalizeMethod(method === void 0 ? defaultMethod(body) : method);
-    rejectRequestBodyForGetHead(normalizedMethod, body);
-    const service = signingOptions.service ?? this.service;
-    const requestUrl = parseRequestUrl(url);
-    assertParsedRequestCanRepresentSignedUrl(requestUrl.pathname, service);
-    const signed = await signAwsRequestInternal({
-      accessKeyId: this.accessKeyId,
-      secretAccessKey: this.secretAccessKey,
-      sessionToken: this.sessionToken,
-      service,
-      region: signingOptions.region ?? this.region,
-      cache: this.cache,
-      unsignedPayload: signingOptions.unsignedPayload ?? this.unsignedPayload,
-      signAllHeaders: signingOptions.signAllHeaders ?? this.signAllHeaders,
-      unsignableHeaders: signingOptions.unsignableHeaders ?? this.unsignableHeaders,
-      signingDate: signingOptions.signingDate,
-      method: normalizedMethod,
-      url,
-      headers,
-      body
-    }, await this.getSecretAccessKeyHash(), requestUrl);
-    assertRequestCanRepresentSignedUrl(signed.url, service);
-    const signedInit = requestInitForSignedRequest(requestInit, signed);
-    try {
-      return new Request(signed.url, signedInit);
-    } catch (err) {
-      if (err instanceof TypeError) {
-        return new Request(signed.url, {
-          ...signedInit,
-          duplex: "half"
-        });
-      }
-      throw err;
-    }
-  }
-  async fetch(input, init = {}) {
-    const requestInit = {
-      ...init,
-      signing: normalizeClientSigningOptions(init.signing)
-    };
-    const method = methodForRequest(input, requestInit);
-    rejectRequestBodyForGetHead(method, requestBodyForInput(input, requestInit));
-    const service = requestInit.signing.service ?? this.service;
-    assertRequestCanRepresentSignedUrl(input instanceof Request ? input.url : input, service);
-    const replayBody = this.retries > 0 && isIdempotentMethod(method);
-    const retryInit = await reusableRequestInitForInput(input, requestInit, this.service, this.unsignedPayload, replayBody);
-    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
-      const fetchFn = this.fetchFn;
-      const request = await this.sign(input, retryInit);
-      let response;
-      try {
-        response = await fetchFn(request);
-      } catch (err) {
-        if (attempt === this.retries || !isIdempotentMethod(request.method) || isAbortError(err, request)) {
-          throw err;
-        }
-        await sleep(Math.random() * this.retryDelayMs(attempt), request.signal);
-        continue;
-      }
-      const retryableResponse = isIdempotentMethod(request.method) && (response.status >= 500 || response.status === 429);
-      if (attempt === this.retries || !retryableResponse) {
-        return response;
-      }
-      await cancelResponseBody(response);
-      if (request.signal.aborted)
-        throw abortReason(request.signal);
-      await sleep(Math.random() * this.retryDelayMs(attempt), request.signal);
-    }
-    throw new Error("unreachable retry loop exit");
-  }
-  getSecretAccessKeyHash() {
-    this.secretAccessKeyHash ??= sha256Hex(this.secretAccessKey);
-    return this.secretAccessKeyHash;
-  }
-  retryDelayMs(attempt) {
-    return Math.min(this.maxRetryDelayMs, this.initialRetryDelayMs * 2 ** attempt);
-  }
-};
-async function signAwsRequest(options) {
-  return signAwsRequestInternal(options);
+  return hex(await hmac(signingKey, options.stringToSign));
 }
-async function signAwsRequestInternal(options, secretAccessKeyHash, parsedRequestUrl) {
-  if (!options || typeof options !== "object") {
-    throw new TypeError("signAwsRequest options are required");
+async function sha256Hex(value) {
+  const bytes = cryptoBufferSource(value);
+  return hex(await crypto.subtle.digest("SHA-256", bytes));
+}
+function cryptoBufferSource(value) {
+  if (typeof value === "string") {
+    return textEncoder.encode(value);
   }
-  requireCredentialComponent(options.accessKeyId, "accessKeyId");
-  requireSecretAccessKey(options.secretAccessKey);
-  requireCredentialComponent(options.service, "service");
-  requireCredentialComponent(options.region, "region");
-  if (options.sessionToken !== void 0) {
-    requireString(options.sessionToken, "sessionToken");
-    rejectControlChars(options.sessionToken, "sessionToken");
-    rejectSurroundingWhitespace(options.sessionToken, "sessionToken");
+  if (value instanceof ArrayBuffer) {
+    return value;
   }
-  const cache = requireSigningCache(options.cache, "cache");
-  if (options.url == null)
-    throw new TypeError("url is a required option");
-  const requestUrl = parsedRequestUrl ?? parseRequestUrl(options.url);
-  const url = requestUrl.url;
-  const method = normalizeMethod(options.method === void 0 ? defaultMethod(options.body) : options.method);
-  const headers = new Headers(options.headers || {});
-  rejectEmptyHeader(headers, AMZ_CONTENT_SHA256_HEADER);
-  const unsignedPayload = optionalBoolean(options.unsignedPayload, "unsignedPayload") ?? options.service === "s3";
-  const signAllHeaders = optionalBoolean(options.signAllHeaders, "signAllHeaders");
-  const unsignableHeaders = snapshotUnsignableHeaders(options, options.unsignableHeaders, "unsignableHeaders");
-  if (unsignedPayload && !headers.has(AMZ_CONTENT_SHA256_HEADER)) {
-    headers.set(AMZ_CONTENT_SHA256_HEADER, UNSIGNED_PAYLOAD);
+  if (ArrayBuffer.isView(value) && value.buffer instanceof ArrayBuffer) {
+    return value;
   }
-  const preparedBody = await prepareBody(options.body, headers, !unsignedPayload && !headers.has(AMZ_CONTENT_SHA256_HEADER));
-  if (!unsignedPayload && !headers.has(AMZ_CONTENT_SHA256_HEADER) && hasRequestBody(options.body)) {
+  return new Uint8Array(value);
+}
+async function hmac(key, value) {
+  const cryptoKey = await crypto.subtle.importKey("raw", typeof key === "string" ? textEncoder.encode(key) : key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return crypto.subtle.sign("HMAC", cryptoKey, textEncoder.encode(value));
+}
+function hex(input) {
+  const bytes = new Uint8Array(input);
+  let out = "";
+  for (const byte of bytes) {
+    out += hexNibble(byte >>> 4);
+    out += hexNibble(byte & 15);
+  }
+  return out;
+}
+function hexNibble(value) {
+  return LOWER_HEX.charAt(value);
+}
+async function prepareBody(body, headers, materialize) {
+  if (body === null || body === void 0) {
+    return { body, bytes: new Uint8Array() };
+  }
+  if (body instanceof FormData) {
+    rejectManualFormDataContentType(headers);
+    const request = new Request("https://aws-sigv4.invalid/", { method: "POST", body });
+    const contentType = request.headers.get(CONTENT_TYPE_HEADER);
+    if (contentType) {
+      headers.set(CONTENT_TYPE_HEADER, contentType);
+    }
+    const bytes2 = new Uint8Array(await request.arrayBuffer());
+    return { body: bytes2, bytes: bytes2 };
+  }
+  setGeneratedContentType(body, headers);
+  if (!materialize) {
+    return { body, bytes: new Uint8Array() };
+  }
+  if (body instanceof ReadableStream) {
+    const bytes2 = new Uint8Array(await new Response(body).arrayBuffer());
+    return { body: bytes2, bytes: bytes2 };
+  }
+  const bytes = await bodyBytes(body);
+  return { body: stableMaterializedBody(body, bytes), bytes };
+}
+function rejectManualFormDataContentType(headers) {
+  if (headers.has(CONTENT_TYPE_HEADER)) {
+    throw new TypeError("FormData content-type must be generated by the runtime");
+  }
+}
+function setGeneratedContentType(body, headers) {
+  if (headers.has(CONTENT_TYPE_HEADER)) {
+    return;
+  }
+  if (typeof body === "string") {
+    headers.set(CONTENT_TYPE_HEADER, "text/plain;charset=UTF-8");
+  } else if (body instanceof URLSearchParams) {
+    headers.set(CONTENT_TYPE_HEADER, "application/x-www-form-urlencoded;charset=UTF-8");
+  } else if (body instanceof Blob && body.type) {
+    headers.set(CONTENT_TYPE_HEADER, body.type);
+  }
+}
+async function bodyBytes(body) {
+  if (typeof body === "string") {
+    return textEncoder.encode(body);
+  }
+  if (body instanceof Uint8Array) {
+    return body;
+  }
+  if (body instanceof ArrayBuffer) {
+    return new Uint8Array(body);
+  }
+  if (ArrayBuffer.isView(body)) {
+    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  }
+  if (body instanceof URLSearchParams) {
+    return textEncoder.encode(body.toString());
+  }
+  if (body instanceof Blob) {
+    return new Uint8Array(await body.arrayBuffer());
+  }
+  throw new TypeError("body must be a string, Blob, URLSearchParams, ArrayBuffer, or ArrayBufferView");
+}
+function shouldHashPayload(body, headers, unsignedPayload) {
+  return body !== void 0 && body !== null && !unsignedPayload && !headers.has(AMZ_CONTENT_SHA256_HEADER);
+}
+async function prepareHashedBody(body, headers, unsignedPayload, materialize = false) {
+  const hashPayload = shouldHashPayload(body, headers, unsignedPayload);
+  const preparedBody = await prepareBody(body, headers, materialize || hashPayload);
+  if (hashPayload) {
     headers.set(AMZ_CONTENT_SHA256_HEADER, await sha256Hex(preparedBody.bytes));
   }
-  const amzDate = formatAmzDate(options.signingDate ?? /* @__PURE__ */ new Date());
-  const date = amzDate.slice(0, 8);
-  const credentialScope = `${date}/${options.region}/${options.service}/${AWS_REQUEST}`;
-  headers.set(AMZ_DATE_HEADER, amzDate);
-  headers.set(HOST_HEADER, url.host);
-  if (options.sessionToken)
-    headers.set(AMZ_SECURITY_TOKEN_HEADER, options.sessionToken);
-  const canonicalPayloadHash = await canonicalPayloadHashValue(headers, preparedBody.bytes, unsignedPayload);
-  if (options.service === "s3" && !headers.has(AMZ_CONTENT_SHA256_HEADER)) {
-    headers.set(AMZ_CONTENT_SHA256_HEADER, canonicalPayloadHash);
+  return preparedBody;
+}
+function stableMaterializedBody(body, bytes) {
+  if (typeof body === "string" || body instanceof Uint8Array) {
+    return body;
   }
-  const { canonicalHeaders, signedHeaders } = canonicalHeaderBlock(url, headers, {
-    signAllHeaders,
-    unsignableHeaders
-  });
-  const canonicalRequest = [
-    method,
-    canonicalPathname(requestUrl.pathname),
-    canonicalQuery(requestUrl.search),
-    `${canonicalHeaders}
-`,
-    signedHeaders,
-    canonicalPayloadHash
-  ].join("\n");
-  const stringToSign = [
-    AWS_ALGORITHM,
-    amzDate,
-    credentialScope,
-    await sha256Hex(canonicalRequest)
-  ].join("\n");
-  const signature = await signatureHex({
-    secretAccessKey: options.secretAccessKey,
-    secretAccessKeyHash,
-    date,
-    region: options.region,
-    service: options.service,
-    stringToSign,
-    cache
-  });
-  headers.set(AUTHORIZATION_HEADER, [
-    `${AWS_ALGORITHM} Credential=${options.accessKeyId}/${credentialScope}`,
-    `SignedHeaders=${signedHeaders}`,
-    `Signature=${signature}`
-  ].join(", "));
+  if (bytes.buffer instanceof ArrayBuffer) {
+    return bytes;
+  }
+  return new Uint8Array(bytes);
+}
+function rejectNonPrintableAscii(value, message) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit < 32 || codeUnit > 126) {
+      throw new TypeError(message);
+    }
+  }
+}
+function canonicalHeaderBlock(url, headers, options) {
+  const signable = signedHeaderNames(headers, options);
+  const canonicalHeaders = signable.map((header) => {
+    const value = header === HOST_HEADER ? url.host : canonicalHeaderValue(headers.get(header) || "", header);
+    return `${header}:${value}`;
+  }).join("\n");
   return {
-    method,
-    url: requestUrl.href,
-    headers,
-    body: preparedBody.body
+    canonicalHeaders,
+    signedHeaders: signable.join(";")
   };
 }
-function parseRequestUrl(input) {
-  const raw = String(input);
-  if (typeof input === "string" && /\s/u.test(raw)) {
-    throw new TypeError("url must not contain unescaped whitespace");
-  }
-  if (typeof input === "string" && raw.includes("\\")) {
-    throw new TypeError("url must not contain backslashes");
-  }
-  const url = new URL(raw);
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new TypeError("url must use http: or https:");
-  }
-  if (url.username || url.password) {
-    throw new TypeError("url must not include username or password");
-  }
-  if (typeof input !== "string") {
-    if (hasMalformedPercentEncoding(url.pathname) || hasMalformedPercentEncoding(url.search)) {
-      throw new TypeError("url must not contain malformed percent encoding");
-    }
-    return {
-      url,
-      href: stripUrlFragment(url.toString()),
-      pathname: url.pathname || "/",
-      search: url.search
-    };
-  }
-  const match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*([^?#]*)?(\?[^#]*)?/u.exec(raw);
-  if (!match) {
-    throw new TypeError("url must include scheme://host");
-  }
-  const pathname = match[1] || "/";
-  const search = match[2] || "";
-  if (hasMalformedPercentEncoding(pathname) || hasMalformedPercentEncoding(search)) {
-    throw new TypeError("url must not contain malformed percent encoding");
-  }
-  return {
-    url,
-    href: `${url.protocol}//${url.host}${pathname}${search}`,
-    pathname,
-    search
-  };
-}
-function stripUrlFragment(value) {
-  const index = value.indexOf("#");
-  return index === -1 ? value : value.slice(0, index);
-}
-function mergeHeaders(base, override) {
-  const headers = new Headers(base);
-  if (override) {
-    new Headers(override).forEach((value, name) => headers.set(name, value));
-  }
-  return headers;
-}
-function mergeDefinedRequestInit(base, override) {
-  const out = { ...base };
-  for (const [key, value] of Object.entries(override)) {
-    if (value !== void 0) {
-      out[key] = value;
+function validateSignedHeaderValues(headers, options) {
+  const overwrittenHeaderNames = new Set((options.overwrittenHeaderNames || []).map((value) => value.toLowerCase()));
+  for (const header of signedHeaderNames(headers, options)) {
+    if (header !== HOST_HEADER && !overwrittenHeaderNames.has(header)) {
+      rejectNonPrintableAsciiHeaderValue(headers.get(header) || "", header);
     }
   }
-  return out;
 }
-function rejectEmptyHeader(headers, name) {
-  if (headers.get(name) === "") {
-    throw new TypeError(`${name} must not be empty`);
-  }
+function signerOverwrittenHeaderNames(hasSessionToken) {
+  return hasSessionToken ? [AMZ_DATE_HEADER, AMZ_SECURITY_TOKEN_HEADER] : [AMZ_DATE_HEADER];
 }
-function requestInitFromRequest(request) {
-  const init = {
-    cache: request.cache,
-    credentials: request.credentials,
-    integrity: request.integrity,
-    keepalive: request.keepalive,
-    mode: request.mode,
-    redirect: request.redirect,
-    referrer: request.referrer,
-    referrerPolicy: request.referrerPolicy,
-    signal: request.signal,
-    window: null
-  };
-  const duplex = request.duplex;
-  if (duplex === "half") {
-    return { ...init, duplex };
-  }
-  return init;
-}
-function normalizeClientSigningOptions(options) {
-  if (options === void 0)
-    return {};
-  if (options === null || typeof options !== "object") {
-    throw new TypeError("init.signing must be an object");
-  }
-  for (const key of Object.keys(options)) {
-    if (!CLIENT_SIGNING_OPTION_KEYS.has(key)) {
-      throw new TypeError(`init.signing.${key} cannot override client credentials or transport options`);
+function signedHeaderNames(headers, options) {
+  const userUnsignable = new Set((options.unsignableHeaders || []).map((value) => value.toLowerCase()));
+  return [.../* @__PURE__ */ new Set([HOST_HEADER, ...headers.keys()])].filter((header) => header !== AUTHORIZATION_HEADER).filter((header) => {
+    if (MANDATORY_SIGNED_HEADERS.has(header)) {
+      return true;
     }
-  }
-  const record = options;
-  const normalized = { ...record };
-  const unsignedPayload = optionalBoolean(record.unsignedPayload, "init.signing.unsignedPayload");
-  const signAllHeaders = optionalBoolean(record.signAllHeaders, "init.signing.signAllHeaders");
-  const unsignableHeaders = snapshotUnsignableHeaders(options, record.unsignableHeaders, "init.signing.unsignableHeaders");
-  if (unsignedPayload === void 0) {
-    delete normalized.unsignedPayload;
-  } else {
-    normalized.unsignedPayload = unsignedPayload;
-  }
-  if (signAllHeaders === void 0) {
-    delete normalized.signAllHeaders;
-  } else {
-    normalized.signAllHeaders = signAllHeaders;
-  }
-  if (unsignableHeaders === void 0) {
-    delete normalized.unsignableHeaders;
-  } else {
-    normalized.unsignableHeaders = unsignableHeaders;
-  }
-  return normalized;
+    if (userUnsignable.has(header)) {
+      return false;
+    }
+    return options.signAllHeaders || !DEFAULT_UNSIGNABLE_HEADERS.has(header);
+  }).sort();
 }
-function requestBodyForInput(input, init) {
-  if (init.body !== void 0)
-    return init.body;
-  return input instanceof Request ? input.body : void 0;
+function canonicalHeaderValue(value, name) {
+  rejectNonPrintableAsciiHeaderValue(value, name);
+  return value.trim().replace(/\s+/gu, " ");
 }
-function methodForRequest(input, init) {
-  if (init.method !== void 0)
-    return normalizeMethod(init.method);
-  if (input instanceof Request)
-    return normalizeMethod(input.method);
-  return defaultMethod(init.body);
+function rejectNonPrintableAsciiHeaderValue(value, name) {
+  rejectNonPrintableAscii(value, `${name} header value must contain only printable ASCII characters`);
 }
-function defaultMethod(body) {
-  return hasRequestBody(body) ? "POST" : "GET";
-}
-function normalizeMethod(method) {
-  if (typeof method !== "string" || !HTTP_METHOD_RE.test(method)) {
-    throw new TypeError("method must be a valid HTTP token");
-  }
-  return method.toUpperCase();
-}
-function isIdempotentMethod(method) {
-  return IDEMPOTENT_METHODS.has(method);
-}
-function rejectRequestBodyForGetHead(method, body) {
-  if ((method === "GET" || method === "HEAD") && hasRequestBody(body)) {
-    throw new TypeError("GET and HEAD requests with a body require signAwsRequest");
-  }
-}
-function hasRequestBody(body) {
-  return body !== void 0 && body !== null;
-}
-function isAbortError(err, request) {
-  return request.signal.aborted || err instanceof DOMException && err.name === "AbortError";
-}
-function assertRequestCanRepresentSignedUrl(url, service) {
-  assertParsedRequestCanRepresentSignedUrl(parseRequestUrl(url).pathname, service);
-}
-function assertParsedRequestCanRepresentSignedUrl(pathname, service) {
-  if (hasDotPathSegment(pathname)) {
-    throw new TypeError(`SigV4Client cannot represent ${service} URLs with dot segments; use signAwsRequest`);
-  }
-}
-function hasDotPathSegment(pathname) {
-  return pathname.split("/").some((segment) => {
-    const value = segment.replace(/%2e/giu, ".");
-    return value === "." || value === "..";
-  });
-}
-function hasMalformedPercentEncoding(value) {
-  return /%(?![0-9A-Fa-f]{2})/u.test(value);
-}
-async function reusableRequestInitForInput(input, init, defaultService, defaultUnsignedPayload, replayBody) {
-  if (!(input instanceof Request)) {
-    return reusableRequestInit(init, defaultService, defaultUnsignedPayload, replayBody);
-  }
-  const inputInit = {
-    ...init,
-    method: init.method ?? input.method,
-    headers: mergeHeaders(input.headers, init.headers)
-  };
-  if (init.body === void 0 && input.body) {
-    inputInit.body = input.clone().body;
-  }
-  return reusableRequestInit(inputInit, defaultService, defaultUnsignedPayload, replayBody);
-}
-async function reusableRequestInit(init, defaultService, defaultUnsignedPayload, replayBody) {
-  const headers = new Headers(init.headers || {});
-  const service = init.signing?.service ?? defaultService;
-  const unsignedPayload = init.signing?.unsignedPayload ?? defaultUnsignedPayload ?? service === "s3";
-  const materializeBody = replayBody && (init.body instanceof FormData || init.body instanceof ReadableStream);
-  const hashPayload = hasRequestBody(init.body) && !unsignedPayload && !headers.has(AMZ_CONTENT_SHA256_HEADER);
-  if (!materializeBody && !hashPayload) {
-    return init;
-  }
-  const body = await prepareBody(init.body, headers, materializeBody || hashPayload);
-  if (hashPayload) {
-    headers.set(AMZ_CONTENT_SHA256_HEADER, await sha256Hex(body.bytes));
-  }
-  const out = {
-    ...init,
-    headers
-  };
-  if (body.body !== void 0)
-    out.body = body.body;
-  return out;
-}
-function requestInitForSignedRequest(base, signed) {
-  const out = {
-    ...base,
-    method: signed.method,
-    headers: signed.headers
-  };
-  if (signed.body !== void 0)
-    out.body = signed.body;
-  return out;
-}
-function bindFetch(fetchFn) {
-  return Object.is(fetchFn, globalThis.fetch) ? fetchFn.bind(globalThis) : fetchFn;
-}
-function requireString(value, name) {
-  if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError(`${name} must be a non-empty string`);
-  }
-}
-function requireCredentialComponent(value, name) {
-  requireString(value, name);
-  rejectControlChars(value, name);
-  rejectWhitespace(value, name);
-  rejectAuthorizationParamSeparators(value, name);
-  if (value.includes("/")) {
-    throw new TypeError(`${name} must not contain /`);
-  }
-}
-function requireSecretAccessKey(value) {
-  requireString(value, "secretAccessKey");
-  rejectControlChars(value, "secretAccessKey");
-}
-function rejectControlChars(value, name) {
-  if (CONTROL_CHAR_RE.test(value)) {
-    throw new TypeError(`${name} must not contain control characters`);
-  }
-}
-function rejectAuthorizationParamSeparators(value, name) {
-  if (AUTH_PARAM_SEPARATOR_RE.test(value)) {
-    throw new TypeError(`${name} must not contain Authorization parameter separators`);
-  }
-}
-function rejectWhitespace(value, name) {
-  if (WHITESPACE_RE.test(value)) {
-    throw new TypeError(`${name} must not contain whitespace`);
-  }
-}
-function rejectSurroundingWhitespace(value, name) {
-  if (value.trim() !== value) {
-    throw new TypeError(`${name} must not contain leading or trailing whitespace`);
-  }
-}
-function requireNonNegativeInteger(value, name) {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new TypeError(`${name} must be a non-negative integer`);
-  }
-  return value;
-}
-function requireNonNegativeFiniteNumber(value, name) {
-  if (!Number.isFinite(value) || value < 0) {
-    throw new TypeError(`${name} must be a non-negative finite number`);
-  }
-  return value;
-}
-function optionalBoolean(value, name) {
-  if (value === void 0)
+function optionalAmzDate(value) {
+  if (value === void 0 || value === null) {
     return void 0;
-  if (typeof value !== "boolean") {
-    throw new TypeError(`${name} must be a boolean`);
   }
-  return value;
+  return formatAmzDate(value);
 }
 function formatAmzDate(value) {
   if (typeof value === "string" && /^\d{8}T\d{6}Z$/u.test(value)) {
@@ -591,8 +261,9 @@ function dateTimeValue(date) {
 }
 function isValidIsoDate(value) {
   const match = ISO_DATE_RE.exec(value);
-  if (!match)
+  if (!match) {
     return false;
+  }
   const [datePart, timePart] = value.split("T");
   const [yearText, monthText, dayText] = datePart.split("-");
   const [hourText, minuteText, secondText] = timePart.split(/[.:Z+-]/u);
@@ -612,44 +283,117 @@ function isValidDateParts(year, month, day, hour, minute, second) {
   date.setUTCFullYear(year);
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day && date.getUTCHours() === hour && date.getUTCMinutes() === minute && date.getUTCSeconds() === second;
 }
-function canonicalHeaderBlock(url, headers, options) {
-  const userUnsignable = new Set((options.unsignableHeaders || []).map((value) => value.toLowerCase()));
-  const signable = [.../* @__PURE__ */ new Set([HOST_HEADER, ...headers.keys()])].filter((header) => header !== AUTHORIZATION_HEADER).filter((header) => {
-    if (MANDATORY_SIGNED_HEADERS.has(header))
-      return true;
-    if (userUnsignable.has(header))
-      return false;
-    return options.signAllHeaders || !DEFAULT_UNSIGNABLE_HEADERS.has(header);
-  }).sort();
-  const canonicalHeaders = signable.map((header) => {
-    const value = header === HOST_HEADER ? url.host : canonicalHeaderValue(headers.get(header) || "");
-    return `${header}:${value}`;
-  }).join("\n");
-  return {
-    canonicalHeaders,
-    signedHeaders: signable.join(";")
-  };
-}
-function canonicalHeaderValue(value) {
-  const normalized = [];
-  let pendingSpace = false;
-  for (const char of value) {
-    if (char === " " || char === "	") {
-      if (normalized.length > 0)
-        pendingSpace = true;
-      continue;
-    }
-    if (pendingSpace) {
-      normalized.push(" ");
-      pendingSpace = false;
-    }
-    normalized.push(char);
+var CLIENT_SIGNING_OPTION_KEYS = /* @__PURE__ */ new Set([
+  "service",
+  "region",
+  "signingDate",
+  "unsignedPayload",
+  "signAllHeaders",
+  "unsignableHeaders",
+  "doubleUrlEncode"
+]);
+var UNSIGNABLE_HEADER_SNAPSHOTS = /* @__PURE__ */ new WeakMap();
+function normalizeClientSigningOptions(options) {
+  if (options === void 0) {
+    return {};
   }
-  return normalized.join("");
+  if (options === null || typeof options !== "object") {
+    throw new TypeError("init.signing must be an object");
+  }
+  for (const key of Object.keys(options)) {
+    if (!CLIENT_SIGNING_OPTION_KEYS.has(key)) {
+      throw new TypeError(`${signingOptionDisplayName(key)} cannot override client credentials or transport options`);
+    }
+  }
+  const record = options;
+  const normalized = { ...record };
+  const service = optionalCredentialComponent(ownNonNullOption(record, "service"), "init.signing.service");
+  setOrDelete(normalized, "service", service);
+  const region = optionalCredentialComponent(ownNonNullOption(record, "region"), "init.signing.region");
+  setOrDelete(normalized, "region", region);
+  const signingDate = optionalAmzDate(ownNonNullOption(record, "signingDate"));
+  setOrDelete(normalized, "signingDate", signingDate);
+  const unsignedPayload = optionalBoolean(ownOption(record, "unsignedPayload"), "init.signing.unsignedPayload");
+  const signAllHeaders = optionalBoolean(ownOption(record, "signAllHeaders"), "init.signing.signAllHeaders");
+  const doubleUrlEncode = optionalBoolean(ownOption(record, "doubleUrlEncode"), "init.signing.doubleUrlEncode");
+  const unsignableHeaders = snapshotUnsignableHeaders(options, ownOption(record, "unsignableHeaders"), "init.signing.unsignableHeaders");
+  setOrDelete(normalized, "unsignedPayload", unsignedPayload);
+  setOrDelete(normalized, "signAllHeaders", signAllHeaders);
+  setOrDelete(normalized, "unsignableHeaders", unsignableHeaders);
+  setOrDelete(normalized, "doubleUrlEncode", doubleUrlEncode);
+  return normalized;
+}
+function signingOptionDisplayName(key) {
+  if (key.length === 0) {
+    return "init.signing option";
+  }
+  for (let index = 0; index < key.length; index += 1) {
+    const codeUnit = key.charCodeAt(index);
+    if (codeUnit < 32 || codeUnit > 126) {
+      return "init.signing option";
+    }
+  }
+  return `init.signing.${key}`;
+}
+function validateCredentialOptions(options, message) {
+  requireOptionsObject(options, message);
+  const record = options;
+  requireCredentialComponent(record.accessKeyId, "accessKeyId");
+  requireSecretAccessKey(record.secretAccessKey);
+  requireCredentialComponent(record.service, "service");
+  requireCredentialComponent(record.region, "region");
+  if (record.sessionToken !== void 0) {
+    validateSessionToken(record.sessionToken);
+  }
+}
+function validateSessionToken(value) {
+  requireString(value, "sessionToken");
+  rejectControlChars(value, "sessionToken");
+  rejectSurroundingWhitespace(value, "sessionToken");
+  rejectNonPrintableAscii(value, "sessionToken must contain only printable ASCII characters");
+}
+function requireCredentialComponent(value, name) {
+  requireString(value, name);
+  rejectControlChars(value, name);
+  rejectWhitespace(value, name);
+  rejectAuthorizationParamSeparators(value, name);
+  rejectNonPrintableAscii(value, `${name} must contain only printable ASCII characters`);
+  if (value.includes("/")) {
+    throw new TypeError(`${name} must not contain /`);
+  }
+}
+function requireSecretAccessKey(value) {
+  requireString(value, "secretAccessKey");
+  rejectControlChars(value, "secretAccessKey");
+}
+function requireNonNegativeInteger(value, name) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+function requireNonNegativeFiniteNumber(value, name) {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative finite number`);
+  }
+  return value;
+}
+function optionalBoolean(value, name) {
+  if (value === void 0) {
+    return void 0;
+  }
+  if (typeof value !== "boolean") {
+    throw new TypeError(`${name} must be a boolean`);
+  }
+  return value;
+}
+function resolveUnsignedPayload(explicit, service) {
+  return explicit ?? service === "s3";
 }
 function normalizeUnsignableHeaders(value, name) {
-  if (value === void 0)
+  if (value === void 0) {
     return void 0;
+  }
   if (value === null || typeof value === "string" || typeof value[Symbol.iterator] !== "function") {
     throw new TypeError(`${name} must be an iterable of header names`);
   }
@@ -661,18 +405,95 @@ function normalizeUnsignableHeaders(value, name) {
   });
 }
 function snapshotUnsignableHeaders(owner, source, name) {
-  if (source === void 0)
+  if (source === void 0) {
     return void 0;
-  if (!isIterable(source))
+  }
+  if (!isIterable(source)) {
     return normalizeUnsignableHeaders(source, name);
-  if (!isOneShotIterable(source))
+  }
+  if (!isOneShotIterable(source)) {
     return normalizeUnsignableHeaders(source, name);
+  }
   const cached = UNSIGNABLE_HEADER_SNAPSHOTS.get(owner);
-  if (cached && cached.source === source)
-    return cached.value;
-  const value = normalizeUnsignableHeaders(source, name);
-  UNSIGNABLE_HEADER_SNAPSHOTS.set(owner, { source, value });
+  if (cached && cached.source === source) {
+    if (cached.result.ok) {
+      return cached.result.value;
+    }
+    throw cached.result.error;
+  }
+  try {
+    const value = normalizeUnsignableHeaders(source, name);
+    UNSIGNABLE_HEADER_SNAPSHOTS.set(owner, { source, result: { ok: true, value } });
+    return value;
+  } catch (error) {
+    UNSIGNABLE_HEADER_SNAPSHOTS.set(owner, { source, result: { ok: false, error } });
+    throw error;
+  }
+}
+function requireOptionsObject(value, message) {
+  if (value === null || typeof value !== "object") {
+    throw new TypeError(message);
+  }
+}
+function requireDefinedOption(value, name) {
+  if (value === null || value === void 0) {
+    throw new TypeError(`${name} is a required option`);
+  }
+}
+function requireSigningCache(value, name) {
+  if (value === void 0) {
+    return void 0;
+  }
+  if (!isSigningCache(value)) {
+    throw new TypeError(`${name} must be a Map-like cache`);
+  }
   return value;
+}
+function requireString(value, name) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`${name} must be a non-empty string`);
+  }
+}
+function rejectControlChars(value, name) {
+  if (CONTROL_CHAR_RE.test(value)) {
+    throw new TypeError(`${name} must not contain control characters`);
+  }
+}
+function rejectAuthorizationParamSeparators(value, name) {
+  if (AUTH_PARAM_SEPARATOR_RE.test(value)) {
+    throw new TypeError(`${name} must not contain Authorization parameter separators`);
+  }
+}
+function rejectWhitespace(value, name) {
+  if (WHITESPACE_RE.test(value)) {
+    throw new TypeError(`${name} must not contain whitespace`);
+  }
+}
+function rejectSurroundingWhitespace(value, name) {
+  if (value.trim() !== value) {
+    throw new TypeError(`${name} must not contain leading or trailing whitespace`);
+  }
+}
+function ownNonNullOption(record, name) {
+  const value = ownOption(record, name);
+  return value === null ? void 0 : value;
+}
+function ownOption(record, name) {
+  return Object.hasOwn(record, name) ? record[name] : void 0;
+}
+function optionalCredentialComponent(value, name) {
+  if (value === void 0) {
+    return void 0;
+  }
+  requireCredentialComponent(value, name);
+  return value;
+}
+function setOrDelete(record, key, value) {
+  if (value === void 0) {
+    Reflect.deleteProperty(record, key);
+  } else {
+    record[key] = value;
+  }
 }
 function isOneShotIterable(value) {
   return Object.is(value[Symbol.iterator](), value);
@@ -680,17 +501,77 @@ function isOneShotIterable(value) {
 function isIterable(value) {
   return value !== null && typeof value !== "string" && typeof value[Symbol.iterator] === "function";
 }
-function requireSigningCache(value, name) {
-  if (value === void 0)
-    return void 0;
-  if (value === null || typeof value !== "object" || value instanceof WeakMap || typeof value.get !== "function" || typeof value.set !== "function") {
-    throw new TypeError(`${name} must be a Map-like cache`);
+function isSigningCache(value) {
+  if (value === null || typeof value !== "object" || value instanceof WeakMap) {
+    return false;
   }
-  return value;
+  const candidate = value;
+  return typeof candidate.get === "function" && typeof candidate.set === "function";
+}
+function parseRequestUrl(input) {
+  const raw = String(input);
+  if (typeof input === "string" && /\s/u.test(raw)) {
+    throw new TypeError("url must not contain unescaped whitespace");
+  }
+  if (typeof input === "string" && raw.includes("\\")) {
+    throw new TypeError("url must not contain backslashes");
+  }
+  const url = new URL(raw);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new TypeError("url must use http: or https:");
+  }
+  if (url.username || url.password) {
+    throw new TypeError("url must not include username or password");
+  }
+  if (typeof input !== "string") {
+    if (hasMalformedPercentEncoding(url.pathname) || hasMalformedPercentEncoding(url.search)) {
+      throw new TypeError("url must not contain malformed percent encoding");
+    }
+    return {
+      url,
+      href: stripUrlFragment(url.toString()),
+      pathname: url.pathname || "/",
+      search: url.search
+    };
+  }
+  const match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)([^?#]*)?(\?[^#]*)?/u.exec(raw);
+  if (!match) {
+    throw new TypeError("url must include scheme://host");
+  }
+  if (!match[1]) {
+    throw new TypeError("url must include scheme://host");
+  }
+  const pathname = match[2] || "/";
+  const search = match[3] || "";
+  if (!pathname.isWellFormed() || !search.isWellFormed()) {
+    throw new TypeError("url must not contain invalid UTF-16");
+  }
+  if (hasMalformedPercentEncoding(pathname) || hasMalformedPercentEncoding(search)) {
+    throw new TypeError("url must not contain malformed percent encoding");
+  }
+  return {
+    url,
+    href: `${url.protocol}//${url.host}${pathname}${search}`,
+    pathname,
+    search
+  };
+}
+function canonicalPathname(pathname, service, doubleUrlEncode) {
+  if (!doubleUrlEncode) {
+    return canonicalSingleEncodedPathname(pathname);
+  }
+  if (service !== "s3") {
+    if (hasDotPathSegment(pathname)) {
+      throw new TypeError("non-S3 doubleUrlEncode URLs must not contain dot path segments");
+    }
+    return canonicalDoubleEncodedPathname(collapsePathSlashes(pathname));
+  }
+  return canonicalDoubleEncodedPathname(pathname);
 }
 function canonicalQuery(search) {
-  if (search === "")
+  if (search === "") {
     return "";
+  }
   return search.slice(1).split("&").filter((part) => part.length > 0).map((part) => {
     const separator = part.indexOf("=");
     const key = separator === -1 ? part : part.slice(0, separator);
@@ -698,31 +579,78 @@ function canonicalQuery(search) {
     return [canonicalQueryComponent(key), canonicalQueryComponent(value)];
   }).sort(([ak, av], [bk, bv]) => compareCodepoint(ak, bk) || compareCodepoint(av, bv)).map(([key, value]) => `${key}=${value}`).join("&");
 }
+function hasDotPathSegment(pathname) {
+  return pathname.split("/").some((segment) => {
+    const value = segment.replace(/%2e/giu, ".");
+    return value === "." || value === "..";
+  });
+}
+function stripUrlFragment(value) {
+  const index = value.indexOf("#");
+  return index === -1 ? value : value.slice(0, index);
+}
+function hasMalformedPercentEncoding(value) {
+  return /%(?![0-9A-Fa-f]{2})/u.test(value);
+}
 function canonicalQueryComponent(value) {
-  return canonicalUriComponent(value, false);
+  return canonicalUriComponent(value);
 }
 function compareCodepoint(left, right) {
-  if (left < right)
+  if (left < right) {
     return -1;
-  if (left > right)
+  }
+  if (left > right) {
     return 1;
+  }
   return 0;
 }
 function encodeRfc3986(value) {
   return value.replace(RFC3986_EXTRA_ESCAPE_RE, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 }
-function canonicalPathname(pathname) {
-  return canonicalUriComponent(pathname, true);
+function strictEncode(value) {
+  try {
+    return encodeRfc3986(encodeURIComponent(value));
+  } catch (err) {
+    if (err instanceof URIError) {
+      throw new TypeError("url must not contain invalid UTF-16");
+    }
+    throw err;
+  }
 }
-function canonicalUriComponent(value, preserveSlash) {
+function canonicalSingleEncodedPathname(pathname) {
   let out = "";
-  for (let index = 0; index < value.length; ) {
-    const char = value[index];
-    if (preserveSlash && char === "/") {
+  for (let index = 0; index < pathname.length; ) {
+    const char = pathname[index];
+    if (char === "/") {
       out += "/";
       index += 1;
       continue;
     }
+    if (char === "%" && isHexPair(pathname, index + 1)) {
+      out += pathname.slice(index, index + 3);
+      index += 3;
+      continue;
+    }
+    const codePoint = pathname.codePointAt(index);
+    if (codePoint === void 0) {
+      break;
+    }
+    const charValue = String.fromCodePoint(codePoint);
+    out += strictEncode(charValue);
+    index += charValue.length;
+  }
+  return out;
+}
+function canonicalDoubleEncodedPathname(pathname) {
+  return strictEncode(pathname).replace(/%2F/gu, "/");
+}
+function collapsePathSlashes(pathname) {
+  return pathname.replace(/\/+/gu, "/");
+}
+function canonicalUriComponent(value) {
+  let out = "";
+  for (let index = 0; index < value.length; ) {
+    const char = value[index];
     if (char === "%" && isHexPair(value, index + 1)) {
       const hex2 = value.slice(index + 1, index + 3).toUpperCase();
       const byte = parseInt(hex2, 16);
@@ -731,17 +659,11 @@ function canonicalUriComponent(value, preserveSlash) {
       continue;
     }
     const codePoint = value.codePointAt(index);
-    if (codePoint === void 0)
+    if (codePoint === void 0) {
       break;
-    const charValue = String.fromCodePoint(codePoint);
-    try {
-      out += encodeRfc3986(encodeURIComponent(charValue));
-    } catch (err) {
-      if (err instanceof URIError) {
-        throw new TypeError("url must not contain invalid UTF-16");
-      }
-      throw err;
     }
+    const charValue = String.fromCodePoint(codePoint);
+    out += strictEncode(charValue);
     index += charValue.length;
   }
   return out;
@@ -752,122 +674,122 @@ function isHexPair(value, index) {
 function isUnreservedByte(byte) {
   return byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte >= 48 && byte <= 57 || byte === 45 || byte === 46 || byte === 95 || byte === 126;
 }
-async function canonicalPayloadHashValue(headers, body, unsignedPayload) {
-  const explicit = headers.get(AMZ_CONTENT_SHA256_HEADER);
-  if (explicit)
-    return explicit;
-  if (unsignedPayload)
-    return UNSIGNED_PAYLOAD;
-  return sha256Hex(body);
-}
-async function prepareBody(body, headers, materialize) {
-  if (body == null) {
-    return { body, bytes: new Uint8Array() };
+function mergeHeaders(base, override) {
+  const headers = new Headers(base);
+  if (override) {
+    new Headers(override).forEach((value, name) => {
+      headers.set(name, value);
+    });
   }
-  if (body instanceof FormData) {
-    rejectManualFormDataContentType(headers);
-    const request = new Request("https://aws-sigv4.invalid/", { method: "POST", body });
-    const contentType = request.headers.get(CONTENT_TYPE_HEADER);
-    if (contentType)
-      headers.set(CONTENT_TYPE_HEADER, contentType);
-    const bytes2 = new Uint8Array(await request.arrayBuffer());
-    return { body: bytes2, bytes: bytes2 };
-  }
-  setGeneratedContentType(body, headers);
-  if (!materialize) {
-    return { body, bytes: new Uint8Array() };
-  }
-  if (body instanceof ReadableStream) {
-    const bytes2 = new Uint8Array(await new Response(body).arrayBuffer());
-    return { body: bytes2, bytes: bytes2 };
-  }
-  const bytes = await bodyBytes(body);
-  return { body, bytes };
+  return headers;
 }
-function rejectManualFormDataContentType(headers) {
-  if (headers.has(CONTENT_TYPE_HEADER)) {
-    throw new TypeError("FormData content-type must be generated by the runtime");
-  }
-}
-function setGeneratedContentType(body, headers) {
-  if (headers.has(CONTENT_TYPE_HEADER))
-    return;
-  if (typeof body === "string") {
-    headers.set(CONTENT_TYPE_HEADER, "text/plain;charset=UTF-8");
-  } else if (body instanceof URLSearchParams) {
-    headers.set(CONTENT_TYPE_HEADER, "application/x-www-form-urlencoded;charset=UTF-8");
-  } else if (body instanceof Blob && body.type) {
-    headers.set(CONTENT_TYPE_HEADER, body.type);
-  }
-}
-async function bodyBytes(body) {
-  if (typeof body === "string")
-    return textEncoder.encode(body);
-  if (body instanceof Uint8Array)
-    return body;
-  if (body instanceof ArrayBuffer)
-    return new Uint8Array(body);
-  if (ArrayBuffer.isView(body))
-    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
-  if (body instanceof URLSearchParams)
-    return textEncoder.encode(body.toString());
-  if (body instanceof Blob)
-    return new Uint8Array(await body.arrayBuffer());
-  throw new TypeError("body must be a string, Blob, URLSearchParams, ArrayBuffer, or ArrayBufferView");
-}
-async function signatureHex(options) {
-  const secretAccessKeyHash = options.secretAccessKeyHash ?? await sha256Hex(options.secretAccessKey);
-  const cacheKey = ["sigv4", secretAccessKeyHash, options.date, options.region, options.service].join(",");
-  let signingKey = options.cache?.get(cacheKey);
-  if (!signingKey) {
-    const kDate = await hmac(`AWS4${options.secretAccessKey}`, options.date);
-    const kRegion = await hmac(kDate, options.region);
-    const kService = await hmac(kRegion, options.service);
-    signingKey = await hmac(kService, AWS_REQUEST);
-    options.cache?.set(cacheKey, signingKey);
-  }
-  return hex(await hmac(signingKey, options.stringToSign));
-}
-async function sha256Hex(value) {
-  const bytes = cryptoBufferSource(value);
-  return hex(await crypto.subtle.digest("SHA-256", bytes));
-}
-function cryptoBufferSource(value) {
-  if (typeof value === "string")
-    return textEncoder.encode(value);
-  if (value instanceof ArrayBuffer)
-    return value;
-  if (ArrayBuffer.isView(value) && value.buffer instanceof ArrayBuffer) {
-    return value;
-  }
-  return new Uint8Array(value);
-}
-async function hmac(key, value) {
-  const cryptoKey = await crypto.subtle.importKey("raw", typeof key === "string" ? textEncoder.encode(key) : key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return crypto.subtle.sign("HMAC", cryptoKey, textEncoder.encode(value));
-}
-function hex(input) {
-  const bytes = new Uint8Array(input);
-  let out = "";
-  for (const byte of bytes) {
-    out += hexNibble(byte >>> 4);
-    out += hexNibble(byte & 15);
+function mergeDefinedRequestInit(base, override) {
+  const out = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    if (value !== void 0) {
+      out[key] = value;
+    }
   }
   return out;
 }
-function hexNibble(value) {
-  return LOWER_HEX.charAt(value);
+function rejectEmptyHeader(headers, name) {
+  if (headers.get(name) === "") {
+    throw new TypeError(`${name} must not be empty`);
+  }
+}
+function requestInitFromRequest(request) {
+  const init = {
+    cache: request.cache,
+    credentials: request.credentials,
+    integrity: request.integrity,
+    keepalive: request.keepalive,
+    mode: request.mode,
+    redirect: request.redirect,
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+    signal: request.signal,
+    window: null
+  };
+  const duplex = request.duplex;
+  if (duplex === "half") {
+    return { ...init, duplex };
+  }
+  return init;
+}
+function requestBodyForInput(input, init) {
+  if (init.body !== void 0) {
+    return init.body;
+  }
+  return input instanceof Request ? input.body : void 0;
+}
+function methodForRequest(input, init) {
+  if (init.method !== void 0) {
+    return normalizeMethod(init.method);
+  }
+  if (input instanceof Request) {
+    return normalizeMethod(input.method);
+  }
+  return defaultMethod(init.body);
+}
+function defaultMethod(body) {
+  return hasRequestBody(body) ? "POST" : "GET";
+}
+function normalizeMethod(method) {
+  if (typeof method !== "string" || !HTTP_METHOD_RE.test(method)) {
+    throw new TypeError("method must be a valid HTTP token");
+  }
+  return method.toUpperCase();
+}
+function isIdempotentMethod(method) {
+  return IDEMPOTENT_METHODS.has(method);
+}
+function rejectRequestBodyForGetHead(method, body) {
+  if ((method === "GET" || method === "HEAD") && hasRequestBody(body)) {
+    throw new TypeError("GET and HEAD requests with a body require signAwsRequest");
+  }
+}
+function hasRequestBody(body) {
+  return body !== void 0 && body !== null;
+}
+function assertRequestCanRepresentSignedUrl(url, service) {
+  assertParsedRequestCanRepresentSignedUrl(parseRequestUrl(url).pathname, service);
+}
+function assertParsedRequestCanRepresentSignedUrl(pathname, service) {
+  if (hasDotPathSegment(pathname)) {
+    throw new TypeError(`SigV4Client cannot represent ${service} URLs with dot segments; use signAwsRequest`);
+  }
+}
+function requestInitForSignedRequest(base, signed) {
+  const out = {
+    ...base,
+    method: signed.method,
+    headers: signed.headers
+  };
+  if (signed.body !== void 0) {
+    out.body = signed.body;
+  }
+  return out;
+}
+function bindFetch(fetchFn) {
+  return Object.is(fetchFn, globalThis.fetch) ? fetchFn.bind(globalThis) : fetchFn;
+}
+function isAbortError(err, request) {
+  return request.signal.aborted || err instanceof DOMException && err.name === "AbortError";
 }
 function sleep(ms, signal) {
   if (!signal) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
-  if (signal.aborted)
+  if (signal.aborted) {
     return Promise.reject(abortReason(signal));
+  }
   return new Promise((resolve, reject) => {
     let timeout;
     const onAbort = () => {
-      clearTimeout(timeout);
+      if (timeout !== void 0) {
+        clearTimeout(timeout);
+      }
+      signal.removeEventListener("abort", onAbort);
       reject(abortReason(signal));
     };
     signal.addEventListener("abort", onAbort, { once: true });
@@ -885,6 +807,284 @@ async function cancelResponseBody(response) {
     await response.body?.cancel();
   } catch {
   }
+}
+async function signAwsRequest(options) {
+  return signAwsRequestInternal(options);
+}
+async function signAwsRequestInternal(options, secretAccessKeyHash, parsedRequestUrl) {
+  validateCredentialOptions(options, "signAwsRequest options are required");
+  const cache = requireSigningCache(options.cache, "cache");
+  requireDefinedOption(options.url, "url");
+  const requestUrl = parsedRequestUrl ?? parseRequestUrl(options.url);
+  const url = requestUrl.url;
+  const method = normalizeMethod(options.method === void 0 ? defaultMethod(options.body) : options.method);
+  const headers = new Headers(options.headers || {});
+  rejectEmptyHeader(headers, AMZ_CONTENT_SHA256_HEADER);
+  const unsignedPayload = resolveUnsignedPayload(optionalBoolean(options.unsignedPayload, "unsignedPayload"), options.service);
+  const signAllHeaders = optionalBoolean(options.signAllHeaders, "signAllHeaders");
+  const unsignableHeaders = snapshotUnsignableHeaders(options, options.unsignableHeaders, "unsignableHeaders");
+  const doubleUrlEncode = optionalBoolean(options.doubleUrlEncode, "doubleUrlEncode") ?? false;
+  if (unsignedPayload && !headers.has(AMZ_CONTENT_SHA256_HEADER)) {
+    headers.set(AMZ_CONTENT_SHA256_HEADER, UNSIGNED_PAYLOAD);
+  }
+  const explicitAmzDate = optionalAmzDate(options.signingDate);
+  headers.set(HOST_HEADER, url.host);
+  if (options.sessionToken) {
+    headers.set(AMZ_SECURITY_TOKEN_HEADER, options.sessionToken);
+  }
+  validateSignedHeaderValues(headers, {
+    signAllHeaders,
+    unsignableHeaders,
+    overwrittenHeaderNames: signerOverwrittenHeaderNames(options.sessionToken !== void 0)
+  });
+  const canonicalPath = canonicalPathname(requestUrl.pathname, options.service, doubleUrlEncode);
+  const preparedBody = await prepareHashedBody(options.body, headers, unsignedPayload);
+  const amzDate = explicitAmzDate ?? formatAmzDate(/* @__PURE__ */ new Date());
+  const date = amzDate.slice(0, 8);
+  const credentialScope = `${date}/${options.region}/${options.service}/${AWS_REQUEST}`;
+  headers.set(AMZ_DATE_HEADER, amzDate);
+  const canonicalPayloadHash = await canonicalPayloadHashValue(headers, preparedBody.bytes);
+  if (options.service === "s3" && !headers.has(AMZ_CONTENT_SHA256_HEADER)) {
+    headers.set(AMZ_CONTENT_SHA256_HEADER, canonicalPayloadHash);
+  }
+  const { canonicalHeaders, signedHeaders } = canonicalHeaderBlock(url, headers, {
+    signAllHeaders,
+    unsignableHeaders
+  });
+  const canonicalRequest = [
+    method,
+    canonicalPath,
+    canonicalQuery(requestUrl.search),
+    `${canonicalHeaders}
+`,
+    signedHeaders,
+    canonicalPayloadHash
+  ].join("\n");
+  const stringToSign = [AWS_ALGORITHM, amzDate, credentialScope, await sha256Hex(canonicalRequest)].join("\n");
+  const signature = await signatureHex({
+    secretAccessKey: options.secretAccessKey,
+    secretAccessKeyHash,
+    date,
+    region: options.region,
+    service: options.service,
+    stringToSign,
+    cache
+  });
+  headers.set(AUTHORIZATION_HEADER, [
+    `${AWS_ALGORITHM} Credential=${options.accessKeyId}/${credentialScope}`,
+    `SignedHeaders=${signedHeaders}`,
+    `Signature=${signature}`
+  ].join(", "));
+  return {
+    method,
+    url: requestUrl.href,
+    headers,
+    body: preparedBody.body
+  };
+}
+async function canonicalPayloadHashValue(headers, body) {
+  const explicit = headers.get(AMZ_CONTENT_SHA256_HEADER);
+  if (explicit) {
+    return explicit;
+  }
+  return sha256Hex(body);
+}
+var MAX_RETRY_DELAY_MS = 2147483647;
+var SigV4Client = class {
+  accessKeyId;
+  secretAccessKey;
+  secretAccessKeyHash;
+  sessionToken;
+  service;
+  region;
+  cache;
+  retries;
+  initialRetryDelayMs;
+  maxRetryDelayMs;
+  unsignedPayload;
+  signAllHeaders;
+  unsignableHeaders;
+  doubleUrlEncode;
+  fetchFn;
+  constructor(options) {
+    validateCredentialOptions(options, "SigV4Client options are required");
+    this.accessKeyId = options.accessKeyId;
+    this.secretAccessKey = options.secretAccessKey;
+    this.sessionToken = options.sessionToken;
+    this.service = options.service;
+    this.region = options.region;
+    this.cache = requireSigningCache(options.cache, "cache") ?? /* @__PURE__ */ new Map();
+    this.retries = requireNonNegativeInteger(options.retries ?? 0, "retries");
+    this.initialRetryDelayMs = requireNonNegativeFiniteNumber(options.initialRetryDelayMs ?? 50, "initialRetryDelayMs");
+    this.maxRetryDelayMs = requireNonNegativeFiniteNumber(options.maxRetryDelayMs ?? 5e3, "maxRetryDelayMs");
+    this.unsignedPayload = optionalBoolean(options.unsignedPayload, "unsignedPayload");
+    this.signAllHeaders = optionalBoolean(options.signAllHeaders, "signAllHeaders");
+    this.unsignableHeaders = normalizeUnsignableHeaders(options.unsignableHeaders, "unsignableHeaders");
+    this.doubleUrlEncode = optionalBoolean(options.doubleUrlEncode, "doubleUrlEncode");
+    const fetchFn = options.fetch === void 0 ? globalThis.fetch : options.fetch;
+    if (typeof fetchFn !== "function") {
+      throw new TypeError(options.fetch === void 0 ? "fetch is not available" : "fetch must be a function");
+    }
+    this.fetchFn = bindFetch(fetchFn);
+  }
+  async sign(input, init = {}) {
+    const requestInit = input instanceof Request ? mergeDefinedRequestInit(requestInitFromRequest(input), init) : { ...init };
+    const signingOptions = normalizeClientSigningOptions(requestInit.signing);
+    delete requestInit.signing;
+    let url;
+    let method = requestInit.method;
+    let headers = requestInit.headers;
+    let body = requestInit.body;
+    if (input instanceof Request) {
+      url = input.url;
+      if (method === void 0) {
+        method = input.method;
+      }
+      headers = mergeHeaders(input.headers, headers);
+      if (body === void 0 && input.body) {
+        body = input.clone().body;
+      }
+    } else {
+      url = input;
+    }
+    const normalizedMethod = normalizeMethod(method === void 0 ? defaultMethod(body) : method);
+    rejectRequestBodyForGetHead(normalizedMethod, body);
+    const service = signingOptions.service ?? this.service;
+    const requestUrl = parseRequestUrl(url);
+    assertParsedRequestCanRepresentSignedUrl(requestUrl.pathname, service);
+    const signed = await signAwsRequestInternal({
+      accessKeyId: this.accessKeyId,
+      secretAccessKey: this.secretAccessKey,
+      sessionToken: this.sessionToken,
+      service,
+      region: signingOptions.region ?? this.region,
+      cache: this.cache,
+      unsignedPayload: signingOptions.unsignedPayload ?? this.unsignedPayload,
+      signAllHeaders: signingOptions.signAllHeaders ?? this.signAllHeaders,
+      unsignableHeaders: signingOptions.unsignableHeaders ?? this.unsignableHeaders,
+      doubleUrlEncode: signingOptions.doubleUrlEncode ?? this.doubleUrlEncode,
+      signingDate: signingOptions.signingDate,
+      method: normalizedMethod,
+      url,
+      headers,
+      body
+    }, await this.getSecretAccessKeyHash(), requestUrl);
+    assertRequestCanRepresentSignedUrl(signed.url, service);
+    const signedInit = requestInitForSignedRequest(requestInit, signed);
+    try {
+      return new Request(signed.url, signedInit);
+    } catch (err) {
+      if (err instanceof TypeError) {
+        return new Request(signed.url, {
+          ...signedInit,
+          duplex: "half"
+        });
+      }
+      throw err;
+    }
+  }
+  async fetch(input, init = {}) {
+    const requestInit = {
+      ...init,
+      signing: normalizeClientSigningOptions(init.signing)
+    };
+    const method = methodForRequest(input, requestInit);
+    rejectRequestBodyForGetHead(method, requestBodyForInput(input, requestInit));
+    const service = requestInit.signing.service ?? this.service;
+    assertRequestCanRepresentSignedUrl(input instanceof Request ? input.url : input, service);
+    const replayBody = this.retries > 0 && isIdempotentMethod(method);
+    const retryInit = await reusableRequestInitForInput(input, requestInit, {
+      defaultService: this.service,
+      defaultUnsignedPayload: this.unsignedPayload,
+      defaultSignAllHeaders: this.signAllHeaders,
+      defaultUnsignableHeaders: this.unsignableHeaders,
+      hasClientSessionToken: this.sessionToken !== void 0,
+      replayBody
+    });
+    for (let attempt = 0; attempt <= this.retries; attempt += 1) {
+      const fetchFn = this.fetchFn;
+      const request = await this.sign(input, retryInit);
+      let response;
+      try {
+        response = await fetchFn(request);
+      } catch (err) {
+        if (attempt === this.retries || !isIdempotentMethod(request.method) || isAbortError(err, request)) {
+          throw err;
+        }
+        await sleep(Math.random() * this.retryDelayMs(attempt), request.signal);
+        continue;
+      }
+      const retryableResponse = isIdempotentMethod(request.method) && (response.status >= 500 || response.status === 429);
+      if (attempt === this.retries || !retryableResponse) {
+        return response;
+      }
+      await cancelResponseBody(response);
+      if (request.signal.aborted) {
+        throw abortReason(request.signal);
+      }
+      await sleep(Math.random() * this.retryDelayMs(attempt), request.signal);
+    }
+    throw new Error("unreachable retry loop exit");
+  }
+  getSecretAccessKeyHash() {
+    if (this.secretAccessKeyHash !== void 0) {
+      return this.secretAccessKeyHash;
+    }
+    const hash = sha256Hex(this.secretAccessKey).catch((err) => {
+      if (this.secretAccessKeyHash === hash) {
+        this.secretAccessKeyHash = void 0;
+      }
+      throw err;
+    });
+    this.secretAccessKeyHash = hash;
+    return hash;
+  }
+  retryDelayMs(attempt) {
+    return Math.min(MAX_RETRY_DELAY_MS, this.maxRetryDelayMs, this.initialRetryDelayMs * 2 ** attempt);
+  }
+};
+async function reusableRequestInitForInput(input, init, options) {
+  if (!(input instanceof Request)) {
+    return reusableRequestInit(init, options);
+  }
+  const inputInit = {
+    ...init,
+    method: init.method ?? input.method,
+    headers: mergeHeaders(input.headers, init.headers)
+  };
+  if (init.body === void 0 && input.body) {
+    inputInit.body = input.clone().body;
+  }
+  return reusableRequestInit(inputInit, options);
+}
+async function reusableRequestInit(init, options) {
+  const headers = new Headers(init.headers || {});
+  rejectEmptyHeader(headers, AMZ_CONTENT_SHA256_HEADER);
+  const service = init.signing?.service ?? options.defaultService;
+  const unsignedPayload = resolveUnsignedPayload(init.signing?.unsignedPayload ?? options.defaultUnsignedPayload, service);
+  const unsignableHeaders = init.signing?.unsignableHeaders ?? options.defaultUnsignableHeaders;
+  validateSignedHeaderValues(headers, {
+    signAllHeaders: init.signing?.signAllHeaders ?? options.defaultSignAllHeaders,
+    unsignableHeaders,
+    overwrittenHeaderNames: signerOverwrittenHeaderNames(options.hasClientSessionToken)
+  });
+  const materializeBody = options.replayBody && (init.body instanceof FormData || init.body instanceof ReadableStream);
+  const hashPayload = shouldHashPayload(init.body, headers, unsignedPayload);
+  if (!materializeBody && !hashPayload) {
+    return {
+      ...init,
+      headers
+    };
+  }
+  const body = await prepareHashedBody(init.body, headers, unsignedPayload, materializeBody);
+  const out = {
+    ...init,
+    headers
+  };
+  if (body.body !== void 0) {
+    out.body = body.body;
+  }
+  return out;
 }
 export {
   SigV4Client,

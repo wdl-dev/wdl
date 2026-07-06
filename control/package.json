@@ -5,7 +5,7 @@
   "author": "Sean Consulting OÜ",
   "type": "module",
   "dependencies": {
-    "@wdl-dev/aws-sigv4": "^1.0.0",
+    "@wdl-dev/aws-sigv4": "^2.0.0",
     "croner": "^10.0.1"
   }
 }
