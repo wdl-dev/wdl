@@ -48,7 +48,9 @@ import {
   decryptSecretHash,
 } from "control-env-budget";
 import {
+  WorkerCodeBudgetError,
   WORKER_LOADER_CODE_MAX_BYTES,
+  assertWorkerLoaderCodeBudget,
   estimatePreparedWorkerLoaderCodeBytes,
 } from "control-worker-code-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
@@ -164,6 +166,9 @@ function validateWorkerLoaderCodeBudget({ prepared, ns, name }) {
   try {
     totalBytes = estimatePreparedWorkerLoaderCodeBytes(prepared);
   } catch (err) {
+    if (err instanceof WorkerCodeBudgetError) {
+      throw new DeployRequestError(err.status, err.code, err.message);
+    }
     throw invalidDeployRequest(errMessage(err));
   }
   if (totalBytes > WORKER_LOADER_CODE_MAX_BYTES) {
@@ -730,6 +735,7 @@ async function commitPreparedDeploy({
       return { response: controlAbortResponse(err, warnings.length ? { warnings } : {}) };
     }
     if (err instanceof WorkerEnvBudgetError) return { response: codedErrorResponse(err, err.code) };
+    if (err instanceof WorkerCodeBudgetError) return { response: codedErrorResponse(err, err.code) };
     if (err instanceof SecretEnvelopeError) return { response: jsonError(503, err.code, err.message) };
     throw err;
   }
@@ -933,6 +939,13 @@ export async function commitWithWatch({
       name,
       prepared,
       resolvedD1Refs,
+    });
+    assertWorkerLoaderCodeBudget({
+      ns,
+      worker: name,
+      version,
+      meta: committedMeta,
+      normalized: prepared.normalized,
     });
     if (controlEnv) {
       await validateCommittedEnvBudget({

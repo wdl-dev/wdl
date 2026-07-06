@@ -44,7 +44,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `control/routing.js`, `control/routing/route-plan.js` | Promote, secret bump/promote, host reconcile WATCH/MULTI loops, and pure route/pattern planning helpers. |
 | `control/lifecycle-indexes.js` | Redis mutation helpers for worker lifecycle, cron, queue consumer, and referrer indexes. |
 | `control/env-budget.js` | Control-plane estimate of workerd `workerLoader` env size for deploy and secret mutation guards. |
-| `control/worker-code-budget.js` | Control-plane final WorkerCode size estimate for deploy guards, sharing runtime wrapper/module injection rules. |
+| `control/worker-code-budget.js` | Control-plane final WorkerCode size estimate for deploy guards, sharing runtime and do-runtime wrapper/module injection rules. |
 | `control/d1-*` | D1 control metadata, store, lifecycle, migration, and d1-runtime client modules. |
 | `control/r2.js` | Control-plane R2 bucket/object API client for the configured S3-compatible store. |
 | `control/s3.js` | S3-compatible ASSETS upload helper. |
@@ -106,7 +106,6 @@ are outside this map unless they own runtime or deployable service behavior.
 | `scripts/run-integration-tests.js` | Integration worker-pool runner. |
 | `scripts/compile-workerd-configs.js` | Compiles workerd Cap'n Proto configs into `dist/workerd-configs/*.bin`. |
 | `scripts/extract-workerd-experimental-compat-flags.mjs` | Pin-bump flag extractor. |
-| `scripts/scan-workerd-0701-metadata.mjs` | Read-only Redis metadata scanner for rollout checks before the workerd 2026-07-01 adaptation: reports retained versions with missing metadata, experimental flags, Python modules, or oversized estimated env. |
 
 ## Infrastructure
 

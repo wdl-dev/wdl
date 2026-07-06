@@ -317,7 +317,7 @@ export function injectRuntimeModulesForHostBindings(
   rewriteCloudflareWorkflowsImports(workerCode);
   if (
     HOST_BINDING_RESERVED_MODULES.has(originalMain) ||
-    [...HOST_BINDING_RESERVED_MODULES].some((name) => workerCode.modules[name])
+    [...HOST_BINDING_RESERVED_MODULES].some((name) => Object.hasOwn(workerCode.modules, name))
   ) {
     throw new Error(
       `Host binding wrapper requires reserved module names ${HOST_BINDING_RESERVED_MODULE_NAMES.join(", ")}`
@@ -351,7 +351,7 @@ export function estimateFinalWorkerLoaderCodeBytes({ mainModule, normalized, met
   const userModuleBytes = new Map();
   for (const [name, body] of normalized) {
     const type = moduleType(meta.modules, name);
-    if (type === "module" || type === "cjs") {
+    if (type === "module") {
       jsModules[name] = typeof body === "string" ? body : new TextDecoder().decode(body);
     } else {
       userModuleBytes.set(name, moduleBodyByteLength(body));

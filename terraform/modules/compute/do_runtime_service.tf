@@ -24,11 +24,12 @@ resource "aws_ecs_task_definition" "do_runtime" {
 
   container_definitions = jsonencode([
     {
-      name        = "redis-proxy"
-      image       = var.rust_image
-      essential   = true
-      command     = ["/redis-proxy"]
-      stopTimeout = 20
+      name              = "redis-proxy"
+      image             = var.rust_image
+      essential         = true
+      command           = ["/redis-proxy"]
+      memoryReservation = local.redis_proxy_memory_reservation
+      stopTimeout       = 20
 
       environment = local.redis_proxy_env
 
@@ -106,8 +107,11 @@ resource "aws_ecs_task_definition" "do_runtime" {
 
   lifecycle {
     precondition {
-      condition     = local.do_runtime_container_memory > 0 && local.do_runtime_container_memory < var.runtime_memory
-      error_message = "do_runtime_container_memory must leave positive task-level memory headroom for the redis-proxy sidecar."
+      condition = (
+        local.do_runtime_container_memory > 0 &&
+        local.do_runtime_container_memory <= var.runtime_memory - local.redis_proxy_memory_reservation - local.stateful_runtime_memory_headroom
+      )
+      error_message = "do_runtime_container_memory must leave task-level memory reservation for the redis-proxy sidecar and additional task headroom."
     }
 
     precondition {

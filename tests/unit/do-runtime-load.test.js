@@ -58,6 +58,7 @@ export function logStructured(_service, _level, _event, fields = {}) {
 }
 `);
 const alarmShimSourceUrl = repositoryFileUrl("do-runtime/alarm-shim-source.js");
+const doRuntimeLoadCodeBudgetUrl = repositoryFileUrl("do-runtime/load-code-budget.js");
 const sharedInternalAuthUrlForTest = sharedInternalAuthUrl();
 const sharedRespondUrlForTest = repositoryFileUrl("shared/respond.js");
 
@@ -69,6 +70,7 @@ const src = applyModuleReplacements(readRepositoryFile("do-runtime/load.js"), [
   [/from "shared-internal-auth";/, `from ${JSON.stringify(sharedInternalAuthUrlForTest)};`],
   [/from "shared-respond";/, `from ${JSON.stringify(sharedRespondUrlForTest)};`],
   [/from "do-runtime-alarm-shim-source";/, `from ${JSON.stringify(alarmShimSourceUrl)};`],
+  [/from "do-runtime-load-code-budget";/, `from ${JSON.stringify(doRuntimeLoadCodeBudgetUrl)};`],
 ]);
 
 const mod = await import(moduleDataUrl(src));

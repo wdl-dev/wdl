@@ -1,14 +1,15 @@
 locals {
-  redis_addr                     = "${var.valkey_host}:${var.valkey_port}"
-  data_redis_url                 = "redis://${local.redis_addr}/1"
-  do_redis_proxy_memory_headroom = 128
+  redis_addr                       = "${var.valkey_host}:${var.valkey_port}"
+  data_redis_url                   = "redis://${local.redis_addr}/1"
+  stateful_runtime_memory_headroom = 128
+  redis_proxy_memory_reservation   = 128
   d1_runtime_container_memory = coalesce(
     var.d1_runtime_container_memory,
-    var.runtime_memory,
+    var.runtime_memory - local.stateful_runtime_memory_headroom,
   )
   do_runtime_container_memory = coalesce(
     var.do_runtime_container_memory,
-    var.runtime_memory - local.do_redis_proxy_memory_headroom,
+    var.runtime_memory - local.redis_proxy_memory_reservation - local.stateful_runtime_memory_headroom,
   )
 
   # PLATFORM_DOMAIN is the base hostname gateway uses to split ns from host

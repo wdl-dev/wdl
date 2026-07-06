@@ -41,7 +41,6 @@ function namespaceSecretMutationErrorResponse(err) {
  *   controlEnv: Record<string, string | undefined>,
  *   nsName: string,
  *   nsSecrets: Record<string, string>,
- *   ignoreWorkerSecretEnvelopeErrors?: boolean,
  * }} args
  */
 async function validateNamespaceSecretBudget({
@@ -49,7 +48,6 @@ async function validateNamespaceSecretBudget({
   controlEnv,
   nsName,
   nsSecrets,
-  ignoreWorkerSecretEnvelopeErrors = false,
 }) {
   const activeRoutes = await redis.hGetAll(routesKey(nsName));
   const indexedWorkers = await redis.sMembers(workersIndexKey(nsName));
@@ -76,7 +74,6 @@ async function validateNamespaceSecretBudget({
       encrypted: workerEncrypted,
       env: controlEnv,
       hashKey: workerSecretsKey,
-      ignoreSecretEnvelopeErrors: ignoreWorkerSecretEnvelopeErrors,
     });
     await assertWorkerVersionsUserEnvBudget({
       redis,
@@ -136,7 +133,6 @@ async function mutateNamespaceSecret({
       encrypted: budgetEncrypted,
       env: controlEnv,
       hashKey: nsSecretsKey,
-      ignoreSecretEnvelopeErrors: method === "DELETE",
     });
     if (method === "PUT") {
       if (typeof encrypted !== "string") throw new Error("PUT namespace secret encrypted value missing");
@@ -151,7 +147,6 @@ async function mutateNamespaceSecret({
       controlEnv,
       nsName,
       nsSecrets,
-      ignoreWorkerSecretEnvelopeErrors: method === "DELETE",
     });
 
     const multi = iso.multi();

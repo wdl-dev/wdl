@@ -11,11 +11,13 @@ import { formatError, logStructured } from "shared-observability";
 import { withInternalAuth } from "shared-internal-auth";
 import { discardResponseBody } from "shared-respond";
 import { DO_ALARM_SHIM_SOURCE } from "do-runtime-alarm-shim-source";
+import {
+  DO_RUNTIME_RESERVED_MODULE,
+  doRuntimeInjectedModuleSources,
+} from "do-runtime-load-code-budget";
 
 const REDIS_PROXY_LOAD_TIMEOUT_MS = 5000;
 const REDIS_PROXY_LOAD_RETRIES = 3;
-const DO_RUNTIME_RESERVED_MODULE = "_wdl-do-runtime-wrapper.js";
-const DO_ALARM_SHIM_MODULE = "_wdl-do-alarm-shim.js";
 const NATIVE_DELETE_ALL_DELETES_ALARM_FLAG = "delete_all_deletes_alarm";
 const NATIVE_DELETE_ALL_PRESERVES_ALARM_FLAG = "delete_all_preserves_alarm";
 
@@ -134,53 +136,19 @@ export async function loadViaProxy(env, invoke, requestId = null) {
   throw lastErr;
 }
 
-/** @param {WorkerMeta} meta */
-function doClassNames(meta) {
-  /** @type {Set<string>} */
-  const out = new Set();
-  for (const spec of Object.values(meta.bindings || {})) {
-    if (spec?.type === "do" && typeof spec.className === "string" && spec.className) {
-      out.add(spec.className);
-    }
-  }
-  return [...out];
-}
-
-/**
- * @param {string} userMainSpecifier
- * @param {string[]} classNames
- */
-function generateDoRuntimeWrapperModule(userMainSpecifier, classNames) {
-  const userMain = JSON.stringify(`./${userMainSpecifier}`);
-  const alarmShim = JSON.stringify(`./${DO_ALARM_SHIM_MODULE}`);
-  const wrappedClasses = classNames.map((name) => `
-export class ${name} extends wrapDurableObjectClass(user.${name}, ${JSON.stringify(name)}) {}
-`).join("");
-  return `
-import * as user from ${userMain};
-export * from ${userMain};
-
-import { wrapDurableObjectClass } from ${alarmShim};
-
-${wrappedClasses}
-`;
-}
-
 /**
  * @param {WorkerCode} workerCode
  * @param {WorkerMeta} meta
  */
 function wrapWorkerCodeForDoRuntime(workerCode, meta) {
-  const classNames = doClassNames(meta);
-  if (!classNames.length) return workerCode;
   const originalMain = workerCode.mainModule;
-  const reserved = [DO_RUNTIME_RESERVED_MODULE, DO_ALARM_SHIM_MODULE];
-  const collision = reserved.find((name) => workerCode.modules[name]);
+  const injections = doRuntimeInjectedModuleSources(originalMain, meta, DO_ALARM_SHIM_SOURCE);
+  if (!injections.length) return workerCode;
+  const collision = injections.find(([moduleName]) => Object.hasOwn(workerCode.modules, moduleName));
   if (collision) {
-    throw new DoRuntimeError(400, "reserved_module_name", `do-runtime requires reserved module name ${collision}`);
+    throw new DoRuntimeError(400, "reserved_module_name", `do-runtime requires reserved module name ${collision[0]}`);
   }
-  workerCode.modules[DO_ALARM_SHIM_MODULE] = DO_ALARM_SHIM_SOURCE;
-  workerCode.modules[DO_RUNTIME_RESERVED_MODULE] = generateDoRuntimeWrapperModule(originalMain, classNames);
+  for (const [moduleName, source] of injections) workerCode.modules[moduleName] = source;
   workerCode.mainModule = DO_RUNTIME_RESERVED_MODULE;
   return workerCode;
 }

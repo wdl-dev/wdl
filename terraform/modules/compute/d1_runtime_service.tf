@@ -78,9 +78,9 @@ resource "aws_ecs_task_definition" "d1_runtime" {
     precondition {
       condition = (
         local.d1_runtime_container_memory > 0 &&
-        local.d1_runtime_container_memory <= var.runtime_memory
+        local.d1_runtime_container_memory <= var.runtime_memory - local.stateful_runtime_memory_headroom
       )
-      error_message = "d1_runtime_container_memory must be positive and no greater than runtime_memory."
+      error_message = "d1_runtime_container_memory must be positive and leave task-level memory headroom."
     }
 
     precondition {

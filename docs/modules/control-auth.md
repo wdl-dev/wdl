@@ -79,11 +79,12 @@ Control lifecycle operations are split so each critical transition has one autho
   allocates the next immutable version through `worker:<ns>:<worker>:next_version`,
   writes bundle metadata/modules/assets, then enters the same promote path used by
   explicit promotion. Before allocation, deploy estimates final WorkerCode under
-  workerd's 64 MiB limit, including runtime-injected wrapper/client modules and workflow
-  import rewrites, and runs an advisory pass over the candidate metadata and current
-  secret envelopes. The watched commit path is the authoritative headroomed
-  `workerLoader` env-budget check after version allocation and metadata materialization,
-  such as resolved D1 database ids, before writing the version.
+  workerd's 64 MiB limit, including runtime/do-runtime-injected wrapper/client modules
+  and workflow import rewrites, and runs an advisory pass over the candidate metadata
+  and current secret envelopes. The watched commit path is the authoritative code-budget
+  and headroomed `workerLoader` env-budget check after version allocation and metadata
+  materialization, such as resolved D1 database ids and workflow keys, before writing the
+  version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
@@ -94,13 +95,13 @@ Control lifecycle operations are split so each critical transition has one autho
   plaintext size and shape, encrypts it into a `WDL-ENC:` envelope before the Redis
   mutation/WATCH retry loop, and reuses the same envelope across retries. Runtime
   therefore sees a new immutable version id instead of mutable in-place secret changes.
-  Secret DELETE remains a repair surface: when estimating the post-delete env, it skips
-  corrupt envelopes in the other secret scope instead of letting an unrelated bad
-  namespace or worker secret block deletion. Secret PUT still fails closed on corrupt
-  retained envelopes.
-  Namespace-secret mutations WATCH the retained worker/version metadata they need to
-  re-estimate before commit; if concurrent metadata changes keep invalidating that view,
-  control returns `namespace_secret_mutation_contention`.
+  Secret DELETE removes the target field from the env estimate before decrypting the
+  remaining secret hashes, so deleting the corrupt target can still succeed. Any corrupt
+  remaining namespace or worker secret fails closed; direct Redis repair is not a
+  supported consistency path. Namespace-secret mutations WATCH the retained
+  worker/version metadata they need to re-estimate before commit; if concurrent metadata
+  changes keep invalidating that view, control returns
+  `namespace_secret_mutation_contention`.
 - Version delete and whole-worker delete are fail-closed. They collect blockers from
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.
@@ -262,16 +263,24 @@ Auth-specific contract:
 - Control 5xx responses use generic/safe messages. Internal exception text, auth Redis
   diagnostics, backend messages, and provider errors belong in logs unless the endpoint
   explicitly owns a diagnostic response field.
-- Deploy and secret mutations return `worker_code_too_large` when tenant module bodies
-  plus runtime-injected modules exceed workerd's 64 MiB dynamic code limit, and
-  `worker_env_too_large` when the estimated `workerLoader` env exceeds WDL's headroomed
-  1 MiB budget.
+- Deploy returns `worker_code_invalid` when final WorkerCode would collide with injected
+  WDL runtime/do-runtime reserved module names or lacks required bundle metadata, and
+  `worker_code_too_large` when final WorkerCode, including runtime/do-runtime-injected
+  modules and generated workflow keys, exceeds workerd's 64 MiB dynamic code limit.
+  Deploy and secret mutations return `worker_env_too_large` when the estimated
+  `workerLoader` env exceeds WDL's headroomed 1 MiB budget.
   `worker_env_too_large` details include `namespace`, optional `worker`, `env_bytes`,
   `max_env_bytes`, `upstream_max_env_bytes`, and `headroom_bytes`. When the blocker is an
   already-retained version being re-estimated during a secret mutation, details also
   include `source_version` and `estimated_version`, and the message identifies
   `<ns>/<worker>@<source_version>` so operators can find the retained version to delete
   or redeploy.
+- If a worker-secret PUT/DELETE has already committed but the follow-up version bump
+  fails an env budget check, Control attempts to roll the secret hash back before
+  returning the budget error. If that rollback cannot be confirmed, Control returns
+  `503 secret_mutation_rollback_failed` with the original `budget_error`; operators
+  must retry the mutation or repair the secret before rollout because the new secret
+  may already be persisted.
 - Control never calls gateway directly. It writes Redis and publishes invalidation
   messages.
 - Control encrypts secret PUT values before entering Redis mutation loops.

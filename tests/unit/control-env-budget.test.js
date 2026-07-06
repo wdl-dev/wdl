@@ -264,24 +264,34 @@ test("decryptSecretHash returns plaintext secret values for budget checks", asyn
   );
 });
 
-test("decryptSecretHash can ignore corrupt envelopes for DELETE repair budgets", async () => {
+test("decryptSecretHash fails closed on corrupt envelopes", async () => {
+  const hashKey = "secrets:demo";
+
+  await assert.rejects(
+    decryptSecretHash({
+      encrypted: { BAD: "WDL-ENC:not-json" },
+      env: envelopeEnv,
+      hashKey,
+    }),
+    /secret envelope JSON is invalid/
+  );
+});
+
+test("decryptSecretHash fails closed on unknown envelope kids", async () => {
   const hashKey = "secrets:demo";
   const encrypted = await encryptSecretValue("plain", {
-    env: envelopeEnv,
+    env: { ...envelopeEnv, SECRET_ENVELOPE_KID: "local:test:secret-envelope:v2" },
     hashKey,
     fieldName: "TOKEN",
   });
 
-  assert.deepEqual(
-    {
-      ...(await decryptSecretHash({
-        encrypted: { TOKEN: encrypted, BAD: "WDL-ENC:not-json" },
-        env: envelopeEnv,
-        hashKey,
-        ignoreSecretEnvelopeErrors: true,
-      })),
-    },
-    { TOKEN: "plain" }
+  await assert.rejects(
+    decryptSecretHash({
+      encrypted: { TOKEN: encrypted },
+      env: envelopeEnv,
+      hashKey,
+    }),
+    /secret envelope kid is not configured/
   );
 });
 

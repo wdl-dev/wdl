@@ -45,7 +45,7 @@ Node.js TLS 行为跟随 bundled workerd binary。升级到 workerd 2026-07-01 �
 | Service bindings | Supported | workerd service binding JSRPC 和 fetch dispatch。 | WDL 解析 target worker metadata，cold-load immutable version，在可用时传播 request id，并通过 control metadata 做 namespace/action ACL。 | Frozen-version service target 按设计不 evict active siblings。 | 当前无已记录缺口。 |
 | Platform bindings | Supported | workerd named entrypoint/JSRPC 机制。 | WDL 从 control metadata 展开 ACL-checked platform bindings。 | Platform bindings 是 WDL-specific。 | 不是 Cloudflare tenant portability feature。 |
 | Vars 和 secrets | Supported | Env values 可 materialize 到 worker `env`。 | Control 存 worker vars/secrets metadata，把 secret value 加密成 at-rest `WDL-ENC:` envelope；redis-proxy 在 cold-load 时解密；deploy/secret mutation 过程中按留有 headroom 的 workerd 1 MiB `workerLoader` serialized env budget 校验用户 vars/secrets 加 runtime 注入的 binding/workflow env value，并计入非 Latin-1 字符串的 V8 two-byte storage；worker secret 改变时 promote immutable version。 | Secrets 由 WDL 平台管理；at-rest envelope provider 是 WDL 部署关注点。 | 不是 Cloudflare account secrets。 |
-| Worker code size | Supported | Dynamic worker module bodies 可由 `workerLoader` 接受，直到 workerd 的 64 MiB 上限。 | Control 会在分配 version 前估算最终 WorkerCode，包含 runtime 注入的 wrapper/client modules 和 workflow import rewrite。 | WDL 的 deploy JSON body limit 对普通 inline deploy 更低。 | 大型 server-side bundle assembly 路径必须保留这道 guard。 |
+| Worker code size | Supported | Dynamic worker module bodies 可由 `workerLoader` 接受，直到 workerd 的 64 MiB 上限。 | Control 会在写入 deploy 产生的 version 前估算最终 WorkerCode，包含 runtime/do-runtime 注入的 wrapper/client modules、workflow import rewrite 和 materialized workflow keys。 | WDL 的 deploy JSON body limit 对普通 inline deploy 更低。 | 大型 server-side bundle assembly 路径必须保留这道 guard。 |
 
 ## 控制面和开发工具
 

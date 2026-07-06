@@ -409,7 +409,7 @@ test("namespace secret DELETE checks env revealed by removing a namespace secret
   }
 });
 
-test("namespace secret DELETE skips decrypting the removed corrupt envelope", async () => {
+test("namespace secret DELETE can remove a corrupt target envelope", async () => {
   const { state } = await import(controlSharedUrl);
   const original = {
     hGetAll: state.redis.hGetAll,
@@ -445,7 +445,7 @@ test("namespace secret DELETE skips decrypting the removed corrupt envelope", as
   }
 });
 
-test("namespace secret DELETE skips other corrupt namespace envelopes for repair", async () => {
+test("namespace secret DELETE fails closed on other corrupt namespace envelopes", async () => {
   const { state } = await import(controlSharedUrl);
   const original = {
     hGetAll: state.redis.hGetAll,
@@ -478,15 +478,61 @@ test("namespace secret DELETE skips other corrupt namespace envelopes for repair
       requestId: "rid-secret-delete-other-corrupt",
     });
 
-    assert.equal(response.status, 200);
-    assert.equal(state.redis.deletes.length, deletesBefore + 1);
-    assert.deepEqual(state.redis.deletes.at(-1), { key: "secrets:demo", field: "TOKEN" });
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "invalid_envelope");
+    assert.equal(state.redis.deletes.length, deletesBefore);
   } finally {
     Object.assign(state.redis, original);
   }
 });
 
-test("namespace secret DELETE skips corrupt worker envelopes for repair", async () => {
+test("namespace secret DELETE fails closed on unknown-kid namespace envelopes", async () => {
+  const { state } = await import(controlSharedUrl);
+  const original = {
+    hGetAll: state.redis.hGetAll,
+    sMembers: state.redis.sMembers,
+  };
+  const deletesBefore = state.redis.deletes.length;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo",
+    fieldName: "TOKEN",
+  });
+  const unknownKid = await encryptSecretValue("plain", {
+    env: { ...env, SECRET_ENVELOPE_KID: "local:test:secret-envelope:v2" },
+    hashKey: "secrets:demo",
+    fieldName: "BAD",
+  });
+  /** @param {string} key */
+  state.redis.hGetAll = async (key) => {
+    if (key === "secrets:demo") return { TOKEN: encrypted, BAD: unknownKid };
+    if (key === "routes:demo") return {};
+    return {};
+  };
+  /** @param {string} key */
+  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
+
+  try {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-delete-unknown-kid",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "unknown_kid");
+    assert.equal(state.redis.deletes.length, deletesBefore);
+  } finally {
+    Object.assign(state.redis, original);
+  }
+});
+
+test("namespace secret DELETE fails closed on corrupt worker envelopes", async () => {
   const { state } = await import(controlSharedUrl);
   const original = {
     hGetAll: state.redis.hGetAll,
@@ -522,9 +568,9 @@ test("namespace secret DELETE skips corrupt worker envelopes for repair", async 
       requestId: "rid-secret-delete-worker-corrupt",
     });
 
-    assert.equal(response.status, 200);
-    assert.equal(state.redis.deletes.length, deletesBefore + 1);
-    assert.deepEqual(state.redis.deletes.at(-1), { key: "secrets:demo", field: "TOKEN" });
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "invalid_envelope");
+    assert.equal(state.redis.deletes.length, deletesBefore);
   } finally {
     Object.assign(state.redis, original);
   }
@@ -637,7 +683,6 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
       iso,
       currentVersion,
       newVersion,
-      sourceMeta: {},
     });
     return { previousVersion: currentVersion, version: newVersion };
   });
@@ -865,6 +910,9 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
   const writesBefore = state.redis.writes.length;
   let sessionCalls = 0;
   let mutateExecCalled = false;
+  let rollbackDeleted = false;
+  /** @type {string | null} */
+  let appliedSecret = null;
   /** @param {(session: unknown) => Promise<unknown>} fn */
   state.redis.session = async (fn) => {
     sessionCalls += 1;
@@ -878,6 +926,7 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
       async hKeys() { return []; },
       /** @param {string} key @param {string} field */
       async hGet(key, field) {
+        if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
         if (key === "routes:demo" && field === "api") {
           return sessionCalls === 1 ? "v1" : "v2";
         }
@@ -891,7 +940,7 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
       },
       /** @param {string} key */
       async hGetAll(key) {
-        if (key === "secrets:demo:api") {
+        if (key === "secrets:demo:api" && sessionCalls > 1) {
           const written = state.redis.writes.at(-1);
           return written?.key === key ? { [written.field]: written.value } : {};
         }
@@ -903,9 +952,10 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
         return {
           /** @param {string} key @param {string} field @param {string} value */
           hSet(key, field, value) {
+            if (key === "secrets:demo:api" && field === "TOKEN") appliedSecret = value;
             state.redis.writes.push({ key, field, value });
           },
-          hDel() {},
+          hDel() { rollbackDeleted = true; },
           sAdd() {},
           sRem() {},
           async exec() { mutateExecCalled = true; },
@@ -928,21 +978,209 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
       requestId: "rid-worker-secret-bump-recheck",
     });
 
-    const body = await readJsonResponse(response, 200);
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_env_too_large");
     assert.equal(mutateExecCalled, true);
     assert.equal(state.redis.writes.length, writesBefore + 1);
-    assert.equal(body.secretWritten, true);
-    assert.equal(body.reloadForced, false);
-    assert.equal(body.warnings[0].kind, "promote_failed");
-    assert.match(body.warnings[0].reason, /workerLoader env/);
+    assert.equal(rollbackDeleted, true);
     assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
     assert.ok(state.redis.watchedKeys.includes("secrets:demo:api"));
+    assert.ok(state.redis.watchedKeys.includes("worker-delete-lock:demo:api"));
   } finally {
     state.redis.session = originalSession;
   }
 });
 
-test("worker secret DELETE skips decrypting the removed corrupt envelope", async () => {
+test("worker secret PUT reports budget rollback failure after the secret write", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const writesBefore = state.redis.writes.length;
+  let sessionCalls = 0;
+  let rollbackAttempted = false;
+  /** @type {string | null} */
+  let appliedSecret = null;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => {
+    sessionCalls += 1;
+    return await fn({
+      /** @param {...string} keys */
+      async watch(...keys) {
+        state.redis.watchedKeys.push(...keys);
+      },
+      async unwatch() {},
+      async get() { return null; },
+      async hKeys() { return []; },
+      /** @param {string} key @param {string} field */
+      async hGet(key, field) {
+        if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
+        if (key === "routes:demo" && field === "api") return sessionCalls === 1 ? "v1" : "v2";
+        if (key === "worker:demo:api:v:1" && field === "__meta__") {
+          return JSON.stringify({ vars: { SAFE: "ok" } });
+        }
+        if (key === "worker:demo:api:v:2" && field === "__meta__") {
+          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
+        }
+        return null;
+      },
+      /** @param {string} key */
+      async hGetAll(key) {
+        if (key === "secrets:demo:api" && sessionCalls > 1) {
+          const written = state.redis.writes.at(-1);
+          return written?.key === key ? { [written.field]: written.value } : {};
+        }
+        return {};
+      },
+      async zCard() { return 1; },
+      async zRange() { return []; },
+      multi() {
+        return {
+          /** @param {string} key @param {string} field @param {string} value */
+          hSet(key, field, value) {
+            if (key === "secrets:demo:api" && field === "TOKEN") appliedSecret = value;
+            state.redis.writes.push({ key, field, value });
+          },
+          hDel() { rollbackAttempted = true; },
+          sAdd() {},
+          sRem() {},
+          async exec() {
+            if (sessionCalls > 2) throw new Error("rollback write failed");
+          },
+        };
+      },
+    });
+  };
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-rollback-failed",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "secret_mutation_rollback_failed");
+    assert.equal(body.budget_error, "worker_env_too_large");
+    assert.equal(body.secretWritten, true);
+    assert.equal(body.rollbackConfirmed, false);
+    assert.equal(state.redis.writes.length, writesBefore + 1);
+    assert.equal(rollbackAttempted, true);
+    assert.equal(typeof appliedSecret, "string");
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret rollback does not restore old secrets after whole-worker delete", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const originalSession = state.redis.session;
+  const oldEncrypted = await encryptSecretValue("old-secret", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  let sessionCalls = 0;
+  let rollbackRestored = false;
+  let rollbackMadeVisible = false;
+  let deleteLockRead = false;
+  /** @type {string | null} */
+  let appliedSecret = null;
+  /** @param {(session: unknown) => Promise<unknown>} fn */
+  state.redis.session = async (fn) => {
+    sessionCalls += 1;
+    return await fn({
+      /** @param {...string} keys */
+      async watch(...keys) {
+        state.redis.watchedKeys.push(...keys);
+      },
+      async unwatch() {},
+      /** @param {string} key */
+      async get(key) {
+        if (key === "worker-delete-lock:demo:api") deleteLockRead = true;
+        return null;
+      },
+      async hKeys() { return sessionCalls > 2 ? ["TOKEN"] : []; },
+      /** @param {string} key @param {string} field */
+      async hGet(key, field) {
+        if (key === "secrets:demo:api" && field === "TOKEN") {
+          return sessionCalls === 1 ? oldEncrypted : appliedSecret;
+        }
+        if (key === "routes:demo" && field === "api") {
+          if (sessionCalls === 1) return "v1";
+          if (sessionCalls === 2) return "v2";
+          return null;
+        }
+        if (key === "worker:demo:api:v:1" && field === "__meta__") {
+          return JSON.stringify({ vars: { SAFE: "ok" } });
+        }
+        if (key === "worker:demo:api:v:2" && field === "__meta__") {
+          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
+        }
+        return null;
+      },
+      /** @param {string} key */
+      async hGetAll(key) {
+        if (key === "secrets:demo:api") {
+          if (sessionCalls === 1) return { TOKEN: oldEncrypted };
+          const written = state.redis.writes.at(-1);
+          return written?.key === key ? { [written.field]: written.value } : {};
+        }
+        return {};
+      },
+      async zCard() { return sessionCalls > 2 ? 0 : 1; },
+      async zRange() { return []; },
+      multi() {
+        return {
+          /** @param {string} key @param {string} field @param {string} value */
+          hSet(key, field, value) {
+            if (key === "secrets:demo:api" && field === "TOKEN") {
+              if (sessionCalls > 2) rollbackRestored = true;
+              else appliedSecret = value;
+            }
+            state.redis.writes.push({ key, field, value });
+          },
+          hDel() {},
+          sAdd() {
+            if (sessionCalls > 2) rollbackMadeVisible = true;
+          },
+          sRem() {},
+          async exec() {},
+        };
+      },
+    });
+  };
+
+  try {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "new-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-rollback-after-delete",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "secret_mutation_rollback_failed");
+    assert.equal(deleteLockRead, true);
+    assert.equal(rollbackRestored, false);
+    assert.equal(rollbackMadeVisible, false);
+  } finally {
+    state.redis.session = originalSession;
+  }
+});
+
+test("worker secret DELETE can remove a corrupt target envelope", async () => {
   const { state } = await import(workerControlSharedUrl);
   let execCalled = false;
   /** @type {string | null} */
@@ -950,7 +1188,9 @@ test("worker secret DELETE skips decrypting the removed corrupt envelope", async
   await withWorkerSecretSession(state, makeWorkerSecretSession({
     hKeys: ["TOKEN"],
     hGetAll(key) {
-      if (key === "secrets:demo:api") return { TOKEN: "WDL-ENC:not-json" };
+      if (key === "secrets:demo:api" && deletedField == null) {
+        return { TOKEN: "WDL-ENC:not-json" };
+      }
       return emptySecretHash();
     },
     onHDel(_key, field) { deletedField = field; },
@@ -974,7 +1214,7 @@ test("worker secret DELETE skips decrypting the removed corrupt envelope", async
   });
 });
 
-test("worker secret DELETE skips other corrupt worker envelopes for repair", async () => {
+test("worker secret DELETE fails closed on other corrupt worker envelopes", async () => {
   const { state } = await import(workerControlSharedUrl);
   const encrypted = await encryptSecretValue("plain", {
     env,
@@ -1005,13 +1245,53 @@ test("worker secret DELETE skips other corrupt worker envelopes for repair", asy
       requestId: "rid-worker-secret-delete-other-corrupt",
     });
 
-    assert.equal(response.status, 200);
-    assert.equal(execCalled, true);
-    assert.equal(deletedField, "TOKEN");
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "invalid_envelope");
+    assert.equal(execCalled, false);
+    assert.equal(deletedField, null);
   });
 });
 
-test("worker secret DELETE skips corrupt namespace envelopes for repair", async () => {
+test("worker secret DELETE fails closed on unknown-kid worker envelopes", async () => {
+  const { state } = await import(workerControlSharedUrl);
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  const unknownKid = await encryptSecretValue("plain", {
+    env: { ...env, SECRET_ENVELOPE_KID: "local:test:secret-envelope:v2" },
+    hashKey: "secrets:demo:api",
+    fieldName: "BAD",
+  });
+  let hDelCalled = false;
+  await withWorkerSecretSession(state, makeWorkerSecretSession({
+    hKeys: ["TOKEN", "BAD"],
+    hGetAll(key) {
+      if (key === "secrets:demo:api") return { TOKEN: encrypted, BAD: unknownKid };
+      return emptySecretHash();
+    },
+    onHDel() { hDelCalled = true; },
+  }), async () => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-delete-unknown-kid",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "unknown_kid");
+    assert.equal(hDelCalled, false);
+  });
+});
+
+test("worker secret DELETE fails closed on corrupt namespace envelopes", async () => {
   const { state } = await import(workerControlSharedUrl);
   const encrypted = await encryptSecretValue("plain", {
     env,
@@ -1043,13 +1323,14 @@ test("worker secret DELETE skips corrupt namespace envelopes for repair", async 
       requestId: "rid-worker-secret-delete-ns-corrupt",
     });
 
-    assert.equal(response.status, 200);
-    assert.equal(execCalled, true);
-    assert.equal(deletedField, "TOKEN");
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "invalid_envelope");
+    assert.equal(execCalled, false);
+    assert.equal(deletedField, null);
   });
 });
 
-test("worker secret DELETE skips corrupt namespace envelopes during bump repair", async () => {
+test("worker secret DELETE fails closed on corrupt namespace envelopes during bump", async () => {
   const { state } = await import(workerControlSharedUrl);
   const originalSession = state.redis.session;
   const encrypted = await encryptSecretValue("plain", {
@@ -1106,11 +1387,9 @@ test("worker secret DELETE skips corrupt namespace envelopes during bump repair"
       requestId: "rid-worker-secret-delete-bump-ns-corrupt",
     });
 
-    const body = await readJsonResponse(response, 200);
-    assert.equal(execCalled, true);
-    assert.equal(body.deleted, true);
-    assert.equal(body.previousVersion, "v1");
-    assert.equal(body.version, "v2");
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "invalid_envelope");
+    assert.equal(execCalled, false);
   } finally {
     state.redis.session = originalSession;
   }

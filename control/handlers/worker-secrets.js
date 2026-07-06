@@ -153,8 +153,6 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
               currentVersion,
               newVersion,
               controlEnv,
-              ignoreWorkerSecretEnvelopeErrors: method === "DELETE",
-              ignoreNamespaceSecretEnvelopeErrors: method === "DELETE",
             }),
         }
       );
@@ -198,7 +196,45 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         else payload.deleted = true;
         return jsonResponse(200, payload);
       }
-      if (err instanceof RoutingError || err instanceof WorkerEnvBudgetError) {
+      if (err instanceof WorkerEnvBudgetError) {
+        const rolledBack = await rollbackSecretMutation({
+          redis,
+          ns,
+          name,
+          key,
+          method: /** @type {"PUT" | "DELETE"} */ (method),
+          appliedValue: storedValue,
+          previousExisted: mutationResult.previousExisted,
+          previousValue: mutationResult.previousValue,
+        });
+        log("warn", "secret_bump_budget_rejected", {
+          request_id: requestId,
+          namespace: ns,
+          worker: name,
+          key,
+          status: err.status,
+          rolled_back: rolledBack,
+          ...formatError(err),
+        });
+        if (!rolledBack) {
+          return jsonError(
+            503,
+            "secret_mutation_rollback_failed",
+            "secret mutation was written, but the version bump failed env budget checks and rollback could not be confirmed; retry the mutation or repair the secret before rollout",
+            {
+              namespace: ns,
+              worker: name,
+              key,
+              method,
+              budget_error: err.code,
+              rollbackConfirmed: false,
+              secretWritten: true,
+            },
+          );
+        }
+        return codedErrorResponse(err, err.code);
+      }
+      if (err instanceof RoutingError) {
         // Secret already landed in our own MULTI; bump failure degrades
         // to a deferred reload — the secret is picked up on next natural
         // cold-load, or wiped by a concurrent whole-delete.
@@ -304,13 +340,11 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
         encrypted: nsEncrypted,
         env: controlEnv,
         hashKey: nsSecretsKey,
-        ignoreSecretEnvelopeErrors: method === "DELETE",
       }),
       decryptSecretHash({
         encrypted: workerBudgetEncrypted,
         env: controlEnv,
         hashKey: secretsKey,
-        ignoreSecretEnvelopeErrors: method === "DELETE",
       }),
     ]);
     if (method === "PUT") {
@@ -350,8 +384,78 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
     }
 
     await multi.exec();
-    return { mutated: true };
+    return {
+      mutated: true,
+      previousExisted: Object.hasOwn(workerEncrypted, key),
+      previousValue: typeof workerEncrypted[key] === "string" ? workerEncrypted[key] : null,
+    };
   });
+}
+
+/**
+ * @param {{
+ *   redis: RedisClient,
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: "PUT" | "DELETE",
+ *   appliedValue: string | null,
+ *   previousExisted?: boolean,
+ *   previousValue?: string | null,
+ * }} args
+ */
+async function rollbackSecretMutation({
+  redis,
+  ns,
+  name,
+  key,
+  method,
+  appliedValue,
+  previousExisted = false,
+  previousValue = null,
+}) {
+  const secretsKey = `secrets:${ns}:${name}`;
+  try {
+    return await runOptimistic(redis, {
+      attempts: MAX_SECRET_ATTEMPTS,
+      onExhausted: () => false,
+    }, async (iso) => {
+      await iso.watch(deleteLockKey(ns, name), secretsKey, routesKey(ns), workerVersionsKey(ns, name));
+      const callerLock = await iso.get(deleteLockKey(ns, name));
+      if (callerLock) return false;
+
+      const current = await iso.hGet(secretsKey, key);
+      if (method === "PUT") {
+        if (typeof appliedValue !== "string" || current !== appliedValue) return false;
+      } else if (current != null) {
+        return false;
+      }
+
+      const active = await iso.hGet(routesKey(ns), name);
+      const retainedCount = await iso.zCard(workerVersionsKey(ns, name));
+      const secretKeys = await iso.hKeys(secretsKey);
+      if (!active && retainedCount === 0 && previousExisted) return false;
+      const multi = iso.multi();
+      if (previousExisted && typeof previousValue === "string") {
+        multi.hSet(secretsKey, key, previousValue);
+        stageWorkerVisible(multi, ns, name);
+      } else {
+        multi.hDel(secretsKey, key);
+        if (
+          method === "PUT" &&
+          secretKeys.length <= 1 &&
+          !active &&
+          retainedCount === 0
+        ) {
+          stageWorkerHidden(multi, ns, name);
+        }
+      }
+      await multi.exec();
+      return true;
+    });
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -366,8 +470,6 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
  *   currentVersion: string,
  *   newVersion: string,
  *   controlEnv: Record<string, string | undefined>,
- *   ignoreWorkerSecretEnvelopeErrors?: boolean,
- *   ignoreNamespaceSecretEnvelopeErrors?: boolean,
  * }} args
  */
 async function assertWorkerSecretBumpEnvBudget({
@@ -377,8 +479,6 @@ async function assertWorkerSecretBumpEnvBudget({
   currentVersion,
   newVersion,
   controlEnv,
-  ignoreWorkerSecretEnvelopeErrors = false,
-  ignoreNamespaceSecretEnvelopeErrors = false,
 }) {
   const nsSecretsKey = `secrets:${ns}`;
   const workerSecretsKey = `secrets:${ns}:${name}`;
@@ -391,13 +491,11 @@ async function assertWorkerSecretBumpEnvBudget({
     encrypted: nsEncrypted,
     env: controlEnv,
     hashKey: nsSecretsKey,
-    ignoreSecretEnvelopeErrors: ignoreNamespaceSecretEnvelopeErrors,
   });
   const workerSecrets = await decryptSecretHash({
     encrypted: workerEncrypted,
     env: controlEnv,
     hashKey: workerSecretsKey,
-    ignoreSecretEnvelopeErrors: ignoreWorkerSecretEnvelopeErrors,
   });
 
   await assertWorkerVersionsUserEnvBudget({

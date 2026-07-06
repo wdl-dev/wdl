@@ -162,6 +162,7 @@ const controlWorker :Workerd.Worker = (
     (name = "control-topology",      esModule = embed "../control/topology.js"),
     (name = "control-env-budget",    esModule = embed "../control/env-budget.js"),
     (name = "control-worker-code-budget", esModule = embed "../control/worker-code-budget.js"),
+    (name = "do-runtime-load-code-budget", esModule = embed "../do-runtime/load-code-budget.js"),
     (name = "control-lifecycle-indexes", esModule = embed "../control/lifecycle-indexes.js"),
     (name = "control-routing",       esModule = embed "../control/routing.js"),
     (name = "control-routing-route-plan", esModule = embed "../control/routing/route-plan.js"),
@@ -236,6 +237,7 @@ const controlWorker :Workerd.Worker = (
     (name = "runtime-owner-hint-cache-source", text = embed "_wdl-owner-hint-cache.js"),
     (name = "runtime-request-id-source", text = embed "_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "workflows-client.js"),
+    (name = "do-runtime-alarm-shim-source", esModule = embed "../do-runtime/alarm-shim-source.js"),
     (name = "wdl-package-json-source", text = embed "../package.json"),
     (name = "runtime-r2-utils",      esModule = embed "r2-utils.js"),
     # Pre-bundled via `npm run build:vendor`; workerd embed can't walk node_modules.

@@ -1,4 +1,4 @@
-import { SecretEnvelopeError, decryptSecretValue } from "shared-secret-envelope";
+import { decryptSecretValue } from "shared-secret-envelope";
 import { errorMessage } from "shared-errors";
 import { bundleKey } from "shared-version";
 
@@ -357,29 +357,20 @@ export function assertWorkerLoaderUserEnvBudget({
  *   encrypted: Record<string, string | null | undefined>,
  *   env: Record<string, string | undefined>,
  *   hashKey: string,
- *   ignoreSecretEnvelopeErrors?: boolean,
  * }} args
  */
-export async function decryptSecretHash({ encrypted, env, hashKey, ignoreSecretEnvelopeErrors = false }) {
+export async function decryptSecretHash({ encrypted, env, hashKey }) {
   const entries = await Promise.all(
     Object.entries(encrypted || {})
       .filter((entry) => typeof entry[1] === "string")
-      .map(async ([fieldName, value]) => {
-        try {
-          return [
-            fieldName,
-            await decryptSecretValue(/** @type {string} */ (value), { env, hashKey, fieldName }),
-          ];
-        } catch (err) {
-          if (ignoreSecretEnvelopeErrors && err instanceof SecretEnvelopeError) return null;
-          throw err;
-        }
-      })
+      .map(async ([fieldName, value]) => [
+        fieldName,
+        await decryptSecretValue(/** @type {string} */ (value), { env, hashKey, fieldName }),
+      ])
   );
   /** @type {Record<string, string>} */
   const out = Object.create(null);
   for (const entry of entries) {
-    if (!entry) continue;
     const [fieldName, value] = entry;
     out[fieldName] = value;
   }

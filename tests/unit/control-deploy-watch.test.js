@@ -260,6 +260,9 @@ const controlWorkerCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
   "control/worker-code-budget.js",
   importSpecifierReplacements({
     "runtime-load-code-budget": runtimeLoadCodeBudgetUrl,
+    "runtime-load-module-rewrite": repositoryFileUrl("runtime/load/module-rewrite.js"),
+    "do-runtime-load-code-budget": repositoryFileUrl("do-runtime/load-code-budget.js"),
+    "shared-errors": repositoryFileUrl("shared/errors.js"),
     "runtime-d1-client-source": textModuleUrl("runtime/d1-client.js"),
     "runtime-d1-data-field-source": textModuleUrl("shared/d1-data-field.js"),
     "runtime-d1-params-source": textModuleUrl("shared/d1-params.js"),
@@ -273,8 +276,14 @@ const controlWorkerCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
     "runtime-owner-hint-cache-source": textModuleUrl("runtime/_wdl-owner-hint-cache.js"),
     "runtime-request-id-source": textModuleUrl("runtime/_wdl-request-id.js"),
     "runtime-workflows-client-source": textModuleUrl("runtime/workflows-client.js"),
+    "do-runtime-alarm-shim-source": repositoryFileUrl("do-runtime/alarm-shim-source.js"),
   })
 ));
+const {
+  WORKER_LOADER_CODE_MAX_BYTES,
+  WorkerCodeBudgetError,
+  estimateWorkerLoaderCodeBytes,
+} = await import(controlWorkerCodeBudgetUrl);
 
 const { commitWithWatch, handle } = await importControlHandler("control/handlers/deploy.js", {
   globalName: "__controlDeployTestState",
@@ -298,6 +307,57 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
   },
 });
 const { WatchError } = await import(sharedRedisUrl);
+
+test("worker code budget shape failures are domain errors", () => {
+  assert.throws(
+    () => estimateWorkerLoaderCodeBytes({ meta: {}, normalized: [] }),
+    (err) => {
+      const budgetErr = /** @type {{ code?: string, status?: number }} */ (err);
+      return err instanceof WorkerCodeBudgetError &&
+        budgetErr.code === "worker_code_invalid" &&
+        budgetErr.status === 400;
+    }
+  );
+});
+
+test("worker code budget wraps runtime estimator validation failures as domain errors", () => {
+  assert.throws(
+    () => estimateWorkerLoaderCodeBytes({
+      meta: {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "module" } },
+        bindings: { ROOM: { type: "do", className: "not a class" } },
+      },
+      normalized: [["worker.js", "export default {}"]],
+    }),
+    (err) => {
+      const budgetErr = /** @type {{ code?: string, status?: number }} */ (err);
+      return err instanceof WorkerCodeBudgetError &&
+        budgetErr.code === "worker_code_invalid" &&
+        budgetErr.status === 400 &&
+        err instanceof Error &&
+        /valid JS class declaration/.test(err.message);
+    }
+  );
+});
+
+test("worker code budget allows do-runtime reserved names when no DO wrapper is injected", () => {
+  assert.doesNotThrow(() => estimateWorkerLoaderCodeBytes({
+    meta: {
+      mainModule: "worker.js",
+      modules: {
+        "worker.js": { type: "module" },
+        "_wdl-do-runtime-wrapper.js": { type: "module" },
+        "_wdl-do-alarm-shim.js": { type: "module" },
+      },
+    },
+    normalized: [
+      ["worker.js", "export default {}"],
+      ["_wdl-do-runtime-wrapper.js", ""],
+      ["_wdl-do-alarm-shim.js", ""],
+    ],
+  }));
+});
 
 function makeSession() {
   return {
@@ -796,6 +856,158 @@ test("deploy handler counts runtime-generated wrapper code before allocating a v
   }
 });
 
+test("deploy handler rejects runtime reserved module collisions before version allocation", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
+    meta: {
+      mainModule: "worker.js",
+      modules: {
+        "worker.js": { type: "module" },
+        "_wdl-wrapper.js": { type: "module" },
+      },
+    },
+    normalized: [
+      ["worker.js", "export default {}"],
+      ["_wdl-wrapper.js", ""],
+    ],
+  };
+
+  let incrCalled = false;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      incrCalled = true;
+      return 1;
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/reserved/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "reserved",
+      requestId: "rid-code-reserved-runtime",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_code_invalid");
+    assert.match(body.message, /reserved module name _wdl-wrapper\.js/);
+    assert.equal(incrCalled, false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+  }
+});
+
+test("deploy handler rejects do-runtime reserved module collisions before version allocation", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
+    meta: {
+      mainModule: "worker.js",
+      modules: {
+        "worker.js": { type: "module" },
+        "_wdl-do-runtime-wrapper.js": { type: "module" },
+      },
+      bindings: { ROOM: { type: "do", className: "Room" } },
+    },
+    normalized: [
+      ["worker.js", "export class Room {}"],
+      ["_wdl-do-runtime-wrapper.js", ""],
+    ],
+  };
+
+  let incrCalled = false;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      incrCalled = true;
+      return 1;
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/do-reserved/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export class Room {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "do-reserved",
+      requestId: "rid-code-reserved-do",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_code_invalid");
+    assert.match(body.message, /reserved module name _wdl-do-runtime-wrapper\.js/);
+    assert.equal(incrCalled, false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+  }
+});
+
+test("deploy handler counts do-runtime wrapper code before allocating a version", async () => {
+  const className = `Room${"A".repeat(64 * 1024)}`;
+  const meta = {
+    mainModule: "worker.js",
+    modules: { "worker.js": { type: "module" } },
+    bindings: { ROOM: { type: "do", className } },
+  };
+  const emptyOverhead = estimateWorkerLoaderCodeBytes({
+    meta,
+    normalized: [["worker.js", ""]],
+  });
+  const source = " ".repeat(WORKER_LOADER_CODE_MAX_BYTES - emptyOverhead + 1);
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
+    meta,
+    normalized: [["worker.js", source]],
+  };
+
+  let incrCalled = false;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      incrCalled = true;
+      return 1;
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/do-heavy/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "do-heavy",
+      requestId: "rid-do-code-budget",
+    });
+
+    const body = await readJsonResponse(response, 413);
+    assert.equal(body.error, "worker_code_too_large");
+    assert.equal(incrCalled, false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+  }
+});
+
 test("deploy handler skips cleanup for empty assets when commit fails", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
@@ -1020,6 +1232,74 @@ test("commitWithWatch assigns stable workflow keys into bundle meta and wf:defs"
       }),
     },
   ]);
+});
+
+test("commitWithWatch checks code budget after workflow keys are materialized", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
+    ["wf:defs:tenant-a:orders", {
+      flow: JSON.stringify({
+        workflowKey: "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        className: "Flow",
+      }),
+    }],
+  ]);
+  /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta = null;
+  /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.execFailures = 0;
+
+  const preparedMeta = {
+    mainModule: "worker.js",
+    modules: { "worker.js": { type: "module" } },
+    workflows: [
+      { name: "flow", binding: "FLOW", className: "Flow" },
+    ],
+  };
+  const committedMeta = {
+    ...preparedMeta,
+    workflows: [
+      { ...preparedMeta.workflows[0], workflowKey: "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    ],
+  };
+  const emptyCommittedBytes = estimateWorkerLoaderCodeBytes({
+    meta: committedMeta,
+    normalized: [["worker.js", ""]],
+  });
+  const source = " ".repeat(WORKER_LOADER_CODE_MAX_BYTES - emptyCommittedBytes + 1);
+  assert.ok(estimateWorkerLoaderCodeBytes({
+    meta: preparedMeta,
+    normalized: [["worker.js", source]],
+  }) <= WORKER_LOADER_CODE_MAX_BYTES);
+  assert.ok(estimateWorkerLoaderCodeBytes({
+    meta: committedMeta,
+    normalized: [["worker.js", source]],
+  }) > WORKER_LOADER_CODE_MAX_BYTES);
+
+  const redis = {
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  await assert.rejects(
+    commitWithWatch({
+      redis,
+      ns: "tenant-a",
+      name: "orders",
+      version: "v1",
+      prepared: {
+        meta: preparedMeta,
+        normalized: [["worker.js", source]],
+      },
+      outgoingRefs: [],
+      d1Refs: [],
+      controlEnv: {},
+    }),
+    /** @param {unknown} err */
+    (err) => /** @type {{ code?: string }} */ (err).code === "worker_code_too_large"
+  );
+  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta, null);
 });
 
 test("commitWithWatch reads workflow defs with own-property discipline", async () => {

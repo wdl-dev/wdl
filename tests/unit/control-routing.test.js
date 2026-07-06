@@ -7,6 +7,7 @@ import {
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
+import { bundleKey as productionBundleKey } from "../../shared/version.js";
 
 const lifecycleIndexesStub = `
 function refMember(ref) { return JSON.stringify(ref); }
@@ -121,11 +122,7 @@ const src = applyModuleReplacements(readRepositoryFile("control/routing.js"), [
   ],
   [
     /import \{ bundleKey, formatVersion, parseVersion, patternsKey, routesKey \} from "shared-version";/,
-    `const bundleKey = (ns, worker, version) => \`bundle:\${ns}:\${worker}:\${version}\`;
-     const formatVersion = (num) => \`v\${num}\`;
-     const parseVersion = (version) => Number(/^v(\\d+)$/.exec(version)?.[1] || NaN);
-     const patternsKey = (host) => \`patterns:\${host}\`;
-     const routesKey = (ns) => \`routes:\${ns}\`;`
+    `import { bundleKey, formatVersion, parseVersion, patternsKey, routesKey } from ${JSON.stringify(repositoryFileUrl("shared/version.js"))};`
   ],
   [
     /import \{ diffCrons, nextFireMs, slotMsFor \} from "control-cron-index";/,
@@ -154,7 +151,7 @@ function makeRedis() {
  * @param {any} meta
  */
 function seedBundle(redis, version, meta) {
-  redis.state.hashes.set(`bundle:demo:worker:${version}`, {
+  redis.state.hashes.set(productionBundleKey("demo", "worker", version), {
     __meta__: JSON.stringify(meta),
   });
 }
@@ -252,10 +249,10 @@ test("promoteWithRoutes removes queue consumer discovery index entries for remov
 
 test("promoteWithRoutes skips empty platform route versions while checking exported as names", async () => {
   const redis = makeRedis();
-  redis.state.hashes.set("bundle:__platform__:api:v1", {
+  redis.state.hashes.set(productionBundleKey("__platform__", "api", "v1"), {
     __meta__: JSON.stringify({ exports: [{ name: "default", as: "demo" }] }),
   });
-  redis.state.hashes.set("bundle:__platform__:other:v2", {
+  redis.state.hashes.set(productionBundleKey("__platform__", "other", "v2"), {
     __meta__: JSON.stringify({ exports: [{ name: "default", as: "other-demo" }] }),
   });
   redis.state.hashes.set("routes:__platform__", { stale: "", other: "v2" });
@@ -265,7 +262,7 @@ test("promoteWithRoutes skips empty platform route versions while checking expor
   assert.equal(redis.state.hashes.get("routes:__platform__")?.api, "v1");
   assert.deepEqual(
     redis.state.commands.find((op) => op[0] === "hGetMany"),
-    ["hGetMany", [["bundle:__platform__:other:v2", "__meta__"]]]
+    ["hGetMany", [[productionBundleKey("__platform__", "other", "v2"), "__meta__"]]]
   );
 });
 
@@ -353,8 +350,8 @@ test("promoteWithRoutes watches and rejects missing service-binding target bundl
       return true;
     }
   );
-  assert.ok(redis.state.watched.includes("bundle:other:api:v3"));
-  assert.equal(redis.state.hashes.has("bundle:demo:worker:v2"), false);
+  assert.ok(redis.state.watched.includes(productionBundleKey("other", "api", "v3")));
+  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
 });
 
 test("promoteWithRoutes batches service-binding dependency watches", async () => {
@@ -375,15 +372,15 @@ test("promoteWithRoutes batches service-binding dependency watches", async () =>
       },
     },
   });
-  redis.state.hashes.set("bundle:other:api:v3", { __meta__: "{}" });
-  redis.state.hashes.set("bundle:other:queue:v4", { __meta__: "{}" });
+  redis.state.hashes.set(productionBundleKey("other", "api", "v3"), { __meta__: "{}" });
+  redis.state.hashes.set(productionBundleKey("other", "queue", "v4"), { __meta__: "{}" });
 
   await promoteWithRoutes(redis, "demo", "worker", "v1");
 
   assert.ok(redis.state.watchBatches.some((batch) =>
     batch.length === 2 &&
-    batch.includes("bundle:other:api:v3") &&
-    batch.includes("bundle:other:queue:v4")
+    batch.includes(productionBundleKey("other", "api", "v3")) &&
+    batch.includes(productionBundleKey("other", "queue", "v4"))
   ));
 });
 
@@ -448,7 +445,7 @@ test("bumpActiveAndPromote runs beforeStageCopy inside the watched copy transact
     batch.includes("secrets:demo") &&
     batch.includes("secrets:demo:worker")
   ));
-  assert.ok(redis.state.hashes.has("bundle:demo:worker:v2"));
+  assert.ok(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")));
 });
 
 test("bumpActiveAndPromote does not copy or flip routes when beforeStageCopy rejects", async () => {
@@ -466,7 +463,7 @@ test("bumpActiveAndPromote does not copy or flip routes when beforeStageCopy rej
     /budget failed/
   );
 
-  assert.equal(redis.state.hashes.has("bundle:demo:worker:v2"), false);
+  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
   assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
 });
 
@@ -580,7 +577,7 @@ test("bumpActiveAndPromote rejects missing service-binding target bundles", asyn
       return true;
     }
   );
-  assert.ok(redis.state.watched.includes("bundle:other:api:v3"));
+  assert.ok(redis.state.watched.includes(productionBundleKey("other", "api", "v3")));
 });
 
 test("promoteWithRoutes rejects a custom host already owned by another namespace", async () => {

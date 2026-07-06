@@ -33,6 +33,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "do-runtime-alarm-shim-source", esModule = embed "alarm-shim-source.js"),
     (name = "do-runtime-http", esModule = embed "http.js"),
     (name = "do-runtime-load", esModule = embed "load.js"),
+    (name = "do-runtime-load-code-budget", esModule = embed "load-code-budget.js"),
     (name = "do-runtime-object-registry", esModule = embed "object-registry.js"),
     (name = "do-runtime-owner-client", esModule = embed "owner-client.js"),
     (name = "do-runtime-owner-registry", esModule = embed "owner-registry.js"),

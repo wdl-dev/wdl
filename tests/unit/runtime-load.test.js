@@ -149,6 +149,7 @@ const {
 const {
   estimateFinalWorkerLoaderCodeBytes,
   injectRuntimeModulesForHostBindings,
+  runtimeInjectedModuleSources,
 } = codeBudgetMod;
 
 const RUNTIME_LOAD_MAGIC = "WDLLOAD!";
@@ -1444,6 +1445,51 @@ test("workerLoader code estimator matches runtime wrapper injection exactly", ()
     /"\.\.\/_wdl-cloudflare-workflows\.js"/
   );
   assert.match(/** @type {string} */ (workerCode.modules["_wdl-wrapper.js"]), new RegExp(entrypoint));
+});
+
+test("workerLoader code estimator does not rewrite CommonJS workflow strings", () => {
+  const source = 'module.exports = { label: "cloudflare:workflows" };';
+  const meta = {
+    mainModule: "src/worker.cjs",
+    modules: { "src/worker.cjs": { type: "cjs" } },
+    workflows: [{ binding: "FLOW", name: "flow", className: "FlowHandler" }],
+  };
+  let injectedBytes = 0;
+  for (const [, injected] of runtimeInjectedModuleSources(
+    meta.mainModule,
+    meta,
+    TEST_RUNTIME_INJECTION_SOURCES
+  )) {
+    injectedBytes += Buffer.byteLength(/** @type {string} */ (injected), "utf8");
+  }
+
+  assert.equal(
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized: [["src/worker.cjs", Buffer.from(source)]],
+      meta,
+      runtimeSources: TEST_RUNTIME_INJECTION_SOURCES,
+    }),
+    Buffer.byteLength(source, "utf8") + injectedBytes
+  );
+});
+
+test("wrapWorkerCodeForHostBindings rejects empty reserved module collisions", () => {
+  const workerCode = {
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": "export default {};",
+      "_wdl-wrapper.js": "",
+    },
+  };
+
+  assert.throws(
+    () => injectRuntimeModulesForHostBindings(workerCode, {
+      mainModule: "worker.js",
+      modules: { "worker.js": { type: "module" } },
+    }, TEST_RUNTIME_INJECTION_SOURCES),
+    /reserved module names/
+  );
 });
 
 test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserves original main module", () => {
