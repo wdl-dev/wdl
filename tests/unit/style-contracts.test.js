@@ -1923,12 +1923,86 @@ test("D1 and DO workerd containers keep explicit memory ceilings", () => {
   assert.match(doKube, /name: do-runtime[\s\S]*?limits:\n\s+memory: 1Gi/);
 });
 
-test("EC2 capacity hosts block awsvpc task access to host IMDS", () => {
-  const terraformCapacity = readRepoFile("terraform/modules/compute/ec2_capacity.tf");
+test("Terraform ECS services use Fargate-only launch contracts", () => {
+  const cluster = readRepoFile("terraform/modules/compute/cluster.tf");
+  const locals = readRepoFile("terraform/modules/compute/locals.tf");
+  const rootVars = readRepoFile("terraform/variables.tf");
 
-  assert.match(terraformCapacity, /http_tokens\s+=\s+"required"/);
-  assert.match(terraformCapacity, /http_put_response_hop_limit\s+=\s+1/);
-  assert.match(terraformCapacity, /ECS_AWSVPC_BLOCK_IMDS=true/);
+  assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
+  assert.match(locals, /fargate_stateless_capacity_provider_strategies\s+=\s+\[/);
+  assert.match(locals, /fargate_ondemand_capacity_provider_strategies\s+=\s+\[/);
+  assert.match(
+    locals,
+    /zero_downtime_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/
+  );
+  assert.match(
+    locals,
+    /stop_before_start_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+0\s*\}/
+  );
+  assert.match(
+    locals,
+    /sequential_replacement_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+50\s*\}/
+  );
+  assert.match(rootVars, /variable "spot_weight" \{[\s\S]*?condition\s+=\s+var\.spot_weight > 0/);
+  assert.match(rootVars, /variable "od_weight" \{[\s\S]*?condition\s+=\s+var\.od_weight > 0/);
+  for (const [name, value] of [
+    ["gateway_cpu", 512],
+    ["gateway_memory", 1024],
+    ["system_runtime_cpu", 512],
+    ["system_runtime_memory", 1024],
+    ["runtime_cpu", 1024],
+    ["runtime_memory", 2048],
+    ["scheduler_cpu", 1024],
+    ["scheduler_memory", 2048],
+    ["workflows_cpu", 512],
+    ["workflows_memory", 1024],
+  ]) {
+    assert.match(
+      rootVars,
+      new RegExp(`variable "${name}" \\{\\s+type\\s+=\\s+number\\s+default\\s+=\\s+${value}`)
+    );
+  }
+
+  for (const file of [
+    "terraform/modules/compute/gateway_service.tf",
+    "terraform/modules/compute/runtime_service.tf",
+    "terraform/modules/compute/system_runtime_service.tf",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_stateless_capacity_provider_strategies/);
+    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
+    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
+
+  for (const file of [
+    "terraform/modules/compute/d1_runtime_service.tf",
+    "terraform/modules/compute/do_runtime_service.tf",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assert.match(source, /deployment\s+=\s+local\.sequential_replacement_deployment/);
+    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
+
+  for (const file of [
+    "terraform/modules/compute/scheduler_service.tf",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assert.match(source, /deployment\s+=\s+local\.stop_before_start_deployment/);
+    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
+
+  {
+    const source = readRepoFile("terraform/modules/compute/workflows_service.tf");
+    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
+    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
+    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+  }
 });
 
 test("DO RPC JSON-data validators stay aligned across client and server", () => {

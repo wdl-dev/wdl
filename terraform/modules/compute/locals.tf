@@ -96,8 +96,12 @@ locals {
     minimum_healthy_percent = 50
   }
 
-  ec2_placement_strategies = [
-    { type = "spread", field = "attribute:ecs.availability-zone" },
-    { type = "spread", field = "instanceId" },
+  fargate_stateless_capacity_provider_strategies = [
+    { capacity_provider = "FARGATE", base = 1, weight = var.od_weight },
+    { capacity_provider = "FARGATE_SPOT", weight = var.spot_weight },
+  ]
+
+  fargate_ondemand_capacity_provider_strategies = [
+    { capacity_provider = "FARGATE", weight = 1 },
   ]
 }

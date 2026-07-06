@@ -83,16 +83,15 @@ Stateful storage：
 - Gateway、user-runtime 和 system-runtime 可以放在环境的 load balancing / service discovery 层后面水平扩展。本地 route cache、已加载 isolate 和 owner hint 都是优化，不是 authority。
 - D1/DO 使用 owner lease、monotonic generation fence 和本地 drain/renew。超过 1 个 task 时需要稳定的 per-replica storage identity，并确保 supervisor drain/renew 只走私有本地入口，不能通过 service alias 打到其他 replica。
 - 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
-- 跑 tenant workload 的 ECS EC2 capacity 必须阻断 task 访问 host IMDS。
-- Instance refresh / lifecycle hook 会让 Terraform rolling 变慢；修改 hook timeout 或 capacity policy 前应记录操作预期。
+- Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
+- Terraform Fargate service 在服务能容忍 overlapping capacity 时应使用 rolling replacement。D1/DO 使用 sequential replacement 并关闭 Availability Zone rebalancing；scheduler 作为 singleton control loop 仍保持 stop-before-start。
 
 ## 安全边界
 
 - user-runtime loaded worker outbound 是 public-only。
 - system-runtime 是刻意放宽的特权环境。
 - Runtime internal `:8088`、d1-runtime `:8787`、do-runtime `:8788`、workflows `:9120` 和 Redis 都是 private mesh services。Private service call 还必须携带带有共享 `WDL_INTERNAL_AUTH_TOKEN` 的 `x-wdl-internal-auth`。
-- EC2 host instance profile 不能从 awsvpc task container 中访问。
-- 平台服务使用 EC2 capacity，operator access 可能需要 ECS Exec。Tenant-facing workload 仍必须阻断 host IMDS，并通过 workerd wrapper/network policy 保持 public-only outbound。
+- Tenant-running runtime task 使用 least-privilege ECS task role、public-only workerd outbound binding 和 private mesh security group 作为 cloud credential 与 network 边界。ECS Exec 只应在需要 operator access 的地方启用。
 
 ## 可观测性
 
@@ -123,7 +122,7 @@ Terraform test 环境优先用 Terraform-managed change，不要用手动 rollin
 
 - Operator-driven checks：Terraform plan review 和 Kubernetes manifest review。
 - `npm run test:integration`
-- `tests/unit/style-contracts.test.js`：local compose Envoy mesh 形态、D1/DO test-hook IaC gate、EC2 IMDS blocking。
+- `tests/unit/style-contracts.test.js`：local compose Envoy mesh 形态、D1/DO test-hook IaC gate、Fargate-only Terraform launch contract。
 - 目标 deployed environment rolling 后的 smoke tests。
 
 ## 已知约束和非目标

@@ -65,6 +65,8 @@ variable "scheduler_cpu" { type = number }
 variable "scheduler_memory" { type = number }
 variable "workflows_cpu" { type = number }
 variable "workflows_memory" { type = number }
+variable "spot_weight" { type = number }
+variable "od_weight" { type = number }
 
 variable "log_level" { type = string }
 variable "log_retention_days" { type = number }

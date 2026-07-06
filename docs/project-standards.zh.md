@@ -53,7 +53,7 @@ Error-code vocabulary 由协议拥有：
 - Gateway route resolution 不是授权。Control-plane 授权由 control/auth 的 action check 拥有。
 - Hidden platform Fetcher、storage credential、secret material 和 private owner-network binding 不能变成 tenant-visible `env` 字段。
 - Secret plaintext 只能出现在校验/加密期间，或 runtime env materialization 期间。At rest 的 secret value 必须是 `WDL-ENC:` envelope。
-- Tenant-runtime escape 不应自动获得云凭证。Host IMDS 和宽权限基础设施 credential 必须保持在 tenant network reach 之外。
+- Tenant-runtime escape 不应自动获得云凭证。Tenant-running task 使用 least-privilege task role，不能拿到宽权限基础设施 credential。
 
 如果改动把数据移过 trust boundary，应同步更新 `docs/security.zh.md`，并增加保护该边界的测试或 style-contract guard。
 

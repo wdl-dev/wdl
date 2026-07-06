@@ -173,32 +173,32 @@ variable "do_test_hooks_enabled" {
 
 variable "gateway_cpu" {
   type    = number
-  default = 128
+  default = 512
 }
 
 variable "gateway_memory" {
   type    = number
-  default = 256
+  default = 1024
 }
 
 variable "system_runtime_cpu" {
   type    = number
-  default = 128
+  default = 512
 }
 
 variable "system_runtime_memory" {
   type    = number
-  default = 256
+  default = 1024
 }
 
 variable "runtime_cpu" {
   type    = number
-  default = 256
+  default = 1024
 }
 
 variable "runtime_memory" {
   type    = number
-  default = 768
+  default = 2048
 }
 
 variable "d1_runtime_container_memory" {
@@ -235,22 +235,42 @@ variable "workflows_desired_count" {
 
 variable "scheduler_cpu" {
   type    = number
-  default = 768
+  default = 1024
 }
 
 variable "scheduler_memory" {
   type    = number
-  default = 512
+  default = 2048
 }
 
 variable "workflows_cpu" {
   type    = number
-  default = 128
+  default = 512
 }
 
 variable "workflows_memory" {
   type    = number
-  default = 256
+  default = 1024
+}
+
+variable "spot_weight" {
+  type        = number
+  default     = 3
+  description = "FARGATE_SPOT weight for stateless gateway and runtime service capacity."
+  validation {
+    condition     = var.spot_weight > 0
+    error_message = "spot_weight must be greater than zero."
+  }
+}
+
+variable "od_weight" {
+  type        = number
+  default     = 1
+  description = "FARGATE on-demand weight for stateless gateway and runtime service capacity."
+  validation {
+    condition     = var.od_weight > 0
+    error_message = "od_weight must be greater than zero."
+  }
 }
 
 # ---- Image tags ------------------------------------------------------------

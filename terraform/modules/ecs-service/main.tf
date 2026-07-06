@@ -20,15 +20,6 @@ resource "aws_ecs_service" "this" {
     }
   }
 
-  dynamic "ordered_placement_strategy" {
-    for_each = var.placement_strategies
-
-    content {
-      type  = ordered_placement_strategy.value.type
-      field = ordered_placement_strategy.value.field
-    }
-  }
-
   network_configuration {
     subnets          = var.subnet_ids
     security_groups  = var.security_group_ids

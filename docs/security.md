@@ -17,8 +17,9 @@ rely on today. Current code, tests, and deployed network policy remain authorita
 - Internal network safety is still a deployment contract. The shared internal token is
   defense in depth and caller-shape authentication for in-tree platform services; it is
   not a substitute for keeping private ports off public ingress.
-- A runtime escape must not automatically become cloud credential theft. Host IMDS and
-  broad instance credentials must be blocked from tenant task network namespaces.
+- A runtime escape must not automatically become cloud credential theft. Tenant-running
+  tasks must use least-privilege task roles and must not receive broad infrastructure
+  credentials.
 
 ## Trust Zones
 
@@ -30,7 +31,7 @@ rely on today. Current code, tests, and deployed network policy remain authorita
 | System runtime | system-runtime, control/auth/tail, `__system__` workers | Platform code | Reserved namespace and private+public outbound |
 | Private service mesh | d1-runtime, do-runtime, workflows, scheduler, redis-proxy sidecars | Trusted platform components | Service Connect/security groups/internal sockets plus `WDL_INTERNAL_AUTH_TOKEN` |
 | State stores | Valkey DBs, EFS localDisk, S3-compatible storage | Platform-owned data services | Writer ownership, Redis DB split, secret envelopes, storage credentials |
-| Host/infra | ECS EC2 hosts, IAM roles, IMDS | Operator-controlled | IMDS block, IAM least privilege, ECS Exec policy |
+| Host/infra | ECS Fargate tasks, IAM roles, task metadata | Operator-controlled | IAM least privilege, ECS Exec policy |
 
 ## Public And Admin Ingress
 
@@ -166,18 +167,11 @@ and correctness change because it can bypass lifecycle and delete fences.
 
 ## Infrastructure Boundaries
 
-EC2-backed ECS capacity runs platform services, including tenant-executing runtime
-tasks. Tenant tasks must not reach host instance metadata:
-
-- EC2 launch/user-data must block awsvpc task access to host IMDS.
-- IMDS hop limit and ECS agent settings must be reviewed together.
-- The instance profile is for ECS/SSM/platform operations, not tenant application
-  capability.
-
-Tenant-executing runtime services share EC2 capacity with platform services, so IMDS
-blocking, public-only outbound bindings, and least-privilege task roles are part of the
-tenant isolation contract. ECS Exec should be enabled only where platform operator
-access is intended.
+Terraform runs platform services on ECS Fargate, including tenant-executing runtime
+tasks. Cloud credential exposure for tenant-running tasks is bounded by
+least-privilege task roles, public-only workerd outbound bindings, and private mesh
+security groups. ECS Exec should be enabled only where platform operator access is
+intended.
 
 Service Connect and security groups are part of the internal mesh boundary. The shared
 `WDL_INTERNAL_AUTH_TOKEN` current value must be identical across runtime,
@@ -225,7 +219,8 @@ propagation.
 ## Tests And Checks That Protect This Model
 
 - `tests/unit/style-contracts.test.js`: route channels, hidden Fetcher stripping,
-  internal socket split, IMDS block, low-cardinality metrics, and other drift guards.
+  internal socket split, Fargate/task-role infrastructure guards, low-cardinality
+  metrics, and other drift guards.
 - `tests/unit/auth-lib.test.js`, `tests/unit/auth-index.test.js`,
   `tests/integration/auth-worker.test.js`, `tests/integration/auth-platform.test.js`:
   token and role boundaries.

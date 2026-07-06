@@ -1,6 +1,6 @@
 resource "aws_ecs_task_definition" "gateway" {
   family                   = "${var.name}-gateway"
-  requires_compatibilities = ["EC2"]
+  requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.gateway_cpu
   memory                   = var.gateway_memory
@@ -45,6 +45,10 @@ resource "aws_ecs_task_definition" "gateway" {
       }
     }
   }])
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_lb_target_group" "gateway" {
@@ -154,11 +158,7 @@ module "gateway_service" {
   enable_execute_command = true
   deployment             = local.zero_downtime_deployment
 
-  capacity_provider_strategies = [
-    { capacity_provider = aws_ecs_capacity_provider.ec2.name, weight = 1 },
-  ]
-
-  placement_strategies = local.ec2_placement_strategies
+  capacity_provider_strategies = local.fargate_stateless_capacity_provider_strategies
 
   subnet_ids         = var.private_subnet_ids
   security_group_ids = [aws_security_group.gateway.id]

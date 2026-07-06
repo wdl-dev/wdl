@@ -23,6 +23,12 @@ alb_security_group_id  = "sg-xxxxxxxxxxxxxxxxx"
 d1_test_hooks_enabled = false
 do_test_hooks_enabled = false
 
+# Stateless gateway/user-runtime/system-runtime keep at least one on-demand
+# Fargate task and place overflow according to these weights. Stateful runtimes,
+# scheduler, and workflows stay on on-demand Fargate.
+spot_weight = 3
+od_weight   = 1
+
 # Optional assets CDN. Leave both empty to skip CloudFront.
 assets_cdn_domain              = ""
 assets_cdn_acm_certificate_arn = ""

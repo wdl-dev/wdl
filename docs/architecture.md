@@ -154,8 +154,8 @@ Hidden Fetcher bindings such as DO, D1, and workflows backends are platform plum
 They must not be exposed to user code. Runtime wrappers remove those bindings before
 tenant code observes `env`.
 
-EC2 instance metadata must be blocked from awsvpc task containers for tenant-running
-workloads.
+Tenant-running Fargate task roles must stay least-privilege; tenant code must not
+receive broad cloud credentials through task metadata.
 
 ## State Ownership
 

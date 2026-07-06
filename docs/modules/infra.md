@@ -138,9 +138,14 @@ Stateful storage:
 - Ordinary D1/DO task loss falls back to lease expiry and takeover by another replica;
   graceful rollout should prefer supervisor drain so ownership is released before the
   child workerd process exits.
-- ECS EC2 capacity must block task access to host IMDS for tenant-running workloads.
-- Instance refresh / lifecycle hooks can make Terraform rolling slow; document
-  operational expectations before changing hook timeout or capacity policy.
+- Terraform runs this application stack's services on ECS Fargate. Capacity policy
+  changes should document which services can use `FARGATE_SPOT`; stateful runtimes and
+  singleton control loops should stay on on-demand Fargate unless their interruption
+  semantics are re-reviewed.
+- Terraform Fargate services should use rolling replacement where the service can
+  tolerate overlapping capacity. D1/DO use sequential replacement with Availability
+  Zone rebalancing disabled; scheduler remains stop-before-start as a singleton
+  control loop.
 
 ## Security Boundaries
 
@@ -149,10 +154,9 @@ Stateful storage:
 - Runtime internal `:8088`, d1-runtime `:8787`, do-runtime `:8788`, workflows `:9120`,
   and Redis are private mesh services. Private service calls also require
   `x-wdl-internal-auth` with the shared `WDL_INTERNAL_AUTH_TOKEN`.
-- EC2 host instance profiles must not be reachable from awsvpc task containers.
-- Tenant-running runtime tasks still share EC2 capacity with platform services, so IMDS
-  blocking and workerd public-only outbound bindings are part of the deployment
-  contract. ECS Exec should be enabled only where operator access is intended.
+- Tenant-running runtime tasks use least-privilege ECS task roles, public-only workerd
+  outbound bindings, and private mesh security groups as their cloud credential and
+  network boundary. ECS Exec should be enabled only where operator access is intended.
 
 ## Observability
 
@@ -196,7 +200,7 @@ operations unless explicitly debugging.
 - Operator-driven checks: Terraform plan review and Kubernetes manifest review.
 - `npm run test:integration`
 - `tests/unit/style-contracts.test.js`: local compose Envoy mesh shape, D1/DO
-  test-hook IaC gates, and EC2 IMDS blocking.
+  test-hook IaC gates, and Fargate-only Terraform launch contracts.
 - Smoke tests against the target deployed environment after rolling.
 
 ## Known Constraints And Non-Goals

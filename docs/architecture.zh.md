@@ -106,7 +106,7 @@ Gateway 负责路由，不负责授权。Control/auth 负责控制面授权。Ru
 
 DO、D1、workflows backend 等 hidden Fetcher binding 是平台 plumbing，不能暴露给用户代码。Runtime wrapper 必须在用户代码观察 `env` 前删除这些 binding。
 
-运行 tenant workload 的 EC2 awsvpc task container 必须阻断 host IMDS。
+Tenant-running Fargate task role 必须保持 least-privilege；tenant code 不能通过 task metadata 拿到宽权限云凭证。
 
 ## 状态所有权
 

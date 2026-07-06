@@ -102,7 +102,8 @@ shared crate `wdl-rust-common`.
 - Hidden backend Fetchers and internal auth tokens for D1/DO/workflows are platform
   plumbing and must be stripped before tenant code observes `env`, request headers, or
   tenant-realm facade state.
-- EC2 instance metadata access must be blocked from tenant-running awsvpc tasks.
+- Tenant-running Fargate task roles must stay least-privilege; tenant code must not
+  receive broad cloud credentials through task metadata.
 
 ## Refactor Discipline
 

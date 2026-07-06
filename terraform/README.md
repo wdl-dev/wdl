@@ -20,7 +20,7 @@ terraform/
   bootstrap/
   foundation/
   modules/
-    compute/   # ECS, Service Connect, EC2 capacity, ALB target group, IAM, logs
+    compute/   # ECS Fargate, Service Connect, ALB target group, IAM, logs
     data/      # Valkey, S3 buckets, optional CloudFront assets CDN, S3 writer secrets
   main.tf
   outputs.tf
@@ -194,9 +194,7 @@ mutable tag.
 
 ## Services
 
-The application stack runs seven ECS services on a shared EC2 capacity provider.
-The default capacity is three `m8g.large` instances across three AZs, with ENI
-trunking enabled.
+The application stack runs seven ECS services on Fargate capacity providers.
 
 - `gateway`: `wdl-workerd`; ALB ingress for tenant traffic and the admin host.
 - `user-runtime`: `wdl-workerd` plus `redis-proxy`; loaded tenant workers and
@@ -218,29 +216,34 @@ private plus public mesh reach.
 
 ## Capacity
 
-The EC2 capacity provider uses a fixed Auto Scaling Group:
+The ECS cluster enables both `FARGATE` and `FARGATE_SPOT` capacity providers:
 
-- `min_size = max_size = desired_capacity = 3`
-- one ECS-optimized ARM64 host per AZ
-- spread placement by AZ, then by instance ID
-- ENI trunking enabled with `awsvpcTrunking`
+- gateway, user-runtime, and system-runtime keep `base = 1` on on-demand Fargate and
+  place overflow according to `od_weight` / `spot_weight`.
+- scheduler, workflows, d1-runtime, and do-runtime run on on-demand Fargate only.
+- All task definitions use ARM64 Linux Fargate-compatible CPU and memory defaults.
+- gateway, user-runtime, system-runtime, and workflows use zero-downtime rolling
+  replacement (`maximum_percent = 200`, `minimum_healthy_percent = 100`).
+- d1-runtime and do-runtime use sequential replacement (`maximum_percent = 100`,
+  `minimum_healthy_percent = 50`) with Availability Zone rebalancing disabled.
+- scheduler remains stop-before-start (`maximum_percent = 100`,
+  `minimum_healthy_percent = 0`) because it is a singleton control loop.
 
-Task-level `memory` is a task cgroup ceiling on this EC2-only stack, but it does not
-separate one container's memory from another container in the same task. CPU remains a
-cgroup share weight. D1 and Durable Object stateful runtime containers also set
-explicit container `memory` hard limits. D1 defaults to `runtime_memory - 128 MiB`.
-DO defaults to `runtime_memory - 256 MiB`: 128 MiB for the colocated redis-proxy
-sidecar reservation plus 128 MiB of task-level headroom. Both are overrideable with
+Fargate task-level `cpu` and `memory` are the task reservation/limit boundary. D1 and
+Durable Object stateful runtime containers also set explicit container `memory` hard
+limits. D1 defaults to `runtime_memory - 128 MiB`. DO defaults to
+`runtime_memory - 256 MiB`: 128 MiB for the colocated redis-proxy sidecar reservation
+plus 128 MiB of task-level headroom. Both are overrideable with
 `d1_runtime_container_memory` / `do_runtime_container_memory`; D1 must leave the
 task-level headroom, and DO must leave both the redis-proxy reservation and additional
-task-level headroom. This matters because newer workerd releases no longer cap SQLite's
-process hard heap at 512 MiB; the container cap keeps a runaway SQLite query inside the
-stateful runtime container budget. The supervisor is PID 1 in that same container.
+task-level headroom. This matters because newer workerd releases no longer cap
+SQLite's process hard heap at 512 MiB; the container cap keeps a runaway SQLite query
+inside the stateful runtime container budget. The supervisor is PID 1 in that same
+container.
 
-The launch template keeps IMDSv2 enabled for the ECS host agent, sets metadata
-hop limit to 1, and sets `ECS_AWSVPC_BLOCK_IMDS=true` so awsvpc tasks cannot read
-the host instance profile through EC2 IMDS. D1 and DO task identity use
-`ECS_CONTAINER_METADATA_URI_V4` instead.
+Tenant-running tasks use least-privilege ECS task roles, public-only workerd outbound
+bindings, and private mesh security groups as the cloud credential and network
+boundary. D1 and DO task identities use `ECS_CONTAINER_METADATA_URI_V4`.
 
 ## Admin Token
 

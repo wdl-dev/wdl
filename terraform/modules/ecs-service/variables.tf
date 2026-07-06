@@ -82,12 +82,3 @@ variable "service_connect_services" {
   }))
   default = []
 }
-
-# Empty when the selected ECS capacity model rejects placement strategies.
-variable "placement_strategies" {
-  type = list(object({
-    type  = string
-    field = string
-  }))
-  default = []
-}

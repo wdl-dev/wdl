@@ -60,6 +60,8 @@ module "compute" {
   scheduler_memory            = var.scheduler_memory
   workflows_cpu               = var.workflows_cpu
   workflows_memory            = var.workflows_memory
+  spot_weight                 = var.spot_weight
+  od_weight                   = var.od_weight
 
   log_level          = var.log_level
   log_retention_days = var.log_retention_days

@@ -95,8 +95,8 @@ Security boundaries are cross-language contracts, not implementation details:
   network bindings must not become tenant-visible `env` fields.
 - Secret plaintext may exist only during validation/encryption or runtime env
   materialization. At rest, secret values are `WDL-ENC:` envelopes.
-- A tenant-runtime escape must not imply cloud credential access. Host IMDS and broad
-  infrastructure credentials stay outside tenant network reach.
+- A tenant-runtime escape must not imply cloud credential access. Tenant-running tasks
+  use least-privilege task roles and must not receive broad infrastructure credentials.
 
 If a change moves data across a trust boundary, update `docs/security.md` and add a
 test or style-contract guard that protects the boundary.

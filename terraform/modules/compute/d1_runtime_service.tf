@@ -1,6 +1,6 @@
 resource "aws_ecs_task_definition" "d1_runtime" {
   family                   = "${var.name}-d1-runtime"
-  requires_compatibilities = ["EC2"]
+  requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.runtime_cpu
   memory                   = var.runtime_memory
@@ -75,6 +75,8 @@ resource "aws_ecs_task_definition" "d1_runtime" {
   }])
 
   lifecycle {
+    create_before_destroy = true
+
     precondition {
       condition = (
         local.d1_runtime_container_memory > 0 &&
@@ -102,11 +104,7 @@ module "d1_runtime_service" {
 
   availability_zone_rebalancing = "DISABLED"
 
-  capacity_provider_strategies = [
-    { capacity_provider = aws_ecs_capacity_provider.ec2.name, weight = 1 },
-  ]
-
-  placement_strategies = local.ec2_placement_strategies
+  capacity_provider_strategies = local.fargate_ondemand_capacity_provider_strategies
 
   subnet_ids         = var.private_subnet_ids
   security_group_ids = [aws_security_group.runtime.id]

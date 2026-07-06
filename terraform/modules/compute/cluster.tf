@@ -9,11 +9,16 @@ resource "aws_ecs_cluster" "this" {
 
 resource "aws_ecs_cluster_capacity_providers" "this" {
   cluster_name       = aws_ecs_cluster.this.name
-  capacity_providers = [aws_ecs_capacity_provider.ec2.name]
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
 
   default_capacity_provider_strategy {
-    capacity_provider = aws_ecs_capacity_provider.ec2.name
-    weight            = 1
+    capacity_provider = "FARGATE_SPOT"
+    weight            = var.spot_weight
+  }
+
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = var.od_weight
   }
 }
 

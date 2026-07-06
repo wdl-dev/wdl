@@ -1,6 +1,6 @@
 resource "aws_ecs_task_definition" "scheduler" {
   family                   = "${var.name}-scheduler"
-  requires_compatibilities = ["EC2"]
+  requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.scheduler_cpu
   memory                   = var.scheduler_memory
@@ -46,6 +46,10 @@ resource "aws_ecs_task_definition" "scheduler" {
       }
     }
   }])
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 module "scheduler_service" {
@@ -64,11 +68,7 @@ module "scheduler_service" {
 
   availability_zone_rebalancing = "DISABLED"
 
-  capacity_provider_strategies = [
-    { capacity_provider = aws_ecs_capacity_provider.ec2.name, weight = 1 },
-  ]
-
-  placement_strategies = local.ec2_placement_strategies
+  capacity_provider_strategies = local.fargate_ondemand_capacity_provider_strategies
 
   subnet_ids         = var.private_subnet_ids
   security_group_ids = [aws_security_group.scheduler.id]
