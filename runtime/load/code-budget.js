@@ -58,7 +58,7 @@ const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
  */
 
 /** @param {string | Uint8Array} body */
-export function moduleBodyByteLength(body) {
+function moduleBodyByteLength(body) {
   return typeof body === "string" ? Buffer.byteLength(body, "utf8") : body.byteLength;
 }
 
@@ -108,37 +108,32 @@ function runtimeModuleInjections(sources) {
 
 /**
  * @typedef {{
- *   type: string,
  *   modules: RuntimeModuleInjection[],
- *   addBinding(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings">, name: string): void,
  *   bindingNames(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings">): string[],
  * }} HostFacadeBindingDefinition
  */
 
-/** @param {RuntimeInjectionSources} sources @returns {HostFacadeBindingDefinition[]} */
-function hostFacadeBindingDefinitions(sources) {
+/**
+ * @param {ReturnType<typeof runtimeModuleInjections>} injections
+ * @returns {HostFacadeBindingDefinition[]}
+ */
+function hostFacadeBindingDefinitions(injections) {
   const {
     d1ModuleInjections,
     r2ModuleInjections,
     doModuleInjections,
-  } = runtimeModuleInjections(sources);
+  } = injections;
   return [
     {
-      type: "d1",
       modules: d1ModuleInjections,
-      addBinding(plan, name) { plan.d1Bindings.push(name); },
       bindingNames(plan) { return plan.d1Bindings; },
     },
     {
-      type: "r2",
       modules: r2ModuleInjections,
-      addBinding(plan, name) { plan.r2Bindings.push(name); },
       bindingNames(plan) { return plan.r2Bindings; },
     },
     {
-      type: "do",
       modules: doModuleInjections,
-      addBinding(plan, name) { plan.doBindings.push(name); },
       bindingNames(plan) { return plan.doBindings; },
     },
   ];
@@ -268,18 +263,19 @@ export function analyzeRuntimeMeta(meta) {
  * @param {RuntimeInjectionSources} runtimeSources
  * @param {RuntimeMetaPlan} [plan]
  */
-export function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = analyzeRuntimeMeta(meta)) {
+function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = analyzeRuntimeMeta(meta)) {
+  const injections = runtimeModuleInjections(runtimeSources);
   /** @type {Map<string, string>} */
   const out = new Map();
   /** @param {RuntimeModuleInjection[]} modules */
   const addModules = (modules) => {
     for (const [name, source] of modules) out.set(name, source);
   };
-  for (const definition of hostFacadeBindingDefinitions(runtimeSources)) {
+  for (const definition of hostFacadeBindingDefinitions(injections)) {
     if (definition.bindingNames(plan).length > 0) addModules(definition.modules);
   }
   if (plan.needsWorkflowsBackend) {
-    addModules(runtimeModuleInjections(runtimeSources).workflowsModuleInjections);
+    addModules(injections.workflowsModuleInjections);
   }
   out.set(WORKFLOWS_MODULE_NAME, WORKFLOWS_MODULE_SOURCE);
   out.set(

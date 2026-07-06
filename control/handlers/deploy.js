@@ -49,9 +49,7 @@ import {
 } from "control-env-budget";
 import {
   WorkerCodeBudgetError,
-  WORKER_LOADER_CODE_MAX_BYTES,
   assertWorkerLoaderCodeBudget,
-  estimatePreparedWorkerLoaderCodeBytes,
 } from "control-worker-code-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
 
@@ -156,29 +154,6 @@ function deployRequestErrorFromUnknown(err) {
     typeof record.code === "string" ? record.code : "invalid_request",
     typeof record.message === "string" ? record.message : String(err)
   );
-}
-
-/**
- * @param {{ prepared: PreparedBundle, ns: string, name: string }} args
- */
-function validateWorkerLoaderCodeBudget({ prepared, ns, name }) {
-  let totalBytes;
-  try {
-    totalBytes = estimatePreparedWorkerLoaderCodeBytes(prepared);
-  } catch (err) {
-    if (err instanceof WorkerCodeBudgetError) {
-      throw new DeployRequestError(err.status, err.code, err.message);
-    }
-    throw invalidDeployRequest(errMessage(err));
-  }
-  if (totalBytes > WORKER_LOADER_CODE_MAX_BYTES) {
-    throw new DeployRequestError(
-      413,
-      "worker_code_too_large",
-      `final WorkerCode for ${ns}/${name} totals ${totalBytes} bytes, ` +
-        `exceeding workerd workerLoader code limit ${WORKER_LOADER_CODE_MAX_BYTES} bytes`
-    );
-  }
 }
 
 /** @param {BindingMap} [bindings] */
@@ -784,9 +759,14 @@ export async function handle({ request, env, ns, name, requestId }) {
   const controlEnv = stringEnv(env);
 
   try {
-    validateWorkerLoaderCodeBudget({ prepared, ns, name });
+    assertWorkerLoaderCodeBudget({
+      ns,
+      worker: name,
+      meta: prepared.meta,
+      normalized: prepared.normalized,
+    });
   } catch (err) {
-    if (err instanceof DeployRequestError) return deployRequestErrorResponse(err);
+    if (err instanceof WorkerCodeBudgetError) return codedErrorResponse(err, err.code);
     throw err;
   }
 

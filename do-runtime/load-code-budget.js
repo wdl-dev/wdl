@@ -8,7 +8,7 @@ export const DO_ALARM_SHIM_MODULE = "_wdl-do-alarm-shim.js";
  */
 
 /** @param {WorkerMeta} meta */
-export function doRuntimeClassNames(meta) {
+function doRuntimeClassNames(meta) {
   /** @type {Set<string>} */
   const out = new Set();
   for (const spec of Object.values(meta.bindings || {})) {
@@ -19,11 +19,16 @@ export function doRuntimeClassNames(meta) {
   return [...out];
 }
 
+/** @param {WorkerMeta} meta */
+export function hasDoRuntimeInjectedModules(meta) {
+  return doRuntimeClassNames(meta).length > 0;
+}
+
 /**
  * @param {string} userMainSpecifier
  * @param {string[]} classNames
  */
-export function generateDoRuntimeWrapperModule(userMainSpecifier, classNames) {
+function generateDoRuntimeWrapperModule(userMainSpecifier, classNames) {
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
   const alarmShim = JSON.stringify(`./${DO_ALARM_SHIM_MODULE}`);
   const wrappedClasses = classNames.map((name) => `

@@ -61,7 +61,6 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
   CONTROL_DEPLOY_TEST_STATE.envBudgetFailuresRemaining = 0;
   CONTROL_DEPLOY_TEST_STATE.envBudgetCalls = [];
-  CONTROL_DEPLOY_TEST_STATE.redis = null;
   CONTROL_DEPLOY_TEST_STATE.logs = [];
   CONTROL_DEPLOY_TEST_STATE.metrics = { increment() {}, observe() {} };
   CONTROL_DEPLOY_TEST_STATE.service = "control";
@@ -282,8 +281,18 @@ const controlWorkerCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
 const {
   WORKER_LOADER_CODE_MAX_BYTES,
   WorkerCodeBudgetError,
-  estimateWorkerLoaderCodeBytes,
+  assertWorkerLoaderCodeBudget,
 } = await import(controlWorkerCodeBudgetUrl);
+
+/** @param {{ meta: Record<string, unknown>, normalized: Array<[string, string | Uint8Array]> }} bundle */
+function assertTestWorkerCodeBytes({ meta, normalized }) {
+  return assertWorkerLoaderCodeBudget({
+    ns: "tenant-a",
+    worker: "unit",
+    meta,
+    normalized,
+  });
+}
 
 const { commitWithWatch, handle } = await importControlHandler("control/handlers/deploy.js", {
   globalName: "__controlDeployTestState",
@@ -310,7 +319,7 @@ const { WatchError } = await import(sharedRedisUrl);
 
 test("worker code budget shape failures are domain errors", () => {
   assert.throws(
-    () => estimateWorkerLoaderCodeBytes({ meta: {}, normalized: [] }),
+    () => assertTestWorkerCodeBytes({ meta: {}, normalized: [] }),
     (err) => {
       const budgetErr = /** @type {{ code?: string, status?: number }} */ (err);
       return err instanceof WorkerCodeBudgetError &&
@@ -322,7 +331,7 @@ test("worker code budget shape failures are domain errors", () => {
 
 test("worker code budget wraps runtime estimator validation failures as domain errors", () => {
   assert.throws(
-    () => estimateWorkerLoaderCodeBytes({
+    () => assertTestWorkerCodeBytes({
       meta: {
         mainModule: "worker.js",
         modules: { "worker.js": { type: "module" } },
@@ -342,7 +351,7 @@ test("worker code budget wraps runtime estimator validation failures as domain e
 });
 
 test("worker code budget allows do-runtime reserved names when no DO wrapper is injected", () => {
-  assert.doesNotThrow(() => estimateWorkerLoaderCodeBytes({
+  assert.doesNotThrow(() => assertTestWorkerCodeBytes({
     meta: {
       mainModule: "worker.js",
       modules: {
@@ -849,6 +858,10 @@ test("deploy handler counts runtime-generated wrapper code before allocating a v
     const body = await readJsonResponse(response, 413);
     assert.equal(body.error, "worker_code_too_large");
     assert.match(body.message, /final WorkerCode/);
+    assert.equal(body.namespace, "tenant-a");
+    assert.equal(body.worker, "code-heavy");
+    assert.equal(typeof body.code_bytes, "number");
+    assert.equal(body.max_code_bytes, WORKER_LOADER_CODE_MAX_BYTES);
     assert.equal(incrCalled, false);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
@@ -964,7 +977,7 @@ test("deploy handler counts do-runtime wrapper code before allocating a version"
     modules: { "worker.js": { type: "module" } },
     bindings: { ROOM: { type: "do", className } },
   };
-  const emptyOverhead = estimateWorkerLoaderCodeBytes({
+  const emptyOverhead = assertTestWorkerCodeBytes({
     meta,
     normalized: [["worker.js", ""]],
   });
@@ -1001,6 +1014,10 @@ test("deploy handler counts do-runtime wrapper code before allocating a version"
 
     const body = await readJsonResponse(response, 413);
     assert.equal(body.error, "worker_code_too_large");
+    assert.equal(body.namespace, "tenant-a");
+    assert.equal(body.worker, "do-heavy");
+    assert.equal(typeof body.code_bytes, "number");
+    assert.equal(body.max_code_bytes, WORKER_LOADER_CODE_MAX_BYTES);
     assert.equal(incrCalled, false);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
@@ -1261,19 +1278,22 @@ test("commitWithWatch checks code budget after workflow keys are materialized", 
       { ...preparedMeta.workflows[0], workflowKey: "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
     ],
   };
-  const emptyCommittedBytes = estimateWorkerLoaderCodeBytes({
+  const emptyCommittedBytes = assertTestWorkerCodeBytes({
     meta: committedMeta,
     normalized: [["worker.js", ""]],
   });
   const source = " ".repeat(WORKER_LOADER_CODE_MAX_BYTES - emptyCommittedBytes + 1);
-  assert.ok(estimateWorkerLoaderCodeBytes({
+  assert.ok(assertTestWorkerCodeBytes({
     meta: preparedMeta,
     normalized: [["worker.js", source]],
   }) <= WORKER_LOADER_CODE_MAX_BYTES);
-  assert.ok(estimateWorkerLoaderCodeBytes({
-    meta: committedMeta,
-    normalized: [["worker.js", source]],
-  }) > WORKER_LOADER_CODE_MAX_BYTES);
+  assert.throws(
+    () => assertTestWorkerCodeBytes({
+      meta: committedMeta,
+      normalized: [["worker.js", source]],
+    }),
+    (err) => /** @type {{ code?: string }} */ (err).code === "worker_code_too_large"
+  );
 
   const redis = {
     /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */

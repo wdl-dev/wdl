@@ -6,8 +6,8 @@ import { HOST_BINDING_RESERVED_MODULE_NAMES } from "runtime-load-module-rewrite"
 import {
   DO_ALARM_SHIM_MODULE,
   DO_RUNTIME_RESERVED_MODULE,
-  doRuntimeInjectedModuleSources,
   estimateDoRuntimeInjectedCodeBytes,
+  hasDoRuntimeInjectedModules,
 } from "do-runtime-load-code-budget";
 import { errorMessage } from "shared-errors";
 import D1_CLIENT_SOURCE from "runtime-d1-client-source";
@@ -83,11 +83,7 @@ function wrapWorkerCodeInvalid(err, details) {
  */
 function reservedModuleNamesForMeta(meta) {
   const names = [...HOST_BINDING_RESERVED_MODULE_NAMES];
-  if (typeof meta.mainModule === "string" && doRuntimeInjectedModuleSources(
-    "_wdl-wrapper.js",
-    meta,
-    DO_ALARM_SHIM_SOURCE
-  ).length > 0) {
+  if (hasDoRuntimeInjectedModules(meta)) {
     names.push(DO_ALARM_SHIM_MODULE, DO_RUNTIME_RESERVED_MODULE);
   }
   return names;
@@ -180,16 +176,6 @@ function estimateWorkerLoaderCodeBytesWithContext(bundle, context = {}) {
 
 /**
  * @param {{
- *   meta: { mainModule?: unknown, modules?: Record<string, { type?: unknown }> | null, [key: string]: unknown },
- *   normalized: Array<[string, string | Uint8Array]>,
- * }} bundle
- */
-export function estimateWorkerLoaderCodeBytes(bundle) {
-  return estimateWorkerLoaderCodeBytesWithContext(bundle);
-}
-
-/**
- * @param {{
  *   ns: string,
  *   worker: string,
  *   version?: string,
@@ -212,14 +198,4 @@ export function assertWorkerLoaderCodeBudget({ ns, worker, version = undefined, 
       max_code_bytes: WORKER_LOADER_CODE_MAX_BYTES,
     }
   );
-}
-
-/**
- * @param {{
- *   meta: { mainModule?: unknown, modules?: Record<string, { type?: unknown }> | null, [key: string]: unknown },
- *   normalized: Array<[string, string | Uint8Array]>,
- * }} prepared
- */
-export function estimatePreparedWorkerLoaderCodeBytes(prepared) {
-  return estimateWorkerLoaderCodeBytes(prepared);
 }

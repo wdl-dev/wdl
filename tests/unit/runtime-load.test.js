@@ -149,7 +149,6 @@ const {
 const {
   estimateFinalWorkerLoaderCodeBytes,
   injectRuntimeModulesForHostBindings,
-  runtimeInjectedModuleSources,
 } = codeBudgetMod;
 
 const RUNTIME_LOAD_MAGIC = "WDLLOAD!";
@@ -1407,8 +1406,18 @@ const TEST_RUNTIME_INJECTION_SOURCES = Object.freeze({
 function workerCodeModuleBytes(workerCode) {
   let total = 0;
   for (const value of Object.values(workerCode.modules)) {
-    assert.equal(typeof value, "string");
-    total += Buffer.byteLength(/** @type {string} */ (value), "utf8");
+    if (typeof value === "string") {
+      total += Buffer.byteLength(value, "utf8");
+      continue;
+    }
+    const record = value && typeof value === "object"
+      ? /** @type {{ cjs?: unknown }} */ (value)
+      : null;
+    if (typeof record?.cjs === "string") {
+      total += Buffer.byteLength(record.cjs, "utf8");
+      continue;
+    }
+    assert.fail(`unexpected workerCode module value ${JSON.stringify(value)}`);
   }
   return total;
 }
@@ -1454,14 +1463,14 @@ test("workerLoader code estimator does not rewrite CommonJS workflow strings", (
     modules: { "src/worker.cjs": { type: "cjs" } },
     workflows: [{ binding: "FLOW", name: "flow", className: "FlowHandler" }],
   };
-  let injectedBytes = 0;
-  for (const [, injected] of runtimeInjectedModuleSources(
-    meta.mainModule,
-    meta,
-    TEST_RUNTIME_INJECTION_SOURCES
-  )) {
-    injectedBytes += Buffer.byteLength(/** @type {string} */ (injected), "utf8");
-  }
+  /** @type {{ mainModule: string, modules: Record<string, string | { cjs: string }> }} */
+  const injectedWorkerCode = {
+    mainModule: meta.mainModule,
+    modules: { [meta.mainModule]: { cjs: source } },
+  };
+  injectRuntimeModulesForHostBindings(injectedWorkerCode, meta, TEST_RUNTIME_INJECTION_SOURCES);
+  assert.deepEqual(injectedWorkerCode.modules[meta.mainModule], { cjs: source });
+  const injectedBytes = workerCodeModuleBytes(injectedWorkerCode) - Buffer.byteLength(source, "utf8");
 
   assert.equal(
     estimateFinalWorkerLoaderCodeBytes({
