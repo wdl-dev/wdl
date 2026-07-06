@@ -287,6 +287,11 @@ Auth-specific contract:
   fallback.
 - Worker delete commits Redis lifecycle state first; async S3 cleanup enqueue is
   best-effort and returns warning if it fails.
+- The `s3-cleanup` system worker persists cleanup tasks in D1. Cron replay owns retries
+  after the row exists, uses minute-scale exponential backoff capped at 30 minutes for
+  S3 failures, and checkpoints large prefix cleanup after each S3 List/Delete page so
+  normal pagination progress does not consume failure attempts or restart from the
+  beginning after a scheduler timeout.
 - Workflow lifecycle blockers are checked through workflows and fail closed on service
   errors.
 - AUTH JSRPC errors or Redis explosions are control-plane failures and map to 503

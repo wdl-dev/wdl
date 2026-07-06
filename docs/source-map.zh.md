@@ -69,7 +69,8 @@
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire 和 SQL splitting utilities。 |
 | `shared/fnv1a32.js` | Runtime-side shard 和 slot hashing 共用的 JavaScript FNV-1a helpers。 |
-| `shared/s3-xml.js` | Control R2 和 runtime R2 路径共用的 S3 XML parsing helpers。 |
+| `shared/s3-query.js` | s3-cleanup system worker 使用的 S3 query encoder；runtime R2 在 `runtime/r2-utils.js` 保留同一套 standalone helper，因为该文件会作为 worker source 注入。 |
+| `shared/s3-xml.js` | Control R2、runtime R2 和 system cleanup 路径共用的 S3 XML parsing helpers。 |
 | `shared/worker-id.js` | Gateway、runtime、DO runtime 和 tests 共用的 `x-worker-id` formatting、parsing 和 runtime-load identity grammar。 |
 | `shared/cron-time.js` | Control 侧 cron parsing 和 slot-alignment helpers；scheduler advancement 使用 Rust `croner`。 |
 | `shared/vendor/` | `npm run build:vendor` 重新生成的预打包第三方依赖。 |

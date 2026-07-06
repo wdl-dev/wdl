@@ -30,6 +30,7 @@ export const S3_CLEANUP_TASK_FIELDS = Object.freeze({
   UPDATED_AT: "updated_at",
   NEXT_ATTEMPT_AT: "next_attempt_at",
   LAST_ERROR: "last_error",
+  CHECKPOINT_JSON: "checkpoint_json",
 });
 
 export const S3_CLEANUP_ERROR = Object.freeze({

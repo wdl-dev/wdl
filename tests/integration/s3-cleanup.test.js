@@ -33,11 +33,17 @@ import http from "node:http";
 const S3MOCK_BASE = ASSETS_CDN_BASE;
 const CLEANUP_DB = "s3-cleanup-state";
 const S3_CLEANUP_WORKER_ID = "__system__:s3-cleanup:v1";
-const INITIAL_MIGRATION_ID = "0001_s3_cleanup_task.sql";
-const INITIAL_MIGRATION_SQL = readFileSync(
-  new URL("../../system-workers/s3-cleanup/migrations/0001_s3_cleanup_task.sql", import.meta.url),
-  "utf8"
-);
+const CLEANUP_MIGRATIONS = [
+  ["0001_s3_cleanup_task.sql", "0001_s3_cleanup_task"],
+  ["0002_s3_cleanup_checkpoint.sql", "0002_s3_cleanup_checkpoint"],
+].map(([id, name]) => ({
+  id,
+  name,
+  sql: readFileSync(
+    new URL(`../../system-workers/s3-cleanup/migrations/${id}`, import.meta.url),
+    "utf8"
+  ),
+}));
 
 setupIntegrationSuite({
   reset: false,
@@ -58,11 +64,7 @@ setupIntegrationSuite({
     assertStatus(created, 201, "created");
 
     const migrated = await adminPost(`/ns/__system__/d1/databases/${CLEANUP_DB}/migrations/apply`, {
-      migrations: [{
-        id: INITIAL_MIGRATION_ID,
-        name: "0001_s3_cleanup_task",
-        sql: INITIAL_MIGRATION_SQL,
-      }],
+      migrations: CLEANUP_MIGRATIONS,
     });
     assertStatus(migrated, 200, "migrated");
 

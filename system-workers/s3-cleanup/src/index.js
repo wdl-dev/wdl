@@ -28,11 +28,13 @@ import {
   xmlTagValueIsTrue,
   xmlUnescape,
 } from "../../../shared/s3-xml.js";
+import { encodeS3Query } from "../../../shared/s3-query.js";
 
 const MAX_ATTEMPTS = 10;
 const BACKOFF_MAX_MS = 30 * 60_000;
-const BACKOFF_BASE_MS = 2_000;
+const BACKOFF_BASE_MS = 60_000;
 const CRON_BATCH = 100;
+const MAX_DELETE_PAGES_PER_RUN = 1;
 const MAX_LIST_PAGES = 1000;
 const PROCESSING_LEASE_MS = 30 * 60_000;
 const S3_TRANSIENT_RETRIES = 10;
@@ -48,11 +50,12 @@ const bindLogLevel = createLogLevelBinder();
  * @typedef {Record<string, unknown> & { S3_ACCESS_KEY_ID: string, S3_SECRET_ACCESS_KEY: string, S3_ENDPOINT: string, S3_BUCKET: string, S3_REGION?: string, LOG_LEVEL?: unknown, S3_CLEANUP_DB: CleanupDb }} S3CleanupEnv
  * @typedef {{ prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<{ meta?: { changes?: number } }>, first(): Promise<Record<string, unknown> | null>, all(): Promise<{ results?: Record<string, unknown>[] }> } } }} CleanupDb
  * @typedef {{ aws: SigV4Client, endpoint: string, bucket: string }} S3Client
- * @typedef {{ id: string, source: Record<string, unknown> | null, prefixes: string[] | null, state: string, attempts: number, createdAt: number, updatedAt: number, nextAttemptAt: number | null, lastError: string | null }} CleanupTask
+ * @typedef {{ prefixIndex: number, continuationToken: string | null, pageCount: number }} CleanupCheckpoint
+ * @typedef {{ id: string, source: Record<string, unknown> | null, prefixes: string[] | null, state: string, attempts: number, createdAt: number, updatedAt: number, nextAttemptAt: number | null, lastError: string | null, checkpoint: CleanupCheckpoint | null }} CleanupTask
  */
 
 /** @param {number} attempts */
-function nextBackoffMs(attempts) {
+export function nextBackoffMs(attempts) {
   return Math.min(BACKOFF_BASE_MS * 2 ** (attempts - 1), BACKOFF_MAX_MS);
 }
 
@@ -152,12 +155,32 @@ function safeJsonParse(raw) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
+/** @param {unknown} raw */
+function normalizeCheckpoint(raw) {
+  const parsed = safeJsonParse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const checkpoint = /** @type {Record<string, unknown>} */ (parsed);
+  const prefixIndex = Number(checkpoint.prefixIndex);
+  if (!Number.isInteger(prefixIndex) || prefixIndex < 0) return null;
+  const continuationToken = checkpoint.continuationToken;
+  const pageCount = Number(checkpoint.pageCount ?? 0);
+  if (!Number.isInteger(pageCount) || pageCount < 0) return null;
+  return {
+    prefixIndex,
+    continuationToken: typeof continuationToken === "string" && continuationToken
+      ? continuationToken
+      : null,
+    pageCount,
+  };
+}
+
 /** @param {Record<string, unknown> | null | undefined} row */
 function normalizeTaskRow(row) {
   if (!row) return null;
   const prefixes = safeJsonParse(row[S3_CLEANUP_TASK_FIELDS.PREFIXES_JSON]);
   const source = safeJsonParse(row[S3_CLEANUP_TASK_FIELDS.SOURCE_JSON]);
   const lastError = row[S3_CLEANUP_TASK_FIELDS.LAST_ERROR];
+  const checkpoint = normalizeCheckpoint(row[S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON]);
   return {
     id: String(row[S3_CLEANUP_TASK_FIELDS.ID] || ""),
     source,
@@ -172,6 +195,7 @@ function normalizeTaskRow(row) {
     lastError: typeof lastError === "string"
       ? lastError
       : null,
+    checkpoint,
   };
 }
 
@@ -323,6 +347,103 @@ async function scheduleRetry(db, id, attempts, message, now = Date.now()) {
 }
 
 /**
+ * @param {CleanupDb} db
+ * @param {string} id
+ * @param {CleanupCheckpoint} checkpoint
+ * @param {number} [now]
+ */
+async function saveProgress(db, id, checkpoint, now = Date.now()) {
+  await db.prepare(`
+    UPDATE ${S3_CLEANUP_TABLE}
+    SET ${S3_CLEANUP_TASK_FIELDS.UPDATED_AT} = ?1,
+        ${S3_CLEANUP_TASK_FIELDS.NEXT_ATTEMPT_AT} = ?2,
+        ${S3_CLEANUP_TASK_FIELDS.ATTEMPTS} = 0,
+        ${S3_CLEANUP_TASK_FIELDS.LAST_ERROR} = NULL,
+        ${S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON} = ?3
+    WHERE ${S3_CLEANUP_TASK_FIELDS.ID} = ?4
+  `).bind(now, now, JSON.stringify(checkpoint), id).run();
+}
+
+/**
+ * @param {S3Client} s3
+ * @param {string} prefix
+ * @param {string | null} [continuationToken]
+ */
+export async function deletePrefixPage(s3, prefix, continuationToken = null) {
+  let deleted = 0;
+  const query = encodeS3Query({
+    "list-type": "2",
+    prefix,
+    "continuation-token": continuationToken,
+  });
+  const listRes = await s3.aws.fetch(`${s3.endpoint}/${s3.bucket}?${query}`, { method: "GET" });
+  if (!listRes.ok) {
+    const body = await listRes.text().catch(() => "");
+    throw new Error(`s3 list ${prefix} → ${listRes.status}: ${body}`);
+  }
+  const xml = await listRes.text();
+  // ListObjectsV2 returns <Key>a&amp;b.txt</Key> for key `a&b.txt` —
+  // if we don't unescape before the subsequent xmlEscape() on send,
+  // `a&amp;amp;b.txt` lands in the Delete body, S3 "successfully"
+  // removes a non-existent key, and the real object is silently
+  // orphaned with status=done.
+  const keys = listXmlTagValues(xml, "Key");
+  const truncated = xmlTagValueIsTrue(xml, "IsTruncated");
+  if (keys.length > 0) {
+    const body = [
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+      "<Delete>",
+      ...keys.map((k) => `<Object><Key>${xmlEscape(k)}</Key></Object>`),
+      "</Delete>",
+    ].join("");
+    // S3 DeleteObjects requires a body integrity header — Content-MD5 or
+    // x-amz-checksum-*. workerd ships SHA-256 but not MD5, so we use the
+    // sha256 checksum.
+    const bodyBytes = utf8Encoder.encode(body);
+    const sha = await crypto.subtle.digest("SHA-256", bodyBytes);
+    const sha_b64 = bytesToBase64(new Uint8Array(sha));
+    const delUrl = `${s3.endpoint}/${s3.bucket}?delete`;
+    const delRes = await fetchRetryableS3Post(s3.aws, delUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/xml",
+        "x-amz-checksum-sha256": sha_b64,
+      },
+      body,
+    });
+    const delXml = await delRes.text();
+    if (!delRes.ok) {
+      throw new Error(`s3 delete ${prefix} → ${delRes.status}: ${delXml}`);
+    }
+    // DeleteObjects reports partial failure in the body — the HTTP
+    // status stays 200 even when every key failed (AccessDenied etc).
+    const errorBlocks = [...delXml.matchAll(/<Error>([\s\S]*?)<\/Error>/g)];
+    if (errorBlocks.length > 0) {
+      const details = errorBlocks.slice(0, 5).map((m) => {
+        const blk = m[1];
+        const k = (/<Key>([^<]*)<\/Key>/.exec(blk) || [])[1] || "?";
+        const c = (/<Code>([^<]*)<\/Code>/.exec(blk) || [])[1] || "?";
+        const msg = (/<Message>([^<]*)<\/Message>/.exec(blk) || [])[1] || "";
+        return `${xmlUnescape(k)}[${c}]: ${xmlUnescape(msg)}`;
+      }).join("; ");
+      throw new Error(
+        `s3 delete ${prefix} partial-fail (${errorBlocks.length} errors): ${details}`
+      );
+    }
+    // Count <Deleted> blocks rather than assume keys.length, in case
+    // any keys we requested already disappeared before we got here.
+    const deletedBlocks = [...delXml.matchAll(/<Deleted>([\s\S]*?)<\/Deleted>/g)];
+    deleted += deletedBlocks.length > 0 ? deletedBlocks.length : keys.length;
+  }
+  if (!truncated) return { deletedCount: deleted, nextContinuationToken: null };
+  const continuationTokens = listXmlTagValues(xml, "NextContinuationToken");
+  if (!continuationTokens[0]) {
+    throw new Error(`s3 list ${prefix} is truncated without NextContinuationToken`);
+  }
+  return { deletedCount: deleted, nextContinuationToken: continuationTokens[0] };
+}
+
+/**
  * @param {S3Client} s3
  * @param {string} prefix
  */
@@ -330,80 +451,13 @@ export async function deletePrefix(s3, prefix) {
   let deleted = 0;
   let continuationToken = null;
   for (let page = 0; page < MAX_LIST_PAGES; page++) {
-    const listUrl = new URL(`${s3.endpoint}/${s3.bucket}`);
-    listUrl.searchParams.set("list-type", "2");
-    listUrl.searchParams.set("prefix", prefix);
-    if (continuationToken) {
-      listUrl.searchParams.set("continuation-token", continuationToken);
-    }
-    const listRes = await s3.aws.fetch(listUrl.toString(), { method: "GET" });
-    if (!listRes.ok) {
-      const body = await listRes.text().catch(() => "");
-      throw new Error(`s3 list ${prefix} → ${listRes.status}: ${body}`);
-    }
-    const xml = await listRes.text();
-    // ListObjectsV2 returns <Key>a&amp;b.txt</Key> for key `a&b.txt` —
-    // if we don't unescape before the subsequent xmlEscape() on send,
-    // `a&amp;amp;b.txt` lands in the Delete body, S3 "successfully"
-    // removes a non-existent key, and the real object is silently
-    // orphaned with status=done.
-    const keys = listXmlTagValues(xml, "Key");
-    const truncated = xmlTagValueIsTrue(xml, "IsTruncated");
-    if (keys.length > 0) {
-      const body = [
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
-        "<Delete>",
-        ...keys.map((k) => `<Object><Key>${xmlEscape(k)}</Key></Object>`),
-        "</Delete>",
-      ].join("");
-      // S3 DeleteObjects requires a body integrity header — Content-MD5 or
-      // x-amz-checksum-*. workerd ships SHA-256 but not MD5, so we use the
-      // sha256 checksum.
-      const bodyBytes = utf8Encoder.encode(body);
-      const sha = await crypto.subtle.digest("SHA-256", bodyBytes);
-      const sha_b64 = bytesToBase64(new Uint8Array(sha));
-      const delUrl = `${s3.endpoint}/${s3.bucket}?delete`;
-      const delRes = await fetchRetryableS3Post(s3.aws, delUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/xml",
-          "x-amz-checksum-sha256": sha_b64,
-        },
-        body,
-      });
-      const delXml = await delRes.text();
-      if (!delRes.ok) {
-        throw new Error(`s3 delete ${prefix} → ${delRes.status}: ${delXml}`);
-      }
-      // DeleteObjects reports partial failure in the body — the HTTP
-      // status stays 200 even when every key failed (AccessDenied etc).
-      const errorBlocks = [...delXml.matchAll(/<Error>([\s\S]*?)<\/Error>/g)];
-      if (errorBlocks.length > 0) {
-        const details = errorBlocks.slice(0, 5).map((m) => {
-          const blk = m[1];
-          const k = (/<Key>([^<]*)<\/Key>/.exec(blk) || [])[1] || "?";
-          const c = (/<Code>([^<]*)<\/Code>/.exec(blk) || [])[1] || "?";
-          const msg = (/<Message>([^<]*)<\/Message>/.exec(blk) || [])[1] || "";
-          return `${xmlUnescape(k)}[${c}]: ${xmlUnescape(msg)}`;
-        }).join("; ");
-        throw new Error(
-          `s3 delete ${prefix} partial-fail (${errorBlocks.length} errors): ${details}`
-        );
-      }
-      // Count <Deleted> blocks rather than assume keys.length, in case
-      // any keys we requested already disappeared before we got here.
-      const deletedBlocks = [...delXml.matchAll(/<Deleted>([\s\S]*?)<\/Deleted>/g)];
-      deleted += deletedBlocks.length > 0 ? deletedBlocks.length : keys.length;
-    }
-    if (!truncated) break;
-    const continuationTokens = listXmlTagValues(xml, "NextContinuationToken");
-    if (!continuationTokens[0]) {
-      throw new Error(`s3 list ${prefix} is truncated without NextContinuationToken`);
-    }
+    const pageResult = await deletePrefixPage(s3, prefix, continuationToken);
+    deleted += pageResult.deletedCount;
+    if (!pageResult.nextContinuationToken) break;
     if (page === MAX_LIST_PAGES - 1) {
       throw new Error(`s3 list ${prefix} exceeded ${MAX_LIST_PAGES} pages`);
     }
-    continuationToken = continuationTokens[0];
+    continuationToken = pageResult.nextContinuationToken;
   }
   return { deletedCount: deleted };
 }
@@ -413,7 +467,7 @@ export async function deletePrefix(s3, prefix) {
  * @param {S3Client} s3
  * @param {CleanupTask | string} taskOrId
  */
-async function processTask(db, s3, taskOrId) {
+export async function processTask(db, s3, taskOrId) {
   const task = typeof taskOrId === "string" ? await loadTask(db, taskOrId) : taskOrId;
   if (!task) {
     return S3_CLEANUP_OUTCOME.MISSING_TASK;
@@ -446,9 +500,54 @@ async function processTask(db, s3, taskOrId) {
 
   let totalDeleted = 0;
   try {
-    for (const prefix of task.prefixes) {
-      const r = await deletePrefix(s3, prefix);
+    const prefixes = /** @type {string[]} */ (task.prefixes);
+    let prefixIndex = task.checkpoint?.prefixIndex ?? 0;
+    let continuationToken = task.checkpoint?.continuationToken ?? null;
+    let pageCount = task.checkpoint?.pageCount ?? 0;
+    if (prefixIndex > prefixes.length) {
+      throw new Error(
+        `s3 cleanup task checkpoint prefixIndex ${prefixIndex} exceeds prefixes length ` +
+          String(prefixes.length)
+      );
+    }
+    for (let page = 0; page < MAX_DELETE_PAGES_PER_RUN && prefixIndex < prefixes.length; page += 1) {
+      if (pageCount >= MAX_LIST_PAGES) {
+        throw new Error(`s3 list ${prefixes[prefixIndex]} exceeded ${MAX_LIST_PAGES} pages`);
+      }
+      const prefix = prefixes[prefixIndex];
+      const r = await deletePrefixPage(s3, prefix, continuationToken);
       totalDeleted += r.deletedCount;
+      const nextPageCount = pageCount + 1;
+      if (r.nextContinuationToken) {
+        if (nextPageCount >= MAX_LIST_PAGES) {
+          throw new Error(`s3 list ${prefix} exceeded ${MAX_LIST_PAGES} pages`);
+        }
+        await saveProgress(db, task.id, {
+          prefixIndex,
+          continuationToken: r.nextContinuationToken,
+          pageCount: nextPageCount,
+        });
+        logStructured("info", "s3_cleanup_task_progress", {
+          task_id: task.id,
+          prefix_index: prefixIndex,
+          deleted_count: totalDeleted,
+          has_more_pages: true,
+        });
+        return S3_CLEANUP_OUTCOME.RETRY;
+      }
+      prefixIndex += 1;
+      continuationToken = null;
+      pageCount = 0;
+    }
+    if (prefixIndex < prefixes.length) {
+      await saveProgress(db, task.id, { prefixIndex, continuationToken: null, pageCount: 0 });
+      logStructured("info", "s3_cleanup_task_progress", {
+        task_id: task.id,
+        prefix_index: prefixIndex,
+        deleted_count: totalDeleted,
+        has_more_prefixes: true,
+      });
+      return S3_CLEANUP_OUTCOME.RETRY;
     }
     logStructured("info", "s3_cleanup_task_done", {
       task_id: task.id, deleted_count: totalDeleted,

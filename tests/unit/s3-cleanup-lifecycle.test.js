@@ -27,6 +27,7 @@ test("s3CleanupQueueFields builds the canonical queue intent", () => {
   assert.equal(S3_CLEANUP_QUEUE_NAME, "worker-delete-s3-cleanup");
   assert.equal(S3_CLEANUP_TABLE, "s3_cleanup_task");
   assert.equal(S3_CLEANUP_TASK_FIELDS.STATE, "state");
+  assert.equal(S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON, "checkpoint_json");
   assert.equal(S3_CLEANUP_TASK_STATUS.PENDING, "pending");
   assert.notEqual(fields.id, taskId);
   assert.match(fields.id, /^[0-9a-f-]{36}$/);
@@ -99,10 +100,18 @@ test("s3-cleanup wrangler consumer queue matches the shared queue name", () => {
     new URL("../../system-workers/s3-cleanup/migrations/0001_s3_cleanup_task.sql", import.meta.url),
     "utf8"
   );
+  const checkpointMigration = readFileSync(
+    new URL("../../system-workers/s3-cleanup/migrations/0002_s3_cleanup_checkpoint.sql", import.meta.url),
+    "utf8"
+  );
   assert.match(toml, new RegExp(`\\bqueue\\s*=\\s*"${RegExp.escape(S3_CLEANUP_QUEUE_NAME)}"`));
   assert.match(toml, /\bbinding\s*=\s*"S3_CLEANUP_DB"/);
   assert.match(toml, /\bmigrations_dir\s*=\s*"migrations"/);
   assert.match(migration, new RegExp(`CREATE TABLE IF NOT EXISTS ${RegExp.escape(S3_CLEANUP_TABLE)}`));
   assert.match(migration, new RegExp(`\\b${RegExp.escape(S3_CLEANUP_TASK_FIELDS.ID)}\\s+TEXT PRIMARY KEY`));
   assert.match(migration, /idx_s3_cleanup_pending_due/);
+  assert.match(
+    checkpointMigration,
+    new RegExp(`ADD COLUMN ${RegExp.escape(S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON)} TEXT`)
+  );
 });
