@@ -80,11 +80,10 @@ Control lifecycle operations are split so each critical transition has one autho
   writes bundle metadata/modules/assets, then enters the same promote path used by
   explicit promotion. Before allocation, deploy estimates final WorkerCode under
   workerd's 64 MiB limit, including runtime/do-runtime-injected wrapper/client modules
-  and workflow import rewrites, and runs an advisory pass over the candidate metadata
-  and current secret envelopes. The watched commit path is the authoritative code-budget
+  and workflow import rewrites. The watched commit path is the authoritative code-budget
   and headroomed `workerLoader` env-budget check after version allocation and metadata
-  materialization, such as resolved D1 database ids and workflow keys, before writing the
-  version.
+  materialization, such as resolved D1 database ids and workflow keys, before writing
+  the version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,

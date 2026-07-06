@@ -616,10 +616,13 @@ test("namespace secret PUT still fails closed on other corrupt namespace envelop
 const workerControlSharedUrl = controlSharedStubUrl(`
 class WatchError extends Error {}
 export function formatError(err) {
-  return { error: err?.code || "internal_error", message: err?.message || String(err) };
+  return { error_code: err?.code || "internal_error", error_message: err?.message || String(err) };
 }
 export const state = {
-  log() {},
+  logs: [],
+  log(level, event, fields = {}) {
+    state.logs.push({ level, event, fields });
+  },
   redis: {
     execCalls: 0,
     watchedKeys: [],
@@ -702,10 +705,10 @@ const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/w
 const { handle: workerHandle } = await import(moduleDataUrl(workerSrc));
 const {
   WORKER_LOADER_ENV_MAX_BYTES,
-  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   estimatedWorkerLoaderEnv,
   estimatedWorkerLoaderEnvBytes,
 } = await import(envBudgetUrl());
+const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = "v0000000000";
 
 test("worker secret PUT encrypts before WATCH retries and reuses the envelope", async () => {
   const response = await workerHandle({
@@ -824,7 +827,7 @@ test("worker secret DELETE checks env revealed by removing a higher-precedence s
   }
 });
 
-test("worker secret PUT budgets the copied active bundle under a future version string", async () => {
+test("worker secret PUT waits for the real bump version before checking the copied bundle", async () => {
   const { state } = await import(workerControlSharedUrl);
   const originalSession = state.redis.session;
   const baseMeta = {
@@ -849,6 +852,7 @@ test("worker secret PUT budgets the copied active bundle under a future version 
     bytesWithPad(0, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) +
     1;
   assert.ok(bytesWithPad(padLength, "v1") <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(bytesWithPad(padLength, "v2") <= WORKER_LOADER_ENV_MAX_BYTES);
   assert.ok(bytesWithPad(padLength, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) > WORKER_LOADER_ENV_MAX_BYTES);
   let execCalled = false;
   /** @param {(session: unknown) => Promise<unknown>} fn */
@@ -896,9 +900,9 @@ test("worker secret PUT budgets the copied active bundle under a future version 
       requestId: "rid-worker-secret-future-version-budget",
     });
 
-    const body = await readJsonResponse(response, 400);
-    assert.equal(body.error, "worker_env_too_large");
-    assert.equal(execCalled, false);
+    const body = await readJsonResponse(response, 200);
+    assert.equal(body.version, "v2");
+    assert.equal(execCalled, true);
   } finally {
     state.redis.session = originalSession;
   }
@@ -1072,6 +1076,13 @@ test("worker secret PUT reports budget rollback failure after the secret write",
     assert.equal(state.redis.writes.length, writesBefore + 1);
     assert.equal(rollbackAttempted, true);
     assert.equal(typeof appliedSecret, "string");
+    const rejectedLog = state.logs.find((/** @type {any} */ entry) =>
+      entry.event === "secret_bump_budget_rejected" &&
+      entry.fields?.request_id === "rid-worker-secret-rollback-failed"
+    );
+    assert.equal(rejectedLog?.fields.rolled_back, false);
+    assert.equal(rejectedLog?.fields.rollback_reason, "error");
+    assert.equal(rejectedLog?.fields.rollback_error_message, "rollback write failed");
   } finally {
     state.redis.session = originalSession;
   }

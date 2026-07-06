@@ -263,6 +263,33 @@ test("logs tail idle-pull watchdog closes abandoned streams before max-session",
   await reader.cancel().catch(() => {});
 });
 
+test("logs tail idle-pull watchdog can close before the first client read", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler({ keepaliveMs: 5 });
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "1000" },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail-idle-before-read",
+  });
+
+  assert.equal(response.status, 200);
+  await Promise.all(waitUntilPromises);
+
+  const reader = response.body.getReader();
+  /** @type {{ done?: boolean, text: string }} */
+  let warning = { done: false, text: "" };
+  for (let i = 0; i < 5 && !warning.text.includes("session_idle"); i += 1) {
+    warning = await readText(reader);
+  }
+  assert.match(warning.text, /session_idle/);
+  assert.equal((await readText(reader)).done, true);
+  assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_idle"));
+});
+
 test("logs tail closes session if watchdog fires while Redis open is pending", async () => {
   resetTailState();
   const state = /** @type {any} */ (globalThis).__tailState;

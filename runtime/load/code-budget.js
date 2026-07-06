@@ -17,6 +17,7 @@ import {
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
 const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
+const utf8Decoder = new TextDecoder();
 
 /**
  * @typedef {string | Uint8Array} NormalizedModuleBody
@@ -348,7 +349,7 @@ export function estimateFinalWorkerLoaderCodeBytes({ mainModule, normalized, met
   for (const [name, body] of normalized) {
     const type = moduleType(meta.modules, name);
     if (type === "module") {
-      jsModules[name] = typeof body === "string" ? body : new TextDecoder().decode(body);
+      jsModules[name] = typeof body === "string" ? body : utf8Decoder.decode(body);
     } else {
       userModuleBytes.set(name, moduleBodyByteLength(body));
     }

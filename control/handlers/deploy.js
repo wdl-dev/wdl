@@ -774,27 +774,6 @@ export async function handle({ request, env, ns, name, requestId }) {
     return deployAssetsS3NotConfiguredResponse();
   }
 
-  try {
-    // Advisory pre-allocation pass that decrypts current secret envelopes before
-    // assets/version side effects. It uses a conservative version placeholder, so
-    // commitWithWatch() is the only env-budget rejection point after version
-    // allocation and watched metadata materialization such as resolved D1 ids.
-    await validateCommittedEnvBudget({
-      redis,
-      controlEnv,
-      ns,
-      name,
-      meta: prepared.meta,
-    });
-  } catch (err) {
-    if (err instanceof WorkerEnvBudgetError) {
-      // Do not reject here: the placeholder can over-estimate DO/workflow-heavy
-      // bundles. The watched commit check below uses the real version and will
-      // reject true budget failures before the version is written.
-    } else if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
-    else throw err;
-  }
-
   const num = await redis.incr(`worker:${ns}:${name}:next_version`);
   const version = formatVersion(num);
 

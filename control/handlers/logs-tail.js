@@ -490,6 +490,12 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   let openNoticeSent = false;
 
   const stream = new ReadableStream({
+    start(controller) {
+      streamController = controller;
+      if (cancelled) {
+        try { controller.close(); } catch {}
+      }
+    },
     async pull(controller) {
       streamController = controller;
       lastPullAtMs = Date.now();

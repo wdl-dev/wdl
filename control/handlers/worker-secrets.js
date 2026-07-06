@@ -9,6 +9,7 @@ import {
   runOptimistic,
   stringEnv,
   codedErrorResponse,
+  errMessage,
 } from "control-shared";
 import {
   deleteLockKey,
@@ -23,7 +24,6 @@ import { stageWorkerHidden, stageWorkerVisible } from "control-lifecycle-indexes
 import { bumpActiveAndPromote, RoutingError } from "control-routing";
 import {
   WorkerEnvBudgetError,
-  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   assertWorkerVersionsUserEnvBudget,
   decryptSecretHash,
 } from "control-env-budget";
@@ -197,7 +197,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         return jsonResponse(200, payload);
       }
       if (err instanceof WorkerEnvBudgetError) {
-        const rolledBack = await rollbackSecretMutation({
+        const rollback = await rollbackSecretMutation({
           redis,
           ns,
           name,
@@ -208,16 +208,25 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
           previousValue: mutationResult.previousValue,
           controlEnv,
         });
+        /** @type {Record<string, string>} */
+        let rollbackFields = {};
+        if ("reason" in rollback) {
+          rollbackFields = {
+            rollback_reason: rollback.reason,
+            ...(rollback.errorMessage ? { rollback_error_message: rollback.errorMessage } : {}),
+          };
+        }
         log("warn", "secret_bump_budget_rejected", {
           request_id: requestId,
           namespace: ns,
           worker: name,
           key,
           status: err.status,
-          rolled_back: rolledBack,
+          rolled_back: rollback.rolledBack,
+          ...rollbackFields,
           ...formatError(err),
         });
-        if (!rolledBack) {
+        if (!rollback.rolledBack) {
           return jsonError(
             503,
             "secret_mutation_rollback_failed",
@@ -359,12 +368,6 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
         ...retainedVersions,
         ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
       ],
-      versionEstimates: typeof activeVersion === "string" && activeVersion
-        ? [{
-            sourceVersion: activeVersion,
-            estimatedVersion: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
-          }]
-        : [],
       nsSecrets,
       workerSecrets,
       assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
@@ -405,6 +408,7 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
  *   previousValue?: string | null,
  *   controlEnv: Record<string, string | undefined>,
  * }} args
+ * @returns {Promise<{ rolledBack: true } | { rolledBack: false, reason: string, errorMessage?: string }>}
  */
 async function rollbackSecretMutation({
   redis,
@@ -419,10 +423,16 @@ async function rollbackSecretMutation({
 }) {
   const nsSecretsKey = `secrets:${ns}`;
   const secretsKey = `secrets:${ns}:${name}`;
+  /** @param {string} reason @param {unknown} [err] */
+  const failed = (reason, err = undefined) => ({
+    rolledBack: false,
+    reason,
+    ...(err === undefined ? {} : { errorMessage: errMessage(err) }),
+  });
   try {
     return await runOptimistic(redis, {
       attempts: MAX_SECRET_ATTEMPTS,
-      onExhausted: () => false,
+      onExhausted: () => failed("contention"),
     }, async (iso) => {
       await iso.watch(
         deleteLockKey(ns, name),
@@ -432,19 +442,19 @@ async function rollbackSecretMutation({
         workerVersionsKey(ns, name)
       );
       const callerLock = await iso.get(deleteLockKey(ns, name));
-      if (callerLock) return false;
+      if (callerLock) return failed("delete_lock");
 
       const current = await iso.hGet(secretsKey, key);
       if (method === "PUT") {
-        if (typeof appliedValue !== "string" || current !== appliedValue) return false;
+        if (typeof appliedValue !== "string" || current !== appliedValue) return failed("secret_changed");
       } else if (current != null) {
-        return false;
+        return failed("secret_restored");
       }
 
       const active = await iso.hGet(routesKey(ns), name);
       const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
       const secretKeys = await iso.hKeys(secretsKey);
-      if (!active && retainedVersions.length === 0 && previousExisted) return false;
+      if (!active && retainedVersions.length === 0 && previousExisted) return failed("worker_deleted");
 
       const nsEncrypted = await iso.hGetAll(nsSecretsKey);
       const workerEncrypted = await iso.hGetAll(secretsKey);
@@ -464,18 +474,22 @@ async function rollbackSecretMutation({
         env: controlEnv,
         hashKey: secretsKey,
       });
-      await assertWorkerVersionsUserEnvBudget({
-        redis: iso,
-        ns,
-        worker: name,
-        versions: [
-          ...retainedVersions,
-          ...(typeof active === "string" && active ? [active] : []),
-        ],
-        nsSecrets,
-        workerSecrets,
-        assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
-      });
+      try {
+        await assertWorkerVersionsUserEnvBudget({
+          redis: iso,
+          ns,
+          worker: name,
+          versions: [
+            ...retainedVersions,
+            ...(typeof active === "string" && active ? [active] : []),
+          ],
+          nsSecrets,
+          workerSecrets,
+          assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+        });
+      } catch (err) {
+        return failed("budget_rejected", err);
+      }
 
       const multi = iso.multi();
       if (previousExisted && typeof previousValue === "string") {
@@ -493,10 +507,10 @@ async function rollbackSecretMutation({
         }
       }
       await multi.exec();
-      return true;
+      return { rolledBack: true };
     });
-  } catch {
-    return false;
+  } catch (err) {
+    return failed("error", err);
   }
 }
 

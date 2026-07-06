@@ -14,7 +14,6 @@ const {
   UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
   WORKER_LOADER_ENV_HEADROOM_BYTES,
   WORKER_LOADER_ENV_MAX_BYTES,
-  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
   assertWorkerVersionsUserEnvBudget,
@@ -26,6 +25,8 @@ const {
   "shared-errors": sharedErrorsUrl,
   "shared-version": sharedVersionUrl,
 }));
+
+const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = "v0000000000";
 
 const envelopeEnv = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
