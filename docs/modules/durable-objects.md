@@ -196,6 +196,11 @@ claims the same scope. This prevents stale owners from starting new protected di
 or passing lease-budget rechecks; it does not physically fence an already-running SQLite
 commit.
 
+Terraform sets an explicit memory hard limit on the do-runtime workerd container in
+addition to the Fargate task memory limit, and reserves memory for the colocated
+redis-proxy sidecar. That is a container failure boundary, not a per-storage-call memory
+interrupt.
+
 ## Security Boundaries
 
 - do-runtime internal endpoints are private-mesh only and are not

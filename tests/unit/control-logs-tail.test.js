@@ -78,17 +78,16 @@ function resetTailState() {
     dataRedis: {
       /** @type {Array<[string, number, Record<string, string>]>} */
       hSetExCalls: [],
-      /** @type {Array<[string, string[]]>} */
-      hMGetCalls: [],
+      /** @type {Array<[string, number, string[]]>} */
+      hGetExCalls: [],
       /** @type {string[]} */
       hLenCalls: [],
       /** @type {Map<string, string>} */
       activeFields: new Map(),
       hLenValue: 0,
-      async hExists() { return false; },
-      /** @param {string} key @param {string[]} fields */
-      async hMGet(key, fields) {
-        this.hMGetCalls.push([key, fields]);
+      /** @param {string} key @param {number} ttlSeconds @param {string[]} fields */
+      async hGetEx(key, ttlSeconds, fields) {
+        this.hGetExCalls.push([key, ttlSeconds, fields]);
         return fields.map((field) => this.activeFields.get(field) ?? null);
       },
       /** @param {string} key */
@@ -438,6 +437,9 @@ test("logs tail writes activation through the data Redis client", async () => {
   await reader.cancel();
   await Promise.all(waitUntilPromises);
 
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hGetExCalls, [
+    ["logs:tail:active", 30, ["demo:foo"]],
+  ]);
   assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
     ["logs:tail:active", 30, { "demo:foo": "1" }],
   ]);
@@ -468,12 +470,12 @@ test("logs tail batches multi-worker activation while preserving the active cap"
   await reader.cancel();
   await Promise.all(waitUntilPromises);
 
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hMGetCalls, [
-    ["logs:tail:active", ["demo:bar", "demo:baz", "demo:foo"]],
+  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hGetExCalls, [
+    ["logs:tail:active", 30, ["demo:bar", "demo:baz", "demo:foo"]],
   ]);
   assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hLenCalls, ["logs:tail:active"]);
   assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
-    ["logs:tail:active", 30, { "demo:bar": "1", "demo:baz": "1" }],
+    ["logs:tail:active", 30, { "demo:baz": "1" }],
   ]);
 });
 

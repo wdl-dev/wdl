@@ -125,4 +125,6 @@ module "user_runtime_service" {
       client_aliases              = [{ port = 8088, dns_name = "user-runtime" }]
     },
   ]
+
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }

@@ -1,5 +1,5 @@
-// PutObject-only S3 helper. Bucket creation is out-of-band (terraform
-// / s3mock initialBuckets) — keeps the S3 IAM surface minimal.
+// PutObject-only S3 helper. Bucket creation is out-of-band (terraform /
+// s3mock boot-time initial buckets) — keeps the S3 IAM surface minimal.
 
 import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { encodeS3KeyPath } from "runtime-r2-utils";

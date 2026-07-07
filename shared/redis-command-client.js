@@ -256,6 +256,15 @@ export class RedisClient {
     return arr ? arr.map(decodeBulk) : [];
   }
 
+  /** @param {string} key @param {number} ttlSeconds @param {string[]} fields */
+  async hGetEx(key, ttlSeconds, fields) {
+    if (fields.length === 0) return [];
+    const arr = /** @type {unknown[] | null} */ (
+      await this._exec("HGETEX", key, "EX", String(ttlSeconds), "FIELDS", String(fields.length), ...fields)
+    );
+    return arr ? arr.map(decodeBulk) : [];
+  }
+
   /** @param {string} key */
   async hGetAll(key) {
     return decodeHashObject(/** @type {unknown[] | null} */ (await this._exec("HGETALL", key)));

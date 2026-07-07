@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aes_gcm::aead::AeadInPlace;
+use aes_gcm::aead::AeadInOut;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -317,13 +317,12 @@ fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ct: &[u8], tag: &[u8], aad: &[u8]) -> 
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| secret_decrypt_error("secret envelope key has invalid length"))?;
     let mut plaintext = ct.to_vec();
+    let nonce = Nonce::try_from(iv)
+        .map_err(|_| secret_decrypt_error("secret envelope has invalid AES-GCM material"))?;
+    let tag = Tag::try_from(tag)
+        .map_err(|_| secret_decrypt_error("secret envelope has invalid AES-GCM material"))?;
     cipher
-        .decrypt_in_place_detached(
-            Nonce::from_slice(iv),
-            aad,
-            plaintext.as_mut_slice(),
-            Tag::from_slice(tag),
-        )
+        .decrypt_inout_detached(&nonce, aad, plaintext.as_mut_slice().into(), &tag)
         .map_err(|_| secret_decrypt_error("secret envelope authentication failed"))?;
     Ok(plaintext)
 }
@@ -542,7 +541,7 @@ mod tests {
             .nth(1)
             .expect("aes_gcm_decrypt helper should exist");
         assert!(
-            helper.contains("decrypt_in_place_detached"),
+            helper.contains("decrypt_inout_detached"),
             "AES-GCM decrypt should pass the tag separately instead of concatenating ct||tag"
         );
         assert!(

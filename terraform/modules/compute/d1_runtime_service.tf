@@ -117,5 +117,8 @@ module "d1_runtime_service" {
     client_aliases              = [{ port = 8787, dns_name = "d1-runtime" }]
   }]
 
-  depends_on = [aws_efs_mount_target.d1_storage]
+  depends_on = [
+    aws_ecs_cluster_capacity_providers.this,
+    aws_efs_mount_target.d1_storage,
+  ]
 }

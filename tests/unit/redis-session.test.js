@@ -184,6 +184,20 @@ test("RedisClient.hMGet returns decoded values and null misses", async () => {
   assert.ok(socket._reader.released, "per-call reader lock released after command");
 });
 
+test("RedisClient.hGetEx refreshes hash field TTLs while reading values", async () => {
+  const socket = makeFakeSocket([bytes("*3\r\n$1\r\na\r\n$-1\r\n$1\r\nc\r\n")]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const values = await client.hGetEx("h", 30, ["a", "b", "c"]);
+
+  assert.deepEqual(values, ["a", null, "c"]);
+  assert.equal(
+    decode(socket._writes[0]),
+    "*9\r\n$6\r\nHGETEX\r\n$1\r\nh\r\n$2\r\nEX\r\n$2\r\n30\r\n$6\r\nFIELDS\r\n$1\r\n3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
+  );
+  assert.ok(socket._reader.released, "per-call reader lock released after command");
+});
+
 test("RedisSession.open fails explicitly after close", async () => {
   const socket = makeFakeSocket([]);
   const { connect } = scriptedConnect(socket);

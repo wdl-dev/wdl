@@ -14,7 +14,7 @@ import {
   readEncryptedSecretPutValue,
 } from "control-handlers-secret-put";
 import { routesKey, workerVersionsKey } from "shared-version";
-import { nsSecretsKey as namespaceSecretsKey, workerSecretsKey } from "shared-secret-keys";
+import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import { workersIndexKey } from "control-lib";
 import {
   WorkerEnvBudgetError,
@@ -88,6 +88,7 @@ async function validateNamespaceSecretBudget({
       nsSecrets,
       workerSecrets,
       assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+      retryMissingVersions: true,
     });
   }
 }
@@ -113,7 +114,7 @@ async function mutateNamespaceSecret({
   plaintext = null,
 }) {
   const controlEnv = stringEnv(env);
-  const nsSecretsKey = namespaceSecretsKey(nsName);
+  const nsSecretHashKey = nsSecretsKey(nsName);
   return await runOptimistic(redis, {
     attempts: MAX_NS_SECRET_ATTEMPTS,
     onExhausted: () => {
@@ -122,9 +123,9 @@ async function mutateNamespaceSecret({
       });
     },
   }, async (iso) => {
-    await iso.watch(nsSecretsKey, routesKey(nsName), workersIndexKey(nsName));
+    await iso.watch(nsSecretHashKey, routesKey(nsName), workersIndexKey(nsName));
 
-    const existingEncrypted = await iso.hGetAll(nsSecretsKey);
+    const existingEncrypted = await iso.hGetAll(nsSecretHashKey);
     if (method === "DELETE" && !Object.hasOwn(existingEncrypted, secretKey)) {
       return { mutated: false };
     }
@@ -132,7 +133,7 @@ async function mutateNamespaceSecret({
     const nsSecrets = await decryptMutatedSecretHashForBudget({
       encrypted: existingEncrypted,
       env: controlEnv,
-      hashKey: nsSecretsKey,
+      hashKey: nsSecretHashKey,
       key: secretKey,
       method,
       plaintext,
@@ -150,9 +151,9 @@ async function mutateNamespaceSecret({
 
     const multi = iso.multi();
     if (method === "PUT") {
-      multi.hSet(nsSecretsKey, secretKey, /** @type {string} */ (encrypted));
+      multi.hSet(nsSecretHashKey, secretKey, /** @type {string} */ (encrypted));
     } else {
-      multi.hDel(nsSecretsKey, secretKey);
+      multi.hDel(nsSecretHashKey, secretKey);
     }
     await multi.exec();
     return { mutated: true };
@@ -172,10 +173,10 @@ async function mutateNamespaceSecret({
 export async function handle({ request, env, method, nsName, secretKey, requestId }) {
   const redis = requireControlRedis();
   const log = requireControlLog();
-  const nsSecretsKey = namespaceSecretsKey(nsName);
+  const nsSecretHashKey = nsSecretsKey(nsName);
 
   if (method === "GET" && secretKey === undefined) {
-    const keys = await redis.hKeys(nsSecretsKey);
+    const keys = await redis.hKeys(nsSecretHashKey);
     return jsonResponse(200, { namespace: nsName, keys: keys.toSorted() });
   }
   if (method === "PUT" && secretKey !== undefined) {
@@ -184,7 +185,7 @@ export async function handle({ request, env, method, nsName, secretKey, requestI
     const put = await readEncryptedSecretPutValue({
       request,
       env,
-      hashKey: nsSecretsKey,
+      hashKey: nsSecretHashKey,
       fieldName: secretKey,
     });
     if ("response" in put) return put.response;

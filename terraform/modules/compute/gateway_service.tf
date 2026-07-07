@@ -174,6 +174,7 @@ module "gateway_service" {
   service_connect_namespace_arn = aws_service_discovery_http_namespace.this.arn
 
   depends_on = [
+    aws_ecs_cluster_capacity_providers.this,
     aws_lb_listener_rule.gateway,
     aws_lb_listener_rule.site,
     aws_lb_listener_rule.site_www_redirect,

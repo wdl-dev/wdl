@@ -1682,7 +1682,8 @@ test("Valkey 9 is the local and Terraform baseline when HFE commands are used", 
   const valkeyTf = withoutLineComments(readRepoFile("terraform/modules/data/valkey.tf"));
   const tail = withoutLineComments(readRepoFile("control/handlers/logs-tail.js"));
 
-  assert.match(tail, /\.hSetEx\(/, "tail activation depends on Valkey hash field expiration");
+  assert.match(tail, /\.hGetEx\(/, "tail activation refreshes active fields with Valkey HGETEX");
+  assert.match(tail, /\.hSetEx\(/, "tail activation creates active fields with Valkey HSETEX");
   assert.match(compose, /image: valkey\/valkey:9\b/);
   assert.match(valkeyTf, /engine_version = "9\.1"/);
   assert.match(valkeyTf, /parameter_group_name = "default\.valkey9"/);
@@ -1971,7 +1972,7 @@ test("D1 and DO workerd containers keep explicit memory ceilings", () => {
     d1Service,
     /local\.d1_runtime_container_memory > 0 &&\s*local\.d1_runtime_container_memory <= var\.runtime_memory - local\.stateful_runtime_memory_headroom/
   );
-  assert.match(locals, /redis_proxy_memory_reservation\s+=\s+128/);
+  assert.match(locals, /redis_proxy_memory_reservation\s+=\s+64/);
   assert.match(locals, /do_runtime_container_memory\s+=\s+coalesce\(\s*var\.do_runtime_container_memory,\s*var\.runtime_memory - local\.redis_proxy_memory_reservation - local\.stateful_runtime_memory_headroom,\s*\)/);
   assert.match(doService, /memoryReservation\s+=\s+local\.redis_proxy_memory_reservation/);
   assert.match(doService, /memory\s+=\s+local\.do_runtime_container_memory/);
@@ -1996,6 +1997,8 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
     assert.ok(match, `missing numeric Terraform default for ${name}`);
     return Number(match[1]);
   };
+
+  assert.match(cluster, /name\s+=\s+"containerInsights"\s+value\s+=\s+"enhanced"/);
   // Keep in sync with the AWS ECS Fargate task-size table.
   const validFargateCpuValues = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
   const fargateMemoryByCpu = new Map([
@@ -2050,6 +2053,16 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
       new RegExp(`var\\.${service}_cpu == 32768 && contains\\(\\[61440, 122880, 249856\\], var\\.${service}_memory\\)`)
     );
   };
+  const assertCapacityProviderDependency = (
+    /** @type {string} */ source,
+    /** @type {string} */ file
+  ) => {
+    assert.match(
+      source,
+      /depends_on\s+=\s+\[[\s\S]*aws_ecs_cluster_capacity_providers\.this/,
+      `${file} service must depend on Fargate capacity-provider association`
+    );
+  };
 
   assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
   assert.doesNotMatch(cluster, /default_capacity_provider_strategy/);
@@ -2084,6 +2097,7 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
     const source = readRepoFile(file);
     assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
     assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_stateless_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, file);
     assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
     assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
   }
@@ -2095,6 +2109,7 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
     const source = readRepoFile(file);
     assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
     assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, file);
     assert.match(source, /deployment\s+=\s+local\.sequential_replacement_deployment/);
     assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
   }
@@ -2105,6 +2120,7 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
     const source = readRepoFile(file);
     assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
     assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, file);
     assert.match(source, /deployment\s+=\s+local\.stop_before_start_deployment/);
     assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
   }
@@ -2113,6 +2129,7 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
     const source = readRepoFile("terraform/modules/compute/workflows_service.tf");
     assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
     assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    assertCapacityProviderDependency(source, "terraform/modules/compute/workflows_service.tf");
     assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
     assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
   }

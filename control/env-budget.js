@@ -1,6 +1,7 @@
 import { decryptSecretValue } from "shared-secret-envelope";
 import { errorMessage } from "shared-errors";
 import { bundleKey } from "shared-version";
+import { WatchError } from "shared-redis";
 
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
@@ -431,6 +432,7 @@ export async function decryptMutatedSecretHashForBudget({
  *   nsSecrets?: Record<string, unknown> | null,
  *   workerSecrets?: Record<string, unknown> | null,
  *   assetsCdnBase?: string | null,
+ *   retryMissingVersions?: boolean,
  * }} args
  */
 export async function assertWorkerVersionsUserEnvBudget({
@@ -442,6 +444,7 @@ export async function assertWorkerVersionsUserEnvBudget({
   nsSecrets = null,
   workerSecrets = null,
   assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
+  retryMissingVersions = false,
 }) {
   const checks = [
     ...[...versions]
@@ -469,6 +472,7 @@ export async function assertWorkerVersionsUserEnvBudget({
   for (const { sourceVersion, estimatedVersion } of uniqueChecks) {
     const rawMeta = await redis.hGet(bundleKey(ns, worker, sourceVersion), "__meta__");
     if (typeof rawMeta !== "string") {
+      if (retryMissingVersions) throw new WatchError();
       throw new Error(`bundle metadata missing for ${ns}/${worker}@${sourceVersion}`);
     }
     /** @type {unknown} */

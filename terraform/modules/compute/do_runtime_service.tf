@@ -148,5 +148,8 @@ module "do_runtime_service" {
     client_aliases              = [{ port = 8788, dns_name = "do-runtime" }]
   }]
 
-  depends_on = [aws_efs_mount_target.do_storage]
+  depends_on = [
+    aws_ecs_cluster_capacity_providers.this,
+    aws_efs_mount_target.do_storage,
+  ]
 }

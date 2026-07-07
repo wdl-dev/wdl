@@ -16,7 +16,7 @@ name = "redis-proxy"
 path = "src/main.rs"
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 axum = { workspace = true, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
 futures-util = { workspace = true, features = ["std"] }

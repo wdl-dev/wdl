@@ -316,6 +316,7 @@ const REDIS_COMMAND_LABELS = new Set([
   "HGET",
   "HGETALL",
   "HGETALL_PIPELINE",
+  "HGETEX",
   "HGET_PIPELINE",
   "HKEYS",
   "HLEN",

@@ -84,6 +84,7 @@ Stateful storage：
 - D1/DO 使用 owner lease、monotonic generation fence 和本地 drain/renew。超过 1 个 task 时需要稳定的 per-replica storage identity，并确保 supervisor drain/renew 只走私有本地入口，不能通过 service alias 打到其他 replica。
 - 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
+- 除了 Fargate task memory limit，D1 和 DO 的 workerd container 还会设置显式 container memory hard limit。DO 还会给本地 redis-proxy sidecar 保留内存。
 - Terraform Fargate service 在服务能容忍 overlapping capacity 时应使用 rolling replacement。D1/DO 使用 sequential replacement；scheduler 作为 singleton control loop 保持 stop-before-start。D1/DO 和 scheduler 都关闭 Availability Zone rebalancing，让 replacement 遵循各自显式 deployment strategy。
 
 ## 安全边界
@@ -97,7 +98,8 @@ Stateful storage：
 
 - 平台服务输出结构化日志。
 - Gateway、user-runtime、system-runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy 按配置暴露 Prometheus metrics；各服务 endpoint path 不完全一致，详见 `log-tail-observability.zh.md`。
-- CloudWatch/EFK ingestion 由部署配置决定。
+- Terraform 默认启用 ECS Container Insights enhanced observability。这属于 AWS 基础设施遥测，提供 cluster、service、task 和 container 级健康与资源指标；它和 WDL 自身的 Prometheus metrics、bounded-label logging contract 是两层东西。
+- Terraform 默认项之外的 CloudWatch/EFK log ingestion 由部署配置决定。
 
 ## 部署 / Rollout 注意事项
 

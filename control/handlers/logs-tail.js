@@ -45,9 +45,8 @@ const SSE_HEADERS = {
  * @typedef {{
  *   exists(key: string): Promise<number>,
  *   xRange(key: string, start: string, end: string, countKeyword: string, count: string): Promise<Array<[Uint8Array, Uint8Array[]]>>,
- *   hExists(key: string, field: string): Promise<boolean>,
  *   hLen(key: string): Promise<number>,
- *   hMGet(key: string, fields: string[]): Promise<Array<Uint8Array | string | null | undefined>>,
+ *   hGetEx(key: string, ttlSeconds: number, fields: string[]): Promise<Array<Uint8Array | string | null | undefined>>,
  *   hSetEx(key: string, ttlSeconds: number, fields: Record<string, string>): Promise<unknown>,
  * }} TailRedis
  * @typedef {{ xRead(...args: string[]): Promise<unknown> }} TailSession
@@ -172,42 +171,22 @@ function findJsonField(fields) {
 
 /**
  * @param {TailRedis} redis
- * @param {string} key
- */
-async function activateTailWorker(redis, key) {
-  if (!(await redis.hExists(TAIL_ACTIVATION_CHANNEL, key))) {
-    const count = await redis.hLen(TAIL_ACTIVATION_CHANNEL);
-    if (count >= TAIL_ACTIVATION_MAX_ENTRIES) return false;
-  }
-  await redis.hSetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, { [key]: "1" });
-  return true;
-}
-
-/**
- * @param {TailRedis} redis
  * @param {string[]} keys
  */
 export async function activateTailWorkers(redis, keys) {
-  if (keys.length === 1) {
-    await activateTailWorker(redis, keys[0]);
-    return;
-  }
-  const active = await redis.hMGet(TAIL_ACTIVATION_CHANNEL, keys);
+  if (keys.length === 0) return;
+  const active = await redis.hGetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, keys);
   const missing = [];
-  /** @type {Record<string, string>} */
-  const fields = {};
   for (let i = 0; i < keys.length; i++) {
-    if (active[i] == null) {
-      missing.push(keys[i]);
-    } else {
-      fields[keys[i]] = "1";
-    }
+    if (active[i] == null) missing.push(keys[i]);
   }
   let allowedMissing = missing;
   if (missing.length > 0) {
     const count = await redis.hLen(TAIL_ACTIVATION_CHANNEL);
     allowedMissing = missing.slice(0, Math.max(0, TAIL_ACTIVATION_MAX_ENTRIES - count));
   }
+  /** @type {Record<string, string>} */
+  const fields = {};
   for (const key of allowedMissing) fields[key] = "1";
   if (Object.keys(fields).length > 0) {
     await redis.hSetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, fields);

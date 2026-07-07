@@ -233,7 +233,7 @@ The ECS cluster enables both `FARGATE` and `FARGATE_SPOT` capacity providers:
 Fargate task-level `cpu` and `memory` are the task reservation/limit boundary. D1 and
 Durable Object stateful runtime containers also set explicit container `memory` hard
 limits. D1 defaults to `runtime_memory - 128 MiB`. DO defaults to
-`runtime_memory - 256 MiB`: 128 MiB for the colocated redis-proxy sidecar reservation
+`runtime_memory - 192 MiB`: 64 MiB for the colocated redis-proxy sidecar reservation
 plus 128 MiB of task-level headroom. Both are overrideable with
 `d1_runtime_container_memory` / `do_runtime_container_memory`; D1 must leave the
 task-level headroom, and DO must leave both the redis-proxy reservation and additional
@@ -245,6 +245,14 @@ container.
 Tenant-running tasks use least-privilege ECS task roles, public-only workerd outbound
 bindings, and private mesh security groups as the cloud credential and network
 boundary. D1 and DO task identities use `ECS_CONTAINER_METADATA_URI_V4`.
+
+## Observability
+
+The Terraform ECS cluster enables Container Insights with enhanced observability. That
+collects AWS infrastructure telemetry for cluster, service, task, and container health
+and utilization, including per-container memory metrics used for capacity checks. AWS
+bills these metrics as CloudWatch Container Insights/custom metrics. This is separate
+from WDL service Prometheus metrics and bounded-label application logs.
 
 ## Admin Token
 

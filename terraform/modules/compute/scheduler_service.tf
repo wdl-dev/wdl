@@ -76,4 +76,6 @@ module "scheduler_service" {
   # Scheduler consumes user-runtime/system-runtime through Service Connect.
   # It's a client in the SC namespace — no service of its own to expose.
   service_connect_namespace_arn = aws_service_discovery_http_namespace.this.arn
+
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }

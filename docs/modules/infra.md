@@ -142,6 +142,9 @@ Stateful storage:
   changes should document which services can use `FARGATE_SPOT`; stateful runtimes and
   singleton control loops should stay on on-demand Fargate unless their interruption
   semantics are re-reviewed.
+- In addition to the Fargate task memory limit, D1 and DO workerd containers set
+  explicit container memory hard limits. DO also reserves memory for its local
+  redis-proxy sidecar.
 - Terraform Fargate services should use rolling replacement where the service can
   tolerate overlapping capacity. D1/DO use sequential replacement, while scheduler
   remains stop-before-start as a singleton control loop. D1/DO and scheduler disable
@@ -165,7 +168,11 @@ Stateful storage:
 - Gateway, user-runtime, system-runtime, d1-runtime, do-runtime, scheduler, workflows,
   and redis-proxy expose Prometheus metrics where configured; endpoint paths differ by
   service and are listed in `log-tail-observability.md`.
-- CloudWatch/EFK ingestion is deployment-configured.
+- Terraform enables ECS Container Insights with enhanced observability by default. That
+  is AWS infrastructure telemetry for cluster, service, task, and container health and
+  utilization. It is separate from WDL's own Prometheus metrics and bounded-label
+  logging contracts.
+- CloudWatch/EFK log ingestion beyond the Terraform defaults is deployment-configured.
 
 ## Deployment / Rollout Notes
 

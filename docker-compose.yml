@@ -100,18 +100,17 @@ services:
       timeout: 3s
       retries: 10
 
-  # Dev S3 emulator. `initialBuckets` provisions at boot so control's
-  # first deploy doesn't race a cold mock.
+  # Dev S3 emulator. Pre-create buckets at boot so control's first deploy
+  # doesn't race a cold mock.
   s3mock:
-    # 4.7.0 — `latest` (5.x on Java 25) ignores `initialBuckets`.
-    image: adobe/s3mock:4.7.0
+    image: adobe/s3mock:5.1.0
     ports:
       # 9090 is sometimes reserved by Docker Desktop on WSL; 9500 has
       # also been observed held by host-side Windows processes — bumped
       # to 19500 to dodge.
       - "${WDL_S3MOCK_HOST_PORT:-19500}:9090"
     environment:
-      initialBuckets: wdl-assets,wdl-r2
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: wdl-assets,wdl-r2
 
   redis-proxy-user:
     <<: *rust-sidecar-image
@@ -236,7 +235,7 @@ services:
       DO_TASK_ENDPOINT: do-runtime-c:8788
 
   envoy:
-    image: envoyproxy/envoy:v1.31-latest
+    image: envoyproxy/envoy:v1.38.3
     volumes:
       - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
     command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "warning"]

@@ -163,4 +163,6 @@ module "system_runtime_service" {
       client_aliases              = [{ port = 8082, dns_name = "system-runtime" }]
     },
   ]
+
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }

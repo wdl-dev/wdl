@@ -396,6 +396,7 @@ async function stageWorkerSecretForBump({
     nsSecrets,
     workerSecrets,
     assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+    retryMissingVersions: true,
   });
 
   stageWorkerSecretMutation(multi, {
@@ -487,6 +488,7 @@ async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, 
       nsSecrets,
       workerSecrets,
       assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+      retryMissingVersions: true,
     });
 
     const multi = iso.multi();

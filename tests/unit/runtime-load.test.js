@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
+  moduleDataUrl,
   readRepositoryModuleSource,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
@@ -27,11 +28,20 @@ const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const SHARED_REDIS_URL = moduleDataUrl(`
+export class WatchError extends Error {
+  constructor(message = "watched key changed") {
+    super(message);
+    this.name = "WatchError";
+  }
+}
+`);
 const FETCH_STUB = { fetch() {} };
 const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "shared-secret-envelope": SHARED_SECRET_ENVELOPE_URL,
   "shared-errors": SHARED_ERRORS_URL,
   "shared-version": SHARED_VERSION_URL,
+  "shared-redis": SHARED_REDIS_URL,
 }));
 const RUNTIME_LOAD_INJECTION_SOURCES_URL = stubRuntimeInjectionSourcesUrl();
 const src = readRepositoryModuleSource("runtime/load.js", [

@@ -35,10 +35,10 @@ spec:
     spec:
       containers:
         - name: s3mock
-          image: adobe/s3mock:4.7.0
+          image: adobe/s3mock:5.1.0
           imagePullPolicy: IfNotPresent
           env:
-            - name: initialBuckets
+            - name: COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS
               value: wdl-assets,wdl-r2
           ports:
             - name: http

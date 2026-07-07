@@ -137,10 +137,19 @@ function secretPutUrl(controlSharedUrl, controlLibUrl) {
 }
 
 function envBudgetUrl() {
+  const sharedRedisUrl = moduleDataUrl(`
+export class WatchError extends Error {
+  constructor(message = "watched key changed") {
+    super(message);
+    this.name = "WatchError";
+  }
+}
+`);
   const source = applyModuleReplacements(readRepositoryFile("control/env-budget.js"), [
     [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
     [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
     [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+    [/from "shared-redis";/, `from ${JSON.stringify(sharedRedisUrl)};`],
   ]);
   return moduleDataUrl(source);
 }
@@ -304,6 +313,9 @@ test("namespace secret PUT accepts lowercase secret keys like production", async
 test("namespace secret PUT runs as a WATCH/MULTI mutation and retries contention", async () => {
   await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
     redis.execFailures = 1;
+    redis.sets.set("workers:demo", new Set(["api"]));
+    seedWorkerSecretVersions(redis, ["v1"]);
+    redis.hashes.set("worker:demo:api:v:1", { __meta__: "{}" });
   }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/RETRY_TOKEN", {
@@ -324,6 +336,8 @@ test("namespace secret PUT runs as a WATCH/MULTI mutation and retries contention
     assert.ok(redis.watched.includes("secrets:demo"));
     assert.ok(redis.watched.includes("routes:demo"));
     assert.ok(redis.watched.includes("workers:demo"));
+    assert.ok(redis.watched.includes("worker-versions:demo:api"));
+    assert.ok(redis.watched.includes("secrets:demo:api"));
   });
 });
 

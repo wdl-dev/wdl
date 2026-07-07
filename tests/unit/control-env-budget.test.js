@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
+  moduleDataUrl,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { encryptSecretValue } from "../../shared/secret-envelope.js";
@@ -10,6 +11,14 @@ import { encryptSecretValue } from "../../shared/secret-envelope.js";
 const secretEnvelopeUrl = repositoryFileUrl("shared/secret-envelope.js");
 const sharedErrorsUrl = repositoryFileUrl("shared/errors.js");
 const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const sharedRedisUrl = moduleDataUrl(`
+export class WatchError extends Error {
+  constructor(message = "watched key changed") {
+    super(message);
+    this.name = "WatchError";
+  }
+}
+`);
 const {
   UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
   WORKER_LOADER_ENV_HEADROOM_BYTES,
@@ -25,6 +34,7 @@ const {
   "shared-secret-envelope": secretEnvelopeUrl,
   "shared-errors": sharedErrorsUrl,
   "shared-version": sharedVersionUrl,
+  "shared-redis": sharedRedisUrl,
 }));
 
 const envelopeEnv = {
@@ -483,6 +493,28 @@ test("worker env budget fails closed when retained bundle metadata is missing", 
       versions: ["v1"],
     }),
     /bundle metadata missing for demo\/api@v1/
+  );
+});
+
+test("worker env budget can surface missing retained bundles as watch retry", async () => {
+  const redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      assert.equal(key, "worker:demo:api:v:1");
+      assert.equal(field, "__meta__");
+      return null;
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkerVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      worker: "api",
+      versions: ["v1"],
+      retryMissingVersions: true,
+    }),
+    (err) => err instanceof Error && err.name === "WatchError"
   );
 });
 

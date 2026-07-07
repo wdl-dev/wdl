@@ -84,4 +84,6 @@ module "workflows_service" {
     timeout_per_request_seconds = 0
     client_aliases              = [{ port = 9120, dns_name = "workflows" }]
   }]
+
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }
