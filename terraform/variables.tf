@@ -174,31 +174,82 @@ variable "do_test_hooks_enabled" {
 variable "gateway_cpu" {
   type    = number
   default = 512
+  validation {
+    condition     = contains([256, 512, 1024, 2048, 4096, 8192, 16384, 32768], var.gateway_cpu)
+    error_message = "gateway_cpu must be a valid ECS Fargate task CPU value."
+  }
 }
 
 variable "gateway_memory" {
   type    = number
   default = 1024
+  validation {
+    condition = (
+      (var.gateway_cpu == 256 && contains([512, 1024, 2048], var.gateway_memory)) ||
+      (var.gateway_cpu == 512 && contains([1024, 2048, 3072, 4096], var.gateway_memory)) ||
+      (var.gateway_cpu == 1024 && contains([2048, 3072, 4096, 5120, 6144, 7168, 8192], var.gateway_memory)) ||
+      (var.gateway_cpu == 2048 && var.gateway_memory >= 4096 && var.gateway_memory <= 16384 && var.gateway_memory % 1024 == 0) ||
+      (var.gateway_cpu == 4096 && var.gateway_memory >= 8192 && var.gateway_memory <= 30720 && var.gateway_memory % 1024 == 0) ||
+      (var.gateway_cpu == 8192 && var.gateway_memory >= 16384 && var.gateway_memory <= 61440 && var.gateway_memory % 4096 == 0) ||
+      (var.gateway_cpu == 16384 && var.gateway_memory >= 32768 && var.gateway_memory <= 122880 && var.gateway_memory % 8192 == 0) ||
+      (var.gateway_cpu == 32768 && contains([61440, 122880, 249856], var.gateway_memory))
+    )
+    error_message = "gateway_memory must be a valid ECS Fargate task memory value for gateway_cpu."
+  }
 }
 
 variable "system_runtime_cpu" {
   type    = number
   default = 512
+  validation {
+    condition     = contains([256, 512, 1024, 2048, 4096, 8192, 16384, 32768], var.system_runtime_cpu)
+    error_message = "system_runtime_cpu must be a valid ECS Fargate task CPU value."
+  }
 }
 
 variable "system_runtime_memory" {
   type    = number
   default = 1024
+  validation {
+    condition = (
+      (var.system_runtime_cpu == 256 && contains([512, 1024, 2048], var.system_runtime_memory)) ||
+      (var.system_runtime_cpu == 512 && contains([1024, 2048, 3072, 4096], var.system_runtime_memory)) ||
+      (var.system_runtime_cpu == 1024 && contains([2048, 3072, 4096, 5120, 6144, 7168, 8192], var.system_runtime_memory)) ||
+      (var.system_runtime_cpu == 2048 && var.system_runtime_memory >= 4096 && var.system_runtime_memory <= 16384 && var.system_runtime_memory % 1024 == 0) ||
+      (var.system_runtime_cpu == 4096 && var.system_runtime_memory >= 8192 && var.system_runtime_memory <= 30720 && var.system_runtime_memory % 1024 == 0) ||
+      (var.system_runtime_cpu == 8192 && var.system_runtime_memory >= 16384 && var.system_runtime_memory <= 61440 && var.system_runtime_memory % 4096 == 0) ||
+      (var.system_runtime_cpu == 16384 && var.system_runtime_memory >= 32768 && var.system_runtime_memory <= 122880 && var.system_runtime_memory % 8192 == 0) ||
+      (var.system_runtime_cpu == 32768 && contains([61440, 122880, 249856], var.system_runtime_memory))
+    )
+    error_message = "system_runtime_memory must be a valid ECS Fargate task memory value for system_runtime_cpu."
+  }
 }
 
 variable "runtime_cpu" {
   type    = number
   default = 1024
+  validation {
+    condition     = contains([256, 512, 1024, 2048, 4096, 8192, 16384, 32768], var.runtime_cpu)
+    error_message = "runtime_cpu must be a valid ECS Fargate task CPU value."
+  }
 }
 
 variable "runtime_memory" {
   type    = number
   default = 2048
+  validation {
+    condition = (
+      (var.runtime_cpu == 256 && contains([512, 1024, 2048], var.runtime_memory)) ||
+      (var.runtime_cpu == 512 && contains([1024, 2048, 3072, 4096], var.runtime_memory)) ||
+      (var.runtime_cpu == 1024 && contains([2048, 3072, 4096, 5120, 6144, 7168, 8192], var.runtime_memory)) ||
+      (var.runtime_cpu == 2048 && var.runtime_memory >= 4096 && var.runtime_memory <= 16384 && var.runtime_memory % 1024 == 0) ||
+      (var.runtime_cpu == 4096 && var.runtime_memory >= 8192 && var.runtime_memory <= 30720 && var.runtime_memory % 1024 == 0) ||
+      (var.runtime_cpu == 8192 && var.runtime_memory >= 16384 && var.runtime_memory <= 61440 && var.runtime_memory % 4096 == 0) ||
+      (var.runtime_cpu == 16384 && var.runtime_memory >= 32768 && var.runtime_memory <= 122880 && var.runtime_memory % 8192 == 0) ||
+      (var.runtime_cpu == 32768 && contains([61440, 122880, 249856], var.runtime_memory))
+    )
+    error_message = "runtime_memory must be a valid ECS Fargate task memory value for runtime_cpu."
+  }
 }
 
 variable "d1_runtime_container_memory" {
@@ -236,21 +287,55 @@ variable "workflows_desired_count" {
 variable "scheduler_cpu" {
   type    = number
   default = 1024
+  validation {
+    condition     = contains([256, 512, 1024, 2048, 4096, 8192, 16384, 32768], var.scheduler_cpu)
+    error_message = "scheduler_cpu must be a valid ECS Fargate task CPU value."
+  }
 }
 
 variable "scheduler_memory" {
   type    = number
   default = 2048
+  validation {
+    condition = (
+      (var.scheduler_cpu == 256 && contains([512, 1024, 2048], var.scheduler_memory)) ||
+      (var.scheduler_cpu == 512 && contains([1024, 2048, 3072, 4096], var.scheduler_memory)) ||
+      (var.scheduler_cpu == 1024 && contains([2048, 3072, 4096, 5120, 6144, 7168, 8192], var.scheduler_memory)) ||
+      (var.scheduler_cpu == 2048 && var.scheduler_memory >= 4096 && var.scheduler_memory <= 16384 && var.scheduler_memory % 1024 == 0) ||
+      (var.scheduler_cpu == 4096 && var.scheduler_memory >= 8192 && var.scheduler_memory <= 30720 && var.scheduler_memory % 1024 == 0) ||
+      (var.scheduler_cpu == 8192 && var.scheduler_memory >= 16384 && var.scheduler_memory <= 61440 && var.scheduler_memory % 4096 == 0) ||
+      (var.scheduler_cpu == 16384 && var.scheduler_memory >= 32768 && var.scheduler_memory <= 122880 && var.scheduler_memory % 8192 == 0) ||
+      (var.scheduler_cpu == 32768 && contains([61440, 122880, 249856], var.scheduler_memory))
+    )
+    error_message = "scheduler_memory must be a valid ECS Fargate task memory value for scheduler_cpu."
+  }
 }
 
 variable "workflows_cpu" {
   type    = number
   default = 512
+  validation {
+    condition     = contains([256, 512, 1024, 2048, 4096, 8192, 16384, 32768], var.workflows_cpu)
+    error_message = "workflows_cpu must be a valid ECS Fargate task CPU value."
+  }
 }
 
 variable "workflows_memory" {
   type    = number
   default = 1024
+  validation {
+    condition = (
+      (var.workflows_cpu == 256 && contains([512, 1024, 2048], var.workflows_memory)) ||
+      (var.workflows_cpu == 512 && contains([1024, 2048, 3072, 4096], var.workflows_memory)) ||
+      (var.workflows_cpu == 1024 && contains([2048, 3072, 4096, 5120, 6144, 7168, 8192], var.workflows_memory)) ||
+      (var.workflows_cpu == 2048 && var.workflows_memory >= 4096 && var.workflows_memory <= 16384 && var.workflows_memory % 1024 == 0) ||
+      (var.workflows_cpu == 4096 && var.workflows_memory >= 8192 && var.workflows_memory <= 30720 && var.workflows_memory % 1024 == 0) ||
+      (var.workflows_cpu == 8192 && var.workflows_memory >= 16384 && var.workflows_memory <= 61440 && var.workflows_memory % 4096 == 0) ||
+      (var.workflows_cpu == 16384 && var.workflows_memory >= 32768 && var.workflows_memory <= 122880 && var.workflows_memory % 8192 == 0) ||
+      (var.workflows_cpu == 32768 && contains([61440, 122880, 249856], var.workflows_memory))
+    )
+    error_message = "workflows_memory must be a valid ECS Fargate task memory value for workflows_cpu."
+  }
 }
 
 variable "spot_weight" {

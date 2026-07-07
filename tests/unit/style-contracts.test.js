@@ -1985,18 +1985,71 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
   const cluster = readRepoFile("terraform/modules/compute/cluster.tf");
   const locals = readRepoFile("terraform/modules/compute/locals.tf");
   const rootVars = readRepoFile("terraform/variables.tf");
+  const variableBlock = (/** @type {string} */ name) => {
+    const start = rootVars.indexOf(`variable "${name}" {`);
+    assert.notEqual(start, -1, `missing Terraform variable ${name}`);
+    const next = rootVars.indexOf('\nvariable "', start + 1);
+    return rootVars.slice(start, next === -1 ? rootVars.length : next);
+  };
   const variableDefault = (/** @type {string} */ name) => {
-    const match = rootVars.match(new RegExp(`variable "${name}" \\{[^}]*?default\\s+=\\s+([0-9]+)`));
+    const match = variableBlock(name).match(/default\s+=\s+([0-9]+)/);
     assert.ok(match, `missing numeric Terraform default for ${name}`);
     return Number(match[1]);
   };
+  // Keep in sync with the AWS ECS Fargate task-size table.
+  const validFargateCpuValues = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
   const fargateMemoryByCpu = new Map([
     [256, new Set([512, 1024, 2048])],
     [512, new Set([1024, 2048, 3072, 4096])],
     [1024, new Set([2048, 3072, 4096, 5120, 6144, 7168, 8192])],
     [2048, new Set(Array.from({ length: 13 }, (_, i) => 4096 + i * 1024))],
     [4096, new Set(Array.from({ length: 23 }, (_, i) => 8192 + i * 1024))],
+    [8192, new Set(Array.from({ length: 12 }, (_, i) => 16384 + i * 4096))],
+    [16384, new Set(Array.from({ length: 12 }, (_, i) => 32768 + i * 8192))],
+    [32768, new Set([61440, 122880, 249856])],
   ]);
+  const cpuListPattern = validFargateCpuValues.join(", ");
+  const assertFargateVariableValidation = (/** @type {string} */ service) => {
+    const cpuBlock = variableBlock(`${service}_cpu`);
+    const memoryBlock = variableBlock(`${service}_memory`);
+    assert.match(
+      cpuBlock,
+      new RegExp(`contains\\(\\[${cpuListPattern}\\], var\\.${service}_cpu\\)`),
+      `${service}_cpu must validate the full Fargate CPU set`
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 256 && contains\\(\\[512, 1024, 2048\\], var\\.${service}_memory\\)`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 512 && contains\\(\\[1024, 2048, 3072, 4096\\], var\\.${service}_memory\\)`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 1024 && contains\\(\\[2048, 3072, 4096, 5120, 6144, 7168, 8192\\], var\\.${service}_memory\\)`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 2048 && var\\.${service}_memory >= 4096 && var\\.${service}_memory <= 16384 && var\\.${service}_memory % 1024 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 4096 && var\\.${service}_memory >= 8192 && var\\.${service}_memory <= 30720 && var\\.${service}_memory % 1024 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 8192 && var\\.${service}_memory >= 16384 && var\\.${service}_memory <= 61440 && var\\.${service}_memory % 4096 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 16384 && var\\.${service}_memory >= 32768 && var\\.${service}_memory <= 122880 && var\\.${service}_memory % 8192 == 0`)
+    );
+    assert.match(
+      memoryBlock,
+      new RegExp(`var\\.${service}_cpu == 32768 && contains\\(\\[61440, 122880, 249856\\], var\\.${service}_memory\\)`)
+    );
+  };
 
   assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
   assert.doesNotMatch(cluster, /default_capacity_provider_strategy/);
@@ -2020,6 +2073,7 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
     const cpu = variableDefault(`${service}_cpu`);
     const memory = variableDefault(`${service}_memory`);
     assert.ok(fargateMemoryByCpu.get(cpu)?.has(memory), `${service} default ${cpu}/${memory} must be a valid Fargate CPU/memory pair`);
+    assertFargateVariableValidation(service);
   }
 
   for (const file of [
