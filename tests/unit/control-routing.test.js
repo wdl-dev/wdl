@@ -1,145 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  applyModuleReplacements,
-  moduleDataUrl,
-  readRepositoryFile,
-  repositoryFileUrl,
-} from "../helpers/load-shared-module.js";
 import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
+import { loadControlRouting } from "../helpers/load-control-routing.js";
+import { loadControlLib } from "../helpers/load-control-lib.js";
 import { bundleKey as productionBundleKey } from "../../shared/version.js";
 
-const lifecycleIndexesStub = `
-function refMember(ref) { return JSON.stringify(ref); }
-function referrersKey(ns, worker, version) { return \`worker-version-referrers:\${ns}:\${worker}:\${version}\`; }
-function d1DatabaseReferrersKey(ns, id) { return \`d1:database-referrers:\${ns}:\${id}\`; }
-function queueConsumerKey(ns, queue) { return \`queue-consumer:\${ns}:\${queue}\`; }
-export function cronWorkerKey(ns, worker) {
-  return \`crons:\${ns}:\${worker}\`;
-}
-export function stageCronSlotRef(multi, ns, worker, entry) {
-  const key = \`cron-slot:\${entry.slot}\`;
-  multi.sAdd(key, \`\${ns}:\${worker}:\${entry.id}:\${entry.gen}\`);
-  multi.expireAt(key, Math.floor(entry.slot / 1000) + 600);
-}
-export function stageD1ReferrerAdds(multi, { ns, worker, version, refs, databaseIdFor }) {
-  for (const ref of refs) multi.sAdd(d1DatabaseReferrersKey(ns, databaseIdFor(ref)), refMember({ callerNs: ns, callerWorker: worker, callerVersion: version, binding: ref.binding }));
-}
-export function stageOutgoingReferrerAdds(multi, { ns, worker, version, refs }) {
-  for (const ref of refs) multi.sAdd(referrersKey(ref.targetNs, ref.targetWorker, ref.targetVersion), refMember({ callerNs: ns, callerWorker: worker, callerVersion: version, binding: ref.binding }));
-}
-export function stageQueueConsumerProjection(multi, ns, worker, version, consumer) {
-  const key = queueConsumerKey(ns, consumer.queue);
-  multi.del(key);
-  multi.hSet(key, { worker, version, max_batch_size: String(consumer.maxBatchSize), max_batch_timeout_ms: String(consumer.maxBatchTimeoutMs), max_retries: String(consumer.maxRetries), ...(consumer.deadLetterQueue ? { dead_letter_queue: consumer.deadLetterQueue } : {}), ...(consumer.retryDelaySeconds != null ? { retry_delay_secs: String(consumer.retryDelaySeconds) } : {}) });
-  multi.sAdd("queue:index:consumers", key);
-}
-export function stageQueueConsumerRemoval(multi, ns, queue) {
-  const key = queueConsumerKey(ns, queue);
-  multi.del(key);
-  multi.sRem("queue:index:consumers", key);
-}
-export function stageCronWorkerIndexed(multi, ns, worker) {
-  multi.sAdd("cron:index:workers", cronWorkerKey(ns, worker));
-}
-export function stageCronWorkerRemoved(multi, ns, worker) {
-  multi.sRem("cron:index:workers", cronWorkerKey(ns, worker));
-}
-export function stageWorkerVersionIndexUpsert(multi, ns, worker, version, versionNumber) {
-  multi.sAdd(\`workers:\${ns}\`, worker);
-  multi.zAdd(\`worker-versions:\${ns}:\${worker}\`, versionNumber, version);
-}
-`;
-const lifecycleIndexesUrl = moduleDataUrl(lifecycleIndexesStub);
-const routePlanSrc = applyModuleReplacements(readRepositoryFile("control/routing/route-plan.js"), [
-  [
-    /import \{ decodePatternProjection \} from "shared-route-projection";/,
-    `const __patternSep = "\\t";
-     const decodePatternProjection = (raw) => {
-       if (typeof raw !== "string") return null;
-       const parts = raw.split(__patternSep);
-       if (parts.length !== 6 || parts[0] !== "v2") return null;
-       const [, ns, worker, version, kind, value] = parts;
-       if (!ns || !worker || !version || !value || (kind !== "exact" && kind !== "prefix")) return null;
-       return { ns, worker, version, kind, value };
-     };`
-  ],
-]);
-const routePlanUrl = moduleDataUrl(routePlanSrc);
-const src = applyModuleReplacements(readRepositoryFile("control/routing.js"), [
-  [
-    /import \{\n {2}DECLARED_HOSTS_KEY,\n {2}HOST_DECLARATIONS_PREFIX,\n {2}runOptimistic,\n\} from "control-shared";/,
-    `const DECLARED_HOSTS_KEY = "declared-hosts";
-    const HOST_DECLARATIONS_PREFIX = "host-declarations:";
-    class WatchError extends Error {}
-    async function runOptimistic(redis, { attempts = 5, onExhausted, onWatchError, shouldRetryResult }, fn) {
-      for (let attempt = 0; attempt < attempts; attempt += 1) {
-        try {
-          const result = await redis.session((session) => fn(session, attempt));
-          if (shouldRetryResult?.(result, attempt)) continue;
-          return result;
-        } catch (err) {
-          if (err instanceof WatchError) {
-            onWatchError?.(err, attempt);
-            continue;
-          }
-          throw err;
-        }
-      }
-      return await onExhausted();
-    }`
-  ],
-  [
-    /import \{\n {2}d1DatabaseKey,\n {2}deleteLockKey,\n {2}extractD1Refs, extractOutgoingRefs,\n\} from "control-lib";/,
-    `const d1DatabaseKey = (ns, id) => \`d1:database:\${ns}:\${id}\`;
-     const deleteLockKey = (ns, worker) => \`worker-delete-lock:\${ns}:\${worker}\`;
-     const extractD1Refs = () => [];
-     const extractOutgoingRefs = (bindings = {}) => Object.entries(bindings || {})
-       .filter(([, spec]) => spec?.type === "service" && spec.targetVersion)
-       .map(([binding, spec]) => ({
-         binding,
-         targetNs: spec.targetNs,
-         targetWorker: spec.targetWorker,
-         targetVersion: spec.targetVersion,
-       }));`
-  ],
-  [/from "control-lifecycle-indexes";/, `from ${JSON.stringify(lifecycleIndexesUrl)};`],
-  [/import \{ parseHostList \} from "control-topology";/, "const parseHostList = (value) => Array.isArray(value) ? value : [];"],
-  [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
-  [
-    /import \{ decodePatternProjection, encodePatternProjection \} from "shared-route-projection";/,
-    `const __patternSep = "\\t";
-     const encodePatternProjection = ({ ns, worker, version, kind, value }) =>
-       ["v2", ns, worker, version, kind, value].join(__patternSep);
-     const decodePatternProjection = (raw) => {
-       if (typeof raw !== "string") return null;
-       const parts = raw.split(__patternSep);
-       if (parts.length !== 6 || parts[0] !== "v2") return null;
-       const [, ns, worker, version, kind, value] = parts;
-       if (!ns || !worker || !version || !value || (kind !== "exact" && kind !== "prefix")) return null;
-       return { ns, worker, version, kind, value };
-     };`
-  ],
-  [
-    /import \{ bundleKey, formatVersion, parseVersion, patternsKey, routesKey \} from "shared-version";/,
-    `import { bundleKey, formatVersion, parseVersion, patternsKey, routesKey } from ${JSON.stringify(repositoryFileUrl("shared/version.js"))};`
-  ],
-  [
-    /import \{ diffCrons, nextFireMs, slotMsFor \} from "control-cron-index";/,
-    "const diffCrons = () => ({ added: [], removed: [] }); const nextFireMs = () => null; const slotMsFor = () => 0;",
-  ],
-  [
-    /import \{ isReservedNs, ROUTES_ALLOWED_RESERVED_NS \} from "shared-ns-pattern";/,
-    `const isReservedNs = (ns) => ns === "__system__" || ns === "__platform__" || ns === "__community__";
-     const ROUTES_ALLOWED_RESERVED_NS = new Set(["__system__"]);`
-  ],
-  [/import \{ PLATFORM_TIER_RESERVED_NS \} from "shared-auth-roles";/, "const PLATFORM_TIER_RESERVED_NS = new Set([\"__platform__\"]);"],
-  [/import \{ queueConsumerKey \} from "shared-queue-keys";/, "const queueConsumerKey = (ns, queue) => `queue-consumer:${ns}:${queue}`;"],
-  [/from "control-routing-route-plan";/, `from ${JSON.stringify(routePlanUrl)};`],
-]);
-
 const { promoteWithRoutes, bumpActiveAndPromote, reconcileHosts } =
-  await import(moduleDataUrl(src));
+  await loadControlRouting();
+const { controlLib } = await loadControlLib();
+const { encodeReferrerMember } = controlLib;
 
 function makeRedis() {
   return createFakeRedis();
@@ -239,7 +108,7 @@ test("promoteWithRoutes removes queue consumer discovery index entries for remov
   await promoteWithRoutes(redis, "demo", "worker", "v2");
 
   assert.equal(redis.state.hashes.has("queue-consumer:demo:jobs"), false);
-  assert.equal(redis.state.sets.get("queue:index:consumers")?.has("queue-consumer:demo:jobs"), false);
+  assert.equal(redis.state.sets.get("queue:index:consumers")?.has("queue-consumer:demo:jobs") ?? false, false);
   assert.ok(redis.state.ops.some((op) =>
     op[0] === "sRem" &&
     op[1] === "queue:index:consumers" &&
@@ -335,9 +204,9 @@ test("promoteWithRoutes watches and rejects missing service-binding target bundl
     bindings: {
       TARGET: {
         type: "service",
-        targetNs: "other",
-        targetWorker: "api",
-        targetVersion: "v3",
+        ns: "other",
+        service: "api",
+        version: "v3",
       },
     },
   });
@@ -360,15 +229,15 @@ test("promoteWithRoutes batches service-binding dependency watches", async () =>
     bindings: {
       TARGET_A: {
         type: "service",
-        targetNs: "other",
-        targetWorker: "api",
-        targetVersion: "v3",
+        ns: "other",
+        service: "api",
+        version: "v3",
       },
       TARGET_B: {
         type: "service",
-        targetNs: "other",
-        targetWorker: "queue",
-        targetVersion: "v4",
+        ns: "other",
+        service: "queue",
+        version: "v4",
       },
     },
   });
@@ -411,60 +280,105 @@ test("bumpActiveAndPromote also rewrites full queue consumer projection", async 
   });
 });
 
-test("bumpActiveAndPromote runs beforeStageCopy inside the watched copy transaction", async () => {
+test("promoteWithRoutes rejects missing D1 dependency databases", async () => {
   const redis = makeRedis();
-  seedBundle(redis, "v1", { queueConsumers: [] });
+  seedBundle(redis, "v1", {
+    bindings: {
+      DB: { type: "d1", databaseId: "d1_main" },
+    },
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      const shaped = assertRoutingErrorShape(err, 409, "d1_database_dependency_missing");
+      assert.deepEqual(shaped.details.broken_d1_dependency, { binding: "DB", databaseId: "d1_main" });
+      return true;
+    }
+  );
+  assert.ok(redis.state.watched.includes("d1:database:demo:d1_main"));
+  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
+});
+
+test("bumpActiveAndPromote stages D1 referrers from production binding metadata", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    bindings: {
+      DB: { type: "d1", databaseId: "d1_main" },
+    },
+  });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.hashes.set("d1:database:demo:d1_main", { state: "ready" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  const result = await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.equal(result.version, "v2");
+  assert.ok(redis.state.watched.includes("d1:database:demo:d1_main"));
+  assert.ok(redis.state.sets.get("d1:database-referrers:demo:d1_main")?.has(encodeReferrerMember({
+    callerNs: "demo",
+    callerWorker: "worker",
+    callerVersion: "v2",
+    binding: "DB",
+  })));
+});
+
+test("bumpActiveAndPromote lets callers stage writes in the same copy transaction", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {});
   redis.state.hashes.set("routes:demo", { worker: "v1" });
   redis.state.strings.set("worker:demo:worker:next_version", "1");
-  /** @type {unknown} */
-  let seen = null;
 
   const result = await bumpActiveAndPromote(redis, "demo", "worker", {
-    /** @param {{ iso: any, currentVersion: string, newVersion: string, sourceMeta: any }} context */
-    async beforeStageCopy(context) {
-      const { iso, currentVersion, newVersion, sourceMeta } = context;
-      await iso.watch("secrets:demo", "secrets:demo:worker");
-      seen = {
-        currentVersion,
-        newVersion,
-        route: await iso.hGet("routes:demo", "worker"),
-        queueConsumers: sourceMeta.queueConsumers,
-      };
+    /** @param {{ iso: { watch: (...keys: string[]) => Promise<unknown> }, multi: { hSet: (key: string, field: string, value: string) => unknown }, currentVersion: string, newVersion: string }} context */
+    stageBeforeCopy: async ({ iso, multi, currentVersion, newVersion }) => {
+      assert.equal(currentVersion, "v1");
+      assert.equal(newVersion, "v2");
+      await iso.watch("secrets:demo:worker");
+      multi.hSet("secrets:demo:worker", "TOKEN", "encrypted");
     },
   });
 
   assert.equal(result.version, "v2");
-  assert.deepEqual(seen, {
-    currentVersion: "v1",
-    newVersion: "v2",
-    route: "v1",
-    queueConsumers: [],
-  });
-  assert.ok(redis.state.watchBatches.some((batch) =>
-    batch.length === 2 &&
-    batch.includes("secrets:demo") &&
-    batch.includes("secrets:demo:worker")
-  ));
+  assert.equal(redis.state.hashes.get("secrets:demo:worker")?.TOKEN, "encrypted");
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v2");
   assert.ok(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")));
+  assert.ok(redis.state.watched.includes("secrets:demo:worker"));
+  const stageIndex = redis.state.ops.findIndex((op) =>
+    op[0] === "hSet" && op[1] === "secrets:demo:worker"
+  );
+  const copyIndex = redis.state.ops.findIndex((op) =>
+    op[0] === "copy" &&
+    op[1] === productionBundleKey("demo", "worker", "v1") &&
+    op[2] === productionBundleKey("demo", "worker", "v2")
+  );
+  assert.ok(stageIndex >= 0);
+  assert.ok(copyIndex > stageIndex);
+  assert.deepEqual(redis.state.ops[copyIndex][3], { REPLACE: true });
 });
 
-test("bumpActiveAndPromote does not copy or flip routes when beforeStageCopy rejects", async () => {
+test("bumpActiveAndPromote aborts copy and route flip when staged writes fail", async () => {
   const redis = makeRedis();
-  seedBundle(redis, "v1", { queueConsumers: [] });
+  seedBundle(redis, "v1", {});
   redis.state.hashes.set("routes:demo", { worker: "v1" });
   redis.state.strings.set("worker:demo:worker:next_version", "1");
 
   await assert.rejects(
     bumpActiveAndPromote(redis, "demo", "worker", {
-      async beforeStageCopy() {
-        throw new Error("budget failed");
+      /** @param {{ iso: { watch: (...keys: string[]) => Promise<unknown> } }} context */
+      stageBeforeCopy: async ({ iso }) => {
+        await iso.watch("secrets:demo:worker");
+        throw new Error("budget rejected");
       },
     }),
-    /budget failed/
+    /budget rejected/
   );
 
-  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
   assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
+  assert.equal(redis.state.ops.some((op) => op[0] === "copy"), false);
+  assert.equal(redis.state.ops.some((op) => op[0] === "hSet" && op[1] === "routes:demo"), false);
+  assert.ok(redis.state.watched.includes("secrets:demo:worker"));
 });
 
 test("bumpActiveAndPromote rejects active routes that no longer declare their hosts", async () => {
@@ -560,9 +474,9 @@ test("bumpActiveAndPromote rejects missing service-binding target bundles", asyn
     bindings: {
       TARGET: {
         type: "service",
-        targetNs: "other",
-        targetWorker: "api",
-        targetVersion: "v3",
+        ns: "other",
+        service: "api",
+        version: "v3",
       },
     },
   });
@@ -631,7 +545,7 @@ test("reconcileHosts preserves global host gate while another namespace still de
 
   await reconcileHosts(redis, "demo", { hosts: [] }, "workers.local");
 
-  assert.equal(redis.state.sets.get("hosts:demo")?.has("app.workers.example"), false);
+  assert.equal(redis.state.sets.get("hosts:demo")?.has("app.workers.example") ?? false, false);
   assert.equal(redis.state.sets.get("declared-hosts")?.has("app.workers.example"), true);
   assert.deepEqual(redis.state.sets.get("host-declarations:app.workers.example"), new Set(["other"]));
 });
@@ -644,7 +558,7 @@ test("reconcileHosts removes global host gate after the final declaration is rem
 
   await reconcileHosts(redis, "demo", { hosts: [] }, "workers.local");
 
-  assert.equal(redis.state.sets.get("hosts:demo")?.has("app.workers.example"), false);
-  assert.equal(redis.state.sets.get("declared-hosts")?.has("app.workers.example"), false);
+  assert.equal(redis.state.sets.get("hosts:demo")?.has("app.workers.example") ?? false, false);
+  assert.equal(redis.state.sets.has("declared-hosts"), false);
   assert.equal(redis.state.sets.has("host-declarations:app.workers.example"), false);
 });

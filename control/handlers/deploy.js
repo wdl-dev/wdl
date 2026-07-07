@@ -38,6 +38,7 @@ import {
   parseQueueConsumers,
 } from "control-topology";
 import { formatVersion, parseVersion, bundleKey, routesKey } from "shared-version";
+import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import { isReservedNs, isValidRouteNs, ROUTES_ALLOWED_RESERVED_NS } from "shared-ns-pattern";
 import { putAsset, inferContentType } from "control-s3";
 import { generateAssetsToken, assetsPrefixFor } from "shared-assets-token";
@@ -119,9 +120,9 @@ class DeployRequestError extends Error {
   }
 }
 
-/** @param {DeployRequestError} err */
-function deployRequestErrorResponse(err) {
-  return codedErrorResponse(err, err.code);
+/** @param {DeployRequestError} err @param {Record<string, unknown>} [extraDetails] */
+function deployRequestErrorResponse(err, extraDetails = {}) {
+  return codedErrorResponse(err, err.code, extraDetails);
 }
 
 /** @param {string} message @returns {DeployRequestError} */
@@ -404,8 +405,8 @@ async function resolvePlatformBindings({ redis, ns, name, bindings, platformBind
     workerSecretKeys,
   ] = await Promise.all([
     collectPlatformExports(redis),
-    redis.hKeys(`secrets:${ns}`),
-    redis.hKeys(`secrets:${ns}:${name}`),
+    redis.hKeys(nsSecretsKey(ns)),
+    redis.hKeys(workerSecretsKey(ns, name)),
   ]);
   const availableCallerSecrets = new Set([...nsSecretKeys, ...workerSecretKeys]);
   const expandedBindings = { ...bindings };
@@ -538,11 +539,13 @@ async function uploadDeployAssets({
   return assetsToUpload.length ? { uploadedPrefix: cleanupPrefix } : {};
 }
 
-function deployAssetsS3NotConfiguredResponse() {
+/** @param {Record<string, unknown>} [extraDetails] */
+function deployAssetsS3NotConfiguredResponse(extraDetails = {}) {
   return jsonError(
     503,
     "s3_not_configured",
-    "Deploy carried 'assets' but control's S3 client is not configured (S3_ENDPOINT/S3_BUCKET unset)"
+    "Deploy carried 'assets' but control's S3 client is not configured (S3_ENDPOINT/S3_BUCKET unset)",
+    extraDetails
   );
 }
 
@@ -589,11 +592,13 @@ async function runDeployPreflight({ redis, ns, name, deployRequest }) {
  * @param {{ redis: RedisClient | RedisSession, controlEnv: Record<string, string | undefined>, ns: string, name: string, meta: PreparedMeta | CommittedMeta, version?: string }} args
  */
 async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta, version = undefined }) {
-  const nsEncrypted = await redis.hGetAll(`secrets:${ns}`);
-  const workerEncrypted = await redis.hGetAll(`secrets:${ns}:${name}`);
+  const nsSecretHashKey = nsSecretsKey(ns);
+  const workerSecretHashKey = workerSecretsKey(ns, name);
+  const nsEncrypted = await redis.hGetAll(nsSecretHashKey);
+  const workerEncrypted = await redis.hGetAll(workerSecretHashKey);
   const [nsSecrets, workerSecrets] = await Promise.all([
-    decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: `secrets:${ns}` }),
-    decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: `secrets:${ns}:${name}` }),
+    decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: nsSecretHashKey }),
+    decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: workerSecretHashKey }),
   ]);
   assertWorkerLoaderUserEnvBudget({
     ns,
@@ -610,10 +615,10 @@ async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta, v
 }
 
 /**
- * @param {{ deployRequest: DeployRequest, ns: string, name: string, mergedBindings: BindingMap }} args
+ * @param {{ deployRequest: DeployRequest, ns: string, name: string, mergedBindings: BindingMap, warningDetails?: Record<string, unknown> }} args
  * @returns {{ response: Response, committed?: never } | { response?: never, committed: CommittedBundle }}
  */
-function prepareDeployCommitCandidate({ deployRequest, ns, name, mergedBindings }) {
+function prepareDeployCommitCandidate({ deployRequest, ns, name, mergedBindings, warningDetails = {} }) {
   try {
     return {
       committed: prepareCommittedBundle({
@@ -624,7 +629,7 @@ function prepareDeployCommitCandidate({ deployRequest, ns, name, mergedBindings 
       }),
     };
   } catch (err) {
-    if (err instanceof DeployRequestError) return { response: deployRequestErrorResponse(err) };
+    if (err instanceof DeployRequestError) return { response: deployRequestErrorResponse(err, warningDetails) };
     throw err;
   }
 }
@@ -697,6 +702,7 @@ async function commitPreparedDeploy({
         prefix: uploadedPrefix, warnings, log,
       });
     }
+    const warningDetails = warnings.length ? { warnings } : {};
     if (err instanceof DeployAbort) {
       log("warn", "deploy_rejected", {
         request_id: requestId,
@@ -707,11 +713,11 @@ async function commitPreparedDeploy({
         reason: err.code,
         ...err.details,
       });
-      return { response: controlAbortResponse(err, warnings.length ? { warnings } : {}) };
+      return { response: controlAbortResponse(err, warningDetails) };
     }
-    if (err instanceof WorkerEnvBudgetError) return { response: codedErrorResponse(err, err.code) };
-    if (err instanceof WorkerCodeBudgetError) return { response: codedErrorResponse(err, err.code) };
-    if (err instanceof SecretEnvelopeError) return { response: jsonError(503, err.code, err.message) };
+    if (err instanceof WorkerEnvBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
+    if (err instanceof WorkerCodeBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
+    if (err instanceof SecretEnvelopeError) return { response: jsonError(503, err.code, err.message, warningDetails) };
     throw err;
   }
   return { commitDurationMs: Date.now() - commitStartedAt };
@@ -742,12 +748,14 @@ export async function handle({ request, env, ns, name, requestId }) {
     throw err;
   }
   const { bindings: mergedBindings, warnings } = platformResult;
+  const warningDetails = warnings.length ? { warnings } : {};
 
   const candidate = prepareDeployCommitCandidate({
     deployRequest: parsed.deployRequest,
     ns,
     name,
     mergedBindings,
+    warningDetails,
   });
   if (candidate.response) return candidate.response;
   const {
@@ -766,12 +774,12 @@ export async function handle({ request, env, ns, name, requestId }) {
       normalized: prepared.normalized,
     });
   } catch (err) {
-    if (err instanceof WorkerCodeBudgetError) return codedErrorResponse(err, err.code);
+    if (err instanceof WorkerCodeBudgetError) return codedErrorResponse(err, err.code, warningDetails);
     throw err;
   }
 
   if (parsed.deployRequest.assetsToUpload && !s3) {
-    return deployAssetsS3NotConfiguredResponse();
+    return deployAssetsS3NotConfiguredResponse(warningDetails);
   }
 
   const num = await redis.incr(`worker:${ns}:${name}:next_version`);
@@ -864,10 +872,10 @@ async function scheduleDeployAbortCleanup({
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, version: string, prepared: PreparedBundle, outgoingRefs: OutgoingRef[], d1Refs: DeployD1Ref[], controlEnv?: Record<string, string | undefined> | null }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, version: string, prepared: PreparedBundle, outgoingRefs: OutgoingRef[], d1Refs: DeployD1Ref[], controlEnv: Record<string, string | undefined> }} args
  */
 export async function commitWithWatch({
-  redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv = null,
+  redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv,
 }) {
   const vNum = parseVersion(version);
   if (vNum == null) throw new Error(`commitWithWatch: bad version ${version}`);
@@ -881,9 +889,7 @@ export async function commitWithWatch({
     },
   }, async (iso) => {
     await watchCommitKeys(iso, { ns, name, prepared, outgoingRefs, d1Refs });
-    if (controlEnv) {
-      await iso.watch(`secrets:${ns}`, `secrets:${ns}:${name}`);
-    }
+    await iso.watch(nsSecretsKey(ns), workerSecretsKey(ns, name));
 
     const resolvedD1Refs = await resolveD1RefsForCommit(iso, { ns, d1Refs });
     await validateCallerNotDeleting(iso, { ns, name });
@@ -899,6 +905,8 @@ export async function commitWithWatch({
       prepared,
       resolvedD1Refs,
     });
+    // Keep this commit-time code-budget check. Workflow keys are materialized
+    // above and then stringified into the generated host wrapper source.
     assertWorkerLoaderCodeBudget({
       ns,
       worker: name,
@@ -906,16 +914,14 @@ export async function commitWithWatch({
       meta: committedMeta,
       normalized: prepared.normalized,
     });
-    if (controlEnv) {
-      await validateCommittedEnvBudget({
-        redis: iso,
-        controlEnv,
-        ns,
-        name,
-        meta: committedMeta,
-        version,
-      });
-    }
+    await validateCommittedEnvBudget({
+      redis: iso,
+      controlEnv,
+      ns,
+      name,
+      meta: committedMeta,
+      version,
+    });
 
     const multi = iso.multi();
     stageDeployCommit(multi, {

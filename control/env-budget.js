@@ -7,11 +7,18 @@ const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
 const DO_ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
 const ESTIMATED_ASSETS_CDN_BASE = "https://assets.invalid";
-const ESTIMATED_VERSION = "v0000000000";
+// Pessimistic placeholder for version strings that will be allocated after a
+// secret mutation. Redis INCR results are parsed as JS numbers today, so this
+// uses the longest safe integer-shaped `v<int>` tag.
+export const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = "v9007199254740991";
 const ESTIMATED_DO_STORAGE_ID = "do_00000000000000000000000000000000";
 const ESTIMATED_WORKFLOW_KEY = "wf_00000000000000000000000000000000";
 
+// Mirrors workerd v1.20260701.1
+// src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_ENV_SIZE.
 export const UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES = 1024 * 1024;
+// Absorbs WDL's JSON-vs-V8 estimator noise and small platform-injected fields
+// while keeping Control fail-closed before workerd's authoritative limit.
 export const WORKER_LOADER_ENV_HEADROOM_BYTES = 8 * 1024;
 export const WORKER_LOADER_ENV_MAX_BYTES =
   UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES - WORKER_LOADER_ENV_HEADROOM_BYTES;
@@ -183,7 +190,7 @@ function estimatedBindingEnvValue({ name, spec, meta, ns, worker, version, asset
 export function estimatedWorkerLoaderEnv({
   ns,
   worker = "",
-  version = ESTIMATED_VERSION,
+  version = WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   vars = null,
   nsSecrets = null,
   workerSecrets = null,
@@ -308,7 +315,7 @@ export function estimatedWorkerLoaderEnvBytes(value) {
 export function assertWorkerLoaderUserEnvBudget({
   ns,
   worker = undefined,
-  version = ESTIMATED_VERSION,
+  version = WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
   sourceVersion = null,
   vars = null,
   nsSecrets = null,
@@ -330,8 +337,10 @@ export function assertWorkerLoaderUserEnvBudget({
     assetsCdnBase,
   }));
   if (bytes > WORKER_LOADER_ENV_MAX_BYTES) {
+    const labelVersion = sourceVersion ||
+      (version !== WORKER_LOADER_ENV_VERSION_PLACEHOLDER ? version : "");
     const label = worker
-      ? `${ns}/${worker}${sourceVersion ? `@${sourceVersion}` : ""}`
+      ? `${ns}/${worker}${labelVersion ? `@${labelVersion}` : ""}`
       : ns;
     throw new WorkerEnvBudgetError(
       `estimated workerLoader env for ${label} serializes to ${bytes} bytes, ` +
@@ -341,6 +350,7 @@ export function assertWorkerLoaderUserEnvBudget({
         ...(worker ? { worker } : {}),
         ...(sourceVersion ? { source_version: sourceVersion } : {}),
         ...(sourceVersion && version ? { estimated_version: version } : {}),
+        ...(!sourceVersion && version !== WORKER_LOADER_ENV_VERSION_PLACEHOLDER ? { version } : {}),
         env_bytes: bytes,
         max_env_bytes: WORKER_LOADER_ENV_MAX_BYTES,
         upstream_max_env_bytes: UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
@@ -374,6 +384,41 @@ export async function decryptSecretHash({ encrypted, env, hashKey }) {
     out[fieldName] = value;
   }
   return out;
+}
+
+/**
+ * Budget checks model the post-mutation plaintext hash. DELETE excludes the
+ * target before decrypting so corrupt target envelopes remain repairable;
+ * other corrupt envelopes still fail closed.
+ * @param {{
+ *   encrypted: Record<string, string | null | undefined>,
+ *   env: Record<string, string | undefined>,
+ *   hashKey: string,
+ *   key: string,
+ *   method: "PUT" | "DELETE",
+ *   plaintext?: string | null,
+ * }} args
+ */
+export async function decryptMutatedSecretHashForBudget({
+  encrypted,
+  env,
+  hashKey,
+  key,
+  method,
+  plaintext = null,
+}) {
+  const budgetEncrypted = { ...encrypted };
+  delete budgetEncrypted[key];
+  const secrets = await decryptSecretHash({
+    encrypted: budgetEncrypted,
+    env,
+    hashKey,
+  });
+  if (method === "PUT") {
+    if (typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
+    secrets[key] = plaintext;
+  }
+  return secrets;
 }
 
 /**

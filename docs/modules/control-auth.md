@@ -89,10 +89,14 @@ Control lifecycle operations are split so each critical transition has one autho
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
   cron/queue projections, lifecycle indexes, and invalidation publications as one
   reviewed transition.
-- Secret update/delete modifies the secret store and then bumps the active worker
-  through `bumpActiveAndPromote()` when an active route exists. Secret PUT validates the
-  plaintext size and shape, encrypts it into a `WDL-ENC:` envelope before the Redis
-  mutation/WATCH retry loop, and reuses the same envelope across retries. Runtime
+- Secret update/delete stages the secret-store mutation inside
+  `bumpActiveAndPromote()` when an active route exists, so the budget check, secret
+  hash write, bundle copy, and route flip share one WATCH/MULTI transaction. If no
+  active route exists, retained versions are budget-checked before the direct secret
+  hash write; only secret-only workers with no retained versions defer their first
+  load-time budget check to deploy. Secret PUT validates the plaintext size and shape,
+  encrypts it into a `WDL-ENC:` envelope before the Redis mutation/WATCH retry loop,
+  and reuses the same envelope across retries. Runtime
   therefore sees a new immutable version id instead of mutable in-place secret changes.
   Secret DELETE removes the target field from the env estimate before decrypting the
   remaining secret hashes, so deleting the corrupt target can still succeed. Any corrupt
@@ -269,17 +273,12 @@ Auth-specific contract:
   Deploy and secret mutations return `worker_env_too_large` when the estimated
   `workerLoader` env exceeds WDL's headroomed 1 MiB budget.
   `worker_env_too_large` details include `namespace`, optional `worker`, `env_bytes`,
-  `max_env_bytes`, `upstream_max_env_bytes`, and `headroom_bytes`. When the blocker is an
-  already-retained version being re-estimated during a secret mutation, details also
-  include `source_version` and `estimated_version`, and the message identifies
-  `<ns>/<worker>@<source_version>` so operators can find the retained version to delete
-  or redeploy.
-- If a worker-secret PUT/DELETE has already committed but the follow-up version bump
-  fails an env budget check, Control attempts to roll the secret hash back before
-  returning the budget error. If that rollback cannot be confirmed, Control returns
-  `503 secret_mutation_rollback_failed` with the original `budget_error`; operators
-  must retry the mutation or repair the secret before rollout because the new secret
-  may already be persisted.
+  `max_env_bytes`, `upstream_max_env_bytes`, and `headroom_bytes`. Deploy-time
+  per-version checks also include `version`. Secret mutations that re-estimate an
+  existing version also include `source_version` and `estimated_version`.
+  `source_version` identifies the stored version to inspect, delete, or redeploy;
+  `estimated_version` is the tag used for budget sizing; on worker-secret bump paths
+  it is the exact allocated bump version.
 - Control never calls gateway directly. It writes Redis and publishes invalidation
   messages.
 - Control encrypts secret PUT values before entering Redis mutation loops.
@@ -291,7 +290,9 @@ Auth-specific contract:
   after the row exists, uses minute-scale exponential backoff capped at 30 minutes for
   S3 failures, and checkpoints large prefix cleanup after each S3 List/Delete page so
   normal pagination progress does not consume failure attempts or restart from the
-  beginning after a scheduler timeout.
+  beginning after a scheduler timeout. Each run processes one page, so very large
+  prefixes drain across multiple cron or queue dispatches instead of holding one
+  scheduler dispatch open for minutes.
 - Workflow lifecycle blockers are checked through workflows and fail closed on service
   errors.
 - AUTH JSRPC errors or Redis explosions are control-plane failures and map to 503

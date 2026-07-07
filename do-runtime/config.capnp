@@ -48,6 +48,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "runtime-load", esModule = embed "../runtime/load.js"),
     (name = "runtime-load-env-build", esModule = embed "../runtime/load/env-build.js"),
     (name = "runtime-load-code-budget", esModule = embed "../runtime/load/code-budget.js"),
+    (name = "runtime-load-injection-sources", esModule = embed "../runtime/load/injection-sources.js"),
     (name = "runtime-load-module-rewrite", esModule = embed "../runtime/load/module-rewrite.js"),
     (name = "runtime-load-wrapper-generate", esModule = embed "../runtime/load/wrapper-generate.js"),
     (name = "runtime-bindings-proxy", esModule = embed "../runtime/bindings/proxy.js"),

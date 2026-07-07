@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { controlSharedStubUrl } from "../helpers/control-shared-stub.js";
+import {
+  createControlHandlerState,
+  controlSharedHarnessUrl,
+  installControlHandlerState,
+} from "../helpers/control-handler-harness.js";
 import { decryptSecretValue, encryptSecretValue, isSecretEnvelope } from "../../shared/secret-envelope.js";
 import {
   applyModuleReplacements,
@@ -8,93 +12,104 @@ import {
   readRepositoryFile,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
-import { installMockProperty } from "../helpers/mock-global.js";
+import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
+import { CONTROL_ROUTING_TEST_URL } from "../helpers/load-control-routing.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
 const SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const SHARED_SECRET_KEYS_URL = repositoryFileUrl("shared/secret-keys.js");
 const env = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
   SECRET_ENVELOPE_KID: "local:test:secret-envelope:v1",
 };
 
-/** @returns {Record<string, string>} */
-function emptySecretHash() {
-  return {};
-}
-
 /**
- * @param {string} key
- * @param {string} field
+ * @typedef {ReturnType<import("../helpers/mocks/fake-redis.js").createFakeRedis>} TestFakeRedis
  */
-function defaultWorkerSecretBundleMeta(key, field) {
-  return /^worker:[^:]+:[^:]+:v:[1-9][0-9]*$/.test(key) && field === "__meta__"
-    ? "{}"
-    : null;
-}
 
-/**
- * @param {{
- *   hKeys?: string[],
- *   hGet?: (key: string, field: string) => string | null | Promise<string | null>,
- *   hGetAll?: (key: string) => Record<string, string> | Promise<Record<string, string>>,
- *   zCard?: number,
- *   zRange?: string[],
- *   onHSet?: (key: string, field: string, value: string) => void,
- *   onHDel?: (key: string, field: string) => void,
- *   onExec?: () => void | Promise<void>,
- * }} options
- */
-function makeWorkerSecretSession({
-  hKeys = [],
-  hGet = defaultWorkerSecretBundleMeta,
-  hGetAll = emptySecretHash,
-  zCard = 0,
-  zRange = [],
-  onHSet = () => {},
-  onHDel = () => {},
-  onExec = () => {},
-} = {}) {
-  return {
-    async watch() {},
-    async unwatch() {},
-    async get() { return null; },
-    async hKeys() { return hKeys; },
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) { return await hGet(key, field); },
-    /** @param {string} key */
-    async hGetAll(key) { return await hGetAll(key); },
-    async zCard() { return zCard; },
-    async zRange() { return zRange; },
-    multi() {
-      return {
-        /** @param {string} key @param {string} field @param {string} value */
-        hSet(key, field, value) { onHSet(key, field, value); },
-        /** @param {string} key @param {string} field */
-        hDel(key, field) { onHDel(key, field); },
-        sAdd() {},
-        sRem() {},
-        async exec() { await onExec(); },
-      };
+/** @type {WeakMap<TestFakeRedis, unknown[][]>} */
+const failedOpsByRedis = new WeakMap();
+
+/** @returns {TestFakeRedis} */
+function createRecordingRedis() {
+  /** @type {unknown[][]} */
+  const failedOps = [];
+  const redis = createFakeRedis(undefined, {
+    onExecFailure(ops) {
+      failedOps.push(...ops.map((op) => [...op]));
     },
-  };
+  });
+  failedOpsByRedis.set(redis, failedOps);
+  return redis;
+}
+
+/** @param {TestFakeRedis} redis */
+function redisAttemptedOps(redis) {
+  return [...(failedOpsByRedis.get(redis) || []), ...redis.ops];
+}
+
+/** @param {TestFakeRedis} redis @param {string} key */
+function redisHSetAttempts(redis, key) {
+  return redisAttemptedOps(redis)
+    .filter((op) => op[0] === "hSet" && op[1] === key)
+    .flatMap((op) => Object.entries(/** @type {Record<string, string>} */ (op[2]))
+      .map(([field, value]) => ({ key, field, value })));
+}
+
+/** @param {TestFakeRedis} redis @param {string} [version] */
+function seedWorkerSecretActive(redis, version = "v1") {
+  redis.hashes.set("routes:demo", { api: version });
+  redis.hashes.set(`worker:demo:api:v:${version.slice(1)}`, { __meta__: "{}" });
+}
+
+/** @param {TestFakeRedis} redis @param {string[]} versions */
+function seedWorkerSecretVersions(redis, versions) {
+  redis.zsets.set("worker-versions:demo:api", new Map(
+    versions.map((version) => [version, Number(version.slice(1))])
+  ));
 }
 
 /**
- * @param {{ redis: Record<string, unknown> }} state
- * @param {ReturnType<typeof makeWorkerSecretSession>} session
- * @param {() => unknown | Promise<unknown>} callback
+ * @param {{ redis: TestFakeRedis }} state
+ * @param {(redis: TestFakeRedis) => void | Promise<void>} setup
+ * @param {(redis: TestFakeRedis, sessionCalls: () => number) => unknown | Promise<unknown>} callback
  */
-async function withWorkerSecretSession(state, session, callback) {
-  const restore = installMockProperty(state.redis, "session",
-    async (/** @type {(session: ReturnType<typeof makeWorkerSecretSession>) => unknown | Promise<unknown>} */ fn) =>
-      await fn(session)
-  );
+async function withWorkerSecretRedis(state, setup, callback) {
+  const redis = createRecordingRedis();
+  seedWorkerSecretActive(redis);
+  redis.strings.set("worker:demo:api:next_version", "1");
+  await setup(redis);
+  let calls = 0;
+  const previousRedis = state.redis;
+  const session = redis.session.bind(redis);
+  redis.session = /** @type {TestFakeRedis["session"]} */ (async (fn) => {
+    calls += 1;
+    return await session(fn);
+  });
+  state.redis = redis;
   try {
-    return await callback();
+    return await callback(redis, () => calls);
   } finally {
-    restore();
+    state.redis = previousRedis;
+  }
+}
+
+/**
+ * @param {{ redis: TestFakeRedis }} state
+ * @param {(redis: TestFakeRedis) => void | Promise<void>} setup
+ * @param {(redis: TestFakeRedis) => unknown | Promise<unknown>} callback
+ */
+async function withNamespaceSecretRedis(state, setup, callback) {
+  const redis = createRecordingRedis();
+  await setup(redis);
+  const previousRedis = state.redis;
+  state.redis = redis;
+  try {
+    return await callback(redis);
+  } finally {
+    state.redis = previousRedis;
   }
 }
 
@@ -130,71 +145,14 @@ function envBudgetUrl() {
   return moduleDataUrl(source);
 }
 
-const controlSharedUrl = controlSharedStubUrl(`
-class WatchError extends Error {}
-export const state = {
-  log() {},
-  redis: {
-    execCalls: 0,
-    execFailures: 0,
-    writes: [],
-    deletes: [],
-    watchedKeys: [],
-    async hKeys() { return []; },
-    async hGet(key, field) {
-      return /^worker:[^:]+:[^:]+:v:[1-9][0-9]*$/.test(key) && field === "__meta__"
-        ? "{}"
-        : null;
-    },
-    async hGetAll() { return {}; },
-    async sMembers() { return []; },
-    async zRange() { return []; },
-    async hSet(key, field, value) {
-      this.writes.push({ key, field, value });
-      return 1;
-    },
-    async hDel() { return 0; },
-    async session(fn) {
-      return await fn({
-        async watch(...keys) {
-          state.redis.watchedKeys.push(...keys);
-        },
-        async hGet(key, field) {
-          return await state.redis.hGet(key, field);
-        },
-        async hGetAll(key) {
-          return await state.redis.hGetAll(key);
-        },
-        async sMembers(key) {
-          return await state.redis.sMembers(key);
-        },
-        async zRange(key, start, stop) {
-          return await state.redis.zRange(key, start, stop);
-        },
-        multi() {
-          return {
-            hSet(key, field, value) {
-              state.redis.writes.push({ key, field, value });
-              return this;
-            },
-            hDel(key, field) {
-              state.redis.deletes.push({ key, field });
-              return this;
-            },
-            async exec() {
-              state.redis.execCalls += 1;
-              if (state.redis.execFailures > 0) {
-                state.redis.execFailures -= 1;
-                throw new WatchError("simulated namespace secret contention");
-              }
-            },
-          };
-        },
-      });
-    },
-  },
-};
-`);
+const NAMESPACE_SECRET_STATE_GLOBAL = "__controlSecretNamespaceState";
+const namespaceSecretState = /** @type {ReturnType<typeof createControlHandlerState> & { redis: TestFakeRedis }} */ (
+  installControlHandlerState(NAMESPACE_SECRET_STATE_GLOBAL, createControlHandlerState({
+    redis: createRecordingRedis(),
+    logs: [],
+  }))
+);
+const controlSharedUrl = controlSharedHarnessUrl(NAMESPACE_SECRET_STATE_GLOBAL);
 const controlLibStubUrl = moduleDataUrl(`
 ${validateSecretKeyStubSource}
 export const workersIndexKey = (ns) => \`workers:\${ns}\`;
@@ -206,86 +164,147 @@ const src = applyModuleReplacements(readRepositoryFile("control/handlers/ns-secr
   [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
   [/from "control-env-budget";/, `from ${JSON.stringify(envBudgetUrl())};`],
   [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
+  [/from "shared-secret-keys";/, `from ${JSON.stringify(SHARED_SECRET_KEYS_URL)};`],
 ]);
 
 const { handle } = await import(moduleDataUrl(src));
+const {
+  WORKER_LOADER_ENV_MAX_BYTES,
+  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
+  estimatedWorkerLoaderEnv,
+  estimatedWorkerLoaderEnvBytes,
+} = await import(envBudgetUrl());
+
+const WORKFLOW_BUDGET_META = Object.freeze({
+  workflows: Object.freeze([{
+    binding: "FLOW",
+    name: "flow",
+    className: "Flow",
+    workflowKey: "wf_0123456789abcdef0123456789abcdef",
+  }]),
+});
+
+/**
+ * @param {{
+ *   padLength: number,
+ *   version: string,
+ *   nsSecrets?: Record<string, string> | null,
+ *   workerSecrets?: Record<string, string> | null,
+ * }} args
+ */
+function workflowBudgetEnvBytes({ padLength, version, nsSecrets = null, workerSecrets = null }) {
+  return estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
+    ns: "demo",
+    worker: "api",
+    version,
+    vars: { PAD: "x".repeat(padLength) },
+    nsSecrets,
+    workerSecrets,
+    meta: WORKFLOW_BUDGET_META,
+  }));
+}
+
+/** @param {number} padLength */
+function workflowBudgetMetaWithPad(padLength) {
+  return {
+    ...WORKFLOW_BUDGET_META,
+    vars: { PAD: "x".repeat(padLength) },
+  };
+}
+
+/**
+ * @param {string} version
+ * @param {{ nsSecrets?: Record<string, string> | null, workerSecrets?: Record<string, string> | null }} [secrets]
+ */
+function maxWorkflowBudgetPadFor(version, secrets = {}) {
+  let lo = 0;
+  let hi = WORKER_LOADER_ENV_MAX_BYTES;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (workflowBudgetEnvBytes({ padLength: mid, version, ...secrets }) <= WORKER_LOADER_ENV_MAX_BYTES) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo;
+}
 
 test("namespace secret PUT stores an envelope instead of plaintext", async () => {
-  const response = await handle({
-    request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
-      method: "PUT",
-      body: JSON.stringify({ value: "plain-secret" }),
-    }),
-    env,
-    method: "PUT",
-    nsName: "demo",
-    secretKey: "TOKEN",
-    requestId: "rid-secret",
-  });
-
-  assert.equal(response.status, 200);
-  const { state } = await import(controlSharedUrl);
-  assert.equal(state.redis.writes.length, 1);
-  assert.equal(state.redis.writes[0].key, "secrets:demo");
-  assert.equal(state.redis.writes[0].field, "TOKEN");
-  assert.equal(isSecretEnvelope(state.redis.writes[0].value), true);
-  assert.equal(state.redis.writes[0].value.includes("plain-secret"), false);
-  assert.equal(
-    await decryptSecretValue(state.redis.writes[0].value, {
+  await withNamespaceSecretRedis(namespaceSecretState, () => {}, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
       env,
-      hashKey: "secrets:demo",
-      fieldName: "TOKEN",
-    }),
-    "plain-secret"
-  );
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret",
+    });
+
+    assert.equal(response.status, 200);
+    const attempts = redisHSetAttempts(redis, "secrets:demo");
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0].field, "TOKEN");
+    assert.equal(redis.hashes.get("secrets:demo")?.TOKEN, attempts[0].value);
+    assert.equal(isSecretEnvelope(attempts[0].value), true);
+    assert.equal(attempts[0].value.includes("plain-secret"), false);
+    assert.equal(
+      await decryptSecretValue(attempts[0].value, {
+        env,
+        hashKey: "secrets:demo",
+        fieldName: "TOKEN",
+      }),
+      "plain-secret"
+    );
+  });
 });
 
 test("namespace secret mutation rejects invalid keys through shared validator", async () => {
-  const { state } = await import(controlSharedUrl);
-  const writesBefore = state.redis.writes.length;
-  const response = await handle({
-    request: new Request("http://control.test/ns/demo/secrets/bad-key", {
+  await withNamespaceSecretRedis(namespaceSecretState, () => {}, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/bad-key", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
       method: "PUT",
-      body: JSON.stringify({ value: "plain-secret" }),
-    }),
-    env,
-    method: "PUT",
-    nsName: "demo",
-    secretKey: "bad-key",
-    requestId: "rid-secret",
-  });
+      nsName: "demo",
+      secretKey: "bad-key",
+      requestId: "rid-secret",
+    });
 
-  const body = await readJsonResponse(response, 400);
-  assert.equal(body.error, "invalid_request");
-  assert.equal(state.redis.writes.length, writesBefore);
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "invalid_request");
+    assert.equal(redis.ops.length, 0);
+  });
 });
 
 test("namespace secret PUT accepts lowercase secret keys like production", async () => {
-  const { state } = await import(controlSharedUrl);
-  const response = await handle({
-    request: new Request("http://control.test/ns/demo/secrets/lowercase", {
+  await withNamespaceSecretRedis(namespaceSecretState, () => {}, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/lowercase", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
       method: "PUT",
-      body: JSON.stringify({ value: "plain-secret" }),
-    }),
-    env,
-    method: "PUT",
-    nsName: "demo",
-    secretKey: "lowercase",
-    requestId: "rid-secret",
-  });
+      nsName: "demo",
+      secretKey: "lowercase",
+      requestId: "rid-secret",
+    });
 
-  assert.equal(response.status, 200);
-  assert.equal(state.redis.writes.at(-1).field, "lowercase");
+    assert.equal(response.status, 200);
+    assert.equal(redisHSetAttempts(redis, "secrets:demo").at(-1)?.field, "lowercase");
+  });
 });
 
 test("namespace secret PUT runs as a WATCH/MULTI mutation and retries contention", async () => {
-  const { state } = await import(controlSharedUrl);
-  const writesBefore = state.redis.writes.length;
-  const execBefore = state.redis.execCalls;
-  state.redis.execFailures = 1;
-  state.redis.watchedKeys = [];
-
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.execFailures = 1;
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/RETRY_TOKEN", {
         method: "PUT",
@@ -299,44 +318,23 @@ test("namespace secret PUT runs as a WATCH/MULTI mutation and retries contention
     });
 
     assert.equal(response.status, 200);
-    assert.equal(state.redis.execCalls - execBefore, 2);
-    assert.equal(state.redis.writes.length - writesBefore, 2);
-    assert.equal(state.redis.writes.at(-1).field, "RETRY_TOKEN");
-    assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
-    assert.ok(state.redis.watchedKeys.includes("routes:demo"));
-    assert.ok(state.redis.watchedKeys.includes("workers:demo"));
-  } finally {
-    state.redis.execFailures = 0;
-  }
+    const attempts = redisHSetAttempts(redis, "secrets:demo");
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts.at(-1)?.field, "RETRY_TOKEN");
+    assert.ok(redis.watched.includes("secrets:demo"));
+    assert.ok(redis.watched.includes("routes:demo"));
+    assert.ok(redis.watched.includes("workers:demo"));
+  });
 });
 
 test("namespace secret PUT checks retained worker versions before storing", async () => {
-  const { state } = await import(controlSharedUrl);
-  const original = {
-    hGet: state.redis.hGet,
-    hGetAll: state.redis.hGetAll,
-    sMembers: state.redis.sMembers,
-    zRange: state.redis.zRange,
-  };
-  const writesBefore = state.redis.writes.length;
-  /** @param {string} key */
-  state.redis.hGetAll = async (key) => {
-    if (key === "routes:demo") return {};
-    return {};
-  };
-  /** @param {string} key */
-  state.redis.sMembers = async (key) => key === "workers:demo" ? ["api"] : [];
-  /** @param {string} key */
-  state.redis.zRange = async (key) => key === "worker-versions:demo:api" ? ["v1"] : [];
-  /** @param {string} key @param {string} field */
-  state.redis.hGet = async (key, field) => {
-    if (key === "worker:demo:api:v:1" && field === "__meta__") {
-      return JSON.stringify({ vars: { BIG: "x".repeat(1024 * 1024) } });
-    }
-    return null;
-  };
-
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.sets.set("workers:demo", new Set(["api"]));
+    seedWorkerSecretVersions(redis, ["v1"]);
+    redis.hashes.set("worker:demo:api:v:1", {
+      __meta__: JSON.stringify({ vars: { BIG: "x".repeat(1024 * 1024) } }),
+    });
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
         method: "PUT",
@@ -351,45 +349,67 @@ test("namespace secret PUT checks retained worker versions before storing", asyn
 
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_env_too_large");
-    assert.equal(state.redis.writes.length, writesBefore);
-  } finally {
-    Object.assign(state.redis, original);
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hSet"), false);
+  });
+});
+
+test("namespace secret PUT budgets active worker versions with their real active version", async () => {
+  const nsSecrets = { TOKEN: "plain-secret" };
+  const padLength = WORKER_LOADER_ENV_MAX_BYTES -
+    workflowBudgetEnvBytes({
+      padLength: 0,
+      version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
+      nsSecrets,
+    }) +
+    1;
+  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v1", nsSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(
+    workflowBudgetEnvBytes({ padLength, version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER, nsSecrets }) >
+      WORKER_LOADER_ENV_MAX_BYTES
+  );
+
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    seedWorkerSecretActive(redis, "v1");
+    redis.sets.set("workers:demo", new Set(["api"]));
+    redis.hashes.set("worker:demo:api:v:1", {
+      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
+    });
+  }, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-active-placeholder",
+    });
+
+    const body = await readJsonResponse(response, 200);
+    assert.equal(body.namespace, "demo");
+    assert.equal(body.key, "TOKEN");
+    assert.equal(body.set, true);
+    assert.equal(redis.hashes.get("secrets:demo")?.TOKEN, redisHSetAttempts(redis, "secrets:demo").at(-1)?.value);
+  });
 });
 
 test("namespace secret DELETE checks env revealed by removing a namespace secret", async () => {
-  const { state } = await import(controlSharedUrl);
-  const original = {
-    hGet: state.redis.hGet,
-    hGetAll: state.redis.hGetAll,
-    sMembers: state.redis.sMembers,
-    zRange: state.redis.zRange,
-  };
-  const deletesBefore = state.redis.deletes.length;
   const encrypted = await encryptSecretValue("small", {
     env,
     hashKey: "secrets:demo",
     fieldName: "TOKEN",
   });
-  /** @param {string} key */
-  state.redis.hGetAll = async (key) => {
-    if (key === "secrets:demo") return { TOKEN: encrypted };
-    if (key === "routes:demo") return {};
-    return {};
-  };
-  /** @param {string} key */
-  state.redis.sMembers = async (key) => key === "workers:demo" ? ["api"] : [];
-  /** @param {string} key */
-  state.redis.zRange = async (key) => key === "worker-versions:demo:api" ? ["v1"] : [];
-  /** @param {string} key @param {string} field */
-  state.redis.hGet = async (key, field) => {
-    if (key === "worker:demo:api:v:1" && field === "__meta__") {
-      return JSON.stringify({ vars: { TOKEN: "x".repeat(1024 * 1024) } });
-    }
-    return null;
-  };
 
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.hashes.set("secrets:demo", { TOKEN: encrypted });
+    redis.sets.set("workers:demo", new Set(["api"]));
+    seedWorkerSecretVersions(redis, ["v1"]);
+    redis.hashes.set("worker:demo:api:v:1", {
+      __meta__: JSON.stringify({ vars: { TOKEN: "x".repeat(1024 * 1024) } }),
+    });
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
         method: "DELETE",
@@ -403,29 +423,14 @@ test("namespace secret DELETE checks env revealed by removing a namespace secret
 
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_env_too_large");
-    assert.equal(state.redis.deletes.length, deletesBefore);
-  } finally {
-    Object.assign(state.redis, original);
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
+  });
 });
 
 test("namespace secret DELETE can remove a corrupt target envelope", async () => {
-  const { state } = await import(controlSharedUrl);
-  const original = {
-    hGetAll: state.redis.hGetAll,
-    sMembers: state.redis.sMembers,
-  };
-  const deletesBefore = state.redis.deletes.length;
-  /** @param {string} key */
-  state.redis.hGetAll = async (key) => {
-    if (key === "secrets:demo") return { TOKEN: "WDL-ENC:not-json" };
-    if (key === "routes:demo") return {};
-    return {};
-  };
-  /** @param {string} key */
-  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
-
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.hashes.set("secrets:demo", { TOKEN: "WDL-ENC:not-json" });
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
         method: "DELETE",
@@ -438,35 +443,21 @@ test("namespace secret DELETE can remove a corrupt target envelope", async () =>
     });
 
     assert.equal(response.status, 200);
-    assert.equal(state.redis.deletes.length, deletesBefore + 1);
-    assert.deepEqual(state.redis.deletes.at(-1), { key: "secrets:demo", field: "TOKEN" });
-  } finally {
-    Object.assign(state.redis, original);
-  }
+    assert.deepEqual(redis.ops.find((op) => op[0] === "hDel"), ["hDel", "secrets:demo", "TOKEN"]);
+    assert.equal(Object.hasOwn(redis.hashes.get("secrets:demo") || {}, "TOKEN"), false);
+  });
 });
 
 test("namespace secret DELETE fails closed on other corrupt namespace envelopes", async () => {
-  const { state } = await import(controlSharedUrl);
-  const original = {
-    hGetAll: state.redis.hGetAll,
-    sMembers: state.redis.sMembers,
-  };
-  const deletesBefore = state.redis.deletes.length;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo",
     fieldName: "TOKEN",
   });
-  /** @param {string} key */
-  state.redis.hGetAll = async (key) => {
-    if (key === "secrets:demo") return { TOKEN: encrypted, BAD: "WDL-ENC:not-json" };
-    if (key === "routes:demo") return {};
-    return {};
-  };
-  /** @param {string} key */
-  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
 
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.hashes.set("secrets:demo", { TOKEN: encrypted, BAD: "WDL-ENC:not-json" });
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
         method: "DELETE",
@@ -480,19 +471,11 @@ test("namespace secret DELETE fails closed on other corrupt namespace envelopes"
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
-    assert.equal(state.redis.deletes.length, deletesBefore);
-  } finally {
-    Object.assign(state.redis, original);
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
+  });
 });
 
 test("namespace secret DELETE fails closed on unknown-kid namespace envelopes", async () => {
-  const { state } = await import(controlSharedUrl);
-  const original = {
-    hGetAll: state.redis.hGetAll,
-    sMembers: state.redis.sMembers,
-  };
-  const deletesBefore = state.redis.deletes.length;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo",
@@ -503,16 +486,10 @@ test("namespace secret DELETE fails closed on unknown-kid namespace envelopes", 
     hashKey: "secrets:demo",
     fieldName: "BAD",
   });
-  /** @param {string} key */
-  state.redis.hGetAll = async (key) => {
-    if (key === "secrets:demo") return { TOKEN: encrypted, BAD: unknownKid };
-    if (key === "routes:demo") return {};
-    return {};
-  };
-  /** @param {string} key */
-  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
 
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.hashes.set("secrets:demo", { TOKEN: encrypted, BAD: unknownKid });
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
         method: "DELETE",
@@ -526,37 +503,22 @@ test("namespace secret DELETE fails closed on unknown-kid namespace envelopes", 
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "unknown_kid");
-    assert.equal(state.redis.deletes.length, deletesBefore);
-  } finally {
-    Object.assign(state.redis, original);
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
+  });
 });
 
 test("namespace secret DELETE fails closed on corrupt worker envelopes", async () => {
-  const { state } = await import(controlSharedUrl);
-  const original = {
-    hGetAll: state.redis.hGetAll,
-    sMembers: state.redis.sMembers,
-    zRange: state.redis.zRange,
-  };
-  const deletesBefore = state.redis.deletes.length;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo",
     fieldName: "TOKEN",
   });
-  /** @param {string} key */
-  state.redis.hGetAll = async (key) => {
-    if (key === "secrets:demo") return { TOKEN: encrypted };
-    if (key === "routes:demo") return {};
-    if (key === "secrets:demo:api") return { BAD: "WDL-ENC:not-json" };
-    return {};
-  };
-  /** @param {string} key */
-  state.redis.sMembers = async (key) => key === "workers:demo" ? ["api"] : [];
-  state.redis.zRange = async () => [];
 
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.hashes.set("secrets:demo", { TOKEN: encrypted });
+    redis.hashes.set("secrets:demo:api", { BAD: "WDL-ENC:not-json" });
+    redis.sets.set("workers:demo", new Set(["api"]));
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
         method: "DELETE",
@@ -570,29 +532,14 @@ test("namespace secret DELETE fails closed on corrupt worker envelopes", async (
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
-    assert.equal(state.redis.deletes.length, deletesBefore);
-  } finally {
-    Object.assign(state.redis, original);
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
+  });
 });
 
 test("namespace secret PUT still fails closed on other corrupt namespace envelopes", async () => {
-  const { state } = await import(controlSharedUrl);
-  const original = {
-    hGetAll: state.redis.hGetAll,
-    sMembers: state.redis.sMembers,
-  };
-  const writesBefore = state.redis.writes.length;
-  /** @param {string} key */
-  state.redis.hGetAll = async (key) => {
-    if (key === "secrets:demo") return { BAD: "WDL-ENC:not-json" };
-    if (key === "routes:demo") return {};
-    return {};
-  };
-  /** @param {string} key */
-  state.redis.sMembers = async (key) => key === "workers:demo" ? [] : [];
-
-  try {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.hashes.set("secrets:demo", { BAD: "WDL-ENC:not-json" });
+  }, async (redis) => {
     const response = await handle({
       request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
         method: "PUT",
@@ -607,61 +554,18 @@ test("namespace secret PUT still fails closed on other corrupt namespace envelop
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
-    assert.equal(state.redis.writes.length, writesBefore);
-  } finally {
-    Object.assign(state.redis, original);
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hSet"), false);
+  });
 });
 
-const workerControlSharedUrl = controlSharedStubUrl(`
-class WatchError extends Error {}
-export function formatError(err) {
-  return { error_code: err?.code || "internal_error", error_message: err?.message || String(err) };
-}
-export const state = {
-  logs: [],
-  log(level, event, fields = {}) {
-    state.logs.push({ level, event, fields });
-  },
-  redis: {
-    execCalls: 0,
-    watchedKeys: [],
-    writes: [],
-    async session(fn) {
-      return await fn({
-        async watch(...keys) {
-          state.redis.watchedKeys.push(...keys);
-        },
-        async unwatch() {},
-        async get() { return null; },
-        async hKeys() { return []; },
-        async hGet(key, field) {
-          return /^worker:[^:]+:[^:]+:v:[1-9][0-9]*$/.test(key) && field === "__meta__"
-            ? "{}"
-            : null;
-        },
-        async hGetAll() { return {}; },
-        async zCard() { return 0; },
-        async zRange() { return []; },
-        multi() {
-          return {
-            hSet(key, field, value) {
-              state.redis.writes.push({ key, field, value });
-            },
-            hDel() {},
-            sAdd() {},
-            sRem() {},
-            async exec() {
-              state.redis.execCalls += 1;
-              if (state.redis.execCalls === 1) throw new WatchError("simulated watch conflict");
-            },
-          };
-        },
-      });
-    },
-  },
-};
-`);
+const WORKER_SECRET_STATE_GLOBAL = "__controlSecretWorkerState";
+const workerSecretState = /** @type {ReturnType<typeof createControlHandlerState> & { redis: TestFakeRedis }} */ (
+  installControlHandlerState(WORKER_SECRET_STATE_GLOBAL, createControlHandlerState({
+    redis: createRecordingRedis(),
+    logs: [],
+  }))
+);
+const workerControlSharedUrl = controlSharedHarnessUrl(WORKER_SECRET_STATE_GLOBAL);
 const workerLibStubUrl = moduleDataUrl(`
 ${validateSecretKeyStubSource}
 export const deleteLockKey = (ns, worker) => \`worker-delete-lock:\${ns}:\${worker}\`;
@@ -675,78 +579,71 @@ export function stageWorkerVisible(multi, ns, name) {
   multi.sAdd(\`workers:\${ns}\`, name);
 }
 `);
-const routingStubUrl = moduleDataUrl(`
-export class RoutingError extends Error {}
-export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) {
-  return await redis.session(async (iso) => {
-    const currentVersion = await iso.hGet(\`routes:\${ns}\`, workerName) || "v1";
-    const currentNumber = Number(/^v(\\d+)$/.exec(currentVersion)?.[1] || 1);
-    const newVersion = \`v\${currentNumber + 1}\`;
-    await options.beforeStageCopy?.({
-      iso,
-      currentVersion,
-      newVersion,
-    });
-    return { previousVersion: currentVersion, version: newVersion };
-  });
-}
-`);
 const workerSecretPutUrl = secretPutUrl(workerControlSharedUrl, workerLibStubUrl);
 const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/worker-secrets.js"), [
   [/from "control-shared";/, `from ${JSON.stringify(workerControlSharedUrl)};`],
   [/from "control-lib";/, `from ${JSON.stringify(workerLibStubUrl)};`],
   [/from "control-handlers-secret-put";/, `from ${JSON.stringify(workerSecretPutUrl)};`],
   [/from "control-lifecycle-indexes";/, `from ${JSON.stringify(lifecycleStubUrl)};`],
-  [/from "control-routing";/, `from ${JSON.stringify(routingStubUrl)};`],
+  [/from "control-routing";/, `from ${JSON.stringify(CONTROL_ROUTING_TEST_URL)};`],
   [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
   [/from "control-env-budget";/, `from ${JSON.stringify(envBudgetUrl())};`],
   [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
+  [/from "shared-secret-keys";/, `from ${JSON.stringify(SHARED_SECRET_KEYS_URL)};`],
 ]);
 const { handle: workerHandle } = await import(moduleDataUrl(workerSrc));
-const {
-  WORKER_LOADER_ENV_MAX_BYTES,
-  estimatedWorkerLoaderEnv,
-  estimatedWorkerLoaderEnvBytes,
-} = await import(envBudgetUrl());
-const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = "v0000000000";
 
 test("worker secret PUT encrypts before WATCH retries and reuses the envelope", async () => {
-  const response = await workerHandle({
-    request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
-      method: "PUT",
-      body: JSON.stringify({ value: "plain-secret" }),
-    }),
-    env,
-    method: "PUT",
-    ns: "demo",
-    name: "api",
-    subPath: ["TOKEN"],
-    requestId: "rid-worker-secret",
-  });
-
-  assert.equal(response.status, 200);
-  const { state } = await import(workerControlSharedUrl);
-  assert.equal(state.redis.execCalls, 2);
-  assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
-  assert.equal(state.redis.writes.length, 2);
-  assert.equal(state.redis.writes[0].key, "secrets:demo:api");
-  assert.equal(state.redis.writes[0].field, "TOKEN");
-  assert.equal(state.redis.writes[0].value, state.redis.writes[1].value);
-  assert.equal(isSecretEnvelope(state.redis.writes[0].value), true);
-  assert.equal(state.redis.writes[0].value.includes("plain-secret"), false);
-  assert.equal(
-    await decryptSecretValue(state.redis.writes[0].value, {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.execFailures = 1;
+  }, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
       env,
-      hashKey: "secrets:demo:api",
-      fieldName: "TOKEN",
-    }),
-    "plain-secret"
-  );
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret",
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual([...new Set(redis.watched)].sort(), [
+      "crons:demo:api",
+      "hosts:demo",
+      "routes:demo",
+      "secrets:demo",
+      "secrets:demo:api",
+      "worker-delete-lock:demo:api",
+      "worker-versions:demo:api",
+      "worker:demo:api:v:1",
+      "worker:demo:api:v:2",
+    ]);
+    const attempts = redisHSetAttempts(redis, "secrets:demo:api");
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[0].field, "TOKEN");
+    assert.equal(attempts[0].value, attempts[1].value);
+    assert.equal(redis.hashes.get("secrets:demo:api")?.TOKEN, attempts[1].value);
+    assert.equal(isSecretEnvelope(attempts[1].value), true);
+    assert.equal(attempts[1].value.includes("plain-secret"), false);
+    assert.equal(
+      await decryptSecretValue(attempts[1].value, {
+        env,
+        hashKey: "secrets:demo:api",
+        fieldName: "TOKEN",
+      }),
+      "plain-secret"
+    );
+  });
 });
 
 test("worker secret mutation rejects invalid keys through shared validator", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const writesBefore = state.redis.writes.length;
+  const state = workerSecretState;
+  const opsBefore = state.redis.ops.length;
   const response = await workerHandle({
     request: new Request("http://control.test/ns/demo/workers/api/secrets/bad-key", {
       method: "PUT",
@@ -762,51 +659,169 @@ test("worker secret mutation rejects invalid keys through shared validator", asy
 
   const body = await readJsonResponse(response, 400);
   assert.equal(body.error, "invalid_request");
-  assert.equal(state.redis.writes.length, writesBefore);
+  assert.equal(state.redis.ops.length, opsBefore);
+});
+
+test("worker secret PUT active precheck reads the shared fake Redis state", async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.delete("routes:demo");
+  }, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-precheck-fake",
+    });
+
+    const body = await readJsonResponse(response, 200);
+    assert.equal(body.note, "stored; will apply on next load or deploy (no active version to promote)");
+    assert.equal(body.version, undefined);
+    assert.equal(redis.commands.some((op) => op[0] === "incr"), false);
+    assert.equal(redis.ops.some((op) => op[0] === "hSet" && op[1] === "secrets:demo:api"), true);
+    assert.deepEqual([...new Set(redis.watched)].sort(), [
+      "routes:demo",
+      "secrets:demo",
+      "secrets:demo:api",
+      "worker-delete-lock:demo:api",
+      "worker-versions:demo:api",
+    ]);
+  });
+});
+
+test("worker secret PUT maps active bump delete-lock errors to deleting", async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.strings.set("worker-delete-lock:demo:api", "holder-token");
+  }, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/KEY", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["KEY"],
+      requestId: "rid-worker-secret-delete-lock",
+    });
+
+    const body = await readJsonResponse(response, 409);
+    assert.equal(body.error, "deleting");
+    assert.equal(redis.ops.length, 0);
+  });
+});
+
+test("worker secret PUT maps active bump contention to secret mutation contention", async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.execFailures = 5;
+  }, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/KEY", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["KEY"],
+      requestId: "rid-worker-secret-bump-contention",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "secret_mutation_contention");
+    assert.equal(redis.ops.some((op) => op[0] === "hSet" && op[1] === "secrets:demo:api"), false);
+  });
+});
+
+test("worker secret DELETE missing key returns noop before bump allocation", async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, () => {}, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/MISSING", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["MISSING"],
+      requestId: "rid-worker-secret-delete-missing",
+    });
+
+    const body = await readJsonResponse(response, 200);
+    assert.equal(body.deleted, false);
+    assert.equal(redis.commands.some((op) => op[0] === "incr"), false);
+    assert.equal(redis.ops.length, 0);
+    assert.deepEqual(redis.watched, []);
+  });
+});
+
+test("worker secret DELETE missing key after precheck returns noop inside bump transaction", async () => {
+  const state = workerSecretState;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("secrets:demo:api", { TOKEN: encrypted });
+  }, async (redis) => {
+    const session = redis.session.bind(redis);
+    let sessionCalls = 0;
+    redis.session = /** @type {TestFakeRedis["session"]} */ (async (fn) => {
+      sessionCalls += 1;
+      const result = await session(fn);
+      if (sessionCalls === 1) {
+        redis.hashes.set("secrets:demo:api", {});
+      }
+      return result;
+    });
+
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-delete-raced-missing",
+    });
+
+    const body = await readJsonResponse(response, 200);
+    assert.equal(body.deleted, false);
+    assert.equal(sessionCalls, 2);
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
+    assert.equal(redis.ops.some((op) => op[0] === "copy"), false);
+    assert.equal(redis.hashes.get("routes:demo")?.api, "v1");
+  });
 });
 
 test("worker secret DELETE checks env revealed by removing a higher-precedence secret", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
+  const state = workerSecretState;
   const encrypted = await encryptSecretValue("small", {
     env,
     hashKey: "secrets:demo:api",
     fieldName: "TOKEN",
   });
-  let execCalled = false;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => await fn({
-    async watch() {},
-    async unwatch() {},
-    async get() { return null; },
-    async hKeys() { return ["TOKEN"]; },
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      if (key === "routes:demo" && field === "api") return "v1";
-      if (key === "worker:demo:api:v:1" && field === "__meta__") {
-        return JSON.stringify({ vars: { TOKEN: "x".repeat(1024 * 1024) } });
-      }
-      return null;
-    },
-    /** @param {string} key */
-    async hGetAll(key) {
-      if (key === "secrets:demo:api") return { TOKEN: encrypted };
-      return {};
-    },
-    async zCard() { return 1; },
-    async zRange() { return ["v1"]; },
-    multi() {
-      return {
-        hSet() {},
-        hDel() {},
-        sAdd() {},
-        sRem() {},
-        async exec() { execCalled = true; },
-      };
-    },
-  });
-
-  try {
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("worker:demo:api:v:1", {
+      __meta__: JSON.stringify({ vars: { TOKEN: "x".repeat(1024 * 1024) } }),
+    });
+    redis.hashes.set("secrets:demo:api", { TOKEN: encrypted });
+    seedWorkerSecretVersions(redis, ["v1"]);
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -821,72 +836,31 @@ test("worker secret DELETE checks env revealed by removing a higher-precedence s
 
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_env_too_large");
-    assert.equal(execCalled, false);
-  } finally {
-    state.redis.session = originalSession;
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
+  });
 });
 
-test("worker secret PUT waits for the real bump version before checking the copied bundle", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
-  const baseMeta = {
-    vars: { PAD: "" },
-    workflows: [{
-      binding: "FLOW",
-      name: "flow",
-      className: "Flow",
-      workflowKey: "wf_0123456789abcdef0123456789abcdef",
-    }],
-  };
-  /** @param {number} padLength @param {string} version */
-  const bytesWithPad = (padLength, version) => estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
-    ns: "demo",
-    worker: "api",
-    version,
-    vars: { PAD: "x".repeat(padLength) },
-    workerSecrets: { TOKEN: "plain-secret" },
-    meta: baseMeta,
-  }));
+test("worker secret PUT budgets the active bump with its allocated version", async () => {
+  const state = workerSecretState;
+  const workerSecrets = { TOKEN: "plain-secret" };
   const padLength = WORKER_LOADER_ENV_MAX_BYTES -
-    bytesWithPad(0, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) +
+    workflowBudgetEnvBytes({
+      padLength: 0,
+      version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
+      workerSecrets,
+    }) +
     1;
-  assert.ok(bytesWithPad(padLength, "v1") <= WORKER_LOADER_ENV_MAX_BYTES);
-  assert.ok(bytesWithPad(padLength, "v2") <= WORKER_LOADER_ENV_MAX_BYTES);
-  assert.ok(bytesWithPad(padLength, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) > WORKER_LOADER_ENV_MAX_BYTES);
-  let execCalled = false;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => await fn({
-    async watch() {},
-    async unwatch() {},
-    async get() { return null; },
-    async hKeys() { return []; },
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      if (key === "routes:demo" && field === "api") return "v1";
-      if (key === "worker:demo:api:v:1" && field === "__meta__") {
-        return JSON.stringify({
-          ...baseMeta,
-          vars: { PAD: "x".repeat(padLength) },
-        });
-      }
-      return null;
-    },
-    async hGetAll() { return {}; },
-    async zCard() { return 1; },
-    async zRange() { return []; },
-    multi() {
-      return {
-        hSet() {},
-        hDel() {},
-        sAdd() {},
-        sRem() {},
-        async exec() { execCalled = true; },
-      };
-    },
-  });
-
-  try {
+  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v1", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v2", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(
+    workflowBudgetEnvBytes({ padLength, version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER, workerSecrets }) >
+      WORKER_LOADER_ENV_MAX_BYTES
+  );
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("worker:demo:api:v:1", {
+      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
+    });
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "PUT",
@@ -901,74 +875,35 @@ test("worker secret PUT waits for the real bump version before checking the copi
     });
 
     const body = await readJsonResponse(response, 200);
+    assert.equal(body.namespace, "demo");
+    assert.equal(body.name, "api");
+    assert.equal(body.key, "TOKEN");
     assert.equal(body.version, "v2");
-    assert.equal(execCalled, true);
-  } finally {
-    state.redis.session = originalSession;
-  }
+    assert.equal(body.previousVersion, "v1");
+    assert.equal(body.set, true);
+    assert.equal(redis.ops.some((op) => op[0] === "hSet" && op[1] === "secrets:demo:api"), true);
+    assert.deepEqual(
+      redis.commands.filter((op) => op[0] === "incr").at(-1),
+      ["incr", "worker:demo:api:next_version"]
+    );
+    assert.equal(redis.strings.get("worker:demo:api:next_version"), "2");
+  });
 });
 
-test("worker secret PUT rechecks the active bundle copied by bump after the secret write", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
-  const writesBefore = state.redis.writes.length;
-  let sessionCalls = 0;
-  let mutateExecCalled = false;
-  let rollbackDeleted = false;
-  /** @type {string | null} */
-  let appliedSecret = null;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => {
-    sessionCalls += 1;
-    return await fn({
-      /** @param {...string} keys */
-      async watch(...keys) {
-        state.redis.watchedKeys.push(...keys);
-      },
-      async unwatch() {},
-      async get() { return null; },
-      async hKeys() { return []; },
-      /** @param {string} key @param {string} field */
-      async hGet(key, field) {
-        if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
-        if (key === "routes:demo" && field === "api") {
-          return sessionCalls === 2 ? "v2" : "v1";
-        }
-        if (key === "worker:demo:api:v:1" && field === "__meta__") {
-          return JSON.stringify({ vars: { SAFE: "ok" } });
-        }
-        if (key === "worker:demo:api:v:2" && field === "__meta__") {
-          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
-        }
-        return null;
-      },
-      /** @param {string} key */
-      async hGetAll(key) {
-        if (key === "secrets:demo:api" && sessionCalls > 1) {
-          const written = state.redis.writes.at(-1);
-          return written?.key === key ? { [written.field]: written.value } : {};
-        }
-        return {};
-      },
-      async zCard() { return 1; },
-      async zRange() { return []; },
-      multi() {
-        return {
-          /** @param {string} key @param {string} field @param {string} value */
-          hSet(key, field, value) {
-            if (key === "secrets:demo:api" && field === "TOKEN") appliedSecret = value;
-            state.redis.writes.push({ key, field, value });
-          },
-          hDel() { rollbackDeleted = true; },
-          sAdd() {},
-          sRem() {},
-          async exec() { mutateExecCalled = true; },
-        };
-      },
+test("worker secret PUT rejects overbudget bump source before writing secret", async () => {
+  const state = workerSecretState;
+  const workerSecrets = { TOKEN: "plain-secret" };
+  const newVersion = "v1000000000";
+  const padLength = maxWorkflowBudgetPadFor("v2", { workerSecrets });
+  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v2", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(workflowBudgetEnvBytes({ padLength, version: newVersion, workerSecrets }) > WORKER_LOADER_ENV_MAX_BYTES);
+  await withWorkerSecretRedis(state, (redis) => {
+    seedWorkerSecretActive(redis, "v2");
+    redis.strings.set("worker:demo:api:next_version", "999999999");
+    redis.hashes.set("worker:demo:api:v:2", {
+      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
     });
-  };
-
-  try {
+  }, async (redis, calls) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "PUT",
@@ -979,82 +914,30 @@ test("worker secret PUT rechecks the active bundle copied by bump after the secr
       ns: "demo",
       name: "api",
       subPath: ["TOKEN"],
-      requestId: "rid-worker-secret-bump-recheck",
+      requestId: "rid-worker-secret-bump-budget",
     });
 
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_env_too_large");
-    assert.equal(mutateExecCalled, true);
-    assert.equal(state.redis.writes.length, writesBefore + 1);
-    assert.equal(rollbackDeleted, true);
-    assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
-    assert.ok(state.redis.watchedKeys.includes("secrets:demo:api"));
-    assert.ok(state.redis.watchedKeys.includes("worker-delete-lock:demo:api"));
-  } finally {
-    state.redis.session = originalSession;
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hSet"), false);
+    assert.equal(calls(), 1);
+  });
 });
 
-test("worker secret PUT reports budget rollback failure after the secret write", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
-  const writesBefore = state.redis.writes.length;
-  let sessionCalls = 0;
-  let rollbackAttempted = false;
-  /** @type {string | null} */
-  let appliedSecret = null;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => {
-    sessionCalls += 1;
-    return await fn({
-      /** @param {...string} keys */
-      async watch(...keys) {
-        state.redis.watchedKeys.push(...keys);
-      },
-      async unwatch() {},
-      async get() { return null; },
-      async hKeys() { return []; },
-      /** @param {string} key @param {string} field */
-      async hGet(key, field) {
-        if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
-        if (key === "routes:demo" && field === "api") return sessionCalls === 2 ? "v2" : "v1";
-        if (key === "worker:demo:api:v:1" && field === "__meta__") {
-          return JSON.stringify({ vars: { SAFE: "ok" } });
-        }
-        if (key === "worker:demo:api:v:2" && field === "__meta__") {
-          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
-        }
-        return null;
-      },
-      /** @param {string} key */
-      async hGetAll(key) {
-        if (key === "secrets:demo:api" && sessionCalls > 1) {
-          const written = state.redis.writes.at(-1);
-          return written?.key === key ? { [written.field]: written.value } : {};
-        }
-        return {};
-      },
-      async zCard() { return 1; },
-      async zRange() { return []; },
-      multi() {
-        return {
-          /** @param {string} key @param {string} field @param {string} value */
-          hSet(key, field, value) {
-            if (key === "secrets:demo:api" && field === "TOKEN") appliedSecret = value;
-            state.redis.writes.push({ key, field, value });
-          },
-          hDel() { rollbackAttempted = true; },
-          sAdd() {},
-          sRem() {},
-          async exec() {
-            if (sessionCalls > 2) throw new Error("rollback write failed");
-          },
-        };
-      },
+test("worker secret PUT checks retry source under its retained version", async () => {
+  const state = workerSecretState;
+  const workerSecrets = { TOKEN: "plain-secret" };
+  const padLength = maxWorkflowBudgetPadFor("v999", { workerSecrets });
+  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v999", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v1000", workerSecrets }) > WORKER_LOADER_ENV_MAX_BYTES);
+  await withWorkerSecretRedis(state, (redis) => {
+    seedWorkerSecretActive(redis, "v1000");
+    redis.strings.set("worker:demo:api:next_version", "998");
+    redis.hashes.set("worker:demo:api:v:1000", {
+      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
     });
-  };
-
-  try {
+    seedWorkerSecretVersions(redis, ["v1000"]);
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "PUT",
@@ -1065,240 +948,20 @@ test("worker secret PUT reports budget rollback failure after the secret write",
       ns: "demo",
       name: "api",
       subPath: ["TOKEN"],
-      requestId: "rid-worker-secret-rollback-failed",
+      requestId: "rid-worker-secret-retained-source-budget",
     });
 
-    const body = await readJsonResponse(response, 503);
-    assert.equal(body.error, "secret_mutation_rollback_failed");
-    assert.equal(body.budget_error, "worker_env_too_large");
-    assert.equal(body.secretWritten, true);
-    assert.equal(body.rollbackConfirmed, false);
-    assert.equal(state.redis.writes.length, writesBefore + 1);
-    assert.equal(rollbackAttempted, true);
-    assert.equal(typeof appliedSecret, "string");
-    const rejectedLog = state.logs.find((/** @type {any} */ entry) =>
-      entry.event === "secret_bump_budget_rejected" &&
-      entry.fields?.request_id === "rid-worker-secret-rollback-failed"
-    );
-    assert.equal(rejectedLog?.fields.rolled_back, false);
-    assert.equal(rejectedLog?.fields.rollback_reason, "error");
-    assert.equal(rejectedLog?.fields.rollback_error_message, "rollback write failed");
-  } finally {
-    state.redis.session = originalSession;
-  }
-});
-
-test("worker secret rollback refuses to reveal an oversized namespace secret", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
-  const writesBefore = state.redis.writes.length;
-  const oversizedNamespaceSecret = await encryptSecretValue("x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1), {
-    env,
-    hashKey: "secrets:demo",
-    fieldName: "TOKEN",
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_env_too_large");
+    assert.equal(redis.ops.some((op) => op[0] === "hSet"), false);
   });
-  let sessionCalls = 0;
-  let rollbackDeleted = false;
-  /** @type {string | null} */
-  let appliedSecret = null;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => {
-    sessionCalls += 1;
-    return await fn({
-      /** @param {...string} keys */
-      async watch(...keys) {
-        state.redis.watchedKeys.push(...keys);
-      },
-      async unwatch() {},
-      async get() { return null; },
-      async hKeys() { return []; },
-      /** @param {string} key @param {string} field */
-      async hGet(key, field) {
-        if (key === "secrets:demo:api" && field === "TOKEN") return appliedSecret;
-        if (key === "routes:demo" && field === "api") {
-          return sessionCalls === 2 ? "v2" : "v1";
-        }
-        if (key === "worker:demo:api:v:1" && field === "__meta__") {
-          return JSON.stringify({ vars: { SAFE: "ok" } });
-        }
-        if (key === "worker:demo:api:v:2" && field === "__meta__") {
-          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
-        }
-        return null;
-      },
-      /** @param {string} key */
-      async hGetAll(key) {
-        if (key === "secrets:demo") return { TOKEN: oversizedNamespaceSecret };
-        if (key === "secrets:demo:api" && sessionCalls > 1) {
-          const written = state.redis.writes.at(-1);
-          return written?.key === key ? { [written.field]: written.value } : {};
-        }
-        return {};
-      },
-      async zCard() { return 1; },
-      async zRange() { return []; },
-      multi() {
-        return {
-          /** @param {string} key @param {string} field @param {string} value */
-          hSet(key, field, value) {
-            if (key === "secrets:demo:api" && field === "TOKEN") appliedSecret = value;
-            state.redis.writes.push({ key, field, value });
-          },
-          hDel() { rollbackDeleted = true; },
-          sAdd() {},
-          sRem() {},
-          async exec() {},
-        };
-      },
-    });
-  };
-
-  try {
-    const response = await workerHandle({
-      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
-        method: "PUT",
-        body: JSON.stringify({ value: "plain-secret" }),
-      }),
-      env,
-      method: "PUT",
-      ns: "demo",
-      name: "api",
-      subPath: ["TOKEN"],
-      requestId: "rid-worker-secret-rollback-reveals-ns",
-    });
-
-    const body = await readJsonResponse(response, 503);
-    assert.equal(body.error, "secret_mutation_rollback_failed");
-    assert.equal(body.budget_error, "worker_env_too_large");
-    assert.equal(body.secretWritten, true);
-    assert.equal(body.rollbackConfirmed, false);
-    assert.equal(state.redis.writes.length, writesBefore + 1);
-    assert.equal(rollbackDeleted, false);
-    assert.ok(state.redis.watchedKeys.includes("secrets:demo"));
-  } finally {
-    state.redis.session = originalSession;
-  }
-});
-
-test("worker secret rollback does not restore old secrets after whole-worker delete", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
-  const oldEncrypted = await encryptSecretValue("old-secret", {
-    env,
-    hashKey: "secrets:demo:api",
-    fieldName: "TOKEN",
-  });
-  let sessionCalls = 0;
-  let rollbackRestored = false;
-  let rollbackMadeVisible = false;
-  let deleteLockRead = false;
-  /** @type {string | null} */
-  let appliedSecret = null;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => {
-    sessionCalls += 1;
-    return await fn({
-      /** @param {...string} keys */
-      async watch(...keys) {
-        state.redis.watchedKeys.push(...keys);
-      },
-      async unwatch() {},
-      /** @param {string} key */
-      async get(key) {
-        if (key === "worker-delete-lock:demo:api") deleteLockRead = true;
-        return null;
-      },
-      async hKeys() { return sessionCalls > 2 ? ["TOKEN"] : []; },
-      /** @param {string} key @param {string} field */
-      async hGet(key, field) {
-        if (key === "secrets:demo:api" && field === "TOKEN") {
-          return sessionCalls === 1 ? oldEncrypted : appliedSecret;
-        }
-        if (key === "routes:demo" && field === "api") {
-          if (sessionCalls === 1) return "v1";
-          if (sessionCalls === 2) return "v2";
-          return null;
-        }
-        if (key === "worker:demo:api:v:1" && field === "__meta__") {
-          return JSON.stringify({ vars: { SAFE: "ok" } });
-        }
-        if (key === "worker:demo:api:v:2" && field === "__meta__") {
-          return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES + 1) } });
-        }
-        return null;
-      },
-      /** @param {string} key */
-      async hGetAll(key) {
-        if (key === "secrets:demo:api") {
-          if (sessionCalls === 1) return { TOKEN: oldEncrypted };
-          const written = state.redis.writes.at(-1);
-          return written?.key === key ? { [written.field]: written.value } : {};
-        }
-        return {};
-      },
-      async zCard() { return sessionCalls > 2 ? 0 : 1; },
-      async zRange() { return []; },
-      multi() {
-        return {
-          /** @param {string} key @param {string} field @param {string} value */
-          hSet(key, field, value) {
-            if (key === "secrets:demo:api" && field === "TOKEN") {
-              if (sessionCalls > 2) rollbackRestored = true;
-              else appliedSecret = value;
-            }
-            state.redis.writes.push({ key, field, value });
-          },
-          hDel() {},
-          sAdd() {
-            if (sessionCalls > 2) rollbackMadeVisible = true;
-          },
-          sRem() {},
-          async exec() {},
-        };
-      },
-    });
-  };
-
-  try {
-    const response = await workerHandle({
-      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
-        method: "PUT",
-        body: JSON.stringify({ value: "new-secret" }),
-      }),
-      env,
-      method: "PUT",
-      ns: "demo",
-      name: "api",
-      subPath: ["TOKEN"],
-      requestId: "rid-worker-secret-rollback-after-delete",
-    });
-
-    const body = await readJsonResponse(response, 503);
-    assert.equal(body.error, "secret_mutation_rollback_failed");
-    assert.equal(deleteLockRead, true);
-    assert.equal(rollbackRestored, false);
-    assert.equal(rollbackMadeVisible, false);
-  } finally {
-    state.redis.session = originalSession;
-  }
 });
 
 test("worker secret DELETE can remove a corrupt target envelope", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  let execCalled = false;
-  /** @type {string | null} */
-  let deletedField = null;
-  await withWorkerSecretSession(state, makeWorkerSecretSession({
-    hKeys: ["TOKEN"],
-    hGetAll(key) {
-      if (key === "secrets:demo:api" && deletedField == null) {
-        return { TOKEN: "WDL-ENC:not-json" };
-      }
-      return emptySecretHash();
-    },
-    onHDel(_key, field) { deletedField = field; },
-    onExec() { execCalled = true; },
-  }), async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("secrets:demo:api", { TOKEN: "WDL-ENC:not-json" });
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -1312,30 +975,20 @@ test("worker secret DELETE can remove a corrupt target envelope", async () => {
     });
 
     assert.equal(response.status, 200);
-    assert.equal(execCalled, true);
-    assert.equal(deletedField, "TOKEN");
+    assert.deepEqual(redis.ops.find((op) => op[0] === "hDel"), ["hDel", "secrets:demo:api", "TOKEN"]);
   });
 });
 
 test("worker secret DELETE fails closed on other corrupt worker envelopes", async () => {
-  const { state } = await import(workerControlSharedUrl);
+  const state = workerSecretState;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo:api",
     fieldName: "TOKEN",
   });
-  let execCalled = false;
-  /** @type {string | null} */
-  let deletedField = null;
-  await withWorkerSecretSession(state, makeWorkerSecretSession({
-    hKeys: ["TOKEN", "BAD"],
-    hGetAll(key) {
-      if (key === "secrets:demo:api") return { TOKEN: encrypted, BAD: "WDL-ENC:not-json" };
-      return emptySecretHash();
-    },
-    onHDel(_key, field) { deletedField = field; },
-    onExec() { execCalled = true; },
-  }), async () => {
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("secrets:demo:api", { TOKEN: encrypted, BAD: "WDL-ENC:not-json" });
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -1350,13 +1003,12 @@ test("worker secret DELETE fails closed on other corrupt worker envelopes", asyn
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
-    assert.equal(execCalled, false);
-    assert.equal(deletedField, null);
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
   });
 });
 
 test("worker secret DELETE fails closed on unknown-kid worker envelopes", async () => {
-  const { state } = await import(workerControlSharedUrl);
+  const state = workerSecretState;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo:api",
@@ -1367,15 +1019,9 @@ test("worker secret DELETE fails closed on unknown-kid worker envelopes", async 
     hashKey: "secrets:demo:api",
     fieldName: "BAD",
   });
-  let hDelCalled = false;
-  await withWorkerSecretSession(state, makeWorkerSecretSession({
-    hKeys: ["TOKEN", "BAD"],
-    hGetAll(key) {
-      if (key === "secrets:demo:api") return { TOKEN: encrypted, BAD: unknownKid };
-      return emptySecretHash();
-    },
-    onHDel() { hDelCalled = true; },
-  }), async () => {
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("secrets:demo:api", { TOKEN: encrypted, BAD: unknownKid });
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -1390,30 +1036,21 @@ test("worker secret DELETE fails closed on unknown-kid worker envelopes", async 
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "unknown_kid");
-    assert.equal(hDelCalled, false);
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
   });
 });
 
 test("worker secret DELETE fails closed on corrupt namespace envelopes", async () => {
-  const { state } = await import(workerControlSharedUrl);
+  const state = workerSecretState;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo:api",
     fieldName: "TOKEN",
   });
-  let execCalled = false;
-  /** @type {string | null} */
-  let deletedField = null;
-  await withWorkerSecretSession(state, makeWorkerSecretSession({
-    hKeys: ["TOKEN"],
-    hGetAll(key) {
-      if (key === "secrets:demo") return { BAD: "WDL-ENC:not-json" };
-      if (key === "secrets:demo:api") return { TOKEN: encrypted };
-      return emptySecretHash();
-    },
-    onHDel(_key, field) { deletedField = field; },
-    onExec() { execCalled = true; },
-  }), async () => {
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("secrets:demo", { BAD: "WDL-ENC:not-json" });
+    redis.hashes.set("secrets:demo:api", { TOKEN: encrypted });
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -1428,56 +1065,22 @@ test("worker secret DELETE fails closed on corrupt namespace envelopes", async (
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
-    assert.equal(execCalled, false);
-    assert.equal(deletedField, null);
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
   });
 });
 
-test("worker secret DELETE fails closed on corrupt namespace envelopes during bump", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  const originalSession = state.redis.session;
+test("worker secret DELETE checks corrupt namespace envelopes before active-version bump", async () => {
+  const state = workerSecretState;
   const encrypted = await encryptSecretValue("plain", {
     env,
     hashKey: "secrets:demo:api",
     fieldName: "TOKEN",
   });
-  let sessionCalls = 0;
-  let execCalled = false;
-  /** @param {(session: unknown) => Promise<unknown>} fn */
-  state.redis.session = async (fn) => {
-    sessionCalls += 1;
-    return await fn({
-      async watch() {},
-      async unwatch() {},
-      async get() { return null; },
-      async hKeys() { return ["TOKEN"]; },
-      /** @param {string} key @param {string} field */
-      async hGet(key, field) {
-        if (key === "routes:demo" && field === "api") return "v1";
-        if (key === "worker:demo:api:v:1" && field === "__meta__") return JSON.stringify({ vars: { SAFE: "ok" } });
-        return null;
-      },
-      /** @param {string} key */
-      async hGetAll(key) {
-        if (key === "secrets:demo") return { BAD: "WDL-ENC:not-json" };
-        if (key === "secrets:demo:api" && sessionCalls === 1) return { TOKEN: encrypted };
-        return {};
-      },
-      async zCard() { return 1; },
-      async zRange() { return []; },
-      multi() {
-        return {
-          hSet() {},
-          hDel() {},
-          sAdd() {},
-          sRem() {},
-          async exec() { execCalled = true; },
-        };
-      },
-    });
-  };
-
-  try {
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("worker:demo:api:v:1", { __meta__: JSON.stringify({ vars: { SAFE: "ok" } }) });
+    redis.hashes.set("secrets:demo", { BAD: "WDL-ENC:not-json" });
+    redis.hashes.set("secrets:demo:api", { TOKEN: encrypted });
+  }, async (redis, calls) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "DELETE",
@@ -1492,23 +1095,16 @@ test("worker secret DELETE fails closed on corrupt namespace envelopes during bu
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
-    assert.equal(execCalled, false);
-  } finally {
-    state.redis.session = originalSession;
-  }
+    assert.equal(redis.ops.some((op) => op[0] === "hDel"), false);
+    assert.equal(calls(), 2);
+  });
 });
 
 test("worker secret PUT still fails closed on other corrupt worker envelopes", async () => {
-  const { state } = await import(workerControlSharedUrl);
-  let hSetCalled = false;
-  await withWorkerSecretSession(state, makeWorkerSecretSession({
-    hKeys: ["BAD"],
-    hGetAll(key) {
-      if (key === "secrets:demo:api") return { BAD: "WDL-ENC:not-json" };
-      return emptySecretHash();
-    },
-    onHSet() { hSetCalled = true; },
-  }), async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("secrets:demo:api", { BAD: "WDL-ENC:not-json" });
+  }, async (redis) => {
     const response = await workerHandle({
       request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
         method: "PUT",
@@ -1524,6 +1120,6 @@ test("worker secret PUT still fails closed on other corrupt worker envelopes", a
 
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "invalid_envelope");
-    assert.equal(hSetCalled, false);
+    assert.equal(redis.ops.some((op) => op[0] === "hSet"), false);
   });
 });

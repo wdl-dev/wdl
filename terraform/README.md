@@ -227,7 +227,8 @@ The ECS cluster enables both `FARGATE` and `FARGATE_SPOT` capacity providers:
 - d1-runtime and do-runtime use sequential replacement (`maximum_percent = 100`,
   `minimum_healthy_percent = 50`) with Availability Zone rebalancing disabled.
 - scheduler remains stop-before-start (`maximum_percent = 100`,
-  `minimum_healthy_percent = 0`) because it is a singleton control loop.
+  `minimum_healthy_percent = 0`) with Availability Zone rebalancing disabled because it
+  is a singleton control loop.
 
 Fargate task-level `cpu` and `memory` are the task reservation/limit boundary. D1 and
 Durable Object stateful runtime containers also set explicit container `memory` hard

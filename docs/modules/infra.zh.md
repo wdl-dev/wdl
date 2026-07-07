@@ -84,7 +84,7 @@ Stateful storage：
 - D1/DO 使用 owner lease、monotonic generation fence 和本地 drain/renew。超过 1 个 task 时需要稳定的 per-replica storage identity，并确保 supervisor drain/renew 只走私有本地入口，不能通过 service alias 打到其他 replica。
 - 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
-- Terraform Fargate service 在服务能容忍 overlapping capacity 时应使用 rolling replacement。D1/DO 使用 sequential replacement 并关闭 Availability Zone rebalancing；scheduler 作为 singleton control loop 仍保持 stop-before-start。
+- Terraform Fargate service 在服务能容忍 overlapping capacity 时应使用 rolling replacement。D1/DO 使用 sequential replacement；scheduler 作为 singleton control loop 保持 stop-before-start。D1/DO 和 scheduler 都关闭 Availability Zone rebalancing，让 replacement 遵循各自显式 deployment strategy。
 
 ## 安全边界
 

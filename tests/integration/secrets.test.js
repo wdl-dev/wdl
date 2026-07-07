@@ -103,7 +103,7 @@ test("worker secret: PUT without active version just stores; first deploy picks 
   const { status, body } = await setWorkerSecret(ns, "pending", "PRE", "preset");
   assert.equal(status, 200);
   assert.equal(body.set, true);
-  assert.ok(/first deploy/i.test(body.note), `note should mention deploy: ${body.note}`);
+  assert.ok(/next load or deploy/i.test(body.note), `note should describe deferred load: ${body.note}`);
   assert.equal(body.version, undefined, "no version bump without active worker");
 
   // Pre-deploy PUT must not burn version numbers — first real deploy

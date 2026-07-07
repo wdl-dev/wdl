@@ -48,6 +48,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-load", esModule = embed "load.js"),
     (name = "runtime-load-env-build", esModule = embed "load/env-build.js"),
     (name = "runtime-load-code-budget", esModule = embed "load/code-budget.js"),
+    (name = "runtime-load-injection-sources", esModule = embed "load/injection-sources.js"),
     (name = "runtime-load-module-rewrite", esModule = embed "load/module-rewrite.js"),
     (name = "runtime-load-wrapper-generate", esModule = embed "load/wrapper-generate.js"),
     (name = "runtime-metrics", esModule = embed "metrics.js"),

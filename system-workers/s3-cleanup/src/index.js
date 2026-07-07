@@ -50,7 +50,7 @@ const bindLogLevel = createLogLevelBinder();
  * @typedef {Record<string, unknown> & { S3_ACCESS_KEY_ID: string, S3_SECRET_ACCESS_KEY: string, S3_ENDPOINT: string, S3_BUCKET: string, S3_REGION?: string, LOG_LEVEL?: unknown, S3_CLEANUP_DB: CleanupDb }} S3CleanupEnv
  * @typedef {{ prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<{ meta?: { changes?: number } }>, first(): Promise<Record<string, unknown> | null>, all(): Promise<{ results?: Record<string, unknown>[] }> } } }} CleanupDb
  * @typedef {{ aws: SigV4Client, endpoint: string, bucket: string }} S3Client
- * @typedef {{ prefixIndex: number, continuationToken: string | null, pageCount: number }} CleanupCheckpoint
+ * @typedef {{ prefixIndex: number, continuationToken: string | null, pageCount: number, deletedCount: number }} CleanupCheckpoint
  * @typedef {{ id: string, source: Record<string, unknown> | null, prefixes: string[] | null, state: string, attempts: number, createdAt: number, updatedAt: number, nextAttemptAt: number | null, lastError: string | null, checkpoint: CleanupCheckpoint | null }} CleanupTask
  */
 
@@ -164,13 +164,16 @@ function normalizeCheckpoint(raw) {
   if (!Number.isInteger(prefixIndex) || prefixIndex < 0) return null;
   const continuationToken = checkpoint.continuationToken;
   const pageCount = Number(checkpoint.pageCount ?? 0);
+  const deletedCount = Number(checkpoint.deletedCount ?? 0);
   if (!Number.isInteger(pageCount) || pageCount < 0) return null;
+  if (!Number.isInteger(deletedCount) || deletedCount < 0) return null;
   return {
     prefixIndex,
     continuationToken: typeof continuationToken === "string" && continuationToken
       ? continuationToken
       : null,
     pageCount,
+    deletedCount,
   };
 }
 
@@ -444,25 +447,6 @@ export async function deletePrefixPage(s3, prefix, continuationToken = null) {
 }
 
 /**
- * @param {S3Client} s3
- * @param {string} prefix
- */
-export async function deletePrefix(s3, prefix) {
-  let deleted = 0;
-  let continuationToken = null;
-  for (let page = 0; page < MAX_LIST_PAGES; page++) {
-    const pageResult = await deletePrefixPage(s3, prefix, continuationToken);
-    deleted += pageResult.deletedCount;
-    if (!pageResult.nextContinuationToken) break;
-    if (page === MAX_LIST_PAGES - 1) {
-      throw new Error(`s3 list ${prefix} exceeded ${MAX_LIST_PAGES} pages`);
-    }
-    continuationToken = pageResult.nextContinuationToken;
-  }
-  return { deletedCount: deleted };
-}
-
-/**
  * @param {CleanupDb} db
  * @param {S3Client} s3
  * @param {CleanupTask | string} taskOrId
@@ -498,7 +482,7 @@ export async function processTask(db, s3, taskOrId) {
     return S3_CLEANUP_OUTCOME.MALFORMED;
   }
 
-  let totalDeleted = 0;
+  let totalDeleted = task.checkpoint?.deletedCount ?? 0;
   try {
     const prefixes = /** @type {string[]} */ (task.prefixes);
     let prefixIndex = task.checkpoint?.prefixIndex ?? 0;
@@ -506,16 +490,14 @@ export async function processTask(db, s3, taskOrId) {
     let pageCount = task.checkpoint?.pageCount ?? 0;
     if (prefixIndex > prefixes.length) {
       throw new Error(
-        `s3 cleanup task checkpoint prefixIndex ${prefixIndex} exceeds prefixes length ` +
-          String(prefixes.length)
+        `s3 cleanup checkpoint prefixIndex ${prefixIndex} exceeds prefix count ${prefixes.length}`
       );
     }
     for (let page = 0; page < MAX_DELETE_PAGES_PER_RUN && prefixIndex < prefixes.length; page += 1) {
-      if (pageCount >= MAX_LIST_PAGES) {
-        throw new Error(`s3 list ${prefixes[prefixIndex]} exceeded ${MAX_LIST_PAGES} pages`);
-      }
       const prefix = prefixes[prefixIndex];
       const r = await deletePrefixPage(s3, prefix, continuationToken);
+      // If checkpoint persistence fails after this delete, retry may re-delete
+      // the page; S3 DELETE is idempotent and deleted_count is best-effort.
       totalDeleted += r.deletedCount;
       const nextPageCount = pageCount + 1;
       if (r.nextContinuationToken) {
@@ -526,6 +508,7 @@ export async function processTask(db, s3, taskOrId) {
           prefixIndex,
           continuationToken: r.nextContinuationToken,
           pageCount: nextPageCount,
+          deletedCount: totalDeleted,
         });
         logStructured("info", "s3_cleanup_task_progress", {
           task_id: task.id,
@@ -540,7 +523,12 @@ export async function processTask(db, s3, taskOrId) {
       pageCount = 0;
     }
     if (prefixIndex < prefixes.length) {
-      await saveProgress(db, task.id, { prefixIndex, continuationToken: null, pageCount: 0 });
+      await saveProgress(db, task.id, {
+        prefixIndex,
+        continuationToken: null,
+        pageCount: 0,
+        deletedCount: totalDeleted,
+      });
       logStructured("info", "s3_cleanup_task_progress", {
         task_id: task.id,
         prefix_index: prefixIndex,

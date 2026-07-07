@@ -63,12 +63,12 @@ function hostDeclarationsKey(host) {
  * @typedef {{ oldRoutes: RoutePattern[], oldQueueConsumers: QueueConsumer[], affectedHosts: Set<string>, hostState: HostState }} PromoteObservedState
  * @typedef {{ newRouteKeys: Set<string>, nsHostsAdd: string[], nsHostsRem: string[], cronKey: string, cronHash: Record<string, string>, cronPlan: CronPlan, queuePlan: QueuePlan }} PromoteStagePlan
  * @typedef {{ log?: (level: string, event: string, fields: Record<string, unknown>) => void, requestId?: string, ns?: string, workerName?: string }} LogContext
- * @typedef {{ iso: RedisIso, currentVersion: string, newVersion: string, sourceMeta: BundleMeta }} BumpBeforeStageContext
- * @typedef {LogContext & { beforeStageCopy?: (context: BumpBeforeStageContext) => Promise<void> }} BumpOptions
+ * @typedef {{ iso: RedisIso, multi: RedisMulti, currentVersion: string, newVersion: string, sourceMeta: BundleMeta }} BumpStageContext
+ * @typedef {LogContext & { stageBeforeCopy?: (context: BumpStageContext) => void | Promise<void> }} BumpOptions
  * @typedef {{ routes?: RoutePattern[], crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
  * @typedef {Record<string, Record<string, string | null | undefined>>} HostState
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
- * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, get: (key: string) => Promise<string | null | undefined>, exists: (key: string) => Promise<number>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
+ * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, get: (key: string) => Promise<string | null | undefined>, exists: (key: string) => Promise<number>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, zRange: (key: string, start: number, stop: number) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
  * @typedef {{ hGet: (key: string, field: string) => Promise<string | null | undefined>, incr: (key: string) => Promise<number>, session: <T>(fn: (iso: RedisIso) => Promise<T>) => Promise<T> }} RedisClient
  */
 
@@ -774,16 +774,16 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
       throw new RoutingError(500, "invalid_generated_version", `bumpActiveAndPromote: bad new version tag ${newVersion}`);
     }
 
-    if (typeof options.beforeStageCopy === "function") {
-      await options.beforeStageCopy({
+    const multi = iso.multi();
+    if (typeof options.stageBeforeCopy === "function") {
+      await options.stageBeforeCopy({
         iso,
+        multi,
         currentVersion,
         newVersion,
         sourceMeta: srcMeta,
       });
     }
-
-    const multi = iso.multi();
     multi.copy(srcKey, dstKey, { REPLACE: true });
     stageVersionFlip(multi, ns, workerName, newVersion, routes, affectedHosts);
     // Idempotent — also heals namespaces drift (manual SREM, recovery scripts).

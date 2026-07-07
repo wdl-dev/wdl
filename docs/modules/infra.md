@@ -143,9 +143,10 @@ Stateful storage:
   singleton control loops should stay on on-demand Fargate unless their interruption
   semantics are re-reviewed.
 - Terraform Fargate services should use rolling replacement where the service can
-  tolerate overlapping capacity. D1/DO use sequential replacement with Availability
-  Zone rebalancing disabled; scheduler remains stop-before-start as a singleton
-  control loop.
+  tolerate overlapping capacity. D1/DO use sequential replacement, while scheduler
+  remains stop-before-start as a singleton control loop. D1/DO and scheduler disable
+  Availability Zone rebalancing so replacement follows their explicit deployment
+  strategy.
 
 ## Security Boundaries
 

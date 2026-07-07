@@ -1,7 +1,6 @@
 import {
   jsonResponse,
   jsonError,
-  formatError,
   ControlAbort,
   controlAbortResponse,
   requireControlLog,
@@ -9,7 +8,6 @@ import {
   runOptimistic,
   stringEnv,
   codedErrorResponse,
-  errMessage,
 } from "control-shared";
 import {
   deleteLockKey,
@@ -25,9 +23,11 @@ import { bumpActiveAndPromote, RoutingError } from "control-routing";
 import {
   WorkerEnvBudgetError,
   assertWorkerVersionsUserEnvBudget,
+  decryptMutatedSecretHashForBudget,
   decryptSecretHash,
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
+import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 
 const MAX_SECRET_ATTEMPTS = 5;
 
@@ -43,20 +43,10 @@ const MAX_SECRET_ATTEMPTS = 5;
  *   set?: boolean,
  *   deleted?: boolean,
  * }} SecretMutationVersionPayload
- * @typedef {{
- *   namespace: string,
- *   name: string,
- *   key: string,
- *   secretWritten: boolean,
- *   reloadForced: boolean,
- *   effect: string,
- *   warnings: { kind: string, reason: string, nextPickup: string }[],
- *   set?: boolean,
- *   deleted?: boolean,
- * }} SecretMutationDeferredPayload
  */
 
 class SecretAbort extends ControlAbort {}
+class SecretNoop extends Error {}
 
 /**
  * @param {{
@@ -72,7 +62,7 @@ class SecretAbort extends ControlAbort {}
 export async function handle({ request, env, method, ns, name, subPath, requestId }) {
   const redis = requireControlRedis();
   const log = requireControlLog();
-  const secretsKey = `secrets:${ns}:${name}`;
+  const secretsKey = workerSecretsKey(ns, name);
 
   if (method === "GET" && subPath.length === 0) {
     const keys = await redis.hKeys(secretsKey);
@@ -99,13 +89,92 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
       putPlaintext = put.plaintext;
     }
 
-    let mutationResult;
     try {
-      mutationResult = await mutateSecret({
-        redis, ns, name, key, method,
-        value: storedValue,
-        plaintext: putPlaintext,
-        controlEnv,
+      if (method === "DELETE" && await workerSecretDeleteWouldNoop({ redis, ns, name, key })) {
+        return workerSecretNoopResponse({ requestId, ns, name, key, log });
+      }
+
+      for (let attempt = 0; attempt < MAX_SECRET_ATTEMPTS; attempt += 1) {
+        try {
+          const result = await bumpActiveAndPromote(
+            /** @type {RoutingRedisClient} */ (redis),
+            ns,
+            name,
+            {
+              log,
+              requestId,
+              stageBeforeCopy: ({ iso, multi, currentVersion, newVersion }) =>
+                stageWorkerSecretForBump({
+                  iso,
+                  multi,
+                  ns,
+                  name,
+                  key,
+                  method: /** @type {"PUT" | "DELETE"} */ (method),
+                  value: storedValue,
+                  plaintext: putPlaintext,
+                  currentVersion,
+                  newVersion,
+                  controlEnv,
+                }),
+            }
+          );
+          log("info", method === "PUT" ? "secret_set" : "secret_deleted", {
+            request_id: requestId,
+            namespace: ns,
+            worker: name,
+            key,
+            previous_version: result.previousVersion,
+            new_version: result.version,
+          });
+          /** @type {SecretMutationVersionPayload} */
+          const payload = {
+            namespace: ns,
+            name,
+            key,
+            version: result.version,
+            previousVersion: result.previousVersion,
+          };
+          if (method === "PUT") payload.set = true;
+          else payload.deleted = true;
+          return jsonResponse(200, payload);
+        } catch (err) {
+          if (err instanceof SecretNoop) return workerSecretNoopResponse({ requestId, ns, name, key, log });
+          if (!(err instanceof RoutingError && err.status === 404)) throw err;
+        }
+
+        const preDeploy = await mutateSecretWithoutActive({
+          redis,
+          ns,
+          name,
+          key,
+          method: /** @type {"PUT" | "DELETE"} */ (method),
+          value: storedValue,
+          plaintext: putPlaintext,
+          controlEnv,
+        });
+        if (preDeploy.activePresent) continue;
+        if (!preDeploy.mutated) return workerSecretNoopResponse({ requestId, ns, name, key, log });
+        log("info",
+          method === "PUT" ? "secret_set_pre_deploy" : "secret_deleted_pre_deploy", {
+          request_id: requestId,
+          namespace: ns,
+          worker: name,
+          key,
+        });
+        /** @type {{ namespace: string, name: string, key: string, note: string, set?: boolean, deleted?: boolean }} */
+        const payload = {
+          namespace: ns,
+          name,
+          key,
+          note: "stored; will apply on next load or deploy (no active version to promote)",
+        };
+        if (method === "PUT") payload.set = true;
+        else payload.deleted = true;
+        return jsonResponse(200, payload);
+      }
+      throw new SecretAbort(503, "secret_mutation_contention", {
+        message: `active version changed during secret mutation; retry later`,
       });
     } catch (err) {
       if (err instanceof SecretAbort) {
@@ -121,159 +190,40 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         return controlAbortResponse(err);
       }
       if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
-      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
-      throw err;
-    }
-
-    if (!mutationResult.mutated) {
-      log("info", "secret_deleted_noop", {
-        request_id: requestId,
-        namespace: ns,
-        worker: name,
-        key,
-      });
-      return jsonResponse(200, {
-        namespace: ns, name, key, deleted: false,
-      });
-    }
-
-    try {
-      const result = await bumpActiveAndPromote(
-        /** @type {RoutingRedisClient} */ (redis),
-        ns,
-        name,
-        {
-          log,
-          requestId,
-          beforeStageCopy: ({ iso, currentVersion, newVersion }) =>
-            assertWorkerSecretBumpEnvBudget({
-              iso,
-              ns,
-              name,
-              currentVersion,
-              newVersion,
-              controlEnv,
-            }),
+      if (err instanceof RoutingError) {
+        if (err.code === "bump_contention") {
+          const abort = new SecretAbort(503, "secret_mutation_contention", {
+            message: `active version changed during secret mutation; retry later`,
+          });
+          log("warn", "secret_mutation_rejected", {
+            request_id: requestId,
+            namespace: ns,
+            worker: name,
+            key,
+            method,
+            status: abort.status,
+            reason: abort.code,
+          });
+          return controlAbortResponse(abort);
         }
-      );
-      log("info", method === "PUT" ? "secret_set" : "secret_deleted", {
-        request_id: requestId,
-        namespace: ns,
-        worker: name,
-        key,
-        previous_version: result.previousVersion,
-        new_version: result.version,
-      });
-      /** @type {SecretMutationVersionPayload} */
-      const payload = {
-        namespace: ns,
-        name,
-        key,
-        version: result.version,
-        previousVersion: result.previousVersion,
-      };
-      if (method === "PUT") payload.set = true;
-      else payload.deleted = true;
-      return jsonResponse(200, payload);
-    } catch (err) {
-      // 404 → pre-deploy flow: hash stays, first deploy picks it up.
-      if (err instanceof RoutingError && err.status === 404) {
-        log("info",
-          method === "PUT" ? "secret_set_pre_deploy" : "secret_deleted_pre_deploy", {
-          request_id: requestId,
-          namespace: ns,
-          worker: name,
-          key,
-        });
-        /** @type {{ namespace: string, name: string, key: string, note: string, set?: boolean, deleted?: boolean }} */
-        const payload = {
-          namespace: ns,
-          name,
-          key,
-          note: "stored; will apply on first deploy (no active version to promote)",
-        };
-        if (method === "PUT") payload.set = true;
-        else payload.deleted = true;
-        return jsonResponse(200, payload);
-      }
-      if (err instanceof WorkerEnvBudgetError) {
-        const rollback = await rollbackSecretMutation({
-          redis,
-          ns,
-          name,
-          key,
-          method: /** @type {"PUT" | "DELETE"} */ (method),
-          appliedValue: storedValue,
-          previousExisted: mutationResult.previousExisted,
-          previousValue: mutationResult.previousValue,
-          controlEnv,
-        });
-        /** @type {Record<string, string>} */
-        let rollbackFields = {};
-        if ("reason" in rollback) {
-          rollbackFields = {
-            rollback_reason: rollback.reason,
-            ...(rollback.errorMessage ? { rollback_error_message: rollback.errorMessage } : {}),
-          };
-        }
-        log("warn", "secret_bump_budget_rejected", {
-          request_id: requestId,
-          namespace: ns,
-          worker: name,
-          key,
-          status: err.status,
-          rolled_back: rollback.rolledBack,
-          ...rollbackFields,
-          ...formatError(err),
-        });
-        if (!rollback.rolledBack) {
-          return jsonError(
-            503,
-            "secret_mutation_rollback_failed",
-            "secret mutation was written, but the version bump failed env budget checks and rollback could not be confirmed; retry the mutation or repair the secret before rollout",
-            {
-              namespace: ns,
-              worker: name,
-              key,
-              method,
-              budget_error: err.code,
-              rollbackConfirmed: false,
-              secretWritten: true,
-            },
-          );
+        if (err.code === "caller_deleting") {
+          const abort = new SecretAbort(409, "deleting", {
+            namespace: ns, worker: name,
+          });
+          log("warn", "secret_mutation_rejected", {
+            request_id: requestId,
+            namespace: ns,
+            worker: name,
+            key,
+            method,
+            status: abort.status,
+            reason: abort.code,
+          });
+          return controlAbortResponse(abort);
         }
         return codedErrorResponse(err, err.code);
       }
-      if (err instanceof RoutingError) {
-        // Secret already landed in our own MULTI; bump failure degrades
-        // to a deferred reload — the secret is picked up on next natural
-        // cold-load, or wiped by a concurrent whole-delete.
-        log("warn", "secret_bump_promote_rejected", {
-          request_id: requestId,
-          namespace: ns,
-          worker: name,
-          key,
-          status: err.status,
-          ...formatError(err),
-        });
-        /** @type {SecretMutationDeferredPayload} */
-        const payload = {
-          namespace: ns,
-          name,
-          key,
-          secretWritten: true,
-          reloadForced: false,
-          effect: "deferred",
-          warnings: [{
-            kind: "promote_failed",
-            reason: err.message,
-            nextPickup: "natural cold-load (runtime recycle, isolate eviction, or next deploy)",
-          }],
-        };
-        if (method === "PUT") payload.set = true;
-        else payload.deleted = true;
-        return jsonResponse(200, payload);
-      }
+      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
       throw err;
     }
   }
@@ -281,9 +231,186 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
   return jsonError(405, "method_not_allowed", "Method not allowed for /secrets");
 }
 
-// Secret mutations watch routes, worker-versions, and both secret hashes because
-// env-budget checks must cover active and retained versions before writing a
-// new secret shape.
+/**
+ * @param {{ redis: RedisClient, ns: string, name: string, key: string }} args
+ */
+async function workerSecretDeleteWouldNoop({ redis, ns, name, key }) {
+  const secretsKey = workerSecretsKey(ns, name);
+  return await redis.session(async (iso) => {
+    const callerLock = await iso.get(deleteLockKey(ns, name));
+    if (callerLock) {
+      throw new SecretAbort(409, "deleting", {
+        namespace: ns, worker: name,
+      });
+    }
+    return !(await iso.hExists(secretsKey, key));
+  });
+}
+
+/**
+ * @param {{ requestId: string, ns: string, name: string, key: string, log: (level: string, event: string, fields: Record<string, unknown>) => void }} args
+ */
+function workerSecretNoopResponse({ requestId, ns, name, key, log }) {
+  log("info", "secret_deleted_noop", {
+    request_id: requestId,
+    namespace: ns,
+    worker: name,
+    key,
+  });
+  return jsonResponse(200, {
+    namespace: ns, name, key, deleted: false,
+  });
+}
+
+/**
+ * @param {import("shared-redis").RedisMulti} multi
+ * @param {{
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: "PUT" | "DELETE",
+ *   value: string | null,
+ *   active: boolean,
+ *   removeFromWorkersIndex?: boolean,
+ * }} args
+ */
+function stageWorkerSecretMutation(multi, { ns, name, key, method, value, active, removeFromWorkersIndex = false }) {
+  const secretsKey = workerSecretsKey(ns, name);
+  if (method === "PUT") {
+    if (typeof value !== "string") throw new Error("PUT secret value missing");
+    multi.hSet(secretsKey, key, value);
+    stageWorkerVisible(multi, ns, name);
+  } else {
+    multi.hDel(secretsKey, key);
+    if (!active && removeFromWorkersIndex) {
+      stageWorkerHidden(multi, ns, name);
+    }
+  }
+}
+
+/**
+ * @param {{
+ *   nsEncrypted: Record<string, string | null | undefined>,
+ *   workerEncrypted: Record<string, string | null | undefined>,
+ *   controlEnv: Record<string, string | undefined>,
+ *   nsSecretHashKey: string,
+ *   workerSecretHashKey: string,
+ *   key: string,
+ *   method: "PUT" | "DELETE",
+ *   plaintext?: string | null,
+ * }} args
+ */
+async function decryptBudgetSecrets({
+  nsEncrypted,
+  workerEncrypted,
+  controlEnv,
+  nsSecretHashKey,
+  workerSecretHashKey,
+  key,
+  method,
+  plaintext = null,
+}) {
+  const [nsSecrets, workerSecrets] = await Promise.all([
+    decryptSecretHash({
+      encrypted: nsEncrypted,
+      env: controlEnv,
+      hashKey: nsSecretHashKey,
+    }),
+    decryptMutatedSecretHashForBudget({
+      encrypted: workerEncrypted,
+      env: controlEnv,
+      hashKey: workerSecretHashKey,
+      key,
+      method,
+      plaintext,
+    }),
+  ]);
+  return { nsSecrets, workerSecrets };
+}
+
+/**
+ * @param {{
+ *   iso: {
+ *     watch: (...keys: string[]) => Promise<unknown>,
+ *     hGet: (key: string, field: string) => Promise<string | null | undefined>,
+ *     hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>,
+ *     zRange: (key: string, start: number, stop: number) => Promise<string[]>,
+ *   },
+ *   multi: import("shared-redis").RedisMulti,
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: "PUT" | "DELETE",
+ *   value: string | null,
+ *   plaintext?: string | null,
+ *   currentVersion: string,
+ *   newVersion: string,
+ *   controlEnv: Record<string, string | undefined>,
+ * }} args
+ */
+async function stageWorkerSecretForBump({
+  iso,
+  multi,
+  ns,
+  name,
+  key,
+  method,
+  value,
+  plaintext = null,
+  currentVersion,
+  newVersion,
+  controlEnv,
+}) {
+  const secretsKey = workerSecretsKey(ns, name);
+  const nsSecretHashKey = nsSecretsKey(ns);
+  const versionsKey = workerVersionsKey(ns, name);
+  await iso.watch(nsSecretHashKey, secretsKey, versionsKey);
+
+  // Keep reads sequential: RedisSession is a single RESP stream.
+  const retainedVersions = await iso.zRange(versionsKey, 0, -1);
+  const nsEncrypted = await iso.hGetAll(nsSecretHashKey);
+  const workerEncrypted = await iso.hGetAll(secretsKey);
+  if (method === "DELETE" && !Object.hasOwn(workerEncrypted, key)) {
+    throw new SecretNoop();
+  }
+  const { nsSecrets, workerSecrets } = await decryptBudgetSecrets({
+    nsEncrypted,
+    workerEncrypted,
+    controlEnv,
+    nsSecretHashKey,
+    workerSecretHashKey: secretsKey,
+    key,
+    method,
+    plaintext,
+  });
+
+  await assertWorkerVersionsUserEnvBudget({
+    redis: iso,
+    ns,
+    worker: name,
+    versions: retainedVersions,
+    versionEstimates: [{
+      sourceVersion: currentVersion,
+      estimatedVersion: newVersion,
+    }],
+    nsSecrets,
+    workerSecrets,
+    assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+  });
+
+  stageWorkerSecretMutation(multi, {
+    ns,
+    name,
+    key,
+    method,
+    value,
+    active: true,
+  });
+}
+
+// No-active secret mutations write the secret hash directly. Active workers use
+// stageWorkerSecretForBump() so the secret write, bundle copy, and route flip
+// commit in one WATCH/MULTI transaction.
 /**
  * @param {{
  *   redis: RedisClient,
@@ -296,9 +423,9 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
  *   controlEnv: Record<string, string | undefined>,
  * }} args
  */
-async function mutateSecret({ redis, ns, name, key, method, value, plaintext = null, controlEnv }) {
-  const secretsKey = `secrets:${ns}:${name}`;
-  const nsSecretsKey = `secrets:${ns}`;
+async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, plaintext = null, controlEnv }) {
+  const secretsKey = workerSecretsKey(ns, name);
+  const nsSecretHashKey = nsSecretsKey(ns);
   return await runOptimistic(redis, {
     attempts: MAX_SECRET_ATTEMPTS,
     onExhausted: () => {
@@ -309,7 +436,7 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
   }, async (iso) => {
     const watches = [
       deleteLockKey(ns, name),
-      nsSecretsKey,
+      nsSecretHashKey,
       secretsKey,
       routesKey(ns),
       workerVersionsKey(ns, name),
@@ -323,248 +450,57 @@ async function mutateSecret({ redis, ns, name, key, method, value, plaintext = n
       });
     }
 
+    const activeVersion = await iso.hGet(routesKey(ns), name);
+    if (activeVersion) return { activePresent: true, mutated: false };
+
+    const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
     let removeFromWorkersIndex = false;
     if (method === "DELETE") {
       const hkeys = await iso.hKeys(secretsKey);
       if (!hkeys.includes(key)) {
-        return { mutated: false };
+        return { activePresent: false, mutated: false };
       }
       if (hkeys.length === 1 && hkeys[0] === key) {
-        const active = await iso.hGet(routesKey(ns), name);
-        const verCount = await iso.zCard(workerVersionsKey(ns, name));
-        if (!active && verCount === 0) {
+        if (retainedVersions.length === 0) {
           removeFromWorkersIndex = true;
         }
       }
     }
 
-    if (method === "PUT" && typeof plaintext !== "string") throw new Error("PUT secret plaintext missing");
-    const activeVersion = await iso.hGet(routesKey(ns), name);
-    const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
-    const nsEncrypted = await iso.hGetAll(nsSecretsKey);
+    const nsEncrypted = await iso.hGetAll(nsSecretHashKey);
     const workerEncrypted = await iso.hGetAll(secretsKey);
-    const workerBudgetEncrypted = { ...workerEncrypted };
-    delete workerBudgetEncrypted[key];
-    const [nsSecrets, workerSecrets] = await Promise.all([
-      decryptSecretHash({
-        encrypted: nsEncrypted,
-        env: controlEnv,
-        hashKey: nsSecretsKey,
-      }),
-      decryptSecretHash({
-        encrypted: workerBudgetEncrypted,
-        env: controlEnv,
-        hashKey: secretsKey,
-      }),
-    ]);
-    if (method === "PUT") {
-      workerSecrets[key] = /** @type {string} */ (plaintext);
-    }
+    const { nsSecrets, workerSecrets } = await decryptBudgetSecrets({
+      nsEncrypted,
+      workerEncrypted,
+      controlEnv,
+      nsSecretHashKey,
+      workerSecretHashKey: secretsKey,
+      key,
+      method,
+      plaintext,
+    });
     await assertWorkerVersionsUserEnvBudget({
       redis: iso,
       ns,
       worker: name,
-      versions: [
-        ...retainedVersions,
-        ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
-      ],
+      versions: retainedVersions,
       nsSecrets,
       workerSecrets,
       assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
     });
 
     const multi = iso.multi();
-    if (method === "PUT") {
-      if (typeof value !== "string") throw new Error("PUT secret value missing");
-      multi.hSet(secretsKey, key, value);
-      // SADD even on secret-only / pre-deploy workers so they're
-      // visible to GET /workers and reachable by whole-delete.
-      stageWorkerVisible(multi, ns, name);
-    } else {
-      multi.hDel(secretsKey, key);
-      if (removeFromWorkersIndex) {
-        stageWorkerHidden(multi, ns, name);
-      }
-    }
+    stageWorkerSecretMutation(multi, {
+      ns,
+      name,
+      key,
+      method,
+      value,
+      active: false,
+      removeFromWorkersIndex,
+    });
 
     await multi.exec();
-    return {
-      mutated: true,
-      previousExisted: Object.hasOwn(workerEncrypted, key),
-      previousValue: typeof workerEncrypted[key] === "string" ? workerEncrypted[key] : null,
-    };
-  });
-}
-
-/**
- * @param {{
- *   redis: RedisClient,
- *   ns: string,
- *   name: string,
- *   key: string,
- *   method: "PUT" | "DELETE",
- *   appliedValue: string | null,
- *   previousExisted?: boolean,
- *   previousValue?: string | null,
- *   controlEnv: Record<string, string | undefined>,
- * }} args
- * @returns {Promise<{ rolledBack: true } | { rolledBack: false, reason: string, errorMessage?: string }>}
- */
-async function rollbackSecretMutation({
-  redis,
-  ns,
-  name,
-  key,
-  method,
-  appliedValue,
-  previousExisted = false,
-  previousValue = null,
-  controlEnv,
-}) {
-  const nsSecretsKey = `secrets:${ns}`;
-  const secretsKey = `secrets:${ns}:${name}`;
-  /** @param {string} reason @param {unknown} [err] */
-  const failed = (reason, err = undefined) => ({
-    rolledBack: false,
-    reason,
-    ...(err === undefined ? {} : { errorMessage: errMessage(err) }),
-  });
-  try {
-    return await runOptimistic(redis, {
-      attempts: MAX_SECRET_ATTEMPTS,
-      onExhausted: () => failed("contention"),
-    }, async (iso) => {
-      await iso.watch(
-        deleteLockKey(ns, name),
-        nsSecretsKey,
-        secretsKey,
-        routesKey(ns),
-        workerVersionsKey(ns, name)
-      );
-      const callerLock = await iso.get(deleteLockKey(ns, name));
-      if (callerLock) return failed("delete_lock");
-
-      const current = await iso.hGet(secretsKey, key);
-      if (method === "PUT") {
-        if (typeof appliedValue !== "string" || current !== appliedValue) return failed("secret_changed");
-      } else if (current != null) {
-        return failed("secret_restored");
-      }
-
-      const active = await iso.hGet(routesKey(ns), name);
-      const retainedVersions = await iso.zRange(workerVersionsKey(ns, name), 0, -1);
-      const secretKeys = await iso.hKeys(secretsKey);
-      if (!active && retainedVersions.length === 0 && previousExisted) return failed("worker_deleted");
-
-      const nsEncrypted = await iso.hGetAll(nsSecretsKey);
-      const workerEncrypted = await iso.hGetAll(secretsKey);
-      const workerBudgetEncrypted = { ...workerEncrypted };
-      if (previousExisted && typeof previousValue === "string") {
-        workerBudgetEncrypted[key] = previousValue;
-      } else {
-        delete workerBudgetEncrypted[key];
-      }
-      const nsSecrets = await decryptSecretHash({
-        encrypted: nsEncrypted,
-        env: controlEnv,
-        hashKey: nsSecretsKey,
-      });
-      const workerSecrets = await decryptSecretHash({
-        encrypted: workerBudgetEncrypted,
-        env: controlEnv,
-        hashKey: secretsKey,
-      });
-      try {
-        await assertWorkerVersionsUserEnvBudget({
-          redis: iso,
-          ns,
-          worker: name,
-          versions: [
-            ...retainedVersions,
-            ...(typeof active === "string" && active ? [active] : []),
-          ],
-          nsSecrets,
-          workerSecrets,
-          assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
-        });
-      } catch (err) {
-        return failed("budget_rejected", err);
-      }
-
-      const multi = iso.multi();
-      if (previousExisted && typeof previousValue === "string") {
-        multi.hSet(secretsKey, key, previousValue);
-        stageWorkerVisible(multi, ns, name);
-      } else {
-        multi.hDel(secretsKey, key);
-        if (
-          method === "PUT" &&
-          secretKeys.length <= 1 &&
-          !active &&
-          retainedVersions.length === 0
-        ) {
-          stageWorkerHidden(multi, ns, name);
-        }
-      }
-      await multi.exec();
-      return { rolledBack: true };
-    });
-  } catch (err) {
-    return failed("error", err);
-  }
-}
-
-/**
- * @param {{
- *   iso: {
- *     watch: (...keys: string[]) => Promise<unknown>,
- *     hGet: (key: string, field: string) => Promise<string | null | undefined>,
- *     hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>,
- *   },
- *   ns: string,
- *   name: string,
- *   currentVersion: string,
- *   newVersion: string,
- *   controlEnv: Record<string, string | undefined>,
- * }} args
- */
-async function assertWorkerSecretBumpEnvBudget({
-  iso,
-  ns,
-  name,
-  currentVersion,
-  newVersion,
-  controlEnv,
-}) {
-  const nsSecretsKey = `secrets:${ns}`;
-  const workerSecretsKey = `secrets:${ns}:${name}`;
-  await iso.watch(nsSecretsKey, workerSecretsKey);
-
-  // Keep reads sequential: RedisSession is a single RESP stream.
-  const nsEncrypted = await iso.hGetAll(nsSecretsKey);
-  const workerEncrypted = await iso.hGetAll(workerSecretsKey);
-  const nsSecrets = await decryptSecretHash({
-    encrypted: nsEncrypted,
-    env: controlEnv,
-    hashKey: nsSecretsKey,
-  });
-  const workerSecrets = await decryptSecretHash({
-    encrypted: workerEncrypted,
-    env: controlEnv,
-    hashKey: workerSecretsKey,
-  });
-
-  await assertWorkerVersionsUserEnvBudget({
-    redis: iso,
-    ns,
-    worker: name,
-    versions: [],
-    versionEstimates: [{
-      sourceVersion: currentVersion,
-      estimatedVersion: newVersion,
-    }],
-    nsSecrets,
-    workerSecrets,
-    assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
+    return { activePresent: false, mutated: true };
   });
 }

@@ -82,6 +82,9 @@ function encodeS3QueryComponent(value) {
 }
 
 /**
+ * Keep this implementation in sync with shared/s3-query.js. runtime/r2-utils.js
+ * is injected as loaded-worker source, so it must stay self-contained.
+ *
  * @param {Record<string, unknown>} params
  * @returns {string}
  */

@@ -23,6 +23,7 @@ import {
   formatReferrerBlocker,
 } from "control-lib";
 import { bundleKey, patternsKey, routesKey } from "shared-version";
+import { workerSecretsKey } from "shared-secret-keys";
 import { decodeBulk, WatchError } from "shared-redis";
 import { queueConsumerScanPrefix } from "shared-queue-keys";
 import { decodePatternProjection } from "shared-route-projection";
@@ -547,7 +548,7 @@ async function collectDeleteInputs({ redis, ns, name }) {
   const otherActive = Object.keys(routesHash).filter((k) => k !== name);
   const namespaceStillActive = otherActive.length > 0;
 
-  const hasWorkerSecrets = (await redis.exists(`secrets:${ns}:${name}`)) > 0;
+  const hasWorkerSecrets = (await redis.exists(workerSecretsKey(ns, name))) > 0;
 
   return {
     ns,
@@ -667,7 +668,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       deleteLockKey(ns, name),
       doStorageIdKey(ns, name),
       workerVersionsKey(ns, name),
-      `secrets:${ns}:${name}`,
+      workerSecretsKey(ns, name),
       ...(collected.doObjectRegistry ? [collected.doObjectRegistry] : []),
       ...collected.doOwnerKeys,
       ...collected.affectedHosts.map((h) => patternsKey(h)),
@@ -692,7 +693,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       await iso.unwatch();
       throw new DriftSignal("active version changed during delete");
     }
-    const curHasSecrets = (await iso.exists(`secrets:${ns}:${name}`)) > 0;
+    const curHasSecrets = (await iso.exists(workerSecretsKey(ns, name))) > 0;
     if (curHasSecrets !== collected.hasWorkerSecrets) {
       await iso.unwatch();
       throw new DriftSignal("secrets presence changed during delete");

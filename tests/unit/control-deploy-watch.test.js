@@ -8,11 +8,11 @@ import { compileControlGraph } from "../helpers/load-control-lib.js";
 import {
   importSpecifierReplacements,
   moduleDataUrl,
-  readRepositoryFile,
   readRepositoryModuleSource,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { readJsonResponse } from "../helpers/response-json.js";
+import { realRuntimeInjectionSourcesUrl } from "../helpers/runtime-injection-sources.js";
 
 const { libUrl: controlLibUrl, lifecycleIndexesUrl } = await compileControlGraph();
 
@@ -31,6 +31,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   putAssetError: null,
   parsedCrons: null,
   parsedQueueConsumers: null,
+  parsedPlatformBindings: null,
   watchedKeys: null,
   envBudgetError: false,
   envBudgetCalls: [],
@@ -56,6 +57,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.putAssetError = null;
   CONTROL_DEPLOY_TEST_STATE.parsedCrons = null;
   CONTROL_DEPLOY_TEST_STATE.parsedQueueConsumers = null;
+  CONTROL_DEPLOY_TEST_STATE.parsedPlatformBindings = null;
   CONTROL_DEPLOY_TEST_STATE.watchedKeys = null;
   CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
   CONTROL_DEPLOY_TEST_STATE.envBudgetCalls = [];
@@ -111,7 +113,9 @@ export function normalizeAssets(value) {
 const controlBindingsUrl = moduleDataUrl(`
 export function parseAllowedCallers() { return []; }
 export function parseExports() { return []; }
-export function parsePlatformBindings() { return []; }
+export function parsePlatformBindings() {
+  return /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings || [];
+}
 export function validateBindings() {}
 export function normalizeBindings(bindings) { return bindings == null ? null : bindings; }
 export async function linkServiceBinding({ callerNs, bindingName, spec, lookupTargetVersion, lookupTargetMeta }) {
@@ -129,7 +133,42 @@ export async function linkServiceBinding({ callerNs, bindingName, spec, lookupTa
   spec.version = version;
   return spec;
 }
-export function linkPlatformBinding() { return null; }
+export function linkPlatformBinding({
+  callerNs,
+  bindingReq,
+  existingBindings,
+  platformExports,
+  availableCallerSecrets,
+}) {
+  if (existingBindings[bindingReq.binding]) {
+    throw new LinkError(400, "platform_binding_name_collision", "binding collision");
+  }
+  const match = platformExports.find((entry) => entry.as === bindingReq.platform);
+  if (!match) {
+    throw new LinkError(400, "platform_binding_not_registered", "platform binding missing");
+  }
+  const allowed = Array.isArray(match.allowedCallers) ? match.allowedCallers : [];
+  if (match.ns !== callerNs && !allowed.includes("*") && !allowed.includes(callerNs)) {
+    throw new LinkError(403, "platform_binding_acl_denied", "acl denied");
+  }
+  const required = Array.isArray(match.requiredCallerSecrets) ? match.requiredCallerSecrets : [];
+  const missing = required.filter((secret) => !availableCallerSecrets.has(secret));
+  return {
+    warning: missing.length ? {
+      binding: bindingReq.binding,
+      platform: bindingReq.platform,
+      missingCallerSecrets: missing,
+    } : undefined,
+    expanded: {
+      type: "service",
+      ns: match.ns,
+      service: match.worker,
+      version: match.version,
+      ...(match.entrypoint && match.entrypoint !== "default" ? { entrypoint: match.entrypoint } : {}),
+      ...(required.length ? { requiredCallerSecrets: required } : {}),
+    },
+  };
+}
 export class LinkError extends Error {
   constructor(status, code, message) {
     super(message);
@@ -211,16 +250,22 @@ export async function resolveDatabaseRefFrom(session, ns, databaseRef) {
 
 const controlEnvBudgetUrl = moduleDataUrl(`
 export class WorkerEnvBudgetError extends Error {
-  constructor(message) {
+  constructor(message, details = {}) {
     super(message);
     this.status = 400;
     this.code = "worker_env_too_large";
+    this.details = details;
   }
 }
 export function assertWorkerLoaderUserEnvBudget() {
   /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.push(Array.from(arguments)[0] || {});
   if (/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError) {
-    throw new WorkerEnvBudgetError("env too large");
+    const args = Array.from(arguments)[0] || {};
+    throw new WorkerEnvBudgetError("env too large", {
+      namespace: args.ns,
+      worker: args.worker,
+      version: args.version,
+    });
   }
   return 0;
 }
@@ -236,11 +281,6 @@ export class SecretEnvelopeError extends Error {
 }
 `);
 
-/** @param {string} path */
-function textModuleUrl(path) {
-  return moduleDataUrl(`export default ${JSON.stringify(readRepositoryFile(path))};`);
-}
-
 const runtimeLoadCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
   "runtime/load/code-budget.js",
   importSpecifierReplacements({
@@ -249,26 +289,15 @@ const runtimeLoadCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
     "runtime-load-wrapper-generate": repositoryFileUrl("runtime/load/wrapper-generate.js"),
   })
 ));
+const runtimeLoadInjectionSourcesUrl = realRuntimeInjectionSourcesUrl();
 const controlWorkerCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
   "control/worker-code-budget.js",
   importSpecifierReplacements({
     "runtime-load-code-budget": runtimeLoadCodeBudgetUrl,
+    "runtime-load-injection-sources": runtimeLoadInjectionSourcesUrl,
     "runtime-load-module-rewrite": repositoryFileUrl("runtime/load/module-rewrite.js"),
     "do-runtime-load-code-budget": repositoryFileUrl("do-runtime/load-code-budget.js"),
     "shared-errors": repositoryFileUrl("shared/errors.js"),
-    "runtime-d1-client-source": textModuleUrl("runtime/d1-client.js"),
-    "runtime-d1-data-field-source": textModuleUrl("shared/d1-data-field.js"),
-    "runtime-d1-params-source": textModuleUrl("shared/d1-params.js"),
-    "runtime-sql-splitter-source": textModuleUrl("shared/sql-splitter.js"),
-    "runtime-d1-transport-source": textModuleUrl("shared/d1-transport.js"),
-    "runtime-r2-client-source": textModuleUrl("runtime/r2-client.js"),
-    "runtime-r2-utils-source": textModuleUrl("runtime/r2-utils.js"),
-    "runtime-do-client-source": textModuleUrl("runtime/do-client.js"),
-    "runtime-do-transport-source": textModuleUrl("runtime/_wdl-do-transport.js"),
-    "runtime-owner-endpoint-source": textModuleUrl("runtime/_wdl-owner-endpoint.js"),
-    "runtime-owner-hint-cache-source": textModuleUrl("runtime/_wdl-owner-hint-cache.js"),
-    "runtime-request-id-source": textModuleUrl("runtime/_wdl-request-id.js"),
-    "runtime-workflows-client-source": textModuleUrl("runtime/workflows-client.js"),
     "do-runtime-alarm-shim-source": repositoryFileUrl("do-runtime/alarm-shim-source.js"),
   })
 ));
@@ -307,6 +336,7 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
     "control-env-budget": controlEnvBudgetUrl,
     "control-worker-code-budget": controlWorkerCodeBudgetUrl,
     "shared-secret-envelope": secretEnvelopeUrl,
+    "shared-secret-keys": repositoryFileUrl("shared/secret-keys.js"),
   },
 });
 const { WatchError } = await import(sharedRedisUrl);
@@ -433,6 +463,54 @@ function makeSession() {
   };
 }
 
+const PLATFORM_AUTH_WARNING = Object.freeze({
+  binding: "AUTH",
+  platform: "auth",
+  missingCallerSecrets: Object.freeze(["API_TOKEN"]),
+});
+
+const PLATFORM_AUTH_META = Object.freeze({
+  exports: Object.freeze([Object.freeze({
+    type: "service",
+    as: "auth",
+    entrypoint: "default",
+    allowedCallers: Object.freeze(["*"]),
+    requiredCallerSecrets: Object.freeze(["API_TOKEN"]),
+  })]),
+});
+
+/**
+ * @param {{
+ *   incr?: () => Promise<number>,
+ *   session?: (fn: (s: ReturnType<typeof makeSession>) => Promise<unknown>) => Promise<unknown>,
+ * }} [options]
+ */
+function installPlatformAuthWarningFixture(options = {}) {
+  /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = [
+    { binding: PLATFORM_AUTH_WARNING.binding, platform: PLATFORM_AUTH_WARNING.platform },
+  ];
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async hKeys() {
+      return [];
+    },
+    /** @param {string} key */
+    async hGetAll(key) {
+      return key === "routes:__platform__" ? { auth: "v1" } : {};
+    },
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      if (key === "worker:__platform__:auth:v:1" && field === "__meta__") {
+        return JSON.stringify(PLATFORM_AUTH_META);
+      }
+      return null;
+    },
+    async incr() {
+      return await (options.incr ? options.incr() : 1);
+    },
+    ...(options.session ? { session: options.session } : {}),
+  };
+}
+
 test("commitWithWatch re-resolves a D1 alias after a watched recreate race", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map([
     ["d1:database-name:tenant-a:main", "d1_old"],
@@ -469,6 +547,7 @@ test("commitWithWatch re-resolves a D1 alias after a watched recreate race", asy
     },
     outgoingRefs: [],
     d1Refs: [{ binding: "DB", databaseId: "main" }],
+    controlEnv: {},
   });
 
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.bindings.DB.databaseId, "d1_new");
@@ -770,14 +849,13 @@ test("deploy handler counts runtime-generated wrapper code before allocating a v
     },
     normalized: [["worker.js", new Uint8Array(64 * 1024 * 1024 - 512 * 1024)]],
   };
-
   let incrCalled = false;
-  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+  installPlatformAuthWarningFixture({
     async incr() {
       incrCalled = true;
       return 1;
     },
-  };
+  });
 
   try {
     const response = await handle({
@@ -799,12 +877,73 @@ test("deploy handler counts runtime-generated wrapper code before allocating a v
     assert.match(body.message, /final WorkerCode/);
     assert.equal(body.namespace, "tenant-a");
     assert.equal(body.worker, "code-heavy");
+    assert.deepEqual(body.warnings, [{
+      binding: "AUTH",
+      platform: "auth",
+      missingCallerSecrets: ["API_TOKEN"],
+    }]);
     assert.equal(typeof body.code_bytes, "number");
     assert.equal(body.max_code_bytes, WORKER_LOADER_CODE_MAX_BYTES);
     assert.equal(incrCalled, false);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = null;
+  }
+});
+
+test("deploy handler preserves warnings on commit env-budget rejection", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
+    meta: {
+      mainModule: "worker.js",
+      modules: { "worker.js": { type: "module" } },
+    },
+    normalized: [["worker.js", "export default {}"]],
+  };
+  /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = true;
+
+  installPlatformAuthWarningFixture({
+    async incr() {
+      return 7;
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  });
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/env-heavy/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "env-heavy",
+      requestId: "rid-env-budget",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "worker_env_too_large");
+    assert.equal(body.namespace, "tenant-a");
+    assert.equal(body.worker, "env-heavy");
+    assert.equal(body.version, "v7");
+    assert.deepEqual(body.warnings, [{
+      binding: "AUTH",
+      platform: "auth",
+      missingCallerSecrets: ["API_TOKEN"],
+    }]);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = false;
   }
 });
 
@@ -1115,6 +1254,7 @@ test("commitWithWatch freezes a physical DO storage id into DO bindings", async 
     },
     outgoingRefs: [],
     d1Refs: [],
+    controlEnv: {},
   });
 
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.bindings.ROOM.doStorageId, "do_existing0123456789abcdef012345");
@@ -1162,6 +1302,7 @@ test("commitWithWatch assigns stable workflow keys into bundle meta and wf:defs"
     },
     outgoingRefs: [],
     d1Refs: [],
+    controlEnv: {},
   });
 
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("wf:defs:tenant-a:orders"));
@@ -1293,6 +1434,7 @@ test("commitWithWatch reads workflow defs with own-property discipline", async (
     },
     outgoingRefs: [],
     d1Refs: [],
+    controlEnv: {},
   });
 
   assert.match(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.workflows[0].workflowKey, /^wf_[0-9a-f]{32}$/);
@@ -1359,6 +1501,7 @@ test("commitWithWatch rejects platform binding target drift before commit", asyn
         targetVersion: "v1",
       }],
       d1Refs: [],
+      controlEnv: {},
     }),
     (err) => {
       const deployErr = /** @type {any} */ (err);

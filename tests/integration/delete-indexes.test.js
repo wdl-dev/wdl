@@ -109,7 +109,7 @@ test("secret PUT on never-deployed worker: SADDs workers:<ns> as secret-only ent
   assert.equal(r.status, 200);
   const body = await responseJson(r);
   assert.equal(body.set, true);
-  assert.match(body.note || "", /stored; will apply on first deploy/);
+  assert.match(body.note || "", /stored; will apply on next load or deploy/);
 
   assert.deepEqual(redisSMembers(`workers:${ns}`), ["future"]);
   assert.deepEqual(redisZRange(`worker-versions:${ns}:future`), []);

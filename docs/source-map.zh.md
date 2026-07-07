@@ -26,7 +26,7 @@
 | `runtime/runtime.js` | Service-name binding、loaded-worker registry、sibling eviction、logger、metrics 和 request-scope setup。 |
 | `runtime/metrics.js` | Runtime Prometheus snapshot helpers 和 bounded metric aggregation。 |
 | `runtime/dispatch.js` 和 `runtime/dispatch/*` | Fetch、scheduled、queue、workflow dispatch、workflow step facade、replay cache 和 deterministic workflow JSON helpers。 |
-| `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation 和 hidden binding stripping。 |
+| `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation、runtime 注入源码 ownership 和 hidden binding stripping。 |
 | `runtime/bindings/` | KV、D1、R2、Durable Objects、ASSETS、service 和 queue 的 host-side binding adapters。 |
 | `runtime/workflows-client.js`、`runtime/dispatch/workflow-*.js`、`runtime/load/env-build.js` | Workflow binding materialization、backend client、dispatch facade、replay cache 和 step semantics。 |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture 和 `wdl tail` 的 activation-gated append path。 |
@@ -57,7 +57,7 @@
 | `shared/auth-roles.js` | Role table、principal validation、reserved namespace policy 和 auth action capabilities。 |
 | `shared/auth-token.js` | Control 和 auth 共用的 `x-admin-token` sanitizer。 |
 | `shared/internal-auth.js` | JS caller 和 receiver 共用的 internal mesh auth header / token helpers。 |
-| `shared/secret-envelope.js` | Secret envelope encryption/decryption、canonical base64/JSON handling 和 AAD binding helpers。 |
+| `shared/secret-envelope.js`、`shared/secret-keys.js` | Secret envelope encryption/decryption、canonical base64/JSON handling、AAD binding helpers 和 secret Redis key construction。 |
 | `shared/hex.js`、`shared/random-id.js`、`shared/errors.js` | byte-to-hex rendering、random hex ids 和 string-only error message extraction 的无依赖小 primitive。 |
 | `shared/observability.js` | JS tiers 的 structured logger、metrics registry、request-id helpers 和 log-level handling。 |
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |

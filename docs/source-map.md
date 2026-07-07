@@ -29,7 +29,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `runtime/runtime.js` | Service-name binding, loaded-worker registry, sibling eviction, logger, metrics, and request-scope setup. |
 | `runtime/metrics.js` | Runtime Prometheus snapshot helpers and bounded metric aggregation. |
 | `runtime/dispatch.js` and `runtime/dispatch/*` | Fetch, scheduled, queue, workflow dispatch, workflow step facade, replay cache, and deterministic workflow JSON helpers. |
-| `runtime/load.js` and `runtime/load/*` | Bundle decode, module rewrite, env construction, wrapper generation, and hidden binding stripping. |
+| `runtime/load.js` and `runtime/load/*` | Bundle decode, module rewrite, env construction, wrapper generation, injected runtime source ownership, and hidden binding stripping. |
 | `runtime/bindings/` | Host-side binding adapters for KV, D1, R2, Durable Objects, ASSETS, service, and queue. |
 | `runtime/workflows-client.js`, `runtime/dispatch/workflow-*.js`, `runtime/load/env-build.js` | Workflow binding materialization, backend client, dispatch facade, replay cache, and step semantics. |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture plus activation-gated append path for `wdl tail`. |
@@ -60,7 +60,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/auth-roles.js` | Role table, principal validation, reserved namespace policy, and auth action capabilities. |
 | `shared/auth-token.js` | Shared `x-admin-token` sanitizer used by control and auth. |
 | `shared/internal-auth.js` | Shared internal mesh auth header and token helpers used by JS callers and receivers. |
-| `shared/secret-envelope.js` | Secret envelope encryption/decryption, canonical base64/JSON handling, and AAD binding helpers. |
+| `shared/secret-envelope.js`, `shared/secret-keys.js` | Secret envelope encryption/decryption, canonical base64/JSON handling, AAD binding helpers, and secret Redis key construction. |
 | `shared/hex.js`, `shared/random-id.js`, `shared/errors.js` | Small dependency-free primitives for byte-to-hex rendering, random hex ids, and string-only error message extraction. |
 | `shared/observability.js` | Structured logger, metrics registry, request-id helpers, and log-level handling for JS tiers. |
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |

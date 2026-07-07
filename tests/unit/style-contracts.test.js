@@ -227,6 +227,26 @@ test("shared primitive owners stay canonical", () => {
   assert.deepEqual(offenders, [], `shared primitive owners must stay canonical:\n${offenders.join("\n")}`);
 });
 
+test("secret Redis key construction uses the shared JS owner", () => {
+  const allowed = new Set(["shared/secret-keys.js"]);
+  const offenders = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    if (allowed.has(file)) continue;
+    const source = withoutLineComments(readRepoFile(file));
+    if (
+      /[`"']secrets:/.test(source) ||
+      /\[\s*["']secrets["'][^\]]*\]\.join\(\s*["']:["']\s*\)/.test(source)
+    ) {
+      offenders.push(file);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `production JS must use shared/secret-keys.js for inline secret Redis key construction:\n${offenders.join("\n")}`
+  );
+});
+
 test("do-runtime worker-name grammar matches shared control grammar", () => {
   assert.equal(
     extractRegex("do-runtime/protocol/wire-grammar.js", "WORKER_NAME_RE"),
@@ -325,6 +345,16 @@ test("route/version registry keys go through shared/version.js helpers", () => {
     }
   }
   assert.deepEqual(offenders, [], `route/version key literals must use shared helpers:\n${offenders.join("\n")}`);
+});
+
+test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
+  const js = readRepoFile("shared/secret-keys.js");
+  const rust = readRepoFile("rust/redis-proxy/src/runtime.rs");
+
+  assert.match(js, /return `secrets:\$\{ns\}`/);
+  assert.match(js, /return `secrets:\$\{ns\}:\$\{worker\}`/);
+  assert.match(rust, /format!\("secrets:\{\}", q\.ns\)/);
+  assert.match(rust, /format!\("secrets:\{\}:\{\}", q\.ns, q\.worker\)/);
 });
 
 test("test bundleKey stubs stay production-faithful", () => {
@@ -1530,6 +1560,21 @@ test("local compose routes private HTTP hops through Envoy only", () => {
   assert.match(supervisorLib, /workerd_args\(D1_COMPILED_CONFIG, false\)/);
   assert.match(supervisorLib, /workerd_args\(pick_do_compiled_config\(\), true\)/);
   assert.match(supervisorConfig, /args\.push\("--experimental"\.into\(\)\)/);
+  for (const file of [
+    "runtime/config-user.capnp",
+    "runtime/config-user-local.capnp",
+    "runtime/config-system.capnp",
+    "runtime/config-system-local.capnp",
+    "do-runtime/config.capnp",
+    "do-runtime/config-local.capnp",
+  ]) {
+    const source = readRepoFile(file);
+    assert.doesNotMatch(
+      source,
+      /compatibilityFlags\s*=\s*\[[^\]]*"experimental"/,
+      `${file} must not re-add the tenant experimental compatibility flag`
+    );
+  }
   // The supervisor config owns the local/production .bin choice; only it
   // references do-runtime-local.bin since compose forwards via the
   // supervisor binary, not via raw workerd serve.
@@ -1579,6 +1624,19 @@ test("local compose routes private HTTP hops through Envoy only", () => {
     );
   }
   assert.ok((envoy.match(/preserve_external_request_id: true/g) || []).length >= 5);
+});
+
+test("S3 query encoding stays aligned between shared and injected runtime helpers", () => {
+  const extract = (/** @type {string} */ file) => {
+    const source = readRepoFile(file);
+    const match = source.match(
+      /function encodeS3QueryComponent[\s\S]*?export function encodeS3Query\(params\) \{[\s\S]*?\n\}/
+    );
+    assert.ok(match, `${file} must expose encodeS3Query next to encodeS3QueryComponent`);
+    return match[0].replace(JSDOC_BLOCK_RE, "").replace(/\s+/g, " ").trim();
+  };
+
+  assert.equal(extract("shared/s3-query.js"), extract("runtime/r2-utils.js"));
 });
 
 test("tenant worker egress stays public-only at the workerd boundary", () => {
@@ -1927,8 +1985,21 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
   const cluster = readRepoFile("terraform/modules/compute/cluster.tf");
   const locals = readRepoFile("terraform/modules/compute/locals.tf");
   const rootVars = readRepoFile("terraform/variables.tf");
+  const variableDefault = (/** @type {string} */ name) => {
+    const match = rootVars.match(new RegExp(`variable "${name}" \\{[^}]*?default\\s+=\\s+([0-9]+)`));
+    assert.ok(match, `missing numeric Terraform default for ${name}`);
+    return Number(match[1]);
+  };
+  const fargateMemoryByCpu = new Map([
+    [256, new Set([512, 1024, 2048])],
+    [512, new Set([1024, 2048, 3072, 4096])],
+    [1024, new Set([2048, 3072, 4096, 5120, 6144, 7168, 8192])],
+    [2048, new Set(Array.from({ length: 13 }, (_, i) => 4096 + i * 1024))],
+    [4096, new Set(Array.from({ length: 23 }, (_, i) => 8192 + i * 1024))],
+  ]);
 
   assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
+  assert.doesNotMatch(cluster, /default_capacity_provider_strategy/);
   assert.match(locals, /fargate_stateless_capacity_provider_strategies\s+=\s+\[/);
   assert.match(locals, /fargate_ondemand_capacity_provider_strategies\s+=\s+\[/);
   assert.match(
@@ -1945,22 +2016,10 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
   );
   assert.match(rootVars, /variable "spot_weight" \{[\s\S]*?condition\s+=\s+var\.spot_weight > 0/);
   assert.match(rootVars, /variable "od_weight" \{[\s\S]*?condition\s+=\s+var\.od_weight > 0/);
-  for (const [name, value] of [
-    ["gateway_cpu", 512],
-    ["gateway_memory", 1024],
-    ["system_runtime_cpu", 512],
-    ["system_runtime_memory", 1024],
-    ["runtime_cpu", 1024],
-    ["runtime_memory", 2048],
-    ["scheduler_cpu", 1024],
-    ["scheduler_memory", 2048],
-    ["workflows_cpu", 512],
-    ["workflows_memory", 1024],
-  ]) {
-    assert.match(
-      rootVars,
-      new RegExp(`variable "${name}" \\{\\s+type\\s+=\\s+number\\s+default\\s+=\\s+${value}`)
-    );
+  for (const service of ["gateway", "system_runtime", "runtime", "scheduler", "workflows"]) {
+    const cpu = variableDefault(`${service}_cpu`);
+    const memory = variableDefault(`${service}_memory`);
+    assert.ok(fargateMemoryByCpu.get(cpu)?.has(memory), `${service} default ${cpu}/${memory} must be a valid Fargate CPU/memory pair`);
   }
 
   for (const file of [

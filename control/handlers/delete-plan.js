@@ -13,6 +13,7 @@ import {
   stageWorkerVersionIndexRemove,
 } from "control-lifecycle-indexes";
 import { bundleKey, patternsKey, routesKey } from "shared-version";
+import { workerSecretsKey } from "shared-secret-keys";
 
 /**
  * @typedef {{ host: string, slot: string, [key: string]: unknown }} RouteSlot
@@ -99,7 +100,7 @@ export function stageWorkerDelete(multi, { collected, channels }) {
     stageQueueConsumerKeyRemoval(multi, qKey);
   }
   if (collected.hasWorkerSecrets) {
-    multi.del(`secrets:${ns}:${name}`);
+    multi.del(workerSecretsKey(ns, name));
   }
   multi.del(workflowDefsKey(ns, name));
   if (collected.doOwnerKeys.length) {

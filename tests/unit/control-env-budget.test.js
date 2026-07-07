@@ -20,13 +20,12 @@ const {
   decryptSecretHash,
   estimatedWorkerLoaderEnv,
   estimatedWorkerLoaderEnvBytes,
+  WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
 } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "shared-secret-envelope": secretEnvelopeUrl,
   "shared-errors": sharedErrorsUrl,
   "shared-version": sharedVersionUrl,
 }));
-
-const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = "v0000000000";
 
 const envelopeEnv = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
@@ -74,6 +73,26 @@ test("worker env budget rejects user-controlled env above workerd workerLoader l
       assert.equal(budgetErr.details.worker, "api");
       assert.equal(budgetErr.details.upstream_max_env_bytes, UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES);
       assert.equal(budgetErr.details.headroom_bytes, WORKER_LOADER_ENV_HEADROOM_BYTES);
+      return true;
+    }
+  );
+});
+
+test("worker env budget reports deploy version separately from retained source versions", () => {
+  assert.throws(
+    () => assertWorkerLoaderUserEnvBudget({
+      ns: "demo",
+      worker: "api",
+      version: "v7",
+      vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES) },
+    }),
+    (err) => {
+      if (!(err instanceof WorkerEnvBudgetError)) return false;
+      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      assert.match(budgetErr.message, /demo\/api@v7/);
+      assert.equal(budgetErr.details.version, "v7");
+      assert.equal(Object.hasOwn(budgetErr.details, "source_version"), false);
+      assert.equal(Object.hasOwn(budgetErr.details, "estimated_version"), false);
       return true;
     }
   );

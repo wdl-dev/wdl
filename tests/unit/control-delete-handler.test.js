@@ -5,7 +5,12 @@ import {
   installControlHandlerState,
 } from "../helpers/control-handler-harness.js";
 import { compileControlGraph } from "../helpers/load-control-lib.js";
-import { applyModuleReplacements, moduleDataUrl, readRepositoryFile } from "../helpers/load-shared-module.js";
+import {
+  applyModuleReplacements,
+  moduleDataUrl,
+  readRepositoryFile,
+  repositoryFileUrl,
+} from "../helpers/load-shared-module.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 const { lifecycleIndexesUrl } = await compileControlGraph();
@@ -91,6 +96,8 @@ export function bundleKey(ns, worker, version) {
 }
 `);
 
+const sharedSecretKeysUrl = repositoryFileUrl("shared/secret-keys.js");
+
 const sharedRedisUrl = moduleDataUrl(`
 const decoder = new TextDecoder();
 export function decodeBulk(value) {
@@ -119,6 +126,7 @@ const deletePlanSrc = applyModuleReplacements(readRepositoryFile("control/handle
   [/from "control-lib";/, `from ${JSON.stringify(controlLibUrl)};`],
   [/from "control-lifecycle-indexes";/, `from ${JSON.stringify(lifecycleIndexesUrl)};`],
   [/from "shared-version";/, `from ${JSON.stringify(sharedVersionUrl)};`],
+  [/from "shared-secret-keys";/, `from ${JSON.stringify(sharedSecretKeysUrl)};`],
 ]);
 const deletePlanUrl = moduleDataUrl(deletePlanSrc);
 
@@ -129,6 +137,7 @@ const { handle } = await importControlHandler("control/handlers/delete.js", {
     "control-lib": controlLibUrl,
     "control-lifecycle-indexes": lifecycleIndexesUrl,
     "shared-version": sharedVersionUrl,
+    "shared-secret-keys": sharedSecretKeysUrl,
     "shared-redis": sharedRedisUrl,
     "shared-queue-keys": sharedQueueKeysUrl,
     "shared-route-projection": sharedRouteProjectionUrl,
@@ -143,6 +152,7 @@ const { handle: handleVersions } = await importControlHandler("control/handlers/
     "control-lib": controlLibUrl,
     "control-lifecycle-indexes": lifecycleIndexesUrl,
     "shared-version": sharedVersionUrl,
+    "shared-secret-keys": sharedSecretKeysUrl,
     "shared-redis": sharedRedisUrl,
   },
 });

@@ -128,9 +128,7 @@ test("D1 store: delete writes tombstone before removing active metadata", async 
   assert.equal(deleted.deleted, true);
   assert.equal(redis.hashes.has("d1:database:demo:d1_main"), false);
   assert.equal(redis.strings.has("d1:database-name:demo:main"), false);
-  const databaseSet = redis.sets.get("d1:databases:demo");
-  assert.ok(databaseSet);
-  assert.equal(databaseSet.has("d1_main"), false);
+  assert.equal(redis.sets.has("d1:databases:demo"), false);
   assert.deepEqual(redis.hashes.get("d1:database-tombstone:demo:d1_main"), {
     namespace: "demo",
     databaseId: "d1_main",

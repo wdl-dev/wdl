@@ -1,5 +1,6 @@
 import { jsonResponse, jsonError, requireControlLog, requireControlRedis } from "control-shared";
 import { routesKey, workersIndexKey, workerVersionsKey } from "control-lib";
+import { workerSecretsKey } from "shared-secret-keys";
 
 /** @param {{ method: string, nsName: string, requestId: string }} args */
 export async function handle({ method, nsName, requestId }) {
@@ -16,7 +17,7 @@ export async function handle({ method, nsName, requestId }) {
     const routesHash = /** @type {Record<string, string>} */ (await session.hGetAll(routesKey(nsName)));
 
     const versionKeys = names.map((name) => workerVersionsKey(nsName, name));
-    const secretKeys = names.map((name) => `secrets:${nsName}:${name}`);
+    const secretKeys = names.map((name) => workerSecretsKey(nsName, name));
     const versionsByWorker = await session.zRangeMany(versionKeys, 0, -1);
     const secretFlags = await session.existsMany(secretKeys);
 

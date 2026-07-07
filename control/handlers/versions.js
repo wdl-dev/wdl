@@ -22,6 +22,7 @@ import {
   stageWorkerVersionIndexRemove,
 } from "control-lifecycle-indexes";
 import { parseVersion, bundleKey, routesKey } from "shared-version";
+import { workerSecretsKey } from "shared-secret-keys";
 
 const MAX_DELETE_ATTEMPTS = 5;
 
@@ -151,7 +152,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     await iso.watch(
       routesKey(ns),
       workerVersionsKey(ns, name),
-      `secrets:${ns}:${name}`,
+      workerSecretsKey(ns, name),
       bundleKey(ns, name, version),
       referrersKey(ns, name, version),
     );
@@ -232,7 +233,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
       }
     }
 
-    const hasWorkerSecrets = (await iso.exists(`secrets:${ns}:${name}`)) > 0;
+    const hasWorkerSecrets = (await iso.exists(workerSecretsKey(ns, name))) > 0;
     const lastRetainedNoActive =
       currentVersions.length === 1 &&
       currentVersions[0] === version &&

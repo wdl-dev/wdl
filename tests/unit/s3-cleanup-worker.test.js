@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  deletePrefix,
+  deletePrefixPage,
   nextBackoffMs,
   processTask,
 } from "../../system-workers/s3-cleanup/src/index.js";
@@ -89,6 +89,13 @@ function cleanupDb(row) {
                 state.row[S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON] = values[2];
                 return { meta: { changes: 1 } };
               }
+              if (/SET\s+attempts\s*=/.test(sql)) {
+                state.row[S3_CLEANUP_TASK_FIELDS.ATTEMPTS] = values[0];
+                state.row[S3_CLEANUP_TASK_FIELDS.UPDATED_AT] = values[1];
+                state.row[S3_CLEANUP_TASK_FIELDS.NEXT_ATTEMPT_AT] = values[2];
+                state.row[S3_CLEANUP_TASK_FIELDS.LAST_ERROR] = values[3];
+                return { meta: { changes: 1 } };
+              }
               if (/SET\s+updated_at\s*=/.test(sql)) {
                 state.row[S3_CLEANUP_TASK_FIELDS.UPDATED_AT] = values[0];
                 state.row[S3_CLEANUP_TASK_FIELDS.NEXT_ATTEMPT_AT] = values[1];
@@ -109,7 +116,7 @@ test("s3-cleanup retry horizon reaches the 30 minute cap before final failure", 
   assert.equal(nextBackoffMs(10), 30 * 60_000);
 });
 
-test("deletePrefix follows truncated empty pages before marking cleanup done", async () => {
+test("deletePrefixPage returns continuation tokens without deleting empty pages", async () => {
   const { s3, calls } = s3Mock([
     new Response([
       "<ListBucketResult>",
@@ -117,37 +124,30 @@ test("deletePrefix follows truncated empty pages before marking cleanup done", a
       "<NextContinuationToken>cursor&amp;1</NextContinuationToken>",
       "</ListBucketResult>",
     ].join("")),
-    new Response([
-      "<ListBucketResult>",
-      "<s3:IsTruncated>false</s3:IsTruncated>",
-      "<s3:Contents><s3:Key>assets/demo/a&amp;b.txt</s3:Key></s3:Contents>",
-      "</ListBucketResult>",
-    ].join("")),
-    new Response("<DeleteResult><Deleted><Key>assets/demo/a&amp;b.txt</Key></Deleted></DeleteResult>"),
   ]);
 
-  const result = await deletePrefix(s3, "assets/demo/");
+  const result = await deletePrefixPage(s3, "assets/demo/");
 
-  assert.deepEqual(result, { deletedCount: 1 });
-  assert.equal(calls.length, 3);
-  assert.equal(new URL(calls[1].url).searchParams.get("continuation-token"), "cursor&1");
-  assert.equal(calls[2].init?.method, "POST");
+  assert.deepEqual(result, { deletedCount: 0, nextContinuationToken: "cursor&1" });
+  assert.equal(calls.length, 1);
 });
 
-test("deletePrefix encodes ListObjectsV2 query spaces as percent bytes", async () => {
+test("deletePrefixPage encodes ListObjectsV2 query spaces as percent bytes", async () => {
   const { s3, calls } = s3Mock([
     new Response("<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>"),
   ]);
 
-  const result = await deletePrefix(s3, "assets/demo/has space/");
+  const result = await deletePrefixPage(s3, "assets/demo/has space/");
 
-  assert.deepEqual(result, { deletedCount: 0 });
+  assert.deepEqual(result, { deletedCount: 0, nextContinuationToken: null });
   assert.match(calls[0].url, /prefix=assets%2Fdemo%2Fhas%20space%2F/);
   assert.doesNotMatch(calls[0].url, /\+/);
 });
 
 test("processTask checkpoints one S3 list page and resumes from the continuation token", async () => {
   const db = cleanupDb(taskRow({ [S3_CLEANUP_TASK_FIELDS.ATTEMPTS]: 3 }));
+  /** @type {Record<string, unknown>[]} */
+  const logs = [];
   const { s3, calls } = s3Mock([
     new Response([
       "<ListBucketResult>",
@@ -164,7 +164,9 @@ test("processTask checkpoints one S3 list page and resumes from the continuation
     new Response("<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>"),
   ]);
 
-  await withMockedProperty(console, "log", () => {}, async () => {
+  await withMockedProperty(console, "log", (line) => {
+    logs.push(JSON.parse(String(line)));
+  }, async () => {
     assert.equal(
       await processTask(/** @type {any} */ (db), s3, "s3cleanup:unit"),
       S3_CLEANUP_OUTCOME.RETRY
@@ -174,6 +176,7 @@ test("processTask checkpoints one S3 list page and resumes from the continuation
       prefixIndex: 0,
       continuationToken: "cursor&1",
       pageCount: 1,
+      deletedCount: 1,
     });
     assert.equal(db.state.row[S3_CLEANUP_TASK_FIELDS.ATTEMPTS], 0);
     assert.equal(
@@ -183,9 +186,39 @@ test("processTask checkpoints one S3 list page and resumes from the continuation
     assert.equal(db.state.deleted, true);
   });
   assert.equal(new URL(calls[2].url).searchParams.get("continuation-token"), "cursor&1");
+  assert.equal(
+    logs.find((entry) => entry.event === "s3_cleanup_task_done")?.deleted_count,
+    1
+  );
 });
 
-test("deletePrefix retries transient DeleteObjects responses", async () => {
+test("processTask rejects checkpoint prefix indexes past the prefix list", async () => {
+  const db = cleanupDb(taskRow({
+    [S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON]: JSON.stringify({
+      prefixIndex: 2,
+      continuationToken: null,
+      pageCount: 0,
+      deletedCount: 0,
+    }),
+  }));
+  const { s3, calls } = s3Mock([]);
+
+  await withMockedProperty(console, "log", () => {}, async () => {
+    assert.equal(
+      await processTask(/** @type {any} */ (db), s3, "s3cleanup:unit"),
+      S3_CLEANUP_OUTCOME.RETRY
+    );
+  });
+  assert.equal(db.state.deleted, false);
+  assert.equal(calls.length, 0);
+  assert.equal(db.state.row[S3_CLEANUP_TASK_FIELDS.ATTEMPTS], 1);
+  assert.match(
+    String(db.state.row[S3_CLEANUP_TASK_FIELDS.LAST_ERROR]),
+    /checkpoint prefixIndex 2 exceeds prefix count 1/
+  );
+});
+
+test("deletePrefixPage retries transient DeleteObjects responses", async () => {
   const { s3, calls } = s3Mock([
     new Response([
       "<ListBucketResult>",
@@ -197,16 +230,16 @@ test("deletePrefix retries transient DeleteObjects responses", async () => {
     new Response("<DeleteResult><Deleted><Key>assets/demo/retry.txt</Key></Deleted></DeleteResult>"),
   ]);
 
-  const result = await deletePrefix(s3, "assets/demo/");
+  const result = await deletePrefixPage(s3, "assets/demo/");
 
-  assert.deepEqual(result, { deletedCount: 1 });
+  assert.deepEqual(result, { deletedCount: 1, nextContinuationToken: null });
   assert.equal(calls.length, 3);
   assert.equal(calls[1].init?.method, "POST");
   assert.equal(calls[2].init?.method, "POST");
   assert.equal(calls[1].url, calls[2].url);
 });
 
-test("deletePrefix returns the last transient DeleteObjects response after retry exhaustion", async () => {
+test("deletePrefixPage returns the last transient DeleteObjects response after retry exhaustion", async () => {
   const { s3, calls } = s3Mock([
     new Response([
       "<ListBucketResult>",
@@ -219,7 +252,7 @@ test("deletePrefix returns the last transient DeleteObjects response after retry
 
   await withMockedProperty(Math, "random", () => 0, async () => {
     await assert.rejects(
-      () => deletePrefix(s3, "assets/demo/"),
+      () => deletePrefixPage(s3, "assets/demo/"),
       /s3 delete assets\/demo\/ → 429: still slow/
     );
   });
@@ -228,13 +261,13 @@ test("deletePrefix returns the last transient DeleteObjects response after retry
   assert.ok(calls.slice(1).every((call) => call.init?.method === "POST"));
 });
 
-test("deletePrefix retries truncated list responses without continuation tokens", async () => {
+test("deletePrefixPage rejects truncated list responses without continuation tokens", async () => {
   const { s3 } = s3Mock([
     new Response("<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>"),
   ]);
 
   await assert.rejects(
-    () => deletePrefix(s3, "assets/demo/"),
+    () => deletePrefixPage(s3, "assets/demo/"),
     /truncated without NextContinuationToken/
   );
 });

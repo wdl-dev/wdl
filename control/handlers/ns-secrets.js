@@ -14,11 +14,13 @@ import {
   readEncryptedSecretPutValue,
 } from "control-handlers-secret-put";
 import { routesKey, workerVersionsKey } from "shared-version";
+import { nsSecretsKey as namespaceSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import { workersIndexKey } from "control-lib";
 import {
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
   assertWorkerVersionsUserEnvBudget,
+  decryptMutatedSecretHashForBudget,
   decryptSecretHash,
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
@@ -65,15 +67,15 @@ async function validateNamespaceSecretBudget({
   }
 
   for (const worker of workerNames) {
-    const workerSecretsKey = `secrets:${nsName}:${worker}`;
-    await redis.watch(workerVersionsKey(nsName, worker), workerSecretsKey);
+    const secretHashKey = workerSecretsKey(nsName, worker);
+    await redis.watch(workerVersionsKey(nsName, worker), secretHashKey);
     const activeVersion = activeRoutes[worker];
     const retainedVersions = await redis.zRange(workerVersionsKey(nsName, worker), 0, -1);
-    const workerEncrypted = await redis.hGetAll(workerSecretsKey);
+    const workerEncrypted = await redis.hGetAll(secretHashKey);
     const workerSecrets = await decryptSecretHash({
       encrypted: workerEncrypted,
       env: controlEnv,
-      hashKey: workerSecretsKey,
+      hashKey: secretHashKey,
     });
     await assertWorkerVersionsUserEnvBudget({
       redis,
@@ -111,7 +113,7 @@ async function mutateNamespaceSecret({
   plaintext = null,
 }) {
   const controlEnv = stringEnv(env);
-  const nsSecretsKey = `secrets:${nsName}`;
+  const nsSecretsKey = namespaceSecretsKey(nsName);
   return await runOptimistic(redis, {
     attempts: MAX_NS_SECRET_ATTEMPTS,
     onExhausted: () => {
@@ -127,19 +129,16 @@ async function mutateNamespaceSecret({
       return { mutated: false };
     }
 
-    const budgetEncrypted = { ...existingEncrypted };
-    delete budgetEncrypted[secretKey];
-    const nsSecrets = await decryptSecretHash({
-      encrypted: budgetEncrypted,
+    const nsSecrets = await decryptMutatedSecretHashForBudget({
+      encrypted: existingEncrypted,
       env: controlEnv,
       hashKey: nsSecretsKey,
+      key: secretKey,
+      method,
+      plaintext,
     });
-    if (method === "PUT") {
-      if (typeof encrypted !== "string") throw new Error("PUT namespace secret encrypted value missing");
-      if (typeof plaintext !== "string") throw new Error("PUT namespace secret plaintext missing");
-      nsSecrets[secretKey] = plaintext;
-    } else {
-      delete nsSecrets[secretKey];
+    if (method === "PUT" && typeof encrypted !== "string") {
+      throw new Error("PUT namespace secret encrypted value missing");
     }
 
     await validateNamespaceSecretBudget({
@@ -173,7 +172,7 @@ async function mutateNamespaceSecret({
 export async function handle({ request, env, method, nsName, secretKey, requestId }) {
   const redis = requireControlRedis();
   const log = requireControlLog();
-  const nsSecretsKey = `secrets:${nsName}`;
+  const nsSecretsKey = namespaceSecretsKey(nsName);
 
   if (method === "GET" && secretKey === undefined) {
     const keys = await redis.hKeys(nsSecretsKey);

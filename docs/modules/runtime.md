@@ -260,10 +260,11 @@ when a matching active tail session exists.
   wrapper/client modules, workflow import rewrites, and generated workflow keys. Vars,
   namespace/worker secrets, and runtime-injected binding/workflow env values are checked
   against a headroomed `workerLoader` env budget in watched commit and secret-mutation
-  paths because workerd's final enforcement includes the full `env` estimate after
-  version allocation and metadata materialization. The estimate starts from JSON bytes
-  and adds V8 two-byte string overhead for non-Latin-1 strings, so mixed ASCII plus CJK
-  or emoji secrets do not slip past control and fail later at cold-load.
+  paths. Deploy and namespace-secret mutations use the version they can load; worker
+  secret mutations also recheck the forced bump inside the WATCH/COPY transaction so
+  the allocated bump version is covered before routing flips. The estimate starts from
+  JSON bytes and adds V8 two-byte string overhead for non-Latin-1 strings, so mixed
+  ASCII plus CJK or emoji secrets do not slip past control and fail later at cold-load.
 - In current stock workerd, a client disconnect during an async `ReadableStream`
   response body may not call the stream source's `cancel()` callback. Tenant streaming
   and SSE workers should use their own heartbeat, timeout, or application close path

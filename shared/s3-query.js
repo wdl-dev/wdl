@@ -11,6 +11,8 @@ function encodeS3QueryComponent(value) {
 /**
  * S3 SigV4 query strings use percent-encoded bytes; URLSearchParams' form
  * encoding turns spaces into '+', which is not the canonical S3 query form.
+ * Keep this implementation in sync with runtime/r2-utils.js; that file is
+ * embedded as loaded-worker source and cannot import shared modules.
  *
  * @param {Record<string, unknown>} params
  * @returns {string}

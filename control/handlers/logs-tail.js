@@ -21,7 +21,7 @@ const TAIL_ACTIVATION_MAX_ENTRIES = 10_000;
 const XREAD_BLOCK_MS = 10_000;
 const SSE_KEEPALIVE_MS = 5_000;
 const LOG_TAIL_IDLE_PULL_GRACE_FACTOR = 3;
-export const LOG_TAIL_IDLE_PULL_MS = SSE_KEEPALIVE_MS * LOG_TAIL_IDLE_PULL_GRACE_FACTOR;
+const LOG_TAIL_IDLE_PULL_MS = SSE_KEEPALIVE_MS * LOG_TAIL_IDLE_PULL_GRACE_FACTOR;
 export const LOG_TAIL_MAX_SESSION_MS_DEFAULT = 15 * 60 * 1000;
 const MAX_WORKERS_PER_TAIL_SESSION = 50;
 const JSON_FIELD_BYTES = [0x6a, 0x73, 0x6f, 0x6e]; // "json"
@@ -362,35 +362,14 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     db: redisDbFromEnv(env, "DATA_REDIS_DB"),
   });
   let sessionOpen = false;
-  let cleanupFinished = false;
   /** @type {Promise<void> | null} */
   let sessionClosePromise = null;
   let cancelled = false;
   /** @type {ReadableStreamDefaultController<Uint8Array> | null} */
   let streamController = null;
-  let expiryLogged = false;
-  let idleLogged = false;
   let lastPullAtMs = Date.now();
   const { promise: cancelPromise, resolve: resolveCancel } =
     /** @type {PromiseWithResolvers<void>} */ (Promise.withResolvers());
-
-  const sessionExpiredWarning = () => sseEvent({
-    event: "tail_warning",
-    data: JSON.stringify({
-      event: "tail_warning",
-      code: "session_expired",
-      message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
-    }),
-  });
-
-  const sessionIdleWarning = () => sseEvent({
-    event: "tail_warning",
-    data: JSON.stringify({
-      event: "tail_warning",
-      code: "session_idle",
-      message: "Tail session stopped receiving client reads; reconnecting closes the abandoned session.",
-    }),
-  });
 
   async function closeSessionIfOpen() {
     if (!sessionOpen && !session.hasOpenResources()) return;
@@ -407,41 +386,55 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     await sessionClosePromise;
   }
 
-  /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
-  function expireSession(controller) {
+  /**
+   * @param {ReadableStreamDefaultController<Uint8Array> | null} controller
+   * @param {{ code: string, message: string, logEvent: string, logFields: Record<string, unknown> }} warning
+   */
+  function closeWithWarning(controller, warning) {
     if (cancelled) return;
     cancelled = true;
-    if (!expiryLogged) {
-      expiryLogged = true;
-      log("info", "tail_session_expired", {
-        request_id: requestId, namespace: ns, worker_count: workers.length,
-        max_session_ms: maxSessionMs,
-      });
-    }
+    log("info", warning.logEvent, warning.logFields);
     if (controller) {
-      try { controller.enqueue(utf8Encoder.encode(sessionExpiredWarning())); } catch {}
+      try {
+        controller.enqueue(utf8Encoder.encode(sseEvent({
+          event: "tail_warning",
+          data: JSON.stringify({
+            event: "tail_warning",
+            code: warning.code,
+            message: warning.message,
+          }),
+        })));
+      } catch {}
       try { controller.close(); } catch {}
     }
     resolveCancel();
   }
 
   /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
+  function expireSession(controller) {
+    closeWithWarning(controller, {
+      code: "session_expired",
+      message: "Tail session reached its maximum lifetime; reconnecting for reauthorization.",
+      logEvent: "tail_session_expired",
+      logFields: {
+        request_id: requestId, namespace: ns, worker_count: workers.length,
+        max_session_ms: maxSessionMs,
+      },
+    });
+  }
+
+  /** @param {ReadableStreamDefaultController<Uint8Array> | null} controller */
   function idleSession(controller) {
-    if (cancelled) return;
-    cancelled = true;
-    if (!idleLogged) {
-      idleLogged = true;
-      log("info", "tail_session_idle", {
+    closeWithWarning(controller, {
+      code: "session_idle",
+      message: "Tail session stopped receiving client reads; reconnecting closes the abandoned session.",
+      logEvent: "tail_session_idle",
+      logFields: {
         request_id: requestId, namespace: ns, worker_count: workers.length,
         idle_pull_ms: Date.now() - lastPullAtMs,
         idle_limit_ms: LOG_TAIL_IDLE_PULL_MS,
-      });
-    }
-    if (controller) {
-      try { controller.enqueue(utf8Encoder.encode(sessionIdleWarning())); } catch {}
-      try { controller.close(); } catch {}
-    }
-    resolveCancel();
+      },
+    });
   }
 
   const expiryTimer = setTimeout(() => expireSession(streamController), maxSessionMs);
@@ -473,7 +466,6 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     clearTimeout(expiryTimer);
     if (idleTimer) clearTimeout(idleTimer);
     await closeSessionIfOpen();
-    cleanupFinished = true;
     log("info", "tail_session_close", {
       request_id: requestId, namespace: ns, worker_count: workers.length,
     });
@@ -492,9 +484,6 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   const stream = new ReadableStream({
     start(controller) {
       streamController = controller;
-      if (cancelled) {
-        try { controller.close(); } catch {}
-      }
     },
     async pull(controller) {
       streamController = controller;
@@ -510,7 +499,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
           // it and fail on the first Redis stream read.
           await session.open();
           sessionOpen = true;
-          if (cancelled || cleanupFinished) {
+          if (cancelled) {
             await closeSessionIfOpen();
             try { controller.close(); } catch {}
             return;

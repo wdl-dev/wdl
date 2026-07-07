@@ -14,6 +14,8 @@ import {
   generateHostBindingWrapperModule,
 } from "runtime-load-wrapper-generate";
 
+// Mirrors workerd v1.20260701.1
+// src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_CODE_SIZE.
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
 const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
@@ -279,6 +281,8 @@ function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = a
     addModules(injections.workflowsModuleInjections);
   }
   out.set(WORKFLOWS_MODULE_NAME, WORKFLOWS_MODULE_SOURCE);
+  // `_wdl-wrapper.js` is always injected: host bindings use the larger wrapper,
+  // and otherwise the abort shim still rewrites the user main module.
   out.set(
     "_wdl-wrapper.js",
     plan.needsHostBindingWrapper

@@ -142,7 +142,7 @@ function platformFloorCompatFlags(compatibilityDate) {
 
 // Throws on non-array / non-string elements rather than silently coercing
 // to []. Control validates this shape at deploy ingress (see
-// control/lib.js#validateCompatibilityFlags), so a throw here only fires
+// control/bundle.js#validateCompatibilityFlags), so a throw here only fires
 // if Redis bytes got corrupted or were written out-of-band — a failure
 // loud enough to surface in cold-load logs, not one that silently drops
 // the user's flag list and leaves only the platform floor.
