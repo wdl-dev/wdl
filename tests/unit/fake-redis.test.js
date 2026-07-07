@@ -6,6 +6,9 @@ test("fake redis client records batched hash reads", async () => {
   const redis = createFakeRedis();
   redis.hashes.set("hash:a", { one: "1", two: "2" });
   redis.hashes.set("hash:b", { one: "3" });
+  const inheritedHash = Object.create({ inherited: "bad" });
+  inheritedHash.own = "ok";
+  redis.hashes.set("hash:proto", inheritedHash);
 
   assert.deepEqual(await redis.hGetAllMany(["hash:a", "hash:b", "hash:c"]), [
     { one: "1", two: "2" },
@@ -16,9 +19,14 @@ test("fake redis client records batched hash reads", async () => {
     ["hash:a", "two"],
     ["hash:b", "missing"],
   ]), ["2", null]);
+  assert.deepEqual(await redis.hMGet("hash:a", ["one", "missing", "two"]), ["1", null, "2"]);
+  assert.deepEqual(await redis.hMGet("hash:proto", ["inherited", "own"]), [null, "ok"]);
+  assert.deepEqual(await redis.hMGet("hash:a", []), []);
   assert.deepEqual(redis.commands, [
     ["hGetAllMany", ["hash:a", "hash:b", "hash:c"]],
     ["hGetMany", [["hash:a", "two"], ["hash:b", "missing"]]],
+    ["hMGet", "hash:a", ["one", "missing", "two"]],
+    ["hMGet", "hash:proto", ["inherited", "own"]],
   ]);
 });
 
@@ -34,11 +42,14 @@ test("fake redis session records single and batched hash reads", async () => {
       { two: "2" },
     ]);
     assert.equal(await session.hGet("hash:b", "two"), "2");
+    assert.deepEqual(await session.hMGet("hash:b", ["two", "missing"]), ["2", null]);
+    assert.deepEqual(await session.hMGet("hash:b", []), []);
   });
   assert.deepEqual(redis.commands, [
     ["hGetAll", "hash:a"],
     ["hGetAllMany", ["hash:a", "hash:b"]],
     ["hGet", "hash:b", "two"],
+    ["hMGet", "hash:b", ["two", "missing"]],
   ]);
 });
 

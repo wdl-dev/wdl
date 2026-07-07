@@ -58,6 +58,12 @@ export function resetFakeRedisState(state) {
   state.nowMs = Date.now();
 }
 
+/** @param {FakeRedisState} state @param {string} key @param {string} field */
+function hashField(state, key, field) {
+  const hash = state.hashes.get(key);
+  return hash && Object.hasOwn(hash, field) ? hash[field] : null;
+}
+
 /**
  * @param {FakeRedisState} [state]
  * @param {{ encodeGet?: boolean, nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
@@ -148,15 +154,22 @@ export function createFakeRedisClient(state, options = {}) {
     async hGet(key, field) {
       expireIfNeeded(state, key, options);
       state.commands.push(["hGet", key, field]);
-      return state.hashes.get(key)?.[field] ?? null;
+      return hashField(state, key, field);
     },
     /** @param {Array<[string, string]>} pairs */
     async hGetMany(pairs) {
       state.commands.push(["hGetMany", pairs.map(([key, field]) => [key, field])]);
       return pairs.map(([key, field]) => {
         expireIfNeeded(state, key, options);
-        return state.hashes.get(key)?.[field] ?? null;
+        return hashField(state, key, field);
       });
+    },
+    /** @param {string} key @param {string[]} fields */
+    async hMGet(key, fields) {
+      if (fields.length === 0) return [];
+      expireIfNeeded(state, key, options);
+      state.commands.push(["hMGet", key, [...fields]]);
+      return fields.map((field) => hashField(state, key, field));
     },
     /** @param {string} key */
     async hGetAll(key) {
@@ -281,15 +294,22 @@ export function createFakeRedisSession(state, options = {}) {
     async hGet(key, field) {
       expireIfNeeded(state, key, options);
       state.commands.push(["hGet", key, field]);
-      return state.hashes.get(key)?.[field] ?? null;
+      return hashField(state, key, field);
     },
     /** @param {Array<[string, string]>} pairs */
     async hGetMany(pairs) {
       state.commands.push(["hGetMany", pairs.map(([key, field]) => [key, field])]);
       return pairs.map(([key, field]) => {
         expireIfNeeded(state, key, options);
-        return state.hashes.get(key)?.[field] ?? null;
+        return hashField(state, key, field);
       });
+    },
+    /** @param {string} key @param {string[]} fields */
+    async hMGet(key, fields) {
+      if (fields.length === 0) return [];
+      expireIfNeeded(state, key, options);
+      state.commands.push(["hMGet", key, [...fields]]);
+      return fields.map((field) => hashField(state, key, field));
     },
     /** @param {string} key */
     async hGetAll(key) {

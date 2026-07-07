@@ -409,6 +409,32 @@ test("namespace secret PUT budgets active worker versions with their real active
   });
 });
 
+test("namespace secret PUT deduplicates retained and active version checks", async () => {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    seedWorkerSecretActive(redis, "v1");
+    seedWorkerSecretVersions(redis, ["v1"]);
+    redis.sets.set("workers:demo", new Set(["api"]));
+  }, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-version-dedupe",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(
+      redis.commands.filter((op) => op[0] === "hGet" && op[1] === "worker:demo:api:v:1" && op[2] === "__meta__").length,
+      1
+    );
+  });
+});
+
 test("namespace secret DELETE checks env revealed by removing a namespace secret", async () => {
   const encrypted = await encryptSecretValue("small", {
     env,

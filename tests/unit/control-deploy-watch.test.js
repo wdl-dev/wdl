@@ -11,6 +11,7 @@ import {
   readRepositoryModuleSource,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { createFakeRedisSession } from "../helpers/mocks/fake-redis.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { realRuntimeInjectionSourcesUrl } from "../helpers/runtime-injection-sources.js";
 
@@ -20,6 +21,8 @@ const { libUrl: controlLibUrl, lifecycleIndexesUrl } = await compileControlGraph
 const CONTROL_DEPLOY_TEST_STATE = {
   strings: new Map(),
   hashes: new Map(),
+  sets: new Map(),
+  zsets: new Map(),
   stagedMeta: null,
   execFailures: 0,
   hSetCalls: [],
@@ -45,6 +48,8 @@ installControlHandlerState("__controlDeployTestState", CONTROL_DEPLOY_TEST_STATE
 function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.strings = new Map();
   CONTROL_DEPLOY_TEST_STATE.hashes = new Map();
+  CONTROL_DEPLOY_TEST_STATE.sets = new Map();
+  CONTROL_DEPLOY_TEST_STATE.zsets = new Map();
   CONTROL_DEPLOY_TEST_STATE.stagedMeta = null;
   CONTROL_DEPLOY_TEST_STATE.execFailures = 0;
   CONTROL_DEPLOY_TEST_STATE.hSetCalls = [];
@@ -339,7 +344,6 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
     "shared-secret-keys": repositoryFileUrl("shared/secret-keys.js"),
   },
 });
-const { WatchError } = await import(sharedRedisUrl);
 
 test("worker code budget shape failures are domain errors", () => {
   assert.throws(
@@ -393,74 +397,43 @@ test("worker code budget allows do-runtime reserved names when no DO wrapper is 
 });
 
 function makeSession() {
-  return {
-    /** @param {string[]} keys */
-    async watch(...keys) {
-      if (!Array.isArray(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys)) /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys = [];
-      /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.push(...keys);
-    },
-    async unwatch() {},
-    /** @param {string} key */
-    async get(key) {
-      return /** @type {any} */ (globalThis).__controlDeployTestState.strings.has(key) ? /** @type {any} */ (globalThis).__controlDeployTestState.strings.get(key) : null;
-    },
-    /** @param {string[]} keys */
-    async getMany(keys) {
-      return keys.map((key) => /** @type {any} */ (globalThis).__controlDeployTestState.strings.has(key) ? /** @type {any} */ (globalThis).__controlDeployTestState.strings.get(key) : null);
-    },
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      const hash = /** @type {any} */ (globalThis).__controlDeployTestState.hashes.get(key);
-      return hash && Object.hasOwn(hash, field) ? hash[field] : null;
-    },
-    /** @param {Array<[string, string]>} pairs */
-    async hGetMany(pairs) {
-      return pairs.map(([key, field]) => {
-        const hash = /** @type {any} */ (globalThis).__controlDeployTestState.hashes.get(key);
-        return hash && Object.hasOwn(hash, field) ? hash[field] : null;
-      });
-    },
-    /** @param {string} key @param {string[]} fields */
-    async hMGet(key, fields) {
-      const hash = /** @type {any} */ (globalThis).__controlDeployTestState.hashes.get(key);
-      return fields.map((field) => hash && Object.hasOwn(hash, field) ? hash[field] : null);
-    },
-    /** @param {string} key */
-    async hGetAll(key) {
-      return /** @type {any} */ (globalThis).__controlDeployTestState.hashes.get(key) || {};
-    },
-    multi() {
-      return {
-        sAdd() { return this; },
-        zAdd() { return this; },
-        /** @param {string} key @param {string} field @param {unknown} value */
-        hSet(key, field, value) {
-          /** @type {any} */ (globalThis).__controlDeployTestState.hSetCalls.push({ key, field, value });
-          return this;
-        },
-        del() { return this; },
-        /**
-         * @param {string} key
-         * @param {unknown} value
-         * @param {{ nx?: boolean }} [opts]
-         */
-        set(key, value, opts = {}) {
-          if (!opts.nx || !/** @type {any} */ (globalThis).__controlDeployTestState.strings.has(key)) {
-            /** @type {any} */ (globalThis).__controlDeployTestState.strings.set(key, value);
-          }
-          return this;
-        },
-        async exec() {
-          if (/** @type {any} */ (globalThis).__controlDeployTestState.execFailures > 0) {
-            /** @type {any} */ (globalThis).__controlDeployTestState.execFailures -= 1;
-            /** @type {any} */ (globalThis).__controlDeployTestState.strings.set("d1:database-name:tenant-a:main", "d1_new");
-            throw new WatchError("watched key changed");
-          }
-          return [];
-        },
-      };
-    },
+  const state = /** @type {any} */ (globalThis).__controlDeployTestState;
+  if (!Array.isArray(state.watchedKeys)) state.watchedKeys = [];
+  const fakeState = {
+    strings: state.strings,
+    hashes: state.hashes,
+    sets: state.sets,
+    zsets: state.zsets,
+    ops: [],
+    watched: state.watchedKeys,
+    watchBatches: [],
+    commands: [],
+    expirations: new Map(),
+    execFailures: state.execFailures,
+    nowMs: Date.now(),
   };
+  const session = createFakeRedisSession(fakeState, {
+    onExecFailure() {
+      state.execFailures = fakeState.execFailures;
+      state.strings.set("d1:database-name:tenant-a:main", "d1_new");
+    },
+  });
+  const realMulti = session.multi.bind(session);
+  session.multi = () => {
+    const multi = realMulti();
+    const hSet = multi.hSet.bind(multi);
+    multi.hSet = (key, fieldsOrField, maybeValue) => {
+      const fields = typeof fieldsOrField === "object"
+        ? fieldsOrField
+        : { [fieldsOrField]: maybeValue };
+      for (const [field, value] of Object.entries(fields)) {
+        state.hSetCalls.push({ key, field, value });
+      }
+      return hSet(key, fieldsOrField, maybeValue);
+    };
+    return multi;
+  };
+  return session;
 }
 
 const PLATFORM_AUTH_WARNING = Object.freeze({
@@ -1113,16 +1086,14 @@ test("deploy handler skips cleanup for empty assets when commit fails", async ()
   /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
 
   const session = makeSession();
-  session.multi = () => ({
-    sAdd() { return this; },
-    zAdd() { return this; },
-    hSet() { return this; },
-    del() { return this; },
-    set() { return this; },
-    async exec() {
+  const realMulti = session.multi.bind(session);
+  session.multi = () => {
+    const multi = realMulti();
+    multi.exec = async () => {
       throw new Error("commit failed after empty assets");
-    },
-  });
+    };
+    return multi;
+  };
   const redis = {
     /** @param {string} key */
     async incr(key) {
