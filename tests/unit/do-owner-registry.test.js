@@ -75,7 +75,7 @@ test("DO owner registry: keys encode owner scope and generation separately", () 
   );
 });
 
-test("DO owner registry: lease guard config is bounded and can be disabled for tests", () => {
+test("DO owner registry: lease guard config bounds values and permits test disable", () => {
   assert.equal(ownerLeaseGuardMs({}), 1000);
   assert.equal(ownerLeaseGuardMs({ DO_OWNER_LEASE_GUARD_MS: "0" }), 0);
   assert.equal(ownerLeaseGuardMs({ DO_OWNER_LEASE_GUARD_MS: "250" }), 250);
@@ -142,7 +142,7 @@ test("DO owner registry: lost owner state cannot validate an old owner from anot
   );
 });
 
-test("DO owner registry: same task can reclaim generation one after owner state loss", async () => {
+test("DO owner registry: same task reclaims generation one after owner state loss", async () => {
   setStoragePointer();
   DO_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "task-b:8788" };
 
@@ -193,7 +193,7 @@ test("DO owner registry: renewal time base validation rejects invalid values", (
   }
 });
 
-test("DO owner registry: draining task can still return a healthy remote owner", async () => {
+test("DO owner registry: draining task returns a healthy remote owner", async () => {
   const ownerKey = OWNER_KEY;
   const owner = ownerRecord({
     ownerKey,
@@ -400,7 +400,7 @@ test("DO owner registry: actor fence reports stale storage before lease-guard re
   assert.deepEqual(doOwnerRegistryWriteCommands(), []);
 });
 
-test("DO owner registry: lease-budget watchdog can reject near-expiry leases without renewing", async () => {
+test("DO owner registry: lease-budget watchdog rejects near-expiry leases without renewing", async () => {
   const ownerKey = OWNER_KEY;
   const redisNow = Date.now();
   setStoragePointer();

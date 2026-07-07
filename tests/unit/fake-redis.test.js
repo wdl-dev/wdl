@@ -1,6 +1,47 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { redisConformanceCases } from "../helpers/redis-conformance-cases.js";
 import { createFakeRedis, FakeRedisWatchError } from "../helpers/mocks/fake-redis.js";
+
+/**
+ * @param {ReturnType<typeof createFakeRedis>} redis
+ * @param {string} prefix
+ * @returns {import("../helpers/redis-conformance-cases.js").RedisConformanceAdapter}
+ */
+function fakeRedisConformanceAdapter(redis, prefix) {
+  return {
+    key: (suffix) => `${prefix}:${suffix}`,
+    del: (...keys) => redis.del(...keys),
+    exists: async (key) => await redis.exists(key) === 1,
+    hSet: (key, fields) => redis.hSet(key, fields),
+    hGet: (key, field) => redis.hGet(key, field),
+    hMGet: (key, fields) => redis.hMGet(key, fields),
+    hGetAll: (key) => redis.hGetAll(key),
+    hDel: (key, ...fields) => redis.hDel(key, ...fields),
+    set: (key, value) => redis.set(key, value),
+    sAdd: (key, member) => redis.sAdd(key, member),
+    zAdd: (key, score, member) => redis.session((session) => session.multi().zAdd(key, score, member).exec()),
+    zRange: (key, start, stop) => redis.zRange(key, start, stop),
+    copy: async (src, dst, opts = {}) => Number(await redis.session((session) => session.copy(src, dst, opts))),
+    expireAt: (key, unixSeconds) => redis.session((session) => session.multi().expireAt(key, unixSeconds).exec()),
+    expireTime: async (key) => {
+      const expiresAt = redis.expirations.get(key);
+      // The fake stores expirations in JavaScript milliseconds; Redis EXPIRETIME
+      // returns whole Unix seconds.
+      return expiresAt == null ? -1 : Math.floor(expiresAt / 1000);
+    },
+  };
+}
+
+for (const conformanceCase of redisConformanceCases) {
+  test(`fake redis conformance: ${conformanceCase.name}`, async () => {
+    const redis = createFakeRedis();
+    await conformanceCase.run(fakeRedisConformanceAdapter(
+      redis,
+      `fake-conformance:${conformanceCase.id}`
+    ));
+  });
+}
 
 test("fake redis client records batched hash reads", async () => {
   const redis = createFakeRedis();
@@ -275,7 +316,7 @@ test("fake redis scan paginates matching keys", async () => {
   assert.deepEqual(second, ["0", ["auth:token:c"]]);
 });
 
-test("fake redis multi can inject watch conflicts", async () => {
+test("fake redis multi injects watch conflicts", async () => {
   const redis = createFakeRedis();
   redis.execFailures = 1;
 

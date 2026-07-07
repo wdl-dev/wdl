@@ -32,7 +32,7 @@ import {
 
 setupIntegrationSuite();
 
-test("Durable Object owner loss can be taken over without losing committed SQLite state", async () => {
+test("Durable Object takeover preserves committed SQLite state after owner loss", async () => {
   const ns = uniqueNs("do-owner-loss");
   const version = await deployAndPromote(ns, "counter", {
     mainModule: "worker.js",

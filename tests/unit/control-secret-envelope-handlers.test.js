@@ -467,7 +467,7 @@ test("namespace secret DELETE checks env revealed by removing a namespace secret
   });
 });
 
-test("namespace secret DELETE can remove a corrupt target envelope", async () => {
+test("namespace secret DELETE removes a corrupt target envelope", async () => {
   await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
     redis.hashes.set("secrets:demo", { TOKEN: "WDL-ENC:not-json" });
   }, async (redis) => {
@@ -997,7 +997,7 @@ test("worker secret PUT checks retry source under its retained version", async (
   });
 });
 
-test("worker secret DELETE can remove a corrupt target envelope", async () => {
+test("worker secret DELETE removes a corrupt target envelope", async () => {
   const state = workerSecretState;
   await withWorkerSecretRedis(state, (redis) => {
     redis.hashes.set("secrets:demo:api", { TOKEN: "WDL-ENC:not-json" });

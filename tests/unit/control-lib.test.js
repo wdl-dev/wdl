@@ -266,7 +266,7 @@ test("normalizeModule: unknown shape throws", () => {
   assert.throws(() => normalizeModule(42), /Unrecognized module value/);
 });
 
-test("prepareBundle: happy path", () => {
+test("prepareBundle: normalizes a minimal module bundle", () => {
   const { meta, normalized } = prepareBundle(
     "worker.js",
     { "worker.js": "export default {}", "data.json": { json: { k: 1 } } },
@@ -342,7 +342,7 @@ test("prepareBundle: Object.prototype binding types are unsupported", () => {
   );
 });
 
-test("prepareBundle: kv binding requires CF-style id (rejects ':', so 'foo:v' / key='bar' can't alias 'foo' / key='v:bar')", () => {
+test("prepareBundle: kv binding requires CF-style id and does not alias colon-separated ids", () => {
   assert.throws(
     () => prepareBundle("w.js", { "w.js": "x" }, { bindings: { KV1: { type: "kv" } } }),
     /kv id must match/
@@ -2301,7 +2301,7 @@ test("linkServiceBinding: target without exports does not expose named entrypoin
   );
 });
 
-test("linkServiceBinding: same-ns default entrypoint can bind target without exports", async () => {
+test("linkServiceBinding: same-ns default entrypoint binds target without exports", async () => {
   const spec = { type: "service", service: "neighbor" };
   await linkServiceBinding({
     callerNs: "caller", callerName: "c", bindingName: "T",

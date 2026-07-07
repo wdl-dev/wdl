@@ -246,7 +246,7 @@ test("gateway-held Durable Object WebSocket proactively reconnects backend for s
   }
 });
 
-test("Durable Object hibernation WebSocket API works through the gateway-held path", async () => {
+test("Durable Object hibernation WebSocket API round-trips through the gateway-held path", async () => {
   const ns = uniqueNs("do-ws-hibernate-api");
   await deployAndPromote(ns, "chat", {
     mainModule: "worker.js",

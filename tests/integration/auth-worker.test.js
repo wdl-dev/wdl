@@ -128,7 +128,7 @@ test("issue → verify → revoke round-trip on a tenant ns", async () => {
   assert.equal(whoami.status, 401);
 });
 
-test("token-issuer can delegated-issue a tenant ns token from server template", async () => {
+test("token-issuer creates a delegated tenant ns token from server template", async () => {
   const bootstrapDelegated = await adminPost("/auth/delegated-tokens", {
     template: "wdl-chat-ns-pool",
   });
@@ -312,7 +312,7 @@ test("revoke(\"bootstrap\") → 403", async () => {
   assert.equal(r.json.error, "bootstrap_protected");
 });
 
-test("list returns metadata (no plaintext); includes bootstrap; can filter by ns", async () => {
+test("list returns metadata without plaintext and filters by namespace", async () => {
   const ns = uniqueNs("auth-list");
   const issued = await adminPost("/auth/tokens", { ns, label: "first" });
   assert.equal(issued.status, 201);
@@ -378,7 +378,7 @@ test("ns token cannot reach ops endpoints (/reload, /auth/*, POST /hosts, reserv
   }
 });
 
-test("ns token CAN read GET /ns/<own>/hosts (diagnostic)", async () => {
+test("ns token reads GET /ns/<own>/hosts diagnostic endpoint", async () => {
   const owned = uniqueNs("auth-ns-diag");
   const issued = await adminPost("/auth/tokens", { ns: owned });
   const tok = issued.json.token;

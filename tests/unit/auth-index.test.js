@@ -312,7 +312,7 @@ test("verify: verify_threw when Redis throws mid-flight", async () => {
 
 // --- verify: outcome split ↔ log level mapping ------------------------------
 
-test("verify: ok path → outcome=ok, log level=info", async () => {
+test("verify: valid token emits outcome=ok and info log", async () => {
   const { auth, authLib } = await freshAuth();
 
   const plaintext = "ok-token-plaintext";

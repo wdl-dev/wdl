@@ -178,7 +178,7 @@ test("pattern branch: promote invalidates gateway cache (next request sees new v
   assert.equal(res.json().tag, "v2");
 });
 
-test("subdomain branch still works untouched", async () => {
+test("subdomain routing dispatches without custom-host branch", async () => {
   const ns = uniqueNs("gw-subdomain");
   await deployAndPromote(ns, "hello", {
     code: `export default { fetch() { return new Response("hello-subdomain"); } };`,

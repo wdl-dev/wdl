@@ -472,7 +472,7 @@ test("D1 graceful shutdown drains owned databases before container stop", async 
   }
 });
 
-test("D1 can force takeover an expired owner after probe failure", async () => {
+test("D1 expired owner takeover succeeds after probe failure", async () => {
   useD1MultiRuntime();
 
   const ns = uniqueNs("d1takeover");
@@ -507,7 +507,7 @@ test("D1 can force takeover an expired owner after probe failure", async () => {
   assert.ok(owner.generation > 42);
 });
 
-test("D1 can rebalance an owned database to another runtime task", async () => {
+test("D1 owned database rebalances to another runtime task", async () => {
   useD1MultiRuntime();
 
   const ns = uniqueNs("d1rebalance");

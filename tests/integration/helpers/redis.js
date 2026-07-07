@@ -1,6 +1,6 @@
 // Typed Redis CLI wrappers for integration tests. Every command goes through
 // composeExec("redis", ...) and returns a parsed value.
-// Raw strings from redis-cli are trimmed before returning.
+// Single-value raw strings from redis-cli are trimmed before returning.
 
 import { composeExec } from "./compose.js";
 import { parseJsonText } from "./json-payload.js";
@@ -84,6 +84,17 @@ export function redisHGet(key, field, options = {}) {
   return val === "" ? null : val;
 }
 
+/** @param {string} key @param {string[]} fields @param {{ db?: number }} [options] @returns {Array<string | null>} */
+export function redisHMGet(key, fields, options = {}) {
+  if (fields.length === 0) return [];
+  const dbArgs = options.db == null ? "" : `-n ${options.db} `;
+  const args = fields.map(shellQuote).join(" ");
+  const out = composeExec("redis", `redis-cli ${dbArgs}--raw HMGET ${shellQuote(key)} ${args}`);
+  // Preserve empty lines: redis-cli --raw renders HMGET nil slots as blanks.
+  const text = out.endsWith("\n") ? out.slice(0, -1) : out;
+  return text.split("\n").map((value) => value === "" ? null : value);
+}
+
 /** @param {string} key @param {string} field @param {{ db?: number, label?: string }} [options] @returns {any} */
 export function redisHGetJson(key, field, options = {}) {
   const val = redisHGet(key, field, options);
@@ -97,9 +108,9 @@ export function redisHSet(key, fields, options = {}) {
   redisCommand(`HSET ${shellQuote(key)} ${args}`, options);
 }
 
-/** @param {string} key @param {string[]} fields @param {{ db?: number }} [options] */
+/** @param {string} key @param {string[]} fields @param {{ db?: number }} [options] @returns {number} */
 export function redisHDel(key, fields, options = {}) {
-  redisCommand(`HDEL ${shellQuote(key)} ${fields.map(shellQuote).join(" ")}`, options);
+  return Number(redisCommand(`HDEL ${shellQuote(key)} ${fields.map(shellQuote).join(" ")}`, options));
 }
 
 /** @param {string} key @param {{ db?: number }} [options] @returns {string[]} */
@@ -231,9 +242,20 @@ export function redisExpireTime(key, options = {}) {
   return Number(redisCommand(`EXPIRETIME ${shellQuote(key)}`, options));
 }
 
+/** @param {string} key @param {number} unixSeconds @param {{ db?: number }} [options] @returns {boolean} */
+export function redisExpireAt(key, unixSeconds, options = {}) {
+  return redisCommand(`EXPIREAT ${shellQuote(key)} ${unixSeconds}`, options) === "1";
+}
+
 /** @param {string} key @param {string} member @param {{ db?: number }} [options] */
 export function redisSIsMember(key, member, options = {}) {
   return redisCommand(`SISMEMBER ${shellQuote(key)} ${shellQuote(member)}`, options) === "1";
+}
+
+/** @param {string} src @param {string} dst @param {{ db?: number, replace?: boolean }} [options] @returns {number} */
+export function redisCopy(src, dst, options = {}) {
+  const replace = options.replace ? " REPLACE" : "";
+  return Number(redisCommand(`COPY ${shellQuote(src)} ${shellQuote(dst)}${replace}`, options));
 }
 
 export function redisFlushAll() {

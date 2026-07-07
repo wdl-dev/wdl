@@ -391,7 +391,7 @@ test("worker env budget checks retained-version binding env injections", async (
   );
 });
 
-test("worker env budget can estimate a source bundle under a future version string", async () => {
+test("worker env budget estimates a source bundle under a future version string", async () => {
   const baseMeta = {
     vars: { PAD: "" },
     workflows: [{
@@ -496,7 +496,7 @@ test("worker env budget fails closed when retained bundle metadata is missing", 
   );
 });
 
-test("worker env budget can surface missing retained bundles as watch retry", async () => {
+test("worker env budget surfaces missing retained bundles as watch retry", async () => {
   const redis = {
     /** @param {string} key @param {string} field */
     async hGet(key, field) {

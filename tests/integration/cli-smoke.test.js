@@ -16,7 +16,7 @@ import {
 
 setupIntegrationSuite();
 
-test("wdl CLI smoke: deploy, workers, secrets, and delete lifecycle", async () => {
+test("wdl CLI exercises deploy, workers, secrets, and delete lifecycle", async () => {
   const ns = uniqueNs("wdl-smoke");
 
   const deploy = runWdlCli(["deploy", "test-workers/kv-demo", "--ns", ns]);
@@ -85,7 +85,7 @@ test("wdl CLI smoke: deploy, workers, secrets, and delete lifecycle", async () =
   assert.match(workersAfterDelete.stdout, /^\(no workers\)$/m);
 });
 
-test("wdl CLI smoke: d1 create, migrations, execute, deploy, and delete", async () => {
+test("wdl CLI exercises D1 create, migrations, execute, deploy, and delete", async () => {
   const ns = uniqueNs("wdl-d1");
 
   await withTempDir("wdl-d1-cli-", async (project) => {

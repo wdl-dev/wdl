@@ -187,7 +187,7 @@ function hostFetch(host, pathWithQuery) {
   });
 }
 
-test("__system__ worker can dial redis:6379 via cloudflare:sockets connect()", async () => {
+test("__system__ worker reaches redis:6379 via cloudflare:sockets connect()", async () => {
   // Reserved-ns subdomains 404 at gateway; __system__ reaches loaded
   // workers via pattern routing (see ROUTES_ALLOWED_RESERVED_NS).
   const host = `${uniqueNs("sys").replaceAll("-", "")}.test`;

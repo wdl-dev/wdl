@@ -388,7 +388,7 @@ test("ns token deploy to __platform__ → 403 ns_not_in_scope (was reserved_ns_r
   assert.equal(r.json.error, "ns_not_in_scope");
 });
 
-test("ns token deploy to __system__ → 403 reserved_ns_requires_ops (sanity, unchanged from old)", async () => {
+test("ns token deploy to __system__ returns 403 reserved_ns_requires_ops", async () => {
   // Red line 1 still fires for non-PLATFORM_TIER reserved ns: __system__.
   const ns = uniqueNs("ns-sys-deny");
   const issued = await adminPost("/auth/tokens", { kind: "ns", ns });

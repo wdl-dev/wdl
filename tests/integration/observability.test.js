@@ -142,7 +142,7 @@ test("gateway /healthz reports subscriber + cache state", async () => {
   assert.equal(typeof body.route_cache_size, "number");
 });
 
-test("user-runtime exposes a basic internal health check (SERVICE_NAME binding surfaced in response body)", async () => {
+test("user-runtime internal health check returns SERVICE_NAME binding", async () => {
   const body = responseJson({ body: runtimeInternalGet("/_healthz") });
   assert.deepEqual(body, {
     ok: true,

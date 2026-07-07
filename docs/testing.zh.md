@@ -153,6 +153,7 @@ npm install -g @wdl-dev/cli@1.3.1
 | Unit runtime R2 binding module graph | `tests/helpers/load-runtime-r2-binding.js` 的 `makeR2Bucket(...)` 和 fetch installer | 用于 `runtime/bindings/r2.js` host-surface 测试，不在每个文件里重建 R2 module replacement graph。 |
 | Unit D1/DO owner-client module graph | `tests/helpers/load-d1-owner-client.js` 和 `tests/helpers/load-do-owner-client.js` 的 `loadD1OwnerClient(...)` / `loadDoOwnerClient(...)` | 用于 owner forwarding client 测试，不在每个文件里重建 state、protocol、internal-auth 和 owner-forwarder replacement graph。 |
 | Unit auth entrypoint harness state | `tests/helpers/load-auth-index.js` 的 `authMockState(...)`、`authLogs(...)` 和 `lastAuthLog(...)` | 测试不直接读写 `globalThis.__authMockState`；该 global 只是 harness 内联 module mock 的私有存储。 |
+| Unit/integration Redis command parity | `tests/helpers/redis-conformance-cases.js` 的 `redisConformanceCases` | fake Redis 和真实 integration Redis wrapper 必须对齐某个 command 语义时，加共享 case。运行 `tests/unit/fake-redis.test.js` 和聚焦 Redis conformance integration 文件。 |
 | 记录 mocked `fetch` 调用 | `tests/helpers/mock-fetch.js` 的 `makeRecordingFetch(...)` / `withRecordingFetch(...)` | 测试需要自定义 call record shape 时使用 `capture`。 |
 | 临时替换 global 或 property | `tests/helpers/mock-global.js` 的 `withMockedGlobal(...)` / `withMockedProperty(...)` | 只有文件拥有 before/after cleanup 时才用 install-style helper。 |
 | 捕获 console 或 stream 输出 | `tests/helpers/output-capture.js` 的 `withCapturedConsole(...)`、`installConsoleMethodCapture(...)` 或 `installStreamWriteCapture(...)` | 测试文件不要直接替换 `console.*` 或 `process.stderr/stdout.write`。 |

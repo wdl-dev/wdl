@@ -262,7 +262,7 @@ test("logs tail idle-pull watchdog closes abandoned streams before max-session",
   await reader.cancel().catch(() => {});
 });
 
-test("logs tail idle-pull watchdog can close before the first client read", async () => {
+test("logs tail idle-pull watchdog closes before the first client read", async () => {
   resetTailState();
   const { handle } = await loadLogsTailHandler({ keepaliveMs: 5 });
   /** @type {Promise<unknown>[]} */

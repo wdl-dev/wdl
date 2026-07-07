@@ -246,7 +246,7 @@ test("admin host does not route runtime internal endpoint names to runtime", asy
   });
 });
 
-test("subdomain data plane can use paths reserved on the runtime internal socket", async () => {
+test("subdomain data plane uses paths reserved on the runtime internal socket", async () => {
   await deployAndPromote("gwns-internal", "app", {
     code: `export default {
       fetch() { return new Response("user fetch"); },

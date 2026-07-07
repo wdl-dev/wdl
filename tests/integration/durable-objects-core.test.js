@@ -57,7 +57,7 @@ test("worker Durable Object binding routes through do-runtime and preserves obje
   });
 });
 
-test("Durable Object classes can use ordinary Worker bindings", async () => {
+test("Durable Object classes receive ordinary Worker bindings", async () => {
   const ns = uniqueNs("do-bindings");
   await deployAndPromote(ns, "rooms", {
     mainModule: "worker.js",

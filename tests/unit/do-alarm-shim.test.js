@@ -391,7 +391,7 @@ test("DO alarm shim: failed alarm keeps row in flight and hides getAlarm", async
   assert.equal(await wrapped.getAlarm(), null);
 });
 
-test("DO alarm shim: retry dispatch can reclaim an already in-flight row", async () => {
+test("DO alarm shim: retry dispatch reclaims an already in-flight row", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   const { storage, state } = makeDoAlarmStorage({

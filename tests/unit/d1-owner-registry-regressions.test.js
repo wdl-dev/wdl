@@ -158,7 +158,7 @@ test("D1 owner registry: lost owner state cannot validate an old owner from anot
   );
 });
 
-test("D1 owner registry: same task can reclaim generation one after owner state loss", async () => {
+test("D1 owner registry: same task reclaims generation one after owner state loss", async () => {
   const identity = { namespace: "tenant-a", databaseId: "db1", dbKey: "tenant-a:db1", slot: 7 };
   D1_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "task-b:8787" };
 

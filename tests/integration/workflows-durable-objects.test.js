@@ -18,7 +18,7 @@ const DO_WORKFLOW_WORKER = readFileSync(
   "utf8"
 );
 
-test("Durable Object classes can create same-worker workflow instances", async () => {
+test("Durable Object classes create same-worker workflow instances", async () => {
   const ns = uniqueNs("wfdo");
   await deployAndPromote(ns, "shop", {
     mainModule: "worker.js",

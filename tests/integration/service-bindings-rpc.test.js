@@ -148,7 +148,7 @@ test("named entrypoint: each concurrent RPC call receives a fresh class instance
   }
 });
 
-test("named entrypoint: default fetch still works when entrypoint omitted", async () => {
+test("named entrypoint: omitted entrypoint dispatches default fetch", async () => {
   const ns = uniqueNs("sb");
   await deployAndPromote(ns, "target", { code: MULTI_ENTRY_TARGET });
   await deployAndPromote(ns, "caller", {
@@ -163,7 +163,7 @@ test("named entrypoint: default fetch still works when entrypoint omitted", asyn
   assert.equal(body.via, "default-fetch");
 });
 
-test("default fetch via service binding works for no-D1/R2 function-default targets", async () => {
+test("default fetch via service binding reaches function-default targets without D1/R2", async () => {
   const ns = uniqueNs("sbfn");
   await deployAndPromote(ns, "target", {
     code: `

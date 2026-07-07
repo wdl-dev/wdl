@@ -303,7 +303,7 @@ test("list ignores forged cursor overflow outside the current binding page", asy
   assert.equal(page.list_complete, true);
 });
 
-test("list can include metadata without fetching values", async () => {
+test("KV list includes metadata without fetching values", async () => {
   await setup("kvns-list-meta");
   await call("kvns-list-meta", {
     op: "put",

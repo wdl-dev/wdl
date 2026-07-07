@@ -40,7 +40,7 @@ function counterDelta(before, after, key) {
   return (after.get(key) ?? 0) - (before.get(key) ?? 0);
 }
 
-test("D1 binding works through loaded worker and is shared by same-namespace workers", async () => {
+test("D1 binding shares one database across same-namespace loaded workers", async () => {
   const ns = uniqueNs("d1binding");
   await setup(ns, "writer");
   await setup(ns, "reader");

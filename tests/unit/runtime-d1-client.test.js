@@ -368,7 +368,7 @@ test("D1 local client: sends configured request id to query bridge", async () =>
   assert.equal(calls[0].requestId, "rid-d1");
 });
 
-test("D1 local client: can resolve request id lazily for class entrypoint wrappers", async () => {
+test("D1 local client: resolves request id lazily for class entrypoint wrappers", async () => {
   let requestId = "rid-first";
   const { db, calls } = makeLocalDb(null, { requestIdProvider: () => requestId });
 

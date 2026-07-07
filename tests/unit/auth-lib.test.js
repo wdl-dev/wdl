@@ -890,9 +890,9 @@ test("actionCategory: type-bad input → unknown", () => {
   }
 });
 
-// --- ROLES / KNOWN_ACTIONS sanity (drift tripwires) -------------------------
+// --- ROLES / KNOWN_ACTIONS contract drift tripwires -------------------------
 
-test("ROLES sanity: every literal action in ROLES.actions ∈ KNOWN_ACTIONS", () => {
+test("ROLES contract: every literal action in ROLES.actions is in KNOWN_ACTIONS", () => {
   for (const [roleName, role] of Object.entries(ROLES)) {
     for (const pat of role.actions) {
       if (pat === "*" || pat.endsWith(".*")) continue;
@@ -902,7 +902,7 @@ test("ROLES sanity: every literal action in ROLES.actions ∈ KNOWN_ACTIONS", ()
   }
 });
 
-test("ROLES sanity: every (namespaces, boundNsKind) is one of three legal forms", () => {
+test("ROLES contract: every namespaces and boundNsKind pair uses a legal form", () => {
   const PLACEHOLDER = PRINCIPAL_NS_PLACEHOLDER;
   for (const [roleName, role] of Object.entries(ROLES)) {
     const ns = JSON.stringify(role.namespaces);
@@ -916,7 +916,7 @@ test("ROLES sanity: every (namespaces, boundNsKind) is one of three legal forms"
   }
 });
 
-test("KNOWN_ACTIONS sanity: every member is hit by some role action OR is hard-policy ops-only", () => {
+test("KNOWN_ACTIONS contract: every member is role-covered or hard-policy ops-only", () => {
   // Either matched by a role's actions, self-introspection hard-policy,
   // auth.token.* / system.* (red line 4/5 owns it), OR host.write
   // (KNOWN_ACTIONS lists it because the classifier emits it; current
@@ -939,7 +939,7 @@ test("KNOWN_ACTIONS sanity: every member is hit by some role action OR is hard-p
   }
 });
 
-test("ROLES sanity: platform admin action set tracks ns except tenant-host read", () => {
+test("ROLES contract: platform admin action set tracks ns except tenant-host read", () => {
   const nsActions = new Set(ROLES.ns.actions);
   const platformActions = new Set(ROLES.platform.actions);
   nsActions.delete("host.read");

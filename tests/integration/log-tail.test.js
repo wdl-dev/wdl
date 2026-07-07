@@ -502,7 +502,7 @@ test("wdl tail: reserved ns rejected with 404 after auth (ops principal)", async
   assert.equal(responseJson(reserved).error, "not_found");
 });
 
-test("wdl tail: platform token can open its bound platform-tier namespace", async () => {
+test("wdl tail: platform token opens its bound platform-tier namespace", async () => {
   const issued = await adminFetch("/auth/tokens", {
     method: "POST",
     body: JSON.stringify({ kind: "platform", ns: "__platform__", label: "tail-platform" }),

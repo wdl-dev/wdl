@@ -87,7 +87,7 @@ function hostFetch(host, pathWithQuery) {
   });
 }
 
-test("__system__ worker can reach control's TCP socket (privileged outbound)", async () => {
+test("__system__ worker reaches control's TCP socket through privileged outbound", async () => {
   const host = `${uniqueNs("sys").replaceAll("-", "")}.test`;
   await deployCaller(host, "/caller/*");
 
