@@ -394,6 +394,40 @@ test("scheduler: stranded ref (slotMs < currentSlot) is advanced without firing 
   assert.equal(res.body, "null", "stranded ref must NOT invoke scheduled()");
 });
 
+test("scheduler: invalid persisted cron ref is removed without firing", async () => {
+  const ns = uniqueNs("cronbadnext");
+  const cron = "0 0 1 1 *";
+  const d = await adminPost(`/ns/${ns}/worker/w/deploy`, {
+    code: SCHEDULED_RECORDER,
+    crons: [{ cron, timezone: "UTC" }],
+  });
+  assertStatus(d, 201, "invalid persisted cron fixture deploy");
+  const p = await adminPost(`/ns/${ns}/worker/w/promote`, { version: d.json.version });
+  assertStatus(p, 200, "invalid persisted cron fixture promote");
+
+  const id = cronId(cron, "UTC");
+  const entry = cronHashJsonField(ns, id);
+  const ref = `${ns}:w:${id}:${entry.gen}`;
+  redisHSet(`crons:${ns}:w`, {
+    [id]: JSON.stringify({ ...entry, timezone: "Mars/Olympus" }),
+  });
+
+  await waitForCurrentSlotFixtureWindow();
+  const currentSlot = Math.floor(Date.now() / 60_000) * 60_000;
+  redisSAdd(`cron-slot:${currentSlot}`, ref);
+  composeRestart("scheduler");
+
+  await waitUntil("scheduler to remove invalid persisted cron ref", async () => {
+    return !redisSMembers(`cron-slot:${currentSlot}`).includes(ref);
+  }, { timeoutMs: 15_000, intervalMs: 500 });
+
+  const res = runtimeInternalGetWithHeaders("/", {
+    "x-worker-id": gatewayWorkerId(ns, "w", d.json.version),
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body, "null", "invalid persisted cron must NOT invoke scheduled()");
+});
+
 test("scheduler: ref with mismatched gen is SREM'd from bucket without firing", async () => {
   const ns = uniqueNs("schstale");
   await deployAndPromoteWithCrons(ns, "w", [

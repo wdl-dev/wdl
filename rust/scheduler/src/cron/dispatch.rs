@@ -7,7 +7,7 @@ use crate::{
     redis_fields_with_error, scheduler_fields_with_error,
 };
 
-use super::reference::{RefVerdict, classify_ref, parse_ref};
+use super::reference::{CronEntry, RefVerdict, classify_ref, parse_ref};
 use super::slot::{lease_key, next_fire_ms, slot_key, slot_ms_for};
 
 const CRON_CLAIM_ADVANCE_SCRIPT: &str = r#"
@@ -68,6 +68,30 @@ async fn remove_ref_from_slot(
         .with_conn(async |mut conn| conn.srem(key, reference).await)
         .await?;
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CronDispatchDecision {
+    RemoveInvalidRef { error_message: String },
+    AdvanceOnly { next_slot: i64 },
+    Fire { next_slot: i64 },
+}
+
+fn cron_dispatch_decision(entry: &CronEntry, slot_ms: i64, tick_now: i64) -> CronDispatchDecision {
+    let next_fire = match next_fire_ms(&entry.cron, &entry.timezone, tick_now) {
+        Ok(ms) => ms,
+        Err(err) => {
+            return CronDispatchDecision::RemoveInvalidRef {
+                error_message: err.message,
+            };
+        }
+    };
+    let next_slot = slot_ms_for(next_fire);
+    if slot_ms < slot_ms_for(tick_now) {
+        CronDispatchDecision::AdvanceOnly { next_slot }
+    } else {
+        CronDispatchDecision::Fire { next_slot }
+    }
 }
 
 async fn process_ref(
@@ -139,10 +163,9 @@ async fn process_ref(
     //       moved to next_slot, giving at-most-once per slot.
     //   (c) stranded refs (slot_ms < current_slot) advance but do NOT fire
     //       — preserves CF's "skip missed after outage" semantic.
-    let current_slot = slot_ms_for(tick_now);
-    let next_fire = match next_fire_ms(&entry.cron, &entry.timezone, tick_now) {
-        Ok(ms) => ms,
-        Err(err) => {
+    let decision = cron_dispatch_decision(&entry, slot_ms, tick_now);
+    let next_slot = match &decision {
+        CronDispatchDecision::RemoveInvalidRef { error_message } => {
             state
                 .metrics
                 .increment("cron_stale_refs_cleaned", &[("service", SERVICE)], 1.0);
@@ -157,14 +180,15 @@ async fn process_ref(
                     "gen": parts.r#gen,
                     "slot": slot_ms,
                     "reason": "next_fire_failed",
-                    "error_message": err.message,
+                    "error_message": error_message,
                 }),
             );
             remove_ref_from_slot(&state, slot_ms, &reference).await?;
             return Ok(());
         }
+        CronDispatchDecision::AdvanceOnly { next_slot }
+        | CronDispatchDecision::Fire { next_slot } => *next_slot,
     };
-    let next_slot = slot_ms_for(next_fire);
     if !claim_and_advance_ref(&state, &reference, slot_ms, next_slot).await? {
         state.metrics.increment(
             "cron_fires",
@@ -185,7 +209,7 @@ async fn process_ref(
         return Ok(());
     }
 
-    if slot_ms < current_slot {
+    if matches!(decision, CronDispatchDecision::AdvanceOnly { .. }) {
         state.metrics.increment(
             "cron_fires",
             &[("service", SERVICE), ("outcome", "skipped_stale")],
@@ -201,7 +225,7 @@ async fn process_ref(
                 "cron_id": parts.cron_id,
                 "from_slot": slot_ms,
                 "to_slot": next_slot,
-                "lag_ms": current_slot - slot_ms,
+                "lag_ms": slot_ms_for(tick_now) - slot_ms,
             }),
         );
         return Ok(());
@@ -314,40 +338,45 @@ pub(crate) async fn tick(state: AppState) -> SchedulerResult<()> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn invalid_next_fire_refs_are_removed_instead_of_bubbling_error() {
-        let source = include_str!("dispatch.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("dispatch source must include production section");
+    use super::*;
 
-        assert!(production_source.contains(
-            "let next_fire = match next_fire_ms(&entry.cron, &entry.timezone, tick_now)"
-        ));
-        assert!(
-            !production_source.contains("next_fire_ms(&entry.cron, &entry.timezone, tick_now)?")
-        );
-        assert!(production_source.contains(r#""reason": "next_fire_failed""#));
-        assert!(
-            production_source.contains("remove_ref_from_slot(&state, slot_ms, &reference).await?")
-        );
+    fn cron_entry(cron: &str) -> CronEntry {
+        CronEntry {
+            cron: cron.to_string(),
+            timezone: "UTC".to_string(),
+            r#gen: 1,
+        }
     }
 
     #[test]
-    fn previous_slot_refs_advance_without_runtime_fire() {
-        let source = include_str!("dispatch.rs");
-        let claim_pos = source
-            .find("claim_and_advance_ref(&state, &reference, slot_ms, next_slot)")
-            .expect("cron dispatch must claim and advance refs before firing");
-        let stale_skip_pos = source
-            .find("if slot_ms < current_slot")
-            .expect("cron dispatch must skip firing stale lookback slots");
-        let runtime_post_pos = source
-            .find("post_runtime(")
-            .expect("cron dispatch must post runtime after stale-slot checks");
+    fn invalid_next_fire_returns_remove_ref_decision() {
+        let decision = cron_dispatch_decision(
+            &cron_entry("not a cron"),
+            1_700_000_000_000,
+            1_700_000_000_000,
+        );
 
-        assert!(claim_pos < stale_skip_pos);
-        assert!(stale_skip_pos < runtime_post_pos);
+        match decision {
+            CronDispatchDecision::RemoveInvalidRef { error_message } => {
+                assert!(!error_message.is_empty());
+            }
+            other => panic!("expected invalid next-fire drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn previous_slot_returns_advance_only_decision() {
+        let tick_now = 1_700_000_000_000;
+        let current_slot = slot_ms_for(tick_now);
+        let entry = cron_entry("*/5 * * * *");
+
+        assert!(matches!(
+            cron_dispatch_decision(&entry, current_slot - 60_000, tick_now),
+            CronDispatchDecision::AdvanceOnly { .. }
+        ));
+        assert!(matches!(
+            cron_dispatch_decision(&entry, current_slot, tick_now),
+            CronDispatchDecision::Fire { .. }
+        ));
     }
 }

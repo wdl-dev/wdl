@@ -58,6 +58,9 @@ const MAX_COMMIT_ATTEMPTS = 5;
 const DEPLOY_JSON_BODY_MAX_BYTES = 32 * 1024 * 1024;
 const DEPLOY_ASSET_UPLOAD_CONCURRENCY = 8;
 
+// Deploy keeps thin local wrappers even though they mirror ControlAbort-like
+// fields: commit aborts need cleanup/log handling, while request errors are
+// pre-commit shape rejections.
 class DeployAbort extends ControlAbort {}
 
 /**

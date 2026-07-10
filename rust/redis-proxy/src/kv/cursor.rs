@@ -75,18 +75,47 @@ pub(crate) async fn existing_cursor_overflow_fields(
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
+    let pipe = existing_cursor_overflow_fields_pipeline(&hash_key, &candidates);
     let exists: Vec<i64> = state
-        .with_redis(async |mut conn| {
-            let mut pipe = redis::pipe();
-            for field in &candidates {
-                pipe.cmd("HEXISTS").arg(&hash_key).arg(field);
-            }
-            pipe.query_async(&mut conn).await
-        })
+        .with_redis(async |mut conn| pipe.query_async(&mut conn).await)
         .await?;
     Ok(candidates
         .into_iter()
         .zip(exists)
         .filter_map(|(key, exists)| (exists > 0).then_some(key))
         .collect())
+}
+
+fn existing_cursor_overflow_fields_pipeline(
+    hash_key: &str,
+    candidates: &[String],
+) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    for field in candidates {
+        pipe.cmd("HEXISTS").arg(hash_key).arg(field);
+    }
+    pipe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::parse_packed_commands;
+
+    #[test]
+    fn existing_cursor_overflow_fields_pipeline_only_probes_existence() {
+        let candidates = vec!["v:first".to_string(), "v:second".to_string()];
+        let commands = parse_packed_commands(
+            &existing_cursor_overflow_fields_pipeline("kvh:tenant:store:b:1", &candidates)
+                .get_packed_pipeline(),
+        );
+
+        assert_eq!(
+            commands,
+            [
+                ["HEXISTS", "kvh:tenant:store:b:1", "v:first"],
+                ["HEXISTS", "kvh:tenant:store:b:1", "v:second"],
+            ]
+        );
+    }
 }

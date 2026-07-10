@@ -72,6 +72,8 @@ function hostDeclarationsKey(host) {
  * @typedef {{ hGet: (key: string, field: string) => Promise<string | null | undefined>, incr: (key: string) => Promise<number>, session: <T>(fn: (iso: RedisIso) => Promise<T>) => Promise<T> }} RedisClient
  */
 
+// Routing owns promotion/route-specific machine codes. Keep this separate from
+// ControlAbort so pure routing helpers do not inherit handler abort semantics.
 export class RoutingError extends Error {
   /** @param {number} status @param {string} code @param {string} message @param {Record<string, unknown>} [details] */
   constructor(status, code, message, details = {}) {

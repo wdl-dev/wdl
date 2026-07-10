@@ -166,12 +166,14 @@ fn meta_field(key: &str) -> String {
     format!("{META_FIELD_PREFIX}{key}")
 }
 
+type GroupedHmgetCommand = (String, Vec<usize>, Vec<String>);
+
 fn grouped_hmget_commands(
     ns: &str,
     id: &str,
     keys: &[String],
     field_prefix: &str,
-) -> Vec<(String, Vec<usize>, Vec<String>)> {
+) -> Vec<GroupedHmgetCommand> {
     grouped_hmget_commands_for_indices(ns, id, keys, 0..keys.len(), field_prefix)
 }
 
@@ -181,7 +183,7 @@ fn grouped_hmget_commands_for_indices(
     keys: &[String],
     indices: impl IntoIterator<Item = usize>,
     field_prefix: &str,
-) -> Vec<(String, Vec<usize>, Vec<String>)> {
+) -> Vec<GroupedHmgetCommand> {
     let mut by_hash: HashMap<String, (Vec<usize>, Vec<String>)> = HashMap::new();
     for index in indices {
         let key = &keys[index];
@@ -255,22 +257,11 @@ fn parse_hmget_budget_reply(
     Ok((bytes, out))
 }
 
-async fn hmget_with_raw_byte_budget(
-    conn: &mut ConnectionManager,
-    total: &mut usize,
+fn hmget_with_raw_byte_budget_command(
     redis_key: &str,
+    remaining: usize,
     fields: &[String],
-) -> AppResult<Vec<Option<Vec<u8>>>> {
-    if fields.is_empty() {
-        return Ok(Vec::new());
-    }
-    // The Lua preflight is the Redis-side atomic budget gate: HSTRLEN and HMGET
-    // run in one script, so over-budget batches fail before payload bytes leave
-    // Redis. Callers keep a separate actual-byte counter over returned values as
-    // defense-in-depth without double-counting stable data against the budget.
-    let remaining = KV_BATCH_RAW_BYTES_MAX
-        .checked_sub(*total)
-        .ok_or_else(raw_bytes_too_large)?;
+) -> redis::Cmd {
     let mut cmd = redis::cmd("EVAL");
     cmd.arg(HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT)
         .arg(1)
@@ -279,9 +270,128 @@ async fn hmget_with_raw_byte_budget(
     for field in fields {
         cmd.arg(field);
     }
-    let (bytes, values) = parse_hmget_budget_reply(cmd.query_async(conn).await?, fields.len())?;
-    add_batch_raw_bytes(total, bytes)?;
-    Ok(values)
+    cmd
+}
+
+async fn query_hmget_with_raw_byte_budget(
+    conn: &mut ConnectionManager,
+    redis_key: &str,
+    remaining: usize,
+    fields: &[String],
+) -> AppResult<(usize, Vec<Option<Vec<u8>>>)> {
+    if fields.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    // HSTRLEN and HMGET run in one Redis-side script, so an over-budget group
+    // is rejected before its payload bytes leave Redis.
+    let cmd = hmget_with_raw_byte_budget_command(redis_key, remaining, fields);
+    parse_hmget_budget_reply(cmd.query_async(conn).await?, fields.len())
+}
+
+#[derive(Default)]
+struct RawByteBudget {
+    preflight_bytes: usize,
+    actual_bytes: usize,
+}
+
+impl RawByteBudget {
+    fn remaining(&self) -> AppResult<usize> {
+        KV_BATCH_RAW_BYTES_MAX
+            .checked_sub(self.preflight_bytes)
+            .ok_or_else(raw_bytes_too_large)
+    }
+
+    fn record_preflight(&mut self, bytes: usize) -> AppResult<()> {
+        add_batch_raw_bytes(&mut self.preflight_bytes, bytes)
+    }
+
+    fn record_actual(&mut self, value: Option<&[u8]>) -> AppResult<()> {
+        if let Some(bytes) = value {
+            add_batch_raw_bytes(&mut self.actual_bytes, bytes.len())?;
+        }
+        Ok(())
+    }
+}
+
+struct GroupedHmgetRequest {
+    redis_key: String,
+    indices: Vec<usize>,
+    fields: Vec<String>,
+    remaining: usize,
+}
+
+struct GroupedFieldRead {
+    pending: std::vec::IntoIter<GroupedHmgetCommand>,
+    output: Vec<Option<Vec<u8>>>,
+}
+
+impl GroupedFieldRead {
+    fn new(commands: Vec<GroupedHmgetCommand>, output_len: usize) -> Self {
+        Self {
+            pending: commands.into_iter(),
+            output: vec![None; output_len],
+        }
+    }
+
+    fn next_request(&mut self, budget: &RawByteBudget) -> AppResult<Option<GroupedHmgetRequest>> {
+        let Some((redis_key, indices, fields)) = self.pending.next() else {
+            return Ok(None);
+        };
+        if indices.len() != fields.len() || indices.iter().any(|index| *index >= self.output.len())
+        {
+            return Err(AppError::internal_error("invalid grouped KV HMGET plan"));
+        }
+        Ok(Some(GroupedHmgetRequest {
+            redis_key,
+            indices,
+            fields,
+            remaining: budget.remaining()?,
+        }))
+    }
+
+    fn apply_response(
+        &mut self,
+        budget: &mut RawByteBudget,
+        request: GroupedHmgetRequest,
+        preflight_bytes: usize,
+        values: Vec<Option<Vec<u8>>>,
+    ) -> AppResult<()> {
+        if values.len() != request.indices.len() {
+            return Err(AppError::internal_error("invalid grouped KV HMGET reply"));
+        }
+        budget.record_preflight(preflight_bytes)?;
+        for (index, value) in request.indices.into_iter().zip(values) {
+            budget.record_actual(value.as_deref())?;
+            self.output[index] = value;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Vec<Option<Vec<u8>>> {
+        self.output
+    }
+}
+
+async fn load_grouped_fields_with_raw_byte_budget(
+    conn: &mut ConnectionManager,
+    commands: Vec<GroupedHmgetCommand>,
+    output_len: usize,
+    budget: &mut RawByteBudget,
+) -> AppResult<Vec<Option<Vec<u8>>>> {
+    // The preflight total limits transfer between groups; the separate actual
+    // total rechecks returned payloads before callers encode a response.
+    let mut read = GroupedFieldRead::new(commands, output_len);
+    while let Some(request) = read.next_request(budget)? {
+        let (preflight_bytes, values) = query_hmget_with_raw_byte_budget(
+            conn,
+            &request.redis_key,
+            request.remaining,
+            &request.fields,
+        )
+        .await?;
+        read.apply_response(budget, request, preflight_bytes, values)?;
+    }
+    Ok(read.finish())
 }
 
 pub(crate) fn kv_put_pipeline(
@@ -360,6 +470,12 @@ fn decode_metadata(bytes: Option<Vec<u8>>) -> AppResult<Option<Value>> {
         .transpose()
 }
 
+fn normalize_list_prefix(prefix: Option<String>) -> AppResult<String> {
+    let prefix = prefix.unwrap_or_default();
+    validate_kv_key(&prefix)?;
+    Ok(prefix)
+}
+
 pub(crate) fn escape_glob_literal(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -396,6 +512,7 @@ pub(crate) async fn kv_get(
     );
     response.headers_mut().insert(
         CONTENT_LENGTH,
+        // `usize::to_string()` is decimal ASCII, which is always a valid header value.
         HeaderValue::from_str(&len.to_string()).unwrap(),
     );
     Ok(response)
@@ -452,55 +569,48 @@ pub(crate) async fn kv_get_batch(
     let include_metadata = body.metadata.unwrap_or(false);
     let keys = body.keys;
     let mut conn = state.redis();
-    let mut preflight_raw_bytes = 0_usize;
-    let mut actual_raw_bytes = 0_usize;
-    let mut values: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
-    for (redis_key, indices, fields) in
-        grouped_hmget_commands(&q.ns, &q.id, &keys, VALUE_FIELD_PREFIX)
-    {
-        let batch =
-            hmget_with_raw_byte_budget(&mut conn, &mut preflight_raw_bytes, &redis_key, &fields)
-                .await?;
-        for (offset, value) in batch.into_iter().enumerate() {
-            if let Some(bytes) = value.as_ref() {
-                add_batch_raw_bytes(&mut actual_raw_bytes, bytes.len())?;
-            }
-            values[indices[offset]] = value;
-        }
-    }
+    let mut budget = RawByteBudget::default();
+    let value_commands = grouped_hmget_commands(&q.ns, &q.id, &keys, VALUE_FIELD_PREFIX);
+    let mut values = load_grouped_fields_with_raw_byte_budget(
+        &mut conn,
+        value_commands,
+        keys.len(),
+        &mut budget,
+    )
+    .await?;
     let mut metadata: Vec<Option<Value>> = vec![None; keys.len()];
     if include_metadata {
         let present_value_indices = values
             .iter()
             .enumerate()
-            .filter_map(|(index, value)| value.as_ref().map(|_| index));
-        for (redis_key, indices, fields) in grouped_hmget_commands_for_indices(
+            .filter_map(|(index, value)| value.as_ref().map(|_| index))
+            .collect::<Vec<_>>();
+        let metadata_commands = grouped_hmget_commands_for_indices(
             &q.ns,
             &q.id,
             &keys,
             present_value_indices,
             META_FIELD_PREFIX,
-        ) {
-            let batch = hmget_with_raw_byte_budget(
-                &mut conn,
-                &mut preflight_raw_bytes,
-                &redis_key,
-                &fields,
-            )
-            .await?;
-            for (offset, raw) in batch.into_iter().enumerate() {
-                let index = indices[offset];
-                if values[index].is_none() {
-                    continue;
-                }
-                if let Some(bytes) = raw.as_ref() {
-                    add_batch_raw_bytes(&mut actual_raw_bytes, bytes.len())?;
-                }
+        );
+        let raw_metadata = load_grouped_fields_with_raw_byte_budget(
+            &mut conn,
+            metadata_commands,
+            keys.len(),
+            &mut budget,
+        )
+        .await?;
+        for (index, raw) in raw_metadata.into_iter().enumerate() {
+            if values[index].is_some() {
                 metadata[index] = decode_metadata(raw)?;
             }
         }
     }
-    record_kv_value_bytes(state.metrics(), "get_batch", "raw_batch", actual_raw_bytes);
+    record_kv_value_bytes(
+        state.metrics(),
+        "get_batch",
+        "raw_batch",
+        budget.actual_bytes,
+    );
     let mut entries = Vec::with_capacity(keys.len());
     for (index, key) in keys.into_iter().enumerate() {
         let value = values[index].take();
@@ -586,8 +696,7 @@ pub(crate) async fn kv_list(
     q.validate_scope()?;
     let limit = normalize_list_limit(q.limit) as usize;
     let (mut bucket, mut scan_cursor, mut overflow) = decode_list_cursor(q.cursor)?;
-    let prefix = q.prefix.unwrap_or_default();
-    validate_kv_key(&prefix)?;
+    let prefix = normalize_list_prefix(q.prefix)?;
     let include_metadata = q.metadata.unwrap_or(false);
     let pattern = format!("{VALUE_FIELD_PREFIX}{}*", escape_glob_literal(&prefix));
     let mut raw_fields = Vec::new();
@@ -648,27 +757,25 @@ pub(crate) async fn kv_list(
         .collect::<AppResult<Vec<_>>>()?;
     let mut metadata = if include_metadata {
         let mut conn = state.redis();
-        let mut preflight_raw_bytes = 0_usize;
-        let mut actual_raw_bytes = 0_usize;
-        let mut values: Vec<Option<Value>> = vec![None; user_keys.len()];
-        for (redis_key, indices, fields) in
-            grouped_hmget_commands(&q.ns, &q.id, &user_keys, META_FIELD_PREFIX)
-        {
-            let batch = hmget_with_raw_byte_budget(
-                &mut conn,
-                &mut preflight_raw_bytes,
-                &redis_key,
-                &fields,
-            )
-            .await?;
-            for (offset, raw) in batch.into_iter().enumerate() {
-                if let Some(bytes) = raw.as_ref() {
-                    add_batch_raw_bytes(&mut actual_raw_bytes, bytes.len())?;
-                }
-                values[indices[offset]] = decode_metadata(raw)?;
-            }
-        }
-        record_kv_value_bytes(state.metrics(), "list", "metadata_batch", actual_raw_bytes);
+        let mut budget = RawByteBudget::default();
+        let metadata_commands = grouped_hmget_commands(&q.ns, &q.id, &user_keys, META_FIELD_PREFIX);
+        let raw_metadata = load_grouped_fields_with_raw_byte_budget(
+            &mut conn,
+            metadata_commands,
+            user_keys.len(),
+            &mut budget,
+        )
+        .await?;
+        let values = raw_metadata
+            .into_iter()
+            .map(decode_metadata)
+            .collect::<AppResult<Vec<_>>>()?;
+        record_kv_value_bytes(
+            state.metrics(),
+            "list",
+            "metadata_batch",
+            budget.actual_bytes,
+        );
         values
     } else {
         Vec::new()
@@ -778,57 +885,96 @@ mod tests {
     }
 
     #[test]
-    fn kv_batch_get_checks_budget_between_value_reads() {
-        let source = include_str!("kv.rs");
-        let start = source
-            .find("pub(crate) async fn kv_get_batch")
-            .expect("kv_get_batch route must exist");
-        let end = source[start..]
-            .find("pub(crate) async fn kv_put")
-            .expect("kv_put should follow kv_get_batch")
-            + start;
-        let helper = &source[start..end];
-        assert!(
-            helper.matches("hmget_with_raw_byte_budget").count() >= 2,
-            "kv_get_batch must atomically budget-check value and metadata HMGET payloads"
+    fn hmget_budget_command_packs_script_key_budget_and_fields() {
+        let fields = vec!["v:first".to_string(), "v:second".to_string()];
+        let commands = parse_packed_commands(
+            &hmget_with_raw_byte_budget_command("kvh:tenant:store:b:1", 1024, &fields)
+                .get_packed_command(),
         );
-        assert!(
-            helper.matches("add_batch_raw_bytes").count() >= 2,
-            "kv_get_batch must also re-check actual HMGET payload bytes after reading"
-        );
-        assert!(
-            !helper.contains("redis::pipe"),
-            "kv_get_batch must not pipeline every bucket before checking the aggregate byte budget"
-        );
-        assert!(
-            source.contains("redis.call(\"HMGET\""),
-            "the atomic KV budget helper should batch reads with Redis HMGET"
+
+        assert_eq!(commands.len(), 1);
+        let command = &commands[0];
+        assert_eq!(command[0], "EVAL");
+        assert_eq!(command[1], HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT);
+        assert_eq!(
+            &command[2..],
+            ["1", "kvh:tenant:store:b:1", "1024", "v:first", "v:second"]
         );
     }
 
     #[test]
-    fn kv_list_metadata_batches_metadata_reads() {
-        let source = include_str!("kv.rs");
-        let start = source
-            .find("pub(crate) async fn kv_list")
-            .expect("kv_list route must exist");
-        let end = source[start..]
-            .find("#[cfg(test)]")
-            .expect("tests should follow kv_list")
-            + start;
-        let helper = &source[start..end];
-        assert!(
-            helper.contains("grouped_hmget_commands"),
-            "kv_list metadata reads should group metadata fields by hash bucket"
+    fn grouped_hmget_commands_batches_metadata_fields_by_hash_bucket() {
+        let keys = vec![
+            "alpha".to_string(),
+            "bravo".to_string(),
+            "charlie".to_string(),
+        ];
+        let commands = grouped_hmget_commands("tenant", "store", &keys, META_FIELD_PREFIX);
+        assert_eq!(
+            commands
+                .iter()
+                .map(|(_, indices, fields)| {
+                    assert_eq!(indices.len(), fields.len());
+                    fields.len()
+                })
+                .sum::<usize>(),
+            keys.len()
         );
-        assert!(
-            helper.contains("hmget_with_raw_byte_budget"),
-            "kv_list metadata reads must atomically budget-check raw metadata bytes before returning payloads"
+
+        for (redis_key, indices, fields) in commands {
+            for (offset, index) in indices.iter().enumerate() {
+                assert_eq!(
+                    redis_key,
+                    hash_key_for_user_key("tenant", "store", &keys[*index])
+                );
+                assert_eq!(fields[offset], meta_field(&keys[*index]));
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_budgeted_reads_decrement_budget_and_restore_input_order() {
+        let commands = vec![
+            (
+                "hash-a".to_string(),
+                vec![2, 0],
+                vec!["v:charlie".to_string(), "v:alpha".to_string()],
+            ),
+            ("hash-b".to_string(), vec![1], vec!["v:bravo".to_string()]),
+        ];
+        let mut read = GroupedFieldRead::new(commands, 3);
+        let mut budget = RawByteBudget::default();
+
+        let first = read.next_request(&budget).unwrap().unwrap();
+        assert_eq!(first.redis_key, "hash-a");
+        assert_eq!(first.remaining, KV_BATCH_RAW_BYTES_MAX);
+        assert_eq!(first.fields, ["v:charlie", "v:alpha"]);
+        read.apply_response(
+            &mut budget,
+            first,
+            1,
+            vec![Some(b"ccc".to_vec()), Some(b"aa".to_vec())],
+        )
+        .unwrap();
+
+        let second = read.next_request(&budget).unwrap().unwrap();
+        assert_eq!(second.redis_key, "hash-b");
+        assert_eq!(second.remaining, KV_BATCH_RAW_BYTES_MAX - 1);
+        assert_eq!(second.fields, ["v:bravo"]);
+        read.apply_response(&mut budget, second, 2, vec![Some(b"bbbb".to_vec())])
+            .unwrap();
+
+        assert!(read.next_request(&budget).unwrap().is_none());
+        assert_eq!(
+            read.finish(),
+            vec![
+                Some(b"aa".to_vec()),
+                Some(b"bbbb".to_vec()),
+                Some(b"ccc".to_vec()),
+            ]
         );
-        assert!(
-            helper.contains("add_batch_raw_bytes"),
-            "kv_list metadata reads must also re-check actual HMGET payload bytes"
-        );
+        assert_eq!(budget.preflight_bytes, 3);
+        assert_eq!(budget.actual_bytes, 9);
     }
 
     #[test]
@@ -889,33 +1035,14 @@ mod tests {
 
     #[test]
     fn kv_list_prefix_uses_kv_key_byte_limit() {
-        let source = include_str!("kv.rs");
-        let start = source
-            .find("pub(crate) async fn kv_list")
-            .expect("kv_list route must exist");
-        let end = source[start..]
-            .find("let include_metadata")
-            .expect("kv_list prefix validation should happen before HSCAN setup")
-            + start;
-        assert!(
-            source[start..end].contains("validate_kv_key(&prefix)?"),
-            "kv_list must reject oversized prefixes before composing the HSCAN pattern"
+        assert_eq!(normalize_list_prefix(None).unwrap(), "");
+        assert_eq!(
+            normalize_list_prefix(Some("photos/".to_string())).unwrap(),
+            "photos/"
         );
 
         let oversized = "x".repeat(KV_KEY_MAX_BYTES + 1);
-        let q = KvParams {
-            ns: "tenant".to_string(),
-            id: "store".to_string(),
-            key: None,
-            ttl: None,
-            exat: None,
-            prefix: Some(oversized),
-            limit: None,
-            metadata: None,
-            cursor: None,
-        };
-        let prefix = q.prefix.unwrap_or_default();
-        let err = validate_kv_key(&prefix).unwrap_err();
+        let err = normalize_list_prefix(Some(oversized)).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("KV key exceeds 512 byte limit"));
     }
@@ -970,52 +1097,6 @@ mod tests {
         let err = decode_list_cursor(Some("42".to_string())).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "invalid_request");
-    }
-
-    #[test]
-    fn kv_list_cursor_overflow_existence_probe_does_not_fetch_values() {
-        let source = include_str!("kv/cursor.rs");
-        let start = source
-            .find("async fn existing_cursor_overflow_fields")
-            .expect("existing_cursor_overflow_fields helper must exist");
-        let helper = &source[start..];
-        assert!(
-            !helper.contains("candidates.clone()"),
-            "cursor overflow validation should not clone the overflow candidate vector"
-        );
-        assert!(
-            !helper.contains("\"MGET\""),
-            "cursor overflow validation must not fetch KV values"
-        );
-        assert!(
-            helper.contains("\"HEXISTS\""),
-            "cursor overflow validation should only probe field existence"
-        );
-    }
-
-    #[test]
-    fn kv_list_metadata_checks_budget_between_metadata_reads() {
-        let source = include_str!("kv.rs");
-        let start = source
-            .find("pub(crate) async fn kv_list")
-            .expect("kv_list route must exist");
-        let end = source[start..]
-            .find("#[cfg(test)]")
-            .expect("test module should follow kv_list")
-            + start;
-        let helper = &source[start..end];
-        assert!(
-            helper.contains("hmget_with_raw_byte_budget"),
-            "kv_list metadata must enforce the aggregate raw metadata byte budget inside the HMGET helper"
-        );
-        assert!(
-            helper.contains("add_batch_raw_bytes"),
-            "kv_list metadata must re-check actual HMGET payload bytes after reading"
-        );
-        assert!(
-            !helper.contains("redis::pipe"),
-            "kv_list metadata must not pipeline all metadata before checking the aggregate byte budget"
-        );
     }
 
     #[test]

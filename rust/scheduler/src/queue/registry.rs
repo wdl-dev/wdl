@@ -176,6 +176,9 @@ pub(crate) async fn refresh_consumer_streams(state: &AppState) {
 }
 
 async fn refresh_consumer_streams_for(queues: &QueueState) {
+    // Lock order is registry -> consumer_streams. Readers clone consumer_streams
+    // before consulting registry, so no path holds consumer_streams while waiting
+    // for registry.
     let registry = queues.registry.read().await;
     let snapshot = sorted_consumer_streams(&registry);
     *queues.consumer_streams.write().await = snapshot;

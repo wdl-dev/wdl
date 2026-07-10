@@ -53,9 +53,9 @@ export { randomHex };
  * }} TokenRecord
  */
 
-// Mirrors control/routing.js#RoutingError shape — index.js maps thrown
-// instances to HTTP code so policy rejections stay distinct from Redis /
-// code exceptions (which 503 fail-closed).
+// Mirrors the control/routing status + machine-code shape on purpose, but stays
+// auth-local: enhanced_error_serialization preserves {status, reason}, and
+// control maps that distinct policy contract without importing auth internals.
 export class AuthPolicyError extends Error {
   /**
    * @param {number} status

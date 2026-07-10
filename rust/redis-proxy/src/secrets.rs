@@ -321,6 +321,8 @@ fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ct: &[u8], tag: &[u8], aad: &[u8]) -> 
         .map_err(|_| secret_decrypt_error("secret envelope has invalid AES-GCM material"))?;
     let tag = Tag::try_from(tag)
         .map_err(|_| secret_decrypt_error("secret envelope has invalid AES-GCM material"))?;
+    // Decrypt into the ciphertext clone and pass the tag separately so large
+    // secrets do not require a second ct||tag message allocation.
     cipher
         .decrypt_inout_detached(&nonce, aad, plaintext.as_mut_slice().into(), &tag)
         .map_err(|_| secret_decrypt_error("secret envelope authentication failed"))?;
@@ -531,23 +533,6 @@ mod tests {
         assert!(metrics.contains(
             r#"wdl_secret_dek_cache_lookups_total{outcome="hit",service="redis-proxy"} 1"#
         ));
-    }
-
-    #[test]
-    fn aes_gcm_decrypt_uses_detached_tag_without_concat_message() {
-        let source = include_str!("secrets.rs");
-        let helper = source
-            .split("fn aes_gcm_decrypt")
-            .nth(1)
-            .expect("aes_gcm_decrypt helper should exist");
-        assert!(
-            helper.contains("decrypt_inout_detached"),
-            "AES-GCM decrypt should pass the tag separately instead of concatenating ct||tag"
-        );
-        assert!(
-            !helper.contains("extend_from_slice(tag)"),
-            "AES-GCM decrypt should not allocate a ct||tag message buffer"
-        );
     }
 
     #[test]

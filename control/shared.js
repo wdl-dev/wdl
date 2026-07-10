@@ -216,6 +216,8 @@ function onRedisCommand(event) {
   recordRedisCommand({ metrics: null, log: state.log, service: state.service, event });
 }
 
+// Intentionally local, despite looking like routing/deploy/auth errors. Each
+// layer owns a slightly different machine-readable wire shape and catch boundary.
 export class ControlAbort extends Error {
   /**
    * @param {number} status
