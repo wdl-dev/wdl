@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { parseJsonText } from "../helpers/json-payload.js";
 import { loadRuntimeDispatch } from "../helpers/load-runtime-dispatch.js";
 import {
+  importRepositoryModule,
+  readRepositoryJson,
+} from "../helpers/load-shared-module.js";
+import {
   jsonRequest,
   makeScope,
   makeStub,
@@ -12,6 +16,10 @@ import { readJsonResponse } from "../helpers/response-json.js";
 import { delay } from "../helpers/timing.js";
 
 const { runtimeDispatch, runtimeDispatchWorkflowStep } = await loadRuntimeDispatch();
+const workflowJson = await importRepositoryModule("runtime/dispatch/workflow-json.js");
+const workflowLimits = /** @type {{ resultBytesMax: number, backendRequestBytesMax: number, payloadTooLargeCode: string }} */ (
+  readRepositoryJson("tests/fixtures/workflow-limits.json")
+);
 const {
   _resetWorkflowReplayCacheForTest,
   _stringifyWorkflowBackendBodyForTest,
@@ -36,6 +44,22 @@ function workflowEnv(backend) {
 
 beforeEach(() => {
   _resetWorkflowReplayCacheForTest();
+});
+
+test("workflow payload limits match the shared Rust/JS contract", () => {
+  assert.equal(workflowJson.WORKFLOW_RESULT_BYTES_MAX, workflowLimits.resultBytesMax);
+  assert.equal(
+    workflowJson.WORKFLOW_BACKEND_REQUEST_BYTES_MAX,
+    workflowLimits.backendRequestBytesMax
+  );
+  assert.equal(
+    workflowJson.WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
+    workflowLimits.payloadTooLargeCode
+  );
+  assert.throws(
+    () => workflowJson._stringifyWorkflowJsonForTest("x", 0),
+    (err) => err instanceof Error && err.name === workflowLimits.payloadTooLargeCode
+  );
 });
 
 test("workflow bounded JSON serializer matches JSON.stringify for supported values", () => {

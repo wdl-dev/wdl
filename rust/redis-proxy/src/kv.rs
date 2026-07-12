@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use wdl_rust_common::hash::fnv1a32;
 use wdl_rust_common::identity::is_valid_runtime_load_ns;
+use wdl_rust_common::redis_eval::eval_cmd;
 
 use crate::observability::Metrics;
 use crate::{AppError, AppResult, AppState, SERVICE, empty};
@@ -262,15 +263,11 @@ fn hmget_with_raw_byte_budget_command(
     remaining: usize,
     fields: &[String],
 ) -> redis::Cmd {
-    let mut cmd = redis::cmd("EVAL");
-    cmd.arg(HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT)
-        .arg(1)
-        .arg(redis_key)
-        .arg(remaining);
-    for field in fields {
-        cmd.arg(field);
-    }
-    cmd
+    let remaining_arg = remaining.to_string();
+    let mut args = Vec::with_capacity(fields.len() + 1);
+    args.push(remaining_arg.as_str());
+    args.extend(fields.iter().map(String::as_str));
+    eval_cmd(HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT, &[redis_key], &args)
 }
 
 async fn query_hmget_with_raw_byte_budget(
@@ -882,6 +879,26 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.code, "internal_error");
+    }
+
+    #[test]
+    fn kv_binding_id_grammar_matches_cross_language_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/cross-language-identity.json"
+        ))
+        .expect("cross-language identity fixture must parse");
+        let cases = fixture["kvIds"]
+            .as_array()
+            .expect("kvIds fixture field must be an array");
+        for case in cases {
+            let value = case["value"]
+                .as_str()
+                .expect("kvIds fixture value must be a string");
+            let valid = case["valid"]
+                .as_bool()
+                .expect("kvIds fixture valid flag must be a boolean");
+            assert_eq!(is_valid_kv_binding_id(value), valid, "kvIds:{value:?}");
+        }
     }
 
     #[test]

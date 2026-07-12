@@ -12,16 +12,19 @@ import {
 } from "./load-shared-module.js";
 import { compileSharedAuthRoles } from "./load-auth-roles.js";
 import { CLOUDFLARE_WORKERS_URL } from "./mocks/cloudflare-workers.js";
+import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
 
 const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_AUTH_TOKEN_URL = repositoryFileUrl("shared/auth-token.js");
 const SHARED_HEX_URL = repositoryFileUrl("shared/hex.js");
 const SHARED_RANDOM_ID_URL = repositoryFileUrl("shared/random-id.js");
+const SHARED_REDIS_LOCK_URL = freshRepositoryModuleDataUrl("shared/redis-lock.js", [
+  [/from "shared-random-id"/g, `from ${JSON.stringify(SHARED_RANDOM_ID_URL)}`],
+]);
 const SHARED_OBSERVABILITY_URL = repositoryFileUrl("shared/observability.js");
+const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 
 const SHARED_REDIS_MOCK = `
-export class WatchError extends Error {}
-
 function ensureState() {
   if (!globalThis.__authMockState) {
     throw new Error("auth-index harness: globalThis.__authMockState not initialized");
@@ -301,7 +304,7 @@ export function resolveDelegatedIssueTemplate(templateId, configured = createDel
   const authLib = await import(authLibUrl);
 
   // Mocks have no module-level state; cache them across loads.
-  const sharedRedisUrl = moduleDataUrl(SHARED_REDIS_MOCK);
+  const sharedRedisUrl = sharedRedisStubUrl(SHARED_REDIS_MOCK);
   const sharedObservabilityUrl = moduleDataUrl(SHARED_OBSERVABILITY_MOCK);
 
   const authRuntimeUrl = freshRepositoryModuleDataUrl("auth/runtime.js", [
@@ -316,6 +319,8 @@ export function resolveDelegatedIssueTemplate(templateId, configured = createDel
     [/from "auth-lib"/g, `from ${JSON.stringify(authLibUrl)}`],
     [/from "auth-runtime"/g, `from ${JSON.stringify(authRuntimeUrl)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
+    [/from "shared-redis-lock"/g, `from ${JSON.stringify(SHARED_REDIS_LOCK_URL)}`],
+    [/from "shared-version"/g, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
   ]);
   const indexMod = await import(indexUrl);
 

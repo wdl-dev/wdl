@@ -1,10 +1,14 @@
 pub fn sanitize_request_id(raw: &str) -> Option<String> {
-    let first = raw.split(',').next()?.trim();
+    let first = raw
+        .split(',')
+        .next()?
+        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
     if first.is_empty() || first.len() > 128 {
         return None;
     }
     if first.chars().any(|ch| {
-        ch.is_ascii_whitespace()
+        ch.is_whitespace()
+            || ch == '\u{feff}'
             || ch == '"'
             || ch == '\\'
             || (ch as u32) < 0x20

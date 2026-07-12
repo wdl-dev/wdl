@@ -570,6 +570,42 @@ test("DurableObjectNamespace direct backend retries owner claim races once", asy
   assert.equal(calls.length, 2);
 });
 
+test("DurableObjectNamespace direct backend ignores hints attached to owner-race responses", async () => {
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {any[]} */
+  const ownerCalls = [];
+  const backend = {
+    fetch: makeRecordingFetch(routerCalls, {
+      response: () => routerCalls.length === 1
+        ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
+            status: 503,
+            headers: doOwnerHintResponse().headers,
+          })
+        : new Response("ok"),
+    }),
+  };
+  const ownerNetwork = {
+    fetch: makeRecordingFetch(ownerCalls, { response: new Response("owner-should-not-be-called") }),
+  };
+  const ns = new DurableObjectNamespace({
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  }, { backend, ownerNetwork });
+
+  const response = await ns.get(ns.idFromName("room-race-hint")).fetch("https://demo.workers.example/send");
+
+  assert.equal(await response.text(), "ok");
+  assert.equal(routerCalls.length, 2);
+  assert.equal(ownerCalls.length, 0);
+  assert.equal(headerValue(routerCalls[0].init.headers, "x-wdl-do-accept-owner-hint"), "1");
+  assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null);
+});
+
 test("DurableObjectNamespace direct backend retries owner lease budget errors once", async () => {
   for (const error of ["owner_lease_expired", "owner_lease_too_short"]) {
     /** @type {any[]} */

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  deleteGatewayInternalHeaders,
   escapeRegex,
   classifyHost,
   isCanonicalPatternHost,
@@ -10,6 +11,24 @@ import {
   matchPatternEntry,
 } from "../../gateway/lib.js";
 import { NS_PATTERN, isValidRouteNs } from "../../shared/ns-pattern.js";
+
+test("deleteGatewayInternalHeaders removes fixed and prefixed private headers", () => {
+  const headers = new Headers({
+    "x-worker-id": "tenant:worker:v1",
+    "x-worker-prefix": "/worker",
+    "x-wdl-upstream-binding": "RUNTIME_USER",
+    "x-wdl-future-private": "private",
+    "x-request-id": "keep-request-id",
+    "sec-websocket-protocol": "keep-protocol",
+  });
+
+  deleteGatewayInternalHeaders(headers);
+
+  assert.deepEqual(Object.fromEntries(headers), {
+    "sec-websocket-protocol": "keep-protocol",
+    "x-request-id": "keep-request-id",
+  });
+});
 
 /**
  * @param {any} sorted

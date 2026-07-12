@@ -18,5 +18,15 @@
     { "raw": "a\rb", "escaped": "a\\rb" },
     { "raw": "a\"b", "escaped": "a\\\"b" },
     { "raw": "\r\n\"\\", "escaped": "\\r\\n\\\"\\\\" }
-  ]
+  ],
+  "logEnvelope": {
+    "orderedKeys": ["ts", "service", "level", "event"],
+    "timestampShape": "0000-00-00T00:00:00.000Z",
+    "levels": [
+      { "name": "debug", "priority": 10, "stream": "stdout" },
+      { "name": "info", "priority": 20, "stream": "stdout" },
+      { "name": "warn", "priority": 30, "stream": "stdout" },
+      { "name": "error", "priority": 40, "stream": "stderr" }
+    ]
+  }
 }

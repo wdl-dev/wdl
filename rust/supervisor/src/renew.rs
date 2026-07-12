@@ -156,51 +156,12 @@ fn log_renew_error(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    struct EnvRestore {
-        key: String,
-        prev: Option<String>,
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            // SAFETY: tests hold ENV_LOCK for the full override/restore window, so
-            // restoring the process environment is serialized.
-            match &self.prev {
-                Some(prev) => unsafe { std::env::set_var(&self.key, prev) },
-                None => unsafe { std::env::remove_var(&self.key) },
-            }
-        }
-    }
-
-    fn temp_env<R>(key: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env mutex poisoned");
-        let prev = std::env::var(key).ok();
-        let _restore = EnvRestore {
-            key: key.to_string(),
-            prev,
-        };
-        // SAFETY: tests hold ENV_LOCK for the full override/restore window, so process
-        // environment mutation is serialized.
-        match value {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            // SAFETY: Same serialization rationale as set_var above.
-            None => unsafe { std::env::remove_var(key) },
-        }
-        f()
-    }
+    use wdl_rust_common::test_env::with_temp_env;
 
     #[test]
     fn start_fails_before_spawn_when_internal_auth_token_is_missing() {
-        temp_env("WDL_INTERNAL_AUTH_TOKEN", None, || {
+        with_temp_env("WDL_INTERNAL_AUTH_TOKEN", None, || {
             let client = Arc::new(reqwest::Client::new());
             match start(&crate::D1_CONFIG, client) {
                 Ok(_) => panic!("start must reject missing token"),

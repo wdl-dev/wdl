@@ -5,6 +5,7 @@ import {
   buildAlarmRequest,
   buildFacetName,
   buildForwardRequest,
+  DO_OWNERSHIP_CODE,
   doErrorResponse,
   DoRuntimeError,
   normalizeDoConnectRequest,
@@ -176,7 +177,7 @@ export class WdlDoHostActor extends DurableObject {
    */
   async dispatchWithFence(invoke, run) {
     if (!beginInFlightDispatch()) {
-      throw new DoRuntimeError(503, "task_draining", "DO task is draining");
+      throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
     }
     try {
       const { owner, leaseRemainingMs } = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
@@ -243,9 +244,9 @@ export class WdlDoHostActor extends DurableObject {
 
     if (!schedule(leaseRemainingMs)) {
       if (scheduleFailureReason === "lease_guard") {
-        throw new DoRuntimeError(503, "owner_lease_too_short", `DO scope ${owner.ownerKey} owner lease has insufficient remaining budget`);
+        throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_LEASE_TOO_SHORT, `DO scope ${owner.ownerKey} owner lease has insufficient remaining budget`);
       }
-      throw new DoRuntimeError(503, "owner_lease_expired", `DO scope ${owner.ownerKey} owner lease has expired`);
+      throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED, `DO scope ${owner.ownerKey} owner lease has expired`);
     }
     try {
       return await run();

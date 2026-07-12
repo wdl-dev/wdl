@@ -1,12 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 
 import {
   CLI_INTEGRATION_MARKER,
   durationPriorityNames,
   hasCliIntegrationMarker,
   prioritizeDefaultFiles,
+  readIntegrationDurationRecords,
+  readIntegrationDurationReport,
 } from "../../scripts/integration-test-plan.js";
+import { installStreamWriteCapture } from "../helpers/output-capture.js";
+import { withTempDir } from "../helpers/temp-dir.js";
 
 test("prioritizeDefaultFiles runs configured slow files first and preserves the rest", () => {
   assert.deepEqual(
@@ -93,4 +98,41 @@ test("hasCliIntegrationMarker only accepts line-start marker comments", () => {
   assert.equal(hasCliIntegrationMarker(`  // ${CLI_INTEGRATION_MARKER}\n`), false);
   assert.equal(hasCliIntegrationMarker(`const marker = "// ${CLI_INTEGRATION_MARKER}";\n`), false);
   assert.equal(hasCliIntegrationMarker(`/* ${CLI_INTEGRATION_MARKER} */\n`), false);
+});
+
+test("integration duration reader owns the full tolerant report schema", async () => {
+  await withTempDir("wdl-duration-reader-", async (dir) => {
+    const file = `${dir}/durations.json`;
+    const report = {
+      updatedAt: "2026-07-10T00:00:00.000Z",
+      runDurationMs: 123,
+      files: {
+        "tests/integration/a.test.js": {
+          durationMs: 42,
+          status: "passed",
+          updatedAt: "2026-07-10T00:00:00.000Z",
+        },
+      },
+    };
+    writeFileSync(file, JSON.stringify(report));
+
+    assert.deepEqual(readIntegrationDurationReport(file), report);
+    assert.deepEqual(readIntegrationDurationRecords(file), report.files);
+  });
+});
+
+test("integration duration reader warns once and returns null for unreadable JSON", async () => {
+  await withTempDir("wdl-duration-reader-", async (dir) => {
+    const file = `${dir}/durations.json`;
+    writeFileSync(file, "not-json");
+    /** @type {string[]} */
+    const writes = [];
+    const restoreWrite = installStreamWriteCapture(process.stderr, writes);
+    try {
+      assert.equal(readIntegrationDurationReport(file), null);
+    } finally {
+      restoreWrite();
+    }
+    assert.match(writes.join(""), /warning: ignoring unreadable integration duration file/);
+  });
 });

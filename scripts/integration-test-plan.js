@@ -74,6 +74,7 @@ const CLI_INTEGRATION_MARKER_RE = new RegExp(`^//\\s*${RegExp.escape(CLI_INTEGRA
 /**
  * @typedef {{ durationMs?: unknown, status?: unknown, updatedAt?: unknown }} DurationRecord
  * @typedef {Record<string, DurationRecord>} DurationRecords
+ * @typedef {{ updatedAt?: unknown, runDurationMs?: unknown, files?: unknown }} DurationReport
  * @typedef {{ priority?: string[], durationRecords?: DurationRecords | null }} PrioritizeOptions
  */
 
@@ -82,27 +83,33 @@ function errorMessage(err) {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** @param {unknown} value @returns {DurationRecords | null} */
-function durationRecordsFromJson(value) {
-  if (!value || typeof value !== "object") return null;
-  const files = /** @type {{ files?: unknown }} */ (value).files;
+/** @param {DurationReport | null} report @returns {DurationRecords | null} */
+function durationRecordsFromReport(report) {
+  const files = report?.files;
   return files && typeof files === "object"
     ? /** @type {DurationRecords} */ (files)
     : null;
 }
 
-/** @param {string} [file] @returns {DurationRecords | null} */
-export function readIntegrationDurationRecords(file = DEFAULT_INTEGRATION_DURATIONS_FILE) {
+/** @param {string} [file] @returns {DurationReport | null} */
+export function readIntegrationDurationReport(file = DEFAULT_INTEGRATION_DURATIONS_FILE) {
   if (!file || !existsSync(file)) return null;
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
-    return durationRecordsFromJson(parsed);
+    return parsed && typeof parsed === "object"
+      ? /** @type {DurationReport} */ (parsed)
+      : null;
   } catch (err) {
     process.stderr.write(
       `warning: ignoring unreadable integration duration file ${file}: ${errorMessage(err)}\n`
     );
     return null;
   }
+}
+
+/** @param {string} [file] @returns {DurationRecords | null} */
+export function readIntegrationDurationRecords(file = DEFAULT_INTEGRATION_DURATIONS_FILE) {
+  return durationRecordsFromReport(readIntegrationDurationReport(file));
 }
 
 /** @param {string[]} names @param {DurationRecords | null | undefined} durationRecords */

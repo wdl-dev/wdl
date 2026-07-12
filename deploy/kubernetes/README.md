@@ -13,13 +13,14 @@ provider's native tooling.
 ## Layout
 
 - `base/` defines reusable Deployments, StatefulSets, Services, and PVCs.
+- `components/metadata-guard/` owns the shared cloud-metadata egress policy.
 - `overlays/local/` pins local images, local development secrets, a namespace,
   and local storage defaults.
 - `overlays/local-ingress/` adds nginx Ingress resources for local hostnames.
-- `overlays/local-metadata-guard/` applies the local overlay plus a minimal
-  metadata egress guard.
+- `overlays/local-metadata-guard/` applies the local overlay plus the shared
+  metadata-guard component.
 - `overlays/local-ingress-metadata-guard/` applies the local ingress overlay
-  plus the same metadata egress guard.
+  plus the same component.
 - `storage/local-nfs/` contains Helm values for a local ReadWriteMany
   provisioner that can simulate provider RWX storage on a development cluster.
 

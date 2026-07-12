@@ -6,6 +6,7 @@ use redis::streams::StreamReadReply;
 use serde_json::json;
 use tokio::time::sleep;
 use wdl_rust_common::hash::fnv1a64;
+use wdl_rust_common::queue_keys::{QUEUE_DELAYED_WAKE_KEY_FIELD, QUEUE_DELAYED_WAKE_STREAM};
 use wdl_rust_common::redis_eval::append_eval_cmd;
 
 use crate::{
@@ -17,7 +18,6 @@ use super::{
     parse_delayed_key, queue_orphaned_key, queue_stream_key, resolve_consumer, stream_id_to_entry,
 };
 
-pub(crate) const QUEUE_DELAYED_WAKE_STREAM: &str = "queue-delayed-wake";
 const QUEUE_DELAYED_CLAIM_SAFETY_MS: u64 = 5_000;
 const QUEUE_DELAYED_NO_PROGRESS_BACKOFF_MS: u64 = 100;
 const QUEUE_DELAYED_WAKE_RETRY_BASE_MS: u64 = 1_000;
@@ -500,7 +500,7 @@ pub(crate) async fn queue_delayed_wake_loop(state: AppState) -> SchedulerResult<
             for id in key.ids {
                 last_id = id.id.clone();
                 let entry = stream_id_to_entry(id);
-                let Some(delayed_key) = entry.fields.get("delayed_key") else {
+                let Some(delayed_key) = entry.fields.get(QUEUE_DELAYED_WAKE_KEY_FIELD) else {
                     continue;
                 };
                 if parse_delayed_key(delayed_key).is_none() {

@@ -9,6 +9,7 @@ import {
 const { makeS3Client } = await importRepositoryModule("control/s3.js", [
   [/import \{ SigV4Client \} from "@wdl-dev\/aws-sigv4";/, "class SigV4Client { constructor(options) { this.options = options; } }"],
   [/from "runtime-r2-utils";/g, `from ${JSON.stringify(repositoryFileUrl("runtime/r2-utils.js"))};`],
+  [/from "shared-s3-retry";/g, `from ${JSON.stringify(repositoryFileUrl("shared/s3-retry.js"))};`],
 ]);
 
 test("makeS3Client requires credentials outside explicit local/mock endpoints", () => {

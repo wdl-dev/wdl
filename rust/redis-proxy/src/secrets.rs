@@ -6,7 +6,7 @@ use aes_gcm::aead::AeadInOut;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wdl_rust_common::hash::fnv1a64;
 use zeroize::Zeroizing;
 
@@ -28,7 +28,7 @@ const DEK_CACHE_SHARDS: usize = 16;
 const DEK_CACHE_SHARD_LIMIT: usize = DEK_CACHE_LIMIT / DEK_CACHE_SHARDS;
 const DEK_CACHE_TTL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SecretEnvelope {
     v: u8,
@@ -123,6 +123,13 @@ impl SecretEnvelopeDecryptor {
         let json_bytes = &value[SECRET_ENVELOPE_PREFIX.len()..];
         let envelope: SecretEnvelope = serde_json::from_slice(json_bytes)
             .map_err(|_| secret_decrypt_error("secret envelope JSON is invalid"))?;
+        let canonical_json = serde_json::to_vec(&envelope)
+            .map_err(|_| secret_decrypt_error("secret envelope JSON is invalid"))?;
+        if canonical_json != json_bytes {
+            return Err(secret_decrypt_error(
+                "secret envelope JSON is not canonical",
+            ));
+        }
         validate_envelope(&envelope)?;
         let provider = self.local.as_ref().ok_or_else(|| {
             secret_decrypt_error("secret envelope local provider is not configured")
@@ -352,6 +359,59 @@ fn secret_config_error(message: impl Into<String>) -> AppError {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SecretEnvelopeParityFixture {
+        provider: SecretEnvelopeParityProvider,
+        vectors: Vec<SecretEnvelopeParityVector>,
+        rejections: Vec<SecretEnvelopeParityRejection>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SecretEnvelopeParityProvider {
+        kid: String,
+        local_key_b64: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SecretEnvelopeParityVector {
+        name: String,
+        plaintext: String,
+        hash_key: String,
+        field_name: String,
+        envelope: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SecretEnvelopeParityRejection {
+        name: String,
+        envelope: String,
+        hash_key: String,
+        field_name: String,
+        configured_kid: String,
+    }
+
+    fn parity_fixture() -> SecretEnvelopeParityFixture {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/secret-envelope-parity.json"
+        ))
+        .expect("secret envelope parity fixture must parse")
+    }
+
+    fn parity_vector<'a>(
+        fixture: &'a SecretEnvelopeParityFixture,
+        name: &str,
+    ) -> &'a SecretEnvelopeParityVector {
+        fixture
+            .vectors
+            .iter()
+            .find(|vector| vector.name == name)
+            .expect("secret envelope parity vector must exist")
+    }
+
     fn test_metrics() -> Arc<Metrics> {
         Arc::new(Metrics::default())
     }
@@ -364,11 +424,23 @@ mod tests {
         }
     }
 
-    fn decryptor_with_local(kid: &str) -> SecretEnvelopeDecryptor {
+    fn decryptor_with_provider(
+        provider: &SecretEnvelopeParityProvider,
+        kid: &str,
+    ) -> SecretEnvelopeDecryptor {
+        let decoded = decode_canonical_base64(
+            &provider.local_key_b64,
+            SECRET_ENVELOPE_LOCAL_KEY_ENV,
+            false,
+        )
+        .expect("secret envelope parity provider key must be canonical base64");
+        let key: [u8; AES_256_KEY_BYTES] = decoded
+            .try_into()
+            .expect("secret envelope parity provider key must be 32 bytes");
         SecretEnvelopeDecryptor {
             local: Some(LocalProvider {
                 kid: kid.to_string(),
-                key: Zeroizing::new(*b"0123456789abcdef0123456789abcdef"),
+                key: Zeroizing::new(key),
             }),
             dek_cache: Arc::new(dek_cache_shards()),
             metrics: test_metrics(),
@@ -415,89 +487,62 @@ mod tests {
     }
 
     #[test]
-    fn decrypts_js_generated_envelope_vector() {
-        let decryptor = decryptor_with_local("local:test:secret-envelope:v1");
-        let envelope = concat!(
-            r#"WDL-ENC:{"v":1,"alg":"AES-256-GCM","kid":"local:test:secret-envelope:v1","#,
-            r#""edek":"ICEiIyQlJicoKSorrmiFFNwSNL789zDTZysVGjsTpksuXqulg0Mt7JrBiLTG0wE1moqP31Jd+edymdiU","#,
-            r#""iv":"LC0uLzAxMjM0NTY3","ct":"IZhLZQvljbpT5euHV5YP","tag":"0wuyjfzeZfuY5hD3HRoKdg=="}"#
-        );
-        let out = decryptor
-            .decrypt_hash_entries(
-                "secrets:demo:api",
-                vec![("TOKEN".to_string(), envelope.as_bytes().to_vec())],
-            )
-            .unwrap();
-        assert_eq!(out.get("TOKEN").unwrap(), "sensitive-value");
+    fn decrypts_secret_envelope_parity_vectors() {
+        let fixture = parity_fixture();
+        for vector in &fixture.vectors {
+            let decryptor = decryptor_with_provider(&fixture.provider, &fixture.provider.kid);
+            let out = decryptor
+                .decrypt_hash_entries(
+                    &vector.hash_key,
+                    vec![(
+                        vector.field_name.clone(),
+                        vector.envelope.as_bytes().to_vec(),
+                    )],
+                )
+                .unwrap_or_else(|err| panic!("{}: {err:?}", vector.name));
+            assert_eq!(
+                out.get(&vector.field_name),
+                Some(&vector.plaintext),
+                "{}",
+                vector.name
+            );
+        }
     }
 
     #[test]
-    fn decrypts_js_generated_empty_string_vector() {
-        let decryptor = decryptor_with_local("local:test:secret-envelope:v1");
-        let envelope = concat!(
-            r#"WDL-ENC:{"v":1,"alg":"AES-256-GCM","kid":"local:test:secret-envelope:v1","#,
-            r#""edek":"ICEiIyQlJicoKSorrmiFFNwSNL789zDTZysVGjsTpksuXqulg0Mt7JrBiLSmHuPVe4uS7JepH053l0Yt","#,
-            r#""iv":"LC0uLzAxMjM0NTY3","ct":"","tag":"TTVUTxM6DfSV+VZ/AODK1w=="}"#
-        );
-        let out = decryptor
-            .decrypt_hash_entries(
-                "secrets:demo:api",
-                vec![("EMPTY".to_string(), envelope.as_bytes().to_vec())],
-            )
-            .unwrap();
-        assert_eq!(out.get("EMPTY").unwrap(), "");
-    }
-
-    #[test]
-    fn decrypt_rejects_storage_location_mismatch() {
-        let decryptor = decryptor_with_local("local:test:secret-envelope:v1");
-        let envelope = concat!(
-            r#"WDL-ENC:{"v":1,"alg":"AES-256-GCM","kid":"local:test:secret-envelope:v1","#,
-            r#""edek":"ICEiIyQlJicoKSorrmiFFNwSNL789zDTZysVGjsTpksuXqulg0Mt7JrBiLTG0wE1moqP31Jd+edymdiU","#,
-            r#""iv":"LC0uLzAxMjM0NTY3","ct":"IZhLZQvljbpT5euHV5YP","tag":"0wuyjfzeZfuY5hD3HRoKdg=="}"#
-        );
-        let err = decryptor
-            .decrypt_hash_entries(
-                "secrets:other:api",
-                vec![("TOKEN".to_string(), envelope.as_bytes().to_vec())],
-            )
-            .unwrap_err();
-        assert_eq!(err.code, "secret_decrypt_failed");
-    }
-
-    #[test]
-    fn decrypt_rejects_unknown_kid() {
-        let decryptor = decryptor_with_local("local:test:secret-envelope:v2");
-        let envelope = concat!(
-            r#"WDL-ENC:{"v":1,"alg":"AES-256-GCM","kid":"local:test:secret-envelope:v1","#,
-            r#""edek":"ICEiIyQlJicoKSorrmiFFNwSNL789zDTZysVGjsTpksuXqulg0Mt7JrBiLTG0wE1moqP31Jd+edymdiU","#,
-            r#""iv":"LC0uLzAxMjM0NTY3","ct":"IZhLZQvljbpT5euHV5YP","tag":"0wuyjfzeZfuY5hD3HRoKdg=="}"#
-        );
-        let err = decryptor
-            .decrypt_hash_entries(
-                "secrets:demo:api",
-                vec![("TOKEN".to_string(), envelope.as_bytes().to_vec())],
-            )
-            .unwrap_err();
-        assert_eq!(err.code, "secret_decrypt_failed");
+    fn rejects_secret_envelope_parity_vectors() {
+        let fixture = parity_fixture();
+        for rejection in &fixture.rejections {
+            let decryptor = decryptor_with_provider(&fixture.provider, &rejection.configured_kid);
+            let err = decryptor
+                .decrypt_hash_entries(
+                    &rejection.hash_key,
+                    vec![(
+                        rejection.field_name.clone(),
+                        rejection.envelope.as_bytes().to_vec(),
+                    )],
+                )
+                .unwrap_err();
+            assert_eq!(err.code, "secret_decrypt_failed", "{}", rejection.name);
+        }
     }
 
     #[test]
     fn dek_cache_is_scoped_to_storage_location() {
-        let decryptor = decryptor_with_local("local:test:secret-envelope:v1");
-        let envelope = concat!(
-            r#"WDL-ENC:{"v":1,"alg":"AES-256-GCM","kid":"local:test:secret-envelope:v1","#,
-            r#""edek":"ICEiIyQlJicoKSorrmiFFNwSNL789zDTZysVGjsTpksuXqulg0Mt7JrBiLTG0wE1moqP31Jd+edymdiU","#,
-            r#""iv":"LC0uLzAxMjM0NTY3","ct":"IZhLZQvljbpT5euHV5YP","tag":"0wuyjfzeZfuY5hD3HRoKdg=="}"#
-        );
+        let fixture = parity_fixture();
+        let vector = parity_vector(&fixture, "value");
+        let decryptor = decryptor_with_provider(&fixture.provider, &fixture.provider.kid);
         // First read at the matching location decrypts and caches the DEK.
         let out = decryptor
             .decrypt_hash_entries(
-                "secrets:demo:api",
-                vec![("TOKEN".to_string(), envelope.as_bytes().to_vec())],
+                &vector.hash_key,
+                vec![(
+                    vector.field_name.clone(),
+                    vector.envelope.as_bytes().to_vec(),
+                )],
             )
             .unwrap();
-        assert_eq!(out.get("TOKEN").unwrap(), "sensitive-value");
+        assert_eq!(out.get(&vector.field_name), Some(&vector.plaintext));
         assert_eq!(
             decryptor
                 .dek_cache
@@ -510,18 +555,24 @@ mod tests {
         // Same envelope at the same location hits the cache.
         let again = decryptor
             .decrypt_hash_entries(
-                "secrets:demo:api",
-                vec![("TOKEN".to_string(), envelope.as_bytes().to_vec())],
+                &vector.hash_key,
+                vec![(
+                    vector.field_name.clone(),
+                    vector.envelope.as_bytes().to_vec(),
+                )],
             )
             .unwrap();
-        assert_eq!(again.get("TOKEN").unwrap(), "sensitive-value");
+        assert_eq!(again.get(&vector.field_name), Some(&vector.plaintext));
 
         // Same edek at a different location is a cache miss (the key is scoped
         // to hash_key/field) and fails closed at DEK decryption via data_key_aad.
         let err = decryptor
             .decrypt_hash_entries(
                 "secrets:other:api",
-                vec![("TOKEN".to_string(), envelope.as_bytes().to_vec())],
+                vec![(
+                    vector.field_name.clone(),
+                    vector.envelope.as_bytes().to_vec(),
+                )],
             )
             .unwrap_err();
         assert_eq!(err.code, "secret_decrypt_failed");
@@ -537,7 +588,9 @@ mod tests {
 
     #[test]
     fn decrypt_records_expired_dek_cache_evictions() {
-        let decryptor = decryptor_with_local("local:test:secret-envelope:v1");
+        let fixture = parity_fixture();
+        let vector = parity_vector(&fixture, "value");
+        let decryptor = decryptor_with_provider(&fixture.provider, &fixture.provider.kid);
         {
             let mut cache = decryptor.dek_cache[0]
                 .lock()
@@ -552,18 +605,16 @@ mod tests {
                 );
             }
         }
-        let envelope = concat!(
-            r#"WDL-ENC:{"v":1,"alg":"AES-256-GCM","kid":"local:test:secret-envelope:v1","#,
-            r#""edek":"ICEiIyQlJicoKSorrmiFFNwSNL789zDTZysVGjsTpksuXqulg0Mt7JrBiLTG0wE1moqP31Jd+edymdiU","#,
-            r#""iv":"LC0uLzAxMjM0NTY3","ct":"IZhLZQvljbpT5euHV5YP","tag":"0wuyjfzeZfuY5hD3HRoKdg=="}"#
-        );
         let out = decryptor
             .decrypt_hash_entries(
-                "secrets:demo:api",
-                vec![("TOKEN".to_string(), envelope.as_bytes().to_vec())],
+                &vector.hash_key,
+                vec![(
+                    vector.field_name.clone(),
+                    vector.envelope.as_bytes().to_vec(),
+                )],
             )
             .unwrap();
-        assert_eq!(out.get("TOKEN").unwrap(), "sensitive-value");
+        assert_eq!(out.get(&vector.field_name), Some(&vector.plaintext));
         let metrics = decryptor.metrics.render_prometheus();
         assert!(metrics.contains(&format!(
             r#"wdl_secret_dek_cache_evictions_total{{reason="expired",service="redis-proxy"}} {DEK_CACHE_SHARD_LIMIT}"#

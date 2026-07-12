@@ -41,6 +41,7 @@ export async function loadRuntimeDispatch() {
     ]);
     const tailForwarderUrl = repositoryModuleDataUrl("runtime/tail-forwarder.js", [
       [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
+      [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
       [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
     ]);
 

@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  R2_BUCKET_NAME_RE as RUNTIME_R2_BUCKET_NAME_RE,
+  R2_HTTP_METADATA_FIELDS,
   R2_OBJECT_MAX_BUFFER_BYTES,
   assertR2BufferSize,
   encodeS3KeyPath,
@@ -8,9 +10,12 @@ import {
   r2PhysicalKey,
   r2PhysicalPrefix,
   r2RangeAndSizeFromHeaders,
+  r2CacheExpiryFromHeaders,
+  setR2CacheExpiryHeader,
   stripR2PhysicalPrefix,
   validateR2BucketName,
 } from "../../runtime/r2-utils.js";
+import { R2_BUCKET_NAME_RE as CONTROL_R2_BUCKET_NAME_RE } from "../../shared/ns-pattern.js";
 
 test("r2PhysicalPrefix scopes virtual buckets under namespace", () => {
   assert.equal(
@@ -47,6 +52,27 @@ test("validateR2BucketName enforces prefix-safe virtual bucket names", () => {
   validateR2BucketName("uploads-1");
   assert.throws(() => validateR2BucketName("Uploads"), /bucket_name must match/);
   assert.throws(() => validateR2BucketName("bad/name"), /bucket_name must match/);
+});
+
+test("injected and control R2 bucket grammars stay identical", () => {
+  assert.equal(RUNTIME_R2_BUCKET_NAME_RE.source, CONTROL_R2_BUCKET_NAME_RE.source);
+  assert.equal(RUNTIME_R2_BUCKET_NAME_RE.flags, CONTROL_R2_BUCKET_NAME_RE.flags);
+});
+
+test("R2 HTTP metadata fields and cache expiry use one mapping", () => {
+  assert.deepEqual(R2_HTTP_METADATA_FIELDS, [
+    ["contentType", "content-type"],
+    ["contentLanguage", "content-language"],
+    ["contentDisposition", "content-disposition"],
+    ["contentEncoding", "content-encoding"],
+    ["cacheControl", "cache-control"],
+  ]);
+  const headers = new Headers();
+  setR2CacheExpiryHeader(headers, 0);
+  assert.equal(headers.get("expires"), "Thu, 01 Jan 1970 00:00:00 GMT");
+  assert.equal(r2CacheExpiryFromHeaders(headers), 0);
+  headers.set("expires", "not-a-date");
+  assert.equal(r2CacheExpiryFromHeaders(headers), undefined);
 });
 
 test("encodeS3KeyPath percent-encodes key segments while preserving slashes", () => {

@@ -14,8 +14,10 @@
 // via JSRPC and execute through the Redis proxy sidecar.
 
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { base64ToBytes, bytesToBase64, toBytes } from "runtime-lib";
+import { toBytes } from "runtime-lib";
 import { recordBindingOperation } from "runtime-metrics";
+import { base64ToBytes, bytesToBase64 } from "shared-base64";
+import { readBoundedStreamBytes } from "shared-bounded-body";
 import { discardResponseBody } from "shared-respond";
 import {
   proxyEndpoint as buildProxyEndpoint,
@@ -72,41 +74,6 @@ function stringifyKvMetadata(value) {
     throw new TypeError("KV put: metadata must be JSON-serializable");
   }
   return json;
-}
-
-/**
- * @param {ReadableStream} stream
- * @returns {Promise<Uint8Array>}
- */
-async function readStreamWithLimit(stream) {
-  const reader = stream.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
-      if (total > KV_VALUE_MAX_BYTES) {
-        try {
-          await reader.cancel(`KV put: value exceeds ${KV_VALUE_MAX_BYTES} byte limit`);
-        } catch {}
-        assertKvValueSize(total);
-      }
-      chunks.push(chunk);
-    }
-  } finally {
-    try { reader.releaseLock(); } catch {}
-  }
-  if (chunks.length === 1) return chunks[0];
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
 }
 
 /**
@@ -280,7 +247,11 @@ export class KV extends WorkerEntrypoint {
     return recordBindingOperation(serviceName(kv), "kv", "put", async () => {
       let bytes;
       if (value instanceof ReadableStream) {
-        bytes = await readStreamWithLimit(value);
+        bytes = await readBoundedStreamBytes(
+          value,
+          KV_VALUE_MAX_BYTES,
+          () => new TypeError(`KV put: value exceeds ${KV_VALUE_MAX_BYTES} byte limit`)
+        );
       } else {
         bytes = toBytes(value);
         assertKvValueSize(bytes.byteLength);

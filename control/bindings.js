@@ -7,6 +7,7 @@ import {
   QUEUE_NAME_RE,
   BINDING_NAME_RE,
   KV_ID_RE,
+  D1_DATABASE_ID_RE,
   R2_BUCKET_NAME_RE,
   WDL_RESERVED_BINDING_RE,
   RESERVED_OBJECT_KEYS,
@@ -25,8 +26,6 @@ import {
   isValidWorkerName,
   MAX_QUEUE_DELAY_SECONDS,
 } from "control-lib";
-
-const D1_DATABASE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 // Narrower than SECRET_KEY_RE (no lowercase) so platform slot names read
 // as registered identifiers rather than local vars.
@@ -457,6 +456,9 @@ export async function linkServiceBinding({
     targetMeta = await lookupTargetMeta(targetNs, service, targetVersion);
     if (!targetMeta) targetMeta = {};
   } catch (err) {
+    // The injected reader may classify persisted target metadata separately
+    // from transport failures; preserve that domain error at the link boundary.
+    if (err instanceof LinkError) throw err;
     const message = errorMessage(err);
     throw new LinkError(502, "service_binding_target_meta_unavailable",
       `bindings.${bindingName}: failed to read target meta: ${message}`);

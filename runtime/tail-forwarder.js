@@ -6,6 +6,7 @@ import {
   optionalRedisProxyBaseUrl,
   proxyEndpoint,
 } from "runtime-bindings-proxy";
+import { errorMessage } from "shared-errors";
 import { withInternalAuth } from "shared-internal-auth";
 
 // Active-set cache. Keep the timing constants beside the implementation;
@@ -297,4 +298,52 @@ export function emitRuntimeTailEvent({ env, ctx, identity, event, phase, fields 
     }));
   ctx.waitUntil(task);
   return task;
+}
+
+/**
+ * @param {{
+ *   env: RuntimeTailEnv,
+ *   ctx: { waitUntil?: (promise: Promise<unknown>) => void },
+ *   identity: { namespace?: string, workerName?: string, workerId?: string, requestId?: string | null },
+ *   event: string,
+ *   fields: Record<string, unknown>,
+ * }} options
+ */
+export function startTailEnvelope({ env, ctx, identity, event, fields }) {
+  const startedAt = Date.now();
+  const startTailEvent = emitRuntimeTailEvent({
+    env, ctx, identity,
+    event,
+    phase: "start",
+    fields,
+  });
+
+  /** @param {Record<string, unknown>} extraFields */
+  function finish(extraFields) {
+    const durationMs = Date.now() - startedAt;
+    emitRuntimeTailEvent({
+      env, ctx, identity,
+      event,
+      phase: "finish",
+      after: startTailEvent,
+      fields: {
+        ...fields,
+        ...extraFields,
+        duration_ms: durationMs,
+      },
+    });
+    return durationMs;
+  }
+
+  return {
+    finish,
+    /** @param {unknown} err @param {Record<string, unknown>} [extraFields] */
+    finishError(err, extraFields = {}) {
+      return finish({
+        ...extraFields,
+        outcome: "error",
+        error: errorMessage(err),
+      });
+    },
+  };
 }

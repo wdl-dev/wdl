@@ -11,6 +11,7 @@ import {
   assertWorkflowDeleteAllowed, cleanupDoAlarmsForWorker,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
   ControlAbort, controlAbortResponse,
+  withOptimisticRetries,
   ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, PATTERNS_CHANNEL,
 } from "control-shared";
 import {
@@ -21,8 +22,10 @@ import {
   doStorageIdKey,
   extractD1Refs, extractOutgoingRefs,
   formatReferrerBlocker,
+  bundleAssetPrefix,
+  parseBundleMeta,
 } from "control-lib";
-import { bundleKey, patternsKey, routesKey } from "shared-version";
+import { bundleKey, hostsKey, patternsKey, routesKey } from "shared-version";
 import { workerSecretsKey } from "shared-secret-keys";
 import { decodeBulk, WatchError } from "shared-redis";
 import { queueConsumerScanPrefix } from "shared-queue-keys";
@@ -80,8 +83,16 @@ const DELETE_COLLECT_READ_CONCURRENCY = 16;
 
 class WholeDeleteError extends ControlAbort {}
 
-// Raised when an under-WATCH drift check observes state that disagrees
-// with the pre-session snapshot — caller loops to re-collect.
+/** @param {string} ns @param {string} name @returns {never} */
+function throwWholeDeleteContention(ns, name) {
+  throw new WholeDeleteError(503, "whole_delete_contention", {
+    namespace: ns, name,
+    message: `exhausted ${MAX_DELETE_ATTEMPTS} attempts; retry later`,
+  });
+}
+
+// Raised when collection or an under-WATCH check observes state that
+// changed across reads; callers retry from a fresh snapshot.
 class DriftSignal extends Error {
   /** @param {string} reason */
   constructor(reason) { super(reason); this.name = "DriftSignal"; }
@@ -204,7 +215,14 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
   let collected = null;
   let workflowBlocker = null;
   try {
-    collected = await collectDeleteInputs({ redis, ns, name });
+    collected = await withOptimisticRetries(
+      async () => await collectDeleteInputs({ redis, ns, name }),
+      {
+        attempts: MAX_DELETE_ATTEMPTS,
+        isRetryableError: (err) => err instanceof DriftSignal,
+        onExhausted: () => throwWholeDeleteContention(ns, name),
+      }
+    );
     await assertWorkflowDeleteAllowed({ ns, worker: name });
   } catch (err) {
     if (err instanceof WholeDeleteError) {
@@ -284,7 +302,7 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
  * @returns {Promise<DeleteOutcome>}
  */
 async function executeWholeDelete({ redis, ns, name, principal, requestId, log }) {
-  for (let attempt = 0; attempt < MAX_DELETE_ATTEMPTS; attempt++) {
+  return await withOptimisticRetries(async () => {
     const collected = await collectDeleteInputs({ redis, ns, name });
     let workflowBlocker = null;
     try {
@@ -338,24 +356,18 @@ async function executeWholeDelete({ redis, ns, name, principal, requestId, log }
       });
     }
 
-    try {
-      const result = await runSessionEXEC({
-        redis, ns, name, principal, requestId, collected,
-      });
-      await cleanupDoAlarmsOrWarn({
-        ns, worker: name, doStorageId: collected.doStorageId, requestId, log,
-      });
-      result.doStorageRetention = describeDoStorageRetention(collected);
-      return result;
-    } catch (err) {
-      if (err instanceof DriftSignal) continue;
-      if (err instanceof WatchError) continue;
-      throw err;
-    }
-  }
-  throw new WholeDeleteError(503, "whole_delete_contention", {
-    namespace: ns, name,
-    message: `exhausted ${MAX_DELETE_ATTEMPTS} attempts; retry later`,
+    const result = await runSessionEXEC({
+      redis, ns, name, principal, requestId, collected,
+    });
+    await cleanupDoAlarmsOrWarn({
+      ns, worker: name, doStorageId: collected.doStorageId, requestId, log,
+    });
+    result.doStorageRetention = describeDoStorageRetention(collected);
+    return result;
+  }, {
+    attempts: MAX_DELETE_ATTEMPTS,
+    isRetryableError: (err) => err instanceof DriftSignal || err instanceof WatchError,
+    onExhausted: () => throwWholeDeleteContention(ns, name),
   });
 }
 
@@ -455,8 +467,8 @@ async function collectDeleteInputs({ redis, ns, name }) {
 
   const queueConsumerKeys = await scanQueueConsumerKeysForWorker(redis, ns, name);
 
-  // Corrupt meta is fail-closed: swallowing would leave S3 orphans and
-  // stranded reverse referrers after a half-delete.
+  // Metadata behind retained/active indexes is required: proceeding without
+  // it would omit S3 and reverse-ref cleanup from a successful delete.
   const retainedVersions = await redis.zRange(workerVersionsKey(ns, name), 0, -1);
   /** @type {Record<string, string>} */
   const prefixByVersion = {};
@@ -474,23 +486,26 @@ async function collectDeleteInputs({ redis, ns, name }) {
     return { ver, rawMeta, referrers };
   });
   for (const { ver, rawMeta, referrers } of retainedReads) {
-    if (rawMeta) {
-      let meta;
-      try {
-        meta = JSON.parse(rawMeta);
-      } catch (err) {
-        throw new WholeDeleteError(500, "corrupt_meta", {
-          namespace: ns, name, version: ver,
-          stage: "retained_meta_parse",
-          detail: errMessage(err),
-        });
+    if (rawMeta == null) {
+      const currentVersions = await redis.zRange(workerVersionsKey(ns, name), 0, -1);
+      if (!currentVersions.includes(ver)) {
+        throw new DriftSignal("retained versions changed during collection");
       }
-      if (meta && meta.assets && typeof meta.assets.prefix === "string") {
-        prefixByVersion[ver] = meta.assets.prefix;
-      }
-      d1RefsByVersion[ver] = extractD1Refs(meta && meta.bindings);
-      outgoingRefsByVersion[ver] = extractOutgoingRefs(meta && meta.bindings, ns);
     }
+    const meta = parseBundleMeta(rawMeta, {
+      ns,
+      worker: name,
+      version: ver,
+      makeError: ({ reason }) => new WholeDeleteError(500, "corrupt_meta", {
+        namespace: ns, name, version: ver,
+        stage: "retained_meta_parse",
+        detail: reason,
+      }),
+    });
+    const assetPrefix = bundleAssetPrefix(meta);
+    if (assetPrefix !== null) prefixByVersion[ver] = assetPrefix;
+    d1RefsByVersion[ver] = extractD1Refs(meta.bindings);
+    outgoingRefsByVersion[ver] = extractOutgoingRefs(meta.bindings, ns);
     referrersByVersion[ver] = referrers;
   }
 
@@ -501,23 +516,27 @@ async function collectDeleteInputs({ redis, ns, name }) {
   let activeRoutes = [];
   if (activeVersion) {
     const rawMeta = await redis.hGet(bundleKey(ns, name, activeVersion), "__meta__");
-    if (rawMeta) {
-      let meta;
-      try {
-        meta = JSON.parse(rawMeta);
-      } catch (err) {
-        throw new WholeDeleteError(500, "corrupt_meta", {
-          namespace: ns, name, version: activeVersion,
-          stage: "active_meta_parse",
-          detail: errMessage(err),
-        });
+    if (rawMeta == null) {
+      const currentActive = await redis.hGet(routesKey(ns), name);
+      if (currentActive !== activeVersion) {
+        throw new DriftSignal("active version changed during collection");
       }
-      activeRoutes = normalizeActiveRoutes(meta, {
-        namespace: ns,
-        name,
-        version: activeVersion,
-      });
     }
+    const meta = parseBundleMeta(rawMeta, {
+      ns,
+      worker: name,
+      version: activeVersion,
+      makeError: ({ reason }) => new WholeDeleteError(500, "corrupt_meta", {
+        namespace: ns, name, version: activeVersion,
+        stage: "active_meta_parse",
+        detail: reason,
+      }),
+    });
+    activeRoutes = normalizeActiveRoutes(meta, {
+      namespace: ns,
+      name,
+      version: activeVersion,
+    });
   }
 
   // A host stays in ns-hosts if any OTHER worker in this ns still holds a
@@ -664,7 +683,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
   return await redis.session(async (iso) => {
     const watchKeys = [
       routesKey(ns),
-      `hosts:${ns}`,
+      hostsKey(ns),
       deleteLockKey(ns, name),
       doStorageIdKey(ns, name),
       workerVersionsKey(ns, name),

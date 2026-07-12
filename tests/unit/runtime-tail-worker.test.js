@@ -4,6 +4,7 @@ import {
   applyModuleReplacements,
   moduleDataUrl,
   readRepositoryFile,
+  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { installMockFetch, makeRecordingFetch } from "../helpers/mock-fetch.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
@@ -12,6 +13,7 @@ import { delay } from "../helpers/timing.js";
 
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
+const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const OBSERVABILITY_STUB_SRC = `const createLogger = (service) => (level, event, fields) => /** @type {any} */ (globalThis).__runtimeTailLogs.push({ service, level, event, fields });
 const createLogLevelBinder = () => {
   let logLevelSet = false;
@@ -23,6 +25,7 @@ const createLogLevelBinder = () => {
 };`;
 const forwarderSrc = applyModuleReplacements(readRepositoryFile("runtime/tail-forwarder.js"), [
   [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
+  [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
   [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
 ]);
 const tailWorkerRawSrc = applyModuleReplacements(readRepositoryFile("runtime/tail-worker.js"), [

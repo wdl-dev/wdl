@@ -511,11 +511,9 @@ const CHAIN_INNER_SRC = `
       throw err;
     }
     async boomPlainNoMessage() {
-      // eslint-disable-next-line no-throw-literal
       throw { code: "E_PLAIN", detail: "plain-obj" };
     }
     async boomPlainWithMessage() {
-      // eslint-disable-next-line no-throw-literal
       throw { message: "from-inner-plain", code: "E_PLAIN_MSG", detail: "plain-msg" };
     }
   }

@@ -1,5 +1,8 @@
 use serde::Deserialize;
 
+const CRON_WORKER_KEY_PREFIX: &str = "crons:";
+pub(crate) const CRON_WORKER_KEY_SCAN_PATTERN: &str = "crons:*:*";
+
 #[derive(Clone, Debug)]
 pub(crate) struct RefParts {
     pub(crate) ns: String,
@@ -27,6 +30,18 @@ pub(crate) enum RefVerdict {
     },
     Stale(&'static str),
     Corrupt,
+}
+
+pub(crate) fn cron_worker_key(ns: &str, worker: &str) -> String {
+    format!("{CRON_WORKER_KEY_PREFIX}{ns}:{worker}")
+}
+
+pub(crate) fn parse_cron_worker_key(key: &str) -> Option<(&str, &str)> {
+    let (ns, worker) = key.strip_prefix(CRON_WORKER_KEY_PREFIX)?.split_once(':')?;
+    if ns.is_empty() || worker.is_empty() || worker.contains(':') {
+        return None;
+    }
+    Some((ns, worker))
 }
 
 pub(crate) fn ref_for(ns: &str, worker: &str, cron_id: &str, r#gen: i64) -> String {
@@ -81,6 +96,36 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::test_fixtures::scheduler_projection_contract;
+
+    #[test]
+    fn cron_projection_contract_matches_control_writer() {
+        let fixture = scheduler_projection_contract();
+        let cron = fixture.cron;
+
+        assert_eq!(cron_worker_key(&cron.ns, &cron.worker), cron.worker_key);
+        assert_eq!(
+            parse_cron_worker_key(&cron.worker_key),
+            Some((cron.ns.as_str(), cron.worker.as_str()))
+        );
+        assert_eq!(
+            ref_for(&cron.ns, &cron.worker, &cron.cron_id, cron.r#gen),
+            cron.reference
+        );
+        let parts = parse_ref(&cron.reference).expect("fixture cron reference must parse");
+        match classify_ref(&parts, Some(cron.meta.json), Some(cron.entry.json)) {
+            RefVerdict::Fire {
+                entry,
+                active_version,
+            } => {
+                assert_eq!(active_version, cron.meta.version);
+                assert_eq!(entry.cron, cron.entry.cron);
+                assert_eq!(entry.timezone, cron.entry.timezone);
+                assert_eq!(entry.r#gen, cron.entry.r#gen);
+            }
+            _ => panic!("fixture cron projection must be fireable"),
+        }
+    }
 
     #[test]
     fn parse_ref_round_trip() {
@@ -103,6 +148,15 @@ mod tests {
         assert!(parse_ref("demo:hello::7").is_none());
         assert!(parse_ref("demo:hello:abc123:x").is_none());
         assert!(parse_ref("demo:hello:abc123:").is_none());
+    }
+
+    #[test]
+    fn parse_cron_worker_key_rejects_non_worker_hash_keys() {
+        assert_eq!(parse_cron_worker_key("queue:demo:jobs"), None);
+        assert_eq!(parse_cron_worker_key("crons:demo"), None);
+        assert_eq!(parse_cron_worker_key("crons::worker"), None);
+        assert_eq!(parse_cron_worker_key("crons:demo:"), None);
+        assert_eq!(parse_cron_worker_key("crons:demo:worker:extra"), None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { controlSharedStubUrl } from "../helpers/control-shared-stub.js";
-import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
+import { createFakeRedis, sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import {
   applyModuleReplacements,
   moduleDataUrl,
@@ -41,10 +41,7 @@ export function d1DatabaseTombstonesKey(ns) { return "d1:database-tombstones:" +
 export function formatD1ReferrerBlockers() { return { blockers: [], malformedReferrerCount: 0 }; }
 `);
 
-const sharedRedisUrl = moduleDataUrl(`
-export function decodeBulk(value) { return value; }
-export class WatchError extends Error {}
-`);
+const sharedRedisUrl = sharedRedisStubUrl();
 
 const modelUrl = repositoryModuleDataUrl("control/d1-model.js", [
   [
@@ -52,6 +49,7 @@ const modelUrl = repositoryModuleDataUrl("control/d1-model.js", [
     `export { splitSqlStatements } from ${JSON.stringify(repositoryFileUrl("shared/sql-splitter.js"))};`
   ],
   [/from "shared-hex";/, `from ${JSON.stringify(repositoryFileUrl("shared/hex.js"))};`],
+  [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
 ]);
 const src = applyModuleReplacements(readRepositoryFile("control/d1-store.js"), [
   [/from "control-shared";/, `from ${JSON.stringify(controlSharedUrl)};`],

@@ -1,0 +1,18 @@
+{
+  "header": "x-wdl-internal-auth",
+  "currentEnv": "WDL_INTERNAL_AUTH_TOKEN",
+  "previousEnv": "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN",
+  "failure": {
+    "status": 401,
+    "error": "internal_auth_failed",
+    "message": "Internal authentication failed"
+  },
+  "rotationCases": [
+    { "actual": "current", "current": "current", "previous": null, "accepted": true },
+    { "actual": "current", "current": "current", "previous": "previous", "accepted": true },
+    { "actual": "previous", "current": "current", "previous": "previous", "accepted": true },
+    { "actual": "wrong", "current": "current", "previous": "previous", "accepted": false },
+    { "actual": null, "current": "current", "previous": "previous", "accepted": false },
+    { "actual": "previous", "current": "current", "previous": null, "accepted": false }
+  ]
+}

@@ -178,11 +178,16 @@ function materializeServiceBinding({ name, spec, ns, worker, nsSecrets, workerSe
   // Secrets-only (not vars): a credential moved from secrets → vars
   // stops reaching the target instead of silently continuing.
   // Missing keys are dropped; control warned at deploy.
+  const requiredCallerSecrets = Array.isArray(spec.requiredCallerSecrets)
+    ? spec.requiredCallerSecrets
+    : [];
   /** @type {Record<string, string> | undefined} */
-  let callerSecrets;
-  if (Array.isArray(spec.requiredCallerSecrets) && spec.requiredCallerSecrets.length) {
-    callerSecrets = {};
-    for (const k of spec.requiredCallerSecrets) {
+  const callerSecrets = requiredCallerSecrets.length
+    // workerd's JSRPC props serializer rejects null-prototype objects.
+    ? {}
+    : undefined;
+  if (callerSecrets) {
+    for (const k of requiredCallerSecrets) {
       if (typeof k !== "string") continue;
       if (Object.hasOwn(workerSecrets, k)) {
         callerSecrets[k] = workerSecrets[k];

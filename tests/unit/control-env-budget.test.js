@@ -3,26 +3,28 @@ import assert from "node:assert/strict";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
-  moduleDataUrl,
   repositoryFileUrl,
+  repositoryModuleDataUrl,
 } from "../helpers/load-shared-module.js";
+import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
+import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { encryptSecretValue } from "../../shared/secret-envelope.js";
 
+const { libUrl: controlLibUrl } = await compileControlGraph();
 const secretEnvelopeUrl = repositoryFileUrl("shared/secret-envelope.js");
-const sharedErrorsUrl = repositoryFileUrl("shared/errors.js");
 const sharedVersionUrl = repositoryFileUrl("shared/version.js");
-const sharedRedisUrl = moduleDataUrl(`
-export class WatchError extends Error {
-  constructor(message = "watched key changed") {
-    super(message);
-    this.name = "WatchError";
-  }
-}
-`);
+const sharedRedisUrl = sharedRedisStubUrl();
+const runtimeEnvBuildUrl = repositoryModuleDataUrl(
+  "runtime/load/env-build.js",
+  importSpecifierReplacements({
+    "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
+  })
+);
 const {
   UPSTREAM_WORKER_LOADER_ENV_MAX_BYTES,
   WORKER_LOADER_ENV_HEADROOM_BYTES,
   WORKER_LOADER_ENV_MAX_BYTES,
+  BundleMetaError,
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
   assertWorkerVersionsUserEnvBudget,
@@ -31,8 +33,9 @@ const {
   estimatedWorkerLoaderEnvBytes,
   WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
 } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
+  "control-lib": controlLibUrl,
+  "runtime-load-env-build": runtimeEnvBuildUrl,
   "shared-secret-envelope": secretEnvelopeUrl,
-  "shared-errors": sharedErrorsUrl,
   "shared-version": sharedVersionUrl,
   "shared-redis": sharedRedisUrl,
 }));
@@ -41,6 +44,19 @@ const envelopeEnv = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
   SECRET_ENVELOPE_KID: "local:test:secret-envelope:v1",
 };
+
+/** @param {unknown} err @param {string} reason */
+function assertBundleMetaError(err, reason) {
+  assert.ok(err instanceof BundleMetaError);
+  const bundleError = /** @type {Error & { status: number, code: string, details: Record<string, string>, cause: unknown }} */ (err);
+  assert.equal(bundleError.status, 500);
+  assert.equal(bundleError.code, "corrupt_meta");
+  assert.equal(bundleError.message, "Corrupt __meta__ for demo/api/v1");
+  assert.deepEqual(bundleError.details, { namespace: "demo", worker: "api", version: "v1" });
+  assert.ok(bundleError.cause instanceof Error);
+  assert.equal(bundleError.cause.message, reason);
+  return true;
+}
 
 test("worker env budget counts merged vars and secrets with worker-secret precedence", () => {
   const estimated = estimatedWorkerLoaderEnv({
@@ -166,11 +182,11 @@ test("worker env budget accounts for V8 two-byte strings on mixed non-Latin-1 en
   );
 });
 
-test("worker env budget stores required caller secrets in a null-prototype map", () => {
+test("worker env budget stores required caller secrets in a JSRPC-serializable object", () => {
   const estimated = estimatedWorkerLoaderEnv({
     ns: "demo",
     worker: "caller",
-    nsSecrets: JSON.parse('{"__proto__":"secret"}'),
+    nsSecrets: { API_TOKEN: "secret" },
     meta: {
       bindings: {
         PLATFORM: {
@@ -178,16 +194,15 @@ test("worker env budget stores required caller secrets in a null-prototype map",
           ns: "__platform__",
           service: "platformApi",
           version: "v1",
-          requiredCallerSecrets: ["__proto__"],
+          requiredCallerSecrets: ["API_TOKEN"],
         },
       },
     },
   });
   const callerSecrets = /** @type {any} */ (estimated.PLATFORM).props.callerSecrets;
 
-  assert.equal(Object.getPrototypeOf(callerSecrets), null);
-  assert.equal(Object.hasOwn(callerSecrets, "__proto__"), true);
-  assert.equal(callerSecrets.__proto__, "secret");
+  assert.equal(Object.getPrototypeOf(callerSecrets), Object.prototype);
+  assert.deepEqual(callerSecrets, { API_TOKEN: "secret" });
 });
 
 test("worker env budget counts configured assets CDN base", () => {
@@ -471,7 +486,35 @@ test("worker env budget reports bundle metadata parse context", async () => {
       worker: "api",
       versions: ["v1"],
     }),
-    /invalid bundle metadata for demo\/api@v1/
+    (err) => {
+      assert.ok(err instanceof BundleMetaError);
+      const bundleError = /** @type {Error & { cause: unknown }} */ (err);
+      assert.ok(bundleError.cause instanceof SyntaxError);
+      return assertBundleMetaError(err, bundleError.cause.message);
+    }
+  );
+});
+
+test("worker env budget maps strict retained metadata failures to corrupt_meta", async () => {
+  const redis = {
+    async hGet() {
+      return JSON.stringify({
+        workflows: [{ binding: "FLOW", name: "flow", className: "Flow" }],
+      });
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkerVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      worker: "api",
+      versions: ["v1"],
+    }),
+    (err) => assertBundleMetaError(
+      err,
+      'Workflow binding "FLOW" is missing workflow metadata (redeploy demo/api)'
+    )
   );
 });
 
@@ -492,7 +535,7 @@ test("worker env budget fails closed when retained bundle metadata is missing", 
       worker: "api",
       versions: ["v1"],
     }),
-    /bundle metadata missing for demo\/api@v1/
+    (err) => assertBundleMetaError(err, "__meta__ must be a JSON string")
   );
 });
 
@@ -535,6 +578,6 @@ test("worker env budget fails closed when retained bundle metadata is not an obj
       worker: "api",
       versions: ["v1"],
     }),
-    /__meta__ must be a JSON object/
+    (err) => assertBundleMetaError(err, "__meta__ must be a JSON object")
   );
 });

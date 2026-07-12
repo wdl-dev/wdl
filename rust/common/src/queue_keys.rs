@@ -5,6 +5,9 @@ use crate::identity::is_valid_runtime_load_ns;
 pub const QUEUE_CONSUMER_INDEX_KEY: &str = "queue:index:consumers";
 pub const QUEUE_STREAM_INDEX_KEY: &str = "queue:index:streams";
 pub const QUEUE_DELAYED_INDEX_KEY: &str = "queue:index:delayed";
+pub const QUEUE_DELAYED_WAKE_STREAM: &str = "queue-delayed-wake";
+pub const QUEUE_DELAYED_WAKE_KEY_FIELD: &str = "delayed_key";
+pub const QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD: &str = "visible_at";
 
 pub fn is_valid_queue_name(queue: &str) -> bool {
     let bytes = queue.as_bytes();
@@ -67,6 +70,25 @@ fn split_queue_key_rest(rest: &str) -> Option<(String, String)> {
 mod tests {
     use super::*;
     use crate::test_fixtures::identity_cases;
+    use serde_json::{Value as JsonValue, json};
+
+    fn assert_queue_key_parse_contract(kind: &str, parse: fn(&str) -> Option<(String, String)>) {
+        let fixture: JsonValue =
+            serde_json::from_str(include_str!("../../../tests/fixtures/queue-key-parse.json"))
+                .expect("queue key parse fixture parses");
+        for entry in fixture[kind]
+            .as_array()
+            .expect("queue key parse fixture field is an array")
+        {
+            let key = entry["key"]
+                .as_str()
+                .expect("queue key parse fixture key is a string");
+            let actual = parse(key)
+                .map(|(ns, queue)| json!({ "ns": ns, "queue": queue }))
+                .unwrap_or(JsonValue::Null);
+            assert_eq!(actual, entry["parsed"], "{kind}:{key:?}");
+        }
+    }
 
     #[test]
     fn queue_name_grammar_matches_cross_language_fixture() {
@@ -80,6 +102,9 @@ mod tests {
         assert_eq!(QUEUE_CONSUMER_INDEX_KEY, "queue:index:consumers");
         assert_eq!(QUEUE_STREAM_INDEX_KEY, "queue:index:streams");
         assert_eq!(QUEUE_DELAYED_INDEX_KEY, "queue:index:delayed");
+        assert_eq!(QUEUE_DELAYED_WAKE_STREAM, "queue-delayed-wake");
+        assert_eq!(QUEUE_DELAYED_WAKE_KEY_FIELD, "delayed_key");
+        assert_eq!(QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD, "visible_at");
         assert_eq!(queue_stream_key("demo", "jobs"), "queue:demo:jobs:s");
         assert_eq!(queue_delayed_key("demo", "jobs"), "queue-delayed:demo:jobs");
         assert_eq!(queue_dlq_key("demo", "jobs"), "queue:demo:jobs:dlq");
@@ -106,41 +131,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_queue_keys() {
-        assert_eq!(
-            parse_stream_key("queue:demo:jobs:s"),
-            Some(("demo".to_string(), "jobs".to_string()))
-        );
-        assert_eq!(
-            parse_stream_key("queue:__platform__:jobs:s"),
-            Some(("__platform__".to_string(), "jobs".to_string()))
-        );
-        assert_eq!(
-            parse_delayed_key("queue-delayed:demo:jobs"),
-            Some(("demo".to_string(), "jobs".to_string()))
-        );
-        assert_eq!(
-            parse_consumer_key("queue-consumer:demo:jobs"),
-            Some(("demo".to_string(), "jobs".to_string()))
-        );
-        assert_eq!(
-            parse_stream_key("queue:t:my-queue-1:s"),
-            Some(("t".to_string(), "my-queue-1".to_string()))
-        );
-        assert_eq!(parse_stream_key("queue:demo:jobs"), None);
-        assert_eq!(parse_stream_key("queue-delayed:demo:jobs"), None);
-        assert_eq!(parse_stream_key("queue::jobs:s"), None);
-        assert_eq!(parse_stream_key("queue:admin:jobs:s"), None);
-        assert_eq!(parse_stream_key("queue:__community__:jobs:s"), None);
-        assert_eq!(parse_stream_key("queue:demo:Jobs:s"), None);
-        assert_eq!(parse_stream_key("queue:demo:jobs:extra:s"), None);
-        assert_eq!(parse_stream_key("notaqueue:demo:jobs:s"), None);
-        assert_eq!(parse_stream_key(""), None);
-        assert_eq!(parse_delayed_key("queue:demo:jobs:s"), None);
-        assert_eq!(parse_delayed_key("queue-delayed::jobs"), None);
-        assert_eq!(parse_delayed_key("queue-delayed:demo:"), None);
-        assert_eq!(parse_consumer_key("queue-consumer:demo"), None);
-        assert_eq!(parse_consumer_key("queue-consumer:"), None);
-        assert_eq!(parse_consumer_key("other:demo:jobs"), None);
+    fn queue_key_parsers_match_cross_language_fixture() {
+        assert_queue_key_parse_contract("stream", parse_stream_key);
+        assert_queue_key_parse_contract("delayed", parse_delayed_key);
+        assert_queue_key_parse_contract("consumer", parse_consumer_key);
     }
 }

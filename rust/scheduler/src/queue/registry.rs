@@ -247,6 +247,7 @@ async fn write_resolved_consumer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::scheduler_projection_contract;
     use std::sync::{Arc as StdArc, Mutex};
 
     fn str_map(items: &[(&str, &str)]) -> HashMap<String, String> {
@@ -348,6 +349,24 @@ mod tests {
         assert_eq!(zeroes.max_retries, 0);
         assert_eq!(zeroes.max_batch_timeout_ms, 0);
         assert_eq!(zeroes.retry_delay_secs, 0);
+    }
+
+    #[test]
+    fn hydrate_consumer_matches_control_projection_fixture() {
+        let fixture = scheduler_projection_contract();
+        let contract = fixture.queue_consumer;
+        let consumer = hydrate_consumer(&contract.ns, &contract.queue, &contract.fields)
+            .expect("fixture queue consumer projection must hydrate");
+
+        assert_eq!(
+            consumer.worker_id,
+            format!("{}:{}:{}", contract.ns, contract.worker, contract.version)
+        );
+        assert_eq!(consumer.max_batch_size, 12);
+        assert_eq!(consumer.max_batch_timeout_ms, 250);
+        assert_eq!(consumer.max_retries, 4);
+        assert_eq!(consumer.retry_delay_secs, 17);
+        assert_eq!(consumer.dead_letter_queue.as_deref(), Some("jobs-dlq"));
     }
 
     #[test]

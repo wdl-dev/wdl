@@ -4,15 +4,13 @@ import {
   DO_INVOKE_URL,
   connectHeaders,
   doOwnerHintCacheKey,
-  dispatchDoRequestWithOwnerHint,
+  dispatchDoConnectWithHintCache,
+  dispatchDoInvokeWithHintCache,
   fetchInvokeInit,
   isWebSocketUpgrade,
-  retryableOwnerRaceResponse,
+  replayOwnerUnavailableForFetch,
   rpcInvokeInit,
   rpcResultFromResponse,
-  staleDoOwnerHintResponse,
-  stripOwnerHintHeaders,
-  withoutOwnerHintOptIn,
 } from "runtime-do-transport";
 import { createOwnerHintCache } from "runtime-owner-hint-cache";
 import { withInternalAuth } from "shared-internal-auth";
@@ -24,12 +22,6 @@ import { withInternalAuth } from "shared-internal-auth";
  */
 
 const ownerHintCache = createOwnerHintCache();
-
-/** @param {Request} request */
-function replayOwnerUnavailableForFetch(request) {
-  const method = request.method.toUpperCase();
-  return method === "GET" || method === "HEAD";
-}
 
 /** @param {DurableObjectNamespace} binding @returns {DoBinding} */
 function doBinding(binding) {
@@ -59,24 +51,16 @@ async function dispatchInvokeWithOwnerHint(binding, init, objectName, { replayOw
   const backend = doBinding(binding).env.DO_BACKEND;
   const props = propsOf(binding);
   const hintKey = doOwnerHintCacheKey(props, objectName);
-  const response = await dispatchDoRequestWithOwnerHint({
+  return await dispatchDoInvokeWithHintCache({
     routerFetch: (url, requestInit) => backend.fetch(url, requestInit),
     routerUrl: DO_INVOKE_URL,
     ownerFetch: fetch,
     ownerPath: "/internal/do/invoke",
     init,
-    cachedHint: /** @type {import("runtime-do-transport").DoOwnerHint | null} */ (ownerHintCache.get(hintKey)),
-    rememberHint: (hint) => ownerHintCache.set(hintKey, hint),
-    clearHint: () => ownerHintCache.delete(hintKey),
-    staleCachedResponse: staleDoOwnerHintResponse,
-    bypassOwnerHintResponse: retryableOwnerRaceResponse,
+    cache: ownerHintCache,
+    hintKey,
     replayOwnerUnavailable,
   });
-  if (await retryableOwnerRaceResponse(response)) {
-    ownerHintCache.delete(hintKey);
-    return stripOwnerHintHeaders(await backend.fetch(DO_INVOKE_URL, withoutOwnerHintOptIn(init)));
-  }
-  return stripOwnerHintHeaders(response);
 }
 
 export class DurableObjectNamespace extends WorkerEntrypoint {
@@ -97,18 +81,15 @@ export class DurableObjectNamespace extends WorkerEntrypoint {
         headers: withInternalAuth(connectHeaders(props, objectName, request, requestId), doBinding(this).env),
       };
       const hintKey = doOwnerHintCacheKey(props, objectName);
-      return stripOwnerHintHeaders(await dispatchDoRequestWithOwnerHint({
+      return await dispatchDoConnectWithHintCache({
         routerFetch: (url, requestInit) => doBinding(this).env.DO_BACKEND.fetch(url, requestInit),
         routerUrl: DO_CONNECT_URL,
         ownerFetch: fetch,
         ownerPath: "/internal/do/connect",
         init,
-        cachedHint: /** @type {import("runtime-do-transport").DoOwnerHint | null} */ (ownerHintCache.get(hintKey)),
-        rememberHint: (hint) => ownerHintCache.set(hintKey, hint),
-        clearHint: () => ownerHintCache.delete(hintKey),
-        staleCachedResponse: staleDoOwnerHintResponse,
-        replayOwnerUnavailable: false,
-      }));
+        cache: ownerHintCache,
+        hintKey,
+      });
     }
     const init = await fetchInvokeInit(props, objectName, request, requestId);
     init.headers = withInternalAuth(init.headers, doBinding(this).env);

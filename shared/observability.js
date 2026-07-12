@@ -6,6 +6,7 @@
 import { bytesToHex } from "./hex.js";
 
 const CARDINALITY_WARN_LIMIT = 100;
+const requestIdUtf8Encoder = new TextEncoder();
 /**
  * @typedef {Record<string, string | number | boolean>} Labels
  * @typedef {(level: string, event: string, fields?: Record<string, unknown>) => void} Logger
@@ -133,7 +134,7 @@ export function sanitizeRequestId(raw) {
   if (Array.isArray(raw)) raw = raw[0];
   if (typeof raw !== "string") return null;
   const first = raw.split(",")[0].trim();
-  if (!first || first.length > 128) return null;
+  if (!first || requestIdUtf8Encoder.encode(first).byteLength > 128) return null;
   if (/[\s"\\]/.test(first)) return null;
   for (let i = 0; i < first.length; i++) {
     const code = first.charCodeAt(i);

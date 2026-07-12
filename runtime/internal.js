@@ -2,7 +2,7 @@
 // runtime/index.js on :8081; scheduler/workflows call this worker on :8088.
 
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { formatWorkerId, parseDispatchWorkerId } from "shared-worker-id";
+import { parseDispatchWorkerId } from "shared-worker-id";
 import {
   internalErrorResponse,
   jsonError,
@@ -21,11 +21,9 @@ import {
   readWorkflowNotifyDispatch,
   readWorkflowRunDispatch,
 } from "runtime-dispatch";
-import { createLoaderCallback } from "runtime-load";
+import { getLoadedWorkerStub } from "runtime-load";
 import {
   bindRuntime,
-  evictSiblings,
-  recordLoadedWorker,
   runtimeServiceAllowsNamespace,
 } from "runtime-state";
 
@@ -51,24 +49,12 @@ export { InternalAuthBackend } from "runtime-bindings-internal-auth-backend";
  * @param {{ env: RuntimeInternalEnv, ctx: { waitUntil(promise: Promise<unknown>): void }, runtime: RuntimeBinding, scope: RuntimeScope, namespace: string, workerName: string, version: string, evictOnLoad?: boolean }} opts
  */
 function loadStub({ env, ctx, runtime, scope, namespace, workerName, version, evictOnLoad = false }) {
-  const workerId = formatWorkerId({ namespace, worker: workerName, version });
-  const baseCallback = createLoaderCallback({
+  return getLoadedWorkerStub({
     requestId: scope.requestId, env, ctx,
-    ns: namespace, worker: workerName, version, workerId,
+    ns: namespace, worker: workerName, version,
     metrics: runtime.metrics, log: runtime.log,
+    evictOnLoad,
   });
-  const stub = env.LOADER.get(workerId, async () => {
-    const code = await baseCallback();
-    recordLoadedWorker(workerId);
-    if (evictOnLoad) {
-      ctx.waitUntil(
-        evictSiblings({ env, workerId, log: runtime.log })
-          .catch(() => {})
-      );
-    }
-    return code;
-  });
-  return { workerId, stub };
 }
 
 /** @param {{ serviceName: string }} runtime @param {string} namespace */

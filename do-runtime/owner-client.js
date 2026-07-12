@@ -1,5 +1,6 @@
 import {
   DO_INVOKE_CONTENT_TYPE,
+  DO_OWNERSHIP_CODE,
   DoRuntimeError,
   encodeDoInvokeRequest,
 } from "do-runtime-protocol";
@@ -68,14 +69,14 @@ export async function forwardToOwner(invoke, env, owner, requestId = null, hopCo
       path: pathname,
     }),
     missingEndpointError: () =>
-      new DoRuntimeError(503, "owner_endpoint_missing", `DO scope ${owner.ownerKey} owner has no endpoint`),
+      new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_ENDPOINT_MISSING, `DO scope ${owner.ownerKey} owner has no endpoint`),
     hopExhaustedError: () =>
       new DoRuntimeError(
         503,
-        "forward_hop_exhausted",
+        DO_OWNERSHIP_CODE.FORWARD_HOP_EXHAUSTED,
         `DO scope ${owner.ownerKey} exceeded the maximum forward depth for ${pathname}`
       ),
-    unavailableError: () => new DoRuntimeError(503, "owner_unavailable", "DO owner is unavailable"),
+    unavailableError: () => new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_UNAVAILABLE, "DO owner is unavailable"),
   });
 }
 
@@ -118,13 +119,13 @@ export async function forwardConnectToOwner(request, invoke, env, owner, request
       owner_endpoint: owner.endpoint,
     }),
     missingEndpointError: () =>
-      new DoRuntimeError(503, "owner_endpoint_missing", `DO scope ${owner.ownerKey} owner has no endpoint`),
+      new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_ENDPOINT_MISSING, `DO scope ${owner.ownerKey} owner has no endpoint`),
     hopExhaustedError: () =>
       new DoRuntimeError(
         503,
-        "forward_hop_exhausted",
+        DO_OWNERSHIP_CODE.FORWARD_HOP_EXHAUSTED,
         `DO scope ${owner.ownerKey} exceeded the maximum forward depth`
       ),
-    unavailableError: () => new DoRuntimeError(503, "owner_unavailable", "DO owner is unavailable"),
+    unavailableError: () => new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_UNAVAILABLE, "DO owner is unavailable"),
   });
 }

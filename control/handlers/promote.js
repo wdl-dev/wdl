@@ -9,6 +9,7 @@ import {
 } from "control-shared";
 import { parseVersion } from "shared-version";
 import { promoteWithRoutes, RoutingError } from "control-routing";
+import { platformDomainFromEnv } from "control-lib";
 
 /**
  * @param {{ request: Request, env: Record<string, unknown>, ns: string, name: string, requestId: string }} args
@@ -27,9 +28,7 @@ export async function handle({ request, env, ns, name, requestId }) {
   }
 
   try {
-    const platformDomain = typeof env.PLATFORM_DOMAIN === "string" && env.PLATFORM_DOMAIN
-      ? env.PLATFORM_DOMAIN
-      : "workers.local";
+    const platformDomain = platformDomainFromEnv(env);
     const result = await promoteWithRoutes(redis, ns, name, body.version, { log, requestId });
     log("info", "worker_promoted", {
       request_id: requestId,

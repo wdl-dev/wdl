@@ -12,7 +12,8 @@ export const SECRET_ENVELOPE_KID_ENV = "SECRET_ENVELOPE_KID";
 const AES_GCM_TAG_BYTES = 16;
 const AES_GCM_IV_BYTES = 12;
 const AES_256_KEY_BYTES = 32;
-const ENVELOPE_FIELDS = ["alg", "ct", "edek", "iv", "kid", "tag", "v"];
+const ENVELOPE_CANONICAL_FIELDS = ["v", "alg", "kid", "edek", "iv", "ct", "tag"];
+const ENVELOPE_FIELDS = ENVELOPE_CANONICAL_FIELDS.toSorted();
 const utf8Encoder = new TextEncoder();
 const utf8FatalDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -51,6 +52,14 @@ function bytesToText(bytes) {
 }
 
 export { bytesToBase64 };
+
+/** @param {Record<string, unknown>} envelope */
+function canonicalEnvelopeJson(envelope) {
+  /** @type {Record<string, unknown>} */
+  const ordered = {};
+  for (const field of ENVELOPE_CANONICAL_FIELDS) ordered[field] = envelope[field];
+  return JSON.stringify(ordered);
+}
 
 /**
  * @param {unknown} value
@@ -218,7 +227,7 @@ export async function encryptSecretValue(plaintext, { env, hashKey, fieldName, r
   edekBytes.set(wrappedDek.tag, dekIv.length + wrappedDek.ct.length);
 
   const payload = await aesGcmEncrypt(dek, payloadIv, textBytes(plaintext), payloadAadBytes(hashKey, fieldName));
-  return `${SECRET_ENVELOPE_PREFIX}${JSON.stringify({
+  return `${SECRET_ENVELOPE_PREFIX}${canonicalEnvelopeJson({
     v: SECRET_ENVELOPE_VERSION,
     alg: SECRET_ENVELOPE_ALG,
     kid,
@@ -252,7 +261,7 @@ function parseEnvelope(value) {
   if (fields.length !== ENVELOPE_FIELDS.length || fields.some((field, idx) => field !== ENVELOPE_FIELDS[idx])) {
     throw new SecretEnvelopeError("invalid_envelope", "secret envelope has unknown or missing fields");
   }
-  if (JSON.stringify(parsed) !== json) {
+  if (canonicalEnvelopeJson(envelope) !== json) {
     throw new SecretEnvelopeError("invalid_envelope", "secret envelope JSON is not canonical");
   }
   if (envelope.v !== SECRET_ENVELOPE_VERSION || envelope.alg !== SECRET_ENVELOPE_ALG) {

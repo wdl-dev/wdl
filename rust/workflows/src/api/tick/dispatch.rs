@@ -10,10 +10,11 @@ use crate::{
 };
 
 use super::super::{
-    InstanceRouteKeys, MAX_WORKFLOW_RUNTIME_RESPONSE_BYTES, RunClaim, clear_suspended_run_claim,
-    eval_script, instance_payload_limit_arg, log_instance_event, observe_instance_duration,
-    parse_positive_identity_i64, read_state_by_id, result_json, spawn_progress_from_identity,
-    terminal_retention_ms,
+    InstanceRouteKeys, MAX_WORKFLOW_RUNTIME_RESPONSE_BYTES, RunClaim,
+    WORKFLOW_PAYLOAD_TOO_LARGE_CODE, clear_suspended_run_claim, eval_script,
+    instance_payload_limit_arg, log_instance_event, observe_instance_duration,
+    parse_positive_identity_i64, read_state_by_id, result_json, runtime_endpoint,
+    spawn_progress_from_identity, terminal_retention_ms,
 };
 
 pub(crate) const COMMIT_RUNTIME_TERMINAL_SCRIPT: &str = r#"
@@ -226,17 +227,7 @@ pub(super) async fn dispatch_runtime(
     params: JsonValue,
     request_id: Option<&str>,
 ) -> WorkflowResult<JsonValue> {
-    let host = if identity.ns == "__system__" {
-        &app.config.system_runtime_host
-    } else {
-        &app.config.runtime_host
-    };
-    let port = if identity.ns == "__system__" {
-        app.config.system_runtime_port
-    } else {
-        app.config.runtime_port
-    };
-    let url = format!("http://{host}:{port}/internal/workflows/run");
+    let url = runtime_endpoint(app, &identity.ns, "/internal/workflows/run");
     let generation = parse_positive_identity_i64(&identity.generation, "generation")?;
     let created_at_ms = parse_positive_identity_i64(&identity.created_at_ms, "createdAtMs")?;
     let mut request = app
@@ -329,7 +320,7 @@ async fn commit_runtime_failed_payload(
 fn runtime_payload_too_large_error(err: &WorkflowError) -> JsonValue {
     json!({
         "name": "WorkflowError",
-        "code": "workflow_payload_too_large",
+        "code": WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
         "message": err.message,
     })
 }

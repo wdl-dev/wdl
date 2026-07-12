@@ -15,6 +15,9 @@ export class SigV4Client {
 `);
 
 const {
+  deleteR2Object,
+  getR2Object,
+  headR2Object,
   listR2Buckets,
   listR2Objects,
   makeR2AdminClient,
@@ -22,6 +25,7 @@ const {
   "@wdl-dev/aws-sigv4": AWS_SIGV4_STUB_URL,
   "runtime-r2-utils": repositoryFileUrl("runtime/r2-utils.js"),
   "shared-s3-xml": repositoryFileUrl("shared/s3-xml.js"),
+  "shared-s3-retry": repositoryFileUrl("shared/s3-retry.js"),
   "shared-respond": repositoryFileUrl("shared/respond.js"),
 }));
 
@@ -113,4 +117,42 @@ test("control R2 admin client restores S3 transient retry budget", () => {
 
   assert.ok(r2);
   assert.equal(r2.client.config.retries, 10);
+});
+
+test("control R2 object methods share request, error, and not-found handling", async () => {
+  const getMock = r2AdminMock(new Response("missing", { status: 404 }));
+  assert.equal(await getR2Object({
+    r2: getMock.r2,
+    ns: "demo",
+    bucketName: "uploads",
+    key: "a.txt",
+    requestId: "rid-get",
+  }), null);
+  assert.equal(getMock.calls[0].init?.method, "GET");
+  assert.equal(new Headers(getMock.calls[0].init?.headers).get("x-request-id"), "rid-get");
+
+  const headMock = r2AdminMock(new Response("backend detail", { status: 503 }));
+  await assert.rejects(
+    () => headR2Object({
+      r2: headMock.r2,
+      ns: "demo",
+      bucketName: "uploads",
+      key: "a.txt",
+    }),
+    /R2 admin HEAD failed with 503: backend detail/
+  );
+
+  const deleteMock = r2AdminMock(new Response("missing", { status: 404 }));
+  assert.deepEqual(await deleteR2Object({
+    r2: deleteMock.r2,
+    ns: "demo",
+    bucketName: "uploads",
+    key: "a.txt",
+  }), {
+    namespace: "demo",
+    bucket: "uploads",
+    key: "a.txt",
+    status: "ok",
+  });
+  assert.equal(deleteMock.calls[0].init?.method, "DELETE");
 });

@@ -118,6 +118,15 @@ not base64. Typical fields include:
 }
 ```
 
+Control writes `__meta__` as a JSON object. Control-plane consumers parse required
+bundle metadata through `control/lib.js::parseBundleMeta()`; malformed JSON, arrays,
+and scalar values fail closed as `corrupt_meta`. Absence remains use-site-specific.
+Paths that need metadata to compute a correct projection change, uniqueness proof,
+lifecycle cleanup, workflow view, or environment budget fail closed while their
+authoritative route or index still names the bundle. Deploy discovery/link preflight
+does not classify absence as `corrupt_meta`; the watched commit remains authoritative
+and rejects a missing pinned service target as `target_drift`.
+
 Routes, crons, queue consumers, bindings, vars, exports, workflow definitions, and asset
 prefixes are version metadata. Rollback is a promote of an older immutable version.
 

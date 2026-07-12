@@ -146,6 +146,41 @@ export function boundedPositiveIntEnv(env, name, fallback, max) {
 
 /**
  * @template T
+ * @param {(attempt: number) => Promise<T>} operation
+ * @param {{
+ *   attempts: number,
+ *   isRetryableError?: (err: unknown) => boolean,
+ *   onRetryableError?: (err: unknown, attempt: number) => void,
+ *   shouldRetryResult?: (result: T, attempt: number) => boolean,
+ *   onExhausted: () => T | Promise<T>,
+ * }} options
+ * @returns {Promise<T>}
+ */
+export async function withOptimisticRetries(operation, {
+  attempts,
+  isRetryableError = () => false,
+  onRetryableError,
+  shouldRetryResult,
+  onExhausted,
+}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const result = await operation(attempt);
+      if (shouldRetryResult?.(result, attempt)) continue;
+      return result;
+    } catch (err) {
+      if (isRetryableError(err)) {
+        onRetryableError?.(err, attempt);
+        continue;
+      }
+      throw err;
+    }
+  }
+  return await onExhausted();
+}
+
+/**
+ * @template T
  * @param {() => Promise<T>} operation
  * @param {{
  *   retries?: number,
@@ -164,16 +199,14 @@ export async function withOwnerWatchRetries(operation, {
   exhaustedMessage,
 }) {
   const maxAttempts = Number.isInteger(retries) && retries > 0 ? retries : 1;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (err) {
-      if (typeof isWatchError === "function" && isWatchError(err)) {
-        if (attempt < maxAttempts - 1) continue;
+  return await withOptimisticRetries(
+    async () => await operation(),
+    {
+      attempts: maxAttempts,
+      isRetryableError: (err) => typeof isWatchError === "function" && isWatchError(err),
+      onExhausted: () => {
         throw createError(503, exhaustedCode, exhaustedMessage);
-      }
-      throw err;
+      },
     }
-  }
-  throw createError(503, exhaustedCode, exhaustedMessage);
+  );
 }

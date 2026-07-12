@@ -73,6 +73,8 @@ Pattern `slot` 是原始 wrangler pattern，例如 `/mcp` 或 `/mcp/*`；它也�
 }
 ```
 
+Control 把 `__meta__` 写为 JSON object。Control-plane consumer 通过 `control/lib.js::parseBundleMeta()` 解析必需的 bundle metadata；malformed JSON、array 和 scalar 值都会以 `corrupt_meta` fail closed。Bundle 缺失的语义仍由具体 use site 持有：当 projection 变更、唯一性证明、lifecycle cleanup、workflow view 或 environment budget 必须消费 metadata 才能产生正确结果时，只要权威 route 或 index 仍指向该 bundle，缺失就 fail closed。Deploy discovery/link preflight 不把缺失归类为 `corrupt_meta`；watched commit 仍是权威检查，并以 `target_drift` 拒绝缺失的 pinned service target。
+
 Routes、crons、queue consumers、bindings、vars、exports、workflow definitions 和 asset prefixes 都是 version metadata。Rollback 本质上是 promote 一个旧的 immutable version。
 
 ## Feature Key Families

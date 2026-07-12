@@ -55,7 +55,7 @@ use limits::{
     MAX_WORKFLOW_EVENT_TYPE_BYTES, MAX_WORKFLOW_INSTANCE_PAYLOAD_BYTES,
     MAX_WORKFLOW_JSON_BODY_BYTES, MAX_WORKFLOW_PARAMS_BYTES, MAX_WORKFLOW_RESULT_BYTES,
     MAX_WORKFLOW_RUNTIME_RESPONSE_BYTES, MAX_WORKFLOW_STEP_CONFIG_BYTES,
-    MAX_WORKFLOW_STEP_NAME_BYTES, READY_SHARDS,
+    MAX_WORKFLOW_STEP_NAME_BYTES, READY_SHARDS, WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
 };
 pub(crate) use model::{
     CreateBatchResponse, EventRecord, InstanceIdentity, InstanceResponse, LifecycleBlocker,
@@ -91,6 +91,18 @@ use status::{
     read_public_state, read_public_state_by_id, read_state, read_state_by_id, response_from_state,
 };
 pub(crate) use tick::tick_workflows;
+
+fn runtime_endpoint(app: &AppState, ns: &str, path: &str) -> String {
+    let (host, port) = if ns == "__system__" {
+        (
+            &app.config.system_runtime_host,
+            app.config.system_runtime_port,
+        )
+    } else {
+        (&app.config.runtime_host, app.config.runtime_port)
+    };
+    format!("http://{host}:{port}{path}")
+}
 
 #[cfg(test)]
 pub(crate) use execution::{

@@ -12,6 +12,7 @@ import {
   readRepositoryFile,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { installMockProperty } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
@@ -19,9 +20,8 @@ import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 
-const sharedRedisUrl = moduleDataUrl(`
+const sharedRedisUrl = sharedRedisStubUrl(`
   export class RedisClient {}
-  export class WatchError extends Error {}
   export function redisDbFromEnv() { return 0; }
 `);
 const controlS3Url = moduleDataUrl(`export function makeS3Client() { return null; }`);
@@ -29,12 +29,48 @@ const controlR2Url = moduleDataUrl(`export function makeR2AdminClient() { return
 const sharedAuthTokenUrl = moduleDataUrl(`export function extractToken() { return null; }`);
 const sharedAuthRolesUrl = moduleDataUrl(`export function validatePrincipalShape() { return false; }`);
 const sharedBoundedBodyUrl = repositoryFileUrl("shared/bounded-body.js");
+const sharedEnvUrl = repositoryFileUrl("shared/env.js");
 const sharedErrorsUrl = repositoryFileUrl("shared/errors.js");
 const sharedRandomIdUrl = repositoryFileUrl("shared/random-id.js");
+const sharedRedisLockUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("shared/redis-lock.js"),
+  [[/from "shared-random-id"/g, `from ${JSON.stringify(sharedRandomIdUrl)}`]]
+));
 const sharedQueueKeysUrl = moduleDataUrl(`export function queueStreamKey() { return ""; }`);
 const sharedRespondUrl = moduleDataUrl(readRepositoryFile("shared/respond.js"));
 const controlLibUrl = moduleDataUrl(`export function deleteLockKey(ns, worker) { return \`worker-delete-lock:\${ns}:\${worker}\`; }`);
 const sharedS3CleanupLifecycleUrl = repositoryFileUrl("shared/s3-cleanup-lifecycle.js");
+const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const controlErrorsUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("control/errors.js"),
+  [[/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`]]
+));
+const controlWorkflowsClientUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("control/workflows-client.js"),
+  [
+    [/from "shared-errors"/g, `from ${JSON.stringify(sharedErrorsUrl)}`],
+    [/from "control-errors"/g, `from ${JSON.stringify(controlErrorsUrl)}`],
+  ]
+));
+const { postWorkflowsInternalRequest } = await import(controlWorkflowsClientUrl);
+const sharedOwnerLeaseUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("shared/owner-lease.js"),
+  [[/from "shared-env"/g, `from ${JSON.stringify(sharedEnvUrl)}`]]
+));
+const controlOptimisticUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("control/optimistic.js"),
+  [
+    [/from "shared-redis"/g, `from ${JSON.stringify(sharedRedisUrl)}`],
+    [/from "shared-owner-lease"/g, `from ${JSON.stringify(sharedOwnerLeaseUrl)}`],
+  ]
+));
+const controlJsonBodyUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("control/json-body.js"),
+  [
+    [/from "shared-bounded-body"/g, `from ${JSON.stringify(sharedBoundedBodyUrl)}`],
+    [/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`],
+  ]
+));
 // Use the same stub constructor imported by control/shared.js so
 // runOptimistic's `instanceof WatchError` check observes the test error.
 const { WatchError: ControlSharedWatchError } = await import(sharedRedisUrl);
@@ -48,12 +84,18 @@ const rewritten = applyModuleReplacements(readRepositoryFile("control/shared.js"
   [/from "shared-bounded-body"/g, `from ${JSON.stringify(sharedBoundedBodyUrl)}`],
   [/from "shared-errors"/g, `from ${JSON.stringify(sharedErrorsUrl)}`],
   [/from "shared-random-id"/g, `from ${JSON.stringify(sharedRandomIdUrl)}`],
+  [/from "shared-redis-lock"/g, `from ${JSON.stringify(sharedRedisLockUrl)}`],
   [/from "shared-queue-keys"/g, `from ${JSON.stringify(sharedQueueKeysUrl)}`],
   [/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`],
   [/from "control-lib"/g, `from ${JSON.stringify(controlLibUrl)}`],
   [/from "shared-s3-cleanup-lifecycle"/g, `from ${JSON.stringify(sharedS3CleanupLifecycleUrl)}`],
+  [/from "shared-version"/g, `from ${JSON.stringify(sharedVersionUrl)}`],
   [/from "shared-internal-auth"/g, `from ${JSON.stringify(sharedInternalAuthUrl())}`],
   [/from "shared-observability"/g, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)}`],
+  [/from "control-workflows-client"/g, `from ${JSON.stringify(controlWorkflowsClientUrl)}`],
+  [/from "control-errors"/g, `from ${JSON.stringify(controlErrorsUrl)}`],
+  [/from "control-optimistic"/g, `from ${JSON.stringify(controlOptimisticUrl)}`],
+  [/from "control-json-body"/g, `from ${JSON.stringify(controlJsonBodyUrl)}`],
 ]);
 
 const {
@@ -612,21 +654,21 @@ test("assertWorkflowDeleteAllowed preserves active workflow blockers", async (t)
   );
 });
 
-test("cleanupDoAlarmsForWorker uses a bounded workflows fetch signal", async (t) => {
+test("shared workflows calls preserve endpoint-specific timeout behavior", async (t) => {
   restoreControlSharedStateAfter(t);
   state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
-  /** @type {number | null} */
-  let timeoutMs = null;
+  /** @type {number[]} */
+  const timeoutMs = [];
   /** @type {AbortSignal[]} */
   const timeoutSignals = [];
   /** @type {ReturnType<typeof setTimeout>[]} */
   const timeoutHandles = [];
-  /** @type {AbortSignal | undefined} */
-  let fetchSignal;
-  /** @type {unknown} */
-  let cleanupBody = null;
+  /** @type {AbortSignal[]} */
+  const fetchSignals = [];
+  /** @type {Record<string, unknown>} */
+  const requestBodies = {};
   const restoreTimeout = installMockProperty(AbortSignal, "timeout", (ms) => {
-    timeoutMs = ms;
+    timeoutMs.push(ms);
     const controller = new AbortController();
     const handle = setTimeout(() => {
       controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
@@ -637,28 +679,61 @@ test("cleanupDoAlarmsForWorker uses a bounded workflows fetch signal", async (t)
   });
   state.workflows = {
     /**
-     * @param {RequestInfo | URL} _url
+     * @param {RequestInfo | URL} url
      * @param {RequestInit | undefined} init
     */
-    async fetch(_url, init) {
-      fetchSignal = init?.signal ?? undefined;
+    async fetch(url, init) {
       assert.equal(new Headers(init?.headers).get("x-wdl-internal-auth"), TEST_INTERNAL_AUTH_TOKEN);
-      cleanupBody = parseJsonObjectRequestBody(init, "DO alarm cleanup request body");
+      const endpoint = String(url);
+      if (endpoint.endsWith("/lifecycle/check-delete")) {
+        assert.equal(init?.signal, undefined);
+        requestBodies.lifecycle = parseJsonObjectRequestBody(init, "workflow lifecycle request body");
+        return Response.json({ allowed: true });
+      }
+      assert.ok(init?.signal instanceof AbortSignal);
+      fetchSignals.push(init.signal);
+      requestBodies.cleanup = parseJsonObjectRequestBody(init, "DO alarm cleanup request body");
       return Response.json({ ok: true });
     },
   };
 
   try {
+    await assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", version: "v2" });
     await cleanupDoAlarmsForWorker({ ns: "demo", worker: "api", doStorageId: "do_old" });
   } finally {
     for (const handle of timeoutHandles) clearTimeout(handle);
     restoreTimeout();
   }
 
-  assert.equal(timeoutMs, 5_000);
+  assert.deepEqual(timeoutMs, [5_000]);
   assert.equal(timeoutSignals.length, 1);
-  assert.equal(timeoutSignals[0], fetchSignal);
-  assert.deepEqual(cleanupBody, { ns: "demo", worker: "api", doStorageId: "do_old" });
+  assert.deepEqual(timeoutSignals, fetchSignals);
+  assert.deepEqual(requestBodies, {
+    lifecycle: { ns: "demo", worker: "api", version: "v2" },
+    cleanup: { ns: "demo", worker: "api", doStorageId: "do_old" },
+  });
+});
+
+test("workflows transport requires an explicit timeout selection at runtime", async () => {
+  let fetchCalls = 0;
+  await assert.rejects(
+    postWorkflowsInternalRequest({
+      workflows: {
+        async fetch() {
+          fetchCalls += 1;
+          return Response.json({ ok: true });
+        },
+      },
+      headers: () => ({ "content-type": "application/json" }),
+      endpoint: "workflows/test",
+      body: {},
+      logEvent: "workflow_test_failed",
+      timeoutMs: /** @type {any} */ (undefined),
+      makeError: (/** @type {"unavailable" | "request_failed"} */ failure) => new Error(failure),
+    }),
+    /request_failed/
+  );
+  assert.equal(fetchCalls, 0);
 });
 
 test("codedErrorResponse preserves semantic status/code with a fallback code", async () => {

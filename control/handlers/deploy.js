@@ -15,7 +15,9 @@ import {
   extractOutgoingRefs,
   deleteLockKey,
   doStorageIdKey,
+  parseBundleMeta,
   workflowDefsKey,
+  platformDomainFromEnv,
 } from "control-lib";
 import {
   stageD1ReferrerAdds,
@@ -37,7 +39,7 @@ import {
   parseCronList,
   parseQueueConsumers,
 } from "control-topology";
-import { formatVersion, parseVersion, bundleKey, routesKey } from "shared-version";
+import { formatVersion, parseVersion, bundleKey, nextVersionKey, routesKey } from "shared-version";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import { isReservedNs, isValidRouteNs, ROUTES_ALLOWED_RESERVED_NS } from "shared-ns-pattern";
 import { putAsset, inferContentType } from "control-s3";
@@ -148,6 +150,16 @@ function isPlatformExportMeta(value) {
     isStringArray(record.allowedCallers) &&
     (record.requiredCallerSecrets === undefined || isStringArray(record.requiredCallerSecrets))
   );
+}
+
+/** @param {string} ns @param {string} worker @param {string} version @param {unknown} raw */
+function linkableBundleMeta(ns, worker, version, raw) {
+  return parseBundleMeta(raw, {
+    ns,
+    worker,
+    version,
+    makeError: ({ message }) => new LinkError(500, "corrupt_meta", message),
+  });
 }
 
 /** @param {unknown} err @returns {DeployRequestError} */
@@ -335,7 +347,9 @@ async function validateServiceBindingsPreflight({ redis, ns, name, bindings }) {
     if (cached) return await cached;
     const load = (async () => {
       const rawMeta = await redis.hGet(bundleKey(targetNs, worker, version), "__meta__");
-      return rawMeta ? JSON.parse(rawMeta) : null;
+      return rawMeta == null
+        ? null
+        : linkableBundleMeta(targetNs, worker, version, rawMeta);
     })();
     metaCache.set(key, load);
     return await load;
@@ -367,15 +381,9 @@ async function collectPlatformExports(redis) {
   }))).flat();
 
   const exportsByWorker = await Promise.all(routeEntries.map(async ({ ns, worker, version }) => {
-    /** @type {{ exports?: unknown }} */
-    let meta;
-    try {
-      const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
-      if (!rawMeta) return [];
-      meta = JSON.parse(rawMeta);
-    } catch {
-      return [];
-    }
+    const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
+    if (rawMeta == null) return [];
+    const meta = linkableBundleMeta(ns, worker, version, rawMeta);
     if (!Array.isArray(meta.exports)) return [];
     const exportsList = /** @type {unknown[]} */ (meta.exports);
     return exportsList
@@ -731,9 +739,7 @@ export async function handle({ request, env, ns, name, requestId }) {
   const redis = requireControlRedis();
   const s3 = getControlS3();
   const log = requireControlLog();
-  const platformDomain = typeof env.PLATFORM_DOMAIN === "string" && env.PLATFORM_DOMAIN
-    ? env.PLATFORM_DOMAIN
-    : "workers.local";
+  const platformDomain = platformDomainFromEnv(env);
 
   const parsed = await parseDeployRequestForHandler({ request, ns, platformDomain });
   if (parsed.response) return parsed.response;
@@ -747,7 +753,16 @@ export async function handle({ request, env, ns, name, requestId }) {
       deployRequest: parsed.deployRequest,
     });
   } catch (err) {
-    if (err instanceof LinkError) return codedErrorResponse(err, "link_error");
+    if (err instanceof LinkError) {
+      log(err.status >= 500 ? "error" : "warn", "deploy_rejected", {
+        request_id: requestId,
+        namespace: ns,
+        worker: name,
+        status: err.status,
+        reason: err.code,
+      });
+      return codedErrorResponse(err, "link_error");
+    }
     throw err;
   }
   const { bindings: mergedBindings, warnings } = platformResult;
@@ -785,7 +800,7 @@ export async function handle({ request, env, ns, name, requestId }) {
     return deployAssetsS3NotConfiguredResponse(warningDetails);
   }
 
-  const num = await redis.incr(`worker:${ns}:${name}:next_version`);
+  const num = await redis.incr(nextVersionKey(ns, name));
   const version = formatVersion(num);
 
   const uploadResult = await uploadDeployAssetsBeforeCommit({
@@ -1064,7 +1079,7 @@ async function validateOutgoingRefsForCommit(iso, { outgoingRefs }) {
       });
     }
     const targetMeta = targetMetas[index];
-    if (!targetMeta) {
+    if (typeof targetMeta !== "string") {
       throw new DeployAbort(409, "target_drift", {
         target: {
           ns: ref.targetNs,

@@ -4,6 +4,7 @@ import {
 } from "shared-redis";
 import {
   buildOwnerKey,
+  DO_OWNERSHIP_CODE,
   DoRuntimeError,
 } from "do-runtime-protocol";
 import {
@@ -283,7 +284,7 @@ export async function resolveDoOwner(env, invoke) {
       if (!await ownerStoragePointerCurrent(session, current)) {
         await session.unwatch();
         forgetOwnedScope(ownerKey);
-        throw new DoRuntimeError(503, "stale_owner_storage", `DO scope ${ownerKey} no longer matches active worker storage`);
+        throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE, `DO scope ${ownerKey} no longer matches active worker storage`);
       }
       if (current.taskId !== localTask.taskId) {
         await session.unwatch();
@@ -292,7 +293,7 @@ export async function resolveDoOwner(env, invoke) {
         return current;
       }
       if (isDraining()) {
-        throw new DoRuntimeError(503, "task_draining", "DO task is draining");
+        throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
       }
       const alreadyLocal = ownedScopes.has(ownerKey);
       const counter = alreadyLocal ? current.generation : await currentOwnerGenerationCounter(session, generationKey);
@@ -315,7 +316,7 @@ export async function resolveDoOwner(env, invoke) {
     }
 
     if (isDraining()) {
-      throw new DoRuntimeError(503, "task_draining", "DO task is draining");
+      throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
     }
     const generation = await nextOwnerGeneration(session, generationKey, current?.generation);
     const owner = ownerRecordFor(env, invoke, localTask, generation, nowMs);
@@ -331,7 +332,7 @@ export async function resolveDoOwner(env, invoke) {
       generation,
     });
     return owner;
-  }), "owner_claim_raced", `failed to resolve DO owner for ${ownerKey}`);
+  }), DO_OWNERSHIP_CODE.OWNER_CLAIM_RACED, `failed to resolve DO owner for ${ownerKey}`);
 }
 
 /**
@@ -342,21 +343,21 @@ export async function resolveDoOwner(env, invoke) {
  */
 export async function assertCurrentOwnerWithLeaseBudget(env, owner, options = {}) {
   if (!owner?.ownerKey || !owner.taskId || owner.generation == null) {
-    throw new DoRuntimeError(503, "owner_fence_missing", "DO host request is missing an owner generation fence");
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING, "DO host request is missing an owner generation fence");
   }
   const client = redisClient(env);
   const { owner: current, nowMs } = await readOwnerWithTimeFromClient(client, owner.ownerKey);
   if (!current || !ownerFenceMatches(current, owner)) {
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "stale_owner_generation", `DO scope ${owner.ownerKey} owner generation is stale`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_GENERATION, `DO scope ${owner.ownerKey} owner generation is stale`);
   }
   if (ownerLeaseExpired(current, nowMs)) {
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "owner_lease_expired", `DO scope ${owner.ownerKey} owner lease has expired`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED, `DO scope ${owner.ownerKey} owner lease has expired`);
   }
   if (!await ownerStoragePointerCurrent(client, current)) {
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "stale_owner_storage", `DO scope ${owner.ownerKey} no longer matches active worker storage`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE, `DO scope ${owner.ownerKey} no longer matches active worker storage`);
   }
   const leaseRemainingMs = Number(current.leaseExpiresAt ?? 0) - nowMs;
   if (leaseRemainingMs < ownerLeaseGuardMs(env)) {
@@ -376,7 +377,7 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options = {}
       }
     }
     forgetOwnedScope(owner.ownerKey);
-    throw new DoRuntimeError(503, "owner_lease_too_short", `DO scope ${owner.ownerKey} owner lease has insufficient remaining budget`);
+    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_LEASE_TOO_SHORT, `DO scope ${owner.ownerKey} owner lease has insufficient remaining budget`);
   }
   return {
     owner: current,
@@ -432,7 +433,7 @@ export async function renewOwner(env, owner) {
     await stageOwnerRenew(session.multi(), key, renewed, ownerTtlSeconds(env)).exec();
     rememberOwner(renewed);
     return { renewed: true, owner: renewed, nowMs };
-  }), "owner_renew_raced", `failed to renew DO owner for ${owner.ownerKey}`);
+  }), DO_OWNERSHIP_CODE.OWNER_RENEW_RACED, `failed to renew DO owner for ${owner.ownerKey}`);
 }
 
 /** @param {DoEnv} env */
@@ -510,7 +511,7 @@ export async function releaseOwner(env, owner) {
     await stageOwnerRelease(session.multi(), key).exec();
     forgetOwnedScope(owner.ownerKey);
     return { released: true, owner: null };
-  }), "owner_release_raced", `failed to release DO owner for ${owner.ownerKey}`);
+  }), DO_OWNERSHIP_CODE.OWNER_RELEASE_RACED, `failed to release DO owner for ${owner.ownerKey}`);
 }
 
 /** @param {DoEnv} env */

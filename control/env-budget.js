@@ -1,19 +1,37 @@
 import { decryptSecretValue } from "shared-secret-envelope";
-import { errorMessage } from "shared-errors";
+import { BundleMetaError, parseBundleMeta } from "control-lib";
+import { buildWorkerEnv } from "runtime-load-env-build";
 import { bundleKey } from "shared-version";
 import { WatchError } from "shared-redis";
 
-const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
-const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
+export { BundleMetaError };
+
 const DO_ALARMS_BINDING = "__WDL_DO_ALARMS__";
-const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
 const ESTIMATED_ASSETS_CDN_BASE = "https://assets.invalid";
 // Pessimistic placeholder for version strings that will be allocated after a
 // secret mutation. Redis INCR results are parsed as JS numbers today, so this
 // uses the longest safe integer-shaped `v<int>` tag.
 export const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = "v9007199254740991";
-const ESTIMATED_DO_STORAGE_ID = "do_00000000000000000000000000000000";
-const ESTIMATED_WORKFLOW_KEY = "wf_00000000000000000000000000000000";
+const ESTIMATED_DO_BACKEND = Object.freeze({ __wdlBinding: "internal", name: "DO_BACKEND" });
+const ESTIMATED_DO_OWNER_NETWORK = Object.freeze({
+  __wdlBinding: "internal",
+  name: "DO_OWNER_NETWORK",
+});
+const ESTIMATED_WORKFLOWS_BACKEND = Object.freeze({
+  __wdlBinding: "internal",
+  name: "WORKFLOWS_BACKEND",
+});
+/** @type {Parameters<typeof buildWorkerEnv>[7]} */
+const ESTIMATED_RUNTIME_CONTEXT = Object.freeze({
+  exports: Object.freeze({
+    KV: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "kv", props }),
+    Assets: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "assets", props }),
+    QueueProducer: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "queue", props }),
+    D1Database: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "d1", props }),
+    R2Bucket: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "r2", props }),
+    ServiceBinding: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "service", props }),
+  }),
+});
 
 // Mirrors workerd v1.20260701.1
 // src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_ENV_SIZE.
@@ -37,6 +55,17 @@ export class WorkerEnvBudgetError extends Error {
   }
 }
 
+/** @param {string} ns @param {string} worker @param {string} version @param {unknown} cause */
+function bundleMaterializationError(ns, worker, version, cause) {
+  return new BundleMetaError({
+    namespace: ns,
+    worker,
+    version,
+    message: `Corrupt __meta__ for ${ns}/${worker}/${version}`,
+    cause,
+  });
+}
+
 /** @param {Record<string, unknown> | null | undefined} source */
 function stringRecord(source) {
   /** @type {Record<string, string>} */
@@ -54,126 +83,21 @@ function objectRecord(value) {
     : null;
 }
 
-/** @param {unknown} value */
-function stringOrFallback(value, fallback = "") {
-  return typeof value === "string" ? value : fallback;
-}
-
-/**
- * @param {{
- *   requiredCallerSecrets?: unknown,
- *   nsSecrets: Record<string, string>,
- *   workerSecrets: Record<string, string>,
- * }} args
- */
-function callerSecretsForBinding({ requiredCallerSecrets, nsSecrets, workerSecrets }) {
-  if (!Array.isArray(requiredCallerSecrets) || requiredCallerSecrets.length === 0) return undefined;
-  /** @type {Record<string, string>} */
-  const callerSecrets = Object.create(null);
-  for (const key of requiredCallerSecrets) {
-    if (typeof key !== "string") continue;
-    if (Object.hasOwn(workerSecrets, key)) {
-      callerSecrets[key] = workerSecrets[key];
-    } else if (Object.hasOwn(nsSecrets, key)) {
-      callerSecrets[key] = nsSecrets[key];
-    }
-  }
-  return callerSecrets;
-}
-
-/**
- * @param {{
- *   name: string,
- *   spec: Record<string, unknown>,
- *   meta: Record<string, unknown>,
- *   ns: string,
- *   worker: string,
- *   version: string,
- *   assetsCdnBase: string,
- *   nsSecrets: Record<string, string>,
- *   workerSecrets: Record<string, string>,
- * }} args
- */
-function estimatedBindingEnvValue({ name, spec, meta, ns, worker, version, assetsCdnBase, nsSecrets, workerSecrets }) {
-  switch (spec.type) {
-    case "kv":
-      return {
-        __wdlBinding: "kv",
-        props: { ns, id: stringOrFallback(spec.id) },
-      };
-    case "assets":
-      return {
-        __wdlBinding: "assets",
-        props: {
-          cdnBase: assetsCdnBase,
-          prefix: stringOrFallback(objectRecord(meta.assets)?.prefix),
-        },
-      };
-    case "queue":
-      return {
-        __wdlBinding: "queue",
-        props: {
-          ns,
-          id: stringOrFallback(spec.id),
-          deliveryDelaySeconds: spec.deliveryDelaySeconds ?? 0,
-        },
-      };
-    case "d1":
-      return {
-        __wdlBinding: "d1",
-        props: {
-          ns,
-          databaseId: stringOrFallback(spec.databaseId),
-          binding: name,
-        },
-      };
-    case "r2":
-      return {
-        __wdlBinding: "r2",
-        props: {
-          ns,
-          bucketName: stringOrFallback(spec.bucketName),
-          binding: name,
-        },
-      };
-    case "do": {
-      const props = {
-        ns,
-        worker,
-        version,
-        doStorageId: stringOrFallback(spec.doStorageId, ESTIMATED_DO_STORAGE_ID),
-        binding: name,
-        className: stringOrFallback(spec.className),
-      };
-      // DO bindings intentionally mirror runtime's default/factory output shape:
-      // props are top-level fields, while hostProxy carries the JSRPC namespace.
-      return {
-        __wdlBinding: "do",
-        ...props,
-        hostProxy: { __wdlBinding: "do-host-proxy", props },
-      };
-    }
-    case "service": {
-      const callerSecrets = callerSecretsForBinding({
-        requiredCallerSecrets: spec.requiredCallerSecrets,
-        nsSecrets,
-        workerSecrets,
-      });
-      return {
-        __wdlBinding: "service",
-        props: {
-          targetNs: stringOrFallback(spec.ns, ns),
-          targetWorker: stringOrFallback(spec.service),
-          targetVersion: stringOrFallback(spec.version),
-          targetEntrypoint: typeof spec.entrypoint === "string" ? spec.entrypoint : null,
-          callerNs: ns,
-          ...(callerSecrets ? { callerSecrets } : {}),
-        },
-      };
-    }
-    default:
-      return { __wdlBinding: stringOrFallback(spec.type, "unknown") };
-  }
+/** @param {{ name: string, spec: Record<string, unknown>, ns: string, worker: string, version: string }} input */
+function estimatedDoBinding({ name, spec, ns, worker, version }) {
+  const props = {
+    ns,
+    worker,
+    version,
+    doStorageId: spec.doStorageId,
+    binding: name,
+    className: spec.className,
+  };
+  return {
+    __wdlBinding: "do",
+    ...props,
+    hostProxy: { __wdlBinding: "do-host-proxy", props },
+  };
 }
 
 /**
@@ -209,63 +133,37 @@ export function estimatedWorkerLoaderEnv({
   const metaRecord = objectRecord(meta);
   if (!metaRecord || !worker) return env;
 
-  let hasDoBinding = false;
-  let doAlarmStorageId = ESTIMATED_DO_STORAGE_ID;
-  let hasWorkflowBinding = false;
-  const workflows = Array.isArray(metaRecord.workflows) ? metaRecord.workflows : [];
-  for (const workflow of workflows) {
-    const record = objectRecord(workflow);
-    if (!record) continue;
-    const binding = stringOrFallback(record.binding);
-    if (!binding) continue;
-    hasWorkflowBinding = true;
-    env[binding] = {
-      ns,
-      worker,
-      version,
-      name: stringOrFallback(record.name),
-      binding,
-      className: stringOrFallback(record.className),
-      workflowKey: stringOrFallback(record.workflowKey, ESTIMATED_WORKFLOW_KEY),
-    };
-  }
-
-  const bindings = objectRecord(metaRecord.bindings);
-  if (bindings) {
-    for (const [name, rawSpec] of Object.entries(bindings)) {
-      const spec = objectRecord(rawSpec);
-      if (!spec) continue;
-      env[name] = estimatedBindingEnvValue({
-        name,
-        spec,
-        meta: metaRecord,
-        ns,
-        worker,
-        version,
-        assetsCdnBase: typeof assetsCdnBase === "string" && assetsCdnBase
-          ? assetsCdnBase
-          : ESTIMATED_ASSETS_CDN_BASE,
-        nsSecrets: nsSecretStrings,
-        workerSecrets: workerSecretStrings,
-      });
-      if (spec.type === "do") {
-        hasDoBinding = true;
-        doAlarmStorageId = stringOrFallback(spec.doStorageId, ESTIMATED_DO_STORAGE_ID);
-      }
+  const estimated = buildWorkerEnv(
+    { ...metaRecord, vars: stringRecord(vars) },
+    nsSecretStrings,
+    workerSecretStrings,
+    ns,
+    worker,
+    version,
+    typeof assetsCdnBase === "string" && assetsCdnBase
+      ? assetsCdnBase
+      : ESTIMATED_ASSETS_CDN_BASE,
+    ESTIMATED_RUNTIME_CONTEXT,
+    ESTIMATED_DO_BACKEND,
+    {
+      doOwnerNetwork: ESTIMATED_DO_OWNER_NETWORK,
+      doBindingFactory: estimatedDoBinding,
+      workflowsBackend: ESTIMATED_WORKFLOWS_BACKEND,
     }
+  );
+
+  let doAlarmStorageId = null;
+  for (const rawSpec of Object.values(objectRecord(metaRecord.bindings) || {})) {
+    const spec = objectRecord(rawSpec);
+    if (spec?.type === "do") doAlarmStorageId = spec.doStorageId;
   }
-  if (hasDoBinding) {
-    env[DO_BACKEND_BINDING] = { __wdlBinding: "internal", name: "DO_BACKEND" };
-    env[DO_OWNER_NETWORK_BINDING] = { __wdlBinding: "internal", name: "DO_OWNER_NETWORK" };
-    env[DO_ALARMS_BINDING] = {
+  if (typeof doAlarmStorageId === "string" && doAlarmStorageId) {
+    estimated[DO_ALARMS_BINDING] = {
       __wdlBinding: "do-alarms",
       props: { ns, worker, version, doStorageId: doAlarmStorageId },
     };
   }
-  if (hasWorkflowBinding) {
-    env[WORKFLOWS_BACKEND_BINDING] = { __wdlBinding: "internal", name: "WORKFLOWS_BACKEND" };
-  }
-  return env;
+  return estimated;
 }
 
 /** @param {string} value */
@@ -471,39 +369,29 @@ export async function assertWorkerVersionsUserEnvBudget({
   // whose command protocol is single-flight even though secret decryption is not.
   for (const { sourceVersion, estimatedVersion } of uniqueChecks) {
     const rawMeta = await redis.hGet(bundleKey(ns, worker, sourceVersion), "__meta__");
-    if (typeof rawMeta !== "string") {
-      if (retryMissingVersions) throw new WatchError();
-      throw new Error(`bundle metadata missing for ${ns}/${worker}@${sourceVersion}`);
-    }
-    /** @type {unknown} */
-    let parsed;
-    try {
-      parsed = JSON.parse(rawMeta);
-    } catch (err) {
-      throw new Error(
-        `invalid bundle metadata for ${ns}/${worker}@${sourceVersion}: ${errorMessage(err)}`,
-        { cause: err }
-      );
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error(
-        `invalid bundle metadata for ${ns}/${worker}@${sourceVersion}: ` +
-          "__meta__ must be a JSON object"
-      );
-    }
-    const meta = /** @type {Record<string, unknown>} */ (parsed);
-    assertWorkerLoaderUserEnvBudget({
+    if (typeof rawMeta !== "string" && retryMissingVersions) throw new WatchError();
+    const meta = parseBundleMeta(rawMeta, {
       ns,
       worker,
-      version: estimatedVersion,
-      sourceVersion,
-      vars: meta.vars && typeof meta.vars === "object" && !Array.isArray(meta.vars)
-        ? /** @type {Record<string, unknown>} */ (meta.vars)
-        : null,
-      nsSecrets,
-      workerSecrets,
-      meta,
-      assetsCdnBase,
+      version: sourceVersion,
     });
+    try {
+      assertWorkerLoaderUserEnvBudget({
+        ns,
+        worker,
+        version: estimatedVersion,
+        sourceVersion,
+        vars: meta.vars && typeof meta.vars === "object" && !Array.isArray(meta.vars)
+          ? /** @type {Record<string, unknown>} */ (meta.vars)
+          : null,
+        nsSecrets,
+        workerSecrets,
+        meta,
+        assetsCdnBase,
+      });
+    } catch (err) {
+      if (err instanceof WorkerEnvBudgetError || err instanceof BundleMetaError) throw err;
+      throw bundleMaterializationError(ns, worker, sourceVersion, err);
+    }
   }
 }

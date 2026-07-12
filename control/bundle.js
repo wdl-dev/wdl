@@ -14,6 +14,7 @@ import {
 } from "shared-ns-pattern";
 import { firstWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 import { normalizeBindings, validateBindings } from "control-bindings";
+import { parseWorkerdDependencyVersion } from "control-lib";
 import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
 
 export class BundleConfigError extends Error {
@@ -26,22 +27,12 @@ export class BundleConfigError extends Error {
 }
 
 const COMPATIBILITY_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-const WORKERD_VERSION_RE = /^1\.(\d{4})(\d{2})(\d{2})\.\d+$/;
 
 /** @param {string} source */
 export function maxWorkerCompatibilityDateFromPackageJson(source) {
-  let parsed;
-  try {
-    parsed = JSON.parse(source);
-  } catch {
-    return null;
-  }
-  const raw = parsed?.dependencies?.workerd;
-  if (typeof raw !== "string") return null;
-  const version = raw.replace(/^[~^]/, "");
-  const match = WORKERD_VERSION_RE.exec(version);
-  if (!match) return null;
-  const max = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + 7));
+  const version = parseWorkerdDependencyVersion(source);
+  if (!version) return null;
+  const max = new Date(Date.UTC(version.year, version.month - 1, version.day + 7));
   return utcDateString(max);
 }
 

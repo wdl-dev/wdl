@@ -3,6 +3,7 @@
 
 import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { encodeS3KeyPath } from "runtime-r2-utils";
+import { S3_TRANSIENT_RETRIES } from "shared-s3-retry";
 
 const TYPE_BY_EXT = {
   ".html": "text/html; charset=utf-8",
@@ -27,8 +28,6 @@ const TYPE_BY_EXT = {
   ".wasm": "application/wasm",
   ".map": "application/json",
 };
-const S3_TRANSIENT_RETRIES = 10;
-
 /**
  * @typedef {{ client: SigV4Client, endpoint: string, bucket: string }} S3Client
  */

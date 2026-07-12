@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importRepositoryModule } from "../helpers/load-shared-module.js";
+import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-shared-module.js";
 
 const requestIdFromOptionsStub = `const requestIdFromOptions = (options) => {
   if (!options || typeof options !== "object") return null;
@@ -20,13 +20,8 @@ const d1Facade = await importRepositoryModule("runtime/d1-client.js", [
 
 const r2Facade = await importRepositoryModule("runtime/r2-client.js", [
   [
-    /import \{\s*R2_OBJECT_MAX_BUFFER_BYTES,\s*assertR2BufferSize,\s*normalizeR2ListLimit,\s*normalizeR2ObjectKey,\s*\} from "\.\/_wdl-r2-utils\.js";/,
-    `const R2_OBJECT_MAX_BUFFER_BYTES = 26214400;
-     const assertR2BufferSize = (size, operation) => {
-       if (size > R2_OBJECT_MAX_BUFFER_BYTES) throw new TypeError("R2 " + operation + ": object too large");
-     };
-     const normalizeR2ListLimit = (limit) => limit == null ? undefined : Number(limit);
-     const normalizeR2ObjectKey = (key) => String(key);`,
+    /from "\.\/_wdl-r2-utils\.js";/,
+    `from ${JSON.stringify(repositoryFileUrl("runtime/r2-utils.js"))};`,
   ],
   [/import \{ requestIdFromOptions \} from "\.\/_wdl-request-id\.js";/, requestIdFromOptionsStub],
 ]);

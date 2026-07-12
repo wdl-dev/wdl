@@ -1,10 +1,12 @@
 // Pure helpers for the runtime worker.
 
+import { base64ToBytes, bytesToBase64 } from "shared-base64";
 import { isWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 
-const BASE64_CHUNK_SIZE = 0x8000;
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+
+export { base64ToBytes, bytesToBase64 };
 
 // Coerce a KV.put value into Uint8Array. ReadableStream is handled by the
 // caller (await body); here we stick to sync inputs.
@@ -17,23 +19,6 @@ export function toBytes(value) {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   throw new Error("KV put: value must be string | ArrayBuffer | typed array | ReadableStream");
-}
-
-/** @param {Uint8Array} bytes @returns {string} */
-export function bytesToBase64(bytes) {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_SIZE) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_SIZE));
-  }
-  return btoa(binary);
-}
-
-/** @param {string} value @returns {Uint8Array} */
-export function base64ToBytes(value) {
-  const binary = atob(value);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
-  return out;
 }
 
 export const MAX_QUEUE_DELAY_SECONDS = 86_400;

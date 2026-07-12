@@ -15,10 +15,12 @@ import {
 } from "../../shared/observability.js";
 import { parseStdoutJson } from "../helpers/json-payload.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
+import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { withCapturedConsole } from "../helpers/output-capture.js";
 
 const REQUEST_ID_FIXTURES = readRepositoryJson("tests/fixtures/request-id-sanitizer.json");
 const OBSERVABILITY_CONTRACT = readRepositoryJson("tests/fixtures/observability-contract.json");
+const OBSERVABILITY_NOOP = await import(OBSERVABILITY_NOOP_URL);
 
 test("generateRequestId produces 16 lowercase hex chars", () => {
   for (let i = 0; i < 20; i++) {
@@ -80,6 +82,12 @@ test("sanitizeRequestId follows the cross-language fixture contract", () => {
   for (const { raw, sanitized } of REQUEST_ID_FIXTURES) {
     assert.equal(sanitizeRequestId(raw), sanitized, `raw=${JSON.stringify(raw)}`);
   }
+});
+
+test("observability noop uses production request-id and error normalization", () => {
+  assert.equal(OBSERVABILITY_NOOP.sanitizeRequestId, sanitizeRequestId);
+  assert.equal(OBSERVABILITY_NOOP.formatError, formatError);
+  assert.equal(OBSERVABILITY_NOOP.ensureRequestId({ "x-request-id": "bad id" }), "rid");
 });
 
 test("formatError normalizes null, Error objects, and primitive throwables", () => {
@@ -243,6 +251,53 @@ test("MetricsRegistry: cardinality warning fires per-metric-name as structured J
     reg.increment("wide_counter_a", { bucket: "0" });
     assert.match(reg.renderPrometheus(), /wdl_wide_counter_a_total\{bucket="0"\} 2/);
   });
+});
+
+test("structured log envelope follows the cross-language contract", () => {
+  const { orderedKeys, timestampShape } = OBSERVABILITY_CONTRACT.logEnvelope;
+  /** @type {Array<{ name: string, priority: number, stream: string }>} */
+  const levels = OBSERVABILITY_CONTRACT.logEnvelope.levels;
+  setLogLevel("debug");
+  try {
+    const log = createLogger("test-svc");
+    withCapturedConsole(({ stdout, stderr }) => {
+      for (const { name } of levels) log(name, `event_${name}`, { probe: true });
+
+      const emitted = [
+        ...stdout.map((line) => ({ line, stream: "stdout" })),
+        ...stderr.map((line) => ({ line, stream: "stderr" })),
+      ].map((record) => ({
+        ...record,
+        payload: parseStdoutJson(record.line, `${record.stream} log payload`),
+      }));
+      assert.equal(emitted.length, levels.length);
+      for (const expected of levels) {
+        const record = emitted.find(({ payload }) => payload.level === expected.name);
+        assert.ok(record, `missing ${expected.name} log line`);
+        assert.equal(record.stream, expected.stream, `${expected.name} stream`);
+        const { payload } = record;
+        assert.deepEqual(Object.keys(payload).slice(0, orderedKeys.length), orderedKeys);
+        assert.equal(payload.ts.replace(/\d/g, "0"), timestampShape);
+      }
+    });
+
+    for (const minimum of levels) {
+      setLogLevel(minimum.name);
+      withCapturedConsole(({ stdout, stderr }) => {
+        for (const { name } of levels) log(name, `gated_${name}`);
+        const actual = [...stdout, ...stderr]
+          .map((line) => parseStdoutJson(line, `minimum=${minimum.name} log payload`).level)
+          .toSorted();
+        const expected = levels
+          .filter(({ priority }) => priority >= minimum.priority)
+          .map(({ name }) => name)
+          .toSorted();
+        assert.deepEqual(actual, expected, `minimum=${minimum.name}`);
+      });
+    }
+  } finally {
+    setLogLevel("info");
+  }
 });
 
 test("setLogLevel=warn suppresses info but passes error through", () => {

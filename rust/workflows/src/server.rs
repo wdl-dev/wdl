@@ -25,7 +25,10 @@ use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use tokio::sync::Semaphore;
 use wdl_rust_common::health::healthcheck_http_200;
-use wdl_rust_common::internal_auth::internal_auth_headers_match;
+use wdl_rust_common::internal_auth::{
+    INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE, internal_auth_failure_response,
+    internal_auth_headers_match,
+};
 use wdl_rust_common::metrics::prometheus_response;
 use wdl_rust_common::request_id::sanitize_request_id;
 use wdl_rust_common::shutdown::shutdown_signal;
@@ -390,14 +393,7 @@ async fn track_request(
     if !matches!(route, "healthz" | "metrics")
         && !internal_auth_headers_match(request.headers(), &state.config.internal_auth_tokens)
     {
-        let response = (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "error": "internal_auth_failed",
-                "message": "Internal authentication failed",
-            })),
-        )
-            .into_response();
+        let response = internal_auth_failure_response();
         record_request_complete(
             &state,
             method.as_str(),
@@ -405,7 +401,7 @@ async fn track_request(
             response.status(),
             request_id.as_deref(),
             started_at,
-            Some(("internal_auth_failed", "Internal authentication failed")),
+            Some((INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE)),
         );
         return response;
     }

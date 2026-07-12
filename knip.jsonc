@@ -9,6 +9,10 @@
         "d1-runtime/index.js",
         "do-runtime/index.js",
         "gateway/index.js",
+        // Injected into loaded workers and imported by the generated binding
+        // wrapper, so this is an external module entry rather than an ignored
+        // source file. Its static dependencies remain covered by Knip.
+        "runtime/d1-client.js",
         "runtime/do-owner-network.js",
         "runtime/index.js",
         "runtime/tail-worker.js",
@@ -26,14 +30,6 @@
         "**/*.js",
         "**/*.mjs",
         "**/*.cjs"
-      ],
-      // These sources are embedded as text by workerd capnp and injected into
-      // loaded workers, so no ordinary JS import points at the files.
-      "ignoreFiles": [
-        "runtime/_wdl-d1-params.js",
-        "runtime/_wdl-d1-transport.js",
-        "runtime/_wdl-sql-splitter.js",
-        "runtime/d1-client.js"
       ],
       "ignore": [
         "shared/vendor/**",

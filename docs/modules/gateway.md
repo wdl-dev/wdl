@@ -28,11 +28,15 @@ Gateway has three dispatch branches:
 The resolved `{ ns, worker, version }` becomes `x-worker-id: <ns>:<worker>:<version>`
 and `x-worker-prefix` on the runtime request. Literal `__system__` routes go to
 `RUNTIME_SYSTEM`; all ordinary tenant namespaces go to `RUNTIME_USER`.
+Before forwarding, gateway removes client-supplied `x-worker-id`, `x-worker-prefix`,
+and every `x-wdl-*` header. The same internal-header policy filters WebSocket upgrade
+responses before they cross back onto the public socket.
 
 The `ADMIN_HOST` branch is infrastructure traffic, not a loaded-worker request.
 It does not set `x-worker-id` or `x-worker-prefix`. `PLATFORM_DOMAIN` and
-`ADMIN_HOST` are environment-configurable; the code defaults are `workers.local`
-and unset admin-host short-circuiting.
+`ADMIN_HOST` are environment-configurable. All tiers normalize `PLATFORM_DOMAIN` as a
+plain lowercase hostname without trailing dots and default it to `workers.local`;
+admin-host short-circuiting remains unset by default.
 
 ## Interfaces
 

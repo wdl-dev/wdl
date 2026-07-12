@@ -11,6 +11,12 @@ import {
   makeSlotEnv,
   persistDurationFile,
 } from "../../scripts/_integration-pool.js";
+import {
+  LOCAL_ADMIN_TOKEN,
+  LOCAL_CONNECT_HOST,
+  localAssetsCdnBase,
+  localControlUrl,
+} from "../../scripts/integration-environment.js";
 import { installStreamWriteCapture } from "../helpers/output-capture.js";
 
 test("integration shard env ignores host control credentials", () => {
@@ -24,10 +30,10 @@ test("integration shard env ignores host control credentials", () => {
 
   assert.equal(env.COMPOSE_PROJECT_NAME, "wdl-it-2");
   assert.equal(env.WDL_GATEWAY_HOST_PORT, "18082");
-  assert.equal(env.ADMIN_TOKEN, "local-dev-token");
-  assert.equal(env.CONTROL_URL, "http://admin.test:18082");
-  assert.equal(env.CONTROL_CONNECT_HOST, "localhost");
-  assert.equal(env.ASSETS_CDN_BASE, "http://localhost:29502/wdl-assets");
+  assert.equal(env.ADMIN_TOKEN, LOCAL_ADMIN_TOKEN);
+  assert.equal(env.CONTROL_URL, localControlUrl(18082));
+  assert.equal(env.CONTROL_CONNECT_HOST, LOCAL_CONNECT_HOST);
+  assert.equal(env.ASSETS_CDN_BASE, localAssetsCdnBase(29502));
   assert.equal(env.WDL_WORKERD_CONFIG_VARIANT, "local");
   assert.equal("WDL_NS" in env, false);
   assert.equal("CLOUDFLARE_ENV" in env, false);

@@ -2,6 +2,8 @@
 // corrupt parseStreamKey's anchor, so inline construction is a drift
 // risk — every tier imports from here.
 
+import { isValidRuntimeLoadNs, QUEUE_NAME_RE } from "./ns-pattern.js";
+
 /**
  * @typedef {{ ns: string, queue: string }} QueueKeyParts
  */
@@ -27,35 +29,41 @@ export const QUEUE_DELAYED_INDEX_KEY = "queue:index:delayed";
 export function queueConsumerScanPrefix(ns) { return `queue-consumer:${ns}:`; }
 
 /**
- * @lintignore kept as the JS mirror of Rust queue key parsers.
+ * @param {string} rest
+ * @returns {QueueKeyParts | null}
+ */
+function parseQueueKeyRest(rest) {
+  const separator = rest.indexOf(":");
+  if (separator <= 0) return null;
+  const ns = rest.slice(0, separator);
+  const queue = rest.slice(separator + 1);
+  if (!isValidRuntimeLoadNs(ns) || !QUEUE_NAME_RE.test(queue)) return null;
+  return { ns, queue };
+}
+
+/**
  * @param {string} key
  * @returns {QueueKeyParts | null}
  */
 export function parseStreamKey(key) {
-  const m = key.match(/^queue:([^:]+):(.+):s$/);
-  return m ? { ns: m[1], queue: m[2] } : null;
+  if (!key.startsWith("queue:") || !key.endsWith(":s")) return null;
+  return parseQueueKeyRest(key.slice("queue:".length, -":s".length));
 }
 
 /**
- * @lintignore kept as the JS mirror of Rust queue key parsers.
  * @param {string} key
  * @returns {QueueKeyParts | null}
  */
 export function parseDelayedKey(key) {
-  const m = key.match(/^queue-delayed:([^:]+):(.+)$/);
-  return m ? { ns: m[1], queue: m[2] } : null;
+  if (!key.startsWith("queue-delayed:")) return null;
+  return parseQueueKeyRest(key.slice("queue-delayed:".length));
 }
 
 /**
- * @lintignore kept as the JS mirror of Rust queue key parsers.
  * @param {string} key
  * @returns {QueueKeyParts | null}
  */
 export function parseConsumerKey(key) {
-  const parts = key.split(":");
-  if (parts.length < 3 || parts[0] !== "queue-consumer") return null;
-  const ns = parts[1];
-  const queue = parts.slice(2).join(":");
-  if (!ns || !queue) return null;
-  return { ns, queue };
+  if (!key.startsWith("queue-consumer:")) return null;
+  return parseQueueKeyRest(key.slice("queue-consumer:".length));
 }

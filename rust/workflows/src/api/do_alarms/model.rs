@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use wdl_rust_common::identity::{is_valid_runtime_load_ns, is_valid_worker_name};
+use wdl_rust_common::version::parse_version_tag;
 
 use crate::{
     DoAlarmJobKeys, WorkflowError, WorkflowResult, do_alarm_by_worker_key, do_alarm_job_id,
@@ -176,36 +178,9 @@ fn is_class_name(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
-fn is_worker_name(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    matches!(bytes.first(), Some(first) if first.is_ascii_alphanumeric())
-        && bytes.len() <= 255
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
-}
-
-fn is_ns_field(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if value.starts_with("__") && value.ends_with("__") && bytes.len() > 4 {
-        return bytes[2..bytes.len() - 2].iter().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_' || *byte == b'-'
-        });
-    }
-    bytes
-        .iter()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-}
-
 fn is_storage_id(value: &str) -> bool {
     value.bytes().all(|byte| {
         byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
-    })
-}
-
-fn is_version(value: &str) -> bool {
-    value.strip_prefix('v').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
     })
 }
 
@@ -260,9 +235,12 @@ pub(super) fn job_from_state(
     parse_positive_i64_field(&state, "dueAtMs")?;
     Ok(DoAlarmJob {
         job_id,
-        ns: protocol_string_field(&state, "ns", is_ns_field)?.to_string(),
-        worker: protocol_string_field(&state, "worker", is_worker_name)?.to_string(),
-        version: protocol_string_field(&state, "scheduledVersion", is_version)?.to_string(),
+        ns: protocol_string_field(&state, "ns", is_valid_runtime_load_ns)?.to_string(),
+        worker: protocol_string_field(&state, "worker", is_valid_worker_name)?.to_string(),
+        version: protocol_string_field(&state, "scheduledVersion", |value| {
+            parse_version_tag(value).is_ok()
+        })?
+        .to_string(),
         do_storage_id: protocol_string_field(&state, "doStorageId", is_storage_id)?.to_string(),
         class_name: protocol_string_field(&state, "className", is_class_name)?.to_string(),
         object_name: object_name_field(&state, "objectName")?.to_string(),
@@ -316,10 +294,15 @@ mod tests {
     #[test]
     fn do_alarm_job_state_rejects_malformed_dispatch_identity() {
         for (field, value) in [
+            ("ns", ""),
             ("ns", "Demo"),
+            ("ns", "admin"),
+            ("ns", "__community__"),
             ("ns", "____"),
             ("worker", "-bad"),
             ("scheduledVersion", "1"),
+            ("scheduledVersion", "v0"),
+            ("scheduledVersion", "v01"),
             ("doStorageId", "DO_ABC"),
             ("className", "bad-name"),
             ("objectName", "bad\nname"),

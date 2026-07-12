@@ -13,7 +13,9 @@ import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
 
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const RUNTIME_LIB_URL = runtimeLibModuleDataUrl();
+const SHARED_BASE64_URL = repositoryFileUrl("shared/base64.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 
 /** @param {Array<[RegExp | string, string]>} [replacements] */
 async function loadKvBinding(replacements = []) {
@@ -21,10 +23,12 @@ async function loadKvBinding(replacements = []) {
     [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
     [/from "runtime-lib";/, `from ${JSON.stringify(RUNTIME_LIB_URL)};`],
     [/from "runtime-metrics";/, `from ${JSON.stringify(RUNTIME_METRICS_NOOP_URL)};`],
+    [/from "shared-base64";/, `from ${JSON.stringify(SHARED_BASE64_URL)};`],
     [
       /from "runtime-bindings-proxy";/,
       `from ${JSON.stringify(PROXY_BINDING_URL)};`,
     ],
+    [/from "shared-bounded-body";/, `from ${JSON.stringify(SHARED_BOUNDED_BODY_URL)};`],
     [/from "shared-respond";/, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
   ];
   return importRepositoryModule("runtime/bindings/kv.js", /** @type {Array<[RegExp | string, string]>} */ ([...baseReplacements, ...replacements]));

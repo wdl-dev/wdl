@@ -4,6 +4,7 @@ import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-share
 
 const SQL_SPLITTER_URL = repositoryFileUrl("shared/sql-splitter.js");
 const SHARED_HEX_URL = repositoryFileUrl("shared/hex.js");
+const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
 const {
   decodeDatabaseHash,
   isReadyDatabase,
@@ -18,6 +19,7 @@ const {
   [/export \{ splitSqlStatements \} from "shared-sql-splitter";/,
     `export { splitSqlStatements } from ${JSON.stringify(SQL_SPLITTER_URL)};`],
   [/from "shared-hex";/, `from ${JSON.stringify(SHARED_HEX_URL)};`],
+  [/from "shared-ns-pattern";/, `from ${JSON.stringify(SHARED_NS_URL)};`],
 ]);
 
 test("control D1: database metadata state is explicit", () => {

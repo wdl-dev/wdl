@@ -32,16 +32,19 @@ const DO_CONNECT_STRIP_HEADERS = [
   ...DO_FETCH_STRIP_HEADERS,
 ];
 const OWNER_ENDPOINT_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
-const OWNER_RACE_RETRY_CODES = new Set([
+export const OWNER_RACE_RETRY_CODES = new Set([
   "stale_owner_generation",
   "owner_claim_raced",
+  "owner_fence_missing",
   "owner_lease_expired",
   "owner_lease_too_short",
 ]);
-const OWNER_HINT_STALE_CODES = new Set([
+export const OWNER_HINT_STALE_CODES = new Set([
   "stale_owner_generation",
   "owner_claim_raced",
+  "owner_fence_missing",
   "owner_lease_expired",
+  "stale_owner_storage",
   "owner_lease_too_short",
   "owner_renew_raced",
   "owner_release_raced",
@@ -67,6 +70,21 @@ const RPC_RESERVED_METHODS = new Set(["fetch", "alarm"]);
  * @typedef {{ ns: string, worker: string, version: string, doStorageId: string, className: string }} DoBindingProps
  * @typedef {{ ownerKey: string, taskId: string, endpoint: string, generation: number }} DoOwnerHint
  * @typedef {(url: string, init?: RequestInit) => Promise<Response>} DoFetch
+ * @typedef {{
+ *   get: (value: unknown) => unknown,
+ *   set: (value: unknown, hint: unknown) => unknown,
+ *   delete: (value: unknown) => unknown,
+ * }} DoOwnerHintCache
+ * @typedef {{
+ *   routerFetch: DoFetch,
+ *   routerUrl: string,
+ *   ownerFetch: DoFetch | typeof fetch | null | undefined,
+ *   ownerPath: string,
+ *   init: RequestInit,
+ *   cache: DoOwnerHintCache,
+ *   hintKey: string,
+ *   replayOwnerUnavailable?: boolean,
+ * }} DoOwnerHintDispatchOptions
  */
 
 /** @param {DoBindingProps} props @param {string} objectName */
@@ -361,6 +379,12 @@ export function isWebSocketUpgrade(request) {
   return (request.headers.get("Upgrade") || "").toLowerCase() === "websocket";
 }
 
+/** @param {Request} request */
+export function replayOwnerUnavailableForFetch(request) {
+  const method = request.method.toUpperCase();
+  return method === "GET" || method === "HEAD";
+}
+
 /**
  * @param {DoBindingProps} props
  * @param {string} objectName
@@ -542,6 +566,55 @@ export async function dispatchDoRequestWithOwnerHint({
     }
     return ownerUnavailableResponse();
   }
+}
+
+/**
+ * @param {DoOwnerHintDispatchOptions} options
+ * @param {boolean} retryOwnerRace
+ */
+async function dispatchDoWithHintCache({
+  routerFetch,
+  routerUrl,
+  ownerFetch,
+  ownerPath,
+  init,
+  cache,
+  hintKey,
+  replayOwnerUnavailable = false,
+}, retryOwnerRace) {
+  let response = await dispatchDoRequestWithOwnerHint({
+    routerFetch,
+    routerUrl,
+    ownerFetch,
+    ownerPath,
+    init,
+    cachedHint: /** @type {DoOwnerHint | null} */ (cache.get(hintKey)),
+    rememberHint: (hint) => cache.set(hintKey, hint),
+    clearHint: () => cache.delete(hintKey),
+    staleCachedResponse: staleDoOwnerHintResponse,
+    bypassOwnerHintResponse: retryOwnerRace
+      ? retryableOwnerRaceResponse
+      : async (_response) => false,
+    replayOwnerUnavailable,
+  });
+  if (retryOwnerRace && await retryableOwnerRaceResponse(response)) {
+    cache.delete(hintKey);
+    response = await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
+  }
+  return stripOwnerHintHeaders(response);
+}
+
+/** @param {DoOwnerHintDispatchOptions} options */
+export async function dispatchDoInvokeWithHintCache(options) {
+  return await dispatchDoWithHintCache(options, true);
+}
+
+/** @param {DoOwnerHintDispatchOptions} options */
+export async function dispatchDoConnectWithHintCache(options) {
+  return await dispatchDoWithHintCache({
+    ...options,
+    replayOwnerUnavailable: false,
+  }, false);
 }
 
 /** @param {Response} response */

@@ -7,22 +7,13 @@ use crate::{
     InstanceKeys, config_from_env, due_key, ready_active_key, ready_key, schema_version_key,
     validate_instance_id_value,
 };
-use std::sync::{Mutex, OnceLock};
-
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+use wdl_rust_common::test_env::with_temp_envs;
 // Source-contract tests below intentionally couple to these module paths. If
 // the files move, update the constants and the associated assertions together.
 const RUNTIME_DISPATCH_SOURCE: &str = include_str!("api/tick/dispatch.rs");
 const EXPECTED_EVENT_INDEX_STALE_SCAN_LIMIT: usize = 256;
 
 fn temp_env<R>(items: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
-    // Environment variables are process-global. This helper only protects the
-    // workflows tests that opt into it; tests that read or mutate env
-    // directly must stay out of the same parallel window.
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env mutex poisoned");
     let mut all_items = items.to_vec();
     if !all_items
         .iter()
@@ -30,31 +21,7 @@ fn temp_env<R>(items: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
     {
         all_items.push(("WDL_INTERNAL_AUTH_TOKEN", Some("test-internal-auth-token")));
     }
-    let previous: Vec<(&str, Option<String>)> = all_items
-        .iter()
-        .map(|(key, _)| (*key, std::env::var(key).ok()))
-        .collect();
-    for (key, value) in &all_items {
-        match value {
-            // SAFETY: Rust marks environment mutation unsafe because other
-            // threads can read concurrently. ENV_LOCK serializes this test
-            // helper's callers, and the workflows env tests keep all
-            // config reads inside the locked closure.
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            // SAFETY: Same rationale as set_var above.
-            None => unsafe { std::env::remove_var(key) },
-        }
-    }
-    let result = f();
-    for (key, value) in previous {
-        match value {
-            // SAFETY: Same rationale as the initial set_var above.
-            Some(value) => unsafe { std::env::set_var(key, value) },
-            // SAFETY: Same rationale as set_var above.
-            None => unsafe { std::env::remove_var(key) },
-        }
-    }
-    result
+    with_temp_envs(&all_items, f)
 }
 
 #[test]

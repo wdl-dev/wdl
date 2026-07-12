@@ -133,6 +133,10 @@ Key families:
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
   `/internal/workflows/tick` endpoint; scheduler never reads or writes DO alarm state
   directly.
+- Workflows revalidates persisted DO alarm namespace, worker, and version identity with
+  the `wdl-rust-common` owners before dispatch. Runtime run dispatch and progress
+  callbacks share one system-vs-user runtime endpoint selector inside the workflows
+  crate.
 - 32 scheduling shards partition ready/due work.
 - Ready tokens are deduplicated hints; instance hash state is authority.
 - Execution commits are fenced by `generation`, `runToken`, active instance status, and
@@ -154,9 +158,11 @@ Key families:
   (`step.sleep`, `step.sleepUntil`, `step.waitForEvent`) remain exclusive and must not
   overlap another in-flight step because they suspend the whole workflow run.
 - Termination is an explicit non-success terminal outcome and uses error retention.
-- Per-instance aggregate payload cap is 16 MiB. Step/event over-cap writes fail the
-  request; over-cap runtime terminal results transition the instance to failed in the
-  same transaction.
+- A single workflow result is capped at 1 MiB and a runtime-to-workflows backend JSON
+  request at 2 MiB. Runtime prevalidation and the Rust backend share the pinned
+  `workflow_payload_too_large` contract. The per-instance aggregate payload cap is
+  16 MiB. Step/event over-cap writes fail the request; over-cap runtime terminal
+  results transition the instance to failed in the same transaction.
 - Workflows semantic request caps use `request_too_large`; this is distinct from
   HTTP-body parser `request_body_too_large` in control/runtime protocols. Workflow
   errors otherwise use the platform `{ error, message }` envelope on HTTP boundaries.

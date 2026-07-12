@@ -1,17 +1,21 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import {
   COMPILE_WORKERD_LOCAL_ARGS,
   DOCKER_COMPOSE_BUILD_ARGS,
+  LOCAL_ADMIN_TOKEN,
+  LOCAL_CONNECT_HOST,
   ROOT,
+  localAssetsCdnBase,
+  localControlUrl,
   shouldPrepareIntegrationArtifacts,
 } from "./integration-environment.js";
+import { readIntegrationDurationReport } from "./integration-test-plan.js";
+import { pipeWithPrefix, writeWithPrefix } from "./_stream-prefix.js";
 
 /**
  * @typedef {{ file: string, slot: number, durationMs: number, status: "passed" | "failed" }} FileDuration
  * @typedef {{ shardCount: number, runDurationMs: number, fileDurations: FileDuration[] }} IntegrationSummary
- * @typedef {{ durationMs: number, status: string, updatedAt: string }} DurationRecord
- * @typedef {{ updatedAt?: string, runDurationMs?: number, files?: Record<string, DurationRecord> }} DurationReport
  * @typedef {{
  *   files: string[],
  *   shardCount: number,
@@ -215,10 +219,10 @@ export function makeSlotEnv(idx, projectPrefix, basePort, s3PortBase, baseEnv = 
     WDL_S3MOCK_HOST_PORT: String(s3mockPort),
     WDL_WORKERD_CONFIG_VARIANT: "local",
     WDL_INTEGRATION_NO_BUILD: "1",
-    ADMIN_TOKEN: "local-dev-token",
-    CONTROL_URL: `http://admin.test:${gatewayPort}`,
-    ASSETS_CDN_BASE: `http://localhost:${s3mockPort}/wdl-assets`,
-    CONTROL_CONNECT_HOST: "localhost",
+    ADMIN_TOKEN: LOCAL_ADMIN_TOKEN,
+    CONTROL_URL: localControlUrl(gatewayPort),
+    ASSETS_CDN_BASE: localAssetsCdnBase(s3mockPort),
+    CONTROL_CONNECT_HOST: LOCAL_CONNECT_HOST,
   };
   return env;
 }
@@ -251,8 +255,9 @@ function teardownSlot(env, prefix) {
   });
 }
 
-/** @param {DurationReport | null | undefined} existing @param {{ runDurationMs: number, fileDurations: FileDuration[] }} observed @param {Date} [now] */
+/** @param {ReturnType<typeof readIntegrationDurationReport> | undefined} existing @param {{ runDurationMs: number, fileDurations: FileDuration[] }} observed @param {Date} [now] */
 export function buildDurationReport(existing, { runDurationMs, fileDurations }, now = new Date()) {
+  /** @type {Record<string, unknown>} */
   const files = { ...(existing?.files && typeof existing.files === "object" ? existing.files : {}) };
   const updatedAt = now.toISOString();
   for (const row of fileDurations) {
@@ -315,44 +320,9 @@ export function persistDurationFile(file, observed) {
 
 /** @param {string} file @param {{ runDurationMs: number, fileDurations: FileDuration[] }} observed */
 function updateDurationFile(file, observed) {
-  const existing = readDurationFile(file);
+  const existing = readIntegrationDurationReport(file);
   const next = buildDurationReport(existing, observed);
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
   renameSync(tmp, file);
-}
-
-/** @param {string} file @returns {DurationReport} */
-function readDurationFile(file) {
-  if (!existsSync(file)) return {};
-  try {
-    return JSON.parse(readFileSync(file, "utf8"));
-  } catch (err) {
-    process.stderr.write(
-      `warning: ignoring unreadable integration duration file ${file}: ${errorMessage(err)}\n`
-    );
-    return {};
-  }
-}
-
-/** @param {NodeJS.ReadableStream} src @param {NodeJS.WritableStream} dst @param {string} prefix */
-function pipeWithPrefix(src, dst, prefix) {
-  let buf = "";
-  src.setEncoding("utf8");
-  src.on("data", (chunk) => {
-    buf += String(chunk);
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      writeWithPrefix(dst, prefix, `${buf.slice(0, nl)}\n`);
-      buf = buf.slice(nl + 1);
-    }
-  });
-  src.on("end", () => {
-    if (buf.length) writeWithPrefix(dst, prefix, `${buf}\n`);
-  });
-}
-
-/** @param {NodeJS.WritableStream} dst @param {string} prefix @param {string} text */
-function writeWithPrefix(dst, prefix, text) {
-  dst.write(`${prefix}${text}`);
 }

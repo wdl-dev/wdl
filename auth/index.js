@@ -37,6 +37,12 @@ import {
   tokenKey,
 } from "auth-runtime";
 import { ROLES } from "shared-auth-roles";
+import {
+  acquireTokenLock,
+  createTokenLock,
+  releaseTokenLock,
+} from "shared-redis-lock";
+import { NAMESPACES_KEY } from "shared-version";
 
 const utf8Decoder = new TextDecoder();
 
@@ -128,33 +134,16 @@ async function scanTokenRecords(runtime, session) {
 
 /**
  * @param {import("shared-redis").RedisSession} session
- * @param {string} key
- * @param {string} token
- */
-async function acquireDelegatedIssueLock(session, key, token) {
-  const reply = await session.multi()
-    .set(key, token, { nx: true, ttl: DELEGATED_ISSUE_LOCK_TTL_SECONDS })
-    .exec();
-  return Array.isArray(reply) && reply[0] === "OK";
-}
-
-/**
- * @param {import("shared-redis").RedisSession} session
- * @param {string} key
- * @param {string} token
+ * @param {{ key: string, token: string }} lock
  * @param {ReturnType<typeof bindAuthRuntime>} runtime
  * @param {string | null} requestId
  */
-async function releaseDelegatedIssueLock(session, key, token, runtime, requestId) {
-  try {
-    await session.delIfEq(key, token);
-  } catch (err) {
-    runtime.logAuth("warn", "auth_delegated_issue_lock_release_failed", requestId, {
+async function releaseDelegatedIssueLock(session, lock, runtime, requestId) {
+  await releaseTokenLock(session, lock, {
+    onError: (err) => runtime.logAuth("warn", "auth_delegated_issue_lock_release_failed", requestId, {
       ...formatError(err),
-    });
-    // Do not turn a completed issue into an unknown/retryable outcome; the
-    // token-scoped lock has a short TTL and will self-clear.
-  }
+    }),
+  });
 }
 
 /**
@@ -225,7 +214,7 @@ async function chooseDelegatedNamespace(session, records, template) {
   for (let attempt = 0; attempt < DELEGATED_ISSUE_NAMESPACE_RETRIES; attempt += 1) {
     const ns = template.nsGenerator.prefix + randomHex(template.nsGenerator.randomHexBytes);
     if (!isValidTenantNs(ns)) continue;
-    if (await session.sIsMember("namespaces", ns)) continue;
+    if (await session.sIsMember(NAMESPACES_KEY, ns)) continue;
     if (tokenNamespaceClaimExists(records, ns)) continue;
     const label = renderDelegatedIssueLabel(template, ns);
     return { ns, label };
@@ -486,16 +475,19 @@ export default class Auth extends WorkerEntrypoint {
       }
 
       const lockKey = delegatedIssueLockKey(issuerTokenId, templateId);
-      const lockToken = randomHex(16);
+      const issueLock = createTokenLock(lockKey);
       const lockAttemptStartedAtMs = Date.now();
       try {
-        const locked = await acquireDelegatedIssueLock(session, lockKey, lockToken);
+        const locked = await acquireTokenLock(session, issueLock, {
+          ttlSeconds: DELEGATED_ISSUE_LOCK_TTL_SECONDS,
+          transactional: true,
+        });
         if (!locked) {
           throw new AuthPolicyError(409, "delegated_issue_busy",
             "delegated issue is already in progress");
         }
       } catch (err) {
-        await releaseDelegatedIssueLock(session, lockKey, lockToken, runtime, requestId);
+        await releaseDelegatedIssueLock(session, issueLock, runtime, requestId);
         return runtime.rethrowPolicy(requestId, "delegated_issue", err);
       }
 
@@ -513,7 +505,7 @@ export default class Auth extends WorkerEntrypoint {
         }
         const namespaceChoice = await chooseDelegatedNamespace(session, tokenRecords, template);
         assertDelegatedIssueLockLocalBudget(lockAttemptStartedAtMs);
-        await watchDelegatedIssueLockHeld(session, lockKey, lockToken);
+        await watchDelegatedIssueLockHeld(session, issueLock.key, issueLock.token);
         const tokenId = generateTokenId();
         const { ns, label } = namespaceChoice;
         const expiresAt = new Date(nowMs + template.ttlSeconds * 1000).toISOString();
@@ -565,7 +557,7 @@ export default class Auth extends WorkerEntrypoint {
       } catch (err) {
         return runtime.rethrowPolicy(requestId, "delegated_issue", err);
       } finally {
-        await releaseDelegatedIssueLock(session, lockKey, lockToken, runtime, requestId);
+        await releaseDelegatedIssueLock(session, issueLock, runtime, requestId);
       }
     });
   }

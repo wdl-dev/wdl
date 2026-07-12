@@ -53,10 +53,6 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: wdl
-              app.kubernetes.io/component: system-runtime
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: wdl
               app.kubernetes.io/component: scheduler
         - podSelector:
             matchLabels:

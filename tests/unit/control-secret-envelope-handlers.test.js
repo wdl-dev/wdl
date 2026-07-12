@@ -11,15 +11,20 @@ import {
   moduleDataUrl,
   readRepositoryFile,
   repositoryFileUrl,
+  repositoryModuleDataUrl,
 } from "../helpers/load-shared-module.js";
-import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
+import { createFakeRedis, sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { CONTROL_ROUTING_TEST_URL } from "../helpers/load-control-routing.js";
+import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
 const SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
-const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 const SHARED_SECRET_KEYS_URL = repositoryFileUrl("shared/secret-keys.js");
+const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl("runtime/load/env-build.js", [
+  [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
+]);
+const { libUrl: PRODUCTION_CONTROL_LIB_URL } = await compileControlGraph();
 const env = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
   SECRET_ENVELOPE_KID: "local:test:secret-envelope:v1",
@@ -137,17 +142,11 @@ function secretPutUrl(controlSharedUrl, controlLibUrl) {
 }
 
 function envBudgetUrl() {
-  const sharedRedisUrl = moduleDataUrl(`
-export class WatchError extends Error {
-  constructor(message = "watched key changed") {
-    super(message);
-    this.name = "WatchError";
-  }
-}
-`);
+  const sharedRedisUrl = sharedRedisStubUrl();
   const source = applyModuleReplacements(readRepositoryFile("control/env-budget.js"), [
+    [/from "control-lib";/, `from ${JSON.stringify(PRODUCTION_CONTROL_LIB_URL)};`],
+    [/from "runtime-load-env-build";/, `from ${JSON.stringify(RUNTIME_ENV_BUILD_URL)};`],
     [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
-    [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
     [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
     [/from "shared-redis";/, `from ${JSON.stringify(sharedRedisUrl)};`],
   ]);
@@ -364,6 +363,50 @@ test("namespace secret PUT checks retained worker versions before storing", asyn
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_env_too_large");
     assert.equal(redis.ops.some((op) => op[0] === "hSet"), false);
+  });
+});
+
+test("namespace secret PUT returns corrupt_meta for invalid retained bundle metadata", async () => {
+  const logStart = namespaceSecretState.logs.length;
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.sets.set("workers:demo", new Set(["api"]));
+    seedWorkerSecretVersions(redis, ["v1"]);
+    redis.hashes.set("worker:demo:api:v:1", { __meta__: "[]" });
+  }, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-ns-secret-corrupt-meta",
+    });
+
+    const body = await readJsonResponse(response, 500);
+    assert.equal(body.error, "corrupt_meta");
+    assert.equal(body.namespace, "demo");
+    assert.equal(body.worker, "api");
+    assert.equal(body.version, "v1");
+    assert.equal(body.detail, undefined);
+    assert.deepEqual(namespaceSecretState.logs.slice(logStart).find((entry) =>
+      entry.event === "ns_secret_mutation_rejected"
+    ), {
+      level: "error",
+      event: "ns_secret_mutation_rejected",
+      fields: {
+        request_id: "rid-ns-secret-corrupt-meta",
+        namespace: "demo",
+        key: "TOKEN",
+        method: "PUT",
+        status: 500,
+        reason: "corrupt_meta",
+        error_detail: "__meta__ must be a JSON object",
+      },
+    });
+    assert.deepEqual(redisHSetAttempts(redis, "secrets:demo"), []);
   });
 });
 
@@ -605,6 +648,12 @@ const workerSecretState = /** @type {ReturnType<typeof createControlHandlerState
     logs: [],
   }))
 );
+
+/** @param {number} start */
+function workerSecretRejectionLogsSince(start) {
+  return workerSecretState.logs.slice(start).filter((entry) => entry.event === "secret_mutation_rejected");
+}
+
 const workerControlSharedUrl = controlSharedHarnessUrl(WORKER_SECRET_STATE_GLOBAL);
 const workerLibStubUrl = moduleDataUrl(`
 ${validateSecretKeyStubSource}
@@ -681,6 +730,76 @@ test("worker secret PUT encrypts before WATCH retries and reuses the envelope", 
   });
 });
 
+test("worker secret PUT returns corrupt_meta for invalid active bundle metadata", async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.set("worker:demo:api:v:1", { __meta__: "[]" });
+  }, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-corrupt-meta",
+    });
+
+    const body = await readJsonResponse(response, 500);
+    assert.equal(body.error, "corrupt_meta");
+    assert.equal(body.message, "Corrupt __meta__ for demo/api/v1");
+    assert.equal(body.detail, undefined);
+    assert.deepEqual(redisHSetAttempts(redis, "secrets:demo:api"), []);
+  });
+});
+
+test("worker secret PUT logs retained metadata diagnostics without exposing them", async () => {
+  const state = workerSecretState;
+  const logStart = state.logs.length;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.delete("routes:demo");
+    seedWorkerSecretVersions(redis, ["v1"]);
+    redis.hashes.set("worker:demo:api:v:1", { __meta__: "[]" });
+  }, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-retained-corrupt-meta",
+    });
+
+    const body = await readJsonResponse(response, 500);
+    assert.equal(body.error, "corrupt_meta");
+    assert.equal(body.detail, undefined);
+    assert.deepEqual(state.logs.slice(logStart).find((entry) =>
+      entry.event === "secret_mutation_rejected"
+    ), {
+      level: "error",
+      event: "secret_mutation_rejected",
+      fields: {
+        request_id: "rid-worker-secret-retained-corrupt-meta",
+        namespace: "demo",
+        worker: "api",
+        key: "TOKEN",
+        method: "PUT",
+        status: 500,
+        reason: "corrupt_meta",
+        error_detail: "__meta__ must be a JSON object",
+      },
+    });
+    assert.deepEqual(redisHSetAttempts(redis, "secrets:demo:api"), []);
+  });
+});
+
 test("worker secret mutation rejects invalid keys through shared validator", async () => {
   const state = workerSecretState;
   const opsBefore = state.redis.ops.length;
@@ -737,6 +856,7 @@ test("worker secret PUT active precheck reads the shared fake Redis state", asyn
 
 test("worker secret PUT maps active bump delete-lock errors to deleting", async () => {
   const state = workerSecretState;
+  const logStart = state.logs.length;
   await withWorkerSecretRedis(state, (redis) => {
     redis.strings.set("worker-delete-lock:demo:api", "holder-token");
   }, async (redis) => {
@@ -756,11 +876,25 @@ test("worker secret PUT maps active bump delete-lock errors to deleting", async 
     const body = await readJsonResponse(response, 409);
     assert.equal(body.error, "deleting");
     assert.equal(redis.ops.length, 0);
+    assert.deepEqual(workerSecretRejectionLogsSince(logStart), [{
+      level: "warn",
+      event: "secret_mutation_rejected",
+      fields: {
+        request_id: "rid-worker-secret-delete-lock",
+        namespace: "demo",
+        worker: "api",
+        key: "KEY",
+        method: "PUT",
+        status: 409,
+        reason: "deleting",
+      },
+    }]);
   });
 });
 
 test("worker secret PUT maps active bump contention to secret mutation contention", async () => {
   const state = workerSecretState;
+  const logStart = state.logs.length;
   await withWorkerSecretRedis(state, (redis) => {
     redis.execFailures = 5;
   }, async (redis) => {
@@ -780,6 +914,55 @@ test("worker secret PUT maps active bump contention to secret mutation contentio
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "secret_mutation_contention");
     assert.equal(redis.ops.some((op) => op[0] === "hSet" && op[1] === "secrets:demo:api"), false);
+    assert.deepEqual(workerSecretRejectionLogsSince(logStart), [{
+      level: "warn",
+      event: "secret_mutation_rejected",
+      fields: {
+        request_id: "rid-worker-secret-bump-contention",
+        namespace: "demo",
+        worker: "api",
+        key: "KEY",
+        method: "PUT",
+        status: 503,
+        reason: "secret_mutation_contention",
+      },
+    }]);
+  });
+});
+
+test("worker secret DELETE precheck logs direct mutation aborts through the shared rejection shape", async () => {
+  const state = workerSecretState;
+  const logStart = state.logs.length;
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.strings.set("worker-delete-lock:demo:api", "holder-token");
+  }, async () => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/KEY", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["KEY"],
+      requestId: "rid-worker-secret-delete-precheck",
+    });
+
+    const body = await readJsonResponse(response, 409);
+    assert.equal(body.error, "deleting");
+    assert.deepEqual(workerSecretRejectionLogsSince(logStart), [{
+      level: "warn",
+      event: "secret_mutation_rejected",
+      fields: {
+        request_id: "rid-worker-secret-delete-precheck",
+        namespace: "demo",
+        worker: "api",
+        key: "KEY",
+        method: "DELETE",
+        status: 409,
+        reason: "deleting",
+      },
+    }]);
   });
 });
 

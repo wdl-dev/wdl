@@ -5,6 +5,24 @@
 // character set can never drift between the tier that accepts deploys and
 // the tier that routes traffic.
 export const NS_PATTERN = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
+export const DEFAULT_PLATFORM_DOMAIN = "workers.local";
+
+/** @param {unknown} value */
+export function configuredHostname(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const host = value.trim().replace(/\.+$/, "").toLowerCase();
+  if (!host || host.includes("/") || host.includes(":") || /\s/.test(host)) return null;
+  return host;
+}
+
+/** @param {Record<string, unknown>} env */
+export function platformDomainFromEnv(env) {
+  const raw = env.PLATFORM_DOMAIN;
+  if (raw == null || raw === "" || typeof raw !== "string") return DEFAULT_PLATFORM_DOMAIN;
+  const domain = configuredHostname(raw);
+  if (!domain) throw new TypeError("PLATFORM_DOMAIN must be a plain hostname");
+  return domain;
+}
 
 export const RESERVED_NS = new Set(["__system__", "__platform__", "__community__"]);
 
@@ -192,6 +210,10 @@ export const WDL_RESERVED_ENTRYPOINT_RE = /^__Wdl[A-Za-z0-9_]*__$/;
 // `:` in the id would alias `kv:<ns>:foo:v:bar` between (id="foo:v",
 // key="bar") and (id="foo", key="v:bar").
 export const KV_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+// D1 API ids are stable control-plane references and may retain the
+// mixed-case/underscore forms accepted by the existing D1 model.
+export const D1_DATABASE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 // Worker-scoped R2 virtual bucket name. Same Redis/S3-key hygiene class as
 // KV / Queue ids: lowercase, no slash, no colon, bounded length.

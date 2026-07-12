@@ -21,6 +21,9 @@ are:
 
 Workers are loaded by immutable id `<ns>:<worker>:<version>`. Promotion creates a new
 id, so active-version changes naturally cold-load a fresh isolate.
+`runtime/load.js` also owns the shared `workerLoader.get()` wrapper: every cache miss is
+recorded for later eviction, while only active-version dispatch paths request sibling
+eviction. Service bindings load their pinned version without evicting siblings.
 
 The two runtime pools use the same image and source but different capnp configs:
 
@@ -84,9 +87,10 @@ services. Runtime therefore treats bindings as adapters:
   worker secrets. A worker-level secret with the same name wins over a namespace-level
   secret, which wins over a var. Control enforces a headroomed estimate of workerd's
   `workerLoader` serialized env budget during deploys and secret mutations. That
-  estimate includes user vars/secrets plus runtime-injected binding/workflow env values,
-  including required caller secret copies in platform/service binding props, so an
-  over-large env fails in the control plane instead of during runtime cold-load.
+  estimate calls the same `buildWorkerEnv()` materializer as cold-load with shape-only
+  factories, then measures user vars/secrets plus runtime-injected binding/workflow env
+  values, including required caller secret copies in platform/service binding props, so
+  an over-large env fails in the control plane instead of during runtime cold-load.
 - Stateful bindings such as D1, Durable Objects, and Workflows call dedicated backend
   services. The hidden backend Fetchers stay in runtime and are removed before tenant
   code observes `env`.

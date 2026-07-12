@@ -1,4 +1,4 @@
-use super::{execution::WorkflowStepRequest, parse_positive_identity_i64};
+use super::{execution::WorkflowStepRequest, parse_positive_identity_i64, runtime_endpoint};
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::time::now_ms;
@@ -8,18 +8,6 @@ use crate::{
 };
 
 const PROGRESS_CALLBACK_CACHE_LIMIT: usize = 4096;
-
-fn runtime_endpoint(app: &AppState, ns: &str) -> String {
-    let (host, port) = if ns == "__system__" {
-        (
-            &app.config.system_runtime_host,
-            app.config.system_runtime_port,
-        )
-    } else {
-        (&app.config.runtime_host, app.config.runtime_port)
-    };
-    format!("http://{host}:{port}/internal/workflows/notify")
-}
 
 fn progress_payload(event: &str, status: &str, step: Option<JsonValue>) -> JsonValue {
     json!({
@@ -83,7 +71,7 @@ async fn notify(app: &AppState, identity: InstanceIdentity, callback: String, pr
         );
         return;
     };
-    let url = runtime_endpoint(app, &identity.ns);
+    let url = runtime_endpoint(app, &identity.ns, "/internal/workflows/notify");
     let response = app
         .http
         .post(url)

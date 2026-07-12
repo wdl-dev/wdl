@@ -4,6 +4,7 @@ import {
   moduleDataUrl,
   repositoryFileUrl,
 } from "./load-shared-module.js";
+import { doProtocolDataUrl } from "./load-do-protocol.js";
 import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
 
 /**
@@ -38,6 +39,7 @@ const DO_ACTOR_TEST_STATE = {
 doActorGlobal.__doActorTestState = DO_ACTOR_TEST_STATE;
 
 const durableObjectStub = "class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }";
+const productionProtocolUrl = doProtocolDataUrl();
 
 const loadUrl = moduleDataUrl(`
 export function loadDoWorkerCode() {
@@ -56,6 +58,7 @@ export async function rememberDoObject(env, invoke) {
 `);
 
 const protocolUrl = moduleDataUrl(`
+export { DO_OWNERSHIP_CODE } from ${JSON.stringify(productionProtocolUrl)};
 export class DoRuntimeError extends Error {
   constructor(status, code, message) {
     super(message);

@@ -54,8 +54,9 @@ export async function readWorkflowNotifyDispatch(request) { return { body: await
 export async function readWorkflowRunDispatch(request) { return { body: await request.json() }; }
 `);
 const runtimeLoadUrl = moduleDataUrl(`
-export function createLoaderCallback() {
-  return async () => ({});
+export function getLoadedWorkerStub({ env, ns, worker, version }) {
+  const workerId = \`\${ns}:\${worker}:\${version}\`;
+  return { workerId, stub: env.LOADER.get(workerId, async () => ({})) };
 }
 `);
 const emptyBindingUrl = moduleDataUrl(`

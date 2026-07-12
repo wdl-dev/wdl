@@ -2,100 +2,62 @@
 // tail so each test wires its own redis fakes without re-declaring the base
 // helpers.
 
-import { moduleDataUrl } from "./load-shared-module.js";
+import {
+  freshRepositoryModuleDataUrl,
+  moduleDataUrl,
+  repositoryFileUrl,
+} from "./load-shared-module.js";
+import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
+import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
+
+const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
+const SHARED_ENV_URL = repositoryFileUrl("shared/env.js");
+const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_RANDOM_ID_URL = repositoryFileUrl("shared/random-id.js");
+const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const CONTROL_ERRORS_URL = freshRepositoryModuleDataUrl("control/errors.js", [
+  [/from "shared-respond"/g, `from ${JSON.stringify(SHARED_RESPOND_URL)}`],
+]);
+const CONTROL_WORKFLOWS_CLIENT_URL = freshRepositoryModuleDataUrl("control/workflows-client.js", [
+  [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
+  [/from "control-errors"/g, `from ${JSON.stringify(CONTROL_ERRORS_URL)}`],
+]);
+const SHARED_OWNER_LEASE_URL = freshRepositoryModuleDataUrl("shared/owner-lease.js", [
+  [/from "shared-env"/g, `from ${JSON.stringify(SHARED_ENV_URL)}`],
+]);
+const CONTROL_OPTIMISTIC_REDIS_URL = sharedRedisStubUrl();
+const CONTROL_OPTIMISTIC_URL = freshRepositoryModuleDataUrl("control/optimistic.js", [
+  [/from "shared-redis"/g, `from ${JSON.stringify(CONTROL_OPTIMISTIC_REDIS_URL)}`],
+  [/from "shared-owner-lease"/g, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)}`],
+]);
+const CONTROL_JSON_BODY_URL = freshRepositoryModuleDataUrl("control/json-body.js", [
+  [/from "shared-bounded-body"/g, `from ${JSON.stringify(SHARED_BOUNDED_BODY_URL)}`],
+  [/from "shared-respond"/g, `from ${JSON.stringify(SHARED_RESPOND_URL)}`],
+]);
 
 const CONTROL_SHARED_BASE = `
-export function jsonResponse(status, data, extraHeaders = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...extraHeaders } });
-}
-function sanitizeJsonErrorDetails(value) {
-  if (Array.isArray(value)) return value;
-  if (!value || typeof value !== "object") return value;
-  const out = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === "error" || key === "message" || key === "reason") continue;
-    if (entry !== undefined) {
-      Object.defineProperty(out, key, {
-        value: entry,
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-    }
-  }
-  return Object.keys(out).length === 0 ? undefined : out;
-}
-export function jsonError(status, error, message, details = {}, extraHeaders = {}) {
-  const body = { error };
-  if (message) body.message = message;
-  const sanitized = sanitizeJsonErrorDetails(details);
-  const safeDetails = sanitized && typeof sanitized === "object" && !Array.isArray(sanitized) ? sanitized : {};
-  return jsonResponse(status, { ...safeDetails, ...body }, extraHeaders);
-}
-export async function readJsonBody(request, { requireObject = false, allowEmpty = false, maxBytes = 1024 * 1024 } = {}) {
-  let body;
-  try {
-    const declared = Number(request.headers.get("content-length") || 0);
-    if (Number.isFinite(declared) && declared > maxBytes) {
-      return { response: jsonError(413, "request_body_too_large", "Body must be at most " + maxBytes + " bytes") };
-    }
-    const text = await request.text();
-    if (Buffer.byteLength(text, "utf8") > maxBytes) {
-      return { response: jsonError(413, "request_body_too_large", "Body must be at most " + maxBytes + " bytes") };
-    }
-    if (text === "") {
-      if (!allowEmpty) {
-        return { response: jsonError(400, "invalid_json", "Body must be valid JSON") };
-      }
-      body = {};
-    } else {
-      body = JSON.parse(text);
-    }
-  } catch {
-    return { response: jsonError(400, "invalid_json", "Body must be valid JSON") };
-  }
-  if (requireObject && (!body || typeof body !== "object" || Array.isArray(body))) {
-    return { response: jsonError(400, "invalid_json_object", "Body must be a JSON object") };
-  }
-  return { body };
-}
-export class ControlAbort extends Error {
-  constructor(status, code, details = {}) {
-    super(details?.message || code);
-    this.status = status;
-    this.code = code;
-    this.details = details;
-  }
-}
-export function codedErrorResponse(err, fallbackCode = "internal_error", extraDetails = {}) {
-  const record = err && typeof err === "object" && !Array.isArray(err) ? err : {};
-  const details = record.details && typeof record.details === "object" && !Array.isArray(record.details)
-    ? record.details
-    : {};
-  const status = typeof record.status === "number" ? record.status : 500;
-  const code = typeof record.code === "string" && record.code ? record.code : fallbackCode;
-  const recordMessage = typeof record.message === "string" && record.message ? record.message : undefined;
-  const message = err instanceof ControlAbort
-    ? (typeof err.details.message === "string" && err.details.message) || err.message || code
-    : recordMessage || (typeof details.message === "string" && details.message) || code;
-  return jsonError(
-    status,
-    code,
-    message,
-    { ...details, ...extraDetails },
-  );
-}
-export function controlAbortResponse(err, extraDetails = {}) {
-  return codedErrorResponse(err, err.code, extraDetails);
-}
-export function errMessage(err) {
-  return err instanceof Error ? err.message : String(err);
-}
-export function randomHex(bytes = 16) {
-  const data = new Uint8Array(bytes);
-  crypto.getRandomValues(data);
-  return Array.from(data, (b) => b.toString(16).padStart(2, "0")).join("");
-}
+import { jsonError, jsonResponse, sanitizeJsonErrorDetails } from ${JSON.stringify(SHARED_RESPOND_URL)};
+import { createPostWorkflowsInternal } from ${JSON.stringify(CONTROL_WORKFLOWS_CLIENT_URL)};
+import { ControlAbort, codedErrorResponse, controlAbortResponse } from ${JSON.stringify(CONTROL_ERRORS_URL)};
+import { runOptimistic, withOptimisticRetries } from ${JSON.stringify(CONTROL_OPTIMISTIC_URL)};
+import { readJsonBody } from ${JSON.stringify(CONTROL_JSON_BODY_URL)};
+import { errorMessage as errMessage } from ${JSON.stringify(SHARED_ERRORS_URL)};
+import { randomHex } from ${JSON.stringify(SHARED_RANDOM_ID_URL)};
+import { formatError } from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};
+export {
+  ControlAbort,
+  codedErrorResponse,
+  controlAbortResponse,
+  errMessage,
+  formatError,
+  jsonError,
+  jsonResponse,
+  randomHex,
+  readJsonBody,
+  runOptimistic,
+  sanitizeJsonErrorDetails,
+  withOptimisticRetries,
+};
 export function prefixedId(prefix, bytes = 16) {
   return prefix + randomHex(bytes);
 }
@@ -125,37 +87,17 @@ export function getControlS3() {
 export function getControlR2() {
   return state.r2;
 }
-export function getControlWorkflows() {
-  return state.workflows;
-}
 export function controlInternalJsonHeaders() {
   const token = state.env?.WDL_INTERNAL_AUTH_TOKEN;
   return token
     ? { "content-type": "application/json", "x-wdl-internal-auth": token }
     : { "content-type": "application/json" };
 }
-function isWatchError(err) {
-  return err instanceof Error && (
-    err.name === "WatchError"
-    || err.constructor?.name === "WatchError"
-  );
-}
-export async function runOptimistic(redis, { attempts = 5, onExhausted, onWatchError, shouldRetryResult }, fn) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const result = await redis.session((session) => fn(session, attempt));
-      if (shouldRetryResult?.(result, attempt)) continue;
-      return result;
-    } catch (err) {
-      if (isWatchError(err)) {
-        onWatchError?.(err, attempt);
-        continue;
-      }
-      throw err;
-    }
-  }
-  return await onExhausted();
-}
+export const postWorkflowsInternal = createPostWorkflowsInternal({
+  getWorkflows: () => state.workflows,
+  headers: controlInternalJsonHeaders,
+  getLog: () => state.log,
+});
 export async function recordCleanupIntentOrWarn({
   cleanupIntent,
   cleanupTaskId,

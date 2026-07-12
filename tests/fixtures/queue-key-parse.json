@@ -1,0 +1,34 @@
+{
+  "stream": [
+    { "key": "queue:demo:jobs:s", "parsed": { "ns": "demo", "queue": "jobs" } },
+    { "key": "queue:__platform__:jobs:s", "parsed": { "ns": "__platform__", "queue": "jobs" } },
+    { "key": "queue:t:my-queue-1:s", "parsed": { "ns": "t", "queue": "my-queue-1" } },
+    { "key": "queue:demo:jobs", "parsed": null },
+    { "key": "queue-delayed:demo:jobs", "parsed": null },
+    { "key": "queue::jobs:s", "parsed": null },
+    { "key": "queue:admin:jobs:s", "parsed": null },
+    { "key": "queue:__community__:jobs:s", "parsed": null },
+    { "key": "queue:demo:Jobs:s", "parsed": null },
+    { "key": "queue:demo:jobs:extra:s", "parsed": null },
+    { "key": "notaqueue:demo:jobs:s", "parsed": null },
+    { "key": "", "parsed": null }
+  ],
+  "delayed": [
+    { "key": "queue-delayed:demo:jobs", "parsed": { "ns": "demo", "queue": "jobs" } },
+    { "key": "queue-delayed:__system__:jobs-1", "parsed": { "ns": "__system__", "queue": "jobs-1" } },
+    { "key": "queue:demo:jobs:s", "parsed": null },
+    { "key": "queue-delayed::jobs", "parsed": null },
+    { "key": "queue-delayed:demo:", "parsed": null },
+    { "key": "queue-delayed:demo:Jobs", "parsed": null },
+    { "key": "queue-delayed:demo:jobs:extra", "parsed": null }
+  ],
+  "consumer": [
+    { "key": "queue-consumer:demo:jobs", "parsed": { "ns": "demo", "queue": "jobs" } },
+    { "key": "queue-consumer:__platform__:jobs-1", "parsed": { "ns": "__platform__", "queue": "jobs-1" } },
+    { "key": "queue-consumer:demo", "parsed": null },
+    { "key": "queue-consumer:", "parsed": null },
+    { "key": "queue-consumer:admin:jobs", "parsed": null },
+    { "key": "queue-consumer:demo:jobs:extra", "parsed": null },
+    { "key": "other:demo:jobs", "parsed": null }
+  ]
+}

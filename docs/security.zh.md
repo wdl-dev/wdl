@@ -94,7 +94,7 @@ Binding 是 tenant capability 的主要 surface：
 
 Terraform 在 ECS Fargate 上运行平台服务，包括执行 tenant 的 runtime task。Tenant-running task 的 cloud credential 暴露由 least-privilege task role、public-only workerd outbound binding 和 private mesh security group 约束。ECS Exec 只应在需要 platform operator access 的地方启用。
 
-Service Connect 和 security group 是 internal mesh 边界的一部分。共享 `WDL_INTERNAL_AUTH_TOKEN` 当前值必须在 runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy sidecar 间保持一致；可选 previous 值只作为维护窗口轮换桥接被 receiver 接受。Caller 始终发送当前值，因此 token 轮换不是 rolling-safe，除非先暂停 traffic 或一起重启 private fleet。Scheduler 是 runtime internal dispatch 和 workflows tick 的 client；Workflows 会把 Durable Object alarm dispatch 到 do-runtime。Scheduler 和 workflows 都不是公开 service target。
+Service Connect 和 security group 是 internal mesh 边界的一部分。共享 `WDL_INTERNAL_AUTH_TOKEN` 当前值必须在 runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy sidecar 间保持一致；可选的 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN` 只作为维护窗口轮换桥接被 receiver 接受。Caller 始终发送当前值，因此 token 轮换不是 rolling-safe，除非先暂停 traffic 或一起重启 private fleet。Scheduler 是 runtime internal dispatch 和 workflows tick 的 client；Workflows 会把 Durable Object alarm dispatch 到 do-runtime。Scheduler 和 workflows 都不是公开 service target。
 
 ## Tenant-facing 合同
 

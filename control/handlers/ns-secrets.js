@@ -1,6 +1,7 @@
 import {
   jsonResponse,
   jsonError,
+  errMessage,
   requireControlLog,
   requireControlRedis,
   stringEnv,
@@ -17,6 +18,7 @@ import { routesKey, workerVersionsKey } from "shared-version";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import { workersIndexKey } from "control-lib";
 import {
+  BundleMetaError,
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
   assertWorkerVersionsUserEnvBudget,
@@ -29,9 +31,24 @@ const MAX_NS_SECRET_ATTEMPTS = 5;
 
 class NamespaceSecretAbort extends ControlAbort {}
 
-/** @param {unknown} err */
-function namespaceSecretMutationErrorResponse(err) {
+/**
+ * @param {unknown} err
+ * @param {{ log: import("control-shared").ControlLogger, requestId: string, nsName: string, secretKey: string, method: string }} context
+ */
+function namespaceSecretMutationErrorResponse(err, { log, requestId, nsName, secretKey, method }) {
   if (err instanceof NamespaceSecretAbort) return controlAbortResponse(err);
+  if (err instanceof BundleMetaError) {
+    log("error", "ns_secret_mutation_rejected", {
+      request_id: requestId,
+      namespace: nsName,
+      key: secretKey,
+      method,
+      status: err.status,
+      reason: err.code,
+      error_detail: errMessage(err.cause),
+    });
+    return codedErrorResponse(err, err.code);
+  }
   if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
   if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
   return null;
@@ -200,7 +217,9 @@ export async function handle({ request, env, method, nsName, secretKey, requestI
         plaintext: put.plaintext,
       });
     } catch (err) {
-      const response = namespaceSecretMutationErrorResponse(err);
+      const response = namespaceSecretMutationErrorResponse(err, {
+        log, requestId, nsName, secretKey, method,
+      });
       if (response) return response;
       throw err;
     }
@@ -225,7 +244,9 @@ export async function handle({ request, env, method, nsName, secretKey, requestI
         method: "DELETE",
       });
     } catch (err) {
-      const response = namespaceSecretMutationErrorResponse(err);
+      const response = namespaceSecretMutationErrorResponse(err, {
+        log, requestId, nsName, secretKey, method,
+      });
       if (response) return response;
       throw err;
     }

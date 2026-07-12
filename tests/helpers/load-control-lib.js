@@ -41,6 +41,7 @@ export async function compileControlGraph(opts = {}) {
   const libUrl = freshRepositoryModuleDataUrl("control/lib.js", [
     [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
+    [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
     [/from "shared-version"/g, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
   ]);
 
@@ -78,6 +79,7 @@ export async function compileControlGraph(opts = {}) {
     ...importSpecifierReplacements({
       "shared-ns-pattern": SHARED_NS_URL,
       "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
+      "control-lib": libUrl,
     }),
     [/from "control-bindings"/g, `from ${JSON.stringify(bindingsUrl)}`],
     [/from "wdl-package-json-source"/g, `from ${JSON.stringify(packageJsonSourceUrl)}`],

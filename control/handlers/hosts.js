@@ -7,6 +7,8 @@ import {
   requireControlRedis,
 } from "control-shared";
 import { reconcileHosts, RoutingError } from "control-routing";
+import { platformDomainFromEnv } from "control-lib";
+import { hostsKey } from "shared-version";
 
 /**
  * @param {{ request: Request, env: Record<string, unknown>, method: string, nsName: string, requestId: string }} args
@@ -16,7 +18,7 @@ export async function handle({ request, env, method, nsName, requestId }) {
   const log = requireControlLog();
 
   if (method === "GET") {
-    const hosts = await redis.sMembers(`hosts:${nsName}`);
+    const hosts = await redis.sMembers(hostsKey(nsName));
     return jsonResponse(200, {
       namespace: nsName,
       hosts: [...hosts].toSorted(),
@@ -27,9 +29,7 @@ export async function handle({ request, env, method, nsName, requestId }) {
     if (parsed.response) return parsed.response;
     const body = /** @type {Record<string, unknown>} */ (parsed.body);
     try {
-      const platformDomain = typeof env.PLATFORM_DOMAIN === "string" && env.PLATFORM_DOMAIN
-        ? env.PLATFORM_DOMAIN
-        : "workers.local";
+      const platformDomain = platformDomainFromEnv(env);
       const hosts = await reconcileHosts(redis, nsName, body, platformDomain);
       log("info", "hosts_reconciled", {
         request_id: requestId,

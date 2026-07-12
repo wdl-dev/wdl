@@ -1,5 +1,6 @@
 import { logStructured } from "shared-observability";
 import { discardResponseBody } from "shared-respond";
+import { deleteGatewayInternalHeaders } from "gateway-lib";
 
 /**
  * @typedef {{
@@ -41,11 +42,6 @@ function websocketClosedNormally(evt) {
 const RECONNECT_DELAYS_MS = [0, 100, 250, 500, 1000, 2000, 5000];
 const MAX_BUFFERED_CLIENT_MESSAGES = 64;
 const MAX_BUFFERED_CLIENT_MESSAGES_CAP = 1024;
-const INTERNAL_HEADER_PREFIX = "x-wdl-";
-const INTERNAL_FORWARD_HEADERS = [
-  "x-worker-id",
-  "x-worker-prefix",
-];
 const proxyOptionsByEnv = new WeakMap();
 
 /** @param {unknown} value */
@@ -58,10 +54,7 @@ function parseNonNegativeInteger(value) {
 /** @param {Headers} headers */
 function publicWebSocketResponseHeaders(headers) {
   const out = new Headers(headers);
-  for (const name of INTERNAL_FORWARD_HEADERS) out.delete(name);
-  for (const name of [...out.keys()]) {
-    if (name.toLowerCase().startsWith(INTERNAL_HEADER_PREFIX)) out.delete(name);
-  }
+  deleteGatewayInternalHeaders(out);
   return out;
 }
 

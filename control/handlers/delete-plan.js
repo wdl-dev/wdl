@@ -12,7 +12,7 @@ import {
   stageWorkerHidden,
   stageWorkerVersionIndexRemove,
 } from "control-lifecycle-indexes";
-import { bundleKey, patternsKey, routesKey } from "shared-version";
+import { NAMESPACES_KEY, bundleKey, nsHostsKey, patternsKey, routesKey } from "shared-version";
 import { workerSecretsKey } from "shared-secret-keys";
 
 /**
@@ -88,10 +88,10 @@ export function stageWorkerDelete(multi, { collected, channels }) {
     multi.hDel(routesKey(ns), name);
   }
   if (collected.hostsLosingNsOwnership.length) {
-    multi.sRem(`ns-hosts:${ns}`, collected.hostsLosingNsOwnership);
+    multi.sRem(nsHostsKey(ns), collected.hostsLosingNsOwnership);
   }
   if (!collected.namespaceStillActive) {
-    multi.sRem("namespaces", ns);
+    multi.sRem(NAMESPACES_KEY, ns);
   }
 
   multi.del(cronWorkerKey(ns, name));

@@ -33,8 +33,10 @@
 | `runtime/lib.js` | 纯 runtime helpers，例如 bundle-to-worker-code、byte normalization 和 dispatch body normalization。 |
 | `control/index.js` | system-runtime `:8082` 上的薄 HTTP dispatcher；auth 后交给 handlers。 |
 | `control/handlers/` | deploy、promote、versions、workers、delete、secrets、hosts、reload、auth tokens、D1、R2、workflows 和 log tail endpoint handlers。 |
-| `control/shared.js` | Control singletons、auth wrapper、JSON/error helpers、Redis publish helpers 和共享 lifecycle/delete helpers。Direct `state.*` access 只应在这里或 dispatcher。 |
-| `control/lib.js` | Control route-to-action classifier、route utilities、delete-lock key helper 和 referrer redaction。 |
+| `control/shared.js` | Control singletons、auth wrapper、Redis publish helpers、state-bound workflow transport wiring 和共享 lifecycle/delete helpers。Direct `state.*` access 只应在这里或 dispatcher。 |
+| `control/errors.js`、`control/json-body.js`、`control/optimistic.js` | 由 `control/shared.js` re-export 的纯 Control error-response、bounded JSON request-body contract，以及 shared optimistic retry loop 上的 strict `WatchError`/Redis-session adapter。 |
+| `control/workflows-client.js` | timeout 由 caller 显式选择的 Control-to-Workflows internal POST transport；endpoint-specific response interpretation 仍由 caller 持有。 |
+| `control/lib.js` | 纯 Control data-shaping：route-to-action classification、key helpers、canonical bundle `__meta__` parsing 和 referrer redaction。 |
 | `control/bundle.js` | Bundle/module normalization、compatibility metadata、vars 和 emitted module manifest construction。 |
 | `control/bindings.js` | Service/platform binding parsers、ACL evaluation 和 linker helpers。 |
 | `control/topology.js` | Deploy metadata 中 routes、patterns、cron、queue consumer 和 workflow declaration parsing。 |
@@ -53,23 +55,26 @@
 | Path | 责任 |
 |---|---|
 | `shared/redis.js`、`shared/redis-*.js` | 公共 Redis import surface，以及拆分后的 RESP codec、per-call client、WATCH/MULTI session 和 subscriber loop modules。Runtime hot path 优先使用 Rust redis-proxy sidecar。 |
-| `shared/owner-lease.js`、`shared/owner-protocol.js`、`shared/owner-forwarder.js` | D1 和 DO runtimes 共用的 owner lease parsing、generation counters、key derivation、fence matching、staged Redis owner writes 和 owner-forwarding HTTP mechanics。 |
+| `shared/redis-lock.js` | Control 和 Auth 共用的 token-fenced Redis lock creation、acquire、renewal 和 best-effort token-scoped release。 |
+| `shared/owner-lease.js`、`shared/owner-protocol.js`、`shared/owner-forwarder.js` | Control 与 D1/DO runtimes 共用的 optimistic retry loop、owner lease parsing、generation counters、key derivation、fence matching、staged Redis owner writes 和 owner-forwarding HTTP mechanics。 |
 | `shared/auth-roles.js` | Role table、principal validation、reserved namespace policy 和 auth action capabilities。 |
 | `shared/auth-token.js` | Control 和 auth 共用的 `x-admin-token` sanitizer。 |
 | `shared/internal-auth.js` | JS caller 和 receiver 共用的 internal mesh auth header / token helpers。 |
 | `shared/secret-envelope.js`、`shared/secret-keys.js` | Secret envelope encryption/decryption、canonical base64/JSON handling、AAD binding helpers 和 secret Redis key construction。 |
+| `shared/base64.js` | Workerd tiers 共用的无依赖 byte/text base64 codec；在 `nodejs_compat` 下使用 `Buffer` fast path。 |
 | `shared/hex.js`、`shared/random-id.js`、`shared/errors.js` | byte-to-hex rendering、random hex ids 和 string-only error message extraction 的无依赖小 primitive。 |
 | `shared/observability.js` | JS tiers 的 structured logger、metrics registry、request-id helpers 和 log-level handling。 |
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |
-| `shared/bounded-body.js` | 共享 bounded request body byte/text readers；各 tier 自己把 limit error 映射为对应 HTTP error contract。 |
-| `shared/ns-pattern.js` | Namespace、worker、binding、queue、KV id、module path、reserved object-key 和 reserved namespace grammars。 |
-| `shared/version.js` | Worker version formatting 和 bundle key helpers。 |
+| `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
+| `shared/ns-pattern.js` | Platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、module path、reserved object-key 和 reserved namespace grammars。 |
+| `shared/version.js` | Worker version formatting，以及 worker 和 route-plane Redis key helpers。 |
 | `shared/workerd-compat-flags.js` | 上游 workerd experimental compatibility enable flags 的 pinned mirror，用于在 cold-load 前拒绝 tenant metadata。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire 和 SQL splitting utilities。 |
 | `shared/fnv1a32.js` | Runtime-side shard 和 slot hashing 共用的 JavaScript FNV-1a helpers。 |
 | `shared/s3-query.js` | s3-cleanup system worker 使用的 S3 query encoder；runtime R2 在 `runtime/r2-utils.js` 保留同一套 standalone helper，因为该文件会作为 worker source 注入。 |
+| `shared/s3-retry.js` | runtime R2 与 s3-cleanup worker 共用的 idempotent S3 POST 有界瞬态重试策略。 |
 | `shared/s3-xml.js` | Control R2、runtime R2 和 system cleanup 路径共用的 S3 XML parsing helpers。 |
 | `shared/worker-id.js` | Gateway、runtime、DO runtime 和 tests 共用的 `x-worker-id` formatting、parsing 和 runtime-load identity grammar。 |
 | `shared/cron-time.js` | Control 侧 cron parsing 和 slot-alignment helpers；scheduler advancement 使用 Rust `croner`。 |

@@ -92,6 +92,7 @@ Stateful storage：
 - user-runtime loaded worker outbound 是 public-only。
 - system-runtime 是刻意放宽的特权环境。
 - Runtime internal `:8088`、d1-runtime `:8787`、do-runtime `:8788`、workflows `:9120` 和 Redis 都是 private mesh services。Private service call 还必须携带带有共享 `WDL_INTERNAL_AUTH_TOKEN` 的 `x-wdl-internal-auth`。
+- Kubernetes NetworkPolicy 使用按组件区分的 caller 集合。ECS 刻意让 user-runtime、system-runtime、D1 和 DO task 共用一组 runtime security group，因此其网络规则粒度更粗，不要求与 Kubernetes caller 矩阵相同。
 - Tenant-running runtime task 使用 least-privilege ECS task role、public-only workerd outbound binding 和 private mesh security group 作为 cloud credential 与 network 边界。ECS Exec 只应在需要 operator access 的地方启用。
 
 ## 可观测性

@@ -14,7 +14,11 @@ import {
   normalizeQueuedDispatchBody,
   normalizeScheduledDispatchBody,
 } from "runtime-lib";
-import { emitRuntimeTailEvent, fetchTailFields } from "runtime-tail-forwarder";
+import {
+  emitRuntimeTailEvent,
+  fetchTailFields,
+  startTailEnvelope,
+} from "runtime-tail-forwarder";
 import {
   _stringifyWorkflowBackendBodyForTest as stringifyWorkflowBackendBodyForTest,
   _stringifyWorkflowJsonForTest as stringifyWorkflowJsonForTest,
@@ -135,35 +139,6 @@ function workflowTailFields(run) {
   };
 }
 
-/** @param {{ env: RuntimeEnv, ctx: RuntimeCtx, identity: RuntimeIdentity, event: string, fields: Record<string, unknown> }} opts */
-function startTailEnvelope({ env, ctx, identity, event, fields }) {
-  const startedAt = Date.now();
-  const startTailEvent = emitRuntimeTailEvent({
-    env, ctx, identity,
-    event,
-    phase: "start",
-    fields,
-  });
-  return {
-    /** @param {Record<string, unknown>} extraFields */
-    finish(extraFields) {
-      const durationMs = Date.now() - startedAt;
-      emitRuntimeTailEvent({
-        env, ctx, identity,
-        event,
-        phase: "finish",
-        after: startTailEvent,
-        fields: {
-          ...fields,
-          ...extraFields,
-          duration_ms: durationMs,
-        },
-      });
-      return durationMs;
-    },
-  };
-}
-
 /** @param {WorkerDispatchArgs} args */
 export async function handleFetchDispatch({ request, stub, scope, env, ctx, identity }) {
   const tail = startTailEnvelope({
@@ -180,10 +155,7 @@ export async function handleFetchDispatch({ request, stub, scope, env, ctx, iden
     return scope.respond(response);
   } catch (err) {
     scope.markError(err);
-    tail.finish({
-      outcome: "error",
-      error: errorMessage(err),
-    });
+    tail.finishError(err);
     return scope.respond(internalErrorResponse(502, "runtime_error", "Runtime error", scope.requestId));
   }
 }

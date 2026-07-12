@@ -11,6 +11,7 @@ import {
   readRepositoryFile,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 
@@ -23,12 +24,7 @@ const workersHandlerState = installControlHandlerState(
   })
 );
 const controlSharedUrl = controlSharedHarnessUrl(WORKERS_HANDLER_STATE_GLOBAL);
-
-const controlLibUrl = moduleDataUrl(`
-export function routesKey(ns) { return "routes:" + ns; }
-export function workersIndexKey(ns) { return "workers:" + ns; }
-export function workerVersionsKey(ns, name) { return "worker-versions:" + ns + ":" + name; }
-`);
+const { libUrl: controlLibUrl } = await compileControlGraph();
 
 const sharedSecretKeysUrl = repositoryFileUrl("shared/secret-keys.js");
 

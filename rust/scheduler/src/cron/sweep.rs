@@ -6,8 +6,8 @@ use crate::{
     AppState, LogLevel, SERVICE, SchedulerResult, indexed_keys_after_backfill, log, now_ms,
 };
 
-use super::reference::{CronEntry, ref_for};
-use super::slot::{next_fire_ms, slot_key, slot_ms_for};
+use super::reference::{CRON_WORKER_KEY_SCAN_PATTERN, CronEntry, parse_cron_worker_key, ref_for};
+use super::slot::{next_fire_ms, slot_expire_at, slot_key, slot_ms_for};
 
 const CRON_WORKER_INDEX_KEY: &str = "cron:index:workers";
 const CRON_WORKER_INDEX_BACKFILLED_KEY: &str = "cron:index:workers:backfilled";
@@ -19,18 +19,9 @@ async fn cron_worker_keys(state: &AppState) -> Result<Vec<String>, redis::RedisE
         state,
         CRON_WORKER_INDEX_KEY,
         CRON_WORKER_INDEX_BACKFILLED_KEY,
-        "crons:*:*",
+        CRON_WORKER_KEY_SCAN_PATTERN,
     )
     .await
-}
-
-fn parse_cron_worker_key(key: &str) -> Option<(&str, &str)> {
-    let parts = key.split(':').collect::<Vec<_>>();
-    if parts.len() == 3 && parts[0] == "crons" && !parts[1].is_empty() && !parts[2].is_empty() {
-        Some((parts[1], parts[2]))
-    } else {
-        None
-    }
 }
 
 async fn fetch_cron_hash_chunk(
@@ -65,7 +56,7 @@ fn cron_slot_writes(slot_refs: BTreeMap<i64, Vec<String>>) -> Vec<CronSlotWrite>
             slot,
             key: slot_key(slot),
             refs,
-            expire_at: slot / 1000 + 600,
+            expire_at: slot_expire_at(slot),
         })
         .collect()
 }
@@ -194,22 +185,12 @@ pub(crate) async fn sweep(state: AppState) -> SchedulerResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_cron_worker_key_accepts_only_scheduler_cron_hashes() {
-        assert_eq!(
-            parse_cron_worker_key("crons:demo:worker"),
-            Some(("demo", "worker"))
-        );
-        assert_eq!(parse_cron_worker_key("queue:demo:jobs"), None);
-        assert_eq!(parse_cron_worker_key("crons:demo"), None);
-        assert_eq!(parse_cron_worker_key("crons::worker"), None);
-        assert_eq!(parse_cron_worker_key("crons:demo:"), None);
-    }
+    use crate::test_fixtures::scheduler_projection_contract;
 
     #[test]
     fn cron_worker_index_keys_are_stable() {
-        assert_eq!(CRON_WORKER_INDEX_KEY, "cron:index:workers");
+        let fixture = scheduler_projection_contract();
+        assert_eq!(CRON_WORKER_INDEX_KEY, fixture.cron.worker_index_key);
         assert_eq!(
             CRON_WORKER_INDEX_BACKFILLED_KEY,
             "cron:index:workers:backfilled"

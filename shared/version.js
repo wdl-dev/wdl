@@ -42,6 +42,12 @@ export function bundleKey(ns, name, version) {
   return `worker:${ns}:${name}:v:${n}`;
 }
 
+// Monotonic immutable-version allocator for one logical worker.
+/** @param {string} ns @param {string} name */
+export function nextVersionKey(ns, name) {
+  return `worker:${ns}:${name}:next_version`;
+}
+
 // Active-route hash for a namespace: field=workerName, value=`v<int>`. Control
 // is the sole writer; centralized here so cross-tier readers cannot drift from
 // the key grammar (reader set in docs/redis-key-layout.md).
@@ -55,6 +61,34 @@ export function routesKey(ns) {
 /** @param {string} host @returns {string} */
 export function patternsKey(host) {
   return `patterns:${host}`;
+}
+
+export const NAMESPACES_KEY = "namespaces";
+export const DECLARED_HOSTS_KEY = "declared-hosts";
+const HOSTS_PREFIX = "hosts:";
+const NS_HOSTS_PREFIX = "ns-hosts:";
+const HOST_DECLARATIONS_PREFIX = "host-declarations:";
+export const HOSTS_SCAN_PATTERN = `${HOSTS_PREFIX}*`;
+export const HOST_DECLARATIONS_SCAN_PATTERN = `${HOST_DECLARATIONS_PREFIX}*`;
+
+/** @param {string} ns */
+export function hostsKey(ns) {
+  return `${HOSTS_PREFIX}${ns}`;
+}
+
+/** @param {string} key */
+export function namespaceFromHostsKey(key) {
+  return key.startsWith(HOSTS_PREFIX) ? key.slice(HOSTS_PREFIX.length) : "";
+}
+
+/** @param {string} ns */
+export function nsHostsKey(ns) {
+  return `${NS_HOSTS_PREFIX}${ns}`;
+}
+
+/** @param {string} host */
+export function hostDeclarationsKey(host) {
+  return `${HOST_DECLARATIONS_PREFIX}${host}`;
 }
 
 // Retained-version ZSET for a worker: score=int version, member=`v<int>`.

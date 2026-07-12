@@ -4,7 +4,6 @@ import {
   importSpecifierReplacements,
 } from "./load-shared-module.js";
 import { createFakeRedis } from "./mocks/fake-redis.js";
-import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
 
 const DEFAULT_GLOBAL_NAME = "__controlHandlerHarnessState";
 
@@ -79,7 +78,6 @@ export const metrics = {
   increment(...args) { harnessState().metrics.increment?.(...args); },
   observe(...args) { harnessState().metrics.observe?.(...args); },
 };
-export { formatError } from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};
 ${extraSource}
 `);
 }

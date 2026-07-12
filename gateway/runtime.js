@@ -11,7 +11,7 @@ import {
   recordRedisCommand,
 } from "shared-observability";
 import { isValidRouteNs } from "shared-ns-pattern";
-import { patternsKey, routesKey } from "shared-version";
+import { DECLARED_HOSTS_KEY, NAMESPACES_KEY, patternsKey, routesKey } from "shared-version";
 import { isCanonicalPatternHost, sortPatterns } from "gateway-lib";
 
 /** @type {Set<string> | null} */
@@ -28,7 +28,6 @@ let websocketProxyDetachedConnections = 0;
 let websocketProxyBufferedMessages = 0;
 const MAX_ROUTE_CACHE_ENTRIES = 10_000;
 const MAX_PATTERN_CACHE_ENTRIES = 10_000;
-const DECLARED_HOSTS_KEY = "declared-hosts";
 const utf8Decoder = new TextDecoder();
 
 export const metrics = new MetricsRegistry();
@@ -56,7 +55,7 @@ export function createGatewayRedis(redisAddr) {
 
 /** @param {RedisClient} redis */
 export async function ensureKnownNs(redis) {
-  if (knownNs === null) knownNs = new Set(await redis.sMembers("namespaces"));
+  if (knownNs === null) knownNs = new Set(await redis.sMembers(NAMESPACES_KEY));
   return knownNs;
 }
 

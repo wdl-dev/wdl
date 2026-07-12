@@ -15,6 +15,8 @@ export const CRON_WORKER_INDEX_KEY = "cron:index:workers";
  * @typedef {{ targetNs: string, targetWorker: string, targetVersion: string, binding: string }} OutgoingRef
  * @typedef {{ binding: string, databaseId?: string, resolvedDatabaseId?: string }} D1Ref
  * @typedef {{ id: string, gen: number, slot: number }} CronIndexEntry
+ * @typedef {{ cron: string, timezone: string }} CronSpec
+ * @typedef {{ cronSeq: number, addedWithPlacement: Array<CronSpec & CronIndexEntry>, removed: Array<{ id: string }> }} CronPlan
  * @typedef {{ queue: string, maxBatchSize: number, maxBatchTimeoutMs: number, maxRetries: number, retryDelaySeconds?: number, deadLetterQueue?: string }} QueueConsumer
  */
 
@@ -64,9 +66,24 @@ export function cronSlotKey(slotMs) {
   return `cron-slot:${slotMs}`;
 }
 
+/** @param {number} slotMs */
+export function cronSlotExpireAt(slotMs) {
+  return Math.floor(slotMs / 1000) + 600;
+}
+
 /** @param {string} ns @param {string} worker @param {string} cronId @param {number} gen */
 export function cronRefMember(ns, worker, cronId, gen) {
   return `${ns}:${worker}:${cronId}:${gen}`;
+}
+
+/** @param {string} version @param {number} seq */
+export function cronMetaJson(version, seq) {
+  return JSON.stringify({ version, seq });
+}
+
+/** @param {CronSpec & { gen: number }} entry */
+export function cronEntryJson(entry) {
+  return JSON.stringify({ cron: entry.cron, timezone: entry.timezone, gen: entry.gen });
 }
 
 /** @param {RedisMulti} multi @param {string} ns @param {string} worker @param {CronIndexEntry} entry */
@@ -75,7 +92,7 @@ export function stageCronSlotRef(multi, ns, worker, entry) {
   multi.sAdd(key, cronRefMember(ns, worker, entry.id, entry.gen));
   // Bound orphan refs (a crashed advance_ref leaves a member behind);
   // tick ignores slots >60s old, so 10min past slot wall-time is safe.
-  multi.expireAt(key, Math.floor(entry.slot / 1000) + 600);
+  multi.expireAt(key, cronSlotExpireAt(entry.slot));
 }
 
 /** @param {RedisMulti} multi @param {string} ns @param {string} worker */
@@ -86,6 +103,35 @@ export function stageCronWorkerIndexed(multi, ns, worker) {
 /** @param {RedisMulti} multi @param {string} ns @param {string} worker */
 export function stageCronWorkerRemoved(multi, ns, worker) {
   multi.sRem(CRON_WORKER_INDEX_KEY, cronWorkerKey(ns, worker));
+}
+
+/** @param {RedisMulti} multi @param {{ ns: string, worker: string, version: string, cronKey: string, seq: number }} args */
+export function stageCronProjectionMeta(multi, { ns, worker, version, cronKey, seq }) {
+  stageCronWorkerIndexed(multi, ns, worker);
+  multi.hSet(cronKey, "__meta__", cronMetaJson(version, seq));
+}
+
+/**
+ * @param {RedisMulti} multi
+ * @param {{ ns: string, worker: string, version: string, cronKey: string, existingHash: Record<string, string>, crons: CronSpec[], plan: CronPlan }} args
+ */
+export function stageCronProjection(
+  multi,
+  { ns, worker, version, cronKey, existingHash, crons, plan }
+) {
+  // __meta__.version lets scheduler build x-worker-id without a second HGET;
+  // delete the hash when no crons remain so stale refs decay.
+  if (crons.length === 0) {
+    if (Object.keys(existingHash).length) multi.del(cronKey);
+    stageCronWorkerRemoved(multi, ns, worker);
+    return;
+  }
+  stageCronProjectionMeta(multi, { ns, worker, version, cronKey, seq: plan.cronSeq });
+  for (const entry of plan.addedWithPlacement) {
+    multi.hSet(cronKey, entry.id, cronEntryJson(entry));
+    stageCronSlotRef(multi, ns, worker, entry);
+  }
+  for (const removed of plan.removed) multi.hDel(cronKey, removed.id);
 }
 
 /** @param {RedisMulti} multi @param {{ ns: string, worker: string, version: string, refs: OutgoingRef[] }} args */
@@ -154,7 +200,7 @@ export function stageD1ReferrerRemovals(multi, { ns, worker, version, refs, data
  * @param {QueueConsumer} consumer
  * @returns {{ worker: string, version: string, max_batch_size: string, max_batch_timeout_ms: string, max_retries: string, dead_letter_queue?: string, retry_delay_secs?: string }}
  */
-function queueConsumerFields(worker, version, consumer) {
+export function queueConsumerFields(worker, version, consumer) {
   /** @type {{ worker: string, version: string, max_batch_size: string, max_batch_timeout_ms: string, max_retries: string, dead_letter_queue?: string, retry_delay_secs?: string }} */
   const fields = {
     worker,

@@ -6,13 +6,15 @@ import { pathToFileURL } from "node:url";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
-  moduleDataUrl,
   readRepositoryModuleSource,
   repositoryFileUrl,
+  repositoryModuleDataUrl,
 } from "../helpers/load-shared-module.js";
+import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { makeRecordingFetch, withMockedFetch } from "../helpers/mock-fetch.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
+import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 import {
@@ -26,20 +28,18 @@ const SHARED_WORKER_ID_URL = repositoryFileUrl("shared/worker-id.js");
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
-const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
-const SHARED_REDIS_URL = moduleDataUrl(`
-export class WatchError extends Error {
-  constructor(message = "watched key changed") {
-    super(message);
-    this.name = "WatchError";
-  }
-}
-`);
+const SHARED_REDIS_URL = sharedRedisStubUrl();
+const { libUrl: CONTROL_LIB_URL } = await compileControlGraph();
+const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl(
+  "runtime/load/env-build.js",
+  importSpecifierReplacements({ "shared-ns-pattern": SHARED_NS_PATTERN_URL })
+);
 const FETCH_STUB = { fetch() {} };
 const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
+  "control-lib": CONTROL_LIB_URL,
+  "runtime-load-env-build": RUNTIME_ENV_BUILD_URL,
   "shared-secret-envelope": SHARED_SECRET_ENVELOPE_URL,
-  "shared-errors": SHARED_ERRORS_URL,
   "shared-version": SHARED_VERSION_URL,
   "shared-redis": SHARED_REDIS_URL,
 }));
@@ -68,6 +68,15 @@ const src = readRepositoryModuleSource("runtime/load.js", [
     "shared-internal-auth": SHARED_INTERNAL_AUTH_URL,
     "shared-respond": SHARED_RESPOND_URL,
   }),
+  [
+    /import \{ evictSiblings, recordLoadedWorker \} from "runtime-state";/,
+    `const recordLoadedWorker = (workerId) => {
+       /** @type {any[]} */ (globalThis).__runtimeLoadRecordedWorkers.push(workerId);
+     };
+     const evictSiblings = async (options) => {
+       /** @type {any[]} */ (globalThis).__runtimeLoadEvictions.push(options);
+     };`
+  ],
   [
     /from "runtime-load-code-budget";/,
     'from "./load/code-budget.js";'
@@ -113,12 +122,16 @@ for (const name of ["env-build.js", "code-budget.js", "module-rewrite.js", "wrap
 }
 after(() => removeTempDir(LOAD_TEST_DIR));
 
+/** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers = [];
+/** @type {any} */ (globalThis).__runtimeLoadEvictions = [];
+
 const mod = await import(pathToFileURL(path.join(LOAD_TEST_RUNTIME_DIR, "load.js")).href);
 const codeBudgetMod = await import(pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "code-budget.js")).href);
 const {
   buildWorkerEnv,
   createLoaderCallback,
   decodeRuntimeLoadPayload,
+  getLoadedWorkerStub,
   runtimeLoadContentTypeMatches,
   wrapWorkerCodeForHostBindings,
 } = mod;
@@ -625,6 +638,7 @@ test("buildWorkerEnv: service binding with requiredCallerSecrets filters from ns
     makeCtx()
   );
   // Listed keys only, worker wins over ns, missing key silently absent.
+  assert.equal(Object.getPrototypeOf(env.JSJ.props.callerSecrets), Object.prototype);
   assert.deepEqual(env.JSJ.props.callerSecrets, { JSJ_API_KEY: "worker-level-key" });
   assert.equal(env.JSJ.props.callerNs, "demo");
   assert.equal(env.JSJ.props.targetNs, "__platform__");
@@ -653,6 +667,7 @@ test("buildWorkerEnv: requiredCallerSecrets does NOT fall back to vars", () => {
     "https://assets.example",
     makeCtx()
   );
+  assert.equal(Object.getPrototypeOf(env.JSJ.props.callerSecrets), Object.prototype);
   assert.deepEqual(env.JSJ.props.callerSecrets, {});
 });
 
@@ -1157,6 +1172,77 @@ test("createLoaderCallback: attaches configured tail worker and always wraps mai
       assert.ok(!("meta" in workerCode), "loader callback should not propagate meta into the workerLoader object");
       assert.equal(fetchCalls.length, 1);
       assert.equal(fetchCalls[0].init.signal.aborted, false);
+    }
+  );
+});
+
+test("getLoadedWorkerStub records cache misses before scheduling active-version eviction", async () => {
+  /** @type {Array<{ id: string, factory: () => Promise<unknown> }>} */
+  const loaderCalls = [];
+  /** @type {Promise<unknown>[]} */
+  const backgroundTasks = [];
+  /** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers.length = 0;
+  /** @type {any} */ (globalThis).__runtimeLoadEvictions.length = 0;
+  const stub = { getEntrypoint() {} };
+  const env = {
+    REDIS_PROXY_URL: "http://redis-proxy.local",
+    WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
+    ASSETS_CDN_BASE: "https://assets.example",
+    PUBLIC_NETWORK: { kind: "public-network" },
+    LOADER: {
+      get(/** @type {string} */ id, /** @type {() => Promise<unknown>} */ factory) {
+        loaderCalls.push({ id, factory });
+        return stub;
+      },
+    },
+  };
+  const ctx = {
+    ...makeCtx(),
+    waitUntil(/** @type {Promise<unknown>} */ promise) {
+      backgroundTasks.push(promise);
+    },
+  };
+
+  await withMockedFetch(
+    async () => new Response(encodeRuntimeLoadPayload({
+      bundle: {
+        "__meta__": JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": { type: "module" } },
+        }),
+        "worker.js": "export default {};",
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": RUNTIME_LOAD_CONTENT_TYPE },
+    }),
+    async () => {
+      const loaded = getLoadedWorkerStub({
+        requestId: "rid-loader-wrapper",
+        env,
+        ctx,
+        ns: "demo",
+        worker: "app",
+        version: "v2",
+        evictOnLoad: true,
+      });
+
+      assert.equal(loaded.workerId, "demo:app:v2");
+      assert.equal(loaded.stub, stub);
+      assert.equal(loaderCalls.length, 1);
+      assert.equal(loaderCalls[0].id, "demo:app:v2");
+      assert.deepEqual(/** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers, []);
+
+      await loaderCalls[0].factory();
+      await Promise.all(backgroundTasks);
+
+      assert.deepEqual(/** @type {any} */ (globalThis).__runtimeLoadRecordedWorkers, ["demo:app:v2"]);
+      assert.deepEqual(
+        /** @type {any} */ (globalThis).__runtimeLoadEvictions.map(
+          (/** @type {{ workerId: string }} */ entry) => entry.workerId
+        ),
+        ["demo:app:v2"]
+      );
     }
   );
 });

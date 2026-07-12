@@ -110,7 +110,6 @@ function walkD1Transport(value, objectLeaf) {
 /**
  * @param {unknown} value
  * @returns {unknown}
- * @lintignore runtime/_wdl-d1-transport.js re-exports this for loaded workers.
  */
 export function decodeD1Transport(value) {
   return walkD1Transport(value, (item) => {

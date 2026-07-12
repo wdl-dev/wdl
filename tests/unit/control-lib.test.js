@@ -27,8 +27,13 @@ const {
   NS_RE,
   parseControlRoute,
   configuredHostname,
+  platformDomainFromEnv,
   configuredPublicUrl,
+  parseWorkerdDependencyVersion,
   platformVersionFromPackageJson,
+  BundleMetaError,
+  parseBundleMeta,
+  bundleAssetPrefix,
   projectAccessPrincipal,
   parseR2DispatchPath,
   isAdminAcceptableNs,
@@ -96,6 +101,82 @@ function deletePlatformTierFixture(ns) {
   PLATFORM_TIER_RESERVED_NS.delete(ns);
   RESERVED_NS.delete(ns);
 }
+
+test("parseBundleMeta returns JSON objects", () => {
+  assert.deepEqual(
+    parseBundleMeta('{"routes":[],"vars":{"MODE":"test"}}', {
+      ns: "demo",
+      worker: "api",
+      version: "v3",
+    }),
+    { routes: [], vars: { MODE: "test" } }
+  );
+});
+
+test("parseBundleMeta rejects missing, malformed, and non-object metadata with context", () => {
+  for (const raw of [undefined, null, "", "{bad", "null", "[]", "1", '"text"']) {
+    assert.throws(
+      () => parseBundleMeta(raw, { ns: "demo", worker: "api", version: "v3" }),
+      (err) => {
+        assert.ok(err instanceof BundleMetaError, `expected BundleMetaError for ${String(raw)}`);
+        const bundleError = /** @type {Error & { status: number, code: string, details: Record<string, string>, cause: unknown }} */ (err);
+        assert.equal(bundleError.status, 500);
+        assert.equal(bundleError.code, "corrupt_meta");
+        assert.equal(bundleError.message, "Corrupt __meta__ for demo/api/v3");
+        assert.deepEqual(bundleError.details, { namespace: "demo", worker: "api", version: "v3" });
+        assert.ok(bundleError.cause instanceof Error);
+        return true;
+      }
+    );
+  }
+});
+
+test("bundleAssetPrefix reads only string prefixes from object-shaped assets", () => {
+  assert.equal(bundleAssetPrefix({ assets: { prefix: "assets/demo/" } }), "assets/demo/");
+  assert.equal(bundleAssetPrefix({ assets: { prefix: "" } }), "");
+  for (const assets of [null, [], "assets/demo/", 1, { prefix: 1 }]) {
+    assert.equal(bundleAssetPrefix({ assets }), null);
+  }
+});
+
+test("parseBundleMeta delegates error construction without changing parse context", () => {
+  const expected = new Error("routing-owned error");
+  /** @type {{ namespace: string, worker: string, version: string, message: string, reason: string, cause: unknown } | null} */
+  let failure = null;
+  assert.throws(
+    () => parseBundleMeta("[]", {
+      ns: "demo",
+      worker: "api",
+      version: "v3",
+      makeError(/** @type {{ namespace: string, worker: string, version: string, message: string, reason: string, cause: unknown }} */ value) {
+        failure = value;
+        return expected;
+      },
+    }),
+    (err) => err === expected
+  );
+  const captured = /** @type {{ namespace: string, worker: string, version: string, message: string, reason: string, cause: unknown } | null} */ (
+    /** @type {unknown} */ (failure)
+  );
+  assert.ok(captured);
+  assert.deepEqual(
+    {
+      namespace: captured.namespace,
+      worker: captured.worker,
+      version: captured.version,
+      message: captured.message,
+      reason: captured.reason,
+    },
+    {
+      namespace: "demo",
+      worker: "api",
+      version: "v3",
+      message: "Corrupt __meta__ for demo/api/v3",
+      reason: "__meta__ must be a JSON object",
+    }
+  );
+  assert.ok(captured.cause instanceof TypeError);
+});
 
 test("encodeReferrerMember: key order is canonical (alphabetical) regardless of caller shape", () => {
   const a = encodeReferrerMember({
@@ -768,15 +849,12 @@ test("validateCompatibilityDate rejects future and unsupported workerd dates", (
 });
 
 test("MAX_WORKER_COMPATIBILITY_DATE matches pinned workerd release plus seven days", () => {
-  assert.match(
-    PACKAGE_WORKERD_DEP,
-    /^[~^]?1\.\d{8}\.\d+$/,
-    `unexpected workerd dependency format ${PACKAGE_WORKERD_DEP}`
-  );
-  assert.equal(PACKAGE_WORKERD_DEP.replace(/^[~^]/, ""), WORKERD_VERSION);
-  const match = /^1\.(\d{4})(\d{2})(\d{2})\.\d+$/.exec(WORKERD_VERSION);
-  assert.ok(match, `unexpected workerd version ${WORKERD_VERSION}`);
-  const max = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + 7));
+  const parsed = parseWorkerdDependencyVersion(JSON.stringify({
+    dependencies: { workerd: PACKAGE_WORKERD_DEP },
+  }));
+  assert.ok(parsed, `unexpected workerd dependency format ${PACKAGE_WORKERD_DEP}`);
+  assert.equal(parsed.version, WORKERD_VERSION);
+  const max = new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day + 7));
   const expected = [
     String(max.getUTCFullYear()).padStart(4, "0"),
     String(max.getUTCMonth() + 1).padStart(2, "0"),
@@ -1975,6 +2053,15 @@ test("configuredHostname accepts plain hosts and rejects URL injection shapes", 
   }
 });
 
+test("platformDomainFromEnv normalizes configured values and owns the default", () => {
+  assert.equal(platformDomainFromEnv({}), "workers.local");
+  assert.equal(platformDomainFromEnv({ PLATFORM_DOMAIN: " Workers.Example. " }), "workers.example");
+  assert.throws(
+    () => platformDomainFromEnv({ PLATFORM_DOMAIN: "workers.example:8443" }),
+    /plain hostname/
+  );
+});
+
 test("configuredPublicUrl returns a safe absolute base URL hint", () => {
   assert.equal(configuredPublicUrl(" https://assets.example/base/?token=secret#frag "), "https://assets.example/base");
   assert.equal(configuredPublicUrl("http://assets.example/"), "http://assets.example");
@@ -2009,6 +2096,21 @@ test("platformVersionFromPackageJson derives WDL version from bundled workerd de
     platformVersionFromPackageJson(JSON.stringify({ dependencies: { workerd: "1.20260531" } })),
     "wdl.unknown"
   );
+});
+
+test("parseWorkerdDependencyVersion owns the bundled dependency grammar", () => {
+  assert.deepEqual(
+    parseWorkerdDependencyVersion(JSON.stringify({ dependencies: { workerd: "^1.20260531.12" } })),
+    { version: "1.20260531.12", year: 2026, month: 5, day: 31, patch: 12 }
+  );
+  for (const source of [
+    "{",
+    JSON.stringify({ dependencies: {} }),
+    JSON.stringify({ dependencies: { workerd: "2.20260531.1" } }),
+    JSON.stringify({ dependencies: { workerd: "1.20260531" } }),
+  ]) {
+    assert.equal(parseWorkerdDependencyVersion(source), null);
+  }
 });
 
 test("normalizeWorkflows: validates deploy-wire workflow declarations", () => {
@@ -2212,6 +2314,20 @@ test("linkServiceBinding: target meta lookup throws → 502", async () => {
       }),
     }),
     502, "failed to read target meta: redis blew up", "service_binding_target_meta_unavailable");
+});
+
+test("linkServiceBinding: preserves target metadata domain errors", async () => {
+  const corruptMeta = new LinkError(500, "corrupt_meta", "Corrupt __meta__ for other/t/v1");
+  await expectLinkError(
+    () => linkServiceBinding({
+      callerNs: "caller", callerName: "c", bindingName: "T",
+      spec: { type: "service", service: "t", ns: "other" },
+      ...makeLookups({
+        versions: { "other/t": "v1" },
+        metaThrows: corruptMeta,
+      }),
+    }),
+    500, "Corrupt __meta__ for other/t/v1", "corrupt_meta");
 });
 
 test("linkServiceBinding: rejects runtime-reserved entrypoint at link time (defense in depth)", async () => {

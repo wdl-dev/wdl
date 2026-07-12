@@ -6,40 +6,22 @@ import {
   installControlHandlerState,
 } from "../helpers/control-handler-harness.js";
 import {
-  moduleDataUrl,
+  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 const WORKFLOWS_HANDLER_GLOBAL = "__workflowsHandlerState";
-
-const controlLibUrl = moduleDataUrl(`
-export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-export const WORKFLOW_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-export function isValidWorkerName(name) { return typeof name === "string" && WORKER_NAME_RE.test(name); }
-export function isValidWorkflowName(name) { return typeof name === "string" && WORKFLOW_NAME_RE.test(name); }
-export function workflowDefsKey(ns, worker) { return "wf:defs:" + ns + ":" + worker; }
-`);
-
-const sharedVersionUrl = moduleDataUrl(`
-export function parseVersion(tag) {
-  const match = /^v([1-9][0-9]*)$/.exec(tag);
-  return match ? Number(match[1]) : null;
-}
-export function bundleKey(ns, worker, version) {
-  const n = parseVersion(version);
-  if (n == null) throw new Error("invalid version tag " + JSON.stringify(version));
-  return "worker:" + ns + ":" + worker + ":v:" + n;
-}
-export function routesKey(ns) { return "routes:" + ns; }
-`);
+const { libUrl: productionControlLibUrl } = await compileControlGraph();
+const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 
 const { handle } = await importControlHandler("control/handlers/workflows.js", {
   globalName: WORKFLOWS_HANDLER_GLOBAL,
   replacements: {
-    "control-lib": controlLibUrl,
+    "control-lib": productionControlLibUrl,
     "shared-internal-auth": sharedInternalAuthUrl(),
     "shared-version": sharedVersionUrl,
   },
@@ -61,8 +43,9 @@ function resetWorkflowsHandlerState() {
   redis.hashes.set("routes:demo", { api: "v2" });
   redis.hashes.set("worker:demo:api:v:2", { "__meta__": meta });
   state.workflows = {
-    /** @param {string} url @param {{ body: string, headers?: HeadersInit }} init */
+    /** @param {string} url @param {{ body: string, headers?: HeadersInit, signal?: AbortSignal | null }} init */
     async fetch(url, init) {
+      assert.equal(init.signal, undefined);
       assert.equal(new Headers(init.headers).get("x-wdl-internal-auth"), TEST_INTERNAL_AUTH_TOKEN);
       redis.commands.push(["fetch", url, parseJsonObjectRequestBody(init, "workflows backend request body")]);
       return new Response(JSON.stringify({ id: "order-1", status: "paused" }), {
@@ -109,6 +92,34 @@ test("workflows handler lists active workflow definitions from bundle metadata",
     fields: { request_id: "rid-list", namespace: "demo", count: 1 },
   }]);
 });
+
+for (const [label, rawMeta] of [
+  ["missing", null],
+  ["empty", ""],
+  ["malformed", "{bad"],
+  ["non-object", "[]"],
+]) {
+  test(`workflows handler fails closed on ${label} active bundle metadata`, async () => {
+    const state = resetWorkflowsHandlerState();
+    state.redis.hashes.set(
+      "worker:demo:api:v:2",
+      rawMeta === null ? {} : { "__meta__": rawMeta }
+    );
+
+    const response = await handle({
+      method: "GET",
+      url: new URL("http://control/ns/demo/workflows"),
+      ns: "demo",
+      subPath: [],
+      requestId: `rid-${label}-meta`,
+    });
+
+    await assertJsonResponse(response, 500, {
+      error: "corrupt_meta",
+      message: "Corrupt __meta__ for demo/api/v2",
+    });
+  });
+}
 
 test("workflows handler lists empty namespaces without batch reads", async () => {
   const state = resetWorkflowsHandlerState();

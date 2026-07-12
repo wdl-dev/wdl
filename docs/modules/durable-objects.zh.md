@@ -67,12 +67,14 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 
 - 同一时间只有一个 task 拥有一个 class shard。
 - Generation fence 防止 stale owner 在 ownership 移动后继续 commit。
+- `do-runtime/protocol.js` 持有 DO ownership error vocabulary，以及能够证明 request 已被 fence 拒绝、可安全通过 router 重试的子集。Injected runtime transport 在直接 parity test 下 mirror 这两个 Set。
 - Facet identity 是 stable `doStorageId` 内的 `className:objectName`，因此 worker promotion 保留 object state。
 - 已构造的 native facet 会保留构造时的 class version，直到 host actor restart 或 facet deletion。Promotion 改变未来 load 和 routing metadata，不会替换当前 host actor 中已经构造的 facet。
 - Whole-worker delete 后 redeploy 会分配新的 `doStorageId`；旧 native storage tombstone 给后续 cleanup，而不是立即物理删除。
 - WebSocket upgrade 必须在 owner endpoint 上完成。Owner-hinted WebSocket direct retry 不能 fall back 到 router-established 101。
 - WDL 会尽量让 client-facing WebSocket 由 gateway 持有并保持连接，包括 user-runtime 或 do-runtime restart 后的 backend reconnect。这个连接连续性目标强于 Cloudflare shutdown 行为；Cloudflare 可以终止 WebSocket 让新 Durable Object instance 接管。当前 backend facet 仍属于 owner scope：初始 `101` 之后，WebSocket message / close event 不会在每一帧重新校验 Redis owner generation。未来增强应在尽量保持 client 连接的同时 rebinding 或拒绝 stale backend owner facet，而不是把 client disconnect 作为主要安全机制。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
 - Ordinary fetch/RPC 只有在明确的 stale-owner 或 owner-race response 后才会回退到 router。Direct owner transport failure，或 direct owner hop 返回 502/503/504 且没有 fresh owner-hint header 时，会清除 cached hint。安全的 `GET`/`HEAD` request 可以通过 router 重放以重新发现 owner；非幂等 method 和 RPC 会返回 `owner_unavailable`，不会重放，因为 owner 可能已经应用了该请求。
+- Shared runtime transport 统一持有 host binding 与 injected facade 的 owner-hint cache wiring、invoke race retry 和 response-header stripping。Connect wrapper 刻意不包含 invoke-only router fallback，以保留 owner-established WebSocket upgrade 语义。
 - `WEBSOCKET_RECONNECT_DELAYS_MS` 和 `WEBSOCKET_MAX_BUFFERED_MESSAGES` 可以在不改代码的情况下调整 gateway backend reconnect budget 和 client-message buffer cap。
 - Alarm delivery 是 at-least-once。Scheduler 唤醒 Workflows；Workflows 把到期 internal alarm job promote 到 ready，在 DB 2 run token 下 claim，然后调用 do-runtime `/internal/do/alarms/dispatch`。do-runtime 仍然构造原来的 `DoInvoke{kind:"alarm"}` 请求，并走正常 owner router/fence 路径。
 - Alarm due time 是传给 `setAlarm()` 的 Unix millisecond timestamp。Workflows 和 do-runtime 都用各自本地 wall clock 判断这些 timestamp；如果 backend ready hint 在 SQLite alarm row 对 do-runtime 来说尚未到期时抵达，do-runtime 会 ignore 这次 dispatch，但不清 row，让 backend due-index repair 路径之后继续投递。这是 alarm compatibility 边界，不属于 Redis-time owner lease fence。

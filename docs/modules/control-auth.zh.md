@@ -11,8 +11,10 @@ Control 跑在 system-runtime 的 `:8082`，通过 gateway admin-host 分支进�
 主要文件：
 
 - `control/index.js`：request dispatcher。
-- `control/lib.js`：route parser 和共享 route 工具。
-- `control/shared.js`：auth wrapper、JSON response、Redis singleton、publish helper。
+- `control/lib.js`：纯 route/key 工具、bundle metadata parsing 和 referrer shaping。
+- `control/shared.js`：auth wrapper、Redis singleton、publish helper、state-bound workflow transport wiring 和 lifecycle helper。
+- `control/errors.js`、`control/json-body.js`、`control/optimistic.js`：纯 Control response 与 request-body contract，以及 shared optimistic retry loop 的 Control adapter。
+- `control/workflows-client.js`：timeout 由 caller 显式选择的 canonical internal Workflows POST transport。
 - `control/handlers/*`：endpoint handlers。
 - `control/routing.js`：promote/reconcile WATCH/MULTI 逻辑。
 - `auth/index.js`、`auth/lib.js`、`shared/auth-roles.js`：token store、role table、authorization evaluation。
@@ -66,12 +68,12 @@ Control lifecycle 操作会拆开处理，确保每个关键 transition 只有�
 
 - Deploy 解析支持的 Wrangler/JSONC 形状，校验 bindings 和 routes，通过 `worker:<ns>:<worker>:next_version` 分配下一个 immutable version，写入 bundle metadata/modules/assets，然后进入 explicit promotion 使用的同一条 promote 路径。分配 version 前，deploy 会按 workerd 64 MiB 上限估算最终 WorkerCode，包含 runtime/do-runtime 注入的 wrapper/client modules 和 workflow import rewrite。真正的 Redis WATCH commit 会在分配真实 version 并完成 metadata materialization（例如 D1 database id 和 workflow keys 解析）之后用 code-budget 和 headroomed `workerLoader` env-budget 做权威检查，然后才写入 version。
 - Promote 是唯一 active-route flip。它会 WATCH 本次候选需要的 delete lock、bundle metadata、D1 ref、service-binding target ref、queue consumer key、host declaration 和 pattern key。EXEC 在一个受审计的 transition 中更新 active route、host 反向索引、cron/queue projection、lifecycle index 和 invalidation publication。
-- Secret update/delete 在 worker 有 active route 时，会把 secret-store mutation stage 到 `bumpActiveAndPromote()` 内部，让 budget check、secret hash write、bundle copy 和 route flip 共享同一个 WATCH/MULTI transaction。如果没有 active route，则会在直接写 secret hash 前检查 retained versions 的预算；只有没有 retained versions 的 secret-only worker 会把第一次 load-time budget check 交给 deploy。Secret PUT 会先校验 plaintext 大小和形状，在进入 Redis mutation / WATCH retry loop 前加密成 `WDL-ENC:` envelope，并在重试间复用同一个 envelope。Runtime 因此看到新的 immutable version id，而不是原地可变的 secret。Secret DELETE 会先从 env 估算输入里移除目标字段，再解密剩余 secret hash，所以删除损坏的目标字段仍可成功；但剩余 namespace 或 worker secret 只要损坏就 fail closed，direct Redis repair 不是受支持的一致性路径。Namespace-secret mutation 会 WATCH 需要重新估算的 retained worker/version metadata；如果并发 metadata 变化持续使视图失效，control 返回 `namespace_secret_mutation_contention`。
+- Secret update/delete 在 worker 有 active route 时，会把 secret-store mutation stage 到 `bumpActiveAndPromote()` 内部，让 budget check、secret hash write、bundle copy 和 route flip 共享同一个 WATCH/MULTI transaction。如果没有 active route，则会在直接写 secret hash 前检查 retained versions 的预算；只有没有 retained versions 的 secret-only worker 会把第一次 load-time budget check 交给 deploy。Secret PUT 会先校验 plaintext 大小和形状，在进入 Redis mutation / WATCH retry loop 前加密成 `WDL-ENC:` envelope，并在重试间复用同一个 envelope。Envelope JSON 使用固定的 `v,alg,kid,edek,iv,ct,tag` 字段顺序，各 base64 字段也必须是 canonical shape；Control 与 redis-proxy 都拒绝 non-canonical persisted forms，使 malformed direct Redis writes fail closed。Runtime 因此看到新的 immutable version id，而不是原地可变的 secret。Secret DELETE 会先从 env 估算输入里移除目标字段，再解密剩余 secret hash，所以删除损坏的目标字段仍可成功；但剩余 namespace 或 worker secret 只要损坏就 fail closed，direct Redis repair 不是受支持的一致性路径。Namespace-secret mutation 会 WATCH 需要重新估算的 retained worker/version metadata；如果并发 metadata 变化持续使视图失效，control 返回 `namespace_secret_mutation_contention`。
 - Version delete 和 whole-worker delete 都 fail-closed。提交 Redis lifecycle deletion 前，会先收集 active route、retained version、service ref、D1 ref、workflow lifecycle check、queue/cron projection 和 delete lock blocker。S3 object cleanup 只在 Redis commit 成功后 enqueue。
-- Worker delete lock value 和 `s3cleanup:<id>` task id 必须由服务端生成随机值。`x-request-id` 只用于诊断，客户端或重试可能复用它；不能把它用作 lock token 或 cleanup-task id。
+- Worker delete lock value 和 `s3cleanup:<id>` task id 必须由服务端生成随机值。`x-request-id` 只用于诊断，客户端或重试可能复用它；不能把它用作 lock token 或 cleanup-task id。Delete、D1 migration 和 delegated issue lock 使用 `shared/redis-lock.js` 的 token-fenced primitive；release 按 token 限定且是 best-effort，因为 TTL expiry 会限制 advisory lock 泄漏时间，release error 不能覆盖操作的真实结果。
 - Auth 不是一层约定俗成的 middleware。`parseControlRoute()` 分配 action，control 把 action 和 namespace 发给 auth，auth 用存储的 token record 对照 `shared/auth-roles.js` 评估权限。Dispatcher 代码不应自己从 URL prefix 推断权限。
 - Delegated token issue 刻意不放进 direct `auth.token.*` lifecycle。`POST /auth/delegated-tokens` 使用 action `auth.delegated_token.issue`，因此 `/auth/tokens` issue/list/revoke 仍保持 strict ops-only；`token-issuer` credential 只能请求 Auth 按一个已配置 template materialize token。
-- `/whoami` 是唯一 namespace-less non-ops action。它对任何有效 token 开放，因为只报告当前 token 自己的 principal、token id、request id 和 public diagnostics。`platformVersion` 是由 bundled workerd date version 派生的 WDL version，使用 `wdl.` namespace，例如 `workerd` `1.20260531.1` 会变成 `wdl.20260531.1`；它不是 project release tag，后者的末尾 counter 可以在同一个 workerd date 上为 WDL-only patch 递增。raw workerd version 不返回。`minCliVersion` 是最低支持的下游 CLI 版本。`urls.control` 是到达 control 的 public origin；当 ingress 提供单个 `x-forwarded-proto` 且值为 `http` 或 `https` 时，`/whoami` 会用该协议生成 `urls.control` 和 `urls.namespace`，否则回退到 control 看到的 request URL 协议。`urls.namespace` 只对 tenant namespace token 返回；`urls.assets` 只在 `ASSETS_CDN_BASE` 是安全的绝对 `http`/`https` URL 时返回，并且会去掉 query 和 fragment。它不能扩展成 token list、token lookup 或携带 secret 的 diagnostics。
+- `/whoami` 是唯一 namespace-less non-ops action。它对任何有效 token 开放，因为只报告当前 token 自己的 principal、token id、request id 和 public diagnostics。`platformVersion` 是由 bundled workerd date version 派生的 WDL version，使用 `wdl.` namespace，例如 `workerd` `1.20260531.1` 会变成 `wdl.20260531.1`；它不是 project release tag，后者的末尾 counter 可以在同一个 workerd date 上为 WDL-only patch 递增。raw workerd version 不返回。`minCliVersion` 是最低支持的下游 CLI 版本。`urls.control` 是到达 control 的 public origin；当 ingress 提供单个 `x-forwarded-proto` 且值为 `http` 或 `https` 时，`/whoami` 会用该协议生成 `urls.control` 和 `urls.namespace`，否则回退到 control 看到的 request URL 协议。`urls.namespace` 只在 caller 是 tenant namespace token 且显式配置了 public hostname 形态的 `PLATFORM_DOMAIN` 时返回；Control 不会把内部 `workers.local` fallback 伪装成 public URL。`urls.assets` 只在 `ASSETS_CDN_BASE` 是安全的绝对 `http`/`https` URL 时返回，并且会去掉 query 和 fragment。它不能扩展成 token list、token lookup 或携带 secret 的 diagnostics。
 - 只有 method、path length 和 verb 精确匹配 authorized shape 时，route shape 才带 `action`。缺 action 是有意行为：非 ops 会触发 auth unknown-action red line，ops 仍可到 dispatcher/handler 的 path 和 method validation，而不是被 auth 拦下。`/reload` 这类已知 top-level route 的 wrong-method case 会在 ops auth 通过后返回 `405 method_not_allowed`。
 
 ## Redis / Storage 合同
@@ -133,6 +135,9 @@ Auth 子合同：
 - 如果 route shape 没有 action，非 ops 在 auth 处 fail closed；ops 可以到 dispatcher/handler 的 path 和 method validation；已知 top-level wrong-method route 返回 `405 method_not_allowed`。
 - Control JSON error 形状是 `{ error, message }`；details 只能 additive。
 - Details 可以增加字段，但不能覆盖 `error`、`message` 或 legacy `reason`。Auth reject reason 是 `error` machine code；日志可以把 `reason` 作为诊断上下文。
+- `control/errors.js::ControlAbort` 是 Control tier 内的基础 coded abort contract。Routing 和 Auth 保留各自 boundary-specific error class；Deploy 可以在 commit cleanup 需要独立 catch boundary 时 subclass `ControlAbort`。
+- `control/json-body.js` 持有 bounded Control JSON parsing 及其 `400`/`413` wire mapping；`control/optimistic.js` 把 strict `WatchError` recognition 和 Redis session 绑定到 `shared/owner-lease.js` 持有的 retry loop。
+- `control/lib.js::parseBundleMeta()` 是 persisted bundle `__meta__` 的唯一 parser。它要求值是 JSON object，并通过 error factory 让 routing、workflows、delete、deploy 和 env-budget 保留各自的 catch boundary。Bundle 缺失的语义仍由具体 use site 持有：当 projection 变更、唯一性证明、lifecycle cleanup、workflow view 或 environment budget 必须消费 metadata 才能产生正确结果时，只要权威 route 或 index 仍指向该 bundle，缺失就 fail closed。Deploy discovery/link preflight 不把缺失归类为 `corrupt_meta`；watched commit 会以 `target_drift` 拒绝缺失的 pinned service target。
 - Delegated issue 的 409 reason 有不同 retry 语义：`delegated_issue_busy` 表示 issuer/template lock 清除后可重试；`active_quota_exceeded` 在已有 delegated credential 过期或 revoke 前不应重试；`namespace_collision` 表示 Auth 已耗尽 configured candidate retry budget。
 - Control 5xx response 使用 generic/safe message。Internal exception text、auth Redis diagnostic、backend message 和 provider error 应进入日志；除非 endpoint 明确拥有某个 diagnostic response field，否则不进入客户端 body。
 - Deploy 在最终 WorkerCode 会碰撞 WDL 注入的 runtime/do-runtime 保留模块名或缺少必要 bundle metadata 时返回 `worker_code_invalid`，在最终 WorkerCode（包含 runtime/do-runtime 注入模块和生成的 workflow keys）超过 workerd 64 MiB dynamic code limit 时返回 `worker_code_too_large`。Deploy 和 secret mutation 在估算的 `workerLoader` env 超过 WDL headroomed 1 MiB budget 时返回 `worker_env_too_large`。`worker_env_too_large` details 包含 `namespace`、可选 `worker`、`env_bytes`、`max_env_bytes`、`upstream_max_env_bytes` 和 `headroom_bytes`。Deploy 阶段的逐版本检查还会包含 `version`。Secret mutation 重新估算既有 version 时，details 还会包含 `source_version` 和 `estimated_version`。`source_version` 是 operator 应检查、删除或 redeploy 的已存版本；`estimated_version` 是本次预算估算使用的 tag，在 worker-secret bump 路径中就是已分配的精确 bump version。
@@ -140,7 +145,7 @@ Auth 子合同：
 - Control 在进入 Redis mutation loop 前加密 secret PUT value。加密/provider 失败会返回 control error，不写 plaintext fallback。
 - Worker delete 先 commit Redis lifecycle state；异步 S3 cleanup enqueue 是 best-effort，失败时返回 warning。
 - `s3-cleanup` system worker 会把 cleanup task 持久化在 D1；row 存在后由 cron replay 负责重试。S3 失败使用分钟级 exponential backoff，最高 30 分钟；大前缀 cleanup 每完成一个 S3 List/Delete page 就 checkpoint continuation token，因此正常分页进度不会消耗 failure attempts，也不会在 scheduler timeout 后从头开始。每次 run 只处理一页，所以超大 prefix 会跨多个 cron 或 queue dispatch 排空，而不是让单次 scheduler dispatch 持续数分钟。
-- Workflow lifecycle blocker 通过 workflows 检查；服务错误时 fail closed。
+- 所有 Control-to-Workflows internal POST 都使用 `control/workflows-client.js` 的 canonical transport。Caller 继续持有 endpoint-specific timeout、non-2xx 和 response-body interpretation。Workflow 管理调用和按 namespace 大小无上界的 lifecycle delete scan 都刻意不设 client-side timeout，保持 transport 收敛前的语义；DO-alarm cleanup 则显式保留原有五秒边界。Workflow lifecycle blocker 在服务错误时 fail closed。
 - AUTH JSRPC 错误或 Redis 爆炸属于控制面失败，映射为 503 fail closed，而不是 tenant-visible authorization fallback。
 
 ## 安全边界
@@ -170,6 +175,10 @@ Verify outcome 记录为 success、reject 或 error；5xx outcome 是 error log�
 - `tests/unit/control-delete-handler.test.js`
 - `tests/unit/control-deploy-watch.test.js`
 - `tests/unit/control-lifecycle-indexes.test.js`
+- `tests/unit/control-shared-stub.test.js`
+- `tests/unit/control-handlers-workflows.test.js`
+- `tests/unit/control-d1-migrations.test.js`
+- `tests/unit/redis-lock.test.js`
 - `tests/unit/auth-lib.test.js`
 - `tests/unit/auth-index.test.js`
 - `tests/integration/auth-worker.test.js`

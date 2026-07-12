@@ -25,3 +25,6 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 wdl-rust-common = { workspace = true, features = ["axum"] }
+
+[dev-dependencies]
+wdl-rust-common = { workspace = true, features = ["axum", "test-support"] }

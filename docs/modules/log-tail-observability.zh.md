@@ -10,6 +10,7 @@ Observability 提供有界 metrics、结构化日志、request-id 传播和 live
 
 - `runtime/tail-worker.js` 捕获 console/exception。
 - `runtime/tail-forwarder.js` 做 active-set check 和 append POST。
+- 同一个 runtime forwarder 统一持有 invocation start/finish envelope timing 和 thrown-value normalization，因此 gateway dispatch 与 service-binding fetch 会输出同一种 `worker_fetch` shape。
 - `redis-proxy` logs endpoints 做 active tail check 和 stream append。
 - `control/handlers/logs-tail.js` 管理 SSE session 和 heartbeat activation。
 - CLI `wdl tail` 给用户消费。
@@ -90,13 +91,13 @@ WDL 在 JS workerd tier 和 Rust 服务中使用同一套可观测性策略：�
 
 通用规则：
 
-- `x-request-id` 尽可能跨 gateway、control/runtime、loaded worker 和 D1 传播。缺失的 inbound id 会在入口生成；multi-valued、包含 control char 或过长的脏 id 会被当成缺失。使用 `shared/request-scope.js` 的 JS entrypoint 会在 response 中 echo sanitize 后的 id，并在 `request_complete` 日志中记录 `request_id`；Rust sidecar 会 sanitize inbound id，并在 request middleware 拥有 completion 时记录。Control 的 Redis `PUBLISH` 路径只在本地日志记录该 id，不把它放进 pub/sub payload。
+- `x-request-id` 尽可能跨 gateway、control/runtime、loaded worker 和 D1 传播。缺失的 inbound id 会在入口生成；multi-valued、包含 Unicode whitespace/control char 或超过 128 UTF-8 bytes 的脏 id 会被当成缺失。使用 `shared/request-scope.js` 的 JS entrypoint 会在 response 中 echo sanitize 后的 id，并在 `request_complete` 日志中记录 `request_id`；Rust sidecar 会 sanitize inbound id，并在 request middleware 拥有 completion 时记录。Control 的 Redis `PUBLISH` 路径只在本地日志记录该 id，不把它放进 pub/sub payload。
 - 日志字段使用 snake_case。只有 `level=error` 写入 stderr；debug/info/warn JSON log line 都写入 stdout，这样 JS、Rust 和 embedded workerd shim 的日志路由保持一致。
 - 内部运维日志，包括 system-worker cleanup 日志和防御性的 Redis callback warning，也使用同一套单行 JSON envelope：`ts`、`service`、`level`、`event`，再加 snake_case 字段。JS 服务使用 `shared/observability.js`；Rust 服务使用 `wdl-rust-common::log::emit_log_line`。错误文本写入 `error_message`；不得输出 secret 值、raw credential、token material、raw Redis key 或无界 payload。
 - 产品 API response body 默认使用 camelCase，除非 endpoint 明确记录不同 wire contract。
 - Metrics 只使用有界枚举 label。
 - 暴露 request metrics 的 Rust HTTP sidecar 使用同一组 `requests`、`request_duration_ms` 和 `request_errors` metric family，以及有界的 `service`/`route`/`status` labels；per-route error context 只进入 `request_complete` 日志中的 `error_code` / `error_message`。
-- JS 和 Rust observability 实现刻意共享 metric prefix `wdl`、request metric families `requests` / `request_duration_ms` / `request_errors`、cardinality warning threshold `100`、Prometheus content type `text/plain; version=0.0.4; charset=utf-8`；共享 fixture `tests/fixtures/observability-contract.json` pin 住这些值，但不引入 runtime metrics owner。
+- JS 和 Rust observability 实现刻意共享 metric prefix `wdl`、request metric families `requests` / `request_duration_ms` / `request_errors`、cardinality warning threshold `100`、Prometheus content type `text/plain; version=0.0.4; charset=utf-8`，以及结构化日志的 key 顺序、level priority、stream routing 和 timestamp shape；共享 fixture `tests/fixtures/observability-contract.json` pin 住这些值，但不引入 runtime observability owner。
 - redis-proxy 用 `kv_value_bytes` summary 记录 KV payload size，label 只有有界的 `service`/`operation`/`kind`。它记录 value、metadata 和 raw batch byte count，用来判断是否需要 large-value offload；namespace、key 和 object identity 不进入 metric label。
 - Rust `request_complete` log 输出整数 `duration_ms`，让各服务日志字段保持稳定；Prometheus duration summary 仍保留浮点值。
 - JS `MetricsRegistry` 在单个 metric name 达到 100 个 series 时输出一次结构化 `metric_cardinality_warning` 日志，之后会丢弃该 metric 的全新 series，但继续更新已有 series。Rust `MetricStore` 当前仍保持同一 warning-only tripwire。该 warning 携带 metric name、观测到的 series 数和配置 limit；tenant-specific 细节本来就不应进入 label。因为这条 warning 由 metrics registry 输出，所以不会被 `LOG_LEVEL` 抑制。

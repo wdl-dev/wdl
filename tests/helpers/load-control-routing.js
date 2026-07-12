@@ -21,10 +21,7 @@ const {
   routePlanUrl,
 } = await compileControlGraph();
 
-const controlSharedUrl = controlSharedStubUrl(`
-export const DECLARED_HOSTS_KEY = "declared-hosts";
-export const HOST_DECLARATIONS_PREFIX = "host-declarations:";
-`);
+const controlSharedUrl = controlSharedStubUrl();
 
 export const CONTROL_ROUTING_TEST_URL = moduleDataUrl(applyModuleReplacements(readRepositoryFile("control/routing.js"), [
   ...importSpecifierReplacements({

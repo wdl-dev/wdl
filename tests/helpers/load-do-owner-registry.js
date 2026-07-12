@@ -7,7 +7,11 @@ import {
   repositoryModuleDataUrl,
   sharedModuleDataUrl,
 } from "./load-shared-module.js";
-import { createFakeRedisState, resetFakeRedisState } from "./mocks/fake-redis.js";
+import {
+  createFakeRedisState,
+  resetFakeRedisState,
+  sharedRedisStubUrl,
+} from "./mocks/fake-redis.js";
 
 const PROTOCOL_URL = doProtocolDataUrl();
 const FAKE_REDIS_URL = repositoryFileUrl("tests/helpers/mocks/fake-redis.js");
@@ -97,14 +101,7 @@ export async function resolveTaskIdentity() {
 }
 `);
 
-const sharedRedisUrl = moduleDataUrl(`
-export { FakeRedisWatchError as WatchError } from ${JSON.stringify(FAKE_REDIS_URL)};
-export function decodeBulk(value) {
-  if (value == null || typeof value === "string") return value;
-  if (value instanceof Uint8Array) return new TextDecoder().decode(value);
-  return String(value);
-}
-`);
+const sharedRedisUrl = sharedRedisStubUrl();
 
 const redisUrl = moduleDataUrl(`
 import { createFakeRedisClient } from ${JSON.stringify(FAKE_REDIS_URL)};

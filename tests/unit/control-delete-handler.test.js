@@ -11,9 +11,10 @@ import {
   readRepositoryFile,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
-const { lifecycleIndexesUrl } = await compileControlGraph();
+const { libUrl: productionControlLibUrl, lifecycleIndexesUrl } = await compileControlGraph();
 
 const controlSharedExtraSource = `
 export const ROUTES_CHANNEL = "routes:invalidate";
@@ -62,50 +63,30 @@ export async function recordS3CleanupIntent(intent) {
 `;
 
 const controlLibUrl = moduleDataUrl(`
-export function workersIndexKey(ns) { return "workers:" + ns; }
-export function workerVersionsKey(ns, name) { return "worker-versions:" + ns + ":" + name; }
-export function referrersKey(ns, name, version) {
-  return "worker-version-referrers:" + ns + ":" + name + ":" + version;
-}
-export function d1DatabaseReferrersKey(ns, databaseId) {
-  return "d1:database-referrers:" + ns + ":" + databaseId;
-}
-export function deleteLockKey(ns, worker) { return "worker-delete-lock:" + ns + ":" + worker; }
-export function encodeReferrerMember(ref) { return JSON.stringify(ref); }
-export function doObjectRegistryKey(id) { return "do:objects:" + id; }
-export function doOwnerScopeScanPatternForStorage(id) { return "do:owner:" + id + ":*"; }
-export function doStorageIdKey(ns, worker) { return "worker:do-storage:" + ns + ":" + worker; }
-export function workflowDefsKey(ns, worker) { return "wf:defs:" + ns + ":" + worker; }
+export {
+  bundleAssetPrefix,
+  d1DatabaseReferrersKey,
+  deleteLockKey,
+  doObjectRegistryKey,
+  doOwnerScopeScanPatternForStorage,
+  doStorageIdKey,
+  encodeReferrerMember,
+  parseBundleMeta,
+  referrersKey,
+  workerVersionsKey,
+  workersIndexKey,
+  workflowDefsKey,
+} from ${JSON.stringify(productionControlLibUrl)};
 export function extractD1Refs() { return []; }
 export function extractOutgoingRefs() { return []; }
 export function formatReferrerBlocker(members) { return { referrers: members }; }
 `);
 
-const sharedVersionUrl = moduleDataUrl(`
-export function routesKey(ns) { return "routes:" + ns; }
-export function patternsKey(host) { return "patterns:" + host; }
-export function formatVersion(n) { return "v" + n; }
-export function parseVersion(tag) {
-  const match = /^v([1-9][0-9]*)$/.exec(tag);
-  return match ? Number(match[1]) : null;
-}
-export function bundleKey(ns, worker, version) {
-  const n = parseVersion(version);
-  if (n == null) throw new Error("invalid version tag " + JSON.stringify(version));
-  return "worker:" + ns + ":" + worker + ":v:" + n;
-}
-`);
+const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 
 const sharedSecretKeysUrl = repositoryFileUrl("shared/secret-keys.js");
 
-const sharedRedisUrl = moduleDataUrl(`
-const decoder = new TextDecoder();
-export function decodeBulk(value) {
-  if (value == null) return null;
-  return value instanceof Uint8Array ? decoder.decode(value) : String(value);
-}
-export class WatchError extends Error {}
-`);
+const sharedRedisUrl = sharedRedisStubUrl();
 
 const sharedQueueKeysUrl = moduleDataUrl(`
 export const QUEUE_CONSUMER_INDEX_KEY = "queue:index:consumers";
@@ -170,6 +151,7 @@ const { handle: handleVersions } = await importControlHandler("control/handlers/
  *   queueConsumerWorkerDuringExec?: string | null,
  *   referrersByVersion?: Record<string, string[]>,
  *   retainedVersions?: string[],
+ *   bundleMetaRaw?: string | null,
  * }} [opts]
  */
 function resetDeleteHandlerState({
@@ -184,13 +166,16 @@ function resetDeleteHandlerState({
   queueConsumerWorkerDuringExec = queueConsumerWorker,
   referrersByVersion = {},
   retainedVersions = ["v1"],
+  bundleMetaRaw,
 } = {}) {
   const referrers = /** @type {Record<string, string[]>} */ (referrersByVersion);
-  const meta = JSON.stringify({
-    ...(assetPrefix ? { assets: { prefix: assetPrefix } } : {}),
-    bindings: {},
-    routes: [],
-  });
+  const meta = bundleMetaRaw === undefined
+    ? JSON.stringify({
+      ...(assetPrefix ? { assets: { prefix: assetPrefix } } : {}),
+      bindings: {},
+      routes: [],
+    })
+    : bundleMetaRaw;
   /** @type {unknown[][]} */
   const multiCalls = [];
   /** @type {unknown[][]} */
@@ -237,7 +222,7 @@ function resetDeleteHandlerState({
     },
     /** @param {string} _cursor @param {string} pattern */
     async scan(_cursor, pattern) {
-      if (pattern === "do:owner:do_old:*") return ["0", doOwnerKeysDuringExec];
+      if (pattern === "do:owner:scope:do_old%3A*") return ["0", doOwnerKeysDuringExec];
       if (pattern === "queue-consumer:demo:*" && queueConsumerWorkerDuringExec) {
         return ["0", queueConsumerKeys];
       }
@@ -270,7 +255,7 @@ function resetDeleteHandlerState({
     },
     /** @param {string} _cursor @param {string} pattern */
     async scan(_cursor, pattern) {
-      if (pattern === "do:owner:do_old:*") return ["0", doOwnerKeys];
+      if (pattern === "do:owner:scope:do_old%3A*") return ["0", doOwnerKeys];
       if (pattern === "queue-consumer:demo:*" && queueConsumerWorker) {
         return ["0", queueConsumerKeys];
       }
@@ -283,6 +268,7 @@ function resetDeleteHandlerState({
     },
     /** @param {string} key @param {string} field */
     async hGet(key, field) {
+      if (key === "routes:demo" && field === "api") return activeVersion;
       if (/^worker:demo:api:v:\d+$/.test(key) && field === "__meta__") return meta;
       if (queueConsumerKeys.includes(key) && field === "worker") return queueConsumerWorker;
       return null;
@@ -332,12 +318,19 @@ function resetDeleteHandlerState({
   });
 }
 
-/** @param {{ assetPrefix?: string | null }} [opts] */
-function resetVersionDeleteHandlerState({ assetPrefix = "assets/demo/api/v1/" } = {}) {
-  const meta = JSON.stringify({
-    ...(assetPrefix ? { assets: { prefix: assetPrefix } } : {}),
-    bindings: {},
-  });
+/** @param {{ assetPrefix?: string | null, bundleMetaRaw?: string | null, retainedVersions?: string[], siblingMetaRaw?: string | null }} [opts] */
+function resetVersionDeleteHandlerState({
+  assetPrefix = "assets/demo/api/v1/",
+  bundleMetaRaw,
+  retainedVersions = ["v1"],
+  siblingMetaRaw = null,
+} = {}) {
+  const meta = bundleMetaRaw === undefined
+    ? JSON.stringify({
+      ...(assetPrefix ? { assets: { prefix: assetPrefix } } : {}),
+      bindings: {},
+    })
+    : bundleMetaRaw;
   /** @type {unknown[][]} */
   const multiCalls = [];
   const session = {
@@ -347,11 +340,12 @@ function resetVersionDeleteHandlerState({ assetPrefix = "assets/demo/api/v1/" } 
     async hGet(key, field) {
       if (key === "routes:demo" && field === "api") return null;
       if (key === "worker:demo:api:v:1" && field === "__meta__") return meta;
+      if (key === "worker:demo:api:v:2" && field === "__meta__") return siblingMetaRaw;
       return null;
     },
     /** @param {string} key */
     async zRange(key) {
-      if (key === "worker-versions:demo:api") return ["v1"];
+      if (key === "worker-versions:demo:api") return retainedVersions;
       return [];
     },
     async sMembers() { return []; },
@@ -507,6 +501,75 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
   ));
 });
 
+test("worker delete classifies non-object retained bundle metadata as corrupt", async () => {
+  const testState = resetDeleteHandlerState({ bundleMetaRaw: "[]" });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-corrupt-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.stage, "retained_meta_parse");
+  assert.equal(body.detail, "__meta__ must be a JSON object");
+  assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
+  assert.equal(testState.releaseCalls, 1);
+});
+
+test("worker delete fails closed when indexed active bundle metadata is missing", async () => {
+  const testState = resetDeleteHandlerState({
+    retainedVersions: [],
+    bundleMetaRaw: null,
+  });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-missing-active-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.stage, "active_meta_parse");
+  assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
+  assert.equal(testState.releaseCalls, 1);
+});
+
+for (const { label, bundleMetaRaw } of [
+  { label: "missing", bundleMetaRaw: null },
+  { label: "empty", bundleMetaRaw: "" },
+]) {
+  test(`worker delete fails closed when retained bundle metadata is ${label}`, async () => {
+    const testState = resetDeleteHandlerState({
+      activeVersion: null,
+      bundleMetaRaw,
+    });
+
+    const response = await handle({
+      request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+      url: new URL("http://control/ns/demo/worker/api/delete"),
+      ns: "demo",
+      name: "api",
+      principal: { kind: "ops" },
+      requestId: `rid-delete-${label}-retained-meta`,
+    });
+
+    const body = await readJsonResponse(response, 500);
+    assert.equal(body.error, "corrupt_meta");
+    assert.equal(body.stage, "retained_meta_parse");
+    assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
+    assert.equal(testState.releaseCalls, 1);
+  });
+}
+
 test("worker delete collects retained version metadata without serial round trips", async () => {
   const testState = resetDeleteHandlerState({
     activeVersion: null,
@@ -550,7 +613,7 @@ test("worker delete retries instead of committing when DO owner keys drift after
   const testState = resetDeleteHandlerState({
     assetPrefix: null,
     doOwnerKeys: [],
-    doOwnerKeysDuringExec: ["do:owner:do_old:Room:shard0"],
+    doOwnerKeysDuringExec: ["do:owner:scope:do_old%3ARoom%3Ashard0"],
   });
 
   const response = await handle({
@@ -629,6 +692,37 @@ test("worker delete dry-run includes workflow lifecycle blockers", async () => {
     count: 1,
     blockers: [{ workflowKey: "wf_old", instanceId: "inst-1" }],
   });
+  assert.equal(testState.releaseCalls, 0);
+});
+
+test("worker delete dry-run retries when a retained version is deleted during collection", async () => {
+  const testState = resetDeleteHandlerState({
+    activeVersion: null,
+    bundleMetaRaw: null,
+    doStorageId: null,
+    queueConsumerWorker: null,
+  });
+  let versionReads = 0;
+  testState.redis.zRange = async (/** @type {string} */ key) => {
+    assert.equal(key, "worker-versions:demo:api");
+    versionReads += 1;
+    return versionReads === 1 ? ["v1"] : [];
+  };
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete?dry_run=1", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete?dry_run=1"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-dry-run-version-delete-race",
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.deleted, false);
+  assert.equal(body.noop, true);
+  assert.deepEqual(body.versionsDeleted, []);
+  assert.equal(versionReads, 3);
   assert.equal(testState.releaseCalls, 0);
 });
 
@@ -907,6 +1001,75 @@ test("version delete reports cleanup_queue_failed when data-plane cleanup enqueu
     entry.fields.error_message === "data redis unavailable"
   ));
 });
+
+test("version delete classifies non-object bundle metadata as corrupt", async () => {
+  const testState = resetVersionDeleteHandlerState({ bundleMetaRaw: "null" });
+
+  const response = await handleVersions({
+    method: "DELETE",
+    ns: "demo",
+    name: "api",
+    subPath: ["v1"],
+    principal: { kind: "ops" },
+    requestId: "rid-version-delete-corrupt-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.namespace, "demo");
+  assert.equal(body.name, "api");
+  assert.equal(body.version, "v1");
+  assert.deepEqual(testState.cleanupIntents, []);
+  assert.equal(testState.releaseCalls, 1);
+});
+
+test("version delete classifies indexed target metadata absence as corrupt", async () => {
+  const testState = resetVersionDeleteHandlerState({ bundleMetaRaw: null });
+
+  const response = await handleVersions({
+    method: "DELETE",
+    ns: "demo",
+    name: "api",
+    subPath: ["v1"],
+    principal: { kind: "ops" },
+    requestId: "rid-version-delete-missing-target-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.version, "v1");
+  assert.deepEqual(testState.cleanupIntents, []);
+  assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
+  assert.equal(testState.releaseCalls, 1);
+});
+
+for (const [label, siblingMetaRaw] of [
+  ["missing", null],
+  ["empty", ""],
+]) {
+  test(`version delete fails closed when indexed sibling metadata is ${label}`, async () => {
+    const testState = resetVersionDeleteHandlerState({
+      retainedVersions: ["v1", "v2"],
+      siblingMetaRaw,
+    });
+
+    const response = await handleVersions({
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["v1"],
+      principal: { kind: "ops" },
+      requestId: `rid-version-delete-${label}-sibling-meta`,
+    });
+
+    const body = await readJsonResponse(response, 500);
+    assert.equal(body.error, "corrupt_meta");
+    assert.equal(body.version, "v2");
+    assert.equal(body.stage, "sibling_meta_parse");
+    assert.deepEqual(testState.cleanupIntents, []);
+    assert.equal(testState.releaseCalls, 1);
+  });
+}
 
 test("version delete reports queueHint none when no content cleanup is needed", async () => {
   const testState = resetVersionDeleteHandlerState({ assetPrefix: null });

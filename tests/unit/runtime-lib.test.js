@@ -4,6 +4,8 @@ import { parseBase64Json } from "../helpers/json-payload.js";
 import { runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
 
 const {
+  base64ToBytes,
+  bytesToBase64,
   toBytes,
   bundleToWorkerCode,
   buildAssetUrl,
@@ -16,8 +18,24 @@ const {
   normalizeQueuedDispatchBody,
   normalizeScheduledDispatchBody,
 } = await import(runtimeLibModuleDataUrl());
+const sharedBase64 = await import("../../shared/base64.js");
 
 const enc = new TextEncoder();
+
+test("runtime base64 exports use the shared codec owner", () => {
+  assert.equal(bytesToBase64, sharedBase64.bytesToBase64);
+  assert.equal(base64ToBytes, sharedBase64.base64ToBytes);
+  const bytes = Uint8Array.from({ length: 70_000 }, (_, index) => index % 256);
+  assert.deepEqual(base64ToBytes(bytesToBase64(bytes)), bytes);
+});
+
+test("shared base64 decoder matches atob rejection semantics with Buffer present", () => {
+  assert.deepEqual(base64ToBytes("Z g =="), new Uint8Array([0x66]));
+  assert.deepEqual(base64ToBytes("Zg"), new Uint8Array([0x66]));
+  for (const invalid of ["%%%", "Zg=", "Zm9v=", "-_8=", "YWJjZA==x"]) {
+    assert.throws(() => base64ToBytes(invalid), /Invalid base64 input/);
+  }
+});
 
 test("toBytes: string → Uint8Array utf8", () => {
   const r = toBytes("hi");
@@ -608,6 +626,10 @@ test("decodeQueueBody: bytes contentType preserves binary payload", () => {
   const decoded = decodeQueueBody(b64FromBytes(payload), "bytes");
   assert.ok(decoded instanceof Uint8Array);
   assert.deepEqual(Array.from(decoded), Array.from(payload));
+});
+
+test("decodeQueueBody: invalid base64 fails closed before handler dispatch", () => {
+  assert.throws(() => decodeQueueBody("%%%", "bytes"), /Invalid base64 input/);
 });
 
 test("decodeQueueBody: unknown contentType throws (v8 path must not silently pass)", () => {

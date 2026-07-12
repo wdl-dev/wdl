@@ -31,3 +31,6 @@ serde_json.workspace = true
 # Supervisor bins use #[tokio::main(flavor = "current_thread")].
 tokio = { workspace = true, features = ["macros", "process", "rt", "signal", "sync", "time"] }
 wdl-rust-common = { workspace = true, default-features = false }
+
+[dev-dependencies]
+wdl-rust-common = { workspace = true, default-features = false, features = ["test-support"] }

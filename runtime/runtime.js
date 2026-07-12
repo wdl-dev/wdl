@@ -1,7 +1,7 @@
 // Runtime helpers for user-runtime and system-runtime. This module owns
 // service-name binding, logger setup, metrics access, request-scope creation,
 // and the per-process loaded-worker registry that drives historical-version
-// eviction; runtime/index.js owns loader dispatch and worker event handling.
+// eviction; runtime/load.js owns the shared workerLoader cold-load wrapper.
 
 import {
   createLogLevelBinder,

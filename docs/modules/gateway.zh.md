@@ -16,7 +16,9 @@ Gateway 有三条 dispatch 分支：
 
 解析出的 `{ ns, worker, version }` 会转成 runtime 请求头 `x-worker-id: <ns>:<worker>:<version>` 和 `x-worker-prefix`。字面量 `__system__` route 进入 `RUNTIME_SYSTEM`；普通 tenant namespace 进入 `RUNTIME_USER`。
 
-`ADMIN_HOST` 分支是 infrastructure traffic，不是 loaded-worker request。它不设置 `x-worker-id` 或 `x-worker-prefix`。`PLATFORM_DOMAIN` 和 `ADMIN_HOST` 可通过环境变量配置；代码默认是 `workers.local`，且未设置 admin-host short-circuit。
+转发前，gateway 会清除客户端提供的 `x-worker-id`、`x-worker-prefix` 和所有 `x-wdl-*` header。同一套内部 header 策略也会在 WebSocket upgrade response 回到公开 socket 前进行过滤。
+
+`ADMIN_HOST` 分支是 infrastructure traffic，不是 loaded-worker request。它不设置 `x-worker-id` 或 `x-worker-prefix`。`PLATFORM_DOMAIN` 和 `ADMIN_HOST` 可通过环境变量配置。所有 tier 都会把 `PLATFORM_DOMAIN` normalize 成不带尾点的纯小写 hostname，并默认使用 `workers.local`；admin-host short-circuit 默认仍未设置。
 
 ## 接口
 

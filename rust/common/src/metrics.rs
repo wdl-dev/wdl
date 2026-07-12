@@ -348,15 +348,9 @@ fn summary_sample_cmp(left: &SummarySample, right: &SummarySample) -> std::cmp::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::observability_contract;
 
     static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
-
-    fn observability_contract() -> serde_json::Value {
-        serde_json::from_str(include_str!(
-            "../../../tests/fixtures/observability-contract.json"
-        ))
-        .expect("observability contract fixture parses")
-    }
 
     #[test]
     fn metrics_contract_matches_cross_language_fixture() {

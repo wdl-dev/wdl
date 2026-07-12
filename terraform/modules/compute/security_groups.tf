@@ -36,6 +36,10 @@ resource "aws_security_group" "runtime" {
   }
 }
 
+# ECS intentionally shares this SG across user, system, D1, and DO tasks. Rules
+# sourced from or targeting it are therefore coarser than Kubernetes per-component
+# NetworkPolicies; splitting those caller sets requires splitting this SG first.
+
 # Range covers :8081 (loader sockets) + :8082 (system-runtime control).
 resource "aws_security_group_rule" "runtime_from_gateway" {
   type                     = "ingress"

@@ -15,6 +15,7 @@ Runtime 从 Redis 加载不可变 worker version，构建 tenant-facing `env` bi
 - `runtime/dispatch.js` 和 `runtime/dispatch/*`：fetch/scheduled/queue/workflow dispatch helper。
 
 Worker 通过不可变 id `<ns>:<worker>:<version>` 加载。Promote 会生成新的 id，因此 active-version 变化自然触发 fresh isolate cold-load。
+`runtime/load.js` 也统一持有 `workerLoader.get()` wrapper：每次 cache miss 都会登记供后续 eviction 使用，只有 active-version dispatch path 会请求 sibling eviction；service binding 加载 pinned version 时不会驱逐 sibling。
 
 两个 runtime pool 使用同一个 image 和源码，但 capnp config 不同：
 
@@ -40,7 +41,7 @@ Tenant 可见 binding 包括 KV、R2、D1、Durable Objects、Queues、ASSETS、
 workerd 提供 isolate、module evaluation、named entrypoint 和 JSRPC 机制。Cloudflare 生产平台通常在外部服务里实现的 binding 后端，则由 WDL 自己补齐。因此 runtime 把 binding 当作 adapter：
 
 - KV、queue producer 这类纯数据 binding 调 colocated redis-proxy sidecar。Loaded worker 看到 Cloudflare-shaped object，但 method call 会先通过 workerd JSRPC 回到 runtime，再经 HTTP 调 redis-proxy。
-- Secret value 也在 cold-load 时经过 redis-proxy。redis-proxy 解密 `WDL-ENC:` value 后，runtime 在 internal load envelope 中收到 plaintext `ns_secrets` 和 `worker_secrets`；tenant-facing `env` 形状保持不变。Env materialization 使用固定优先级：bundle vars，然后 namespace secrets，然后 worker secrets。同名 worker-level secret 覆盖 namespace-level secret，namespace-level secret 覆盖 var。Control 会在 deploy 和 secret mutation 过程中用留有 headroom 的预算估算完整 workerLoader env，包括用户 vars/secrets、runtime 注入的 binding/workflow env value，以及 platform/service binding props 中复制的 required caller secret，避免超限配置拖到 runtime cold-load 才失败。
+- Secret value 也在 cold-load 时经过 redis-proxy。redis-proxy 解密 `WDL-ENC:` value 后，runtime 在 internal load envelope 中收到 plaintext `ns_secrets` 和 `worker_secrets`；tenant-facing `env` 形状保持不变。Env materialization 使用固定优先级：bundle vars，然后 namespace secrets，然后 worker secrets。同名 worker-level secret 覆盖 namespace-level secret，namespace-level secret 覆盖 var。Control 会在 deploy 和 secret mutation 过程中用 shape-only factory 调用 cold-load 同一个 `buildWorkerEnv()` materializer，再用留有 headroom 的预算估算完整 workerLoader env，包括用户 vars/secrets、runtime 注入的 binding/workflow env value，以及 platform/service binding props 中复制的 required caller secret，避免超限配置拖到 runtime cold-load 才失败。
 - D1、Durable Objects、Workflows 这类 stateful binding 调专门 backend service。Hidden backend Fetcher 留在 runtime 内部，并在 tenant code 观察 `env` 前被删除。
 - R2 是 S3-compatible object-storage adapter：runtime 使用平台 credential 签名请求，并发送到配置的 endpoint。
 - ASSETS 是 deploy artifact URL helper：control 在 deploy 时把 assets 上传到 S3-compatible storage；runtime 读取 `__meta__.assets` 和 `ASSETS_CDN_BASE`，只暴露 `env.ASSETS.url(path)` 用来生成 tokenized CDN URL。

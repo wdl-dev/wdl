@@ -4,15 +4,17 @@ import {
   importRepositoryModule,
   importSpecifierReplacements,
   moduleDataUrl,
+  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 /** @type {any} */ (globalThis).__controlIndexState = null;
 
+const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 const controlLibUrl = moduleDataUrl(`
 export const NS_RE = /^[a-z0-9-]+$/;
 export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-export function configuredHostname(value) { return typeof value === "string" && value ? value : null; }
+export { configuredHostname } from ${JSON.stringify(sharedNsPatternUrl)};
 export function configuredPublicUrl() { return null; }
 export function platformVersionFromPackageJson() { return "wdl.test"; }
 export function projectAccessPrincipal(principal) { return principal || null; }
@@ -170,6 +172,20 @@ test("control whoami uses sanitized forwarded proto for public URL hints", async
     control: "https://control.example",
     namespace: "https://tenant-a.workers.example",
   });
+});
+
+test("control whoami omits namespace URL when no public platform domain is configured", async () => {
+  const state = resetControlIndexState();
+  state.authResult.principal = { kind: "ns", ns: "tenant-a" };
+
+  const response = await controlIndex.fetch(
+    new Request("http://control.example/whoami"),
+    {},
+    /** @type {ExecutionContext} */ ({})
+  );
+
+  const body = await readJsonResponse(response, 200);
+  assert.deepEqual(body.urls, { control: "http://control.example" });
 });
 
 test("control whoami ignores malformed forwarded proto values", async () => {

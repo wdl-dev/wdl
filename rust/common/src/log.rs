@@ -2,11 +2,30 @@ use chrono::{SecondsFormat, Utc};
 use serde_json::Value as JsonValue;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[repr(u8)]
 pub enum LogLevel {
     Debug = 10,
     Info = 20,
     Warn = 30,
     Error = 40,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogStream {
+    Stdout,
+    Stderr,
+}
+
+fn should_emit(level: LogLevel, min_level: LogLevel) -> bool {
+    level >= min_level
+}
+
+fn stream_for_level(level: LogLevel) -> LogStream {
+    if level == LogLevel::Error {
+        LogStream::Stderr
+    } else {
+        LogStream::Stdout
+    }
 }
 
 impl LogLevel {
@@ -45,14 +64,13 @@ pub fn emit_log_line(
     event: &str,
     fields: JsonValue,
 ) {
-    if level < min_level {
+    if !should_emit(level, min_level) {
         return;
     }
     let line = log_payload_line(service, level, event, fields);
-    if level >= LogLevel::Error {
-        eprintln!("{line}");
-    } else {
-        println!("{line}");
+    match stream_for_level(level) {
+        LogStream::Stdout => println!("{line}"),
+        LogStream::Stderr => eprintln!("{line}"),
     }
 }
 
@@ -119,7 +137,15 @@ fn now_log_ts() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::observability_contract;
     use serde_json::json;
+
+    fn timestamp_shape(value: &str) -> String {
+        value
+            .chars()
+            .map(|ch| if ch.is_ascii_digit() { '0' } else { ch })
+            .collect()
+    }
 
     #[test]
     fn level_parse_is_case_insensitive() {
@@ -131,10 +157,50 @@ mod tests {
     }
 
     #[test]
-    fn level_ord_lets_us_gate() {
-        assert!(LogLevel::Debug < LogLevel::Info);
-        assert!(LogLevel::Info < LogLevel::Warn);
-        assert!(LogLevel::Warn < LogLevel::Error);
+    fn log_levels_gating_and_streams_match_cross_language_fixture() {
+        let contract = observability_contract();
+        let levels = contract["logEnvelope"]["levels"]
+            .as_array()
+            .expect("logEnvelope.levels is an array");
+
+        for entry in levels {
+            let name = entry["name"].as_str().expect("log level name is a string");
+            let priority = entry["priority"]
+                .as_u64()
+                .expect("log level priority is a number");
+            let stream = entry["stream"]
+                .as_str()
+                .expect("log level stream is a string");
+            let level = LogLevel::parse(name).expect("fixture log level is supported");
+            let actual_stream = match stream_for_level(level) {
+                LogStream::Stdout => "stdout",
+                LogStream::Stderr => "stderr",
+            };
+            assert_eq!(u64::from(level as u8), priority, "{name} priority");
+            assert_eq!(actual_stream, stream, "{name} stream");
+        }
+
+        for min_entry in levels {
+            let min_name = min_entry["name"]
+                .as_str()
+                .expect("minimum log level name is a string");
+            let min_priority = min_entry["priority"]
+                .as_u64()
+                .expect("minimum log level priority is a number");
+            let min_level = LogLevel::parse(min_name).expect("minimum log level is supported");
+            for entry in levels {
+                let name = entry["name"].as_str().expect("log level name is a string");
+                let priority = entry["priority"]
+                    .as_u64()
+                    .expect("log level priority is a number");
+                let level = LogLevel::parse(name).expect("fixture log level is supported");
+                assert_eq!(
+                    should_emit(level, min_level),
+                    priority >= min_priority,
+                    "{name} at minimum {min_name}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -159,6 +225,10 @@ mod tests {
 
     #[test]
     fn log_payload_line_matches_js_envelope_order() {
+        let contract = observability_contract();
+        let ordered_keys = contract["logEnvelope"]["orderedKeys"]
+            .as_array()
+            .expect("logEnvelope.orderedKeys is an array");
         let line = log_payload_line(
             "scheduler",
             LogLevel::Info,
@@ -166,25 +236,24 @@ mod tests {
             json!({ "port": 7070 }),
         );
 
-        assert!(
-            line.starts_with(r#"{"ts":"#),
-            "Rust structured logs should match JS envelope order: {line}"
-        );
-        assert!(line.contains(r#","service":"scheduler","level":"info","event":"started","#));
+        let mut position = 0;
+        for (index, key) in ordered_keys.iter().enumerate() {
+            let key = key.as_str().expect("ordered log key is a string");
+            let marker = format!("{}\"{key}\":", if index == 0 { "{" } else { "," });
+            let offset = line[position..]
+                .find(&marker)
+                .unwrap_or_else(|| panic!("missing ordered marker {marker:?} in {line}"));
+            position += offset + marker.len();
+        }
     }
 
     #[test]
     fn log_timestamp_matches_js_iso_millisecond_shape() {
+        let contract = observability_contract();
+        let expected = contract["logEnvelope"]["timestampShape"]
+            .as_str()
+            .expect("logEnvelope.timestampShape is a string");
         let ts = now_log_ts();
-        assert_eq!(ts.len(), "2026-01-01T00:00:00.000Z".len());
-        assert_eq!(&ts[4..5], "-");
-        assert_eq!(&ts[7..8], "-");
-        assert_eq!(&ts[10..11], "T");
-        assert_eq!(&ts[13..14], ":");
-        assert_eq!(&ts[16..17], ":");
-        assert_eq!(&ts[19..20], ".");
-        assert_eq!(&ts[23..24], "Z");
-        assert!(ts[20..23].chars().all(|ch| ch.is_ascii_digit()));
-        assert!(!ts.contains("+00:00"));
+        assert_eq!(timestamp_shape(&ts), expected);
     }
 }

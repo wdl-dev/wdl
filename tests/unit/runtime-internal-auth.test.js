@@ -50,8 +50,8 @@ export async function readWorkflowNotifyDispatch() { throw new Error("unexpected
 export async function readWorkflowRunDispatch() { throw new Error("unexpected workflow run body read"); }
 `);
 const runtimeLoadUrl = moduleDataUrl(`
-export function createLoaderCallback() {
-  return async () => { throw new Error("unexpected worker load"); };
+export function getLoadedWorkerStub() {
+  throw new Error("unexpected worker load");
 }
 `);
 const emptyBindingUrl = moduleDataUrl(`

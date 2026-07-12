@@ -11,11 +11,9 @@ import { parseDispatchWorkerId } from "shared-worker-id";
 import {
   handleFetchDispatch,
 } from "runtime-dispatch";
-import { createLoaderCallback } from "runtime-load";
+import { getLoadedWorkerStub } from "runtime-load";
 import {
   bindRuntime,
-  evictSiblings,
-  recordLoadedWorker,
   runtimeServiceAllowsNamespace,
 } from "runtime-state";
 
@@ -64,23 +62,13 @@ export default class Runtime extends WorkerEntrypoint {
         return scope.respond(jsonError(403, "runtime_pool_mismatch", "Worker namespace is not allowed in this runtime pool"));
       }
 
-      const baseCallback = createLoaderCallback({
+      // Gateway-routed traffic is the authoritative "this version is active"
+      // signal. Service-binding cold-loads use the same helper without eviction.
+      const { stub } = getLoadedWorkerStub({
         requestId: scope.requestId, env, ctx,
         ns: namespace, worker: workerName, version, workerId,
         metrics: runtime.metrics, log: runtime.log,
-      });
-      // Factory fires only on cache miss. Gateway-routed traffic is the
-      // authoritative "this version is active" signal, so this is the
-      // one place we evict historical siblings; service-binding cold
-      // loads record but do not evict.
-      const stub = env.LOADER.get(workerId, async () => {
-        const code = await baseCallback();
-        recordLoadedWorker(workerId);
-        ctx.waitUntil(
-          evictSiblings({ env, workerId, log: runtime.log })
-            .catch(() => {})
-        );
-        return code;
+        evictOnLoad: true,
       });
 
       const forwardRequest = new Request(request);

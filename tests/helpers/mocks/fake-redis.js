@@ -1,3 +1,16 @@
+import {
+  moduleDataUrl,
+  repositoryFileUrl,
+  repositoryModuleDataUrl,
+} from "../load-shared-module.js";
+
+const SHARED_OBSERVABILITY_URL = repositoryFileUrl("shared/observability.js");
+const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_REDIS_RESP_URL = repositoryModuleDataUrl("shared/redis-resp.js", [
+  [/from "shared-observability";/, `from ${JSON.stringify(SHARED_OBSERVABILITY_URL)};`],
+  [/from "\.\/errors\.js";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
+]);
+
 /** @typedef {Map<string, string>} FakeRedisStrings */
 /** @typedef {Map<string, Record<string, string>>} FakeRedisHashes */
 /** @typedef {Map<string, Set<string>>} FakeRedisSets */
@@ -24,6 +37,20 @@ export class FakeRedisWatchError extends Error {
     super(message);
     this.name = "WatchError";
   }
+}
+
+/**
+ * Canonical `shared-redis` test surface. Callers may append only the
+ * state-bound exports their module graph needs.
+ * @param {string} [extraSource]
+ */
+export function sharedRedisStubUrl(extraSource = "") {
+  return moduleDataUrl(`
+import { FakeRedisWatchError as WatchError } from ${JSON.stringify(import.meta.url)};
+export { WatchError };
+export { decodeBulk } from ${JSON.stringify(SHARED_REDIS_RESP_URL)};
+${extraSource}
+`);
 }
 
 /** @returns {FakeRedisState} */

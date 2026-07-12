@@ -177,6 +177,9 @@ queue-orphaned:<ns>:<queue>       Stream, messages whose consumer disappeared
 queue-delayed-wake                Stream, wake signal for delayed ZSET dispatcher
 ```
 
+`wdl-rust-common::queue_keys` owns the wake stream and its `delayed_key` / `visible_at`
+entry fields so the redis-proxy producer and scheduler consumer cannot drift.
+
 Indexes are not authority. Writers add index entries, and scheduler reconcile owns stale
 cleanup after proving the referenced key is absent.
 
@@ -294,6 +297,8 @@ Representative test anchors:
   consumers.
 - `tests/unit/control-lifecycle-indexes.test.js`: JS cron/queue key helpers and
   projection staging.
+- `tests/fixtures/queue-key-parse.json`: shared JS/Rust queue discovery-key parser
+  contract.
 - `tests/unit/runtime-lib.test.js`: internal dispatch body normalization.
 - `tests/unit/runtime-dispatch-handlers.test.js`: scheduled and queue dispatch behavior, tail
   event envelope behavior.

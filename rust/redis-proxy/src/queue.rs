@@ -6,8 +6,9 @@ use redis::Pipeline;
 use serde::{Deserialize, Serialize};
 use wdl_rust_common::identity::is_valid_runtime_load_ns;
 use wdl_rust_common::queue_keys::{
-    QUEUE_DELAYED_INDEX_KEY, QUEUE_STREAM_INDEX_KEY, is_valid_queue_name, queue_delayed_key,
-    queue_stream_key,
+    QUEUE_DELAYED_INDEX_KEY, QUEUE_DELAYED_WAKE_KEY_FIELD, QUEUE_DELAYED_WAKE_STREAM,
+    QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD, QUEUE_STREAM_INDEX_KEY, is_valid_queue_name,
+    queue_delayed_key, queue_stream_key,
 };
 
 use crate::{AppError, AppResult, AppState, empty};
@@ -15,7 +16,6 @@ use crate::{AppError, AppResult, AppState, empty};
 pub(crate) const MAX_QUEUE_MESSAGE_BYTES: usize = 128_000;
 pub(crate) const MAX_QUEUE_BATCH_MESSAGES: usize = 100;
 pub(crate) const MAX_QUEUE_BATCH_BYTES: usize = 256_000;
-pub(crate) const QUEUE_DELAYED_WAKE_STREAM: &str = "queue-delayed-wake";
 const QUEUE_DELAYED_WAKE_MAX_LEN: usize = 1000;
 const MAX_SAFE_VISIBLE_AT: f64 = 9_007_199_254_740_991.0;
 
@@ -63,9 +63,9 @@ pub(crate) fn pipe_delayed_wake(pipe: &mut Pipeline, delayed_key: &str, visible_
         .arg("~")
         .arg(QUEUE_DELAYED_WAKE_MAX_LEN)
         .arg("*")
-        .arg("delayed_key")
+        .arg(QUEUE_DELAYED_WAKE_KEY_FIELD)
         .arg(delayed_key)
-        .arg("visible_at")
+        .arg(QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD)
         .arg(visible_at.to_string());
 }
 
@@ -399,9 +399,9 @@ mod tests {
         let packed = String::from_utf8(pipe.get_packed_pipeline()).unwrap();
         assert!(packed.contains(QUEUE_DELAYED_WAKE_STREAM));
         assert!(packed.contains("MAXLEN"));
-        assert!(packed.contains("delayed_key"));
+        assert!(packed.contains(QUEUE_DELAYED_WAKE_KEY_FIELD));
         assert!(packed.contains("queue-delayed:demo:jobs"));
-        assert!(packed.contains("visible_at"));
+        assert!(packed.contains(QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD));
     }
 
     #[test]

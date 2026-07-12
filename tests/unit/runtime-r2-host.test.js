@@ -121,6 +121,33 @@ test("R2 host put returns metadata from PUT response without a follow-up HEAD", 
   }
 });
 
+test("R2 host reads every mapped HTTP metadata response header", async () => {
+  const restore = installR2FetchMock(async () => new Response(null, {
+    status: 200,
+    headers: {
+      "content-type": "text/plain",
+      "content-language": "en",
+      "content-disposition": "inline",
+      "content-encoding": "gzip",
+      "cache-control": "max-age=60",
+      expires: "Thu, 01 Jan 1970 00:00:00 GMT",
+    },
+  }));
+  try {
+    const meta = await makeR2Bucket().head("metadata.txt");
+    assert.deepEqual(meta.httpMetadata, {
+      contentType: "text/plain",
+      contentLanguage: "en",
+      contentDisposition: "inline",
+      contentEncoding: "gzip",
+      cacheControl: "max-age=60",
+      cacheExpiry: 0,
+    });
+  } finally {
+    restore();
+  }
+});
+
 test("R2 host metadata preserves magic custom metadata keys as data fields", async () => {
   const restore = installR2FetchMock(async () => new Response(null, {
     status: 200,

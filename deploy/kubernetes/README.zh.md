@@ -7,10 +7,11 @@
 ## 目录结构
 
 - `base/` 定义可复用的 Deployment、StatefulSet、Service 和 PVC。
+- `components/metadata-guard/` 统一维护云 metadata egress policy。
 - `overlays/local/` 固定本地镜像、本地开发 secret、namespace 和本地存储默认值。
 - `overlays/local-ingress/` 为本地主机名增加 nginx Ingress 资源。
-- `overlays/local-metadata-guard/` 应用本地 overlay，并额外加入一个最小 metadata egress guard。
-- `overlays/local-ingress-metadata-guard/` 应用本地 ingress overlay，并额外加入同一条 metadata egress guard。
+- `overlays/local-metadata-guard/` 应用本地 overlay，并额外加入共享的 metadata-guard component。
+- `overlays/local-ingress-metadata-guard/` 应用本地 ingress overlay，并额外加入同一个 component。
 - `storage/local-nfs/` 包含一个本地 ReadWriteMany provisioner 的 Helm values，可在开发集群中模拟云厂商 RWX 存储。
 
 base 使用 production-style 镜像契约：workerd 服务默认使用 `docker.io/getwdl/wdl-workerd:latest`，Rust sidecar 和 Rust service 默认使用 `docker.io/getwdl/wdl-rust:latest`。本地 overlay 会把这些 public image name 映射到 Compose 集成测试本地构建的 `wdl-workerd:dev` 和 `wdl-rust:dev` tag。

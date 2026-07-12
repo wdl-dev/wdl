@@ -3,6 +3,7 @@ import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { recordBindingOperation } from "runtime-metrics";
 import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { discardResponseBody } from "shared-respond";
+import { S3_TRANSIENT_RETRIES, fetchRetryableS3Post } from "shared-s3-retry";
 import {
   assertR2BufferSize,
   encodeS3KeyPath,
@@ -27,9 +28,6 @@ import { parseListObjects, xmlEscape, xmlUnescape } from "runtime-bindings-r2-xm
 const DELETE_OBJECTS_BATCH_SIZE = 1000;
 const LIST_INCLUDE_HEAD_CONCURRENCY = 16;
 const S3_CLIENT_CACHE_MAX_ENTRIES = 128;
-const S3_TRANSIENT_RETRIES = 10;
-const S3_RETRY_BASE_MS = 50;
-const S3_RETRY_MAX_MS = 5_000;
 const utf8Encoder = new TextEncoder();
 const s3Cache = new Map();
 const s3ByBucket = new WeakMap();
@@ -111,47 +109,6 @@ async function mapWithConcurrency(items, concurrency, fn) {
   const count = Math.min(concurrency, items.length);
   await Promise.all(Array.from({ length: count }, worker));
   return out;
-}
-
-/** @param {number} ms */
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** @param {number} attempt */
-function s3RetryDelayMs(attempt) {
-  return Math.min(S3_RETRY_BASE_MS * 2 ** attempt, S3_RETRY_MAX_MS);
-}
-
-/** @param {Response} response */
-function isTransientS3Response(response) {
-  return response.status === 429 || response.status >= 500;
-}
-
-/**
- * DeleteObjects is a POST, but deleting the same key set is safe to retry.
- * Keep this scoped to S3 POST calls with known idempotent semantics.
- * @param {{ fetch(url: string, init?: RequestInit): Promise<Response> }} client
- * @param {string} url
- * @param {RequestInit} init
- */
-async function fetchRetryableS3Post(client, url, init) {
-  for (let attempt = 0; attempt <= S3_TRANSIENT_RETRIES; attempt += 1) {
-    let response;
-    try {
-      response = await client.fetch(url, init);
-    } catch (err) {
-      if (attempt === S3_TRANSIENT_RETRIES) throw err;
-      await delay(Math.random() * s3RetryDelayMs(attempt));
-      continue;
-    }
-    if (attempt === S3_TRANSIENT_RETRIES || !isTransientS3Response(response)) {
-      return response;
-    }
-    await discardResponseBody(response);
-    await delay(Math.random() * s3RetryDelayMs(attempt));
-  }
-  throw new Error("unreachable S3 retry loop exit");
 }
 
 /** @param {R2BucketBinding} bucket */

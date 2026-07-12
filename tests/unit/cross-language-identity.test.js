@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  KV_ID_RE,
   QUEUE_NAME_RE,
   WORKER_NAME_RE,
   WORKFLOW_INSTANCE_ID_RE,
@@ -28,5 +29,6 @@ test("cross-language identity grammar fixture matches JS owners", () => {
   assertIdentityCases("runtimeLoadNs", isValidRuntimeLoadNs);
   assertIdentityCases("workerNames", (value) => WORKER_NAME_RE.test(value));
   assertIdentityCases("queueNames", (value) => QUEUE_NAME_RE.test(value));
+  assertIdentityCases("kvIds", (value) => KV_ID_RE.test(value));
   assertIdentityCases("workflowInstanceIds", (value) => WORKFLOW_INSTANCE_ID_RE.test(value));
 });

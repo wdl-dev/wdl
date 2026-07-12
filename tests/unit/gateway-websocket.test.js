@@ -77,6 +77,7 @@ const { proxyGatewayWebSocket, webSocketProxyOptionsFromEnv } = await importRepo
   [
     [/from "shared-observability";/, `from ${JSON.stringify(repositoryFileUrl("shared/observability.js"))};`],
     [/from "shared-respond";/, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
+    [/from "gateway-lib";/, `from ${JSON.stringify(repositoryFileUrl("gateway/lib.js"))};`],
   ]
 );
 

@@ -3,10 +3,16 @@ import {
   jsonError,
   readJsonBody,
   errMessage,
-  randomHex,
+  formatError,
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
+import {
+  acquireTokenLock,
+  createTokenLock,
+  releaseTokenLock,
+  renewTokenLock,
+} from "shared-redis-lock";
 import {
   migrationStatus,
   MIGRATIONS_TABLE_SQL,
@@ -60,28 +66,35 @@ function migrationProgress(applied, skipped) {
 async function acquireMigrationLock(ns, databaseId) {
   const redis = requireControlRedis();
   const key = migrationLockKey(ns, databaseId);
-  const token = randomHex();
-  const ok = await redis.set(key, token, { ttl: MIGRATION_LOCK_TTL_SECONDS, nx: true });
-  if (!ok) return null;
-  return { key, token };
+  const lock = createTokenLock(key);
+  return await acquireTokenLock(redis, lock, { ttlSeconds: MIGRATION_LOCK_TTL_SECONDS })
+    ? lock
+    : null;
 }
 
 /** @param {MigrationLock | null} lock */
 export async function renewMigrationLock(lock) {
   if (!lock) return { ok: false, reason: "lost" };
   const redis = requireControlRedis();
-  const renewed = await redis.set(lock.key, lock.token, {
-    ttl: MIGRATION_LOCK_TTL_SECONDS,
-    ifeq: lock.token,
-  });
+  const renewed = await renewTokenLock(redis, lock, MIGRATION_LOCK_TTL_SECONDS);
   return renewed ? { ok: true } : { ok: false, reason: "lost" };
 }
 
-/** @param {MigrationLock | null} lock */
-async function releaseMigrationLock(lock) {
+/**
+ * @param {MigrationLock | null} lock
+ * @param {{ log: import("control-shared").ControlLogger, ns: string, databaseId: string, requestId: string }} context
+ */
+async function releaseMigrationLock(lock, { log, ns, databaseId, requestId }) {
   if (!lock) return;
   const redis = requireControlRedis();
-  await redis.delIfEq(lock.key, lock.token);
+  await releaseTokenLock(redis, lock, {
+    onError: (err) => log("warn", "d1_migration_lock_release_failed", {
+      request_id: requestId,
+      namespace: ns,
+      database_id: databaseId,
+      ...formatError(err),
+    }),
+  });
 }
 
 /**
@@ -320,7 +333,12 @@ export async function applyMigrations({ request, env, ns, databaseId, requestId 
       appliedById.set(migration.id, record);
     }
   } finally {
-    await releaseMigrationLock(lock);
+    await releaseMigrationLock(lock, {
+      log,
+      ns,
+      databaseId: database.databaseId,
+      requestId,
+    });
   }
 
   log("info", "d1_migrations_applied", {

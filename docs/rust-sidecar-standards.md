@@ -156,6 +156,10 @@ wrapper, and UTF-8-safe string truncation. It must not become a dumping ground f
 service behavior. Axum-facing helpers are feature-gated so non-HTTP users such as
 the D1/DO supervisor binaries do not pay for the HTTP stack.
 
+The `test-support` feature exposes the single process-environment override helper used
+by Rust service tests. It serializes overrides across modules in one test process and
+restores all values during unwinding; production dependency builds leave it disabled.
+
 Local explicit code is still preferable when sidecars have different behavior around:
 
 - service-specific shutdown/drain timing and shutdown log events

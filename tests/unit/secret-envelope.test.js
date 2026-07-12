@@ -7,14 +7,16 @@ import {
   encryptSecretValue,
   isSecretEnvelope,
 } from "../../shared/secret-envelope.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 
+const SECRET_ENVELOPE_PARITY = readRepositoryJson("tests/fixtures/secret-envelope-parity.json");
 const env = {
-  SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-  SECRET_ENVELOPE_KID: "local:test:secret-envelope:v1",
+  SECRET_ENVELOPE_LOCAL_KEY_B64: SECRET_ENVELOPE_PARITY.provider.localKeyB64,
+  SECRET_ENVELOPE_KID: SECRET_ENVELOPE_PARITY.provider.kid,
 };
 
-function deterministicRandomFactory() {
-  let next = 0;
+function deterministicRandomFactory(start = 0) {
+  let next = start;
   return (/** @type {number} */ length) => {
     const out = new Uint8Array(length);
     for (let i = 0; i < length; i++) out[i] = next++ & 0xff;
@@ -22,70 +24,42 @@ function deterministicRandomFactory() {
   };
 }
 
-test("secret envelope encrypts and decrypts with storage-location AAD", async () => {
-  const envelope = await encryptSecretValue("sensitive-value", {
-    env,
-    hashKey: "secrets:demo:api",
-    fieldName: "TOKEN",
-    random: deterministicRandomFactory(),
-  });
-
-  assert.equal(isSecretEnvelope(envelope), true);
-  assert.ok(envelope.startsWith(SECRET_ENVELOPE_PREFIX));
-  assert.equal(envelope.includes("sensitive-value"), false);
-  assert.equal(
-    await decryptSecretValue(envelope, {
+test("secret envelope generation and decrypt match the shared parity vectors", async () => {
+  for (const vector of SECRET_ENVELOPE_PARITY.vectors) {
+    const envelope = await encryptSecretValue(vector.plaintext, {
       env,
-      hashKey: "secrets:demo:api",
-      fieldName: "TOKEN",
-    }),
-    "sensitive-value"
-  );
+      hashKey: vector.hashKey,
+      fieldName: vector.fieldName,
+      random: deterministicRandomFactory(vector.randomStart),
+    });
+
+    assert.equal(envelope, vector.envelope, vector.name);
+    assert.equal(isSecretEnvelope(envelope), true, vector.name);
+    if (vector.plaintext !== "") assert.equal(envelope.includes(vector.plaintext), false, vector.name);
+    assert.equal(
+      await decryptSecretValue(envelope, {
+        env,
+        hashKey: vector.hashKey,
+        fieldName: vector.fieldName,
+      }),
+      vector.plaintext,
+      vector.name
+    );
+  }
 });
 
-test("secret envelope preserves empty string secrets", async () => {
-  const envelope = await encryptSecretValue("", {
-    env,
-    hashKey: "secrets:demo:api",
-    fieldName: "EMPTY",
-    random: deterministicRandomFactory(),
-  });
-
-  assert.equal(isSecretEnvelope(envelope), true);
-  assert.equal(
-    await decryptSecretValue(envelope, {
-      env,
-      hashKey: "secrets:demo:api",
-      fieldName: "EMPTY",
-    }),
-    ""
-  );
-});
-
-test("secret envelope rejects copy to another hash or field", async () => {
-  const envelope = await encryptSecretValue("value", {
-    env,
-    hashKey: "secrets:demo",
-    fieldName: "TOKEN",
-    random: deterministicRandomFactory(),
-  });
-
-  await assert.rejects(
-    decryptSecretValue(envelope, {
-      env,
-      hashKey: "secrets:other",
-      fieldName: "TOKEN",
-    }),
-    { code: "secret_decrypt_failed" }
-  );
-  await assert.rejects(
-    decryptSecretValue(envelope, {
-      env,
-      hashKey: "secrets:demo",
-      fieldName: "OTHER",
-    }),
-    { code: "secret_decrypt_failed" }
-  );
+test("secret envelope rejection behavior matches the shared parity vectors", async () => {
+  for (const rejection of SECRET_ENVELOPE_PARITY.rejections) {
+    await assert.rejects(
+      decryptSecretValue(rejection.envelope, {
+        env: { ...env, SECRET_ENVELOPE_KID: rejection.configuredKid },
+        hashKey: rejection.hashKey,
+        fieldName: rejection.fieldName,
+      }),
+      { code: rejection.jsErrorCode },
+      rejection.name
+    );
+  }
 });
 
 test("secret envelope requires explicit local provider configuration", async () => {
@@ -107,24 +81,6 @@ test("secret envelope rejects unprefixed values", async () => {
       fieldName: "TOKEN",
     }),
     { code: "secret_not_encrypted" }
-  );
-});
-
-test("secret envelope rejects unknown kid", async () => {
-  const envelope = await encryptSecretValue("value", {
-    env,
-    hashKey: "secrets:demo",
-    fieldName: "TOKEN",
-    random: deterministicRandomFactory(),
-  });
-
-  await assert.rejects(
-    decryptSecretValue(envelope, {
-      env: { ...env, SECRET_ENVELOPE_KID: "local:test:secret-envelope:v2" },
-      hashKey: "secrets:demo",
-      fieldName: "TOKEN",
-    }),
-    { code: "unknown_kid" }
   );
 });
 

@@ -3,6 +3,28 @@ export const R2_LIST_LIMIT_MAX = 1000;
 // Keep in sync with shared/ns-pattern.js. This file is embedded into loaded
 // workers as _wdl-r2-utils.js, so it must stay standalone.
 export const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const R2_HTTP_METADATA_FIELDS = Object.freeze([
+  Object.freeze(["contentType", "content-type"]),
+  Object.freeze(["contentLanguage", "content-language"]),
+  Object.freeze(["contentDisposition", "content-disposition"]),
+  Object.freeze(["contentEncoding", "content-encoding"]),
+  Object.freeze(["cacheControl", "cache-control"]),
+]);
+
+/** @param {Headers} headers */
+export function r2CacheExpiryFromHeaders(headers) {
+  const expires = headers.get("expires");
+  if (!expires) return undefined;
+  const ms = new Date(expires).getTime();
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** @param {Headers} headers @param {unknown} value */
+export function setR2CacheExpiryHeader(headers, value) {
+  if (value == null) return;
+  const date = value instanceof Date ? value : new Date(Number(value));
+  headers.set("expires", date.toUTCString());
+}
 
 /**
  * @param {unknown} bucketName

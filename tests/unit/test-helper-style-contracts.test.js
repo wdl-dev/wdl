@@ -34,11 +34,7 @@ test("test files use moduleDataUrl/repositoryFileUrl instead of raw fs+URL boile
 });
 
 test("test module source rewrites go through load-shared-module helpers", () => {
-  const EXEMPT = new Set([
-    "tests/helpers/load-shared-module.js",
-    "tests/unit/test-helper-style-contracts.test.js",
-  ]);
-  const testFiles = scannedTestFiles(EXEMPT);
+  const testFiles = scannedTestFiles();
   /** @type {string[]} */
   const offenders = [];
   const sourceReader = String.raw`(?:readFileSync|readRepositoryFile|readRepositoryModuleSource)`;
@@ -87,8 +83,7 @@ test("test module source rewrites go through load-shared-module helpers", () => 
 });
 
 test("test global mocks go through mock-global helpers", () => {
-  const EXEMPT = new Set(["tests/helpers/mock-global.js"]);
-  const testFiles = scannedTestFiles(EXEMPT);
+  const testFiles = scannedTestFiles();
   /** @type {string[]} */
   const offenders = [];
   for (const file of testFiles) {
@@ -115,7 +110,6 @@ test("test global mocks go through mock-global helpers", () => {
 test("auth index tests access mock state through the harness", () => {
   const EXEMPT = new Set([
     "tests/helpers/load-auth-index.js",
-    "tests/unit/test-helper-style-contracts.test.js",
   ]);
   const testFiles = scannedTestFiles(EXEMPT);
   /** @type {string[]} */
@@ -132,8 +126,6 @@ test("auth index tests access mock state through the harness", () => {
 test("test output capture goes through output-capture helpers", () => {
   const EXEMPT = new Set([
     "tests/helpers/output-capture.js",
-    "tests/unit/output-capture.test.js",
-    "tests/unit/test-helper-style-contracts.test.js",
   ]);
   const testFiles = scannedTestFiles(EXEMPT);
   /** @type {string[]} */
@@ -153,9 +145,7 @@ test("test output capture goes through output-capture helpers", () => {
 
 test("test request-body and DO envelope decoders use shared helpers", () => {
   const EXEMPT = new Set([
-    "tests/helpers/request-body.js",
     "tests/helpers/do-envelope.js",
-    "tests/unit/test-helper-style-contracts.test.js",
   ]);
   const testFiles = scannedTestFiles(EXEMPT);
   /** @type {string[]} */
@@ -181,11 +171,7 @@ test("test request-body and DO envelope decoders use shared helpers", () => {
 });
 
 test("integration response JSON parsing uses response accessors", () => {
-  const EXEMPT = new Set([
-    "tests/integration/helpers/http-response.js",
-    "tests/unit/test-helper-style-contracts.test.js",
-  ]);
-  const testFiles = scannedTestFiles(EXEMPT)
+  const testFiles = scannedTestFiles()
     .filter((file) => file.startsWith("tests/integration/"));
   /** @type {string[]} */
   const offenders = [];
@@ -284,11 +270,7 @@ test("integration Redis commands use typed Redis helpers", () => {
 });
 
 test("integration status assertions use status helpers for structured diagnostics", () => {
-  const EXEMPT = new Set([
-    "tests/integration/helpers/assertions.js",
-    "tests/unit/test-helper-style-contracts.test.js",
-  ]);
-  const testFiles = scannedTestFiles(EXEMPT)
+  const testFiles = scannedTestFiles()
     .filter((file) => file.startsWith("tests/integration/"));
   /** @type {string[]} */
   const offenders = [];
@@ -304,13 +286,7 @@ test("integration status assertions use status helpers for structured diagnostic
 });
 
 test("unit JSON response assertions use response-json helper", () => {
-  const EXEMPT = new Set([
-    "tests/helpers/response-json.js",
-    "tests/unit/mock-fetch.test.js",
-    "tests/unit/response-json.test.js",
-    "tests/unit/test-helper-style-contracts.test.js",
-  ]);
-  const testFiles = scannedTestFiles(EXEMPT)
+  const testFiles = scannedTestFiles()
     .filter((file) => file.startsWith("tests/unit/"));
   /** @type {string[]} */
   const offenders = [];
@@ -343,12 +319,7 @@ test("unit JSON response assertions use response-json helper", () => {
 });
 
 test("tests use delay helper for simple sleep promises", () => {
-  const EXEMPT = new Set([
-    "tests/helpers/timing.js",
-    "tests/integration/helpers/stack.js",
-    "tests/unit/test-helper-style-contracts.test.js",
-  ]);
-  const testFiles = scannedTestFiles(EXEMPT)
+  const testFiles = scannedTestFiles()
     .filter((file) => !file.includes("/manual/"));
   /** @type {string[]} */
   const offenders = [];
@@ -366,7 +337,6 @@ test("tests use delay helper for simple sleep promises", () => {
 test("test temporary directories use temp-dir helper", () => {
   const EXEMPT = new Set([
     "tests/helpers/temp-dir.js",
-    "tests/unit/test-helper-style-contracts.test.js",
   ]);
   const testFiles = scannedTestFiles(EXEMPT);
   /** @type {string[]} */
@@ -386,9 +356,7 @@ test("test temporary directories use temp-dir helper", () => {
 
 test("DO owner hint test fixtures use shared helper", () => {
   const EXEMPT = new Set([
-    "tests/helpers/do-owner-hint.js",
     "tests/unit/style-contracts.test.js",
-    "tests/unit/test-helper-style-contracts.test.js",
   ]);
   const testFiles = scannedTestFiles(EXEMPT);
   /** @type {string[]} */
@@ -404,11 +372,7 @@ test("DO owner hint test fixtures use shared helper", () => {
 });
 
 test("repository JSON fixtures use readRepositoryJson", () => {
-  const EXEMPT = new Set([
-    "tests/helpers/load-shared-module.js",
-    "tests/unit/test-helper-style-contracts.test.js",
-  ]);
-  const testFiles = scannedTestFiles(EXEMPT);
+  const testFiles = scannedTestFiles();
   /** @type {string[]} */
   const offenders = [];
   const fixtureJsonParse = /JSON\.parse\(\s*readFileSync\(\s*new URL\([^)]*fixtures\/[^)]*\.json/;
@@ -422,15 +386,7 @@ test("repository JSON fixtures use readRepositoryJson", () => {
 });
 
 test("structured JSON payloads use protocol-specific helpers", () => {
-  const EXEMPT = new Set([
-    "tests/integration/helpers/http-response.js",
-    "tests/integration/helpers/internal-http.js",
-    "tests/integration/helpers/json-payload.js",
-    "tests/helpers/json-payload.js",
-    "tests/integration/helpers/ws-roundtrip-runner.cjs",
-    "tests/unit/test-helper-style-contracts.test.js",
-  ]);
-  const testFiles = scannedTestFiles(EXEMPT);
+  const testFiles = scannedTestFiles();
   /** @type {string[]} */
   const offenders = [];
   const structuredJsonParsers = [

@@ -145,4 +145,21 @@ test("/_queued: rejects malformed requests with 400", async () => {
     { queue: "x", messages: [{ id: "m", first_seen_ms: 0, attempts: 0, body_b64: "", content_type: "v8" }] }
   );
   assertStatus(badContentType, 400, "bad content type request");
+
+  const badBase64 = runtimeDispatchPost(
+    "/_queued",
+    { "x-worker-id": workerId },
+    {
+      queue: "x",
+      messages: [{
+        id: "m",
+        first_seen_ms: 0,
+        attempts: 0,
+        body_b64: "%%%",
+        content_type: "bytes",
+      }],
+    }
+  );
+  assertStatus(badBase64, 400, "invalid base64 request");
+  assert.equal(responseJson(badBase64).error, "queue_message_decode_failed");
 });

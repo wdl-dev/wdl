@@ -201,6 +201,9 @@ Prefer the narrow helper that matches the response or fixture source:
   static-analysis utilities (`source-scan.js`), and `mocks/` for mocked
   Cloudflare runtime surfaces. `load-shared-module.js` owns repository module
   source loading, data-URL construction, and import-specifier rewrite helpers;
+  load import-free contract owners such as `shared/version.js` and
+  `shared/ns-pattern.js` directly with `repositoryFileUrl(...)` instead of
+  reimplementing their grammar in a stub.
   use it instead of ad hoc `readFileSync(...).replace(...)` chains when a test
   rewrites repo module imports. Use `readRepositoryFile(...)` plus
   `applyModuleReplacements(...)` for local source rewrites,
@@ -216,7 +219,9 @@ Prefer the narrow helper that matches the response or fixture source:
   `control/handlers/*` unit tests. Use it for state/env/log/metrics/backend
   injection instead of declaring another file-local `control-shared` data-URL
   stub when the handler under test follows the shared control entrypoint
-  shape.
+  shape. The harness stub imports pure response, bounded JSON body, coded abort,
+  and optimistic retry contracts from their production owners; keep only
+  state-bound wiring and test instrumentation local to the stub.
   `load-runtime-r2-binding.js` owns the `runtime/bindings/r2.js` host binding
   module graph, including SigV4Client/fetch recording hooks. Extend that loader
   for additional R2 host tests instead of copying the replacement graph back
@@ -227,7 +232,10 @@ Prefer the narrow helper that matches the response or fixture source:
   `mocks/fake-redis.js` owns the reusable in-memory Redis session/multi subset
   for unit tests, including command tracing for reads, writes, batch helpers,
   and multi ops; extend it when multiple tests need the same Redis command
-  shape instead of adding another file-local mock.
+  shape instead of adding another file-local mock. Use
+  `sharedRedisStubUrl(...)` for data-URL `shared-redis` replacements so tests
+  share the fake `WatchError` constructor and production `decodeBulk`
+  semantics; append only graph-specific state or client exports.
   `request-body.js` owns typed JSON request-body parsing for mock backends;
   use it when tests capture `RequestInit.body` instead of open-coding
   `JSON.parse(...)`. `do-envelope.js` owns test decoding for Durable Object

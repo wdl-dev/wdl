@@ -4,10 +4,19 @@ import { test } from "node:test";
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
 import { loadDoProtocol } from "../helpers/load-do-protocol.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
+import {
+  OWNER_HINT_STALE_CODES,
+  OWNER_RACE_RETRY_CODES,
+  dispatchDoInvokeWithHintCache,
+  retryableOwnerRaceResponse,
+  staleDoOwnerHintResponse,
+} from "../../runtime/_wdl-do-transport.js";
+import { doOwnerHintHeaders } from "../helpers/do-owner-hint.js";
 
 const {
   DoRuntimeError,
   DO_INVOKE_CONTENT_TYPE,
+  DO_OWNERSHIP_CODE,
   buildFacetName,
   buildAlarmRequest,
   buildForwardRequest,
@@ -22,6 +31,80 @@ const {
   readLocalActorInvokeRequest,
   readJsonBody,
 } = await loadDoProtocol();
+
+test("DO ownership errors stay aligned with runtime hint and retry handling", async () => {
+  const ownershipCodes = new Set(Object.values(DO_OWNERSHIP_CODE));
+  /** @type {Set<string>} */
+  const ownerRaceRetryCodes = new Set([
+    DO_OWNERSHIP_CODE.STALE_OWNER_GENERATION,
+    DO_OWNERSHIP_CODE.OWNER_CLAIM_RACED,
+    DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING,
+    DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED,
+    DO_OWNERSHIP_CODE.OWNER_LEASE_TOO_SHORT,
+  ]);
+  assert.deepEqual(
+    [...OWNER_HINT_STALE_CODES].toSorted(),
+    [...ownershipCodes].toSorted()
+  );
+  assert.deepEqual(
+    [...OWNER_RACE_RETRY_CODES].toSorted(),
+    [...ownerRaceRetryCodes].toSorted()
+  );
+
+  for (const code of ownershipCodes) {
+    const response = Response.json({ error: code }, { status: 503 });
+    assert.equal(await staleDoOwnerHintResponse(response), true, code);
+    assert.equal(
+      await retryableOwnerRaceResponse(response),
+      ownerRaceRetryCodes.has(code),
+      code
+    );
+  }
+});
+
+test("DO invoke dispatch does not cache hints carried by owner-race responses", async () => {
+  /** @type {Array<{ url: string, init: RequestInit | undefined }>} */
+  const routerCalls = [];
+  /** @type {unknown[]} */
+  const cachedHints = [];
+  const init = {
+    method: "POST",
+    headers: { "x-wdl-do-accept-owner-hint": "1" },
+  };
+
+  const response = await dispatchDoInvokeWithHintCache({
+    async routerFetch(url, requestInit) {
+      routerCalls.push({ url, init: requestInit });
+      return routerCalls.length === 1
+        ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
+            status: 503,
+            headers: doOwnerHintHeaders(),
+          })
+        : new Response("retried");
+    },
+    routerUrl: "http://do-runtime/internal/do/invoke",
+    async ownerFetch() {
+      assert.fail("owner endpoint must not receive an owner-race response hint");
+    },
+    ownerPath: "/internal/do/invoke",
+    init,
+    cache: {
+      get() {
+        return null;
+      },
+      set(_key, hint) {
+        cachedHints.push(hint);
+      },
+      delete() {},
+    },
+    hintKey: "room-a",
+  });
+
+  assert.equal(await response.text(), "retried");
+  assert.equal(routerCalls.length, 2);
+  assert.deepEqual(cachedHints, []);
+  assert.equal(new Headers(routerCalls[1].init?.headers).get("x-wdl-do-accept-owner-hint"), null);
+});
 
 const DO_STORAGE_ID = "do_0123456789abcdef0123456789abcdef";
 const CHAT_ROOM_HOST_ID = `${DO_STORAGE_ID}:ChatRoom:shard12`;

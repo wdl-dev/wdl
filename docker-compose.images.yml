@@ -1,49 +1,41 @@
+x-rust-published: &rust-published
+  image: docker.io/getwdl/wdl-rust:latest
+  pull_policy: always
+
+x-workerd-published: &workerd-published
+  image: docker.io/getwdl/wdl-workerd:latest
+  pull_policy: always
+
 services:
   redis-proxy-user:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
   redis-proxy-system:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
   redis-proxy-do:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
   scheduler:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
   workflows:
-    image: docker.io/getwdl/wdl-rust:latest
-    pull_policy: always
+    <<: *rust-published
   user-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   system-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   gateway:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   d1-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   d1-runtime-a:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   d1-runtime-b:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   d1-runtime-c:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   do-runtime:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   do-runtime-a:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   do-runtime-b:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published
   do-runtime-c:
-    image: docker.io/getwdl/wdl-workerd:latest
-    pull_policy: always
+    <<: *workerd-published

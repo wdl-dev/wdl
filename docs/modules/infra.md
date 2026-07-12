@@ -158,6 +158,9 @@ Stateful storage:
 - Runtime internal `:8088`, d1-runtime `:8787`, do-runtime `:8788`, workflows `:9120`,
   and Redis are private mesh services. Private service calls also require
   `x-wdl-internal-auth` with the shared `WDL_INTERNAL_AUTH_TOKEN`.
+- Kubernetes NetworkPolicies use per-component caller sets. ECS intentionally groups
+  user-runtime, system-runtime, D1, and DO tasks in one runtime security group, so its
+  network rules are coarser and are not required to match the Kubernetes caller matrix.
 - Tenant-running runtime tasks use least-privilege ECS task roles, public-only workerd
   outbound bindings, and private mesh security groups as their cloud credential and
   network boundary. ECS Exec should be enabled only where operator access is intended.

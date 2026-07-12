@@ -1,5 +1,6 @@
-const WORKFLOW_RESULT_BYTES_MAX = 1024 * 1024;
-const WORKFLOW_BACKEND_REQUEST_BYTES_MAX = 2 * 1024 * 1024;
+export const WORKFLOW_RESULT_BYTES_MAX = 1024 * 1024;
+export const WORKFLOW_BACKEND_REQUEST_BYTES_MAX = 2 * 1024 * 1024;
+export const WORKFLOW_PAYLOAD_TOO_LARGE_CODE = "workflow_payload_too_large";
 const WORKFLOW_JSON_ENCODE_CHARS = 8192;
 const WORKFLOW_JSON_FLUSH_CHARS = 8192;
 const utf8Encoder = new TextEncoder();
@@ -20,7 +21,7 @@ export function workflowStepError(code, message) {
  */
 function workflowPayloadTooLarge(kind, maxBytes = WORKFLOW_RESULT_BYTES_MAX) {
   return workflowStepError(
-    "workflow_payload_too_large",
+    WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
     `Workflow ${kind} exceeds the ${maxBytes} byte limit`
   );
 }
@@ -255,7 +256,6 @@ export function stringifyWorkflowResult(value, kind) {
   return stringifyWorkflowJson(value, kind, WORKFLOW_RESULT_BYTES_MAX);
 }
 
-/** @lintignore data-URL unit tests import this hook from a rewritten module. */
 /**
  * @param {unknown} value
  * @param {number} [maxBytes]
@@ -264,7 +264,6 @@ export function _stringifyWorkflowJsonForTest(value, maxBytes = WORKFLOW_RESULT_
   return stringifyWorkflowJson(value, "test value", maxBytes);
 }
 
-/** @lintignore data-URL unit tests import this hook from a rewritten module. */
 /** @param {string} path @param {unknown} body */
 export function _stringifyWorkflowBackendBodyForTest(path, body) {
   return workflowBackendBody(path, body);

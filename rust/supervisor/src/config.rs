@@ -258,71 +258,43 @@ pub(crate) fn pick_do_compiled_config() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn temp_env<R>(key: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env mutex poisoned");
-        let prev = std::env::var(key).ok();
-        // SAFETY: these tests serialize environment mutation with ENV_LOCK, so no
-        // concurrent test can read or write the same process environment while this
-        // temporary override is active.
-        match value {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            // SAFETY: Same serialization rationale as set_var above.
-            None => unsafe { std::env::remove_var(key) },
-        }
-        let result = f();
-        // SAFETY: ENV_LOCK is still held, so restoring the process environment is
-        // serialized with all other test environment mutation in this module.
-        match prev {
-            Some(p) => unsafe { std::env::set_var(key, p) },
-            // SAFETY: Same serialization rationale as set_var above.
-            None => unsafe { std::env::remove_var(key) },
-        }
-        result
-    }
+    use wdl_rust_common::test_env::with_temp_env;
 
     #[test]
     fn positive_int_env_accepts_only_strict_positive_integer_strings() {
-        temp_env("WDLTEST_VAL", None, || {
+        with_temp_env("WDLTEST_VAL", None, || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some(""), || {
+        with_temp_env("WDLTEST_VAL", Some(""), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some("0"), || {
+        with_temp_env("WDLTEST_VAL", Some("0"), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some("-3"), || {
+        with_temp_env("WDLTEST_VAL", Some("-3"), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some("nope"), || {
+        with_temp_env("WDLTEST_VAL", Some("nope"), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some("12.9"), || {
+        with_temp_env("WDLTEST_VAL", Some("12.9"), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some("1e3"), || {
+        with_temp_env("WDLTEST_VAL", Some("1e3"), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some("18446744073709551616"), || {
+        with_temp_env("WDLTEST_VAL", Some("18446744073709551616"), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 7);
         });
-        temp_env("WDLTEST_VAL", Some("42"), || {
+        with_temp_env("WDLTEST_VAL", Some("42"), || {
             assert_eq!(positive_int_env("WDLTEST_", "VAL", 7), 42);
         });
     }
 
     #[test]
     fn owner_ttl_ms_saturates_extreme_env_values() {
-        temp_env(
+        with_temp_env(
             "WDLTEST_OWNER_TTL_SECONDS",
             Some("18446744073709552"),
             || {

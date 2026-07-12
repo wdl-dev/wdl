@@ -5,6 +5,7 @@ import {
   applyModuleReplacements,
   moduleDataUrl,
   readRepositoryFile,
+  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
@@ -15,11 +16,18 @@ const D1_MIGRATIONS_TEST_STATE = {
   runtimeCalls: null,
   runtimeResult: null,
   lockToken: null,
+  logs: [],
   splitStatements: null,
 };
 /** @type {typeof globalThis & { __d1MigrationTestState?: typeof D1_MIGRATIONS_TEST_STATE }} */
 const d1MigrationGlobal = globalThis;
 d1MigrationGlobal.__d1MigrationTestState = D1_MIGRATIONS_TEST_STATE;
+
+const sharedRandomIdUrl = repositoryFileUrl("shared/random-id.js");
+const sharedRedisLockUrl = moduleDataUrl(applyModuleReplacements(
+  readRepositoryFile("shared/redis-lock.js"),
+  [[/from "shared-random-id"/g, `from ${JSON.stringify(sharedRandomIdUrl)}`]]
+));
 
 const controlSharedUrl = controlSharedStubUrl(`
 export const state = {
@@ -41,7 +49,9 @@ export const state = {
       return await fn(globalThis.__d1MigrationTestState.session);
     },
   },
-  log() {},
+  log(level, event, fields) {
+    /** @type {any} */ (globalThis).__d1MigrationTestState.logs.push({ level, event, fields });
+  },
 };
 `);
 
@@ -108,6 +118,7 @@ const src = applyModuleReplacements(readRepositoryFile("control/d1-migrations.js
   [/from "control-d1-model";/, `from ${JSON.stringify(modelUrl)};`],
   [/from "control-d1-runtime-client";/, `from ${JSON.stringify(backendUrl)};`],
   [/from "control-d1-store";/, `from ${JSON.stringify(storeUrl)};`],
+  [/from "shared-redis-lock";/, `from ${JSON.stringify(sharedRedisLockUrl)};`],
 ]);
 
 const {
@@ -123,6 +134,7 @@ afterEach(() => {
   D1_MIGRATIONS_TEST_STATE.runtimeCalls = null;
   D1_MIGRATIONS_TEST_STATE.runtimeResult = null;
   D1_MIGRATIONS_TEST_STATE.lockToken = null;
+  D1_MIGRATIONS_TEST_STATE.logs = [];
   D1_MIGRATIONS_TEST_STATE.splitStatements = null;
 });
 
@@ -265,6 +277,7 @@ test("applyMigrations maps lock renewal loss to 409", async () => {
 test("applyMigrations includes empty progress when reading existing migrations fails", async () => {
   /** @type {any} */ (globalThis).__d1MigrationTestState.redis = {
     async set() { return "OK"; },
+    async delIfEq() { throw new Error("migration lock release unavailable"); },
   };
   /** @type {any} */ (globalThis).__d1MigrationTestState.runtimeResult = {
     ok: false,
@@ -290,6 +303,17 @@ test("applyMigrations includes empty progress when reading existing migrations f
     assert.equal(body.error, "d1_migrations_apply_failed");
     assert.deepEqual(body.applied, []);
     assert.deepEqual(body.skipped, []);
+    assert.deepEqual(/** @type {any} */ (globalThis).__d1MigrationTestState.logs, [{
+      level: "warn",
+      event: "d1_migration_lock_release_failed",
+      fields: {
+        request_id: "rid-migration-read-failure",
+        namespace: "demo",
+        database_id: "d1_main",
+        error_name: "Error",
+        error_message: "migration lock release unavailable",
+      },
+    }]);
   } finally {
     /** @type {any} */ (globalThis).__d1MigrationTestState.redis = null;
     /** @type {any} */ (globalThis).__d1MigrationTestState.runtimeResult = null;

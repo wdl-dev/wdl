@@ -13,6 +13,7 @@ const R2_UTILS_URL = repositoryFileUrl("runtime/r2-utils.js");
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_S3_XML_URL = repositoryFileUrl("shared/s3-xml.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const SHARED_S3_RETRY_URL = repositoryFileUrl("shared/s3-retry.js");
 const R2_METADATA_URL = repositoryModuleDataUrl("runtime/bindings/r2/metadata.js", [
   [/from "runtime-r2-utils";/, `from ${JSON.stringify(R2_UTILS_URL)};`],
 ]);
@@ -51,6 +52,7 @@ const mod = await importRepositoryModule("runtime/bindings/r2.js", [
   [/from "runtime-bindings-r2-metadata";/, `from ${JSON.stringify(R2_METADATA_URL)};`],
   [/from "runtime-bindings-r2-xml";/, `from ${JSON.stringify(R2_XML_URL)};`],
   [/from "shared-respond";/, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
+  [/from "shared-s3-retry";/, `from ${JSON.stringify(SHARED_S3_RETRY_URL)};`],
 ]);
 
 export const { R2Bucket } = mod;

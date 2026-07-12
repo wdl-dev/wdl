@@ -126,39 +126,12 @@ pub(crate) fn build_request_id(prefix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn temp_env<R>(key: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env mutex poisoned");
-        let prev = std::env::var(key).ok();
-        // SAFETY: tests hold ENV_LOCK for the full override/restore window, so process
-        // environment mutation is serialized.
-        match value {
-            Some(v) => unsafe { std::env::set_var(key, v) },
-            // SAFETY: Same serialization rationale as set_var above.
-            None => unsafe { std::env::remove_var(key) },
-        }
-        let result = f();
-        // SAFETY: ENV_LOCK is still held, so restoring the environment cannot race
-        // with another test in this module.
-        match prev {
-            Some(p) => unsafe { std::env::set_var(key, p) },
-            // SAFETY: Same serialization rationale as set_var above.
-            None => unsafe { std::env::remove_var(key) },
-        }
-        result
-    }
+    use wdl_rust_common::test_env::with_temp_env;
 
     #[test]
     fn build_request_id_starts_with_prefix() {
-        temp_env("HOSTNAME", Some("test-host"), || {
+        with_temp_env("HOSTNAME", Some("test-host"), || {
             let id = build_request_id("do-drain");
             assert!(
                 id.starts_with("do-drain-test-host-"),

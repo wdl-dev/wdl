@@ -1,7 +1,8 @@
 import { bytesToHex } from "shared-hex";
+import { D1_DATABASE_ID_RE } from "shared-ns-pattern";
 export { splitSqlStatements } from "shared-sql-splitter";
 
-export const D1_DATABASE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+export { D1_DATABASE_ID_RE };
 export const D1_DATABASE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 export const D1_MIGRATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,191}$/;
 export const EXECUTE_MODES = new Set(["all", "raw", "run", "exec"]);

@@ -36,8 +36,10 @@ are outside this map unless they own runtime or deployable service behavior.
 | `runtime/lib.js` | Pure runtime helpers such as bundle-to-worker-code, byte normalization, and dispatch body normalization. |
 | `control/index.js` | Thin HTTP dispatcher on system-runtime `:8082`; delegates to handlers after auth. |
 | `control/handlers/` | Endpoint handlers for deploy, promote, versions, workers, delete, secrets, hosts, reload, auth tokens, D1, R2, workflows, and log tail. |
-| `control/shared.js` | Control singletons, auth wrapper, JSON/error helpers, Redis publish helpers, and shared lifecycle/delete helpers. Direct `state.*` access belongs here or in the dispatcher. |
-| `control/lib.js` | Control route-to-action classifier, route utilities, delete-lock key helper, and referrer redaction. |
+| `control/shared.js` | Control singletons, auth wrapper, Redis publish helpers, state-bound workflow transport wiring, and shared lifecycle/delete helpers. Direct `state.*` access belongs here or in the dispatcher. |
+| `control/errors.js`, `control/json-body.js`, `control/optimistic.js` | Pure Control error-response and bounded JSON request-body contracts plus the strict `WatchError`/Redis-session adapter over the shared optimistic retry loop, re-exported by `control/shared.js`. |
+| `control/workflows-client.js` | Internal Control-to-Workflows POST transport with explicit caller-owned timeout selection; callers own endpoint-specific response interpretation. |
+| `control/lib.js` | Pure Control data-shaping: route-to-action classification, key helpers, canonical bundle `__meta__` parsing, and referrer redaction. |
 | `control/bundle.js` | Bundle/module normalization, compatibility metadata, vars, and emitted module manifest construction. |
 | `control/bindings.js` | Service/platform binding parsers, ACL evaluation, and linker helpers. |
 | `control/topology.js` | Route, pattern, cron, queue consumer, and workflow declaration parsing for deploy metadata. |
@@ -56,23 +58,26 @@ are outside this map unless they own runtime or deployable service behavior.
 | Path | Responsibility |
 |---|---|
 | `shared/redis.js`, `shared/redis-*.js` | Public Redis import surface plus split RESP codec, per-call client, WATCH/MULTI session, and subscriber loop modules. Runtime hot paths prefer the Rust redis-proxy sidecar. |
-| `shared/owner-lease.js`, `shared/owner-protocol.js`, `shared/owner-forwarder.js` | Shared owner lease parsing, generation counters, key derivation, fence matching, staged Redis owner writes, and owner-forwarding HTTP mechanics used by D1 and DO runtimes. |
+| `shared/redis-lock.js` | Token-fenced Redis lock creation, acquire, renewal, and best-effort token-scoped release shared by Control and Auth. |
+| `shared/owner-lease.js`, `shared/owner-protocol.js`, `shared/owner-forwarder.js` | Shared optimistic retry loop plus owner lease parsing, generation counters, key derivation, fence matching, staged Redis owner writes, and owner-forwarding HTTP mechanics used by Control and the D1/DO runtimes. |
 | `shared/auth-roles.js` | Role table, principal validation, reserved namespace policy, and auth action capabilities. |
 | `shared/auth-token.js` | Shared `x-admin-token` sanitizer used by control and auth. |
 | `shared/internal-auth.js` | Shared internal mesh auth header and token helpers used by JS callers and receivers. |
 | `shared/secret-envelope.js`, `shared/secret-keys.js` | Secret envelope encryption/decryption, canonical base64/JSON handling, AAD binding helpers, and secret Redis key construction. |
+| `shared/base64.js` | Dependency-free byte/text base64 codec shared by workerd tiers, with a `Buffer` fast path under `nodejs_compat`. |
 | `shared/hex.js`, `shared/random-id.js`, `shared/errors.js` | Small dependency-free primitives for byte-to-hex rendering, random hex ids, and string-only error message extraction. |
 | `shared/observability.js` | Structured logger, metrics registry, request-id helpers, and log-level handling for JS tiers. |
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
-| `shared/bounded-body.js` | Shared bounded request body byte/text readers; each tier maps limit errors to its own HTTP error contract. |
-| `shared/ns-pattern.js` | Namespace, worker, binding, queue, KV id, module path, reserved object-key, and reserved namespace grammars. |
-| `shared/version.js` | Worker version formatting and bundle key helpers. |
+| `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
+| `shared/ns-pattern.js` | Platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
+| `shared/version.js` | Worker version formatting plus worker and route-plane Redis key helpers. |
 | `shared/workerd-compat-flags.js` | Pinned mirror of upstream workerd experimental compatibility enable flags used to reject tenant metadata before cold-load. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |
 | `shared/d1-*.js`, `shared/sql-splitter.js` | D1 parameter, data-field, transport, timeout, query-wire, and SQL splitting utilities shared by runtime, d1-runtime, control, and tests. |
 | `shared/fnv1a32.js` | Shared JavaScript FNV-1a helpers for runtime-side shard and slot hashing. |
 | `shared/s3-query.js` | S3 query encoder used by the s3-cleanup system worker; runtime R2 keeps the same standalone helper in `runtime/r2-utils.js` because that file is injected as worker source. |
+| `shared/s3-retry.js` | Bounded transient retry policy for idempotent S3 POST operations, shared by runtime R2 and the s3-cleanup worker. |
 | `shared/s3-xml.js` | Shared S3 XML parsing helpers used by control R2, runtime R2, and system cleanup paths. |
 | `shared/worker-id.js` | Shared `x-worker-id` formatting, parsing, and runtime-load identity grammar used by gateway, runtime, DO runtime, and tests. |
 | `shared/cron-time.js` | Control-side cron parsing and slot-alignment helpers; scheduler advancement uses Rust `croner`. |

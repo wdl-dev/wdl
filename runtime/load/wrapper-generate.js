@@ -1,3 +1,15 @@
+const WDL_ABORT_SHIM_SOURCE = `// Reserved name (WDL_RESERVED_ENTRYPOINT_RE) — control rejects user
+// [[exports]] / [[services]] matches; implicit user exports collide
+// silently via the export-* shadow rule.
+export class __WdlAbort__ extends WorkerEntrypoint {
+  abort(reason) {
+    abortIsolate(reason ?? "wdl-evict");
+  }
+}`;
+
+const DEFAULT_EXPORT_SOURCE_SNIPPET = "const source = Function.prototype.toString.call(raw);";
+const DEFAULT_EXPORT_CLASS_TEST_SOURCE = "/^\\s*class\\b/.test(source)";
+
 /** @param {string} userMainSpecifier */
 export function generateAbortShimWrapperModule(userMainSpecifier) {
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
@@ -6,14 +18,7 @@ import * as user from ${userMain};
 import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers";
 export * from ${userMain};
 
-// Reserved name (WDL_RESERVED_ENTRYPOINT_RE) — control rejects user
-// [[exports]] / [[services]] matches; implicit user exports collide
-// silently via the export-* shadow rule.
-export class __WdlAbort__ extends WorkerEntrypoint {
-  abort(reason) {
-    abortIsolate(reason ?? "wdl-evict");
-  }
-}
+${WDL_ABORT_SHIM_SOURCE}
 
 export class __WdlWorkflowNotify__ extends WorkerEntrypoint {
   fetch() {
@@ -25,8 +30,8 @@ const raw = user.default;
 let wrappedDefault = raw;
 
 if (typeof raw === "function") {
-  const source = Function.prototype.toString.call(raw);
-  if (!/^\\s*class\\b/.test(source)) {
+  ${DEFAULT_EXPORT_SOURCE_SNIPPET}
+  if (!${DEFAULT_EXPORT_CLASS_TEST_SOURCE}) {
     wrappedDefault = {
       fetch(request, env, ctx) {
         return raw.call(undefined, request, env, ctx);
@@ -83,14 +88,7 @@ ${workflowImport}
 // declared entrypoints get facade-aware env even when star exports are present.
 ${starExport}
 
-// Reserved name (WDL_RESERVED_ENTRYPOINT_RE) — control rejects user
-// [[exports]] / [[services]] matches; implicit user exports collide
-// silently via the export-* shadow rule.
-export class __WdlAbort__ extends WorkerEntrypoint {
-  abort(reason) {
-    abortIsolate(reason ?? "wdl-evict");
-  }
-}
+${WDL_ABORT_SHIM_SOURCE}
 
 export class __WdlWorkflowNotify__ extends WorkerEntrypoint {
   async fetch(request) {
@@ -267,8 +265,8 @@ if (raw && typeof raw === "object") {
     wrapDefaultFunctionKey(key);
   }
 } else if (typeof raw === "function") {
-  const source = Function.prototype.toString.call(raw);
-  if (/^\\s*class\\b/.test(source)) {
+  ${DEFAULT_EXPORT_SOURCE_SNIPPET}
+  if (${DEFAULT_EXPORT_CLASS_TEST_SOURCE}) {
     wrappedDefault = class extends raw {
       constructor(ctx, env) {
         const requestContext = createRequestContext();

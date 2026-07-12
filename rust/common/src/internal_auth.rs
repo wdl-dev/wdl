@@ -1,12 +1,17 @@
 use std::env;
 
 #[cfg(feature = "axum")]
-use axum::http::HeaderMap;
+use axum::{
+    http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response},
+};
 use subtle::ConstantTimeEq;
 
 pub const INTERNAL_AUTH_HEADER: &str = "x-wdl-internal-auth";
 pub const INTERNAL_AUTH_ENV: &str = "WDL_INTERNAL_AUTH_TOKEN";
 pub const INTERNAL_AUTH_PREVIOUS_ENV: &str = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN";
+pub const INTERNAL_AUTH_FAILURE_CODE: &str = "internal_auth_failed";
+pub const INTERNAL_AUTH_FAILURE_MESSAGE: &str = "Internal authentication failed";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InternalAuthTokens {
@@ -81,9 +86,58 @@ pub fn internal_auth_headers_match(headers: &HeaderMap, expected: &InternalAuthT
     internal_auth_matches_any(internal_auth_header_value(headers), expected)
 }
 
+#[cfg(feature = "axum")]
+pub fn internal_auth_failure_response() -> Response {
+    let body = serde_json::json!({
+        "error": INTERNAL_AUTH_FAILURE_CODE,
+        "message": INTERNAL_AUTH_FAILURE_MESSAGE,
+    })
+    .to_string();
+    (
+        StatusCode::UNAUTHORIZED,
+        [(CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contract() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/internal-auth-contract.json"
+        ))
+        .expect("internal auth contract fixture")
+    }
+
+    #[test]
+    fn internal_auth_literals_and_rotation_match_contract() {
+        let contract = contract();
+        assert_eq!(contract["header"], INTERNAL_AUTH_HEADER);
+        assert_eq!(contract["currentEnv"], INTERNAL_AUTH_ENV);
+        assert_eq!(contract["previousEnv"], INTERNAL_AUTH_PREVIOUS_ENV);
+        assert_eq!(contract["failure"]["error"], INTERNAL_AUTH_FAILURE_CODE);
+        assert_eq!(
+            contract["failure"]["message"],
+            INTERNAL_AUTH_FAILURE_MESSAGE
+        );
+
+        for case in contract["rotationCases"]
+            .as_array()
+            .expect("rotationCases array")
+        {
+            let tokens = InternalAuthTokens {
+                current: case["current"].as_str().expect("current token").to_string(),
+                previous: case["previous"].as_str().map(str::to_string),
+            };
+            assert_eq!(
+                internal_auth_matches_any(case["actual"].as_str(), &tokens),
+                case["accepted"].as_bool().expect("accepted boolean")
+            );
+        }
+    }
 
     #[test]
     fn internal_auth_matches_requires_exact_token() {
@@ -134,5 +188,25 @@ mod tests {
         );
         assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, "".to_string()).is_err());
         assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, "tokén".to_string()).is_err());
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn internal_auth_failure_response_matches_contract() {
+        let contract = contract();
+        let response = internal_auth_failure_response();
+        assert_eq!(
+            u64::from(response.status().as_u16()),
+            contract["failure"]["status"]
+                .as_u64()
+                .expect("failure status")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("internal auth failure body");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("internal auth failure JSON");
+        assert_eq!(body["error"], contract["failure"]["error"]);
+        assert_eq!(body["message"], contract["failure"]["message"]);
     }
 }

@@ -7,8 +7,8 @@ use crate::{
     redis_fields_with_error, scheduler_fields_with_error,
 };
 
-use super::reference::{CronEntry, RefVerdict, classify_ref, parse_ref};
-use super::slot::{lease_key, next_fire_ms, slot_key, slot_ms_for};
+use super::reference::{CronEntry, RefVerdict, classify_ref, cron_worker_key, parse_ref};
+use super::slot::{lease_key, next_fire_ms, slot_expire_at, slot_key, slot_ms_for};
 
 const CRON_CLAIM_ADVANCE_SCRIPT: &str = r#"
 if redis.call('SET', KEYS[2], ARGV[1], 'NX', 'EX', ARGV[2]) then
@@ -30,7 +30,7 @@ async fn claim_and_advance_ref(
     let from_key = slot_key(from_slot);
     let lease = lease_key(from_slot, &reference);
     let to_key = slot_key(to_slot);
-    let to_expire_at = to_slot / 1000 + 600;
+    let to_expire_at = slot_expire_at(to_slot);
     let instance_id = state.instance_id.clone();
     let lease_ttl_s = state.config.lease_ttl_s;
     let lease_ttl_s_arg = lease_ttl_s.to_string();
@@ -107,7 +107,7 @@ async fn process_ref(
         remove_ref_from_slot(&state, slot_ms, &reference).await?;
         return Ok(());
     };
-    let cron_hash_key = format!("crons:{}:{}", parts.ns, parts.worker);
+    let cron_hash_key = cron_worker_key(&parts.ns, &parts.worker);
     let cron_id = parts.cron_id.clone();
     let (meta_str, entry_str): (Option<String>, Option<String>) = state
         .redis

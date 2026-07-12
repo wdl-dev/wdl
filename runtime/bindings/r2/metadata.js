@@ -1,4 +1,9 @@
-import { r2RangeAndSizeFromHeaders } from "runtime-r2-utils";
+import {
+  R2_HTTP_METADATA_FIELDS,
+  r2CacheExpiryFromHeaders,
+  r2RangeAndSizeFromHeaders,
+  setR2CacheExpiryHeader,
+} from "runtime-r2-utils";
 
 /**
  * @typedef {{ offset?: number, length?: number, suffix?: number, header?: string }} R2RangeOptions
@@ -79,22 +84,12 @@ export function headersWithRequestId(requestMeta = {}) {
 function httpMetadataFromHeaders(headers) {
   /** @type {Record<string, unknown>} */
   const out = {};
-  const fields = [
-    ["content-type", "contentType"],
-    ["content-language", "contentLanguage"],
-    ["content-disposition", "contentDisposition"],
-    ["content-encoding", "contentEncoding"],
-    ["cache-control", "cacheControl"],
-  ];
-  for (const [header, field] of fields) {
+  for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
     const value = headers.get(header);
     if (value) out[field] = value;
   }
-  const expires = headers.get("expires");
-  if (expires) {
-    const ms = new Date(expires).getTime();
-    if (Number.isFinite(ms)) out.cacheExpiry = ms;
-  }
+  const cacheExpiry = r2CacheExpiryFromHeaders(headers);
+  if (cacheExpiry != null) out.cacheExpiry = cacheExpiry;
   return out;
 }
 
@@ -171,19 +166,10 @@ export function metaFromPutResponse(userKey, headers, bodySize, options = {}) {
  * @param {R2Options} [httpMetadata]
  */
 export function applyHttpMetadata(headers, httpMetadata = {}) {
-  const pairs = [
-    ["contentType", "content-type"],
-    ["contentLanguage", "content-language"],
-    ["contentDisposition", "content-disposition"],
-    ["contentEncoding", "content-encoding"],
-    ["cacheControl", "cache-control"],
-  ];
-  for (const [field, header] of pairs) {
+  for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
     if (httpMetadata[field]) headers.set(header, String(httpMetadata[field]));
   }
-  if (httpMetadata.cacheExpiry != null) {
-    headers.set("expires", new Date(Number(httpMetadata.cacheExpiry)).toUTCString());
-  }
+  setR2CacheExpiryHeader(headers, httpMetadata.cacheExpiry);
 }
 
 /**

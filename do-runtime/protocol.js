@@ -25,6 +25,21 @@ export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
 export { hostIdForObject, hostIdForShard, shardForObjectName } from "do-runtime-protocol-identity";
 
+export const DO_OWNERSHIP_CODE = Object.freeze({
+  OWNER_CLAIM_RACED: "owner_claim_raced",
+  OWNER_FENCE_MISSING: "owner_fence_missing",
+  STALE_OWNER_GENERATION: "stale_owner_generation",
+  OWNER_LEASE_EXPIRED: "owner_lease_expired",
+  STALE_OWNER_STORAGE: "stale_owner_storage",
+  OWNER_LEASE_TOO_SHORT: "owner_lease_too_short",
+  OWNER_RENEW_RACED: "owner_renew_raced",
+  OWNER_RELEASE_RACED: "owner_release_raced",
+  OWNER_UNAVAILABLE: "owner_unavailable",
+  OWNER_ENDPOINT_MISSING: "owner_endpoint_missing",
+  FORWARD_HOP_EXHAUSTED: "forward_hop_exhausted",
+  TASK_DRAINING: "task_draining",
+});
+
 const MAX_MODULE_COUNT = 128;
 const MAX_MODULE_SOURCE_BYTES = 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;

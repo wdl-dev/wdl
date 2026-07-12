@@ -1,21 +1,5 @@
 import { spawn } from "node:child_process";
-
-/** @param {NodeJS.ReadableStream} src @param {NodeJS.WritableStream} dst @param {string} prefix */
-function pipeWithPrefix(src, dst, prefix) {
-  let buf = "";
-  src.setEncoding("utf8");
-  src.on("data", (chunk) => {
-    buf += String(chunk);
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      dst.write(`${prefix}${buf.slice(0, nl)}\n`);
-      buf = buf.slice(nl + 1);
-    }
-  });
-  src.on("end", () => {
-    if (buf.length) dst.write(`${prefix}${buf}\n`);
-  });
-}
+import { pipeWithPrefix } from "./_stream-prefix.js";
 
 const tasks = process.argv.slice(2);
 if (tasks.length === 0) {

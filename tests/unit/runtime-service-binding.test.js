@@ -14,20 +14,19 @@ const { ServiceBinding } = await importRepositoryModule("runtime/bindings/servic
     `const INTERNAL_AUTH_HEADER = ${JSON.stringify(TEST_INTERNAL_AUTH_HEADER)};`
   ],
   [
-    /import \{ createLoaderCallback \} from "runtime-load";/,
-    `const createLoaderCallback = (options) => {
+    /import \{ getLoadedWorkerStub \} from "runtime-load";/,
+    `const getLoadedWorkerStub = (options) => {
        /** @type {any} */ (globalThis).__serviceBindingLoaderCallbackOptions.push(options);
-       return async () => ({});
+       return {
+         workerId: options.workerId,
+         stub: options.env.LOADER.get(options.workerId, async () => ({})),
+       };
      };`
   ],
   [
-    /import \{ recordLoadedWorker \} from "runtime-state";/,
-    `const recordLoadedWorker = () => {};`
-  ],
-  [
-    /import \{ emitRuntimeTailEvent, fetchTailFields \} from "runtime-tail-forwarder";/,
-    `const emitRuntimeTailEvent = () => null;
-     const fetchTailFields = () => ({});`
+    /import \{ fetchTailFields, startTailEnvelope \} from "runtime-tail-forwarder";/,
+    `const fetchTailFields = () => ({});
+     const startTailEnvelope = () => ({ finish() {}, finishError() {} });`
   ],
 ]);
 
@@ -102,6 +101,7 @@ test("ServiceBinding RPC cold-load does not mint a service-binding request id", 
   const options = loaderCallbackOptions();
   assert.equal(options.length, 1);
   assert.equal(options[0].requestId, null);
+  assert.equal(options[0].evictOnLoad, undefined);
 });
 
 test("ServiceBinding fetch strips caller-supplied platform forwarding headers", async () => {

@@ -1,18 +1,24 @@
 // Shared state + helpers for control. Handlers import from here; the
 // dispatcher in index.js calls ensureInit(env) before route dispatch.
 
-import { RedisClient, WatchError, redisDbFromEnv } from "shared-redis";
+import { RedisClient, redisDbFromEnv } from "shared-redis";
 import { makeS3Client } from "control-s3";
 import { makeR2AdminClient } from "control-r2";
 import { extractToken } from "shared-auth-token";
 import { validatePrincipalShape } from "shared-auth-roles";
-import { BodyTooLargeError, readBoundedText } from "shared-bounded-body";
 import { queueStreamKey } from "shared-queue-keys";
 import { internalErrorResponse, jsonError, jsonResponse, sanitizeJsonErrorDetails } from "shared-respond";
 import { withInternalAuth } from "shared-internal-auth";
 import { errorMessage } from "shared-errors";
 import { randomHex } from "shared-random-id";
 import { deleteLockKey } from "control-lib";
+import {
+  DECLARED_HOSTS_KEY,
+  HOST_DECLARATIONS_SCAN_PATTERN,
+  HOSTS_SCAN_PATTERN,
+  hostDeclarationsKey,
+  namespaceFromHostsKey,
+} from "shared-version";
 import {
   S3_CLEANUP_QUEUE_NAME,
   S3_CLEANUP_TASK_ID_PREFIX,
@@ -24,15 +30,29 @@ import {
   formatError,
   recordRedisCommand,
 } from "shared-observability";
+import {
+  WORKFLOWS_INTERNAL_TIMEOUT_MS,
+  createPostWorkflowsInternal,
+} from "control-workflows-client";
+import {
+  ControlAbort,
+  codedErrorResponse,
+  controlAbortResponse,
+} from "control-errors";
+import { runOptimistic, withOptimisticRetries } from "control-optimistic";
+import {
+  DEFAULT_JSON_BODY_MAX_BYTES,
+  readJsonBody,
+} from "control-json-body";
+import {
+  acquireTokenLock,
+  createTokenLock,
+  releaseTokenLock,
+} from "shared-redis-lock";
 
 export const ROUTES_CHANNEL = "routes:invalidate";
 export const ROUTES_FLUSH_CHANNEL = "routes:flush";
 export const PATTERNS_CHANNEL = "patterns:invalidate";
-export const DEFAULT_JSON_BODY_MAX_BYTES = 1024 * 1024;
-export const DECLARED_HOSTS_KEY = "declared-hosts";
-export const HOST_DECLARATIONS_PREFIX = "host-declarations:";
-const HOSTS_PREFIX = "hosts:";
-const DO_ALARM_CLEANUP_TIMEOUT_MS = 5_000;
 
 /**
  * @typedef {import("shared-observability").RedisCommandEvent} RedisCommandEvent
@@ -69,6 +89,9 @@ let s3Initialized = false;
 let r2Initialized = false;
 
 export { formatError, internalErrorResponse, jsonError, jsonResponse };
+export { ControlAbort, codedErrorResponse, controlAbortResponse };
+export { runOptimistic, withOptimisticRetries };
+export { DEFAULT_JSON_BODY_MAX_BYTES, readJsonBody };
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
@@ -99,30 +122,6 @@ export { randomHex };
  */
 export function prefixedId(prefix, bytes = 16) {
   return `${prefix}${randomHex(bytes)}`;
-}
-
-/**
- * @template T, S
- * @param {{ session: <U>(fn: (session: S) => Promise<U>) => Promise<U> }} redis
- * @param {{ attempts?: number, onExhausted: () => unknown | Promise<unknown>, onWatchError?: (err: unknown, attempt: number) => void, shouldRetryResult?: (result: T, attempt: number) => boolean }} options
- * @param {(session: S, attempt: number) => Promise<T>} fn
- * @returns {Promise<T>}
- */
-export async function runOptimistic(redis, { attempts = 5, onExhausted, onWatchError, shouldRetryResult }, fn) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const result = await redis.session((session) => fn(session, attempt));
-      if (shouldRetryResult?.(result, attempt)) continue;
-      return result;
-    } catch (err) {
-      if (err instanceof WatchError) {
-        onWatchError?.(err, attempt);
-        continue;
-      }
-      throw err;
-    }
-  }
-  return /** @type {T} */ (await onExhausted());
 }
 
 /** @param {Record<string, unknown>} env */
@@ -199,11 +198,6 @@ export function getControlR2() {
   return state.r2;
 }
 
-/** @returns {WorkflowBackend | null} */
-export function getControlWorkflows() {
-  return state.workflows;
-}
-
 export function controlInternalJsonHeaders() {
   if (!state.env) {
     throw new Error("control shared state has not been initialized");
@@ -216,107 +210,11 @@ function onRedisCommand(event) {
   recordRedisCommand({ metrics: null, log: state.log, service: state.service, event });
 }
 
-// Intentionally local, despite looking like routing/deploy/auth errors. Each
-// layer owns a slightly different machine-readable wire shape and catch boundary.
-export class ControlAbort extends Error {
-  /**
-   * @param {number} status
-   * @param {string} code
-   * @param {{ message?: string, [key: string]: unknown }} [details]
-   */
-  constructor(status, code, details = {}) {
-    super(details?.message || code);
-    this.status = status;
-    this.code = code;
-    this.details = details;
-  }
-}
-
-// Domain errors still flow through jsonError() so details cannot shadow the
-// top-level wire contract.
-/**
- * @param {unknown} err
- * @param {string} [fallbackCode]
- * @param {Record<string, unknown>} [extraDetails]
- */
-export function codedErrorResponse(err, fallbackCode = "internal_error", extraDetails = {}) {
-  const record = isRecord(err) ? err : {};
-  const details = isRecord(record.details) ? record.details : {};
-  const status = typeof record.status === "number" ? record.status : 500;
-  const code = typeof record.code === "string" && record.code ? record.code : fallbackCode;
-  const recordMessage = typeof record.message === "string" && record.message ? record.message : undefined;
-  const message = err instanceof ControlAbort
-    ? (typeof err.details.message === "string" && err.details.message) || err.message || code
-    : recordMessage || (typeof details.message === "string" && details.message) || code;
-  return jsonError(
-    status,
-    code,
-    message,
-    { ...details, ...extraDetails },
-  );
-}
-
-// ControlAbort always carries code; the separate wrapper keeps abort call sites
-// explicit while ordinary coded errors still get a fallback code.
-/**
- * @param {ControlAbort} err
- * @param {Record<string, unknown>} [extraDetails]
- */
-export function controlAbortResponse(err, extraDetails = {}) {
-  return codedErrorResponse(err, err.code, extraDetails);
-}
-
-/**
- * @param {Request} request
- * @param {{ requireObject?: boolean, allowEmpty?: boolean, maxBytes?: number }} [opts]
- */
-export async function readJsonBody(
-  request,
-  { requireObject = false, allowEmpty = false, maxBytes = DEFAULT_JSON_BODY_MAX_BYTES } = {},
-) {
-  let body;
-  try {
-    const limited = await readTextBody(request, maxBytes);
-    if ("response" in limited) return { response: limited.response };
-    const text = limited.text;
-    if (text === "") {
-      if (!allowEmpty) {
-        return {
-          response: jsonError(400, "invalid_json", "Body must be valid JSON"),
-        };
-      }
-      body = {};
-    } else {
-      body = JSON.parse(text);
-    }
-  } catch {
-    return {
-      response: jsonError(400, "invalid_json", "Body must be valid JSON"),
-    };
-  }
-  if (requireObject && (!body || typeof body !== "object" || Array.isArray(body))) {
-    return {
-      response: jsonError(400, "invalid_json_object", "Body must be a JSON object"),
-    };
-  }
-  return { body };
-}
-
-/**
- * @param {Request} request
- * @param {number} maxBytes
- * @returns {Promise<{ text: string } | { response: Response }>}
- */
-async function readTextBody(request, maxBytes) {
-  try {
-    return { text: await readBoundedText(request, maxBytes) };
-  } catch (err) {
-    if (err instanceof BodyTooLargeError) {
-      return { response: jsonError(413, "request_body_too_large", `Body must be at most ${maxBytes} bytes`) };
-    }
-    throw err;
-  }
-}
+export const postWorkflowsInternal = createPostWorkflowsInternal({
+  getWorkflows: () => state.workflows,
+  headers: controlInternalJsonHeaders,
+  getLog: () => state.log,
+});
 
 // AuthPolicyError → HTTP body shape. 4xx messages are user-actionable;
 // 5xx messages stay generic so internal auth diagnostics do not leak.
@@ -426,11 +324,6 @@ async function scanKeys(redis, pattern) {
   return keys;
 }
 
-/** @param {string} key */
-function namespaceFromHostsKey(key) {
-  return key.startsWith(HOSTS_PREFIX) ? key.slice(HOSTS_PREFIX.length) : "";
-}
-
 /**
  * Rebuild the global declared-host gate from namespace-owned `hosts:<ns>` sets.
  * This is an ops reload repair path, not the ordinary writer; `/hosts` reconcile
@@ -439,8 +332,8 @@ function namespaceFromHostsKey(key) {
  * @param {RedisClient} [redis]
  */
 export async function rebuildDeclaredHostIndexes(redis = requireControlRedis()) {
-  const hostKeys = await scanKeys(redis, `${HOSTS_PREFIX}*`);
-  const oldDeclarationKeys = await scanKeys(redis, `${HOST_DECLARATIONS_PREFIX}*`);
+  const hostKeys = await scanKeys(redis, HOSTS_SCAN_PATTERN);
+  const oldDeclarationKeys = await scanKeys(redis, HOST_DECLARATIONS_SCAN_PATTERN);
   /** @type {Map<string, Set<string>>} */
   const declarationsByHost = new Map();
   for (const key of hostKeys) {
@@ -459,7 +352,7 @@ export async function rebuildDeclaredHostIndexes(redis = requireControlRedis()) 
     multi.del(DECLARED_HOSTS_KEY, ...oldDeclarationKeys);
     for (const [host, namespaces] of declarationsByHost) {
       multi.sAdd(DECLARED_HOSTS_KEY, host);
-      multi.sAdd(`${HOST_DECLARATIONS_PREFIX}${host}`, [...namespaces]);
+      multi.sAdd(hostDeclarationsKey(host), [...namespaces]);
     }
     await multi.exec();
   });
@@ -530,12 +423,8 @@ export function buildS3CleanupTaskId() {
   return `${S3_CLEANUP_TASK_ID_PREFIX}${crypto.randomUUID()}`;
 }
 
-export function generateLockToken() {
-  return crypto.randomUUID();
-}
-
-// TTL only matters when a handler crashes mid-flow (normal path releases
-// in a finally block); 30s covers the Redis critical section and no more.
+// Normal paths release this advisory lock in finally; the TTL only bounds
+// leaks after a crash. The token fences release, not the protected operation.
 const DELETE_LOCK_TTL_SECONDS = 30;
 /**
  * @param {RedisClient} redis
@@ -543,10 +432,11 @@ const DELETE_LOCK_TTL_SECONDS = 30;
  * @param {string} worker
  */
 export async function acquireDeleteLock(redis, ns, worker) {
-  const token = generateLockToken();
   const key = deleteLockKey(ns, worker);
-  const reply = await redis.set(key, token, { nx: true, ttl: DELETE_LOCK_TTL_SECONDS });
-  return reply === "OK" ? token : null;
+  const lock = createTokenLock(key);
+  return await acquireTokenLock(redis, lock, { ttlSeconds: DELETE_LOCK_TTL_SECONDS })
+    ? lock.token
+    : null;
 }
 
 // Compare-and-delete so we don't free a token a TTL-expired-then-reacquired
@@ -561,15 +451,13 @@ export async function acquireDeleteLock(redis, ns, worker) {
 export async function releaseDeleteLock(redis, ns, worker, token, requestId) {
   if (!token) return;
   const key = deleteLockKey(ns, worker);
-  try {
-    await redis.delIfEq(key, token);
-  } catch (err) {
-    requireControlLog()("warn", "delete_lock_release_failed", {
+  await releaseTokenLock(redis, { key, token }, {
+    onError: (err) => requireControlLog()("warn", "delete_lock_release_failed", {
       request_id: requestId,
       namespace: ns, worker,
       ...formatError(err),
-    });
-  }
+    }),
+  });
 }
 
 // Standalone intent write for deploy aborts, where the cleanup follows a
@@ -628,51 +516,33 @@ export async function recordCleanupIntentOrWarn({
  * @param {{ ns: string, worker: string, version?: string, allowCleanup?: boolean }} args
  */
 export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefined, allowCleanup = false }) {
-  if (!state.workflows || typeof state.workflows.fetch !== "function") {
-    throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
-      message: "Workflow lifecycle check is unavailable",
-      namespace: ns,
+  const context = {
+    namespace: ns,
+    worker,
+    ...(version ? { version } : {}),
+  };
+  const { response, body } = await postWorkflowsInternal({
+    endpoint: "workflows/lifecycle/check-delete",
+    body: {
+      ns,
       worker,
       ...(version ? { version } : {}),
-    });
-  }
-  let response;
-  let body;
-  try {
-    response = await state.workflows.fetch(
-      "http://workflows/internal/workflows/lifecycle/check-delete",
-      {
-        method: "POST",
-        headers: controlInternalJsonHeaders(),
-        body: JSON.stringify({
-          ns,
-          worker,
-          ...(version ? { version } : {}),
-          ...(allowCleanup ? { allowCleanup: true } : {}),
-        }),
-      },
-    );
-    body = await response.json().catch(() => null);
-  } catch (err) {
-    state.log?.("error", "workflow_lifecycle_check_failed", {
-      namespace: ns,
-      worker,
-      ...(version ? { version } : {}),
-      error_message: errMessage(err),
-    });
-    throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
-      message: "Workflow lifecycle check failed",
-      namespace: ns,
-      worker,
-      ...(version ? { version } : {}),
-    });
-  }
+      ...(allowCleanup ? { allowCleanup: true } : {}),
+    },
+    logEvent: "workflow_lifecycle_check_failed",
+    logFields: context,
+    errorDetails: context,
+    unavailableMessage: "Workflow lifecycle check is unavailable",
+    requestFailedMessage: "Workflow lifecycle check failed",
+    // The lifecycle scan is unbounded by namespace size. Preserve its
+    // pre-consolidation behavior instead of imposing the ordinary short
+    // control-to-workflows request timeout.
+    timeoutMs: null,
+  });
   if (!response.ok) {
     throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
       message: "Workflow lifecycle check failed",
-      namespace: ns,
-      worker,
-      ...(version ? { version } : {}),
+      ...context,
       upstream_status: response.status,
       upstream_error: isRecord(body) && typeof body.error === "string" ? body.error : null,
     });
@@ -680,9 +550,7 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
   if (!isRecord(body) || typeof body.allowed !== "boolean") {
     throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
       message: "Workflow lifecycle check returned an invalid response",
-      namespace: ns,
-      worker,
-      ...(version ? { version } : {}),
+      ...context,
     });
   }
   if (body.allowed !== true) {
@@ -690,9 +558,7 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
       message: version
         ? `${ns}/${worker}/${version} has active workflow instances`
         : `${ns}/${worker} has active workflow instances`,
-      namespace: ns,
-      worker,
-      ...(version ? { version } : {}),
+      ...context,
       count: Number.isFinite(body.count) ? body.count : 0,
       blockers: Array.isArray(body.blockers) ? body.blockers : [],
     });
@@ -703,43 +569,22 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
  * @param {{ ns: string, worker: string, doStorageId: string }} args
  */
 export async function cleanupDoAlarmsForWorker({ ns, worker, doStorageId }) {
-  if (!state.workflows || typeof state.workflows.fetch !== "function") {
-    throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
-      message: "Workflow DO alarm cleanup is unavailable",
-      namespace: ns,
-      worker,
-    });
-  }
-  let response;
-  let body;
-  try {
-    response = await state.workflows.fetch(
-      "http://workflows/internal/workflows/do-alarms/cleanup-worker",
-      {
-        method: "POST",
-        headers: controlInternalJsonHeaders(),
-        body: JSON.stringify({ ns, worker, doStorageId }),
-        signal: AbortSignal.timeout(DO_ALARM_CLEANUP_TIMEOUT_MS),
-      },
-    );
-    body = await response.json().catch(() => null);
-  } catch (err) {
-    state.log?.("error", "workflow_do_alarm_cleanup_failed", {
-      namespace: ns,
-      worker,
-      error_message: errMessage(err),
-    });
-    throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
-      message: "Workflow DO alarm cleanup failed",
-      namespace: ns,
-      worker,
-    });
-  }
+  const context = { namespace: ns, worker };
+  const { response, body } = await postWorkflowsInternal({
+    endpoint: "workflows/do-alarms/cleanup-worker",
+    body: { ns, worker, doStorageId },
+    logEvent: "workflow_do_alarm_cleanup_failed",
+    logFields: context,
+    errorDetails: context,
+    unavailableMessage: "Workflow DO alarm cleanup is unavailable",
+    requestFailedMessage: "Workflow DO alarm cleanup failed",
+    // This endpoint was already bounded before transport consolidation.
+    timeoutMs: WORKFLOWS_INTERNAL_TIMEOUT_MS,
+  });
   if (!response.ok || !isRecord(body) || body.ok !== true) {
     throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
       message: "Workflow DO alarm cleanup failed",
-      namespace: ns,
-      worker,
+      ...context,
       upstream_status: response.status,
       upstream_error: isRecord(body) && typeof body.error === "string" ? body.error : null,
     });

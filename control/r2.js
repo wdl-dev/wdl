@@ -1,5 +1,6 @@
 import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { discardResponseBody } from "shared-respond";
+import { S3_TRANSIENT_RETRIES } from "shared-s3-retry";
 import {
   encodeS3KeyPath,
   encodeS3Query,
@@ -13,7 +14,6 @@ import {
 import { collectXmlFields, listXmlTagValues, xmlTagValueIsTrue } from "shared-s3-xml";
 
 const DEFAULT_LIST_LIMIT = 1000;
-const S3_TRANSIENT_RETRIES = 10;
 
 /**
  * @typedef {{ client: SigV4Client, endpoint: string, bucket: string }} R2Admin
@@ -58,6 +58,37 @@ function requestHeaders(requestId) {
   const headers = new Headers();
   if (requestId) headers.set("x-request-id", String(requestId));
   return headers;
+}
+
+/**
+ * @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string, method: "GET" | "HEAD" | "DELETE", notFound?: "error" | "null" | "ok" }} args
+ * @returns {Promise<Response | null>}
+ */
+async function fetchR2AdminObject({
+  r2,
+  ns,
+  bucketName,
+  key,
+  requestId,
+  method,
+  notFound = "error",
+}) {
+  const res = await r2.client.fetch(r2ObjectUrl(r2, { ns, bucketName }, key), {
+    method,
+    headers: requestHeaders(requestId),
+  });
+  if (res.status === 404 && notFound !== "error") {
+    if (notFound === "null") {
+      await discardResponseBody(res);
+      return null;
+    }
+    return res;
+  }
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`R2 admin ${method} failed with ${res.status}: ${detail.slice(0, 200)}`);
+  }
+  return res;
 }
 
 /** @param {unknown} value */
@@ -185,54 +216,42 @@ export async function listR2Objects({
 
 /** @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string }} args */
 export async function getR2Object({ r2, ns, bucketName, key, requestId }) {
-  validateR2BucketName(bucketName);
-  normalizeR2ObjectKey(key);
-  const res = await r2.client.fetch(r2ObjectUrl(r2, { ns, bucketName }, key), {
+  return fetchR2AdminObject({
+    r2,
+    ns,
+    bucketName,
+    key,
+    requestId,
     method: "GET",
-    headers: requestHeaders(requestId),
+    notFound: "null",
   });
-  if (res.status === 404) {
-    await discardResponseBody(res);
-    return null;
-  }
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`R2 admin GET failed with ${res.status}: ${detail.slice(0, 200)}`);
-  }
-  return res;
 }
 
 /** @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string }} args */
 export async function headR2Object({ r2, ns, bucketName, key, requestId }) {
-  validateR2BucketName(bucketName);
-  normalizeR2ObjectKey(key);
-  const res = await r2.client.fetch(r2ObjectUrl(r2, { ns, bucketName }, key), {
+  return fetchR2AdminObject({
+    r2,
+    ns,
+    bucketName,
+    key,
+    requestId,
     method: "HEAD",
-    headers: requestHeaders(requestId),
+    notFound: "null",
   });
-  if (res.status === 404) {
-    await discardResponseBody(res);
-    return null;
-  }
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`R2 admin HEAD failed with ${res.status}: ${detail.slice(0, 200)}`);
-  }
-  return res;
 }
 
 /** @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string }} args */
 export async function deleteR2Object({ r2, ns, bucketName, key, requestId }) {
-  validateR2BucketName(bucketName);
-  normalizeR2ObjectKey(key);
-  const res = await r2.client.fetch(r2ObjectUrl(r2, { ns, bucketName }, key), {
+  const res = await fetchR2AdminObject({
+    r2,
+    ns,
+    bucketName,
+    key,
+    requestId,
     method: "DELETE",
-    headers: requestHeaders(requestId),
+    notFound: "ok",
   });
-  if (!res.ok && res.status !== 404) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`R2 admin DELETE failed with ${res.status}: ${detail.slice(0, 200)}`);
-  }
+  if (!res) throw new Error("R2 admin DELETE unexpectedly returned no response");
   await discardResponseBody(res);
   return { namespace: ns, bucket: bucketName, key, status: "ok" };
 }

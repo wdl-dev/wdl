@@ -14,6 +14,10 @@ pub(crate) fn slot_key(slot_ms: i64) -> String {
     format!("cron-slot:{slot_ms}")
 }
 
+pub(crate) fn slot_expire_at(slot_ms: i64) -> i64 {
+    slot_ms.div_euclid(1000) + 600
+}
+
 pub(crate) fn wait_ms_until_next_slot(now_ms: i64) -> u64 {
     (slot_ms_for(now_ms) + 60_000 - now_ms).max(1) as u64
 }
@@ -45,6 +49,7 @@ mod tests {
 
     use super::*;
     use crate::cron::reference::ref_for;
+    use crate::test_fixtures::scheduler_projection_contract;
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -60,8 +65,13 @@ mod tests {
 
     #[test]
     fn cron_key_builders_compose_scheduler_keys() {
+        let fixture = scheduler_projection_contract();
+        assert_eq!(slot_key(fixture.cron.slot_ms), fixture.cron.slot_key);
+        assert_eq!(
+            slot_expire_at(fixture.cron.slot_ms),
+            fixture.cron.slot_expire_at
+        );
         let reference = ref_for("demo", "hello", "abc123", 7);
-        assert_eq!(slot_key(1_710_000_000_000), "cron-slot:1710000000000");
         assert_eq!(
             lease_key(1_710_000_000_000, &reference),
             "cron-lease:1710000000000:demo:hello:abc123:7"

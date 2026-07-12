@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "lint": "eslint .",
-    "lint:unused": "knip --include exports,types,files --no-config-hints",
+    "lint:unused": "knip --include exports,types,files --no-config-hints --treat-tag-hints-as-errors",
     "typecheck": "tsc --noEmit",
     "typecheck:strict": "tsc --project tsconfig.strict.json",
     "test:unit": "node --test --test-reporter=spec 'tests/unit/**/*.test.js'",
@@ -42,7 +42,8 @@
     "eslint": "^10.6.0",
     "globals": "^17.7.0",
     "knip": "^6.25.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "yaml": "^2.9.0"
   },
   "dependencies": {
     "workerd": "1.20260701.1"

@@ -13,6 +13,8 @@ mod runtime_client;
 mod server;
 mod state;
 mod tasks;
+#[cfg(test)]
+mod test_fixtures;
 mod time;
 mod workflows;
 

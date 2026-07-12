@@ -1,0 +1,48 @@
+{
+  "cron": {
+    "workerIndexKey": "cron:index:workers",
+    "ns": "tenant",
+    "worker": "worker",
+    "workerKey": "crons:tenant:worker",
+    "slotMs": 1778856600000,
+    "slotKey": "cron-slot:1778856600000",
+    "slotExpireAt": 1778857200,
+    "cronId": "cron-1",
+    "gen": 7,
+    "reference": "tenant:worker:cron-1:7",
+    "meta": {
+      "version": "v3",
+      "seq": 7,
+      "json": "{\"version\":\"v3\",\"seq\":7}"
+    },
+    "entry": {
+      "cron": "*/5 * * * *",
+      "timezone": "UTC",
+      "gen": 7,
+      "json": "{\"cron\":\"*/5 * * * *\",\"timezone\":\"UTC\",\"gen\":7}"
+    }
+  },
+  "queueConsumer": {
+    "ns": "tenant",
+    "queue": "jobs",
+    "worker": "worker",
+    "version": "v3",
+    "input": {
+      "queue": "jobs",
+      "maxBatchSize": 12,
+      "maxBatchTimeoutMs": 250,
+      "maxRetries": 4,
+      "deadLetterQueue": "jobs-dlq",
+      "retryDelaySeconds": 17
+    },
+    "fields": {
+      "worker": "worker",
+      "version": "v3",
+      "max_batch_size": "12",
+      "max_batch_timeout_ms": "250",
+      "max_retries": "4",
+      "dead_letter_queue": "jobs-dlq",
+      "retry_delay_secs": "17"
+    }
+  }
+}

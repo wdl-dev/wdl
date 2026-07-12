@@ -3,26 +3,18 @@ import {
   DO_INVOKE_URL,
   connectHeaders,
   doOwnerHintCacheKey,
-  dispatchDoRequestWithOwnerHint,
+  dispatchDoConnectWithHintCache,
+  dispatchDoInvokeWithHintCache,
   fetchInvokeInit,
   isWebSocketUpgrade,
-  retryableOwnerRaceResponse,
+  replayOwnerUnavailableForFetch,
   rpcInvokeInit,
   rpcResultFromResponse,
-  staleDoOwnerHintResponse,
-  stripOwnerHintHeaders,
-  withoutOwnerHintOptIn,
 } from "./_wdl-do-transport.js";
 import { createOwnerHintCache } from "./_wdl-owner-hint-cache.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
 const ownerHintCache = createOwnerHintCache();
-
-/** @param {Request} request */
-function replayOwnerUnavailableForFetch(request) {
-  const method = request.method.toUpperCase();
-  return method === "GET" || method === "HEAD";
-}
 
 /**
  * @typedef {{ fetch(url: string, init?: RequestInit): Promise<Response> }} DoBackend
@@ -201,28 +193,24 @@ export class DurableObjectNamespace {
         method: "GET",
         headers: connectHeaders(props, objectName, request, requestId),
       };
-      const response = await this.#fetchWithOwnerHint(
+      return await this.#dispatchWithOwnerHint(
+        dispatchDoConnectWithHintCache,
         DO_CONNECT_URL,
         "/internal/do/connect",
         init,
         doOwnerHintCacheKey(props, objectName),
         false
       );
-      return stripOwnerHintHeaders(response);
     }
     const init = await fetchInvokeInit(props, objectName, request, requestId);
-    const response = await this.#fetchWithOwnerHint(
+    return await this.#dispatchWithOwnerHint(
+      dispatchDoInvokeWithHintCache,
       DO_INVOKE_URL,
       "/internal/do/invoke",
       init,
       doOwnerHintCacheKey(props, objectName),
       replayOwnerUnavailableForFetch(request)
     );
-    if (await retryableOwnerRaceResponse(response)) {
-      ownerHintCache.delete(doOwnerHintCacheKey(props, objectName));
-      return stripOwnerHintHeaders(await backend.fetch(DO_INVOKE_URL, withoutOwnerHintOptIn(init)));
-    }
-    return stripOwnerHintHeaders(response);
   }
 
   /** @param {string} objectName @param {string} method @param {unknown[]} args @param {string | null} [requestId] */
@@ -236,32 +224,26 @@ export class DurableObjectNamespace {
     }
     const props = requireBindingProps(this.#props);
     const init = rpcInvokeInit(props, objectName, method, args, requestId);
-    const response = await this.#fetchWithOwnerHint(
+    const response = await this.#dispatchWithOwnerHint(
+      dispatchDoInvokeWithHintCache,
       DO_INVOKE_URL,
       "/internal/do/invoke",
       init,
       doOwnerHintCacheKey(props, objectName),
       false
     );
-    let routed = response;
-    if (await retryableOwnerRaceResponse(response)) {
-      // Owner-hint following already happened above. This retry is only for
-      // generation races after reaching an owner, so it falls back through the
-      // router with hint opt-in disabled.
-      ownerHintCache.delete(doOwnerHintCacheKey(props, objectName));
-      routed = await backend.fetch(DO_INVOKE_URL, withoutOwnerHintOptIn(init));
-    }
-    return await rpcResultFromResponse(stripOwnerHintHeaders(routed));
+    return await rpcResultFromResponse(response);
   }
 
   /**
+   * @param {typeof dispatchDoInvokeWithHintCache | typeof dispatchDoConnectWithHintCache} dispatch
    * @param {string} routerUrl
    * @param {string} ownerPath
    * @param {RequestInit} init
    * @param {string} hintKey
    * @param {boolean} replayOwnerUnavailable
    */
-  async #fetchWithOwnerHint(routerUrl, ownerPath, init, hintKey, replayOwnerUnavailable) {
+  async #dispatchWithOwnerHint(dispatch, routerUrl, ownerPath, init, hintKey, replayOwnerUnavailable) {
     const backend = this.#backend;
     const ownerNetwork = this.#ownerNetwork;
     if (!backend || typeof backend.fetch !== "function") {
@@ -273,18 +255,14 @@ export class DurableObjectNamespace {
       : null;
     /** @type {import("./_wdl-do-transport.js").DoFetch} */
     const routerFetch = (url, requestInit) => backend.fetch(url, requestInit);
-    return await dispatchDoRequestWithOwnerHint({
+    return await dispatch({
       routerFetch,
       routerUrl,
       ownerFetch,
       ownerPath,
       init,
-      cachedHint: /** @type {import("./_wdl-do-transport.js").DoOwnerHint | null} */ (
-        ownerHintCache.get(hintKey)
-      ),
-      rememberHint: (hint) => ownerHintCache.set(hintKey, hint),
-      clearHint: () => ownerHintCache.delete(hintKey),
-      staleCachedResponse: staleDoOwnerHintResponse,
+      cache: ownerHintCache,
+      hintKey,
       replayOwnerUnavailable,
     });
   }

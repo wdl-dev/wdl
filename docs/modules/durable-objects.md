@@ -110,6 +110,9 @@ when the logical worker is gone or now points at a different `doStorageId`.
 
 - One task owns a class shard at a time.
 - Generation fencing prevents stale owners from committing after ownership moves.
+- `do-runtime/protocol.js` owns the DO ownership error vocabulary and the subset that
+  proves a request was fence-rejected and is safe to retry through the router. The
+  injected runtime transport mirrors both sets under a direct parity test.
 - Facet identity is `className:objectName` inside stable `doStorageId`, so worker
   promotion preserves object state.
 - Existing native facets keep the constructed class version until host actor restart or
@@ -136,6 +139,10 @@ when the logical worker is gone or now points at a different `doStorageId`.
   through the router to rediscover the owner; non-idempotent methods and RPC return
   `owner_unavailable` without replay because the owner may already have applied the
   request.
+- The shared runtime transport owns owner-hint cache wiring, invoke race retry, and
+  response-header stripping for both the host binding and injected facade. Its connect
+  wrapper deliberately omits the invoke-only router fallback required to preserve
+  owner-established WebSocket upgrades.
 - `WEBSOCKET_RECONNECT_DELAYS_MS` and `WEBSOCKET_MAX_BUFFERED_MESSAGES` tune gateway
   backend reconnect budget and client-message buffering without a code rebuild.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due
@@ -203,8 +210,9 @@ interrupt.
 
 ## Security Boundaries
 
-- do-runtime internal endpoints are private-mesh only and are not
-  application-authenticated.
+- do-runtime internal endpoints are private-mesh only and require the shared
+  `WDL_INTERNAL_AUTH_TOKEN` through `x-wdl-internal-auth`; health and metrics are the
+  only unauthenticated endpoints.
 - Tenant code reaches DOs only through runtime-generated facades and frozen metadata.
 - Tenant-visible DO metadata and errors must not include owner task ids, backend
   endpoints, or raw transport error text.

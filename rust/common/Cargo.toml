@@ -14,6 +14,7 @@ path = "src/lib.rs"
 [features]
 default = ["axum"]
 axum = ["dep:axum"]
+test-support = []
 
 [dependencies]
 axum = { workspace = true, features = ["http1"], optional = true }

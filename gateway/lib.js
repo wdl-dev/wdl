@@ -8,6 +8,20 @@
  * @typedef {{ slot: string, reason: string }} PatternError
  */
 
+const INTERNAL_HEADER_PREFIX = "x-wdl-";
+const INTERNAL_FORWARD_HEADERS = [
+  "x-worker-id",
+  "x-worker-prefix",
+];
+
+/** @param {Headers} headers */
+export function deleteGatewayInternalHeaders(headers) {
+  for (const name of INTERNAL_FORWARD_HEADERS) headers.delete(name);
+  for (const name of [...headers.keys()]) {
+    if (name.toLowerCase().startsWith(INTERNAL_HEADER_PREFIX)) headers.delete(name);
+  }
+}
+
 /** @param {string} s */
 export function escapeRegex(s) {
   return RegExp.escape(s);

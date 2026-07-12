@@ -1,8 +1,11 @@
 import {
+  R2_HTTP_METADATA_FIELDS,
   R2_OBJECT_MAX_BUFFER_BYTES,
   assertR2BufferSize,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
+  r2CacheExpiryFromHeaders,
+  setR2CacheExpiryHeader,
 } from "./_wdl-r2-utils.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
@@ -119,15 +122,13 @@ function cappedReadableStream(stream, operation) {
 
 /** @param {Headers} headers */
 function headersToHttpMetadata(headers) {
-  const expires = headers.get("expires");
-  return {
-    contentType: headers.get("content-type") || undefined,
-    contentLanguage: headers.get("content-language") || undefined,
-    contentDisposition: headers.get("content-disposition") || undefined,
-    contentEncoding: headers.get("content-encoding") || undefined,
-    cacheControl: headers.get("cache-control") || undefined,
-    cacheExpiry: expires ? new Date(expires).getTime() : undefined,
-  };
+  /** @type {AnyRecord} */
+  const out = {};
+  for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
+    out[field] = headers.get(header) || undefined;
+  }
+  out.cacheExpiry = r2CacheExpiryFromHeaders(headers);
+  return out;
 }
 
 /** @param {unknown} input */
@@ -140,14 +141,8 @@ function normalizeHttpMetadata(input) {
   /** @type {AnyRecord} */
   const out = {};
   const record = /** @type {AnyRecord} */ (input);
-  for (const key of [
-    "contentType",
-    "contentLanguage",
-    "contentDisposition",
-    "contentEncoding",
-    "cacheControl",
-  ]) {
-    if (record[key] != null) out[key] = String(record[key]);
+  for (const [field] of R2_HTTP_METADATA_FIELDS) {
+    if (record[field] != null) out[field] = String(record[field]);
   }
   if (record.cacheExpiry != null) {
     const ms = record.cacheExpiry instanceof Date
@@ -320,17 +315,11 @@ export class R2Object {
   /** @param {Headers} headers */
   writeHttpMetadata(headers) {
     const h = this.httpMetadata || {};
-    const contentType = stringOrUndefined(h.contentType);
-    const contentLanguage = stringOrUndefined(h.contentLanguage);
-    const contentDisposition = stringOrUndefined(h.contentDisposition);
-    const contentEncoding = stringOrUndefined(h.contentEncoding);
-    const cacheControl = stringOrUndefined(h.cacheControl);
-    if (contentType) headers.set("content-type", contentType);
-    if (contentLanguage) headers.set("content-language", contentLanguage);
-    if (contentDisposition) headers.set("content-disposition", contentDisposition);
-    if (contentEncoding) headers.set("content-encoding", contentEncoding);
-    if (cacheControl) headers.set("cache-control", cacheControl);
-    if (h.cacheExpiry) headers.set("expires", dateFromUnknown(h.cacheExpiry).toUTCString());
+    for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
+      const value = stringOrUndefined(h[field]);
+      if (value) headers.set(header, value);
+    }
+    setR2CacheExpiryHeader(headers, h.cacheExpiry);
   }
 }
 

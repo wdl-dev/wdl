@@ -133,6 +133,61 @@ test("R2Bucket.put preserves onlyIf etag arrays for host binding", async () => {
   assert.deepEqual(calls[0].requestMeta, { requestId: "rid-put" });
 });
 
+test("R2Bucket.put normalizes every Headers httpMetadata field", async () => {
+  /** @type {any[]} */
+  const calls = [];
+  const bucket = new R2Bucket({
+    async put(/** @type {string} */ _key, /** @type {any} */ _value, /** @type {any} */ options) {
+      calls.push(options);
+      return null;
+    },
+  });
+  const headers = new Headers({
+    "content-type": "text/plain",
+    "content-language": "en",
+    "content-disposition": "inline",
+    "content-encoding": "gzip",
+    "cache-control": "max-age=60",
+    expires: "Thu, 01 Jan 1970 00:00:00 GMT",
+  });
+
+  await bucket.put("a.txt", "hello", { httpMetadata: headers });
+
+  assert.deepEqual(calls[0].httpMetadata, {
+    contentType: "text/plain",
+    contentLanguage: "en",
+    contentDisposition: "inline",
+    contentEncoding: "gzip",
+    cacheControl: "max-age=60",
+    cacheExpiry: 0,
+  });
+});
+
+test("R2Object.writeHttpMetadata writes every mapped field including epoch expiry", () => {
+  const object = new R2Object({
+    httpMetadata: {
+      contentType: "text/plain",
+      contentLanguage: "en",
+      contentDisposition: "inline",
+      contentEncoding: "gzip",
+      cacheControl: "max-age=60",
+      cacheExpiry: 0,
+    },
+  });
+  const headers = new Headers();
+
+  object.writeHttpMetadata(headers);
+
+  assert.deepEqual(Object.fromEntries(headers), {
+    "cache-control": "max-age=60",
+    "content-disposition": "inline",
+    "content-encoding": "gzip",
+    "content-language": "en",
+    "content-type": "text/plain",
+    expires: "Thu, 01 Jan 1970 00:00:00 GMT",
+  });
+});
+
 test("R2Bucket.put rejects timestamp onlyIf conditions", async () => {
   const bucket = new R2Bucket({
     async put() {

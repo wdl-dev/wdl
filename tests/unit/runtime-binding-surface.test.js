@@ -6,6 +6,8 @@ import { RUNTIME_METRICS_NOOP_URL } from "../helpers/mocks/runtime-metrics.js";
 import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
 
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
+const SHARED_BASE64_URL = repositoryFileUrl("shared/base64.js");
+const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 
 const toBytesStub = `const toBytes = (value) => {
@@ -16,13 +18,7 @@ const toBytesStub = `const toBytes = (value) => {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   throw new Error("KV put: value must be string | ArrayBuffer | typed array | ReadableStream");
-};
-const bytesToBase64 = (bytes) => {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-};
-const base64ToBytes = (value) => Uint8Array.from(atob(value), (ch) => ch.charCodeAt(0));`;
+};`;
 
 const buildAssetUrlStub = `const buildAssetUrl = (cdnBase, prefix, path) => {
   if (!cdnBase) throw new Error("ASSETS.url: cdnBase is not configured");
@@ -45,8 +41,10 @@ const buildAssetUrlStub = `const buildAssetUrl = (cdnBase, prefix, path) => {
 test("KV host RPC surface exposes only public namespace methods", async () => {
   const { KV } = await importRepositoryModule("runtime/bindings/kv.js", [
     [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
-    [/import \{ base64ToBytes, bytesToBase64, toBytes \} from "runtime-lib";/, toBytesStub],
+    [/import \{ toBytes \} from "runtime-lib";/, toBytesStub],
     [/from "runtime-metrics";/, `from ${JSON.stringify(RUNTIME_METRICS_NOOP_URL)};`],
+    [/from "shared-base64";/, `from ${JSON.stringify(SHARED_BASE64_URL)};`],
+    [/from "shared-bounded-body";/, `from ${JSON.stringify(SHARED_BOUNDED_BODY_URL)};`],
     [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
     [/from "shared-respond";/, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
   ]);

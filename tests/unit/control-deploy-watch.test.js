@@ -11,11 +11,15 @@ import {
   readRepositoryModuleSource,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
-import { createFakeRedisSession } from "../helpers/mocks/fake-redis.js";
+import { createFakeRedisSession, sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { realRuntimeInjectionSourcesUrl } from "../helpers/runtime-injection-sources.js";
 
-const { libUrl: controlLibUrl, lifecycleIndexesUrl } = await compileControlGraph();
+const {
+  libUrl: controlLibUrl,
+  lifecycleIndexesUrl,
+  sharedAuthRolesUrl,
+} = await compileControlGraph();
 
 /** @type {any} */
 const CONTROL_DEPLOY_TEST_STATE = {
@@ -193,36 +197,11 @@ export function parseQueueConsumers() {
 }
 `);
 
-const sharedVersionUrl = moduleDataUrl(`
-export function routesKey(ns) { return "routes:" + ns; }
-export function formatVersion(n) { return "v" + n; }
-export function parseVersion(tag) {
-  const match = /^v([1-9][0-9]*)$/.exec(tag);
-  return match ? Number(match[1]) : null;
-}
-export function bundleKey(ns, worker, version) {
-  const n = parseVersion(version);
-  if (n == null) throw new Error("invalid version tag " + JSON.stringify(version));
-  return "worker:" + ns + ":" + worker + ":v:" + n;
-}
-`);
+const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 
-const sharedRedisUrl = moduleDataUrl(`
-export class WatchError extends Error {}
-`);
+const sharedRedisUrl = sharedRedisStubUrl();
 
-const sharedNsUrl = moduleDataUrl(`
-export function isReservedNs(ns) { return typeof ns === "string" && ns.startsWith("__"); }
-export function isValidRouteNs(ns) {
-  return typeof ns === "string" &&
-    (/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(ns) || ns === "__system__");
-}
-export const ROUTES_ALLOWED_RESERVED_NS = new Set(["__system__"]);
-`);
-
-const sharedAuthRolesUrl = moduleDataUrl(`
-export const PLATFORM_TIER_RESERVED_NS = new Set(["__platform__"]);
-`);
+const sharedNsUrl = repositoryFileUrl("shared/ns-pattern.js");
 
 const controlS3Url = moduleDataUrl(`
 export async function putAsset() {
@@ -689,6 +668,69 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
   }
+});
+
+test("deploy handler classifies empty service target metadata before commit", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    /** @param {string} key @param {string} field */
+    async hGet(key, field) {
+      if (key === "routes:other" && field === "api") return "v1";
+      if (key === "worker:other:api:v:1" && field === "__meta__") return "";
+      return null;
+    },
+    async incr() {
+      throw new Error("corrupt target metadata must fail before version allocation");
+    },
+  };
+
+  const response = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/caller/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+        bindings: {
+          API: { type: "service", ns: "other", service: "api" },
+        },
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "caller",
+    requestId: "rid-corrupt-service-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.message, "Corrupt __meta__ for other/api/v1");
+});
+
+test("deploy handler fails closed instead of hiding empty platform export metadata", async () => {
+  installPlatformAuthWarningFixture();
+  /** @param {string} key @param {string} field */
+  const corruptPlatformMetaHGet = async (key, field) => {
+    if (key === "worker:__platform__:auth:v:1" && field === "__meta__") return "";
+    return null;
+  };
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis.hGet = corruptPlatformMetaHGet;
+
+  const response = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/caller/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "caller",
+    requestId: "rid-corrupt-platform-meta",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.message, "Corrupt __meta__ for __platform__/auth/v1");
 });
 
 test("deploy handler schedules cleanup when the first asset upload fails", async () => {

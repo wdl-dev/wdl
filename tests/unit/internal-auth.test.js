@@ -4,6 +4,8 @@ import { test } from "node:test";
 import {
   INTERNAL_AUTH_HEADER,
   INTERNAL_AUTH_ENV,
+  INTERNAL_AUTH_FAILURE_CODE,
+  INTERNAL_AUTH_FAILURE_MESSAGE,
   INTERNAL_AUTH_PREVIOUS_ENV,
   internalAuthFailureResponse,
   internalAuthPreviousToken,
@@ -14,10 +16,32 @@ import {
   withInternalAuthEntries,
 } from "../../shared/internal-auth.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 
 const TOKEN = "test-internal-auth-token";
 const ENV = { [INTERNAL_AUTH_ENV]: TOKEN };
+const contract = /** @type {{ header: string, currentEnv: string, previousEnv: string, failure: { status: number, error: string, message: string }, rotationCases: Array<{ actual: string | null, current: string, previous: string | null, accepted: boolean }> }} */ (
+  readRepositoryJson("tests/fixtures/internal-auth-contract.json")
+);
+
+test("internal auth literals and rotation match the shared Rust/JS contract", () => {
+  assert.equal(INTERNAL_AUTH_HEADER, contract.header);
+  assert.equal(INTERNAL_AUTH_ENV, contract.currentEnv);
+  assert.equal(INTERNAL_AUTH_PREVIOUS_ENV, contract.previousEnv);
+  assert.equal(INTERNAL_AUTH_FAILURE_CODE, contract.failure.error);
+  assert.equal(INTERNAL_AUTH_FAILURE_MESSAGE, contract.failure.message);
+
+  for (const entry of contract.rotationCases) {
+    const headers = new Headers();
+    if (entry.actual !== null) headers.set(INTERNAL_AUTH_HEADER, entry.actual);
+    const env = {
+      [INTERNAL_AUTH_ENV]: entry.current,
+      ...(entry.previous === null ? {} : { [INTERNAL_AUTH_PREVIOUS_ENV]: entry.previous }),
+    };
+    assert.equal(verifyInternalAuthHeaders(headers, env), entry.accepted);
+  }
+});
 
 test("internal auth token requires a non-empty configured string", () => {
   assert.equal(internalAuthToken(ENV), TOKEN);
@@ -110,8 +134,8 @@ test("internal auth strip removes only the internal header", () => {
 
 test("internal auth failure response has stable public shape", async () => {
   const response = internalAuthFailureResponse();
-  await assertJsonResponse(response, 401, {
-    error: "internal_auth_failed",
-    message: "Internal authentication failed",
+  await assertJsonResponse(response, contract.failure.status, {
+    error: contract.failure.error,
+    message: contract.failure.message,
   });
 });

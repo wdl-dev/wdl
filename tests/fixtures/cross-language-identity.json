@@ -50,6 +50,20 @@
     { "value": "jobs:tail", "valid": false },
     { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false }
   ],
+  "kvIds": [
+    { "value": "cache", "valid": true },
+    { "value": "9cache", "valid": true },
+    { "value": "session-store", "valid": true },
+    { "value": "a-", "valid": true },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": true },
+    { "value": "", "valid": false },
+    { "value": "-cache", "valid": false },
+    { "value": "Cache", "valid": false },
+    { "value": "cache_id", "valid": false },
+    { "value": "cache:id", "valid": false },
+    { "value": "cache/id", "valid": false },
+    { "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "valid": false }
+  ],
   "workflowInstanceIds": [
     { "value": "inst-1", "valid": true },
     { "value": "a_1", "valid": true },

@@ -3,15 +3,16 @@ import {
   WORKFLOW_NAME_RE,
   isValidWorkerName,
   isValidWorkflowName,
+  parseBundleMeta,
   workflowDefsKey,
 } from "control-lib";
 import {
-  codedErrorResponse,
-  controlInternalJsonHeaders,
+  ControlAbort,
+  controlAbortResponse,
   errMessage,
-  getControlWorkflows,
   jsonError,
   jsonResponse,
+  postWorkflowsInternal,
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
@@ -21,10 +22,8 @@ const LIFECYCLE_ACTIONS = new Set(["pause", "resume", "restart", "terminate"]);
 
 /**
  * @typedef {import("shared-redis").RedisClient} RedisClient
- * @typedef {{ fetch: typeof fetch }} WorkflowBackend
  * @typedef {{ method: string, url: URL, ns: string, subPath: string[], requestId: string }} WorkflowsHandlerArgs
  * @typedef {{ redis: RedisClient }} RedisDeps
- * @typedef {{ redis: RedisClient, workflows: WorkflowBackend | null }} WorkflowDeps
  * @typedef {{ name: string, binding: string, className: string, workflowKey: string }} ActiveWorkflowMeta
  * @typedef {{ name: string, binding: string | null, className: string, workflowKey: string, retired?: boolean }} WorkflowEntry
  * @typedef {WorkflowEntry & { namespace: string, worker: string, activeVersion: string }} ListedWorkflowEntry
@@ -50,8 +49,8 @@ export async function handle({ method, url, ns, subPath, requestId }) {
   try {
     return await handleInner({ method, url, ns, subPath, requestId });
   } catch (err) {
-    if (err instanceof WorkflowControlError) {
-      return codedErrorResponse(err);
+    if (err instanceof ControlAbort) {
+      return controlAbortResponse(err);
     }
     throw err;
   }
@@ -60,9 +59,8 @@ export async function handle({ method, url, ns, subPath, requestId }) {
 /** @param {WorkflowsHandlerArgs} args */
 async function handleInner({ method, url, ns, subPath, requestId }) {
   const redis = requireControlRedis();
-  const workflows = getControlWorkflows();
   const log = requireControlLog();
-  const deps = { redis, workflows };
+  const deps = { redis };
   if (method === "GET" && subPath.length === 0) {
     const body = await listWorkflowDefinitions(deps, ns);
     log("info", "workflows_listed", {
@@ -78,7 +76,7 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
     const workflow = await resolveWorkflow(deps, ns, worker, workflowName);
 
     if (method === "GET" && subPath.length === 3) {
-      const body = await callWorkflowsRust(deps, "instances", {
+      const body = await callWorkflowsRust("instances", {
         ...workflow.request,
         options: listOptions(url),
         requestId,
@@ -96,7 +94,7 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
     if (subPath.length >= 4) {
       const instanceId = decodePathSegment(subPath[3], "workflow instance id");
       if (method === "GET" && subPath.length === 4) {
-        const body = await callWorkflowsRust(deps, "status", {
+        const body = await callWorkflowsRust("status", {
           ...workflow.request,
           instanceId,
           options: statusOptions(url),
@@ -116,9 +114,11 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
       if (method === "POST" && subPath.length === 5 && LIFECYCLE_ACTIONS.has(subPath[4])) {
         const action = subPath[4];
         if (workflow.workflow?.retired && action === "restart") {
-          throw new WorkflowControlError(409, "workflow_not_exported", `Workflow ${ns}/${worker}/${workflowName} is not exported by the active worker version`);
+          throw new ControlAbort(409, "workflow_not_exported", {
+            message: `Workflow ${ns}/${worker}/${workflowName} is not exported by the active worker version`,
+          });
         }
-        const body = await callWorkflowsRust(deps, action, {
+        const body = await callWorkflowsRust(action, {
           ...workflow.request,
           instanceId,
           requestId,
@@ -157,7 +157,7 @@ async function listWorkflowDefinitions({ redis }, ns) {
   const workflows = [];
   for (let i = 0; i < routeEntries.length; i += 1) {
     const [worker, activeVersion] = routeEntries[i];
-    const meta = parseBundleMetaRaw(ns, worker, activeVersion, metaRaws[i]);
+    const meta = workflowBundleMeta(ns, worker, activeVersion, metaRaws[i]);
     const activeByName = new Map();
     for (const workflow of workflowsFromMeta(meta)) {
       activeByName.set(workflow.name, workflow);
@@ -202,14 +202,20 @@ async function listWorkflowDefinitions({ redis }, ns) {
  */
 async function resolveWorkflow({ redis }, ns, worker, workflowName) {
   if (!isValidWorkerName(worker)) {
-    throw new WorkflowControlError(400, "invalid_worker_name", `Invalid worker name ${JSON.stringify(worker)}. Must match ${WORKER_NAME_RE}.`);
+    throw new ControlAbort(400, "invalid_worker_name", {
+      message: `Invalid worker name ${JSON.stringify(worker)}. Must match ${WORKER_NAME_RE}.`,
+    });
   }
   if (!isValidWorkflowName(workflowName)) {
-    throw new WorkflowControlError(400, "invalid_workflow_name", `Invalid workflow name ${JSON.stringify(workflowName)}. Must match ${WORKFLOW_NAME_RE}.`);
+    throw new ControlAbort(400, "invalid_workflow_name", {
+      message: `Invalid workflow name ${JSON.stringify(workflowName)}. Must match ${WORKFLOW_NAME_RE}.`,
+    });
   }
   const activeVersion = await redis.hGet(routesKey(ns), worker);
   if (!activeVersion) {
-    throw new WorkflowControlError(404, "worker_not_found", `Worker ${ns}/${worker} is not active`);
+    throw new ControlAbort(404, "worker_not_found", {
+      message: `Worker ${ns}/${worker} is not active`,
+    });
   }
   const meta = await readBundleMeta({ redis }, ns, worker, activeVersion);
   const workflow = workflowsFromMeta(meta).find((entry) => entry.name === workflowName);
@@ -232,7 +238,9 @@ async function resolveWorkflow({ redis }, ns, worker, workflowName) {
     ? defs[workflowName]
     : undefined;
   if (!def) {
-    throw new WorkflowControlError(404, "workflow_not_found", `Workflow ${ns}/${worker}/${workflowName} is not exported`);
+    throw new ControlAbort(404, "workflow_not_found", {
+      message: `Workflow ${ns}/${worker}/${workflowName} is not exported`,
+    });
   }
   const retiredWorkflow = {
     name: workflowName,
@@ -297,16 +305,16 @@ function parseWorkflowDefs(raw) {
  * @param {string} ns
  * @param {string} worker
  * @param {string} version
- * @param {string | Uint8Array | null | undefined} raw
- * @returns {unknown}
+ * @param {unknown} raw
+ * @returns {Record<string, unknown>}
  */
-function parseBundleMetaRaw(ns, worker, version, raw) {
-  if (!raw) return null;
-  try {
-    return JSON.parse(String(raw));
-  } catch {
-    throw new WorkflowControlError(500, "corrupt_meta", `Corrupt __meta__ for ${ns}/${worker}/${version}`);
-  }
+function workflowBundleMeta(ns, worker, version, raw) {
+  return parseBundleMeta(raw, {
+    ns,
+    worker,
+    version,
+    makeError: ({ message }) => new ControlAbort(500, "corrupt_meta", { message }),
+  });
 }
 
 /**
@@ -329,7 +337,8 @@ async function readWorkflowListRaws({ redis }, ns, routeEntries) {
       worker_count: routeEntries.length,
       error_message: errMessage(err),
     });
-    throw new WorkflowControlError(500, "workflow_metadata_unavailable", "Workflow metadata is unavailable", {
+    throw new ControlAbort(500, "workflow_metadata_unavailable", {
+      message: "Workflow metadata is unavailable",
       namespace: ns,
       worker_count: routeEntries.length,
     });
@@ -341,7 +350,7 @@ async function readWorkflowListRaws({ redis }, ns, routeEntries) {
  * @param {string} ns
  * @param {string} worker
  * @param {string} version
- * @returns {Promise<unknown>}
+ * @returns {Promise<Record<string, unknown>>}
  */
 async function readBundleMeta({ redis }, ns, worker, version) {
   let raw;
@@ -354,13 +363,14 @@ async function readBundleMeta({ redis }, ns, worker, version) {
       version,
       error_message: errMessage(err),
     });
-    throw new WorkflowControlError(500, "workflow_metadata_unavailable", "Workflow metadata is unavailable", {
+    throw new ControlAbort(500, "workflow_metadata_unavailable", {
+      message: "Workflow metadata is unavailable",
       namespace: ns,
       worker,
       version,
     });
   }
-  return parseBundleMetaRaw(ns, worker, version, raw);
+  return workflowBundleMeta(ns, worker, version, raw);
 }
 
 /**
@@ -393,32 +403,21 @@ function isActiveWorkflowMeta(entry) {
 }
 
 /**
- * @param {WorkflowDeps} deps
  * @param {string} endpoint
  * @param {WorkflowRequest} body
  * @returns {Promise<Record<string, unknown>>}
  */
-async function callWorkflowsRust({ workflows }, endpoint, body) {
-  if (!workflows || typeof workflows.fetch !== "function") {
-    throw new WorkflowControlError(503, "workflow_internal_dispatch_failed", "Workflow backend is unavailable");
-  }
-  let response;
-  let parsed;
-  try {
-    response = await workflows.fetch(`http://workflows/internal/workflows/${endpoint}`, {
-      method: "POST",
-      headers: controlInternalJsonHeaders(),
-      body: JSON.stringify(body),
-    });
-    parsed = await response.json().catch(() => null);
-  } catch (err) {
-    requireControlLog()("error", "workflow_backend_request_failed", {
+async function callWorkflowsRust(endpoint, body) {
+  const { response, body: parsed } = await postWorkflowsInternal({
+    endpoint: `workflows/${endpoint}`,
+    body,
+    logEvent: "workflow_backend_request_failed",
+    logFields: {
       request_id: body.requestId || null,
       endpoint,
-      error_message: errMessage(err),
-    });
-    throw new WorkflowControlError(503, "workflow_internal_dispatch_failed", "Workflow backend request failed");
-  }
+    },
+    timeoutMs: null,
+  });
   if (!response.ok) {
     if (isUpstreamErrorBody(parsed)) {
       if (response.status >= 500) {
@@ -432,17 +431,21 @@ async function callWorkflowsRust({ workflows }, endpoint, body) {
       }
       return throwUpstreamError(response.status, parsed);
     }
-    throw new WorkflowControlError(
+    throw new ControlAbort(
       response.status >= 400 ? response.status : 502,
       "workflow_internal_dispatch_failed",
-      "Workflow backend request failed",
-      { upstream_status: response.status },
+      {
+        message: "Workflow backend request failed",
+        upstream_status: response.status,
+      },
     );
   }
   if (!parsed || typeof parsed !== "object") {
-    throw new WorkflowControlError(502, "workflow_internal_dispatch_failed", "Workflow backend returned an invalid response");
+    throw new ControlAbort(502, "workflow_internal_dispatch_failed", {
+      message: "Workflow backend returned an invalid response",
+    });
   }
-  return parsed;
+  return /** @type {Record<string, unknown>} */ (parsed);
 }
 
 /**
@@ -452,18 +455,22 @@ async function callWorkflowsRust({ workflows }, endpoint, body) {
  */
 function throwUpstreamError(status, body) {
   if (status >= 500) {
-    throw new WorkflowControlError(
+    throw new ControlAbort(
       status,
       body.error,
-      "Workflow backend request failed",
-      { upstream_status: status },
+      {
+        message: "Workflow backend request failed",
+        upstream_status: status,
+      },
     );
   }
-  throw new WorkflowControlError(
+  throw new ControlAbort(
     status,
     body.error,
-    typeof body.message === "string" ? body.message : body.error,
-    filterDetails(body),
+    {
+      ...filterDetails(body),
+      message: typeof body.message === "string" ? body.message : body.error,
+    },
   );
 }
 
@@ -508,7 +515,9 @@ function statusOptions(url) {
   /** @type {Record<string, unknown>} */
   const options = {};
   if (url.searchParams.has("include_steps") || url.searchParams.has("step_limit")) {
-    throw new WorkflowControlError(400, "invalid_request", "workflow status query options use camelCase");
+    throw new ControlAbort(400, "invalid_request", {
+      message: "workflow status query options use camelCase",
+    });
   }
   const includeSteps = url.searchParams.get("includeSteps");
   if (includeSteps != null) options.includeSteps = parseBooleanOption(includeSteps, "includeSteps");
@@ -523,7 +532,7 @@ function statusOptions(url) {
  */
 function parseIntegerOption(raw, label) {
   if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
-    throw new WorkflowControlError(400, "invalid_request", `${label} must be an integer`);
+    throw new ControlAbort(400, "invalid_request", { message: `${label} must be an integer` });
   }
   return Number(raw);
 }
@@ -537,7 +546,7 @@ function parseBooleanOption(raw, label) {
   // numeric options stay strict because an empty number has no useful meaning.
   if (raw === "" || raw === "1" || raw === "true") return true;
   if (raw === "0" || raw === "false") return false;
-  throw new WorkflowControlError(400, "invalid_request", `${label} must be true or false`);
+  throw new ControlAbort(400, "invalid_request", { message: `${label} must be true or false` });
 }
 
 /**
@@ -548,21 +557,8 @@ function decodePathSegment(value, label) {
   try {
     return decodeURIComponent(value);
   } catch {
-    throw new WorkflowControlError(400, "invalid_request", `invalid percent-encoding in ${label}`);
-  }
-}
-
-class WorkflowControlError extends Error {
-  /**
-   * @param {number} status
-   * @param {string} code
-   * @param {string} message
-   * @param {Record<string, unknown>} [details]
-   */
-  constructor(status, code, message, details = {}) {
-    super(message);
-    this.status = status;
-    this.code = code;
-    this.details = details;
+    throw new ControlAbort(400, "invalid_request", {
+      message: `invalid percent-encoding in ${label}`,
+    });
   }
 }

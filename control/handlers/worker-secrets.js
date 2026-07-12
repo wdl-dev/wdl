@@ -3,6 +3,7 @@ import {
   jsonError,
   ControlAbort,
   controlAbortResponse,
+  errMessage,
   requireControlLog,
   requireControlRedis,
   runOptimistic,
@@ -21,6 +22,7 @@ import {
 import { stageWorkerHidden, stageWorkerVisible } from "control-lifecycle-indexes";
 import { bumpActiveAndPromote, RoutingError } from "control-routing";
 import {
+  BundleMetaError,
   WorkerEnvBudgetError,
   assertWorkerVersionsUserEnvBudget,
   decryptMutatedSecretHashForBudget,
@@ -47,6 +49,36 @@ const MAX_SECRET_ATTEMPTS = 5;
 
 class SecretAbort extends ControlAbort {}
 class SecretNoop extends Error {}
+
+function secretMutationContentionAbort() {
+  return new SecretAbort(503, "secret_mutation_contention", {
+    message: "active version changed during secret mutation; retry later",
+  });
+}
+
+/**
+ * @param {{
+ *   abort: ControlAbort,
+ *   requestId: string,
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: string,
+ *   log: (level: string, event: string, fields: Record<string, unknown>) => void,
+ * }} args
+ */
+function rejectSecretMutation({ abort, requestId, ns, name, key, method, log }) {
+  log("warn", "secret_mutation_rejected", {
+    request_id: requestId,
+    namespace: ns,
+    worker: name,
+    key,
+    method,
+    status: abort.status,
+    reason: abort.code,
+  });
+  return controlAbortResponse(abort);
+}
 
 /**
  * @param {{
@@ -173,12 +205,13 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
         else payload.deleted = true;
         return jsonResponse(200, payload);
       }
-      throw new SecretAbort(503, "secret_mutation_contention", {
-        message: `active version changed during secret mutation; retry later`,
-      });
+      throw secretMutationContentionAbort();
     } catch (err) {
       if (err instanceof SecretAbort) {
-        log("warn", "secret_mutation_rejected", {
+        return rejectSecretMutation({ abort: err, requestId, ns, name, key, method, log });
+      }
+      if (err instanceof BundleMetaError) {
+        log("error", "secret_mutation_rejected", {
           request_id: requestId,
           namespace: ns,
           worker: name,
@@ -186,40 +219,28 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
           method,
           status: err.status,
           reason: err.code,
+          error_detail: errMessage(err.cause),
         });
-        return controlAbortResponse(err);
+        return codedErrorResponse(err, err.code);
       }
       if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
       if (err instanceof RoutingError) {
         if (err.code === "bump_contention") {
-          const abort = new SecretAbort(503, "secret_mutation_contention", {
-            message: `active version changed during secret mutation; retry later`,
-          });
-          log("warn", "secret_mutation_rejected", {
-            request_id: requestId,
-            namespace: ns,
-            worker: name,
+          return rejectSecretMutation({
+            abort: secretMutationContentionAbort(),
+            requestId,
+            ns,
+            name,
             key,
             method,
-            status: abort.status,
-            reason: abort.code,
+            log,
           });
-          return controlAbortResponse(abort);
         }
         if (err.code === "caller_deleting") {
           const abort = new SecretAbort(409, "deleting", {
             namespace: ns, worker: name,
           });
-          log("warn", "secret_mutation_rejected", {
-            request_id: requestId,
-            namespace: ns,
-            worker: name,
-            key,
-            method,
-            status: abort.status,
-            reason: abort.code,
-          });
-          return controlAbortResponse(abort);
+          return rejectSecretMutation({ abort, requestId, ns, name, key, method, log });
         }
         return codedErrorResponse(err, err.code);
       }

@@ -109,6 +109,8 @@ queue-orphaned:<ns>:<queue>       Stream, consumer 消失后的 message 降落�
 queue-delayed-wake                Stream, delayed ZSET dispatcher 的 wake signal
 ```
 
+`wdl-rust-common::queue_keys` 持有 wake stream 及其 `delayed_key` / `visible_at` entry fields，避免 redis-proxy producer 与 scheduler consumer 漂移。
+
 Index 不是权威状态。Writer 只负责添加 index member；scheduler reconcile 在确认被引用 key 不存在后负责 stale cleanup。
 
 ## Ownership / 并发 / 失败语义
@@ -185,6 +187,7 @@ Runtime tail logs 也会为 loaded worker 执行输出 `worker_scheduled` 和 `w
 - `tests/unit/control-lib.test.js`：cron 和 queue manifest 解析。
 - `tests/unit/control-routing.test.js`：cron 和 queue consumer 的 promote projection。
 - `tests/unit/control-lifecycle-indexes.test.js`：JS cron/queue key helper 和 projection staging。
+- `tests/fixtures/queue-key-parse.json`：JS/Rust 共用的 queue discovery-key parser 合同。
 - `tests/unit/runtime-lib.test.js`：internal dispatch body normalization。
 - `tests/unit/runtime-dispatch-handlers.test.js`：scheduled / queue dispatch 行为，以及 tail event envelope 行为。
 - `tests/unit/style-contracts.test.js`：跨 tier Redis key/layout drift 检查。

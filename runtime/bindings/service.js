@@ -9,9 +9,8 @@
 // entrypoint. Protected by service-binding RPC integration tests.
 
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { createLoaderCallback } from "runtime-load";
-import { recordLoadedWorker } from "runtime-state";
-import { emitRuntimeTailEvent, fetchTailFields } from "runtime-tail-forwarder";
+import { getLoadedWorkerStub } from "runtime-load";
+import { fetchTailFields, startTailEnvelope } from "runtime-tail-forwarder";
 import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 
 const SERVICE_BINDING_INTERNAL_HEADERS = [
@@ -72,49 +71,24 @@ export class ServiceBinding extends WorkerEntrypoint {
       requestId,
     };
     const baseFields = fetchTailFields(forwarded);
-    const startedAt = Date.now();
-    const startTailEvent = emitRuntimeTailEvent({
+    const tail = startTailEnvelope({
       env: self.env,
       ctx: self.ctx,
       identity,
       event: "worker_fetch",
-      phase: "start",
       fields: baseFields,
     });
     try {
       const response = await targetStub(self, requestId)
         .getEntrypoint(targetEntrypoint ?? null, targetEntrypointOpts(self))
         .fetch(forwarded);
-      emitRuntimeTailEvent({
-        env: self.env,
-        ctx: self.ctx,
-        identity,
-        event: "worker_fetch",
-        phase: "finish",
-        after: startTailEvent,
-        fields: {
-          ...baseFields,
-          outcome: "ok",
-          status: response.status,
-          duration_ms: Date.now() - startedAt,
-        },
+      tail.finish({
+        outcome: "ok",
+        status: response.status,
       });
       return response;
     } catch (err) {
-      emitRuntimeTailEvent({
-        env: self.env,
-        ctx: self.ctx,
-        identity,
-        event: "worker_fetch",
-        phase: "finish",
-        after: startTailEvent,
-        fields: {
-          ...baseFields,
-          outcome: "error",
-          error: err instanceof Error ? err.message : undefined,
-          duration_ms: Date.now() - startedAt,
-        },
-      });
+      tail.finishError(err);
       throw err;
     }
   }
@@ -151,7 +125,9 @@ function serviceBinding(binding) {
 function targetStub(self, requestId) {
   const { targetNs, targetWorker, targetVersion } = self.ctx.props;
   const targetId = targetIdOf(self.ctx.props);
-  const baseCallback = createLoaderCallback({
+  // The pinned target version may not be active, so service-binding cold-loads
+  // record the isolate but deliberately leave sibling eviction disabled.
+  return getLoadedWorkerStub({
     requestId,
     env: self.env,
     ctx: self.ctx,
@@ -159,14 +135,7 @@ function targetStub(self, requestId) {
     worker: targetWorker,
     version: targetVersion,
     workerId: targetId,
-  });
-  // Record but do not evict — the pinned version may not be the
-  // active one, so aborting siblings here would thrash gateway traffic.
-  return self.env.LOADER.get(targetId, async () => {
-    const code = await baseCallback();
-    recordLoadedWorker(targetId);
-    return code;
-  });
+  }).stub;
 }
 
 /**

@@ -4,7 +4,6 @@ import {
   assertWorkflowDeleteAllowed,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
   ControlAbort, controlAbortResponse,
-  errMessage,
   requireControlLog,
   requireControlRedis,
   runOptimistic,
@@ -13,6 +12,8 @@ import {
   workerVersionsKey, referrersKey,
   extractD1Refs,
   extractOutgoingRefs, formatReferrerBlocker,
+  bundleAssetPrefix,
+  parseBundleMeta,
 } from "control-lib";
 import {
   stageD1ReferrerRemovals,
@@ -179,19 +180,14 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     }
 
     const bundleMetaRaw = await iso.hGet(bundleKey(ns, name, version), "__meta__");
-    if (!bundleMetaRaw) {
-      throw new VersionDeleteError(404, "version_not_found", {
+    const bundleMeta = parseBundleMeta(bundleMetaRaw, {
+      ns,
+      worker: name,
+      version,
+      makeError: () => new VersionDeleteError(500, "corrupt_meta", {
         namespace: ns, name, version,
-      });
-    }
-    let bundleMeta;
-    try {
-      bundleMeta = JSON.parse(bundleMetaRaw);
-    } catch {
-      throw new VersionDeleteError(500, "corrupt_meta", {
-        namespace: ns, name, version,
-      });
-    }
+      }),
+    });
 
     const referrerMembers = await iso.sMembers(referrersKey(ns, name, version));
     if (referrerMembers.length > 0) {
@@ -203,8 +199,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
 
     const outgoingRefs = extractOutgoingRefs(bundleMeta.bindings, ns);
     const d1Refs = extractD1Refs(bundleMeta.bindings);
-    const prefix = bundleMeta.assets && bundleMeta.assets.prefix
-      ? bundleMeta.assets.prefix : null;
+    const prefix = bundleAssetPrefix(bundleMeta);
 
     // Secret-bump COPY can make siblings share the same assets prefix;
     // skip the cleanup task if any other retained version still points
@@ -215,18 +210,17 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
       for (const otherV of currentVersions) {
         if (otherV === version) continue;
         const otherRaw = await iso.hGet(bundleKey(ns, name, otherV), "__meta__");
-        if (!otherRaw) continue;
-        let otherMeta;
-        try {
-          otherMeta = JSON.parse(otherRaw);
-        } catch (err) {
-          throw new VersionDeleteError(500, "corrupt_meta", {
+        const otherMeta = parseBundleMeta(otherRaw, {
+          ns,
+          worker: name,
+          version: otherV,
+          makeError: ({ reason }) => new VersionDeleteError(500, "corrupt_meta", {
             namespace: ns, name, version: otherV,
             stage: "sibling_meta_parse",
-            detail: errMessage(err),
-          });
-        }
-        if (otherMeta && otherMeta.assets && otherMeta.assets.prefix === prefix) {
+            detail: reason,
+          }),
+        });
+        if (bundleAssetPrefix(otherMeta) === prefix) {
           skipS3Cleanup = true;
           break;
         }
