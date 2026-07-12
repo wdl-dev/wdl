@@ -71,8 +71,21 @@ test("R2 HTTP metadata fields and cache expiry use one mapping", () => {
   setR2CacheExpiryHeader(headers, 0);
   assert.equal(headers.get("expires"), "Thu, 01 Jan 1970 00:00:00 GMT");
   assert.equal(r2CacheExpiryFromHeaders(headers), 0);
+  setR2CacheExpiryHeader(headers, "2026-07-12T00:00:00.000Z");
+  assert.equal(headers.get("expires"), "Sun, 12 Jul 2026 00:00:00 GMT");
   headers.set("expires", "not-a-date");
   assert.equal(r2CacheExpiryFromHeaders(headers), undefined);
+});
+
+test("setR2CacheExpiryHeader rejects invalid expiry values", () => {
+  for (const value of ["", "not-a-date", new Date(NaN), true]) {
+    const headers = new Headers();
+    assert.throws(
+      () => setR2CacheExpiryHeader(headers, value),
+      /cacheExpiry must be a valid Date or timestamp/
+    );
+    assert.equal(headers.has("expires"), false);
+  }
 });
 
 test("encodeS3KeyPath percent-encodes key segments while preserving slashes", () => {

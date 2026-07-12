@@ -22,7 +22,18 @@ export function r2CacheExpiryFromHeaders(headers) {
 /** @param {Headers} headers @param {unknown} value */
 export function setR2CacheExpiryHeader(headers, value) {
   if (value == null) return;
-  const date = value instanceof Date ? value : new Date(Number(value));
+  let date;
+  if (value instanceof Date || typeof value === "number") {
+    date = new Date(value);
+  } else if (typeof value === "string" && value.trim() !== "") {
+    const timestamp = Number(value);
+    date = new Date(Number.isFinite(timestamp) ? timestamp : value);
+  } else {
+    throw new TypeError("R2 httpMetadata.cacheExpiry must be a valid Date or timestamp");
+  }
+  if (!Number.isFinite(date.getTime())) {
+    throw new TypeError("R2 httpMetadata.cacheExpiry must be a valid Date or timestamp");
+  }
   headers.set("expires", date.toUTCString());
 }
 
