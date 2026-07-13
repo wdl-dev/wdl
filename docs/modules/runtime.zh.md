@@ -53,7 +53,7 @@ KV 是最直接的例子。Runtime 把 `KV` 导出成 named entrypoint，并用 
 
 KV 支持常用 `KVNamespace` 调用：`get`、batch `get`、`getWithMetadata`、batch `getWithMetadata`、`put`、`delete` 和 `list`。`get` 支持 text、JSON、arrayBuffer 和 stream 形状；batch read 支持 text 和 JSON。Runtime shim 在 proxy 前把 value 限制到 25 MiB，stream value 也用同一个 cap 读取。所有 KV 操作的 key 都在 redis-proxy 边界限制为 512 个 UTF-8 字节，包括 list prefix 和 batch read。`list()` 基于 Redis `HSCAN`，不是 Cloudflare 有序 B-tree：key 不排序，cursor 是 opaque WDL cursor，并发写可能乱序出现或被再次看到。`limit` 上限是 1000。`cacheTtl` 只是 API shape；没有 Cloudflare edge read cache 或 global eventual-consistency window。
 
-R2 binding 把 `bucket_name` 映射到平台 S3-compatible bucket 下的 namespace-scoped virtual bucket：`r2/<ns>/<bucket_name>/<object-key>`。同一个 namespace 中使用同一 `bucket_name` 的 worker 会有意共享数据；不同 namespace 通过前缀隔离。Runtime 支持常用 `head`、`get`、`put`、`delete` 和 `list` 路径。`get()` 返回 streaming body，便捷 reader 执行 25 MiB cap。`put(stream, ...)` 目前会先 buffer，再发单个 S3 PUT，并使用同一个 cap；不支持 multipart upload、SSE-C 和 checksum selection。Conditional requests 和 range GET 实现常用 R2 行为。`list({ include: [...] })` 为 metadata fields 额外执行 HEAD，并使用并发 cap。Tenant-facing R2 error 只暴露 operation/status，以及有帮助的 virtual object key；不会暴露原始 S3 response body 或 physical `r2/<ns>/<bucket>/...` key。Control-plane R2 admin error 可以为 operator 保留 backend detail。
+R2 binding 把 `bucket_name` 映射到平台 S3-compatible bucket 下的 namespace-scoped virtual bucket：`r2/<ns>/<bucket_name>/<object-key>`。同一个 namespace 中使用同一 `bucket_name` 的 worker 会有意共享数据；不同 namespace 通过前缀隔离。Runtime 支持常用 `head`、`get`、`put`、`delete` 和 `list` 路径。`get()` 返回 streaming body，便捷 reader 执行 25 MiB cap。`put(stream, ...)` 目前会先 buffer，再发单个 S3 PUT，并使用同一个 cap；不支持 multipart upload、SSE-C 和 checksum selection。Conditional requests 和 range GET 实现常用 R2 行为。`list({ include: [...] })` 为 metadata fields 额外执行 HEAD，并使用并发 cap。Tenant 提供的 `Headers` metadata 如果包含 `Expires`，其值必须是 canonical IMF-fixdate；malformed write metadata 会在 host binding call 前被拒绝。Tenant-facing R2 error 只暴露 operation/status，以及有帮助的 virtual object key；不会暴露原始 S3 response body 或 physical `r2/<ns>/<bucket>/...` key。Control-plane R2 admin error 可以为 operator 保留 backend detail。
 
 ASSETS 是 deploy-artifact helper，不是完整 Cloudflare Pages asset pipeline。Control 把文件上传到 `assets/<ns>/<worker>/<token>/<path>`，注入 `ASSETS` binding，runtime 暴露同步的 `env.ASSETS.url(path)`。该方法在 runtime 中不做 IO，并用 `ASSETS_CDN_BASE` 返回浏览器可访问的 CDN URL。Path 按 `/` 切段，空段、`.` 和 `..` 被拒绝，每段会 percent-encode。Version 在 load 时绑定，因此 rollback 会切换 asset URL。需要对静态文件做 auth 或 rewrite 的 worker 应把文件留在 bundle 里，而不是使用 declared `assets`。
 
@@ -82,9 +82,9 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 - workerLoader cache 没有 LRU。Runtime 给每个 loaded worker 注入 `__WdlAbort__`，并在 active-version cold-load 时 evict sibling historical versions。
 - Service-binding cold load 会记录 loaded version，但不 evict sibling，因为 service binding 可能有意指向 frozen historical version。
 - Internal active-version scheduled/queue dispatch 会 opt into sibling eviction；frozen workflow dispatch 不会。
-- 只要注入 privileged internal Fetcher，wrapper generation 就会避免 raw env 暴露给未包装 entrypoint。
+- 只要注入 privileged internal Fetcher，wrapper generation 就会避免 raw env 暴露给未包装 entrypoint。Host-wrapper runtime 会在 tenant module 前执行，并捕获所有参与 handler/env wrapping 决策和 request-context cleanup 的 intrinsic，因此 tenant 顶层 prototype mutation 不能绕过这条边界或遗留 stale request context。
 - Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。
-- Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error` response，并带 request id。异常细节输出到结构化日志/live tail，不复制进客户端 body。
+- Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error` response，并带 request id。异常细节输出到结构化日志/live tail，不复制进客户端 body；throwable 自身无法转成字符串时，tail formatting 也不能反向覆盖原始异常。
 - Internal scheduled、queue 和 workflow dispatch route 使用 result envelope 表达 handler outcome。Tenant handler error 是 scheduler/workflow 协议中的 outcome state，不是 generic platform transport error。
 - Runtime 没有 route-cache invalidation protocol。`workerLoader` cache key 是不可变 worker id，因此 promote 后的新 version 是新 key，会自然 cold-load。
 - `runtime/tail-worker.js` 通过 `workerCode.tails` 附加到每次 dynamic load。它总是输出结构化 stdout；只有 shared tail forwarder 看到 active subscription 后，才转发到 `wdl tail`。

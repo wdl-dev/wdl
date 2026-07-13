@@ -132,7 +132,9 @@ are isolated by prefix. Runtime supports the common `head`, `get`, `put`, `delet
 25 MiB cap. `put(stream, ...)` currently buffers and sends one S3 PUT with the same cap;
 multipart upload, SSE-C, and checksum selection are not supported. Conditional requests
 and range GETs implement the common R2 behavior. `list({ include: [...] })` performs
-extra HEAD requests for metadata fields and applies a concurrency cap.
+extra HEAD requests for metadata fields and applies a concurrency cap. Tenant-supplied
+`Headers` metadata must carry a canonical IMF-fixdate `Expires` value when that header
+is present; malformed write metadata is rejected before the host binding call.
 Tenant-facing R2 errors expose operation/status plus virtual object keys where useful,
 but not raw S3 response bodies or physical `r2/<ns>/<bucket>/...` keys. Control-plane
 R2 admin errors may retain backend detail for operators.
@@ -200,12 +202,16 @@ opaque cold-load failures under the current stock binary.
 - Internal active-version scheduled/queue dispatches opt into sibling eviction; frozen
   workflow dispatches do not.
 - Wrapper generation hides raw env from unwrapped entrypoints whenever privileged
-  internal Fetchers are injected.
+  internal Fetchers are injected. Its host-wrapper runtime evaluates before tenant
+  modules and captures every intrinsic used to decide handler or env wrapping and to
+  settle request-context cleanup, so tenant top-level prototype mutation cannot bypass
+  that boundary or retain stale request context.
 - Request context wrappers swap facade objects into env and propagate request id where
   that event class can carry it.
 - An uncaught tenant `fetch()` exception maps to a platform `502 runtime_error`
   response with the request id. Exception details are emitted to structured logs/live
-  tail and are not copied into the client body.
+  tail and are not copied into the client body. Tail formatting cannot replace the
+  original throwable when its string conversion fails.
 - Internal scheduled, queue, and workflow dispatch routes use result envelopes for
   handler outcomes. A tenant handler error is represented as outcome state for the
   scheduler/workflow protocol, not as a generic platform transport error.

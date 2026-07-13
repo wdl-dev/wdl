@@ -71,8 +71,12 @@ test("R2 HTTP metadata fields and cache expiry use one mapping", () => {
   setR2CacheExpiryHeader(headers, 0);
   assert.equal(headers.get("expires"), "Thu, 01 Jan 1970 00:00:00 GMT");
   assert.equal(r2CacheExpiryFromHeaders(headers), 0);
+  assert.equal(r2CacheExpiryFromHeaders(headers, { canonical: true }), 0);
   setR2CacheExpiryHeader(headers, "2026-07-12T00:00:00.000Z");
   assert.equal(headers.get("expires"), "Sun, 12 Jul 2026 00:00:00 GMT");
+  headers.set("expires", "0");
+  assert.equal(Number.isFinite(r2CacheExpiryFromHeaders(headers)), true);
+  assert.equal(r2CacheExpiryFromHeaders(headers, { canonical: true }), undefined);
   headers.set("expires", "not-a-date");
   assert.equal(r2CacheExpiryFromHeaders(headers), undefined);
 });

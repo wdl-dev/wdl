@@ -119,11 +119,13 @@ async function withNamespaceSecretRedis(state, setup, callback) {
 }
 
 const validateSecretKeyStubSource = `
+import { RESERVED_OBJECT_KEYS } from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};
 const SECRET_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const WDL_RESERVED_BINDING_RE = /^__WDL_[A-Za-z0-9_]*__$/;
 export function validateSecretKey(key) {
   if (typeof key !== "string" || !SECRET_KEY_RE.test(key)) throw new Error("bad key");
   if (WDL_RESERVED_BINDING_RE.test(key)) throw new Error("reserved key");
+  if (RESERVED_OBJECT_KEYS.has(key)) throw new Error("reserved object key");
   if (key.length > 128) throw new Error("key too long");
 }
 `;
@@ -281,6 +283,26 @@ test("namespace secret mutation rejects invalid keys through shared validator", 
       method: "PUT",
       nsName: "demo",
       secretKey: "bad-key",
+      requestId: "rid-secret",
+    });
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "invalid_request");
+    assert.equal(redis.ops.length, 0);
+  });
+});
+
+test("namespace secret mutation rejects Object.prototype keys before persistence", async () => {
+  await withNamespaceSecretRedis(namespaceSecretState, () => {}, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/constructor", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "constructor",
       requestId: "rid-secret",
     });
 

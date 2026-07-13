@@ -110,9 +110,9 @@ when the logical worker is gone or now points at a different `doStorageId`.
 
 - One task owns a class shard at a time.
 - Generation fencing prevents stale owners from committing after ownership moves.
-- `do-runtime/protocol.js` owns the DO ownership error vocabulary and the subset that
-  proves a request was fence-rejected and is safe to retry through the router. The
-  injected runtime transport mirrors both sets under a direct parity test.
+- `do-runtime/protocol.js` owns the DO ownership error vocabulary. The injected runtime
+  transport keeps its retry and stale-hint subsets private and pins them through
+  response-classification tests.
 - Facet identity is `className:objectName` inside stable `doStorageId`, so worker
   promotion preserves object state.
 - Existing native facets keep the constructed class version until host actor restart or
@@ -134,11 +134,12 @@ when the logical worker is gone or now points at a different `doStorageId`.
   Client messages queued under an older backend reconnect epoch may be discarded
   without per-frame ack/nack when the gateway resets that epoch.
 - Ordinary fetch/RPC can fall back through the router after explicit stale-owner or
-  owner-race responses. A direct owner transport failure, or a 502/503/504 without a
-  fresh owner-hint header, evicts the cached hint. Safe `GET`/`HEAD` requests may replay
-  through the router to rediscover the owner; non-idempotent methods and RPC return
-  `owner_unavailable` without replay because the owner may already have applied the
-  request.
+  owner-race responses carrying do-runtime's private ownership-error control header.
+  Tenant response bodies cannot opt into replay. A direct owner transport failure, or a
+  502/503/504 without a fresh owner-hint header, evicts the cached hint. Safe `GET`/`HEAD`
+  requests may replay through the router to rediscover the owner; non-idempotent methods
+  and RPC return `owner_unavailable` without replay because the owner may already have
+  applied the request.
 - The shared runtime transport owns owner-hint cache wiring, invoke race retry, and
   response-header stripping for both the host binding and injected facade. Its connect
   wrapper deliberately omits the invoke-only router fallback required to preserve
@@ -218,8 +219,9 @@ interrupt.
   endpoints, or raw transport error text.
 - Owner hints are trusted only when returned by do-runtime headers and validated against
   endpoint grammar.
-- Owner-hint defense is layered: tenant response bodies are ignored, only do-runtime
-  control headers are trusted, and endpoint grammar/acceptable-address checks must pass.
+- Owner-hint and ownership-error defense is layered: tenant response bodies and
+  tenant-supplied control headers are ignored, only do-runtime control headers are
+  trusted, and endpoint grammar/acceptable-address checks must pass for hints.
 - do-runtime supervisor must call local `127.0.0.1:8788` drain/renew endpoints; Service
   Connect aliases may hit a different task.
 

@@ -231,3 +231,23 @@ test("DO host actor: registry remember failure is best-effort and does not fail 
   assert.equal(harness.logs.at(-1).fields.member, "Room:alice");
   assert.equal(harness.logs.at(-1).fields.worker_id, "demo:room:v1");
 });
+
+test("DO host actor strips tenant-supplied ownership error control markers", async () => {
+  const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  harness.assertResponses = [{
+    ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
+    taskId: "task-a",
+    generation: 7,
+    leaseExpiresAt: Date.now() + 60_000,
+  }];
+
+  const response = await host.dispatchWithFence(invoke(), () => Promise.resolve(
+    new Response("tenant response", {
+      status: 503,
+      headers: { "x-wdl-do-ownership-error": "owner_fence_missing" },
+    })
+  ));
+
+  assert.equal(await response.text(), "tenant response");
+  assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
+});

@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::header::CONTENT_LENGTH;
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -21,7 +21,7 @@ use wdl_rust_common::internal_auth::{
 };
 use wdl_rust_common::metrics::prometheus_response;
 use wdl_rust_common::redis_conn::RedisConnection;
-use wdl_rust_common::request_id::sanitize_request_id;
+use wdl_rust_common::request_id::request_id_from_headers;
 use wdl_rust_common::time::duration_ms_for_log;
 
 // CF KV allows 25 MiB values; set Axum's body cap above that instead of
@@ -293,13 +293,6 @@ fn response_error(response: &Response) -> Option<(&'static str, &str)> {
         .map(|err| (err.code, err.message.as_str()))
 }
 
-fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(sanitize_request_id)
-}
-
 async fn track_request(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -411,6 +404,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
+    use axum::http::HeaderMap;
     use axum::response::IntoResponse;
     use serde_json::json;
 

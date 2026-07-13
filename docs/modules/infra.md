@@ -99,13 +99,14 @@ Private mesh callers and receivers share `WDL_INTERNAL_AUTH_TOKEN` as the curren
 internal token. Calls between runtime, d1-runtime, do-runtime, scheduler,
 workflows, and redis-proxy sidecars carry it as `x-wdl-internal-auth`. Receivers
 also accept optional `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN` during rotation; callers
-always send only the current token. Both token values must be non-empty ASCII
-strings so JS and Rust compare the same header representation. Health and
-metrics endpoints are the only unauthenticated service endpoints. The token is
-platform plumbing, not a tenant binding: runtime wrapper code strips it from
-tenant-visible `env`, host-owned DO proxies and host-side backend capabilities
-add it for DO forwarding, and spoofed tenant headers are removed before
-forwarding.
+always send only the current token. Receivers require exactly one auth header.
+Both token values must contain only visible ASCII bytes, with no whitespace or commas,
+so Fetch header normalization preserves them exactly and header joining cannot make
+repeated headers look like one configured token. Health and metrics endpoints are the
+only unauthenticated service endpoints. The token is platform plumbing,
+not a tenant binding: runtime wrapper code strips it from tenant-visible `env`, host-owned
+DO proxies and host-side backend capabilities add it for DO forwarding, and spoofed tenant
+headers are removed before forwarding.
 
 ## Redis / Storage Contracts
 

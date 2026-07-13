@@ -163,6 +163,30 @@ test("R2Bucket.put normalizes every Headers httpMetadata field", async () => {
   });
 });
 
+test("R2Bucket.put rejects non-canonical Headers expiry before the host call", async () => {
+  let calls = 0;
+  const bucket = new R2Bucket({
+    async put() {
+      calls += 1;
+      return null;
+    },
+  });
+  for (const expires of [
+    "not-a-date",
+    "0",
+    "2026-07-13T00:00:00.000Z",
+    "July 13, 2026",
+    "Tue, 13 Jul 2026 00:00:00 GMT",
+  ]) {
+    const headers = new Headers({ expires });
+    await assert.rejects(
+      () => bucket.put("a.txt", "hello", { httpMetadata: headers }),
+      /Expires header must be canonical IMF-fixdate/
+    );
+  }
+  assert.equal(calls, 0);
+});
+
 test("R2Object.writeHttpMetadata writes every mapped field including epoch expiry", () => {
   const object = new R2Object({
     httpMetadata: {

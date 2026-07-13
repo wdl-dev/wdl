@@ -20,9 +20,13 @@ pub struct InternalAuthTokens {
 }
 
 fn validate_internal_auth_token(name: &str, token: String) -> Result<String, String> {
-    if token.is_empty() || !token.is_ascii() {
+    if token.is_empty()
+        || token
+            .bytes()
+            .any(|byte| !(0x21..=0x7e).contains(&byte) || byte == b',')
+    {
         return Err(format!(
-            "{name} must be configured as a non-empty ASCII string"
+            "{name} must be configured as visible ASCII without whitespace or commas"
         ));
     }
     Ok(token)
@@ -76,9 +80,12 @@ pub fn internal_auth_matches_any(actual: Option<&str>, expected: &InternalAuthTo
 
 #[cfg(feature = "axum")]
 pub fn internal_auth_header_value(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(INTERNAL_AUTH_HEADER)
-        .and_then(|value| value.to_str().ok())
+    let mut values = headers.get_all(INTERNAL_AUTH_HEADER).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    Some(value)
 }
 
 #[cfg(feature = "axum")]
@@ -124,6 +131,14 @@ mod tests {
             INTERNAL_AUTH_FAILURE_MESSAGE
         );
 
+        for case in contract["tokenCases"].as_array().expect("tokenCases array") {
+            let value = case["value"].as_str().expect("token value").to_string();
+            assert_eq!(
+                validate_internal_auth_token(INTERNAL_AUTH_ENV, value).is_ok(),
+                case["accepted"].as_bool().expect("accepted boolean")
+            );
+        }
+
         for case in contract["rotationCases"]
             .as_array()
             .expect("rotationCases array")
@@ -134,6 +149,28 @@ mod tests {
             };
             assert_eq!(
                 internal_auth_matches_any(case["actual"].as_str(), &tokens),
+                case["accepted"].as_bool().expect("accepted boolean")
+            );
+        }
+
+        #[cfg(feature = "axum")]
+        for case in contract["headerCases"]
+            .as_array()
+            .expect("headerCases array")
+        {
+            let tokens = InternalAuthTokens {
+                current: case["current"].as_str().expect("current token").to_string(),
+                previous: case["previous"].as_str().map(str::to_string),
+            };
+            let mut headers = HeaderMap::new();
+            for value in case["values"].as_array().expect("header values") {
+                headers.append(
+                    INTERNAL_AUTH_HEADER,
+                    value.as_str().expect("header value").parse().unwrap(),
+                );
+            }
+            assert_eq!(
+                internal_auth_headers_match(&headers, &tokens),
                 case["accepted"].as_bool().expect("accepted boolean")
             );
         }
@@ -181,13 +218,21 @@ mod tests {
     }
 
     #[test]
-    fn internal_auth_tokens_must_be_ascii() {
+    fn internal_auth_tokens_must_be_visible_ascii_without_commas() {
         assert_eq!(
             validate_internal_auth_token(INTERNAL_AUTH_ENV, "ascii-token".to_string()).unwrap(),
             "ascii-token"
         );
         assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, "".to_string()).is_err());
         assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, "tokén".to_string()).is_err());
+        assert!(
+            validate_internal_auth_token(INTERNAL_AUTH_ENV, "token,other".to_string()).is_err()
+        );
+        assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, " token".to_string()).is_err());
+        assert!(validate_internal_auth_token(INTERNAL_AUTH_ENV, "token ".to_string()).is_err());
+        assert!(
+            validate_internal_auth_token(INTERNAL_AUTH_ENV, "token\0value".to_string()).is_err()
+        );
     }
 
     #[cfg(feature = "axum")]

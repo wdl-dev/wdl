@@ -91,9 +91,9 @@ WDL 在 JS workerd tier 和 Rust 服务中使用同一套可观测性策略：�
 
 通用规则：
 
-- `x-request-id` 尽可能跨 gateway、control/runtime、loaded worker 和 D1 传播。缺失的 inbound id 会在入口生成；multi-valued、包含 Unicode whitespace/control char 或超过 128 UTF-8 bytes 的脏 id 会被当成缺失。使用 `shared/request-scope.js` 的 JS entrypoint 会在 response 中 echo sanitize 后的 id，并在 `request_complete` 日志中记录 `request_id`；Rust sidecar 会 sanitize inbound id，并在 request middleware 拥有 completion 时记录。Control 的 Redis `PUBLISH` 路径只在本地日志记录该 id，不把它放进 pub/sub payload。
+- `x-request-id` 尽可能跨 gateway、control/runtime、loaded worker 和 D1 传播。缺失的 inbound id 会在入口生成；header adapter 只考虑第一个逗号分隔 token，包含 visible ASCII 以外字节、引号、反斜杠或超过 128 字节的 id 会被当成缺失。使用 `shared/request-scope.js` 的 JS entrypoint 会在 response 中 echo sanitize 后的 id，并在 `request_complete` 日志中记录 `request_id`；Rust sidecar 会 sanitize inbound id，并在 request middleware 拥有 completion 时记录。Control 的 Redis `PUBLISH` 路径只在本地日志记录该 id，不把它放进 pub/sub payload。
 - 日志字段使用 snake_case。只有 `level=error` 写入 stderr；debug/info/warn JSON log line 都写入 stdout，这样 JS、Rust 和 embedded workerd shim 的日志路由保持一致。
-- 内部运维日志，包括 system-worker cleanup 日志和防御性的 Redis callback warning，也使用同一套单行 JSON envelope：`ts`、`service`、`level`、`event`，再加 snake_case 字段。JS 服务使用 `shared/observability.js`；Rust 服务使用 `wdl-rust-common::log::emit_log_line`。错误文本写入 `error_message`；不得输出 secret 值、raw credential、token material、raw Redis key 或无界 payload。
+- 内部运维日志，包括 system-worker cleanup 日志和防御性的 Redis callback warning，也使用同一套单行 JSON envelope：`ts`、`service`、`level`、`event`，再加 snake_case 字段。JS 服务使用 `shared/observability.js`；Rust 服务使用 `wdl-rust-common::log::emit_log_line`。错误文本写入 `error_message`；无法转成文本的 throwable 降级为 `Unknown error`，不能反向覆盖原始失败。不得输出 secret 值、raw credential、token material、raw Redis key 或无界 payload。
 - 产品 API response body 默认使用 camelCase，除非 endpoint 明确记录不同 wire contract。
 - Metrics 只使用有界枚举 label。
 - 暴露 request metrics 的 Rust HTTP sidecar 使用同一组 `requests`、`request_duration_ms` 和 `request_errors` metric family，以及有界的 `service`/`route`/`status` labels；per-route error context 只进入 `request_complete` 日志中的 `error_code` / `error_message`。

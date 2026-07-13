@@ -5,8 +5,9 @@ import {
   buildAlarmRequest,
   buildFacetName,
   buildForwardRequest,
+  DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   DO_OWNERSHIP_CODE,
-  doErrorResponse,
+  doPlatformErrorResponse,
   DoRuntimeError,
   normalizeDoConnectRequest,
   readLocalActorInvokeRequest,
@@ -26,6 +27,7 @@ import {
 } from "do-runtime-state";
 import { errorMessage } from "shared-errors";
 import { formatError } from "shared-observability";
+import { rebuildResponseWithHeaders } from "shared-respond";
 
 /**
  * @typedef {{ LOADER: { get(key: string, loader: () => Promise<unknown>): DoWorkerStub }, DO_TEST_HOOKS?: unknown }} DoEnv
@@ -167,7 +169,7 @@ export class WdlDoHostActor extends DurableObject {
         return await facet.fetch(buildForwardRequest(invoke.request));
       });
     } catch (err) {
-      return doErrorResponse(err);
+      return doPlatformErrorResponse(err);
     }
   }
 
@@ -182,7 +184,9 @@ export class WdlDoHostActor extends DurableObject {
     try {
       const { owner, leaseRemainingMs } = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
       await this.rememberObject(invoke);
-      return await this.dispatchWithLeaseBudget(invoke, owner, leaseRemainingMs, run);
+      return withoutOwnershipErrorControlHeader(
+        await this.dispatchWithLeaseBudget(invoke, owner, leaseRemainingMs, run)
+      );
     } finally {
       endInFlightDispatch();
     }
@@ -257,6 +261,14 @@ export class WdlDoHostActor extends DurableObject {
   }
 }
 
+/** @param {Response} response */
+function withoutOwnershipErrorControlHeader(response) {
+  if (!response.headers.has(DO_OWNERSHIP_ERROR_CONTROL_HEADER)) return response;
+  const headers = new Headers(response.headers);
+  headers.delete(DO_OWNERSHIP_ERROR_CONTROL_HEADER);
+  return rebuildResponseWithHeaders(response, headers);
+}
+
 /**
  * @param {DoFacet} facet
  * @param {{ method: string, args: unknown[] }} rpc
@@ -278,8 +290,8 @@ async function dispatchRpc(facet, rpc) {
     const errorObject = err && typeof err === "object" ? err : {};
     // The stack captured from fn(...) is tenant method execution, not
     // do-runtime framework internals, so it belongs on the tenant RPC boundary.
-    // Runtime failures still go through doErrorResponse(), which intentionally
-    // hides internal stack traces and infrastructure details.
+    // Runtime failures still go through the platform error mapper, which
+    // intentionally hides internal stack traces and infrastructure details.
     return Response.json({
       error: "do_rpc_error",
       name: "name" in errorObject && typeof errorObject.name === "string" ? errorObject.name : "Error",

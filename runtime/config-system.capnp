@@ -336,6 +336,7 @@ const tailWorker :Workerd.Worker = (
   modules = [
     (name = "worker", esModule = embed "tail-worker.js"),
     (name = "hex.js", esModule = embed "../shared/hex.js"),
+    (name = "errors.js", esModule = embed "../shared/errors.js"),
     (name = "shared-observability", esModule = embed "../shared/observability.js"),
     (name = "runtime-tail-forwarder", esModule = embed "tail-forwarder.js"),
     (name = "runtime-bindings-proxy", esModule = embed "bindings/proxy.js"),

@@ -172,6 +172,10 @@ Control uses WATCH/MULTI/EXEC for active-version flips, routing changes, delete 
 and lifecycle index updates. Worker lifecycle indexes are authoritative; handlers should
 not add fallback scans of bundle state.
 
+Secret mutation validates env-var grammar, runtime-reserved names, and reserved
+`Object.prototype` keys before persistence so every accepted key can be materialized by
+the runtime env builder.
+
 Auth stores token records in Redis and evaluates against `shared/auth-roles.js`.
 
 Key families:

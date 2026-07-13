@@ -138,9 +138,9 @@ Central owners:
 Common rules:
 
 - `x-request-id` propagates across gateway, control/runtime, loaded workers, and D1
-  where possible. Missing inbound ids are minted at ingress; dirty ids such as
-  multi-valued ids, ids containing Unicode whitespace or control characters, or ids
-  over 128 UTF-8 bytes are treated as absent. JS entrypoints using
+  where possible. Missing inbound ids are minted at ingress. Header adapters consider
+  only the first comma-delimited token; ids containing bytes outside visible ASCII,
+  quotes, backslashes, or more than 128 bytes are treated as absent. JS entrypoints using
   `shared/request-scope.js` echo the sanitized id on responses and log it as
   `request_id` on `request_complete`; Rust sidecars sanitize inbound ids and log them
   where request middleware owns completion. Control's Redis `PUBLISH` path logs the id
@@ -153,8 +153,9 @@ Common rules:
   `ts`, `service`, `level`, `event`, plus snake_case fields. JS services use
   `shared/observability.js`; Rust services use
   `wdl-rust-common::log::emit_log_line`. Error text is emitted as `error_message`;
-  secret values, raw credentials, token material, raw Redis keys, and unbounded payloads
-  are not emitted.
+  throwables that cannot be converted to text degrade to `Unknown error` instead of
+  replacing the original failure. Secret values, raw credentials, token material, raw
+  Redis keys, and unbounded payloads are not emitted.
 - Product API response bodies should use camelCase unless an endpoint explicitly
   documents a different wire contract.
 - Metrics should use bounded enumerated labels only.

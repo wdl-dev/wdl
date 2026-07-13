@@ -97,6 +97,7 @@ test("formatError normalizes null, Error objects, and primitive throwables", () 
     error_message: "boom",
   });
   assert.deepEqual(formatError(42), { error_message: "42" });
+  assert.deepEqual(formatError(Object.create(null)), { error_message: "Unknown error" });
 });
 
 test("formatError promotes stable code/reason fields to error_code", () => {
@@ -111,6 +112,33 @@ test("formatError promotes stable code/reason fields to error_code", () => {
   const reasoned = new Error("auth unavailable");
   /** @type {any} */ (reasoned).reason = "auth_unavailable";
   assert.equal(formatError(reasoned).error_code, "auth_unavailable");
+});
+
+test("formatError contains throwing Error field getters", () => {
+  const broken = new Error("original");
+  for (const field of ["name", "message", "code"]) {
+    Object.defineProperty(broken, field, {
+      configurable: true,
+      get() { throw new Error(`formatter read ${field}`); },
+    });
+  }
+  Object.defineProperty(broken, "reason", { value: "tenant_failure" });
+
+  assert.deepEqual(formatError(broken), {
+    error_name: "Error",
+    error_message: "Unknown error",
+    error_code: "tenant_failure",
+  });
+});
+
+test("formatError contains a throwing Error classification trap", () => {
+  const throwable = new Proxy(Object.create(null), {
+    getPrototypeOf() { throw new Error("prototype trap"); },
+  });
+
+  assert.deepEqual(formatError(throwable), {
+    error_message: "Unknown error",
+  });
 });
 
 test("MetricsRegistry: renderPrometheus emits counter TYPE + totals", () => {

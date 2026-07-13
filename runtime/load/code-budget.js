@@ -10,6 +10,8 @@ import {
   rewriteCloudflareWorkflowsImports,
 } from "runtime-load-module-rewrite";
 import {
+  HOST_BINDING_RUNTIME_MODULE_NAME,
+  HOST_BINDING_RUNTIME_SOURCE,
   generateAbortShimWrapperModule,
   generateHostBindingWrapperModule,
 } from "runtime-load-wrapper-generate";
@@ -281,6 +283,9 @@ function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = a
     addModules(injections.workflowsModuleInjections);
   }
   out.set(WORKFLOWS_MODULE_NAME, WORKFLOWS_MODULE_SOURCE);
+  if (plan.needsHostBindingWrapper) {
+    out.set(HOST_BINDING_RUNTIME_MODULE_NAME, HOST_BINDING_RUNTIME_SOURCE);
+  }
   // `_wdl-wrapper.js` is always injected: host bindings use the larger wrapper,
   // and otherwise the abort shim still rewrites the user main module.
   out.set(

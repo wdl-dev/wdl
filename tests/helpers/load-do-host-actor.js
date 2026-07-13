@@ -58,22 +58,17 @@ export async function rememberDoObject(env, invoke) {
 `);
 
 const protocolUrl = moduleDataUrl(`
-export { DO_OWNERSHIP_CODE } from ${JSON.stringify(productionProtocolUrl)};
-export class DoRuntimeError extends Error {
-  constructor(status, code, message) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
+export {
+  DO_OWNERSHIP_CODE,
+  DO_OWNERSHIP_ERROR_CONTROL_HEADER,
+  DoRuntimeError,
+  doPlatformErrorResponse,
+} from ${JSON.stringify(productionProtocolUrl)};
 export function buildFacetName(invoke) {
   return [invoke.className, invoke.objectName].join(":");
 }
 export function buildAlarmRequest() { throw new Error("unexpected alarm request"); }
 export function buildForwardRequest() { throw new Error("unexpected forward request"); }
-export function doErrorResponse(err) {
-  return Response.json({ error: err?.code || "internal_error", message: err?.message || String(err) }, { status: err?.status || 500 });
-}
 export function normalizeDoConnectRequest() { throw new Error("unexpected connect normalize"); }
 export async function readLocalActorInvokeRequest() { throw new Error("unexpected actor request read"); }
 `);
@@ -134,6 +129,7 @@ const source = applyModuleReplacements(readRepositoryFile("do-runtime/actor.js")
   [/from "do-runtime-state";/g, `from ${JSON.stringify(stateUrl)};`],
   [/from "shared-errors";/g, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
   [/from "shared-observability";/g, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};`],
+  [/from "shared-respond";/g, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
 ]);
 
 /** @returns {DoHostActorHarnessState} */

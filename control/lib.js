@@ -4,6 +4,7 @@
 
 import {
   NS_PATTERN,
+  RESERVED_OBJECT_KEYS,
   isReservedNs,
   RESERVED_TENANT_NS,
   WORKER_NAME_RE,
@@ -694,6 +695,9 @@ export function validateSecretKey(key) {
   }
   if (WDL_RESERVED_BINDING_RE.test(key)) {
     throw new Error("secret key is reserved for runtime-internal bindings");
+  }
+  if (RESERVED_OBJECT_KEYS.has(key)) {
+    throw new Error("secret key is a reserved Object.prototype key");
   }
   if (key.length > 128) throw new Error("secret key too long (max 128)");
 }

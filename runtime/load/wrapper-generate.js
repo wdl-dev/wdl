@@ -10,6 +10,80 @@ export class __WdlAbort__ extends WorkerEntrypoint {
 const DEFAULT_EXPORT_SOURCE_SNIPPET = "const source = Function.prototype.toString.call(raw);";
 const DEFAULT_EXPORT_CLASS_TEST_SOURCE = "/^\\s*class\\b/.test(source)";
 
+export const HOST_BINDING_RUNTIME_MODULE_NAME = "_wdl-host-wrapper-runtime.js";
+export const HOST_BINDING_RUNTIME_SOURCE = `
+const IntrinsicObject = Object;
+const IntrinsicPromise = Promise;
+const IntrinsicProxy = Proxy;
+const IntrinsicReflect = Reflect;
+const IntrinsicSymbol = Symbol;
+const intrinsicArrayForEach = Array.prototype.forEach;
+const intrinsicFunctionToString = Function.prototype.toString;
+const intrinsicObjectDefineProperty = Object.defineProperty;
+const intrinsicObjectEntries = Object.entries;
+const intrinsicObjectKeys = Object.keys;
+const intrinsicPromiseResolve = Promise.resolve;
+const intrinsicPromiseThen = Promise.prototype.then;
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicReflectGet = Reflect.get;
+const intrinsicRegExpTest = RegExp.prototype.test;
+
+export function applyFunction(fn, receiver, args) {
+  return intrinsicReflectApply(fn, receiver, args);
+}
+
+export function createPrivateSymbol(description) {
+  return IntrinsicSymbol(description);
+}
+
+export function createProxy(target, handler) {
+  return new IntrinsicProxy(target, handler);
+}
+
+export function defineProperty(target, property, descriptor) {
+  return intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [target, property, descriptor]);
+}
+
+export function forEachArray(values, callback) {
+  intrinsicReflectApply(intrinsicArrayForEach, values, [callback]);
+}
+
+export function forEachObjectEntry(record, callback) {
+  const entries = intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [record]);
+  forEachArray(entries, (entry) => callback(entry[0], entry[1]));
+}
+
+export function functionSource(fn) {
+  return intrinsicReflectApply(intrinsicFunctionToString, fn, []);
+}
+
+export function objectKeys(record) {
+  return intrinsicReflectApply(intrinsicObjectKeys, IntrinsicObject, [record]);
+}
+
+export function reflectGet(target, property, receiver) {
+  return intrinsicReflectApply(intrinsicReflectGet, IntrinsicReflect, [target, property, receiver]);
+}
+
+export function regexpTest(regexp, value) {
+  return intrinsicReflectApply(intrinsicRegExpTest, regexp, [value]);
+}
+
+export function settleWithFinally(value, callback) {
+  const promise = intrinsicReflectApply(intrinsicPromiseResolve, IntrinsicPromise, [value]);
+  return intrinsicReflectApply(intrinsicPromiseThen, promise, [
+    (result) => {
+      callback();
+      return result;
+    },
+    (error) => {
+      callback();
+      throw error;
+    },
+  ]);
+}
+`;
+
 /** @param {string} userMainSpecifier */
 export function generateAbortShimWrapperModule(userMainSpecifier) {
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
@@ -78,12 +152,25 @@ export class ${name} extends user.${name} {
 }
 `).join("");
   return `
-import * as user from ${userMain};
 import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers";
+import {
+  applyFunction,
+  createPrivateSymbol,
+  createProxy,
+  defineProperty,
+  forEachArray,
+  forEachObjectEntry,
+  functionSource,
+  objectKeys,
+  reflectGet,
+  regexpTest,
+  settleWithFinally,
+} from "./${HOST_BINDING_RUNTIME_MODULE_NAME}";
 ${d1Import}
 ${r2Import}
 ${doImport}
 ${workflowImport}
+import * as user from ${userMain};
 // Local wrapper subclasses intentionally shadow same-name user exports, so
 // declared entrypoints get facade-aware env even when star exports are present.
 ${starExport}
@@ -103,7 +190,7 @@ const WORKFLOW_BINDINGS = ${workflowBindingJson};
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
 const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
-const HOST_BINDINGS_WRAPPED = Symbol("wdl.host-bindings-wrapped");
+const HOST_BINDINGS_WRAPPED = createPrivateSymbol("wdl.host-bindings-wrapped");
 const INTERNAL_BINDING_RE = /^__WDL_[A-Za-z0-9_]*__$/;
 
 function requestIdFromEventArg(arg) {
@@ -139,7 +226,7 @@ function withRequestContext(context, arg, fn) {
   try {
     const result = fn();
     if (result && typeof result.then === "function") {
-      return Promise.resolve(result).finally(() => {
+      return settleWithFinally(result, () => {
         context.requestId = previous;
       });
     }
@@ -152,12 +239,12 @@ function withRequestContext(context, arg, fn) {
 }
 
 function wrapClassInstance(instance, requestContext) {
-  return new Proxy(instance, {
+  return createProxy(instance, {
     get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
+      const value = reflectGet(target, prop, receiver);
       if (typeof value !== "function") return value;
       return function(...args) {
-        return withRequestContext(requestContext, args[0], () => value.apply(target, args));
+        return withRequestContext(requestContext, args[0], () => applyFunction(value, target, args));
       };
     },
   });
@@ -175,26 +262,26 @@ function wrapEnv(env, requestIdOrContext = null) {
   delete out[DO_BACKEND_BINDING];
   delete out[DO_OWNER_NETWORK_BINDING];
   delete out[WORKFLOWS_BACKEND_BINDING];
-  for (const name of Object.keys(out)) {
-    if (INTERNAL_BINDING_RE.test(name)) delete out[name];
-  }
-  for (const name of D1_BINDINGS) {
+  forEachArray(objectKeys(out), (name) => {
+    if (regexpTest(INTERNAL_BINDING_RE, name)) delete out[name];
+  });
+  forEachArray(D1_BINDINGS, (name) => {
     if (out[name] !== undefined) out[name] = new D1Database(out[name], requestIdOptions(requestIdOrContext));
-  }
-  for (const name of R2_BINDINGS) {
+  });
+  forEachArray(R2_BINDINGS, (name) => {
     if (out[name] !== undefined) out[name] = new R2Bucket(out[name], requestIdOptions(requestIdOrContext));
-  }
-  for (const name of DO_BINDINGS) {
+  });
+  forEachArray(DO_BINDINGS, (name) => {
     if (out[name] !== undefined) {
       out[name] = new DurableObjectNamespace(out[name], doOptions(requestIdOrContext, doBackend, doOwnerNetwork));
     }
-  }
-  for (const [name, metadata] of Object.entries(WORKFLOW_BINDINGS)) {
+  });
+  forEachObjectEntry(WORKFLOW_BINDINGS, (name, metadata) => {
     if (out[name] !== undefined) {
       out[name] = new Workflow(out[name] || metadata, workflowOptions(requestIdOrContext, workflowsBackend));
     }
-  }
-  Object.defineProperty(out, HOST_BINDINGS_WRAPPED, { value: true });
+  });
+  defineProperty(out, HOST_BINDINGS_WRAPPED, { value: true });
   return out;
 }
 
@@ -244,7 +331,7 @@ async function notifyWorkflowCallback(request, env) {
 
 function wrapHandler(owner, fn) {
   return function(arg1, env, ctx) {
-    return fn.call(owner, arg1, wrapEnv(env, requestIdFromEventArg(arg1)), ctx);
+    return applyFunction(fn, owner, [arg1, wrapEnv(env, requestIdFromEventArg(arg1)), ctx]);
   };
 }
 
@@ -258,15 +345,20 @@ if (raw && typeof raw === "object") {
   const wrapDefaultFunctionKey = (key) => {
     const fn = raw[key];
     if (typeof fn === "function") {
-      wrappedDefault[key] = wrapHandler(raw, fn);
+      defineProperty(wrappedDefault, key, {
+        value: wrapHandler(raw, fn),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
   };
-  for (const key of HOST_WRAPPED_HANDLER_KEYS) {
+  forEachArray(HOST_WRAPPED_HANDLER_KEYS, (key) => {
     wrapDefaultFunctionKey(key);
-  }
+  });
 } else if (typeof raw === "function") {
-  ${DEFAULT_EXPORT_SOURCE_SNIPPET}
-  if (${DEFAULT_EXPORT_CLASS_TEST_SOURCE}) {
+  const source = functionSource(raw);
+  if (regexpTest(/^\\s*class\\b/, source)) {
     wrappedDefault = class extends raw {
       constructor(ctx, env) {
         const requestContext = createRequestContext();

@@ -9,6 +9,7 @@ import {
   jsonInitResponse,
   jsonResponse,
   prometheusResponse,
+  rebuildResponseWithHeaders,
   sanitizeJsonErrorDetails,
 } from "../../shared/respond.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
@@ -61,6 +62,21 @@ test("echoResponseWithRequestId overwrites a pre-existing x-request-id", () => {
   });
   const out = echoResponseWithRequestId(src, "ours-id");
   assert.equal(out.headers.get("x-request-id"), "ours-id");
+});
+
+test("rebuildResponseWithHeaders preserves response fields while replacing headers", async () => {
+  const src = new Response("hello", {
+    status: 202,
+    statusText: "Accepted",
+    headers: { "x-old": "hidden" },
+  });
+  const out = rebuildResponseWithHeaders(src, { "x-new": "visible" });
+
+  assert.equal(out.status, 202);
+  assert.equal(out.statusText, "Accepted");
+  assert.equal(out.headers.get("x-old"), null);
+  assert.equal(out.headers.get("x-new"), "visible");
+  assert.equal(await out.text(), "hello");
 });
 
 test("jsonResponse returns JSON with the canonical content-type", async () => {

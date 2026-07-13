@@ -21,7 +21,7 @@ import { assertJsonResponse } from "../helpers/response-json.js";
 
 const TOKEN = "test-internal-auth-token";
 const ENV = { [INTERNAL_AUTH_ENV]: TOKEN };
-const contract = /** @type {{ header: string, currentEnv: string, previousEnv: string, failure: { status: number, error: string, message: string }, rotationCases: Array<{ actual: string | null, current: string, previous: string | null, accepted: boolean }> }} */ (
+const contract = /** @type {{ header: string, currentEnv: string, previousEnv: string, failure: { status: number, error: string, message: string }, tokenCases: Array<{ value: string, accepted: boolean }>, rotationCases: Array<{ actual: string | null, current: string, previous: string | null, accepted: boolean }>, headerCases: Array<{ values: string[], current: string, previous: string | null, accepted: boolean }> }} */ (
   readRepositoryJson("tests/fixtures/internal-auth-contract.json")
 );
 
@@ -32,9 +32,23 @@ test("internal auth literals and rotation match the shared Rust/JS contract", ()
   assert.equal(INTERNAL_AUTH_FAILURE_CODE, contract.failure.error);
   assert.equal(INTERNAL_AUTH_FAILURE_MESSAGE, contract.failure.message);
 
+  for (const entry of contract.tokenCases) {
+    const read = () => internalAuthToken({ [INTERNAL_AUTH_ENV]: entry.value });
+    if (entry.accepted) assert.equal(read(), entry.value);
+    else assert.throws(read);
+  }
   for (const entry of contract.rotationCases) {
     const headers = new Headers();
     if (entry.actual !== null) headers.set(INTERNAL_AUTH_HEADER, entry.actual);
+    const env = {
+      [INTERNAL_AUTH_ENV]: entry.current,
+      ...(entry.previous === null ? {} : { [INTERNAL_AUTH_PREVIOUS_ENV]: entry.previous }),
+    };
+    assert.equal(verifyInternalAuthHeaders(headers, env), entry.accepted);
+  }
+  for (const entry of contract.headerCases) {
+    const headers = new Headers();
+    for (const value of entry.values) headers.append(INTERNAL_AUTH_HEADER, value);
     const env = {
       [INTERNAL_AUTH_ENV]: entry.current,
       ...(entry.previous === null ? {} : { [INTERNAL_AUTH_PREVIOUS_ENV]: entry.previous }),
@@ -52,11 +66,15 @@ test("internal auth token requires a non-empty configured string", () => {
   assert.throws(() => internalAuthToken({ [INTERNAL_AUTH_ENV]: "" }), /WDL_INTERNAL_AUTH_TOKEN must be configured/);
   assert.throws(
     () => internalAuthToken({ [INTERNAL_AUTH_ENV]: "tokén" }),
-    /WDL_INTERNAL_AUTH_TOKEN must be configured as a non-empty ASCII string/
+    /WDL_INTERNAL_AUTH_TOKEN must be configured as visible ASCII/
   );
   assert.throws(
     () => internalAuthPreviousToken({ [INTERNAL_AUTH_PREVIOUS_ENV]: "prévious" }),
-    /WDL_INTERNAL_AUTH_PREVIOUS_TOKEN must be configured as a non-empty ASCII string/
+    /WDL_INTERNAL_AUTH_PREVIOUS_TOKEN must be configured as visible ASCII/
+  );
+  assert.throws(
+    () => internalAuthToken({ [INTERNAL_AUTH_ENV]: "token,other" }),
+    /without whitespace or commas/
   );
 });
 

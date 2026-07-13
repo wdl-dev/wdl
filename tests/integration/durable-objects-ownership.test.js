@@ -72,7 +72,7 @@ test("Durable Object takeover preserves committed SQLite state after owner loss"
     assert.equal(owner.taskId, "do-runtime-a");
     const shortLeaseOwner = {
       ...owner,
-      leaseExpiresAt: Date.now() + 1000,
+      leaseExpiresAt: Date.now() + 30_000,
     };
     redisSetDoOwner(ownerKey, shortLeaseOwner);
     const renew = serviceInternalPost("do-runtime-a", 8788, "/internal/do/renew", {});
@@ -122,6 +122,9 @@ test("Durable Object takeover preserves committed SQLite state after owner loss"
       storage: 3,
       body: "from-worker",
     });
+  }, {
+    // Keep heartbeat renewal outside this explicit-renew assertion window.
+    renewStartDelayMs: 600_000,
   });
 });
 

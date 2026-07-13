@@ -4,14 +4,14 @@ import {
   verifyInternalAuthHeaders,
 } from "shared-internal-auth";
 import { createHttpRequestScope } from "shared-request-scope";
-import { discardResponseBody, prometheusResponse } from "shared-respond";
+import { discardResponseBody, prometheusResponse, rebuildResponseWithHeaders } from "shared-respond";
 import { boundedPositiveIntEnv } from "shared-owner-lease";
 import { formatWorkerId } from "shared-worker-id";
 import { WdlDoHostActor } from "do-runtime-actor";
 import { handleAlarmDispatch } from "do-runtime-alarm-dispatch";
 import {
   buildLocalActorRequest,
-  doErrorResponse,
+  doPlatformErrorResponse,
   DoRuntimeError,
   hostIdForObject,
   hostIdForShard,
@@ -153,14 +153,7 @@ function withOwnerHintHeaders(response, owner) {
   for (const [name, value] of Object.entries(ownerHintHeaders(owner))) {
     headers.set(name, value);
   }
-  const init = /** @type {ResponseInit & { webSocket?: WebSocket }} */ ({
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-  const webSocket = /** @type {{ webSocket?: WebSocket }} */ (response).webSocket;
-  if (webSocket) init.webSocket = webSocket;
-  return new Response(response.status === 101 ? null : response.body, init);
+  return rebuildResponseWithHeaders(response, headers);
 }
 
 /** @param {Request} request */
@@ -543,7 +536,7 @@ export default {
       return scope.respond(jsonError(404, "not_found", "Not found"));
     } catch (err) {
       scope.markError(err);
-      return scope.respond(doErrorResponse(err));
+      return scope.respond(doPlatformErrorResponse(err));
     } finally {
       scope.complete();
     }

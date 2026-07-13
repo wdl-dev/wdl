@@ -81,3 +81,26 @@ export async function withMockedProperty(target, name, mockImpl, callback) {
     restore();
   }
 }
+
+/**
+ * Temporarily replaces an accessor or other descriptor for one async scope.
+ *
+ * @template {object} T
+ * @template {keyof T} K
+ * @template {() => unknown | Promise<unknown>} TCallback
+ * @param {T} target
+ * @param {K} name
+ * @param {PropertyDescriptor} descriptor
+ * @param {TCallback} callback
+ * @returns {Promise<Awaited<ReturnType<TCallback>>>}
+ */
+export async function withMockedPropertyDescriptor(target, name, descriptor, callback) {
+  const originalDescriptor = Object.getOwnPropertyDescriptor(target, name);
+  Object.defineProperty(target, name, descriptor);
+  try {
+    return /** @type {Awaited<ReturnType<TCallback>>} */ (await callback());
+  } finally {
+    if (originalDescriptor) Object.defineProperty(target, name, originalDescriptor);
+    else delete target[name];
+  }
+}

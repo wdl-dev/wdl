@@ -5,10 +5,12 @@ import { decodeDoEnvelopeMetadata as decodeDoEnvelope } from "../helpers/do-enve
 import {
   doOwnerHintHeaders,
   doOwnerHintResponse,
+  doOwnershipErrorHeaders,
   tenantBodyDoOwnerHintResponse,
 } from "../helpers/do-owner-hint.js";
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { makeRecordingFetch, withRecordingFetch } from "../helpers/mock-fetch.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
@@ -72,6 +74,7 @@ test("DO fetch requestSpec strips tenant internal owner routing headers", async 
       "x-wdl-do-hop-count": "99",
       "x-wdl-do-accept-owner-hint": "1",
       "x-wdl-do-owner-hint": "1",
+      "x-wdl-do-ownership-error": "owner_fence_missing",
       "x-wdl-do-owner-key": "tenant",
       "x-wdl-do-owner-generation": "123",
       "x-request-id": "tenant-rid",
@@ -82,9 +85,43 @@ test("DO fetch requestSpec strips tenant internal owner routing headers", async 
   assert.equal(headers.get("x-wdl-do-hop-count"), null);
   assert.equal(headers.get("x-wdl-do-accept-owner-hint"), null);
   assert.equal(headers.get("x-wdl-do-owner-hint"), null);
+  assert.equal(headers.get("x-wdl-do-ownership-error"), null);
   assert.equal(headers.get("x-wdl-do-owner-key"), null);
   assert.equal(headers.get("x-wdl-do-owner-generation"), null);
   assert.equal(headers.get("x-request-id"), "tenant-rid");
+});
+
+test("DO fetch requestSpec uses captured header mutation intrinsics", async () => {
+  const request = new Request("https://tenant.workers.example/send", {
+    method: "POST",
+    headers: {
+      "x-wdl-do-owner-key": "tenant",
+      "x-wdl-do-ownership-error": "owner_fence_missing",
+    },
+    body: "hello",
+  });
+
+  const { spec } = await withMockedProperty(
+    Headers.prototype,
+    "delete",
+    function mockedDelete() {},
+    () => withMockedProperty(
+      Headers.prototype,
+      "has",
+      function mockedHas() { return true; },
+      () => withMockedProperty(
+        Headers.prototype,
+        "set",
+        function mockedSet() {},
+        () => requestSpec(request, "scope-rid")
+      )
+    )
+  );
+
+  const headers = new Headers(spec.headers);
+  assert.equal(headers.get("x-wdl-do-owner-key"), null);
+  assert.equal(headers.get("x-wdl-do-ownership-error"), null);
+  assert.equal(headers.get("x-request-id"), "scope-rid");
 });
 
 test("DO owner hint parser requires integer owner generation", () => {
@@ -232,7 +269,10 @@ test("DO-to-DO fetch retries owner generation races without hint opt-in", async 
   const binding = bindingWithBackend({
     fetch: makeRecordingFetch(calls, {
       response: () => calls.length === 1
-        ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, { status: 503 })
+        ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("stale_owner_generation"),
+          })
         : new Response("retried"),
     }),
   });
@@ -262,7 +302,10 @@ test("DO-to-DO fetch ignores owner hints attached to race responses", async () =
         response: () => calls.length === 1
           ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
               status: 503,
-              headers: doOwnerHintResponse().headers,
+              headers: doOwnershipErrorHeaders(
+                "stale_owner_generation",
+                doOwnerHintResponse().headers
+              ),
             })
           : new Response("retried"),
       }),
@@ -286,7 +329,10 @@ test("DO-to-DO RPC retries owner claim races without hint opt-in", async () => {
   const binding = bindingWithBackend({
     fetch: makeRecordingFetch(calls, {
       response: () => calls.length === 1
-        ? Response.json({ error: "owner_claim_raced", message: "retry" }, { status: 503 })
+        ? Response.json({ error: "owner_claim_raced", message: "retry" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("owner_claim_raced"),
+          })
         : Response.json({ ok: true, result: "retried-rpc" }),
     }),
   });
@@ -384,6 +430,7 @@ test("DO-to-DO websocket strips owner hint headers from successful upgrades", as
           "x-wdl-do-owner-endpoint": "do-runtime-a:8788",
           "x-wdl-do-owner-generation": "3",
           "x-wdl-do-owner-hint": "1",
+          "x-wdl-do-ownership-error": "owner_fence_missing",
         },
       });
     },
@@ -400,4 +447,5 @@ test("DO-to-DO websocket strips owner hint headers from successful upgrades", as
   assert.equal(await response.text(), "upgrade");
   assert.equal(response.headers.get("x-wdl-do-owner-key"), null);
   assert.equal(response.headers.get("x-wdl-do-owner-hint"), null);
+  assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
 });

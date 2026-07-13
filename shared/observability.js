@@ -4,9 +4,9 @@
 // Label discipline + cardinality rules: see CLAUDE.md.
 
 import { bytesToHex } from "./hex.js";
+import { errorMessage } from "./errors.js";
 
 const CARDINALITY_WARN_LIMIT = 100;
-const requestIdUtf8Encoder = new TextEncoder();
 /**
  * @typedef {Record<string, string | number | boolean>} Labels
  * @typedef {(level: string, event: string, fields?: Record<string, unknown>) => void} Logger
@@ -120,10 +120,21 @@ export function generateRequestId() {
   return bytesToHex(bytes);
 }
 
+/** @param {string} value */
+function trimAsciiWhitespace(value) {
+  let start = 0;
+  let end = value.length;
+  /** @param {number} code */
+  const isWhitespace = (code) => code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
+  while (start < end && isWhitespace(value.charCodeAt(start))) start += 1;
+  while (end > start && isWhitespace(value.charCodeAt(end - 1))) end -= 1;
+  return value.slice(start, end);
+}
+
 // An inbound id flows into log fields AND response headers AND downstream
-// subrequests, so anything multi-valued (Node joins dup headers as "v1, v2"
-// or sometimes string[]) or containing CRLF/quotes/control chars must be
-// dropped — pass-through would corrupt header framing or JSON escaping.
+// subrequests. Header adapters may join repeated values with commas, so only
+// the first token is considered; non-visible-ASCII and quote/backslash bytes
+// are rejected before pass-through.
 // Dirty → mint fresh; preserving a maybe-poisoned upstream id defeats the
 // "single correlation token" goal.
 /**
@@ -133,12 +144,11 @@ export function generateRequestId() {
 export function sanitizeRequestId(raw) {
   if (Array.isArray(raw)) raw = raw[0];
   if (typeof raw !== "string") return null;
-  const first = raw.split(",")[0].trim();
-  if (!first || requestIdUtf8Encoder.encode(first).byteLength > 128) return null;
-  if (/[\s"\\]/.test(first)) return null;
+  const first = trimAsciiWhitespace(raw.split(",")[0]);
+  if (!first || first.length > 128) return null;
   for (let i = 0; i < first.length; i++) {
     const code = first.charCodeAt(i);
-    if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return null;
+    if (code < 0x21 || code > 0x7e || code === 0x22 || code === 0x5c) return null;
   }
   return first;
 }
@@ -221,18 +231,36 @@ export function recordRequestComplete({
  */
 export function formatError(err) {
   if (!err) return { error_message: "Unknown error" };
-  if (err instanceof Error) {
+  if (isErrorObject(err)) {
     /** @type {Record<string, string>} */
     const out = {
-      error_name: err.name,
-      error_message: err.message,
+      error_name: errorStringField(err, "name") ?? "Error",
+      error_message: errorMessage(err),
     };
-    const coded = /** @type {{ code?: unknown, reason?: unknown }} */ (err);
-    if (typeof coded.code === "string") out.error_code = coded.code;
-    else if (typeof coded.reason === "string") out.error_code = coded.reason;
+    const code = errorStringField(err, "code") ?? errorStringField(err, "reason");
+    if (code !== null) out.error_code = code;
     return out;
   }
-  return { error_message: String(err) };
+  return { error_message: errorMessage(err) };
+}
+
+/** @param {unknown} value @returns {value is Error} */
+function isErrorObject(value) {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+/** @param {Error} err @param {string} field */
+function errorStringField(err, field) {
+  try {
+    const value = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (err))[field];
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 // Metrics bypass this gate entirely (in-memory registry, separate scrape

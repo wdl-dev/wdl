@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -15,6 +16,11 @@ import {
 } from "./helpers/durable-objects.js";
 
 setupIntegrationSuite();
+
+const DO_INTRINSIC_GUARD_WORKER = readFileSync(
+  new URL("../fixtures/do-intrinsic-guard-worker.mjs.txt", import.meta.url),
+  "utf8"
+);
 
 test("worker Durable Object binding routes through do-runtime and preserves object state", async () => {
   const ns = uniqueNs("do");
@@ -54,6 +60,30 @@ test("worker Durable Object binding routes through do-runtime and preserves obje
     memory: 1,
     storage: 1,
     body: "from-worker",
+  });
+});
+
+test("tenant top-level intrinsic patches cannot bypass host env wrapping", async () => {
+  const ns = uniqueNs("do-intrinsic-guard");
+  await deployAndPromote(ns, "guard", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_INTRINSIC_GUARD_WORKER },
+    vars: { BYPASS: true },
+    bindings: {
+      ROOM: { type: "do", className: "Room" },
+    },
+  });
+
+  const response = await gatewayFetch(ns, "/guard");
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  assert.deepEqual(responseJson({ body: text }), {
+    room: "room-ok",
+    roomFacade: "DurableObjectNamespace",
+    ownerMetadataVisible: false,
+    doBackendVisible: false,
+    ownerNetworkVisible: false,
+    workflowsBackendVisible: false,
   });
 });
 

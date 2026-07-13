@@ -10,12 +10,18 @@ export const R2_HTTP_METADATA_FIELDS = Object.freeze([
   Object.freeze(["contentEncoding", "content-encoding"]),
   Object.freeze(["cacheControl", "cache-control"]),
 ]);
+const R2_IMF_FIXDATE_RE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
 
-/** @param {Headers} headers */
-export function r2CacheExpiryFromHeaders(headers) {
+/** @param {Headers} headers @param {{ canonical?: boolean }} [options] */
+export function r2CacheExpiryFromHeaders(headers, { canonical = false } = {}) {
   const expires = headers.get("expires");
   if (!expires) return undefined;
   const ms = new Date(expires).getTime();
+  if (canonical && (
+    !R2_IMF_FIXDATE_RE.test(expires) ||
+    !Number.isFinite(ms) ||
+    new Date(ms).toUTCString() !== expires
+  )) return undefined;
   return Number.isFinite(ms) ? ms : undefined;
 }
 

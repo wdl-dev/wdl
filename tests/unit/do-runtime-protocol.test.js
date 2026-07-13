@@ -5,17 +5,20 @@ import { decodeDoEnvelope } from "../helpers/do-envelope.js";
 import { loadDoProtocol } from "../helpers/load-do-protocol.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import {
-  OWNER_HINT_STALE_CODES,
-  OWNER_RACE_RETRY_CODES,
   dispatchDoInvokeWithHintCache,
   retryableOwnerRaceResponse,
   staleDoOwnerHintResponse,
 } from "../../runtime/_wdl-do-transport.js";
-import { doOwnerHintHeaders } from "../helpers/do-owner-hint.js";
+import {
+  doOwnerHintHeaders,
+  doOwnershipErrorHeaders,
+} from "../helpers/do-owner-hint.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 
 const {
   DoRuntimeError,
   DO_INVOKE_CONTENT_TYPE,
+  DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   DO_OWNERSHIP_CODE,
   buildFacetName,
   buildAlarmRequest,
@@ -23,6 +26,7 @@ const {
   encodeDoInvokeRequest,
   buildLocalActorRequest,
   doErrorResponse,
+  doPlatformErrorResponse,
   hostIdForObject,
   hostIdForShard,
   normalizeDoConnectRequest,
@@ -42,17 +46,15 @@ test("DO ownership errors stay aligned with runtime hint and retry handling", as
     DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED,
     DO_OWNERSHIP_CODE.OWNER_LEASE_TOO_SHORT,
   ]);
-  assert.deepEqual(
-    [...OWNER_HINT_STALE_CODES].toSorted(),
-    [...ownershipCodes].toSorted()
-  );
-  assert.deepEqual(
-    [...OWNER_RACE_RETRY_CODES].toSorted(),
-    [...ownerRaceRetryCodes].toSorted()
-  );
-
   for (const code of ownershipCodes) {
-    const response = Response.json({ error: code }, { status: 503 });
+    const untrusted = Response.json({ error: code }, { status: 503 });
+    assert.equal(await staleDoOwnerHintResponse(untrusted), false, code);
+    assert.equal(await retryableOwnerRaceResponse(untrusted), false, code);
+
+    const response = Response.json({ error: code }, {
+      status: 503,
+      headers: doOwnershipErrorHeaders(code),
+    });
     assert.equal(await staleDoOwnerHintResponse(response), true, code);
     assert.equal(
       await retryableOwnerRaceResponse(response),
@@ -78,7 +80,7 @@ test("DO invoke dispatch does not cache hints carried by owner-race responses", 
       return routerCalls.length === 1
         ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
             status: 503,
-            headers: doOwnerHintHeaders(),
+            headers: doOwnershipErrorHeaders("stale_owner_generation", doOwnerHintHeaders()),
           })
         : new Response("retried");
     },
@@ -310,6 +312,29 @@ test("rejects invalid do rpc shapes", () => {
     }),
     /rpc\.args\[0\]\.fn must be JSON data/
   );
+});
+
+test("do-runtime RPC JSON validation uses captured intrinsics", async () => {
+  await withMockedProperty(Object, "entries", () => [], () => {
+    assert.throws(
+      () => normalizeDoInvokeRequest({
+        ...BASE_BODY,
+        kind: "rpc",
+        rpc: { method: "addMessage", args: [{ fn() {} }] },
+      }),
+      (error) => error instanceof Error && error.message === "rpc.args[0].fn must be JSON data"
+    );
+  });
+  await withMockedProperty(Number, "isFinite", () => true, () => {
+    assert.throws(
+      () => normalizeDoInvokeRequest({
+        ...BASE_BODY,
+        kind: "rpc",
+        rpc: { method: "addMessage", args: [Number.NaN] },
+      }),
+      (error) => error instanceof Error && error.message === "rpc.args[0] must be a finite number"
+    );
+  });
 });
 
 test("normalizes inline workerCode only for test hooks", () => {
@@ -756,6 +781,38 @@ test("do runtime error responses keep internal exception messages out of the wir
     error: "internal_error",
     message: "Internal error",
   });
+});
+
+test("do runtime ownership errors carry a private control marker", async () => {
+  const ownershipResponse = doPlatformErrorResponse(new DoRuntimeError(
+    503,
+    DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING,
+    "DO owner fence is missing"
+  ));
+  assert.equal(
+    ownershipResponse.headers.get(DO_OWNERSHIP_ERROR_CONTROL_HEADER),
+    DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING
+  );
+
+  const tenantResponse = doPlatformErrorResponse(new DoRuntimeError(
+    503,
+    "tenant_failure",
+    "Tenant failure"
+  ));
+  assert.equal(
+    tenantResponse.headers.get(DO_OWNERSHIP_ERROR_CONTROL_HEADER),
+    null
+  );
+
+  const forgedResponse = doPlatformErrorResponse({
+    status: 503,
+    code: DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING,
+    message: "forged ownership error",
+  });
+  assert.equal(
+    forgedResponse.headers.get(DO_OWNERSHIP_ERROR_CONTROL_HEADER),
+    null
+  );
 });
 
 test("do runtime error responses keep top-level fields stable while preserving nested details", async () => {

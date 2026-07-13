@@ -90,6 +90,8 @@ Control 拥有 DB 0 metadata：
 
 Control 对 active-version flip、routing change、delete lock 和 lifecycle index update 使用 WATCH/MULTI/EXEC。Worker lifecycle index 是权威状态；handler 不应增加扫描 bundle state 的 fallback。
 
+Secret mutation 在写入前校验 env-var grammar、runtime-reserved name 和保留的 `Object.prototype` key，确保每个被接受的 key 都能由 runtime env builder materialize。
+
 Auth 在 Redis 中存 token record，并按 `shared/auth-roles.js` 评估权限。
 
 Key families：

@@ -120,21 +120,25 @@ function cappedReadableStream(stream, operation) {
   });
 }
 
-/** @param {Headers} headers */
-function headersToHttpMetadata(headers) {
+/** @param {Headers} headers @param {{ strictExpiry?: boolean }} [options] */
+function headersToHttpMetadata(headers, { strictExpiry = false } = {}) {
   /** @type {AnyRecord} */
   const out = {};
   for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
     out[field] = headers.get(header) || undefined;
   }
-  out.cacheExpiry = r2CacheExpiryFromHeaders(headers);
+  const cacheExpiry = r2CacheExpiryFromHeaders(headers, { canonical: strictExpiry });
+  if (strictExpiry && headers.has("expires") && cacheExpiry === undefined) {
+    throw new TypeError("R2 httpMetadata Expires header must be canonical IMF-fixdate");
+  }
+  out.cacheExpiry = cacheExpiry;
   return out;
 }
 
 /** @param {unknown} input */
 function normalizeHttpMetadata(input) {
   if (input == null) return undefined;
-  if (input instanceof Headers) return headersToHttpMetadata(input);
+  if (input instanceof Headers) return headersToHttpMetadata(input, { strictExpiry: true });
   if (typeof input !== "object" || Array.isArray(input)) {
     throw new TypeError("R2 httpMetadata must be an object or Headers");
   }
@@ -424,6 +428,7 @@ export class R2Bucket {
 
   /** @param {string} key @param {unknown} value @param {AnyRecord} [options] */
   async put(key, value, options) {
+    const normalizedOptions = normalizePutOptions(options);
     const bytes = await valueToBytes(value);
     assertR2BufferSize(bytes.byteLength, "put");
     const { stub } = /** @type {R2BucketState} */ (bucketState.get(this));
@@ -431,7 +436,7 @@ export class R2Bucket {
     const meta = await stub.put(
       normalizeR2ObjectKey(key),
       bytes,
-      normalizePutOptions(options),
+      normalizedOptions,
       bucketRequestMeta(this)
     );
     return meta ? new R2Object(meta) : null;

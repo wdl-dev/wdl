@@ -30,7 +30,7 @@ use wdl_rust_common::internal_auth::{
     internal_auth_headers_match,
 };
 use wdl_rust_common::metrics::prometheus_response;
-use wdl_rust_common::request_id::sanitize_request_id;
+use wdl_rust_common::request_id::request_id_from_headers;
 use wdl_rust_common::shutdown::shutdown_signal;
 use wdl_rust_common::time::duration_ms_for_log;
 
@@ -372,13 +372,6 @@ fn response_error(response: &Response) -> Option<(&'static str, &str)> {
         .extensions()
         .get::<ResponseError>()
         .map(|err| (err.code, err.message.as_str()))
-}
-
-fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .and_then(sanitize_request_id)
 }
 
 async fn track_request(

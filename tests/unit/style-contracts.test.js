@@ -2524,7 +2524,8 @@ test("DO owner hints are trusted only from do-runtime headers", () => {
   assert.ok(match, "runtime DO transport must keep ownerHintFromResponse next to followOwnerHint");
   const ownerHintFromResponse = match[0];
 
-  assert.match(ownerHintFromResponse, /ownerHintFromHeaders\(response\.headers\)/);
+  assert.match(ownerHintFromResponse, /const headers = responseHeaders\(response\)/);
+  assert.match(ownerHintFromResponse, /ownerHintFromHeaders\(headers\)/);
   assert.doesNotMatch(ownerHintFromResponse, /response\.clone\(\)\.json\(\)/);
   assert.doesNotMatch(ownerHintFromResponse, /\.json\(\)/);
 
@@ -2539,6 +2540,11 @@ test("DO owner hints are trusted only from do-runtime headers", () => {
   assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.endpoint\]/);
   assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.generation\]/);
   assert.match(ownerHintHeadersFn, /if \(control\) headers\[DO_OWNER_HINT_CONTROL_HEADER\] = "1";/);
+
+  assert.doesNotMatch(runtime, /export const OWNER_(?:HINT_STALE|RACE_RETRY)_CODES/);
+  assert.match(runtime, /const code = responseHeader\(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER\)/);
+  assert.match(runtime, /setHas\(OWNER_RACE_RETRY_CODES, code\)/);
+  assert.match(doRuntime, /doPlatformErrorResponse\(err\)/);
 });
 
 test("owner endpoint validation lives in neutral runtime helper", () => {

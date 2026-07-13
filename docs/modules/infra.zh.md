@@ -59,7 +59,7 @@ Gateway 和 runtime 在不同环境中使用稳定的内部端口合同：
 
 不要把 private mesh endpoint 暴露到 public ingress。K8s 和 ECS 交付都必须通过 Service Connect、ClusterIP Services、NetworkPolicy 或等价控制保持这个假设成立。
 
-Private mesh caller 和 receiver 共享 `WDL_INTERNAL_AUTH_TOKEN` 作为当前 internal token。runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy sidecar 之间的调用会携带 `x-wdl-internal-auth`。轮换期间 receiver 还会接受可选的 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`；caller 始终只发送当前 token。两个 token 值都必须是非空 ASCII string，确保 JS 和 Rust 比较同一种 header 表示。Health 和 metrics endpoint 是唯一不要求该 token 的 service endpoint。这个 token 是平台 plumbing，不是 tenant binding：runtime wrapper code 会从 tenant-visible `env` 中剥离它，host-owned DO proxy 和 host-side backend capability 会在 DO forwarding 时添加它，并在 forwarding 前删除租户伪造的同名 header。
+Private mesh caller 和 receiver 共享 `WDL_INTERNAL_AUTH_TOKEN` 作为当前 internal token。runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy sidecar 之间的调用会携带 `x-wdl-internal-auth`。轮换期间 receiver 还会接受可选的 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`；caller 始终只发送当前 token。Receiver 要求 auth header 恰好出现一次；两个 token 值都只能包含 visible ASCII byte，不能包含空白或逗号，确保 Fetch header normalization 不改变 token，并避免 header joining 把重复 header 伪装成单个已配置 token。Health 和 metrics endpoint 是唯一不要求该 token 的 service endpoint。这个 token 是平台 plumbing，不是 tenant binding：runtime wrapper code 会从 tenant-visible `env` 中剥离它，host-owned DO proxy 和 host-side backend capability 会在 DO forwarding 时添加它，并在 forwarding 前删除租户伪造的同名 header。
 
 ## Redis / Storage 合同
 

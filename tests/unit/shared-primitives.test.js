@@ -19,3 +19,14 @@ test("errorMessage extracts string messages without structured log shape", () =>
   assert.equal(errorMessage(42), "42");
   assert.equal(errorMessage(null), "null");
 });
+
+test("errorMessage never replaces a pathological thrown value", () => {
+  const throwable = Object.create(null);
+  assert.equal(errorMessage(throwable), "Unknown error");
+
+  const brokenError = new Error("original");
+  Object.defineProperty(brokenError, "message", {
+    get() { throw new Error("message getter failed"); },
+  });
+  assert.equal(errorMessage(brokenError), "Unknown error");
+});

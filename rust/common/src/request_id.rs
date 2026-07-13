@@ -1,23 +1,32 @@
+#[cfg(feature = "axum")]
+use axum::http::HeaderMap;
+
+#[cfg(feature = "axum")]
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
 pub fn sanitize_request_id(raw: &str) -> Option<String> {
     let first = raw
         .split(',')
         .next()?
-        .trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
+        .trim_matches(|ch: char| ch.is_ascii_whitespace());
     if first.is_empty() || first.len() > 128 {
         return None;
     }
-    if first.chars().any(|ch| {
-        ch.is_whitespace()
-            || ch == '\u{feff}'
-            || ch == '"'
-            || ch == '\\'
-            || (ch as u32) < 0x20
-            || ch == '\u{7f}'
-            || ('\u{80}'..='\u{9f}').contains(&ch)
-    }) {
+    if first
+        .bytes()
+        .any(|byte| !(0x21..=0x7e).contains(&byte) || byte == b'"' || byte == b'\\')
+    {
         return None;
     }
     Some(first.to_string())
+}
+
+#[cfg(feature = "axum")]
+pub fn request_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(sanitize_request_id)
 }
 
 #[cfg(test)]
@@ -48,6 +57,21 @@ mod tests {
         assert_eq!(sanitize_request_id("bad\"id"), None);
         assert_eq!(sanitize_request_id("bad\\id"), None);
         assert_eq!(sanitize_request_id("bad\nid"), None);
+        assert_eq!(sanitize_request_id("café"), None);
+        assert_eq!(sanitize_request_id("\u{85}rid"), None);
+    }
+
+    #[cfg(feature = "axum")]
+    #[test]
+    fn request_id_header_adapter_rejects_non_ascii_wire_values() {
+        use axum::http::HeaderValue;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            REQUEST_ID_HEADER,
+            HeaderValue::from_bytes("é".as_bytes()).expect("obs-text header value"),
+        );
+        assert_eq!(request_id_from_headers(&headers), None);
     }
 
     #[test]

@@ -932,6 +932,13 @@ test("validateSecretKey: env-var grammar only", () => {
     assert.throws(() => validateSecretKey(bad), `"${bad}" should be rejected`);
   }
   assert.throws(() => validateSecretKey("__WDL_DO_BACKEND__"), /runtime-internal bindings/);
+  for (const reserved of ["__proto__", "constructor", "prototype", "toString", "valueOf"]) {
+    assert.throws(
+      () => validateSecretKey(reserved),
+      /reserved Object\.prototype key/,
+      `"${reserved}" should be rejected before persistence`
+    );
+  }
   assert.throws(() => validateSecretKey("A".repeat(129)), /too long/);
 });
 

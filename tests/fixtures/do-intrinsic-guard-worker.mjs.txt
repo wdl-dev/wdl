@@ -1,0 +1,70 @@
+const iteratorSymbol = Symbol.iterator;
+const originalArrayIterator = Array.prototype[iteratorSymbol];
+const originalFunctionToString = Function.prototype.toString;
+const originalObjectDefineProperty = Object.defineProperty;
+const originalObjectEntries = Object.entries;
+const originalObjectKeys = Object.keys;
+const originalPromiseThen = Promise.prototype.then;
+const originalProxy = Proxy;
+const originalReflectGet = Reflect.get;
+const originalSymbol = Symbol;
+
+Array.prototype[iteratorSymbol] = function* () {};
+Function.prototype.toString = () => "function fetch() {}";
+Object.defineProperty = () => {};
+Object.entries = () => [];
+Object.keys = () => [];
+Promise.prototype.then = () => { throw new Error("tenant Promise.then must not run"); };
+globalThis.Proxy = class BrokenProxy { constructor(target) { return target; } };
+Reflect.get = () => undefined;
+globalThis.Symbol = () => "BYPASS";
+
+function restoreIntrinsics() {
+  globalThis.Symbol = originalSymbol;
+  Reflect.get = originalReflectGet;
+  globalThis.Proxy = originalProxy;
+  Object.keys = originalObjectKeys;
+  Object.entries = originalObjectEntries;
+  Object.defineProperty = originalObjectDefineProperty;
+  Promise.prototype.then = originalPromiseThen;
+  Function.prototype.toString = originalFunctionToString;
+}
+
+function restorePromiseThen() {
+  Promise.prototype.then = originalPromiseThen;
+}
+
+function restoreArrayIterator() {
+  Array.prototype[iteratorSymbol] = originalArrayIterator;
+}
+
+export class Room {
+  async fetch(request) {
+    queueMicrotask(restorePromiseThen);
+    return new Response(await request.text());
+  }
+}
+
+export default {
+  async fetch(_request, env) {
+    restoreIntrinsics();
+    const room = env.ROOM.get(env.ROOM.idFromName("guard"));
+    const roomResponse = await room.fetch("https://room.local/", {
+      method: "POST",
+      body: "room-ok",
+    });
+    const ownerMetadataVisible =
+      roomResponse.headers.has("x-wdl-do-owner-task-id") ||
+      roomResponse.headers.has("x-wdl-do-owner-endpoint") ||
+      roomResponse.headers.has("x-wdl-do-ownership-error");
+    restoreArrayIterator();
+    return Response.json({
+      room: await roomResponse.text(),
+      roomFacade: env.ROOM.constructor.name,
+      ownerMetadataVisible,
+      doBackendVisible: "__WDL_DO_BACKEND__" in env,
+      ownerNetworkVisible: "__WDL_DO_OWNER_NETWORK__" in env,
+      workflowsBackendVisible: "__WDL_WORKFLOWS_BACKEND__" in env,
+    });
+  },
+};

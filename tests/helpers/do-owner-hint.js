@@ -31,6 +31,13 @@ export function doOwnerHintResponse(options = {}) {
   });
 }
 
+/** @param {string} code @param {HeadersInit | undefined} [headers] */
+export function doOwnershipErrorHeaders(code, headers = undefined) {
+  const out = new Headers(headers);
+  out.set("x-wdl-do-ownership-error", code);
+  return out;
+}
+
 export function tenantBodyDoOwnerHintResponse() {
   return Response.json({
     error: "do_owner_hint",
