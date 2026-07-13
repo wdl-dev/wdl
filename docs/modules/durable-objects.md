@@ -222,6 +222,10 @@ interrupt.
 - Owner-hint and ownership-error defense is layered: tenant response bodies and
   tenant-supplied control headers are ignored, only do-runtime control headers are
   trusted, and endpoint grammar/acceptable-address checks must pass for hints.
+- The injected DO transport and shared D1/DO endpoint validator evaluate before tenant
+  modules and capture the intrinsics used for private-header stripping, request bounds,
+  invoke serialization, replay classification, and endpoint validation. Tenant prototype
+  mutation cannot rewrite a trusted target or replay policy after those checks.
 - do-runtime supervisor must call local `127.0.0.1:8788` drain/renew endpoints; Service
   Connect aliases may hit a different task.
 

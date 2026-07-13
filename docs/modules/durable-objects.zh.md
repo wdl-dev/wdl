@@ -101,6 +101,7 @@ Terraform 除了 Fargate task memory limit，还会给 do-runtime workerd contai
 - Tenant-visible DO metadata 和 error 不得包含 owner task id、backend endpoint 或原始 transport error 文本。
 - Owner hint 只信任 do-runtime header，并且要通过 endpoint grammar validation。
 - Owner-hint 与 ownership-error 防御是分层的：忽略 tenant response body 和 tenant-supplied control header，只信任 do-runtime control header；hint 还必须通过 endpoint grammar / acceptable-address 检查。
+- 注入的 DO transport 与共享 D1/DO endpoint validator 会在 tenant module 前执行，并捕获 private-header stripping、request bound、invoke serialization、replay classification 和 endpoint validation 使用的 intrinsic。Tenant prototype mutation 不能在校验后改写受信 target 或 replay policy。
 - do-runtime supervisor 必须调用本地 `127.0.0.1:8788` drain/renew endpoint；Service Connect alias 可能打到其他 task。
 
 ## 可观测性

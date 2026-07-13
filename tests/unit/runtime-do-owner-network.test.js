@@ -7,8 +7,13 @@ import {
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { withMockedFetch } from "../helpers/mock-fetch.js";
+import {
+  withMockedProperty,
+  withMockedPropertyDescriptor,
+} from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
+import { validOwnerEndpointForService } from "../../runtime/_wdl-owner-endpoint.js";
 
 const OWNER_ENDPOINT_URL = repositoryFileUrl("runtime/_wdl-owner-endpoint.js");
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
@@ -67,6 +72,77 @@ test("do owner network rejects invalid owner endpoints before forwarding", async
     }
     assert.equal(called, false);
   });
+});
+
+test("owner endpoint validation uses captured tenant-realm intrinsics", async () => {
+  const invalidEndpoint = "redis-proxy-user:7070";
+
+  let hostileUrlCalls = 0;
+  await withMockedProperty(
+    globalThis,
+    "URL",
+    /** @type {typeof URL} */ (/** @type {unknown} */ (class HostileURL {
+      constructor() {
+        hostileUrlCalls += 1;
+        this.host = invalidEndpoint;
+        this.hostname = "do-runtime-a";
+        this.port = "8788";
+        this.username = "";
+        this.password = "";
+        this.pathname = "/";
+        this.search = "";
+        this.hash = "";
+      }
+    })),
+    () => {
+      assert.equal(validOwnerEndpointForService(invalidEndpoint, 8788, "do-runtime"), false);
+    }
+  );
+  assert.equal(hostileUrlCalls, 0);
+
+  let hostileGetterCalls = 0;
+  await withMockedPropertyDescriptor(URL.prototype, "port", {
+    configurable: true,
+    get() {
+      hostileGetterCalls += 1;
+      return "8788";
+    },
+  }, () => withMockedPropertyDescriptor(URL.prototype, "hostname", {
+    configurable: true,
+    get() {
+      hostileGetterCalls += 1;
+      return "do-runtime-a";
+    },
+  }, () => {
+    assert.equal(validOwnerEndpointForService(invalidEndpoint, 8788, "do-runtime"), false);
+  }));
+  assert.equal(hostileGetterCalls, 0);
+
+  const nativeRegExpTest = RegExp.prototype.test;
+  let hostileRegExpCalls = 0;
+  await withMockedProperty(RegExp.prototype, "test", /** @this {RegExp} */ function hostileTest(value) {
+    if (value === "redis-proxy-user") {
+      hostileRegExpCalls += 1;
+      return true;
+    }
+    return Reflect.apply(nativeRegExpTest, this, [value]);
+  }, () => {
+    assert.equal(validOwnerEndpointForService("redis-proxy-user:8788", 8788, "do-runtime"), false);
+  });
+  assert.equal(hostileRegExpCalls, 0);
+
+  const nativeString = String;
+  let hostileStringCalls = 0;
+  await withMockedProperty(globalThis, "String", /** @type {StringConstructor} */ (function hostileString(value) {
+    if (value === 8788) {
+      hostileStringCalls += 1;
+      return "7070";
+    }
+    return nativeString(value);
+  }), () => {
+    assert.equal(validOwnerEndpointForService("do-runtime-a:7070", 8788, "do-runtime"), false);
+  });
+  assert.equal(hostileStringCalls, 0);
 });
 
 test("do owner network rejects non-owner-dispatch paths before forwarding", async () => {
