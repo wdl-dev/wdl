@@ -1530,12 +1530,19 @@ test("published Compose overrides cover every locally built image service", () =
    * }} */ (yamlDocument("docker-compose.yml", { merge: true }).toJS());
   const publishedDocument = yamlDocument("docker-compose.images.yml");
   const published = /** @type {{
-   *   services: Record<string, { image?: string, pull_policy?: string }>,
+   *   services: Record<string, { build?: string, image?: string, pull_policy?: string }>,
    * }} */ (yamlDocument("docker-compose.images.yml", { merge: true }).toJS());
   const familyByDockerfile = new Map([
     ["Dockerfile.rust", { alias: "rust-published", image: "docker.io/getwdl/wdl-rust:latest" }],
     ["Dockerfile.workerd", { alias: "workerd-published", image: "docker.io/getwdl/wdl-workerd:latest" }],
   ]);
+  for (const family of familyByDockerfile.values()) {
+    const build = /** @type {{ tag?: string, value?: unknown } | undefined} */ (
+      publishedDocument.getIn([`x-${family.alias}`, "build"], true)
+    );
+    assert.equal(build?.tag, "!reset", `${family.alias} must reset inherited build config`);
+    assert.equal(build?.value, "null", `${family.alias} build reset must use null`);
+  }
   const expected = new Map();
   for (const [service, config] of Object.entries(local.services)) {
     if (!config.build) continue;
@@ -1551,6 +1558,7 @@ test("published Compose overrides cover every locally built image service", () =
     assert.deepEqual(published.services[service], {
       image: family.image,
       pull_policy: "always",
+      build: "null",
     });
   }
 });

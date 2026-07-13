@@ -1,10 +1,12 @@
 x-rust-published: &rust-published
   image: docker.io/getwdl/wdl-rust:latest
   pull_policy: always
+  build: !reset null
 
 x-workerd-published: &workerd-published
   image: docker.io/getwdl/wdl-workerd:latest
   pull_policy: always
+  build: !reset null
 
 services:
   redis-proxy-user:
