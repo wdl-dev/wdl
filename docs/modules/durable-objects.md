@@ -65,7 +65,11 @@ Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime facade. The
 rejects an oversized `Content-Length` before reading, and streamed bodies are read
 incrementally so the cap is enforced before buffering the full body.
 DO RPC method names use the JavaScript identifier grammar and are capped at 256 ASCII
-bytes by both the runtime client and do-runtime protocol reader.
+bytes by both the runtime client and do-runtime protocol reader. RPC arguments are
+structural JSON data capped at 1 MiB: finite numbers, strings, booleans, null, dense
+arrays, and plain objects are accepted. Serialization does not invoke `toJSON()` hooks;
+sparse arrays, circular structures, non-plain objects, and non-JSON values fail before
+dispatch.
 DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
 and storage id. They do not accept inline worker source.
 DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without

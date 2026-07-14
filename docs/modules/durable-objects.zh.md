@@ -35,7 +35,7 @@ Storage cleanup endpoint 是 native facet storage cleanup 和 worker storage cle
 
 DO protocol error 使用 `{ error, message, details? }`。不同于 admin HTTP 的 flat additive error shape，DO protocol detail 会嵌套在 `details` 下，因为消费者是 runtime/DO client protocol，不是通用 admin JSON parser。未知 internal exception 仍会降级成安全的 `internal_error` / `Internal error` message。Storage delete-worker 在 partial batch result 时可能返回 HTTP 207 和 `{ ok:false, deleted, errors }`；这是 result envelope，不是 generic JSON error envelope。
 Tenant-originated DO fetch body 在 runtime facade 中限制为 1 MiB。Facade 会在读取前拒绝超限的 `Content-Length`，streamed body 会增量读取，因此 limit 会在完整 buffering 前生效。
-DO RPC method name 使用 JavaScript identifier grammar，并由 runtime client 和 do-runtime protocol reader 同时限制为最多 256 ASCII bytes。
+DO RPC method name 使用 JavaScript identifier grammar，并由 runtime client 和 do-runtime protocol reader 同时限制为最多 256 ASCII bytes。RPC 参数是最多 1 MiB 的 structural JSON data：接受 finite number、string、boolean、null、dense array 和 plain object。序列化不会调用 `toJSON()` hook；sparse array、circular structure、non-plain object 和 non-JSON value 会在 dispatch 前失败。
 DO invoke envelope 通过 canonical namespace、worker、version 和 storage id 标识 persisted bundle，不接受 inline worker source。
 DO host id 最多 512 UTF-8 bytes，并使用不带前导零的 canonical `shardN` suffix。
 

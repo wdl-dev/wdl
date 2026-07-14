@@ -9,6 +9,7 @@
 - Made required bundle metadata, queue base64 bodies, and persisted secret envelopes fail closed under their owning contracts; JavaScript and Rust now share the secret-envelope, queue-key, request-id, internal-auth, worker-version, scheduler-projection, and workflow-limit fixtures.
 - Normalized `PLATFORM_DOMAIN` across routing tiers, stopped `/whoami` from advertising the internal `workers.local` fallback as a public namespace URL, and aligned Compose/Kubernetes/test wiring with the consolidated owners.
 - Removed the unreachable DO inline worker-code test hook and its Terraform switch; do-runtime invoke paths now accept only canonical persisted bundle identities and reject non-canonical or oversized host ids.
+- Added Terraform plan-time validation for application subnets: every supplied subnet must belong to the configured VPC, use an RFC1918 or `100.64.0.0/10` IPv4 CIDR, and occupy a distinct Availability Zone. Existing unsupported subnet selections now fail during planning.
 
 ## wdl.20260701.1 - 2026-07-08
 
