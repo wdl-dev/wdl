@@ -3,6 +3,13 @@ variable "region" { type = string }
 
 variable "vpc_id" { type = string }
 variable "private_subnet_ids" { type = list(string) }
+variable "private_subnet_availability_zone_ids" {
+  type = set(string)
+  validation {
+    condition     = length(var.private_subnet_availability_zone_ids) == length(var.private_subnet_ids)
+    error_message = "Each private subnet must belong to a different Availability Zone so EFS creates at most one mount target per AZ."
+  }
+}
 
 variable "alb_https_listener_arn" { type = string }
 variable "alb_security_group_id" { type = string }
@@ -44,7 +51,6 @@ variable "runtime_desired_count" { type = number }
 variable "d1_runtime_desired_count" { type = number }
 variable "do_runtime_desired_count" { type = number }
 variable "d1_test_hooks_enabled" { type = bool }
-variable "do_test_hooks_enabled" { type = bool }
 variable "scheduler_desired_count" { type = number }
 variable "workflows_desired_count" { type = number }
 variable "gateway_cpu" { type = number }

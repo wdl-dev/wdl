@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { fnv1a32CodeUnits } from "../../../shared/fnv1a32.js";
+import { doStorageIdKey } from "../../../shared/version.js";
 import { doAlarmJobIdForStorage } from "../../helpers/do-alarm-job-id.js";
 import { serviceInternalPost, serviceInternalPostAsync } from "./internal-http.js";
 import {
@@ -147,7 +148,7 @@ export function redisAddDoAlarmByWorker(ns, worker, jobId) {
 
 /** @param {string} ns @param {string} worker */
 export function redisGetDoStorageId(ns, worker) {
-  return redisGetRaw(`worker:do-storage:${ns}:${worker}`) ?? "";
+  return redisGetRaw(doStorageIdKey(ns, worker)) ?? "";
 }
 
 /**

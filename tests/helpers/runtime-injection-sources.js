@@ -15,7 +15,7 @@ const REAL_RUNTIME_INJECTION_SOURCE_PATHS = Object.freeze({
   r2UtilsSource: "runtime/r2-utils.js",
   doClientSource: "runtime/do-client.js",
   doTransportSource: "runtime/_wdl-do-transport.js",
-  ownerEndpointSource: "runtime/_wdl-owner-endpoint.js",
+  ownerEndpointSource: "shared/owner-endpoint.js",
   ownerHintCacheSource: "runtime/_wdl-owner-hint-cache.js",
   requestIdSource: "runtime/_wdl-request-id.js",
   workflowsClientSource: "runtime/workflows-client.js",

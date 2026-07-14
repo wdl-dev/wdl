@@ -59,7 +59,7 @@ ASSETS 是 deploy-artifact helper，不是完整 Cloudflare Pages asset pipeline
 
 R2 和 ASSETS 生命周期语义故意不同。ASSETS 是 deploy artifact，version/worker delete 会 stage `worker-delete-s3-cleanup` work。R2 是 tenant runtime data，worker delete 永远不删除 R2 object。
 
-Service binding 在 caller deploy 时冻结。Control 解析 target namespace、worker、version 和 entrypoint，存入 caller metadata，runtime 第一次使用时加载该精确 target version。之后 target promote 不会移动已有 caller；caller redeploy 才是 refresh 边界。这种 version pinning 让 rollback 和 version delete referrer check 都是确定的。
+Service binding 在 caller deploy 时冻结。Control 解析 target namespace、worker、version 和 entrypoint，存入 caller metadata，runtime 第一次使用时加载该精确 target version。之后 target promote 不会移动已有 caller；caller redeploy 才是 refresh 边界。这种 version pinning 让 rollback 和 version delete referrer check 都是确定的。Runtime 会在 materialize binding 前用 canonical positive JavaScript-safe-integer grammar 重新校验 persisted pinned version。
 
 Cross-namespace service binding 要求 target 为被绑定的 entrypoint 声明 `[[exports]]` entry；default export 也要声明 `entrypoint = "default"`。该 entry 的 `allowed_callers` 控制 cross-namespace 访问；`["*"]` 对所有 namespace 开放，空数组则关闭 cross-namespace caller。没有 `[[exports]]` 的 target 只向 same-namespace caller 暴露 default entrypoint。Same-namespace caller 绕过 ACL，但 target 一旦声明 `[[exports]]`，仍受 strict entrypoint visibility 约束。ACL 变化是 deploy-time，不是 call-time；既有 caller 会保持 pin，直到 redeploy。
 

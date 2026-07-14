@@ -86,6 +86,18 @@ test("D1 owner client classifies non-error forwarded HTTP status as ok", async (
   assert.equal(D1_OWNER_CLIENT_TEST_STATE.logs.at(-1).level, "info");
 });
 
+test("D1 owner client rejects invalid endpoints before authenticated forwarding", async () => {
+  await assert.rejects(
+    () => mod.forwardToOwner(query(), env(), { ...owner(), endpoint: "8.8.8.8:8787" }, "req-invalid", 0),
+    (err) => {
+      assert.equal(/** @type {{ status?: unknown }} */ (err).status, 503);
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "owner-endpoint-invalid");
+      return true;
+    }
+  );
+  assert.equal(D1_OWNER_CLIENT_TEST_STATE.fetches.length, 0);
+});
+
 test("D1 owner client maps post-forward transport failures to result-unknown", async () => {
   restoreFetch();
   restoreFetch = installMockFetch(makeRecordingFetch(D1_OWNER_CLIENT_TEST_STATE.fetches, {

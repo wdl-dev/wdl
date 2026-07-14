@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
 import { loadDoProtocol } from "../helpers/load-do-protocol.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import {
   dispatchDoInvokeWithHintCache,
@@ -35,6 +36,7 @@ const {
   readLocalActorInvokeRequest,
   readJsonBody,
 } = await loadDoProtocol();
+const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 
 test("DO ownership errors stay aligned with runtime hint and retry handling", async () => {
   const ownershipCodes = new Set(Object.values(DO_OWNERSHIP_CODE));
@@ -141,19 +143,6 @@ function withRequestBody(invoke, bodyBytes) {
   };
 }
 
-const INLINE_BODY = {
-  ...BASE_BODY,
-  hostId: CHAT_ROOM_HOST_ID,
-  workerId: "tenant:chat:1",
-  workerCode: {
-    compatibilityDate: "2026-04-24",
-    mainModule: "worker.js",
-    modules: {
-      "worker.js": "export class ChatRoom {}",
-    },
-  },
-};
-
 test("normalizes do invoke request", () => {
   const invoke = normalizeDoInvokeRequest(BASE_BODY);
 
@@ -174,20 +163,48 @@ test("normalizes do invoke request", () => {
   assert.equal(buildFacetName(invoke), "ChatRoom:room-a");
 });
 
-test("normalizes do invoke request for reserved namespaces", () => {
-  const invoke = normalizeDoInvokeRequest({
-    ...BASE_BODY,
-    ns: "__system__",
-  });
+test("DO invoke version ingress matches the shared JS/Rust fixture", () => {
+  for (const { tag, parsed } of versionFixture.cases) {
+    if (parsed == null) {
+      assert.throws(
+        () => normalizeDoInvokeRequest({ ...BASE_BODY, version: tag }),
+        /version/,
+        tag
+      );
+    } else {
+      const invoke = normalizeDoInvokeRequest({ ...BASE_BODY, version: tag });
+      assert.ok("version" in invoke, tag);
+      assert.equal(invoke.version, tag, tag);
+    }
+  }
+});
 
-  assert.equal(invoke.workerId, "__system__:chat:v1");
-  assert.deepEqual(invoke.props, {
-    ns: "__system__",
-    worker: "chat",
-    version: "v1",
-    doStorageId: DO_STORAGE_ID,
-    className: "ChatRoom",
-  });
+test("normalizes do invoke requests for runtime-load reserved namespaces", () => {
+  for (const ns of ["__system__", "__platform__"]) {
+    const invoke = normalizeDoInvokeRequest({
+      ...BASE_BODY,
+      ns,
+    });
+
+    assert.equal(invoke.workerId, `${ns}:chat:v1`);
+    assert.deepEqual(invoke.props, {
+      ns,
+      worker: "chat",
+      version: "v1",
+      doStorageId: DO_STORAGE_ID,
+      className: "ChatRoom",
+    });
+  }
+});
+
+test("DO invoke namespace ingress uses the canonical runtime-load grammar", () => {
+  for (const ns of ["-tenant", "tenant-", "a".repeat(64), "admin", "__community__"]) {
+    assert.throws(
+      () => normalizeDoInvokeRequest({ ...BASE_BODY, ns }),
+      /ns is not valid/,
+      ns
+    );
+  }
 });
 
 test("normalizes do invoke request for mixed-case worker names", () => {
@@ -337,29 +354,16 @@ test("do-runtime RPC JSON validation uses captured intrinsics", async () => {
   });
 });
 
-test("normalizes inline workerCode only for test hooks", () => {
-  assert.throws(
-    () => normalizeDoInvokeRequest(INLINE_BODY),
-    /workerCode is only accepted when DO_TEST_HOOKS=1/
-  );
-  const invoke = normalizeDoInvokeRequest(INLINE_BODY, { allowInlineWorkerCode: true });
-  assert.equal(invoke.hostId, CHAT_ROOM_HOST_ID);
-  assert.equal("workerCode" in invoke ? "allowExperimental" in invoke.workerCode : undefined, false);
-});
-
-test("rejects experimental workerd compatibility flags in inline workerCode", () => {
+test("rejects inline workerCode", () => {
   assert.throws(
     () => normalizeDoInvokeRequest({
-      ...INLINE_BODY,
+      ...BASE_BODY,
       workerCode: {
-        ...INLINE_BODY.workerCode,
-        compatibilityFlags: ["nodejs_compat", "unsafe_module"],
+        mainModule: "worker.js",
+        modules: { "worker.js": "export class ChatRoom {}" },
       },
-    }, { allowInlineWorkerCode: true }),
-    (err) => err instanceof DoRuntimeError &&
-      err.status === 400 &&
-      err.code === "experimental_compat_flag_unsupported" &&
-      /"unsafe_module"/.test(err.message)
+    }),
+    /workerCode is not accepted/
   );
 });
 
@@ -550,13 +554,15 @@ test("rejects invalid do alarm retry counts", () => {
 });
 
 test("rejects invalid owner fence generation", () => {
-  assert.throws(
-    () => normalizeDoInvokeRequest({
-      ...BASE_BODY,
-      owner: { ownerKey: CHAT_ROOM_HOST_ID, taskId: "task-a", generation: -1 },
-    }),
-    /owner\.generation must be a non-negative integer/
-  );
+  for (const generation of [-1, 0, 9007199254740992]) {
+    assert.throws(
+      () => normalizeDoInvokeRequest({
+        ...BASE_BODY,
+        owner: { ownerKey: CHAT_ROOM_HOST_ID, taskId: "task-a", generation },
+      }),
+      /owner\.generation must be a positive safe integer/
+    );
+  }
 });
 
 test("rejects invalid class names", () => {
@@ -577,35 +583,24 @@ test("rejects bare numeric versions", () => {
   );
 });
 
-test("rejects missing main module", () => {
+test("rejects malformed, out-of-range, and mismatched host ids", () => {
   assert.throws(
-    () => normalizeDoInvokeRequest({
-      ...BASE_BODY,
-      hostId: CHAT_ROOM_HOST_ID,
-      workerId: "tenant:chat:1",
-      workerCode: {
-        mainModule: "missing.js",
-        modules: { "worker.js": "export default {};" },
-      },
-    }, { allowInlineWorkerCode: true }),
-    /workerCode\.mainModule must reference a module/
-  );
-});
-
-test("rejects malformed inline test-hook host ids", () => {
-  assert.throws(
-    () => normalizeDoInvokeRequest({
-      ...INLINE_BODY,
-      hostId: "tenant-worker",
-    }, { allowInlineWorkerCode: true }),
+    () => normalizeDoInvokeRequest({ ...BASE_BODY, hostId: "tenant-worker" }),
     /hostId is not valid/
   );
   assert.throws(
     () => normalizeDoInvokeRequest({
-      ...INLINE_BODY,
+      ...BASE_BODY,
       hostId: `${DO_STORAGE_ID}:ChatRoom:shard16`,
-    }, { allowInlineWorkerCode: true }),
+    }),
     /hostId shard is not valid/
+  );
+  assert.throws(
+    () => normalizeDoInvokeRequest({
+      ...BASE_BODY,
+      hostId: `${DO_STORAGE_ID}:ChatRoom:shard012`,
+    }),
+    /hostId is not valid/
   );
   assert.throws(
     () => normalizeDoInvokeRequest({
@@ -613,6 +608,15 @@ test("rejects malformed inline test-hook host ids", () => {
       hostId: `${DO_STORAGE_ID}:ChatRoom:shard0`,
     }),
     /hostId does not match object shard/
+  );
+});
+
+test("generated host ids honor the aggregate protocol size limit", () => {
+  const maxHostId = hostIdForShard("a".repeat(496), "ChatRoom", 0);
+  assert.equal(Buffer.byteLength(maxHostId), 512);
+  assert.throws(
+    () => hostIdForShard("a".repeat(497), "ChatRoom", 0),
+    /hostId is too large/
   );
 });
 
@@ -730,29 +734,6 @@ test("rejects invalid header names and control characters", () => {
       objectName: "room\u0000a",
     }),
     /objectName must not contain control characters/
-  );
-});
-
-test("rejects inline workerCode module limits", () => {
-  const tooManyModules = Object.fromEntries(
-    Array.from({ length: 129 }, (_, index) => [`module-${index}.js`, "export default {};"])
-  );
-  assert.throws(
-    () => normalizeDoInvokeRequest({
-      ...INLINE_BODY,
-      workerCode: { ...INLINE_BODY.workerCode, modules: tooManyModules },
-    }, { allowInlineWorkerCode: true }),
-    /workerCode\.modules has too many modules/
-  );
-  assert.throws(
-    () => normalizeDoInvokeRequest({
-      ...INLINE_BODY,
-      workerCode: {
-        ...INLINE_BODY.workerCode,
-        modules: { "worker.js": "x".repeat(1024 * 1024 + 1) },
-      },
-    }, { allowInlineWorkerCode: true }),
-    /workerCode\.modules\.worker\.js is too large/
   );
 });
 

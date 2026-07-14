@@ -1,7 +1,8 @@
 //! Worker version and bundle-key helpers shared by Rust services.
 //!
 //! JavaScript control code owns the canonical version tag grammar in
-//! `shared/version.js`: `v[1-9][0-9]*`. Rust services that read bundle hashes
+//! `shared/version.js`: `v[1-9][0-9]*`, bounded to JavaScript's safe-integer
+//! range. Rust services that read bundle hashes
 //! must use the same grammar so malformed Redis state fails closed instead of
 //! silently normalizing to another worker version.
 //!
@@ -11,6 +12,8 @@
 //! here so a future key-grammar change updates JS and Rust together.
 
 use std::fmt;
+
+const MAX_SAFE_VERSION: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidVersionTag;
@@ -28,7 +31,10 @@ pub fn parse_version_tag(version: &str) -> Result<u64, InvalidVersionTag> {
     if raw.is_empty() || raw.starts_with('0') || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(InvalidVersionTag);
     }
-    raw.parse::<u64>().map_err(|_| InvalidVersionTag)
+    let parsed = raw.parse::<u64>().map_err(|_| InvalidVersionTag)?;
+    (parsed <= MAX_SAFE_VERSION)
+        .then_some(parsed)
+        .ok_or(InvalidVersionTag)
 }
 
 pub fn worker_bundle_key(
@@ -64,6 +70,21 @@ mod tests {
     fn parses_canonical_version_tags() {
         assert_eq!(parse_version_tag("v1").unwrap(), 1);
         assert_eq!(parse_version_tag("v42").unwrap(), 42);
+    }
+
+    #[test]
+    fn matches_cross_language_version_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/version-tags.json"))
+                .expect("version tag fixture parses");
+        for case in fixture["cases"]
+            .as_array()
+            .expect("version tag fixture cases is an array")
+        {
+            let tag = case["tag"].as_str().expect("version tag is a string");
+            let expected = case["parsed"].as_u64();
+            assert_eq!(parse_version_tag(tag).ok(), expected, "{tag:?}");
+        }
     }
 
     #[test]

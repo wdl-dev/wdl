@@ -56,7 +56,8 @@
 |---|---|
 | `shared/redis.js`、`shared/redis-*.js` | 公共 Redis import surface，以及拆分后的 RESP codec、per-call client、WATCH/MULTI session 和 subscriber loop modules。Runtime hot path 优先使用 Rust redis-proxy sidecar。 |
 | `shared/redis-lock.js` | Control 和 Auth 共用的 token-fenced Redis lock creation、acquire、renewal 和 best-effort token-scoped release。 |
-| `shared/owner-lease.js`、`shared/owner-protocol.js`、`shared/owner-forwarder.js` | Control 与 D1/DO runtimes 共用的 optimistic retry loop、owner lease parsing、generation counters、key derivation、fence matching、staged Redis owner writes 和 owner-forwarding HTTP mechanics。 |
+| `shared/optimistic-retry.js` | Control 和 D1/DO owner-lease adapter 共用的通用有界 optimistic retry loop。 |
+| `shared/owner-endpoint.js`、`shared/owner-lease.js`、`shared/owner-protocol.js`、`shared/owner-forwarder.js` | Control 与 D1/DO runtimes 共用的 owner endpoint grammar、owner lease parsing、generation counters、key derivation、fence matching、staged Redis owner writes 和 authenticated forwarding mechanics。 |
 | `shared/auth-roles.js` | Role table、principal validation、reserved namespace policy 和 auth action capabilities。 |
 | `shared/auth-token.js` | Control 和 auth 共用的 `x-admin-token` sanitizer。 |
 | `shared/internal-auth.js` | JS caller 和 receiver 共用的 internal mesh auth header / token helpers。 |

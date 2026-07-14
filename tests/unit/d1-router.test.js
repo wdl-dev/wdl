@@ -7,7 +7,7 @@ import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.j
 
 
 const taskIdentityUrl = moduleDataUrl(`
-export async function resolveTaskIdentity() { return { taskId: "task-a", endpoint: "task-a:8787" }; }
+export async function resolveTaskIdentity() { return { taskId: "task-a", endpoint: "d1-runtime-a:8787" }; }
 `);
 const timeoutUrl = moduleDataUrl(`
 export function createD1QueryDeadline() {
@@ -20,7 +20,7 @@ export async function ownerLeaseExpiredByRedisTime(_env, owner) {
 }
 export async function resolveDbOwner(env, query, options) {
   return /** @type {any} */ (globalThis).__d1RouterResolveDbOwner?.(env, query, options) ||
-    { taskId: "task-a", endpoint: "task-a:8787", generation: 1 };
+    { taskId: "task-a", endpoint: "d1-runtime-a:8787", generation: 1 };
 }
 export async function takeoverExpiredOwner(env, owner) {
   return /** @type {any} */ (globalThis).__d1RouterTakeoverExpiredOwner?.(env, owner) || owner;
@@ -144,14 +144,14 @@ test("D1 router uses takeover owner even after refresh is disabled", async () =>
   const oldOwner = {
     dbKey: query.dbKey,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 7,
     leaseExpiresAt: Date.now() - 1_000,
   };
   const takeoverOwner = {
     dbKey: query.dbKey,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 8,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -206,7 +206,7 @@ test("D1 router owner-not-ready errors do not expose owner task identity", async
   const owner = {
     dbKey: query.dbKey,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 7,
     leaseExpiresAt: Date.now() + 60_000,
   };

@@ -6,6 +6,7 @@ import {
   applyModuleReplacements,
   moduleDataUrl,
   readRepositoryFile,
+  repositoryFileUrl,
   sharedModuleDataUrl,
 } from "../helpers/load-shared-module.js";
 
@@ -13,10 +14,15 @@ const { D1ProtocolError } = await loadD1Protocol();
 
 const PROTOCOL_URL = d1ProtocolDataUrl();
 const SHARED_TASK_IDENTITY_URL = sharedModuleDataUrl("shared/task-identity.js");
+const SHARED_OWNER_ENDPOINT_URL = repositoryFileUrl("shared/owner-endpoint.js");
 const src = applyModuleReplacements(readRepositoryFile("d1-runtime/task-identity.js"), [
   [
     /import \{ createTaskIdentityResolver \} from "shared-task-identity";/,
     `import { createTaskIdentityResolver } from ${JSON.stringify(SHARED_TASK_IDENTITY_URL)};`,
+  ],
+  [
+    /import \{ validOwnerEndpointForService \} from "shared-owner-endpoint";/,
+    `import { validOwnerEndpointForService } from ${JSON.stringify(SHARED_OWNER_ENDPOINT_URL)};`,
   ],
   [
     /import \{ D1ProtocolError \} from "d1-runtime-protocol";/,
@@ -68,6 +74,13 @@ test("D1 task identity: env task id and endpoint win", async () => {
   });
 });
 
+test("D1 task identity: public owner endpoints are rejected", () => {
+  assert.throws(
+    () => taskIdentityFromEnv({ D1_TASK_ID: "task-a", D1_TASK_ENDPOINT: "8.8.8.8:8787" }),
+    (err) => isProtocolError(err, 503, "task-identity-unavailable")
+  );
+});
+
 test("D1 task identity: partial env identity is rejected", () => {
   assert.throws(
     () => taskIdentityFromEnv({ D1_TASK_ID: "task-only" }),
@@ -85,11 +98,11 @@ test("D1 task identity: ECS metadata yields task arn and private IPv4 endpoint",
         Networks: [{ IPv4Addresses: ["10.0.42.17"] }],
       },
     ],
-  }, { D1_TASK_PORT: "9797" });
+  });
 
   assert.deepEqual(identity, {
     taskId: "arn:aws:ecs:us-east-1:123456789012:task/cluster/abc",
-    endpoint: "10.0.42.17:9797",
+    endpoint: "10.0.42.17:8787",
     source: "ecs-metadata",
   });
 });

@@ -55,3 +55,23 @@ pub(crate) fn scheduler_projection_contract() -> SchedulerProjectionContract {
     ))
     .expect("scheduler projection contract fixture must parse")
 }
+
+pub(crate) fn version_tag_cases() -> Vec<(String, bool)> {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/version-tags.json"))
+            .expect("version tag fixture must parse");
+    fixture["cases"]
+        .as_array()
+        .expect("version tag fixture cases must be an array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["tag"]
+                    .as_str()
+                    .expect("version tag must be a string")
+                    .to_string(),
+                entry["parsed"].as_u64().is_some(),
+            )
+        })
+        .collect()
+}

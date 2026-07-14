@@ -42,6 +42,8 @@ const d1OwnerClientModule = await importOwnerClientModule("d1-runtime/owner-clie
   "d1-runtime-owner-registry": ownerRegistryUrl,
   "shared-internal-auth": ownerHarness.internalAuthUrl,
   "shared-owner-forwarder": ownerHarness.ownerForwarderUrl,
+  "shared-owner-endpoint": ownerHarness.ownerEndpointUrl,
+  "shared-owner-lease": ownerHarness.ownerLeaseUrl,
   "d1-runtime-state": ownerHarness.stateUrl,
 });
 

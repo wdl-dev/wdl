@@ -3,9 +3,33 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  azs                = slice(data.aws_availability_zones.available.names, 0, 3)
-  public_subnets     = { for idx, cidr in var.public_subnet_cidrs : idx => cidr }
-  private_subnets    = { for idx, cidr in var.private_subnet_cidrs : idx => cidr }
+  azs             = slice(data.aws_availability_zones.available.names, 0, 3)
+  public_subnets  = { for idx, cidr in var.public_subnet_cidrs : idx => cidr }
+  private_subnets = { for idx, cidr in var.private_subnet_cidrs : idx => cidr }
+  network_cidrs   = concat([var.vpc_cidr], var.public_subnet_cidrs, var.private_subnet_cidrs)
+  private_cidr_contract = {
+    for cidr in local.network_cidrs : cidr => try(
+      (
+        tonumber(split(".", cidrhost(cidr, 0))[0]) == 10 &&
+        tonumber(split("/", cidr)[1]) >= 8
+        ) || (
+        tonumber(split(".", cidrhost(cidr, 0))[0]) == 100 &&
+        tonumber(split(".", cidrhost(cidr, 0))[1]) >= 64 &&
+        tonumber(split(".", cidrhost(cidr, 0))[1]) <= 127 &&
+        tonumber(split("/", cidr)[1]) >= 10
+        ) || (
+        tonumber(split(".", cidrhost(cidr, 0))[0]) == 172 &&
+        tonumber(split(".", cidrhost(cidr, 0))[1]) >= 16 &&
+        tonumber(split(".", cidrhost(cidr, 0))[1]) <= 31 &&
+        tonumber(split("/", cidr)[1]) >= 12
+        ) || (
+        tonumber(split(".", cidrhost(cidr, 0))[0]) == 192 &&
+        tonumber(split(".", cidrhost(cidr, 0))[1]) == 168 &&
+        tonumber(split("/", cidr)[1]) >= 16
+      ),
+      false,
+    )
+  }
   assets_cdn_enabled = var.assets_cdn_domain != ""
   site_host_enabled  = var.site_host != ""
   site_www_host      = local.site_host_enabled ? "www.${var.site_host}" : ""
@@ -25,6 +49,13 @@ resource "aws_vpc" "this" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
+
+  lifecycle {
+    precondition {
+      condition     = alltrue(values(local.private_cidr_contract))
+      error_message = "vpc_cidr and subnet CIDRs must be IPv4 ranges within RFC1918 or 100.64.0.0/10."
+    }
+  }
 
   tags = {
     Name = "${var.name_prefix}-vpc"

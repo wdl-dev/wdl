@@ -49,18 +49,26 @@ test("D1 owner registry: owner keys encode database keys safely", () => {
 });
 
 test("D1 owner registry: parseOwner accepts Redis strings and bulk bytes", () => {
+  const [identity] = normalizeDatabases([{ namespace: "tenant-a", databaseId: "d1_main" }]);
   const owner = {
-    namespace: "tenant-a",
-    databaseId: "d1_main",
-    dbKey: "tenant-a:d1_main",
+    ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: Date.now() + 1000,
   };
-  assert.deepEqual(parseOwner(JSON.stringify(owner)), owner);
-  assert.deepEqual(parseOwner(new TextEncoder().encode(JSON.stringify(owner))), owner);
-  assert.equal(parseOwner(null), null);
+  assert.deepEqual(parseOwner(JSON.stringify(owner), identity.dbKey), owner);
+  assert.deepEqual(parseOwner(new TextEncoder().encode(JSON.stringify(owner)), identity.dbKey), owner);
+  assert.equal(parseOwner(null, identity.dbKey), null);
+  assert.throws(
+    () => parseOwner(JSON.stringify({ ...owner, endpoint: "8.8.8.8:8787" }), identity.dbKey),
+    /D1 owner record is invalid/
+  );
+  assert.throws(
+    () => parseOwner(JSON.stringify({ ...owner, dbKey: "tenant-b:db-b" }), identity.dbKey),
+    /D1 owner record is invalid/
+  );
+  assert.throws(() => parseOwner("{not-json", identity.dbKey), /D1 owner record is invalid/);
 });
 
 test("D1 owner registry: rebalance request normalization validates shape", () => {
@@ -76,7 +84,15 @@ test("D1 owner registry: rebalance request normalization validates shape", () =>
   assert.throws(() => normalizeDatabases([]), /databases must be a non-empty array/);
   assert.throws(
     () => normalizeDatabases([{ namespace: "tenant-a", databaseId: "db:bad" }]),
-    /databaseId must not contain ':'/
+    /databaseId is invalid/
+  );
+  assert.throws(
+    () => normalizeDatabases([{ namespace: "admin", databaseId: "main" }]),
+    /namespace is invalid/
   );
   assert.throws(() => normalizeTarget({ taskId: "task-b" }), /target.endpoint is required/);
+  assert.throws(
+    () => normalizeTarget({ taskId: "task-b", endpoint: "8.8.8.8:8787" }),
+    /target.endpoint is invalid/
+  );
 });

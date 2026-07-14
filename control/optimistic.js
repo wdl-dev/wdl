@@ -1,5 +1,5 @@
 import { WatchError } from "shared-redis";
-import { withOptimisticRetries } from "shared-owner-lease";
+import { withOptimisticRetries } from "shared-optimistic-retry";
 
 export { withOptimisticRetries };
 

@@ -11,10 +11,10 @@ import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
 import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
 
 const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
-const SHARED_ENV_URL = repositoryFileUrl("shared/env.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_RANDOM_ID_URL = repositoryFileUrl("shared/random-id.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const SHARED_OPTIMISTIC_RETRY_URL = repositoryFileUrl("shared/optimistic-retry.js");
 const CONTROL_ERRORS_URL = freshRepositoryModuleDataUrl("control/errors.js", [
   [/from "shared-respond"/g, `from ${JSON.stringify(SHARED_RESPOND_URL)}`],
 ]);
@@ -22,13 +22,10 @@ const CONTROL_WORKFLOWS_CLIENT_URL = freshRepositoryModuleDataUrl("control/workf
   [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
   [/from "control-errors"/g, `from ${JSON.stringify(CONTROL_ERRORS_URL)}`],
 ]);
-const SHARED_OWNER_LEASE_URL = freshRepositoryModuleDataUrl("shared/owner-lease.js", [
-  [/from "shared-env"/g, `from ${JSON.stringify(SHARED_ENV_URL)}`],
-]);
 const CONTROL_OPTIMISTIC_REDIS_URL = sharedRedisStubUrl();
 const CONTROL_OPTIMISTIC_URL = freshRepositoryModuleDataUrl("control/optimistic.js", [
   [/from "shared-redis"/g, `from ${JSON.stringify(CONTROL_OPTIMISTIC_REDIS_URL)}`],
-  [/from "shared-owner-lease"/g, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)}`],
+  [/from "shared-optimistic-retry"/g, `from ${JSON.stringify(SHARED_OPTIMISTIC_RETRY_URL)}`],
 ]);
 const CONTROL_JSON_BODY_URL = freshRepositoryModuleDataUrl("control/json-body.js", [
   [/from "shared-bounded-body"/g, `from ${JSON.stringify(SHARED_BOUNDED_BODY_URL)}`],

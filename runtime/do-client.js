@@ -15,6 +15,13 @@ import { createOwnerHintCache } from "./_wdl-owner-hint-cache.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
 const ownerHintCache = createOwnerHintCache();
+const intrinsicObjectHasOwn = Object.hasOwn;
+const intrinsicReflectApply = Reflect.apply;
+
+/** @param {object} object @param {PropertyKey} key */
+function objectHasOwn(object, key) {
+  return intrinsicReflectApply(intrinsicObjectHasOwn, undefined, [object, key]);
+}
 
 /**
  * @typedef {{ fetch(url: string, init?: RequestInit): Promise<Response> }} DoBackend
@@ -139,12 +146,12 @@ export class DurableObjectNamespace {
    */
   constructor(binding, options = {}) {
     const isMetadataBinding = binding && typeof binding === "object" && (
-      Object.hasOwn(binding, "ns") ||
-      Object.hasOwn(binding, "worker") ||
-      Object.hasOwn(binding, "version") ||
-      Object.hasOwn(binding, "doStorageId") ||
-      Object.hasOwn(binding, "binding") ||
-      Object.hasOwn(binding, "className")
+      objectHasOwn(binding, "ns") ||
+      objectHasOwn(binding, "worker") ||
+      objectHasOwn(binding, "version") ||
+      objectHasOwn(binding, "doStorageId") ||
+      objectHasOwn(binding, "binding") ||
+      objectHasOwn(binding, "className")
     );
     if (binding && !isMetadataBinding) {
       this.#setBindingProxy(/** @type {DurableObjectBindingProxy} */ (binding));

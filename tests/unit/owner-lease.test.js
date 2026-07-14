@@ -31,7 +31,9 @@ test("owner lease helpers parse Redis owner records", () => {
   assert.equal(parseOwnerRecord(null), null);
   assert.equal(parseOwnerRecord("{not-json"), null);
   assert.equal(parseOwnerRecord(JSON.stringify({ taskId: "missing-generation" })), null);
+  assert.equal(parseOwnerRecord(JSON.stringify({ taskId: "zero", generation: 0 })), null);
   assert.equal(parseOwnerRecord(JSON.stringify({ taskId: "fractional", generation: 1.5 })), null);
+  assert.equal(parseOwnerRecord(JSON.stringify({ taskId: "unsafe", generation: Number.MAX_SAFE_INTEGER + 1 })), null);
   assert.equal(parseOwnerRecord(JSON.stringify({ taskId: "bad-lease", generation: 1, leaseExpiresAt: "soon" })), null);
 });
 
@@ -68,6 +70,8 @@ test("owner lease helpers derive monotonic owner generations from Redis counters
   values.set("fractional", "3.5");
   values.set("bad", "not-a-number");
   values.set("negative", "-1");
+  values.set("near-max", String(Number.MAX_SAFE_INTEGER - 1));
+  values.set("max", String(Number.MAX_SAFE_INTEGER));
   values.set("huge", "9007199254740992");
   const session = {
     /** @param {string} key */
@@ -97,6 +101,16 @@ test("owner lease helpers derive monotonic owner generations from Redis counters
   assert.equal(await nextOwnerGeneration(session, "normal", 3), 8);
   assert.equal(await nextOwnerGeneration(session, "normal", 10), 11);
   assert.equal(await nextOwnerGeneration(session, "missing", 0), 1);
+  assert.equal(await nextOwnerGeneration(session, "near-max", 0), Number.MAX_SAFE_INTEGER);
+  assert.equal(await currentOwnerGenerationCounter(session, "max"), Number.MAX_SAFE_INTEGER);
+  await assert.rejects(
+    () => nextOwnerGeneration(session, "max", 0),
+    /Owner generation counter is exhausted: max/
+  );
+  await assert.rejects(
+    () => nextOwnerGeneration(session, "missing", Number.MAX_SAFE_INTEGER),
+    /Owner generation counter is exhausted: missing/
+  );
   await assert.rejects(
     () => nextOwnerGeneration(session, "bad", 0),
     /Owner generation counter is corrupt: bad/

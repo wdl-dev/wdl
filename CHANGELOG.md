@@ -4,10 +4,11 @@
 
 - Updated maintenance dependencies and image baselines: workerd runtime images now use distroless `base-debian13`, local and Kubernetes Valkey use `valkey/valkey:9.1-alpine`, and root development tooling moved to current patch/minor releases.
 - Consolidated duplicated Control request/error/retry paths, Redis locks and key grammars, queue and cron projections, S3 retry policy, observability helpers, and Rust sidecar contracts into canonical owners with shared behavioral and cross-language fixture coverage.
-- Hardened the tenant/runtime boundary: gateway strips private `x-wdl-*` headers, generated wrappers and Durable Object transports resist tenant prototype mutation, and DO ownership retries now rely on private do-runtime markers plus captured endpoint validation without replaying unknown-outcome non-idempotent requests.
+- Hardened the tenant/runtime boundary: gateway strips private `x-wdl-*` headers, generated wrappers and D1/R2/DO facades resist tenant prototype mutation, owner records and forwarding targets require service-specific private endpoints, and DO ownership retries rely on private do-runtime markers without replaying unknown-outcome non-idempotent requests.
 - Tightened forward-only input contracts: internal auth tokens must be visible ASCII without whitespace or commas, request ids are visible ASCII, secret names reject reserved `Object.prototype` keys, and `Headers`-form R2 metadata requires a canonical IMF-fixdate `Expires` value.
-- Made required bundle metadata, queue base64 bodies, and persisted secret envelopes fail closed under their owning contracts; JavaScript and Rust now share the secret-envelope, queue-key, request-id, internal-auth, scheduler-projection, and workflow-limit fixtures.
+- Made required bundle metadata, queue base64 bodies, and persisted secret envelopes fail closed under their owning contracts; JavaScript and Rust now share the secret-envelope, queue-key, request-id, internal-auth, worker-version, scheduler-projection, and workflow-limit fixtures.
 - Normalized `PLATFORM_DOMAIN` across routing tiers, stopped `/whoami` from advertising the internal `workers.local` fallback as a public namespace URL, and aligned Compose/Kubernetes/test wiring with the consolidated owners.
+- Removed the unreachable DO inline worker-code test hook and its Terraform switch; do-runtime invoke paths now accept only canonical persisted bundle identities and reject non-canonical or oversized host ids.
 
 ## wdl.20260701.1 - 2026-07-08
 

@@ -2,6 +2,7 @@ import { normalizeD1Param } from "shared-d1-params";
 import { fnv1a32CodeUnits } from "shared-fnv1a32";
 import { BodyTooLargeError, readBoundedBytes as readRequestBoundedBytes } from "shared-bounded-body";
 import { errorMessage as sharedErrorMessage } from "shared-errors";
+import { D1_DATABASE_ID_RE, isValidRuntimeLoadNs } from "shared-ns-pattern";
 import {
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
@@ -96,11 +97,11 @@ export class D1ProtocolError extends Error {
  * @param {unknown} databaseId
  */
 export function dbKeyOf(namespace, databaseId) {
-  if (typeof namespace !== "string" || !namespace) {
-    throw new D1ProtocolError(400, "invalid-namespace", "namespace is required");
+  if (!isValidRuntimeLoadNs(namespace)) {
+    throw new D1ProtocolError(400, "invalid-namespace", "namespace is invalid");
   }
-  if (typeof databaseId !== "string" || !databaseId) {
-    throw new D1ProtocolError(400, "invalid-database-id", "databaseId is required");
+  if (typeof databaseId !== "string" || !D1_DATABASE_ID_RE.test(databaseId)) {
+    throw new D1ProtocolError(400, "invalid-database-id", "databaseId is invalid");
   }
   return `${namespace}:${databaseId}`;
 }
@@ -365,7 +366,9 @@ const OWNERSHIP_CODES = new Set([
   "not-owner",
   "owner-not-ready",
   "owner-unavailable",
+  "owner-record-invalid",
   "owner-endpoint-missing",
+  "owner-endpoint-invalid",
   "forward-hop-exhausted",
   "owner-claim-raced",
   "owner-takeover-raced",

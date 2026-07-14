@@ -21,7 +21,6 @@ alb_https_listener_arn = "arn:aws:elasticloadbalancing:ap-east-1:123456789012:li
 alb_security_group_id  = "sg-xxxxxxxxxxxxxxxxx"
 
 d1_test_hooks_enabled = false
-do_test_hooks_enabled = false
 
 # Stateless gateway/user-runtime/system-runtime keep at least one on-demand
 # Fargate task and place overflow according to these weights. Stateful runtimes,

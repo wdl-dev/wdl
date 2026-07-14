@@ -14,6 +14,7 @@ import {
   rpcInvokeBody,
 } from "../../runtime/_wdl-do-transport.js";
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
+import { loadDoProtocol } from "../helpers/load-do-protocol.js";
 import {
   doOwnerHintHeaders,
   doOwnerHintResponse,
@@ -25,6 +26,8 @@ import {
   withMockedPropertyDescriptor,
 } from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
+
+const { normalizeDoInvokeRequest } = await loadDoProtocol();
 
 test.afterEach(() => {
   clearDoOwnerHintsForTest();
@@ -110,6 +113,27 @@ test("DurableObjectNamespace metadata host proxy handles normal fetch while webs
   assert.equal(proxyCalls.length, 1);
   assert.equal(backendCalls.length, 1);
   assert.equal(backendCalls[0].url, "http://do-runtime/internal/do/connect");
+});
+
+test("DurableObjectNamespace classifies metadata with a captured Object.hasOwn", async () => {
+  await withMockedProperty(Object, "hasOwn", () => {
+    throw new Error("tenant Object.hasOwn was called");
+  }, async () => {
+    const namespace = new DurableObjectNamespace({
+      ns: "tenant",
+      worker: "worker",
+      version: "v1",
+      doStorageId: "storage",
+      className: "Room",
+      hostProxy: {
+        async fetchObject() {
+          return new Response("ok");
+        },
+      },
+    });
+    const response = await namespace.get(namespace.idFromName("room")).fetch("https://example.test/");
+    assert.equal(await response.text(), "ok");
+  });
 });
 
 test("DurableObjectNamespace direct backend keeps binding/backend in private fields", async () => {
@@ -393,6 +417,60 @@ test("DO RPC validation uses captured JSON and method intrinsics", async () => {
       (error) => error instanceof TypeError && error.message === "rpc.method is not valid"
     );
   });
+});
+
+test("DO RPC method bounds match server normalization", () => {
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+  };
+  for (const { method, valid } of [
+    { method: "save", valid: true },
+    { method: "m".repeat(256), valid: true },
+    { method: "m".repeat(257), valid: false },
+  ]) {
+    const metadata = {
+      ...props,
+      objectName: "room-a",
+      kind: "rpc",
+      rpc: { method, args: [] },
+    };
+    if (!valid) {
+      assert.throws(() => rpcInvokeBody(props, "room-a", method, []), /rpc\.method is not valid/);
+      assert.throws(() => normalizeDoInvokeRequest(metadata), /rpc\.method is too large/);
+      continue;
+    }
+    const envelope = rpcInvokeBody(props, "room-a", method, []);
+    const invoke = normalizeDoInvokeRequest(decodeDoEnvelope(envelope).metadata);
+    assert.equal("rpc" in invoke ? invoke.rpc.method : null, method);
+  }
+});
+
+test("DO RPC snapshots tenant arguments once before sizing and encoding", () => {
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+  };
+  let reads = 0;
+  const argument = {};
+  Object.defineProperty(argument, "payload", {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return reads === 1 ? "stable" : "x".repeat(1_200_000);
+    },
+  });
+
+  const envelope = rpcInvokeBody(props, "room-a", "save", [argument]);
+  const { metadata } = decodeDoEnvelope(envelope);
+  assert.equal(reads, 1);
+  assert.equal(/** @type {any} */ (metadata).rpc.args[0].payload, "stable");
 });
 
 test("DurableObjectNamespace RPC rejects oversized args before transport", async () => {
@@ -1532,8 +1610,21 @@ test("DO owner hint parsing keeps the validated endpoint with patched String", a
   assert.equal(hint?.endpoint, "do-runtime-a:8788");
 });
 
+test("DO owner hint generation parsing requires a positive safe integer with captured intrinsics", async () => {
+  const headers = new Headers(doOwnerHintHeaders({ endpoint: "do-runtime-a:8788" }));
+  await withMockedProperty(Number, "isSafeInteger", () => false, () => {
+    assert.equal(ownerHintFromHeaders(headers)?.generation, 3);
+  });
+  for (const generation of ["0", "not-an-integer", "9007199254740992"]) {
+    headers.set("x-wdl-do-owner-generation", generation);
+    await withMockedProperty(Number, "isSafeInteger", () => true, () => {
+      assert.equal(ownerHintFromHeaders(headers), null, generation);
+    });
+  }
+});
+
 test("DurableObjectNamespace direct backend rejects unsafe IPv4 owner hint endpoints", async () => {
-  for (const endpoint of ["0.0.0.0:8788", "127.0.0.1:8788", "169.254.169.254:8788", "224.0.0.1:8788"]) {
+  for (const endpoint of ["0.0.0.0:8788", "8.8.8.8:8788", "127.0.0.1:8788", "169.254.169.254:8788", "224.0.0.1:8788"]) {
     /** @type {any[]} */
     const ownerCalls = [];
     const backend = {
@@ -1742,6 +1833,23 @@ test("DurableObjectNamespace direct backend rejects oversized declared request b
     }),
     /Durable Object fetch body exceeds/
   );
+});
+
+test("DO request body bounds use captured Number intrinsics", async () => {
+  const request = new Request("https://demo.workers.example/send", {
+    method: "POST",
+    headers: { "content-length": String(1024 * 1024 + 1) },
+    body: "x",
+  });
+  await withMockedProperty(globalThis, "Number", /** @type {NumberConstructor} */ (() => 0), async () => {
+    await assert.rejects(fetchInvokeInit({
+      ns: "tenant",
+      worker: "chat",
+      version: "v1",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+    }, "room-a", request, null), /Durable Object fetch body exceeds/);
+  });
 });
 
 test("DO requestSpec rejects streaming bodies as soon as they cross the cap", async () => {

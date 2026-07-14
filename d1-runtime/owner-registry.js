@@ -10,6 +10,7 @@ import { decodeBulk, WatchError } from "shared-redis";
 import { envValueOr } from "shared-env";
 import { errorMessage } from "shared-errors";
 import { createRequiredRedisClient } from "shared-redis-client";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import {
   boundedPositiveIntEnv,
   currentOwnerGenerationCounter,
@@ -55,6 +56,7 @@ const DRAIN_WAIT_POLL_MS = 25;
 const OWNER_PREFIX = "d1:owner:db:";
 const OWNER_CLAIM_RETRIES = 3;
 const OWNER_CLAIM_WINNER_READ_DELAYS_MS = [0, 10, 25, 50, 100];
+const D1_OWNER_PORT = 8787;
 
 /**
  * @typedef {{ idFromName(name: string): unknown, get(id: unknown): { fetch(url: string, init?: RequestInit): Promise<Response> } }} D1Namespace
@@ -127,9 +129,39 @@ export function ownerGenerationKeyOf(dbKey) {
   return ownerProtocolKeys(OWNER_PREFIX, dbKey).generationKey;
 }
 
-/** @param {string | null | undefined} raw @returns {D1Owner | null} */
-export function parseOwner(raw) {
-  return /** @type {D1Owner | null} */ (parseOwnerRecord(raw));
+/**
+ * @param {D1Owner | null} owner
+ * @param {string} expectedDbKey
+ */
+function ownerMatchesScope(owner, expectedDbKey) {
+  if (
+    !owner ||
+    typeof owner.namespace !== "string" ||
+    typeof owner.databaseId !== "string" ||
+    typeof owner.dbKey !== "string" ||
+    typeof owner.slot !== "number" ||
+    !Number.isSafeInteger(owner.slot) || owner.slot < 0
+  ) return false;
+  try {
+    return owner.dbKey === expectedDbKey && dbKeyOf(owner.namespace, owner.databaseId) === expectedDbKey;
+  } catch {
+    return false;
+  }
+}
+
+/** @param {string | null | undefined} raw @param {string} expectedDbKey @returns {D1Owner | null} */
+export function parseOwner(raw, expectedDbKey) {
+  if (raw == null) return null;
+  const owner = /** @type {D1Owner | null} */ (parseOwnerRecord(raw));
+  if (
+    !owner ||
+    !ownerMatchesScope(owner, expectedDbKey) ||
+    typeof owner.taskId !== "string" || !owner.taskId ||
+    !validOwnerEndpointForService(owner.endpoint, D1_OWNER_PORT, "d1-runtime")
+  ) {
+    throw new D1ProtocolError(503, "owner-record-invalid", "D1 owner record is invalid");
+  }
+  return owner;
 }
 
 /** @param {string} dbKey @returns {never} */
@@ -148,12 +180,12 @@ export async function readOwner(env, dbKey) {
 
 /** @param {RedisClient} client @param {string} dbKey */
 async function readOwnerFromClient(client, dbKey) {
-  return await readOwnerRecord(client, ownerKeyOf(dbKey), (raw) => parseOwner(decodeBulk(raw)));
+  return await readOwnerRecord(client, ownerKeyOf(dbKey), (raw) => parseOwner(decodeBulk(raw), dbKey));
 }
 
 /** @param {{ getWithTime(key: string): Promise<{ value: string | Uint8Array | null | undefined, nowMs: number }> }} client @param {string} dbKey */
 async function readOwnerWithTimeFromClient(client, dbKey) {
-  return await readOwnerRecordWithRedisTime(client, ownerKeyOf(dbKey), (raw) => parseOwner(decodeBulk(raw)));
+  return await readOwnerRecordWithRedisTime(client, ownerKeyOf(dbKey), (raw) => parseOwner(decodeBulk(raw), dbKey));
 }
 
 /** @param {RedisClient} client @param {string} dbKey */
@@ -168,6 +200,9 @@ async function readOwnerWithTimeAfterClaimRace(client, dbKey) {
 
 /** @param {D1Env} env @param {D1Identity} identity @param {number} generation @param {D1Target} target @param {number} nowMs */
 function ownerRecordFor(env, identity, generation, target, nowMs) {
+  if (!validOwnerEndpointForService(target.endpoint, D1_OWNER_PORT, "d1-runtime")) {
+    throw new D1ProtocolError(503, "owner-record-invalid", "D1 owner target endpoint is invalid");
+  }
   const ttl = ownerTtlSeconds(env);
   return {
     namespace: identity.namespace,
@@ -465,7 +500,7 @@ export async function releaseOwner(env, owner) {
   const key = ownerKeyOf(owner.dbKey);
   return await withWatchRetries(async () => client.session(async (session) => {
     await session.watch(key);
-    const current = parseOwner(await session.get(key));
+    const current = parseOwner(await session.get(key), owner.dbKey);
     if (!ownerFenceMatches(current, owner)) {
       await session.unwatch();
       forgetOwnedDb(owner.dbKey);
@@ -645,9 +680,6 @@ export function normalizeDatabases(databases) {
     const record = /** @type {Record<string, unknown>} */ (database);
     const namespace = record.namespace;
     const databaseId = record.databaseId;
-    if (typeof databaseId === "string" && databaseId.includes(":")) {
-      throw new D1ProtocolError(400, "invalid-database-id", "databaseId must not contain ':'");
-    }
     const dbKey = dbKeyOf(namespace, databaseId);
     const normalizedNamespace = /** @type {string} */ (namespace);
     const normalizedDatabaseId = /** @type {string} */ (databaseId);
@@ -673,6 +705,9 @@ export function normalizeTarget(target) {
   if (typeof record.endpoint !== "string" || !record.endpoint) {
     throw new D1ProtocolError(400, "invalid-target", "target.endpoint is required");
   }
+  if (!validOwnerEndpointForService(record.endpoint, D1_OWNER_PORT, "d1-runtime")) {
+    throw new D1ProtocolError(400, "invalid-target", "target.endpoint is invalid");
+  }
   return { taskId: record.taskId, endpoint: record.endpoint };
 }
 
@@ -684,7 +719,7 @@ export async function rebalanceDatabase(env, database, target) {
   const localTask = await resolveTaskIdentity(env);
   return await withWatchRetries(async () => client.session(async (session) => {
     await session.watch(key, generationKey);
-    const current = parseOwner(await session.get(key));
+    const current = parseOwner(await session.get(key), database.dbKey);
     if (!current || current.taskId !== localTask.taskId) {
       await session.unwatch();
       forgetOwnedDb(database.dbKey);

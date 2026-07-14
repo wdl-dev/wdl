@@ -21,6 +21,7 @@ import {
 } from "d1-runtime-state";
 import { withInternalAuth } from "shared-internal-auth";
 import { forwardOwnerRequest } from "shared-owner-forwarder";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 
 /**
  * @typedef {Record<string, unknown> & { D1_QUERY_TIMEOUT_MS?: unknown }} D1Env
@@ -30,6 +31,7 @@ import { forwardOwnerRequest } from "shared-owner-forwarder";
  */
 
 const OWNER_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
+const D1_OWNER_PORT = 8787;
 
 /** @param {Headers} headers */
 function isD1QueryResponse(headers) {
@@ -53,6 +55,9 @@ function resultUnknownError(query, detail) {
 /** @param {D1Env} env @param {D1Query} query @param {D1Owner} owner */
 export async function probeOwner(env, query, owner) {
   if (!owner.endpoint) return { outcome: "owner-endpoint-missing" };
+  if (!validOwnerEndpointForService(owner.endpoint, D1_OWNER_PORT, "d1-runtime")) {
+    return { outcome: "owner-endpoint-invalid" };
+  }
   try {
     const res = await fetch(
       `http://${owner.endpoint}/internal/d1/probe?dbKey=${encodeURIComponent(query.dbKey)}&generation=${owner.generation}`,
@@ -83,6 +88,8 @@ export async function forwardToOwner(query, env, owner, requestId = null, hopCou
     const response = await forwardOwnerRequest({
       env,
       endpoint: owner.endpoint,
+      endpointPort: D1_OWNER_PORT,
+      endpointService: "d1-runtime",
       pathname: "/internal/d1/query",
       requestId,
       hopCount,
@@ -113,6 +120,8 @@ export async function forwardToOwner(query, env, owner, requestId = null, hopCou
       }),
       missingEndpointError: () =>
         new D1ProtocolError(503, "owner-endpoint-missing", `D1 database ${query.dbKey} owner has no endpoint`),
+      invalidEndpointError: () =>
+        new D1ProtocolError(503, "owner-endpoint-invalid", `D1 database ${query.dbKey} owner endpoint is invalid`),
       hopExhaustedError: () =>
         new D1ProtocolError(
           503,

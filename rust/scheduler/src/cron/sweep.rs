@@ -6,7 +6,9 @@ use crate::{
     AppState, LogLevel, SERVICE, SchedulerResult, indexed_keys_after_backfill, log, now_ms,
 };
 
-use super::reference::{CRON_WORKER_KEY_SCAN_PATTERN, CronEntry, parse_cron_worker_key, ref_for};
+use super::reference::{
+    CRON_WORKER_KEY_SCAN_PATTERN, CronEntry, cron_meta_version, parse_cron_worker_key, ref_for,
+};
 use super::slot::{next_fire_ms, slot_expire_at, slot_key, slot_ms_for};
 
 const CRON_WORKER_INDEX_KEY: &str = "cron:index:workers";
@@ -69,6 +71,23 @@ fn count_sadd_replies(replies: &[i64]) -> u64 {
         .sum()
 }
 
+fn has_dispatchable_cron_meta(hash: &HashMap<String, String>) -> bool {
+    hash.get("__meta__")
+        .and_then(|raw| cron_meta_version(raw))
+        .is_some()
+}
+
+fn dispatchable_cron_worker<'a>(
+    key: &'a str,
+    hash: &HashMap<String, String>,
+) -> Result<(&'a str, &'a str), &'static str> {
+    let (ns, worker) = parse_cron_worker_key(key).ok_or("invalid_identity")?;
+    if !has_dispatchable_cron_meta(hash) {
+        return Err("invalid_meta");
+    }
+    Ok((ns, worker))
+}
+
 async fn write_cron_slot_refs(
     state: &AppState,
     slot_refs: BTreeMap<i64, Vec<String>>,
@@ -98,17 +117,25 @@ pub(crate) async fn sweep(state: AppState) -> SchedulerResult<()> {
     let started = now_ms();
     let mut workers = 0_u64;
     let mut skipped = 0_u64;
+    let mut skipped_workers = 0_u64;
     let keys = cron_worker_keys(&state).await?;
     let mut slot_refs: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     for chunk in keys.chunks(CRON_SWEEP_READ_CHUNK_SIZE) {
         let hashes = fetch_cron_hash_chunk(&state, chunk).await?;
         for (key, hash) in chunk.iter().zip(hashes) {
             workers += 1;
-            if !hash.contains_key("__meta__") {
-                continue;
-            }
-            let Some((ns, worker)) = parse_cron_worker_key(key) else {
-                continue;
+            let (ns, worker) = match dispatchable_cron_worker(key, &hash) {
+                Ok(identity) => identity,
+                Err(reason) => {
+                    skipped_workers += 1;
+                    log(
+                        &state,
+                        LogLevel::Warn,
+                        "cron_sweep_worker_skipped",
+                        json!({ "worker_key": key, "reason": reason }),
+                    );
+                    continue;
+                }
             };
             let now = now_ms();
             for (id, raw) in hash {
@@ -168,6 +195,11 @@ pub(crate) async fn sweep(state: AppState) -> SchedulerResult<()> {
         &[("service", SERVICE)],
         skipped as f64,
     );
+    state.metrics.increment(
+        "cron_sweep_workers_skipped",
+        &[("service", SERVICE)],
+        skipped_workers as f64,
+    );
     log(
         &state,
         LogLevel::Info,
@@ -176,6 +208,8 @@ pub(crate) async fn sweep(state: AppState) -> SchedulerResult<()> {
             "workers": workers,
             "re_added": re_added,
             "skipped": skipped,
+            "entries_skipped": skipped,
+            "workers_skipped": skipped_workers,
             "duration_ms": now_ms() - started,
         }),
     );
@@ -228,5 +262,42 @@ mod tests {
     #[test]
     fn count_sadd_replies_ignores_expireat_replies() {
         assert_eq!(count_sadd_replies(&[2, 1, 0, 1, 4, 1]), 6);
+    }
+
+    #[test]
+    fn cron_sweep_requires_dispatchable_worker_metadata() {
+        let valid = HashMap::from([(
+            "__meta__".to_string(),
+            json!({ "version": "v1" }).to_string(),
+        )]);
+        assert_eq!(
+            dispatchable_cron_worker("crons:demo:worker", &valid),
+            Ok(("demo", "worker"))
+        );
+        assert_eq!(
+            dispatchable_cron_worker("crons:__platform__:worker", &valid),
+            Err("invalid_identity")
+        );
+        assert_eq!(
+            dispatchable_cron_worker("crons:demo:worker", &HashMap::new()),
+            Err("invalid_meta")
+        );
+        assert_eq!(
+            dispatchable_cron_worker(
+                "crons:demo:worker",
+                &HashMap::from([("__meta__".to_string(), "{broken".to_string(),)])
+            ),
+            Err("invalid_meta")
+        );
+        assert_eq!(
+            dispatchable_cron_worker(
+                "crons:demo:worker",
+                &HashMap::from([(
+                    "__meta__".to_string(),
+                    json!({ "version": "v9007199254740992" }).to_string(),
+                )])
+            ),
+            Err("invalid_meta")
+        );
     }
 }

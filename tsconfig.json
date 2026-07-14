@@ -22,7 +22,6 @@
       "runtime-dispatch-workflow-*": ["runtime/dispatch/workflow-*.js"],
       "runtime-load-*": ["runtime/load/*.js"],
       "runtime-do-transport": ["runtime/_wdl-do-transport.js"],
-      "runtime-owner-endpoint": ["runtime/_wdl-owner-endpoint.js"],
       "runtime-owner-hint-cache": ["runtime/_wdl-owner-hint-cache.js"],
       "runtime-state": ["runtime/runtime.js"],
       "runtime-*": ["runtime/*.js"],

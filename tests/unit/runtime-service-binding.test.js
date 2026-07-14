@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { importRepositoryModule } from "../helpers/load-shared-module.js";
+import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-shared-module.js";
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
@@ -12,6 +12,10 @@ const { ServiceBinding } = await importRepositoryModule("runtime/bindings/servic
   [
     /import \{ INTERNAL_AUTH_HEADER \} from "shared-internal-auth";/,
     `const INTERNAL_AUTH_HEADER = ${JSON.stringify(TEST_INTERNAL_AUTH_HEADER)};`
+  ],
+  [
+    /import \{ sanitizeRequestId \} from "shared-observability";/,
+    `import { sanitizeRequestId } from ${JSON.stringify(repositoryFileUrl("shared/observability.js"))};`
   ],
   [
     /import \{ getLoadedWorkerStub \} from "runtime-load";/,
@@ -142,4 +146,20 @@ test("ServiceBinding fetch cold-load propagates request id when present", async 
   const options = loaderCallbackOptions();
   assert.equal(options.length, 1);
   assert.equal(options[0].requestId, requestId);
+});
+
+test("ServiceBinding fetch canonicalizes request ids without minting replacements", async () => {
+  resetLoaderCallbackOptions();
+  const binding = makeServiceBinding();
+
+  const canonical = await readJsonResponse(await binding.fetch(new Request("https://worker.workers.example/rpc", {
+    headers: { "x-request-id": " rid-first , rid-second" },
+  })), 200);
+  assert.equal(canonical.requestId, "rid-first");
+
+  const invalid = await readJsonResponse(await binding.fetch(new Request("https://worker.workers.example/rpc", {
+    headers: { "x-request-id": "bad\\id" },
+  })), 200);
+  assert.equal(invalid.requestId, null);
+  assert.equal(loaderCallbackOptions().at(-1).requestId, null);
 });

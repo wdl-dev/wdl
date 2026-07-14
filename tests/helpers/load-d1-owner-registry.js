@@ -48,7 +48,7 @@ export function resetD1OwnerRegistryTestState() {
   D1_OWNER_REGISTRY_TEST_STATE.forgottenStorageSizes = [];
   D1_OWNER_REGISTRY_TEST_STATE.pendingQueries = 0;
   D1_OWNER_REGISTRY_TEST_STATE.draining = false;
-  D1_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-a", endpoint: "task-a:8787" };
+  D1_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-a", endpoint: "d1-runtime-a:8787" };
   D1_OWNER_REGISTRY_TEST_STATE.onWatchExecFailure = null;
   D1_OWNER_REGISTRY_TEST_STATE.logEntries = [];
   D1_OWNER_REGISTRY_TEST_STATE.metricIncrements = [];
@@ -173,6 +173,7 @@ const src = applyModuleReplacements(readRepositoryFile("d1-runtime/owner-registr
   [/from "shared-redis";/, `from ${JSON.stringify(redisUrl)};`],
   [/from "shared-env";/, `from ${JSON.stringify(SHARED_ENV_URL)};`],
   [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
+  [/from "shared-owner-endpoint";/, `from ${JSON.stringify(repositoryFileUrl("shared/owner-endpoint.js"))};`],
   [/from "shared-owner-lease";/, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)};`],
   [/from "shared-owner-protocol";/, `from ${JSON.stringify(SHARED_OWNER_PROTOCOL_URL)};`],
   [/from "shared-redis-client";/, `from ${JSON.stringify(redisClientUrl)};`],

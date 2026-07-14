@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseBase64Json } from "../helpers/json-payload.js";
-import { runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
+import { readRepositoryJson, runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
 
 const {
   base64ToBytes,
@@ -19,6 +19,7 @@ const {
   normalizeScheduledDispatchBody,
 } = await import(runtimeLibModuleDataUrl());
 const sharedBase64 = await import("../../shared/base64.js");
+const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 
 const enc = new TextEncoder();
 
@@ -191,6 +192,19 @@ test("normalizeWorkflowNotifyBody validates route worker identity grammar", () =
     () => normalizeWorkflowNotifyBody(workflowBody({ frozenVersion: "v0" })),
     /frozenVersion must be an immutable worker version/
   );
+});
+
+test("workflow dispatch version ingress matches the shared JS/Rust fixture", () => {
+  for (const { tag, parsed } of versionFixture.cases) {
+    const body = workflowBody({ frozenVersion: tag });
+    if (parsed == null) {
+      assert.throws(() => normalizeWorkflowRunBody(body), /frozenVersion/, tag);
+      assert.throws(() => normalizeWorkflowNotifyBody(body), /frozenVersion/, tag);
+    } else {
+      assert.equal(normalizeWorkflowRunBody(body).frozenVersion, tag, tag);
+      assert.equal(normalizeWorkflowNotifyBody(body).frozenVersion, tag, tag);
+    }
+  }
 });
 
 test("decodeQueuedDispatchMessages decodes runtime queue wire messages", () => {

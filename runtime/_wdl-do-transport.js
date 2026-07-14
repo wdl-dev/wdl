@@ -7,6 +7,7 @@ export const MAX_DO_REQUEST_BODY_BYTES = 1024 * 1024;
 export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
+const MAX_DO_RPC_METHOD_BYTES = 256;
 export const DO_ACCEPT_OWNER_HINT_HEADER = "x-wdl-do-accept-owner-hint";
 export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
@@ -78,6 +79,7 @@ const intrinsicHeadersHas = Headers.prototype.has;
 const intrinsicHeadersSet = Headers.prototype.set;
 const intrinsicJsonStringify = JSON.stringify;
 const intrinsicNumberIsFinite = Number.isFinite;
+const intrinsicNumberIsSafeInteger = Number.isSafeInteger;
 const intrinsicObjectCreate = Object.create;
 const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
@@ -364,6 +366,11 @@ function encodeUtf8(value) {
 }
 
 /** @param {unknown} value */
+function numberValue(value) {
+  return intrinsicReflectApply(IntrinsicNumber, undefined, [value]);
+}
+
+/** @param {unknown} value */
 function stringifyJson(value) {
   return intrinsicReflectApply(intrinsicJsonStringify, IntrinsicJSON, [cloneJsonData(value)]);
 }
@@ -435,8 +442,8 @@ async function readRequestBodyBytes(request) {
   // local instead of importing a helper that would add another facade module.
   const contentLength = headerValue(requestHeaders(request), "content-length");
   if (contentLength != null && contentLength !== "") {
-    const declared = Number(contentLength);
-    if (Number.isFinite(declared) && declared > MAX_DO_REQUEST_BODY_BYTES) {
+    const declared = numberValue(contentLength);
+    if (intrinsicReflectApply(intrinsicNumberIsFinite, IntrinsicNumber, [declared]) && declared > MAX_DO_REQUEST_BODY_BYTES) {
       throw new TypeError(`Durable Object fetch body exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
     }
   }
@@ -475,64 +482,68 @@ async function readRequestBodyBytes(request) {
  * @param {unknown} value
  * @param {string} field
  * @param {WeakSet<object>} [seen]
- * @returns {string | null}
+ * @returns {unknown}
  */
-function jsonDataError(value, field, seen = new IntrinsicWeakSet()) {
+function cloneJsonRpcData(value, field, seen = new IntrinsicWeakSet()) {
   if (value === null) return null;
   const type = typeof value;
-  if (type === "string" || type === "boolean") return null;
+  if (type === "string" || type === "boolean") return value;
   if (type === "number") {
-    return intrinsicReflectApply(intrinsicNumberIsFinite, IntrinsicNumber, [value])
-      ? null
-      : `${field} must be a finite number`;
+    if (!intrinsicReflectApply(intrinsicNumberIsFinite, IntrinsicNumber, [value])) {
+      throw new TypeError(`${field} must be a finite number`);
+    }
+    return value;
   }
   if (type === "bigint" || type === "function" || type === "symbol" || type === "undefined") {
-    return `${field} must be JSON data`;
+    throw new TypeError(`${field} must be JSON data`);
   }
-  if (type !== "object") return `${field} must be JSON data`;
+  if (type !== "object") throw new TypeError(`${field} must be JSON data`);
   const objectValue = /** @type {Record<string, unknown> | unknown[]} */ (value);
   if (intrinsicReflectApply(intrinsicWeakSetHas, seen, [objectValue])) {
-    return `${field} must not be circular`;
+    throw new TypeError(`${field} must not be circular`);
   }
   intrinsicReflectApply(intrinsicWeakSetAdd, seen, [objectValue]);
-  if (intrinsicReflectApply(intrinsicArrayIsArray, IntrinsicArray, [objectValue])) {
-    const arrayValue = /** @type {unknown[]} */ (objectValue);
-    for (let i = 0; i < arrayValue.length; i++) {
-      if (!(i in arrayValue)) return `${field} must not be sparse`;
-      const error = jsonDataError(arrayValue[i], `${field}[${i}]`, seen);
-      if (error) return error;
+  try {
+    if (intrinsicReflectApply(intrinsicArrayIsArray, IntrinsicArray, [objectValue])) {
+      const arrayValue = /** @type {unknown[]} */ (objectValue);
+      const length = arrayValue.length;
+      const out = new IntrinsicArray(length);
+      intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [out, null]);
+      for (let i = 0; i < length; i++) {
+        if (!(i in arrayValue)) throw new TypeError(`${field} must not be sparse`);
+        out[i] = cloneJsonRpcData(arrayValue[i], `${field}[${i}]`, seen);
+      }
+      return out;
     }
+    const proto = intrinsicReflectApply(intrinsicObjectGetPrototypeOf, IntrinsicObject, [objectValue]);
+    if (proto !== IntrinsicObject.prototype && proto !== null) {
+      throw new TypeError(`${field} must be a plain JSON object`);
+    }
+    const symbols = intrinsicReflectApply(intrinsicObjectGetOwnPropertySymbols, IntrinsicObject, [objectValue]);
+    if (symbols.length > 0) throw new TypeError(`${field} must not contain symbol keys`);
+    const out = /** @type {Record<string, unknown>} */ (
+      intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
+    );
+    const entries = /** @type {[string, unknown][]} */ (
+      intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [objectValue])
+    );
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      out[entry[0]] = cloneJsonRpcData(entry[1], `${field}.${entry[0]}`, seen);
+    }
+    return out;
+  } finally {
     intrinsicReflectApply(intrinsicWeakSetDelete, seen, [objectValue]);
-    return null;
   }
-  const proto = intrinsicReflectApply(intrinsicObjectGetPrototypeOf, IntrinsicObject, [objectValue]);
-  if (proto !== IntrinsicObject.prototype && proto !== null) return `${field} must be a plain JSON object`;
-  const symbols = intrinsicReflectApply(intrinsicObjectGetOwnPropertySymbols, IntrinsicObject, [objectValue]);
-  if (symbols.length > 0) return `${field} must not contain symbol keys`;
-  const entries = /** @type {[string, unknown][]} */ (
-    intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [objectValue])
-  );
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const error = jsonDataError(entry[1], `${field}.${entry[0]}`, seen);
-    if (error) return error;
-  }
-  intrinsicReflectApply(intrinsicWeakSetDelete, seen, [objectValue]);
-  return null;
-}
-
-/** @param {unknown} args */
-export function assertJsonRpcArgs(args) {
-  if (!intrinsicReflectApply(intrinsicArrayIsArray, IntrinsicArray, [args])) {
-    throw new TypeError("rpc.args must be an array");
-  }
-  const error = jsonDataError(args, "rpc.args");
-  if (error) throw new TypeError(error);
 }
 
 /** @param {unknown} method */
 export function assertRpcMethod(method) {
-  if (typeof method !== "string" || !regexpTest(/^[A-Za-z_$][A-Za-z0-9_$]*$/, method)) {
+  if (
+    typeof method !== "string" ||
+    byteLength(method) > MAX_DO_RPC_METHOD_BYTES ||
+    !regexpTest(/^[A-Za-z_$][A-Za-z0-9_$]*$/, method)
+  ) {
     throw new TypeError("rpc.method is not valid");
   }
   if (setHas(RPC_RESERVED_METHODS, method)) {
@@ -549,8 +560,11 @@ export function assertRpcMethod(method) {
  */
 export function rpcInvokeBody(props, objectName, method, args) {
   assertRpcMethod(method);
-  assertJsonRpcArgs(args);
-  if (byteLength(stringifyJson(args)) > MAX_DO_REQUEST_BODY_BYTES) {
+  if (!intrinsicReflectApply(intrinsicArrayIsArray, IntrinsicArray, [args])) {
+    throw new TypeError("rpc.args must be an array");
+  }
+  const stableArgs = /** @type {unknown[]} */ (cloneJsonRpcData(args, "rpc.args"));
+  if (byteLength(stringifyJson(stableArgs)) > MAX_DO_REQUEST_BODY_BYTES) {
     throw new TypeError(`rpc.args exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
   }
   return encodeDoInvokeEnvelope({
@@ -561,7 +575,7 @@ export function rpcInvokeBody(props, objectName, method, args) {
     className: props.className,
     objectName,
     kind: "rpc",
-    rpc: { method, args },
+    rpc: { method, args: stableArgs },
   });
 }
 
@@ -752,8 +766,11 @@ export function ownerHintFromHeaders(headers) {
   const endpoint = headerValue(headers, DO_OWNER_HINT_HEADERS.endpoint);
   const rawGeneration = headerValue(headers, DO_OWNER_HINT_HEADERS.generation);
   if (rawGeneration == null || rawGeneration === "") return null;
-  const generation = Number(rawGeneration);
-  if (!ownerKey || !taskId || !validOwnerEndpoint(endpoint) || !Number.isInteger(generation) || generation < 0) {
+  const generation = numberValue(rawGeneration);
+  if (
+    !ownerKey || !taskId || !validOwnerEndpoint(endpoint) ||
+    !intrinsicReflectApply(intrinsicNumberIsSafeInteger, IntrinsicNumber, [generation]) || generation <= 0
+  ) {
     return null;
   }
   return { ownerKey, taskId, endpoint: /** @type {string} */ (endpoint), generation };

@@ -30,7 +30,7 @@ import { formatError } from "shared-observability";
 import { rebuildResponseWithHeaders } from "shared-respond";
 
 /**
- * @typedef {{ LOADER: { get(key: string, loader: () => Promise<unknown>): DoWorkerStub }, DO_TEST_HOOKS?: unknown }} DoEnv
+ * @typedef {{ LOADER: { get(key: string, loader: () => Promise<unknown>): DoWorkerStub } }} DoEnv
  * @typedef {{ getDurableObjectClass(className: string, options: { props: Record<string, unknown> }): DurableObjectClass }} DoWorkerStub
  * @typedef {{ fetch(request: Request): Promise<Response> }} DoFacet
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
@@ -66,12 +66,11 @@ export class WdlDoHostActor extends DurableObject {
   tenantWorker(invoke, requestId) {
     const existing = this.workers.get(invoke.workerId);
     if (existing) return existing;
-    const workerCode = "workerCode" in invoke ? invoke.workerCode : undefined;
     const worker = this.env.LOADER.get(invoke.workerId, () => (
-      workerCode || loadDoWorkerCode(
+      loadDoWorkerCode(
         this.env,
         this.ctx,
-        /** @type {DoInvoke & { ns: string, worker: string, version: string, doStorageId: string }} */ (invoke),
+        invoke,
         requestId
       )
     ));
@@ -136,9 +135,7 @@ export class WdlDoHostActor extends DurableObject {
         });
       }
       if (url.pathname === "/delete-storage") {
-        const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request, {
-          allowInlineWorkerCode: false,
-        }));
+        const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request));
         await assertCurrentOwner(this.env, invoke.owner);
         const facetName = buildFacetName(invoke);
         this.ctx.facets.delete(facetName);
@@ -148,9 +145,7 @@ export class WdlDoHostActor extends DurableObject {
         metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
         return Response.json({ ok: true });
       }
-      const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request, {
-        allowInlineWorkerCode: this.env.DO_TEST_HOOKS === "1",
-      }));
+      const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request));
       return await this.dispatchWithFence(invoke, async () => {
         const requestId = request.headers.get("x-request-id") || null;
         const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {

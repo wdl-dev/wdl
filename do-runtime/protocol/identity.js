@@ -1,6 +1,7 @@
 import {
   CLASS_NAME_RE,
   DO_HOST_SHARD_COUNT,
+  HOST_ID_RE,
   MAX_ID_BYTES,
   STORAGE_ID_RE,
 } from "do-runtime-protocol-wire-grammar";
@@ -61,7 +62,9 @@ export function hostIdForShard(doStorageId, className, shard) {
   }
   requireIdentityString(doStorageId, "doStorageId", STORAGE_ID_RE);
   requireIdentityString(className, "className", CLASS_NAME_RE);
-  return `${doStorageId}:${className}:shard${parsed}`;
+  const hostId = `${doStorageId}:${className}:shard${parsed}`;
+  requireIdentityString(hostId, "hostId", HOST_ID_RE);
+  return hostId;
 }
 
 /**

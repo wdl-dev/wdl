@@ -8,6 +8,7 @@ import {
   assertCurrentOwnerWithLeaseBudget,
   drainOwnedDbs,
   drainConcurrency,
+  normalizeDatabases,
   ownerGenerationKeyOf,
   ownerKeyOf,
   rebalanceDatabase,
@@ -19,6 +20,26 @@ import {
 
 beforeEach(resetD1OwnerRegistryTestState);
 
+test("D1 owner registry: records stored under another database scope fail closed", async () => {
+  const [requested, misplaced] = normalizeDatabases([
+    { namespace: "tenant-a", databaseId: "db-a" },
+    { namespace: "tenant-b", databaseId: "db-b" },
+  ]);
+  D1_TEST_STATE.registryStore.set(ownerKeyOf(requested.dbKey), JSON.stringify({
+    ...misplaced,
+    taskId: "task-b",
+    endpoint: "d1-runtime-b:8787",
+    generation: 3,
+    leaseExpiresAt: Date.now() + 60_000,
+  }));
+
+  await assert.rejects(
+    () => resolveDbOwner({ REDIS_ADDR: "redis:6379" }, requested),
+    /D1 owner record is invalid/
+  );
+  assert.deepEqual(D1_TEST_STATE.setCommands, []);
+});
+
 test("D1 owner registry: same-task reclaim repairs a stale generation counter without advancing owner generation", async () => {
   const identity = { namespace: "tenant-a", databaseId: "db1", dbKey: "tenant-a:db1", slot: 7 };
   const ownerKey = ownerKeyOf(identity.dbKey);
@@ -26,7 +47,7 @@ test("D1 owner registry: same-task reclaim repairs a stale generation counter wi
   D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify({
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 11,
     leaseExpiresAt: Date.now() + 60_000,
   }));
@@ -81,7 +102,7 @@ test("D1 owner registry: same-task hot path does not refresh the owner lease", a
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 11,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -107,7 +128,7 @@ test("D1 owner registry: expired same-task owner is reclaimed before local dispa
   const expiredOwner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 11,
     leaseExpiresAt: redisNow - 1,
   };
@@ -137,7 +158,7 @@ test("D1 owner registry: expired same-task owner is reclaimed before local dispa
 
 test("D1 owner registry: lost owner state cannot validate an old owner from another task", async () => {
   const identity = { namespace: "tenant-a", databaseId: "db1", dbKey: "tenant-a:db1", slot: 7 };
-  D1_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "task-b:8787" };
+  D1_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "d1-runtime-b:8787" };
 
   const owner = await resolveDbOwner({ REDIS_ADDR: "redis:6379" }, identity);
 
@@ -160,13 +181,13 @@ test("D1 owner registry: lost owner state cannot validate an old owner from anot
 
 test("D1 owner registry: same task reclaims generation one after owner state loss", async () => {
   const identity = { namespace: "tenant-a", databaseId: "db1", dbKey: "tenant-a:db1", slot: 7 };
-  D1_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "task-b:8787" };
+  D1_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "d1-runtime-b:8787" };
 
   const owner = await resolveDbOwner({ REDIS_ADDR: "redis:6379" }, identity);
 
   assert.equal(owner.taskId, "task-b");
   assert.equal(owner.generation, 1);
-  assert.equal(owner.endpoint, "task-b:8787");
+  assert.equal(owner.endpoint, "d1-runtime-b:8787");
   assert.deepEqual(await assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, owner), owner);
 });
 
@@ -176,7 +197,7 @@ test("D1 owner registry: current-owner check rejects expired matching leases", a
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: redisNow - 1,
   };
@@ -199,7 +220,7 @@ test("D1 owner registry: current-owner check renews leases inside the guard wind
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: redisNow + 250,
   };
@@ -224,7 +245,7 @@ test("D1 owner registry: current-owner budget result carries Redis-time remainin
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: redisNow + 5000,
   };
@@ -246,7 +267,7 @@ test("D1 owner registry: current-owner check rejects renewals that still miss th
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: redisNow + 250,
   };
@@ -274,7 +295,7 @@ test("D1 owner registry: post-renew guard budget uses the renew Redis time", asy
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: redisNow + 250,
   };
@@ -300,7 +321,7 @@ test("D1 owner registry: current-owner check uses Redis server time as lease aut
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt,
   };
@@ -324,7 +345,7 @@ test("D1 owner registry: stale generation repair failure is best-effort", async 
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 11,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -352,7 +373,7 @@ test("D1 owner registry: claim race falls back to the winner owner", async () =>
   const winner = {
     ...identity,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 4,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -381,7 +402,7 @@ test("D1 owner registry: claim race waits briefly for a winner owner", async () 
   const winner = {
     ...identity,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 4,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -411,7 +432,7 @@ test("D1 owner registry: observed remote owner avoids repeated registry reads", 
   const owner = {
     ...identity,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 4,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -438,7 +459,7 @@ test("D1 owner registry: observed local owner avoids repeated registry reads", a
   const owner = {
     ...identity,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 4,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -462,14 +483,14 @@ test("D1 owner registry: forced refresh bypasses observed owner cache", async ()
   const firstOwner = {
     ...identity,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 4,
     leaseExpiresAt: Date.now() + 60_000,
   };
   const nextOwner = {
     ...identity,
     taskId: "task-c",
-    endpoint: "task-c:8787",
+    endpoint: "d1-runtime-c:8787",
     generation: 5,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -494,7 +515,7 @@ test("D1 owner registry: takeover bumps generation monotonically even when the s
     dbKey: "tenant-a:db1",
     slot: 7,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 11,
     leaseExpiresAt: redisNow - 1,
   };
@@ -520,7 +541,7 @@ test("D1 owner registry: drain waits for in-flight queries before releasing owne
     dbKey: "tenant-a:db1",
     slot: 7,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -560,7 +581,7 @@ test("D1 owner registry: drain releases idle databases even when one actor times
     dbKey: `tenant-a:${databaseId}`,
     slot: idx,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 3,
     leaseExpiresAt: Date.now() + 60_000,
   }));
@@ -614,7 +635,7 @@ test("D1 owner registry: takeover retries WatchError before surfacing an ownersh
     dbKey: "tenant-a:db1",
     slot: 7,
     taskId: "task-b",
-    endpoint: "task-b:8787",
+    endpoint: "d1-runtime-b:8787",
     generation: 4,
     leaseExpiresAt: redisNow - 1,
   };
@@ -641,7 +662,7 @@ test("D1 owner registry: rebalance retries WatchError before moving ownership", 
   const currentOwner = {
     ...database,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 6,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -655,7 +676,7 @@ test("D1 owner registry: rebalance retries WatchError before moving ownership", 
   const result = await rebalanceDatabase(
     { REDIS_ADDR: "redis:6379" },
     database,
-    { taskId: "task-b", endpoint: "task-b:8787" }
+    { taskId: "task-b", endpoint: "d1-runtime-b:8787" }
   );
 
   assert.equal(result.outcome, "moved");
@@ -674,7 +695,7 @@ test("D1 owner registry: rebalance to the current owner is a no-op", async () =>
   const currentOwner = {
     ...database,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 6,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -687,7 +708,7 @@ test("D1 owner registry: rebalance to the current owner is a no-op", async () =>
   const result = await rebalanceDatabase(
     { REDIS_ADDR: "redis:6379" },
     database,
-    { taskId: "task-a", endpoint: "task-a:8787" }
+    { taskId: "task-a", endpoint: "d1-runtime-a:8787" }
   );
 
   assert.equal(result.outcome, "unchanged");
@@ -709,7 +730,7 @@ test("D1 owner registry: rebalance to same task with a different endpoint refres
   const currentOwner = {
     ...database,
     taskId: "task-a",
-    endpoint: "task-a:8787",
+    endpoint: "d1-runtime-a:8787",
     generation: 6,
     leaseExpiresAt: Date.now() + 60_000,
   };
@@ -720,12 +741,12 @@ test("D1 owner registry: rebalance to same task with a different endpoint refres
   const result = await rebalanceDatabase(
     { REDIS_ADDR: "redis:6379" },
     database,
-    { taskId: "task-a", endpoint: "task-a-new:8787" }
+    { taskId: "task-a", endpoint: "d1-runtime-a-new:8787" }
   );
 
   assert.equal(result.outcome, "moved");
   assert.equal(result.owner.taskId, "task-a");
-  assert.equal(result.owner.endpoint, "task-a-new:8787");
+  assert.equal(result.owner.endpoint, "d1-runtime-a-new:8787");
   assert.equal(result.owner.generation, 7);
   assert.equal(D1_TEST_STATE.ownedDbs.has(database.dbKey), false);
   assert.deepEqual(D1_TEST_STATE.forgottenStorageSizes, [database.dbKey]);
@@ -740,7 +761,7 @@ test("D1 owner registry: renew uses bounded concurrency instead of strict serial
       dbKey: `tenant-a:db${idx}`,
       slot: idx,
       taskId: "task-a",
-      endpoint: "task-a:8787",
+      endpoint: "d1-runtime-a:8787",
       generation: 1,
       leaseExpiresAt: Date.now() + 60_000,
     };

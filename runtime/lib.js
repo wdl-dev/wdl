@@ -1,6 +1,7 @@
 // Pure helpers for the runtime worker.
 
 import { base64ToBytes, bytesToBase64 } from "shared-base64";
+import { parseVersion } from "shared-version";
 import { isWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 
 const utf8Encoder = new TextEncoder();
@@ -111,7 +112,6 @@ const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
 const ROUTE_NS_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|__system__)$/;
 const RESERVED_TENANT_NS = new Set(["admin"]);
 const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
-const VERSION_RE = /^v[1-9][0-9]*$/;
 
 // Loaded workers may declare an older compatibilityDate than the platform
 // workers. Keep enhanced error serialization as a floor only before the date
@@ -312,7 +312,11 @@ function requiredWorkerName(body) {
 
 /** @param {Record<string, unknown> | null} body */
 function requiredVersion(body) {
-  return requiredPatternString(body, "frozenVersion", VERSION_RE, "an immutable worker version");
+  const version = requiredString(body, "frozenVersion");
+  if (parseVersion(version) == null) {
+    throw new Error("frozenVersion must be an immutable worker version");
+  }
+  return version;
 }
 
 /** @param {Record<string, unknown> | null} body @param {string} field */

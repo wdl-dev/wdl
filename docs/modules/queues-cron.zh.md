@@ -23,6 +23,7 @@ Scheduler 负责实际投递：
 
 - Cron 代码在 `rust/scheduler/src/cron/`。
 - Queue registry、consume、delayed delivery、DLQ 和 orphan 处理在 `rust/scheduler/src/queue/`。
+- Scheduler 在构造 cron runtime worker id 前会用 canonical `wdl-rust-common` grammar 重新校验 projection 的 route namespace、worker name 和 version。非法 cron ref 会在 slot advance 或 runtime dispatch 前移除，cron sweep 也不会从 malformed worker metadata 重新播种 ref。Queue consumer projection 仍是受信任的 Control-owned internal state；scheduler 不为不受支持的 direct Redis write 增加第二套 worker identity/version validator。
 - 部署上 scheduler 默认 1 个副本，当前 dispatch 路径具备多副本安全性。增加副本可以提高运行时并发，但不等于部署零中断：生产 rollout 仍可采用 stop-before-start 语义，并短暂暂停调度。
 
 ## 接口
@@ -60,7 +61,7 @@ Scheduler 不是通用 job runner。它把 Redis projection 转成 runtime call�
 Cron 使用 wall-clock 分钟 slot：
 
 1. `wait_ms_until_next_slot()` 睡到下一个 UTC 分钟边界。tick loop 随后扫描当前 `cron-slot:<slot_ms>` bucket 和前一个 bucket。扫描前一个 bucket 是为了覆盖分钟 rollover 附近刚写入的 ref。
-2. 另一条 sweep/reconcile 路径从 `cron:index:workers` 读取 active cron hash，用 croner 和配置的 timezone 计算每个 entry 的下一次触发时间，再 round 到分钟 slot，并把 ref 写入 slot bucket。这个流程是 repair 逻辑，不是权威状态。Control 只在 promote-time 初始 slot placement 使用 JavaScript `croner`；scheduler repair 和 advance 使用 Rust `croner`。
+2. 另一条 sweep/reconcile 路径从 `cron:index:workers` 读取 active cron hash，用 croner 和配置的 timezone 计算每个 entry 的下一次触发时间，再 round 到分钟 slot，并把 ref 写入 slot bucket。这个流程是 repair 逻辑，不是权威状态。Control 只在 promote-time 初始 slot placement 使用 JavaScript `croner`；scheduler repair 和 advance 使用 Rust `croner`。缺少 canonical identity 或 metadata 的 worker hash 会被跳过，不会重新播种非法 ref，并输出 bounded `invalid_identity` 或 `invalid_meta` reason。
 3. Cron ref 带 entry generation。真正 fire 前，scheduler 会重新读取 `crons:<ns>:<worker>` 并比较 `gen`；metadata 缺失、JSON 损坏或 generation 不匹配都会让 ref 变成 stale，并从 slot 中移除。
 4. Scheduler 会先原子地 lease ref、从当前 slot 移除、加入下一个 slot，然后才调用 runtime。这个顺序保证每个 slot 只 fire 一次，并且 runtime/network 失败不会变成自动 cron retry。
 5. 如果某个 ref 滞留在早于当前 wall-clock slot 的旧 slot 中，scheduler 只把它 advance 到下一个 future slot，不会 fire。也就是说 outage 或 scheduler 长时间停顿期间错过的 cron event 会被跳过，而不是补发。
@@ -160,7 +161,9 @@ Scheduler 为 cron 和 queue outcome 输出结构化日志和 Prometheus metrics
 - `cron_queue_lag_ms{outcome=...}`
 - `cron_bucket_size`
 - `cron_stale_refs_cleaned`
-- Logs：`cron_fired`、`cron_lease_lost`、`cron_ref_stale`、`cron_ref_stale_advanced`、`cron_reconcile`
+- `cron_sweep_entries_skipped`
+- `cron_sweep_workers_skipped`
+- Logs：`cron_fired`、`cron_lease_lost`、`cron_ref_stale`、`cron_ref_stale_advanced`、`cron_sweep_entry_skipped`、`cron_sweep_worker_skipped`、`cron_reconcile`
 
 重要 queue 信号：
 

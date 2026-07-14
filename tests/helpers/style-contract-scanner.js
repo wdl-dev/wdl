@@ -224,13 +224,47 @@ function findClosingDelimiter(source, openIndex, open, close) {
   return -1;
 }
 
+/** @param {string} source */
+export function stripCapnpComments(source) {
+  let out = "";
+  let quoted = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quoted) {
+      out += char;
+      if (char === "\\") {
+        index += 1;
+        out += source[index] ?? "";
+      } else if (char === '"') {
+        quoted = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      out += char;
+      continue;
+    }
+    if (char !== "#") {
+      out += char;
+      continue;
+    }
+    while (index < source.length && source[index] !== "\n") {
+      out += " ";
+      index += 1;
+    }
+    if (index < source.length) out += "\n";
+  }
+  return out;
+}
+
 /**
  * Extracts a Cap'n Proto const struct while ignoring comments and formatting.
  * @param {string} source
  * @param {string} name
  */
 export function extractCapnpConstBlock(source, name) {
-  const clean = source.replace(/#.*$/gm, "");
+  const clean = stripCapnpComments(source);
   const declaration = new RegExp(`const\\s+${RegExp.escape(name)}\\s+:[^=]+=`).exec(clean);
   assert.ok(declaration, `Cap'n Proto const ${name} must be present`);
   const start = clean.indexOf("(", declaration.index + declaration[0].length);

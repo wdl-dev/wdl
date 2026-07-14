@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   DECLARED_HOSTS_KEY,
   HOST_DECLARATIONS_SCAN_PATTERN,
@@ -14,6 +15,8 @@ import {
   nsHostsKey,
   parseVersion,
 } from "../../shared/version.js";
+
+const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 
 test("formatVersion: integer → v<int>", () => {
   assert.equal(formatVersion(1), "v1");
@@ -43,6 +46,12 @@ test("parseVersion: returns null for malformed", () => {
   assert.equal(parseVersion(null), null);
   assert.equal(parseVersion(undefined), null);
   assert.equal(parseVersion(1), null);
+});
+
+test("parseVersion matches the shared JS/Rust version fixture", () => {
+  for (const { tag, parsed } of versionFixture.cases) {
+    assert.equal(parseVersion(tag), parsed, tag);
+  }
 });
 
 test("bundleKey: composes worker:<ns>:<name>:v:<int>", () => {

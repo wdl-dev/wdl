@@ -35,6 +35,9 @@ Storage cleanup endpoint 是 native facet storage cleanup 和 worker storage cle
 
 DO protocol error 使用 `{ error, message, details? }`。不同于 admin HTTP 的 flat additive error shape，DO protocol detail 会嵌套在 `details` 下，因为消费者是 runtime/DO client protocol，不是通用 admin JSON parser。未知 internal exception 仍会降级成安全的 `internal_error` / `Internal error` message。Storage delete-worker 在 partial batch result 时可能返回 HTTP 207 和 `{ ok:false, deleted, errors }`；这是 result envelope，不是 generic JSON error envelope。
 Tenant-originated DO fetch body 在 runtime facade 中限制为 1 MiB。Facade 会在读取前拒绝超限的 `Content-Length`，streamed body 会增量读取，因此 limit 会在完整 buffering 前生效。
+DO RPC method name 使用 JavaScript identifier grammar，并由 runtime client 和 do-runtime protocol reader 同时限制为最多 256 ASCII bytes。
+DO invoke envelope 通过 canonical namespace、worker、version 和 storage id 标识 persisted bundle，不接受 inline worker source。
+DO host id 最多 512 UTF-8 bytes，并使用不带前导零的 canonical `shardN` suffix。
 
 ## Redis / Storage 合同
 
@@ -77,6 +80,7 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 - Shared runtime transport 统一持有 host binding 与 injected facade 的 owner-hint cache wiring、invoke race retry 和 response-header stripping。Connect wrapper 刻意不包含 invoke-only router fallback，以保留 owner-established WebSocket upgrade 语义。
 - `WEBSOCKET_RECONNECT_DELAYS_MS` 和 `WEBSOCKET_MAX_BUFFERED_MESSAGES` 可以在不改代码的情况下调整 gateway backend reconnect budget 和 client-message buffer cap。
 - Alarm delivery 是 at-least-once。Scheduler 唤醒 Workflows；Workflows 把到期 internal alarm job promote 到 ready，在 DB 2 run token 下 claim，然后调用 do-runtime `/internal/do/alarms/dispatch`。do-runtime 仍然构造原来的 `DoInvoke{kind:"alarm"}` 请求，并走正常 owner router/fence 路径。
+- Alarm mutation、retarget、dispatch 和 whole-worker storage cleanup 只接受 canonical positive JavaScript-safe-integer worker version grammar。非法 internal 或 persisted version 会在写入 job 或尝试 worker invoke 前失败。
 - Alarm due time 是传给 `setAlarm()` 的 Unix millisecond timestamp。Workflows 和 do-runtime 都用各自本地 wall clock 判断这些 timestamp；如果 backend ready hint 在 SQLite alarm row 对 do-runtime 来说尚未到期时抵达，do-runtime 会 ignore 这次 dispatch，但不清 row，让 backend due-index repair 路径之后继续投递。这是 alarm compatibility 边界，不属于 Redis-time owner lease fence。
 - Failed alarm 使用 `WORKFLOWS_DO_ALARM_RETRY_DELAY_MS`、`WORKFLOWS_DO_ALARM_RETRY_MAX_DELAY_MS` 和 `WORKFLOWS_DO_ALARM_RETRY_JITTER` 的 exponential backoff 和 jitter 重试，最多到 `WORKFLOWS_DO_ALARM_RETRY_MAX_TRIES`（默认 `6`），之后 discard 并增加 `do_alarm_dispatches{outcome="discarded"}`。
 - 如果 Workflows client 调用 do-runtime 后 timeout，backend 会保留 running claim 到 `WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS` 过期，而不是立即调度 retry。默认值是五分钟，且配置值会被 clamp 到高于 `WORKFLOWS_DISPATCH_TIMEOUT_MS`，这样正常 timeout 处理可以避免 do-runtime 仍在执行原 dispatch 时并发执行重叠 alarm body。Operator 应按最长预期 alarm handler body 配置 claim lease，而不只是按 HTTP dispatch timeout；alarm body 仍是 at-least-once，claim lease 过期后可能重叠执行。
@@ -99,9 +103,11 @@ Terraform 除了 Fargate task memory limit，还会给 do-runtime workerd contai
 - do-runtime internal endpoints 只在 private mesh 内可达，并要求共享的 `WDL_INTERNAL_AUTH_TOKEN` / `x-wdl-internal-auth` 内部认证 header。Health 和 metrics endpoint 例外。
 - Tenant code 只能通过 runtime 生成的 facade 和 frozen metadata 访问 DO。
 - Tenant-visible DO metadata 和 error 不得包含 owner task id、backend endpoint 或原始 transport error 文本。
-- Owner hint 只信任 do-runtime header，并且要通过 endpoint grammar validation。
+- Owner hint 只信任 do-runtime header，并且要通过 endpoint grammar validation。Owner hint 和 invoke fence 必须携带正的 JavaScript-safe-integer generation。
+- Task identity 和 persisted owner record 在写入和读取时都会校验。Persisted record 的 `ownerKey`、`hostId`、storage id、class 和 shard 必须能重建出读取它的 Redis scope；owner resolution 还必须在 do-runtime 读取 invoking bundle 的 active storage pointer 前，确认 record 的 canonical namespace 和 worker 与该 bundle 一致。Owner forwarding 只接受 8788 端口上的 DO service/headless DNS，或 RFC1918/100.64 私网 IPv4；非法记录在附加 internal auth 前 fail closed。
 - Owner-hint 与 ownership-error 防御是分层的：忽略 tenant response body 和 tenant-supplied control header，只信任 do-runtime control header；hint 还必须通过 endpoint grammar / acceptable-address 检查。
 - 注入的 DO transport 与共享 D1/DO endpoint validator 会在 tenant module 前执行，并捕获 private-header stripping、request bound、invoke serialization、replay classification 和 endpoint validation 使用的 intrinsic。Tenant prototype mutation 不能在校验后改写受信 target 或 replay policy。
+- 注入的 alarm shim 也会在 tenant module 前执行，并捕获 internal alarm 分类、SQLite 状态更新和 storage facade 安装依赖的 request、response、number、proxy 与 reflection 操作。Tenant 顶层对这些 intrinsic 的修改不能把 internal alarm 重定向到 tenant fetch handler，也不能阻止 facade 安装。
 - do-runtime supervisor 必须调用本地 `127.0.0.1:8788` drain/renew endpoint；Service Connect alias 可能打到其他 task。
 
 ## 可观测性

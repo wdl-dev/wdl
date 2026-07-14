@@ -9,7 +9,8 @@ use crate::{
 };
 
 use super::{
-    Consumer, QUEUE_CONSUMER_INDEX_KEY, QUEUE_DELAYED_INDEX_KEY, QUEUE_STREAM_INDEX_KEY,
+    Consumer, QUEUE_CONSUMER_INDEX_KEY, QUEUE_CONSUMER_SCAN_PATTERN, QUEUE_DELAYED_INDEX_KEY,
+    QUEUE_DELAYED_SCAN_PATTERN, QUEUE_STREAM_INDEX_KEY, QUEUE_STREAM_SCAN_PATTERN,
     parse_consumer_key, queue_consumer_key, queue_stream_key, redis_error_is_busygroup,
 };
 
@@ -72,8 +73,12 @@ async fn flush_indexed_streams(
 pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
     let mut seen = HashSet::new();
     let mut registry_changed = false;
-    let consumer_keys =
-        indexed_keys(&state, QUEUE_CONSUMER_INDEX_KEY, "queue-consumer:*:*").await?;
+    let consumer_keys = indexed_keys(
+        &state,
+        QUEUE_CONSUMER_INDEX_KEY,
+        QUEUE_CONSUMER_SCAN_PATTERN,
+    )
+    .await?;
     let mut indexed_streams = Vec::new();
     for consumer_key_chunk in consumer_keys.chunks(QUEUE_RECONCILE_CONSUMER_HASH_BATCH_SIZE) {
         let consumer_hashes: Vec<HashMap<String, String>> = state
@@ -148,13 +153,15 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
     // strand a stream outside the consumer loop.
     refresh_consumer_streams(&state).await;
 
-    let streams = indexed_data_keys(&state, QUEUE_STREAM_INDEX_KEY, "queue:*:*:s").await?;
+    let streams =
+        indexed_data_keys(&state, QUEUE_STREAM_INDEX_KEY, QUEUE_STREAM_SCAN_PATTERN).await?;
     {
         let mut known = state.queues.known_streams.write().await;
         known.clear();
         known.extend(streams);
     }
-    let delayed = indexed_data_keys(&state, QUEUE_DELAYED_INDEX_KEY, "queue-delayed:*:*").await?;
+    let delayed =
+        indexed_data_keys(&state, QUEUE_DELAYED_INDEX_KEY, QUEUE_DELAYED_SCAN_PATTERN).await?;
     let delayed_changed = {
         let delayed = delayed.into_iter().collect::<HashSet<_>>();
         let mut known = state.queues.known_delayed.write().await;

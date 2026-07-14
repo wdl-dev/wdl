@@ -124,14 +124,19 @@ test("DO fetch requestSpec uses captured header mutation intrinsics", async () =
   assert.equal(headers.get("x-request-id"), "scope-rid");
 });
 
-test("DO owner hint parser requires integer owner generation", () => {
-  assert.deepEqual(ownerHintFromHeaders(new Headers(doOwnerHintHeaders({ generation: 0 }))), {
+test("DO owner hint parser requires positive safe-integer owner generation", () => {
+  assert.deepEqual(ownerHintFromHeaders(new Headers(doOwnerHintHeaders({ generation: 3 }))), {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "do-runtime-a",
     endpoint: "do-runtime-a:8788",
-    generation: 0,
+    generation: 3,
   });
+  assert.equal(ownerHintFromHeaders(new Headers(doOwnerHintHeaders({ generation: 0 }))), null);
   assert.equal(ownerHintFromHeaders(new Headers(doOwnerHintHeaders({ generation: 1.5 }))), null);
+  assert.equal(
+    ownerHintFromHeaders(new Headers(doOwnerHintHeaders({ generation: 9007199254740992 }))),
+    null
+  );
   const missingGeneration = new Headers(doOwnerHintHeaders({}));
   missingGeneration.delete("x-wdl-do-owner-generation");
   assert.equal(ownerHintFromHeaders(missingGeneration), null);

@@ -29,7 +29,6 @@ const controlR2Url = moduleDataUrl(`export function makeR2AdminClient() { return
 const sharedAuthTokenUrl = moduleDataUrl(`export function extractToken() { return null; }`);
 const sharedAuthRolesUrl = moduleDataUrl(`export function validatePrincipalShape() { return false; }`);
 const sharedBoundedBodyUrl = repositoryFileUrl("shared/bounded-body.js");
-const sharedEnvUrl = repositoryFileUrl("shared/env.js");
 const sharedErrorsUrl = repositoryFileUrl("shared/errors.js");
 const sharedRandomIdUrl = repositoryFileUrl("shared/random-id.js");
 const sharedRedisLockUrl = moduleDataUrl(applyModuleReplacements(
@@ -41,6 +40,7 @@ const sharedRespondUrl = moduleDataUrl(readRepositoryFile("shared/respond.js"));
 const controlLibUrl = moduleDataUrl(`export function deleteLockKey(ns, worker) { return \`worker-delete-lock:\${ns}:\${worker}\`; }`);
 const sharedS3CleanupLifecycleUrl = repositoryFileUrl("shared/s3-cleanup-lifecycle.js");
 const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const sharedOptimisticRetryUrl = repositoryFileUrl("shared/optimistic-retry.js");
 const controlErrorsUrl = moduleDataUrl(applyModuleReplacements(
   readRepositoryFile("control/errors.js"),
   [[/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`]]
@@ -53,15 +53,11 @@ const controlWorkflowsClientUrl = moduleDataUrl(applyModuleReplacements(
   ]
 ));
 const { postWorkflowsInternalRequest } = await import(controlWorkflowsClientUrl);
-const sharedOwnerLeaseUrl = moduleDataUrl(applyModuleReplacements(
-  readRepositoryFile("shared/owner-lease.js"),
-  [[/from "shared-env"/g, `from ${JSON.stringify(sharedEnvUrl)}`]]
-));
 const controlOptimisticUrl = moduleDataUrl(applyModuleReplacements(
   readRepositoryFile("control/optimistic.js"),
   [
     [/from "shared-redis"/g, `from ${JSON.stringify(sharedRedisUrl)}`],
-    [/from "shared-owner-lease"/g, `from ${JSON.stringify(sharedOwnerLeaseUrl)}`],
+    [/from "shared-optimistic-retry"/g, `from ${JSON.stringify(sharedOptimisticRetryUrl)}`],
   ]
 ));
 const controlJsonBodyUrl = moduleDataUrl(applyModuleReplacements(

@@ -12,6 +12,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { getLoadedWorkerStub } from "runtime-load";
 import { fetchTailFields, startTailEnvelope } from "runtime-tail-forwarder";
 import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
+import { sanitizeRequestId } from "shared-observability";
 
 const SERVICE_BINDING_INTERNAL_HEADERS = [
   "x-worker-id",
@@ -63,7 +64,9 @@ export class ServiceBinding extends WorkerEntrypoint {
     forwarded.headers.set("x-worker-id", targetId);
     // ALS doesn't cross JSRPC in workerd — the outer rid isn't visible here,
     // so we can only preserve what the caller forwarded, never mint one.
-    const requestId = forwarded.headers.get("x-request-id") || null;
+    const requestId = sanitizeRequestId(forwarded.headers.get("x-request-id"));
+    if (requestId) forwarded.headers.set("x-request-id", requestId);
+    else forwarded.headers.delete("x-request-id");
     const identity = {
       namespace: self.ctx.props.targetNs,
       workerName: self.ctx.props.targetWorker,

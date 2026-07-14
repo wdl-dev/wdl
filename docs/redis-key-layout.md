@@ -8,12 +8,12 @@ families, and ownership rules that span modules.
 
 WDL uses a deliberate logical split:
 
-- **DB 0, control plane:** bundles, routes/patterns, auth, D1/DO owner state, cron
+- **`DB 0`, control plane:** bundles, routes/patterns, auth, D1/DO owner state, cron
   config, queue-consumer config, lifecycle metadata, and workflow definitions
   (`wf:defs:*`).
-- **DB 1, data plane:** KV hash buckets, queue streams, delayed queues, orphan streams,
+- **`DB 1`, data plane:** KV hash buckets, queue streams, delayed queues, orphan streams,
   and live log-tail streams.
-- **DB 2, workflows:** `wf:schema_version`, instance state, step records/summaries,
+- **`DB 2`, workflows:** `wf:schema_version`, instance state, step records/summaries,
   ready/due shards, events and event-type indexes, payload refs, retention indexes, and
   run leases.
 
@@ -52,8 +52,9 @@ secrets:<ns>                    Hash, namespace-level WDL-ENC envelopes
 secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelopes
 ```
 
-`worker:<ns>:<name>:v:<int>` uses the integer version in the key, not the `"v<int>"`
-tag. Test fixtures that seed Redis directly must use `shared/version.js#bundleKey`.
+`worker:<ns>:<name>:v:<int>` uses a positive JavaScript-safe integer version in the
+key, not the `"v<int>"` tag. Test fixtures that seed Redis directly must use
+`shared/version.js#bundleKey`.
 
 `namespaces` is an active worker gate. It is populated when a namespace has an active
 worker route and may be removed when the last active worker is deleted.
@@ -144,6 +145,11 @@ Feature modules own the detailed contracts:
 
 Cross-cutting constraints:
 
+- Persisted D1/DO owner records must reconstruct the encoded scope of the Redis key
+  under which they are read. A syntactically valid record stored under another scope
+  fails closed before forwarding, takeover, renewal, or release. DO owner resolution
+  also binds the record's canonical namespace and worker to the invoking bundle before
+  reading that bundle's active storage pointer.
 - Indexes are usually repairable projections, not authority. The module doc must state
   which key is authoritative before adding a writer.
 - Lifecycle and delete blocker indexes are authoritative where the module says they are;

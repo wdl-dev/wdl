@@ -4,7 +4,9 @@ use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::time::now_ms;
-use wdl_rust_common::version::{do_storage_id_key, routes_key, worker_versions_key};
+use wdl_rust_common::version::{
+    do_storage_id_key, parse_version_tag, routes_key, worker_versions_key,
+};
 
 use crate::{
     AppState, DoAlarmJobKeys, LogLevel, WorkflowError, WorkflowResult, do_alarm_shard_queue_keys,
@@ -241,6 +243,8 @@ async fn resolve_alarm_dispatch_version(
     }
 
     if let Some(active_version) = active_version {
+        parse_version_tag(&active_version)
+            .map_err(|_| WorkflowError::invalid_state("Active worker version is invalid"))?;
         log(
             app,
             LogLevel::Info,

@@ -6,6 +6,7 @@ import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import {
   importSpecifierReplacements,
   moduleDataUrl,
+  readRepositoryJson,
   readRepositoryModuleSource,
   repositoryFileUrl,
   repositoryModuleDataUrl,
@@ -29,8 +30,10 @@ function stub(src) {
 const protocolUrl = doProtocolDataUrl();
 const sharedRespondUrl = repositoryFileUrl("shared/respond.js");
 const sharedEnvUrl = repositoryFileUrl("shared/env.js");
+const sharedOptimisticRetryUrl = repositoryFileUrl("shared/optimistic-retry.js");
 const sharedOwnerLeaseUrl = repositoryModuleDataUrl("shared/owner-lease.js", [
   [/from "shared-env";/, `from ${JSON.stringify(sharedEnvUrl)};`],
+  [/from "shared-optimistic-retry";/, `from ${JSON.stringify(sharedOptimisticRetryUrl)};`],
 ]);
 const httpUrl = stub(readRepositoryModuleSource("do-runtime/http.js", importSpecifierReplacements({
   "shared-respond": sharedRespondUrl,
@@ -46,9 +49,11 @@ export function createHttpRequestScope({ request }) {
 }
 `);
 const workerIdUrl = repositoryFileUrl("shared/worker-id.js");
+const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 const actorUrl = stub(`export class WdlDoHostActor {}`);
 const alarmDispatchUrl = stub(readRepositoryModuleSource("do-runtime/alarm-dispatch.js", importSpecifierReplacements({
   "shared-worker-id": workerIdUrl,
+  "shared-version": sharedVersionUrl,
   "do-runtime-protocol": protocolUrl,
   "do-runtime-http": httpUrl,
 })));
@@ -124,6 +129,7 @@ const IMPORT_STUBS = {
   "shared-owner-lease": sharedOwnerLeaseUrl,
   "shared-respond": sharedRespondUrl,
   "shared-request-scope": requestScopeUrl,
+  "shared-version": sharedVersionUrl,
   "shared-worker-id": workerIdUrl,
   "do-runtime-actor": actorUrl,
   "do-runtime-alarm-dispatch": alarmDispatchUrl,
@@ -151,6 +157,7 @@ const src = readRepositoryModuleSource("do-runtime/index.js", importSpecifierRep
 const { default: app } = await import(stub(src));
 const { DO_INVOKE_CONTENT_TYPE, DoRuntimeError, encodeDoInvokeRequest } = await import(protocolUrl);
 const doState = await import(stateUrl);
+const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 
 beforeEach(() => {
   /** @type {any} */ (globalThis).__doIndexHostResponse = null;
@@ -248,6 +255,29 @@ test("do-runtime alarm dispatch endpoint invokes the local alarm shim path", asy
   const hostFetches = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches);
   const [fetchCall] = hostFetches;
   assert.equal(fetchCall.input.url, "https://do-runtime.internal/invoke");
+});
+
+test("do-runtime alarm dispatch rejects non-canonical versions from the shared fixture", async () => {
+  for (const { tag, parsed } of versionFixture.cases) {
+    if (parsed != null) continue;
+    const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ns: "tenant",
+        worker: "alarms",
+        version: tag,
+        doStorageId: "do_0123456789abcdef0123456789abcdef",
+        className: "Room",
+        objectName: "alice",
+        retryCount: 0,
+        token: "row-token",
+      }),
+    }), env());
+    assert.equal(response.status, 400, tag);
+    assert.match((await jsonBody(response)).message, /version/, tag);
+  }
+  assert.deepEqual(/** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches), []);
 });
 
 test("do-runtime alarm dispatch endpoint maps failed local dispatch to retryable 503", async () => {
@@ -486,6 +516,26 @@ test("do-runtime storage-delete-worker classifies invalid members as 207 partial
     deleted: 0,
     errors: [{ member: "bad-member", error: "invalid_member" }],
   });
+});
+
+test("do-runtime storage-delete-worker rejects non-canonical versions before dispatch", async () => {
+  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/storage/delete-worker", {
+    method: "POST",
+    body: JSON.stringify({
+      ns: "tenant",
+      worker: "chat",
+      version: "v9007199254740992",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      members: ["Room:room-a:0"],
+    }),
+  }), env());
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await jsonBody(response), {
+    error: "invalid_request",
+    message: "version is invalid",
+  });
+  assert.deepEqual(/** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches), []);
 });
 
 test("do-runtime storage-delete-worker preserves stable member error codes from host responses", async () => {

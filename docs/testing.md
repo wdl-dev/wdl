@@ -204,7 +204,7 @@ Prefer the narrow helper that matches the response or fixture source:
   load import-free contract owners such as `shared/version.js` and
   `shared/ns-pattern.js` directly with `repositoryFileUrl(...)` instead of
   reimplementing their grammar in a stub.
-  use it instead of ad hoc `readFileSync(...).replace(...)` chains when a test
+  Use it instead of ad hoc `readFileSync(...).replace(...)` chains when a test
   rewrites repo module imports. Use `readRepositoryFile(...)` plus
   `applyModuleReplacements(...)` for local source rewrites,
   `readRepositoryModuleSource(...)` when reading repository module source and

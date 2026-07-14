@@ -6,9 +6,9 @@
 
 WDL 使用明确的逻辑切分：
 
-- **DB 0，控制面：**bundle、routes/patterns、auth、D1/DO owner state、cron config、queue-consumer config、lifecycle metadata，以及 workflow definition（`wf:defs:*`）。
-- **DB 1，数据面：**KV hash bucket、queue stream、delayed queue、orphan stream 和 live log-tail stream。
-- **DB 2，workflows：**`wf:schema_version`、instance state、step record/summary、ready/due shard、event 和 event-type index、payload ref、retention index、run lease。
+- **`DB 0`，控制面：**bundle、routes/patterns、auth、D1/DO owner state、cron config、queue-consumer config、lifecycle metadata，以及 workflow definition（`wf:defs:*`）。
+- **`DB 1`，数据面：**KV hash bucket、queue stream、delayed queue、orphan stream 和 live log-tail stream。
+- **`DB 2`，workflows：**`wf:schema_version`、instance state、step record/summary、ready/due shard、event 和 event-type index、payload ref、retention index、run lease。
 
 Local compose、Kubernetes 和 Terraform 都启用这个切分。Rust service 和 Rust `redis-proxy` 使用 `DATA_REDIS_URL` / `DATA_REDIS_DB` 选择 data-plane Redis connection/database；嵌入的 JS control/log-tail 路径使用 `DATA_REDIS_ADDR` 加 `DATA_REDIS_DB`，因为它们的 RESP client 接收 host:port address。未设置这些 data-plane 变量的部署会把数据面 key 留在 control Redis connection/database，直到显式 opt in。Workflows 不同：未设置 `WORKFLOWS_REDIS_URL` 时 workflows service 仍默认使用 DB 2；只有显式设置 `WORKFLOWS_REDIS_DB=0` 时才使用 DB 0。
 
@@ -37,7 +37,7 @@ secrets:<ns>                    Hash, namespace-level WDL-ENC envelope
 secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 ```
 
-`worker:<ns>:<name>:v:<int>` 的 key 使用整数 version，而不是 `"v<int>"` tag。直接 seed Redis 的测试 fixture 必须使用 `shared/version.js#bundleKey`。
+`worker:<ns>:<name>:v:<int>` 的 key 使用 JavaScript safe-integer 范围内的正整数 version，而不是 `"v<int>"` tag。直接 seed Redis 的测试 fixture 必须使用 `shared/version.js#bundleKey`。
 
 `namespaces` 是 active worker gate。有 active worker route 时会加入，最后一个 active worker 删除时可能移除。Namespace-level secrets 和 data-plane state 等资源可以比这个 set membership 活得更久。Auth 在 delegated token issue 时只把它作为 generated-namespace collision 的 best-effort 信号读取，而不是永久 namespace registry。
 
@@ -91,6 +91,7 @@ Routes、crons、queue consumers、bindings、vars、exports、workflow definiti
 
 跨模块约束：
 
+- Persisted D1/DO owner record 必须能重建出读取它的 Redis key 所编码的 scope。语法合法但错放在其他 scope 下的记录会在 forwarding、takeover、renew 或 release 前 fail closed；DO owner resolution 还必须在读取 invoking bundle 的 active storage pointer 前，把 record 的 canonical namespace 和 worker 绑定到该 bundle。
 - Index 通常是可修复 projection，不是 authority。新增 writer 前，模块文档必须说明哪个 key 是权威状态。
 - Lifecycle 和 delete blocker index 在模块文档声明为权威时就是权威；不要增加绕过这些 index 的 request-path fallback scan。
 - Queue main stream 不做 trim，因为 at-least-once delivery 是合同。DLQ、orphan、log-tail 这类诊断 stream 可以使用有界 approximate trim。

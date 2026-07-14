@@ -35,10 +35,10 @@ function generateDoRuntimeWrapperModule(userMainSpecifier, classNames) {
 export class ${name} extends wrapDurableObjectClass(user.${name}, ${JSON.stringify(name)}) {}
 `).join("");
   return `
+import { wrapDurableObjectClass } from ${alarmShim};
+
 import * as user from ${userMain};
 export * from ${userMain};
-
-import { wrapDurableObjectClass } from ${alarmShim};
 
 ${wrappedClasses}
 `;

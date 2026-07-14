@@ -102,6 +102,9 @@ pub(super) fn validate_set_request(req: &DoAlarmSetRequest) -> WorkflowResult<()
     validate_non_empty(&req.ns, "ns")?;
     validate_non_empty(&req.worker, "worker")?;
     validate_non_empty(&req.version, "version")?;
+    if parse_version_tag(&req.version).is_err() {
+        return Err(WorkflowError::invalid_request("version is invalid"));
+    }
     validate_non_empty(&req.do_storage_id, "doStorageId")?;
     validate_non_empty(&req.class_name, "className")?;
     validate_non_empty(&req.object_name, "objectName")?;
@@ -254,6 +257,20 @@ pub(super) fn job_from_state(
 mod tests {
     use super::*;
 
+    fn valid_set_request() -> DoAlarmSetRequest {
+        DoAlarmSetRequest {
+            ns: "demo".to_string(),
+            worker: "alarms".to_string(),
+            version: "v1".to_string(),
+            do_storage_id: "do_abc".to_string(),
+            class_name: "AlarmCounter".to_string(),
+            object_name: "alpha".to_string(),
+            scheduled_time: 123_456_789,
+            retry_count: 0,
+            token: "row-token".to_string(),
+        }
+    }
+
     fn valid_job_state() -> HashMap<String, String> {
         HashMap::from([
             ("ns".to_string(), "demo".to_string()),
@@ -318,6 +335,27 @@ mod tests {
                 err.message.contains(field),
                 "unexpected error message: {}",
                 err.message
+            );
+        }
+    }
+
+    #[test]
+    fn do_alarm_set_version_matches_cross_language_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/version-tags.json"
+        ))
+        .expect("version tag fixture parses");
+        for case in fixture["cases"]
+            .as_array()
+            .expect("version tag fixture cases is an array")
+        {
+            let tag = case["tag"].as_str().expect("version tag is a string");
+            let mut req = valid_set_request();
+            req.version = tag.to_string();
+            assert_eq!(
+                validate_set_request(&req).is_ok(),
+                case["parsed"].as_u64().is_some(),
+                "{tag:?}"
             );
         }
     }

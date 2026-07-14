@@ -18,6 +18,7 @@ const runtimeEnvBuildUrl = repositoryModuleDataUrl(
   "runtime/load/env-build.js",
   importSpecifierReplacements({
     "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
+    "shared-version": repositoryFileUrl("shared/version.js"),
   })
 );
 const {

@@ -1,4 +1,5 @@
 import { createTaskIdentityResolver } from "shared-task-identity";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import { DoRuntimeError } from "do-runtime-protocol";
 
 const resolver = createTaskIdentityResolver({
@@ -8,6 +9,7 @@ const resolver = createTaskIdentityResolver({
   serviceLabel: "DO",
   unavailableCode: "task_identity_unavailable",
   createError: (status, code, message) => new DoRuntimeError(status, code, message),
+  validateEndpoint: (endpoint, port) => validOwnerEndpointForService(endpoint, port, "do-runtime"),
 });
 
 export const {

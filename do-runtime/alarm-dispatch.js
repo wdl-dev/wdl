@@ -1,4 +1,5 @@
 import { formatWorkerId } from "shared-worker-id";
+import { parseVersion } from "shared-version";
 import { DoRuntimeError, hostIdForObject, nonEmptyAlarmString, readJsonBody } from "do-runtime-protocol";
 import { json } from "do-runtime-http";
 
@@ -18,6 +19,15 @@ function requiredAlarmString(value, field) {
     throw new DoRuntimeError(400, "invalid_do_alarm_dispatch", `DO alarm ${field} must be a non-empty string`);
   }
   return text;
+}
+
+/** @param {unknown} value */
+function requiredAlarmVersion(value) {
+  const version = requiredAlarmString(value, "version");
+  if (parseVersion(version) == null) {
+    throw new DoRuntimeError(400, "invalid_do_alarm_dispatch", "DO alarm version is invalid");
+  }
+  return version;
 }
 
 /** @param {unknown} value */
@@ -41,7 +51,7 @@ export async function handleAlarmDispatch(request, env, dispatchInvoke, requestI
     : {};
   const ns = requiredAlarmString(record.ns, "ns");
   const worker = requiredAlarmString(record.worker, "worker");
-  const version = requiredAlarmString(record.version, "version");
+  const version = requiredAlarmVersion(record.version);
   const doStorageId = requiredAlarmString(record.doStorageId, "doStorageId");
   const className = requiredAlarmString(record.className, "className");
   const objectName = requiredAlarmString(record.objectName, "objectName");

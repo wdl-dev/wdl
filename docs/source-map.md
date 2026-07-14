@@ -59,7 +59,8 @@ are outside this map unless they own runtime or deployable service behavior.
 |---|---|
 | `shared/redis.js`, `shared/redis-*.js` | Public Redis import surface plus split RESP codec, per-call client, WATCH/MULTI session, and subscriber loop modules. Runtime hot paths prefer the Rust redis-proxy sidecar. |
 | `shared/redis-lock.js` | Token-fenced Redis lock creation, acquire, renewal, and best-effort token-scoped release shared by Control and Auth. |
-| `shared/owner-lease.js`, `shared/owner-protocol.js`, `shared/owner-forwarder.js` | Shared optimistic retry loop plus owner lease parsing, generation counters, key derivation, fence matching, staged Redis owner writes, and owner-forwarding HTTP mechanics used by Control and the D1/DO runtimes. |
+| `shared/optimistic-retry.js` | Generic bounded optimistic retry loop used by Control and the D1/DO owner-lease adapters. |
+| `shared/owner-endpoint.js`, `shared/owner-lease.js`, `shared/owner-protocol.js`, `shared/owner-forwarder.js` | Shared owner endpoint grammar, lease parsing, generation counters, key derivation, fence matching, staged Redis owner writes, and authenticated forwarding mechanics used by Control and the D1/DO runtimes. |
 | `shared/auth-roles.js` | Role table, principal validation, reserved namespace policy, and auth action capabilities. |
 | `shared/auth-token.js` | Shared `x-admin-token` sanitizer used by control and auth. |
 | `shared/internal-auth.js` | Shared internal mesh auth header and token helpers used by JS callers and receivers. |

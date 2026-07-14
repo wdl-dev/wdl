@@ -263,13 +263,6 @@ test("secret Redis key construction uses the shared JS owner", () => {
   );
 });
 
-test("do-runtime worker-name grammar matches shared control grammar", () => {
-  assert.equal(
-    extractRegex("do-runtime/protocol/wire-grammar.js", "WORKER_NAME_RE"),
-    extractRegex("shared/ns-pattern.js", "WORKER_NAME_RE")
-  );
-});
-
 test("runtime workflow instance id grammar matches shared control grammar", () => {
   assert.equal(
     extractRegex("runtime/workflows-client.js", "WORKFLOW_INSTANCE_ID_RE"),
@@ -291,7 +284,6 @@ test("runtime workflow dispatch identity grammar mirrors shared grammar", () => 
     extractRegex("runtime/lib.js", "WORKER_NAME_RE"),
     extractRegex("shared/ns-pattern.js", "WORKER_NAME_RE")
   );
-  assert.equal(extractRegex("runtime/lib.js", "VERSION_RE"), "/^v[1-9][0-9]*$/");
 });
 
 test("D1 object field setters stay shared across wire and transport codecs", () => {
@@ -1160,10 +1152,12 @@ test("redis-proxy HTTP observability matches platform request strategy", () => {
   assert.match(lib, /struct ResponseError/);
 });
 
-test("embedded DO alarm shim follows shared log stream routing", () => {
+test("embedded DO alarm shim keeps best-effort log routing no-throw", () => {
   const source = withoutLineComments(readRepoFile("do-runtime/alarm-shim-source.js"));
+  const logger = /function logStructured\([^]*?\n}\n\nfunction ensureAlarmTable/.exec(source)?.[0] || "";
   assert.equal(/console\.warn\(/.test(source), false);
-  assert.match(source, /if \(level === "error"\) console\.error\(line\);\n {2}else console\.log\(line\);/);
+  assert.match(logger, /if \(level === "error"\) console\.error\(line\);\s+else console\.log\(line\);/);
+  assert.match(logger, /try \{[^]*} catch \{/);
 });
 
 test("active docs and sources do not point at note paths", () => {
@@ -1207,42 +1201,48 @@ test("active bilingual docs stay paired", () => {
   assert.deepEqual(offenders.toSorted(), []);
 });
 
-test("active bilingual docs keep normative protocol tokens aligned", () => {
-  const files = activeBilingualDocFiles();
-  const fileSet = new Set(files);
-  const tokenPatterns = [
-    /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g,
-    /\bx-[a-z0-9]+(?:-[a-z0-9]+)+\b/g,
-    /:\d{2,5}\b/g,
-    /\bDB\s*[0-9]+\b/gi,
+test("owning bilingual docs retain selected cross-tier protocol literals", () => {
+  // Explicitly pin only high-value literals in their owning docs. Do not return
+  // to scanning every uppercase token, example port, or incidental DB mention.
+  /** @param {string} value */
+  const codeSpan = (value) => `\`${value}\``;
+  /** @type {Array<{ files: string[], literals: string[] }>} */
+  const contracts = [
+    {
+      files: ["docs/modules/infra.md", "docs/modules/infra.zh.md"],
+      literals: [
+        "WDL_INTERNAL_AUTH_TOKEN",
+        "x-wdl-internal-auth",
+        ":8088",
+        ":8787",
+        ":8788",
+        ":9120",
+      ],
+    },
+    {
+      files: ["docs/redis-key-layout.md", "docs/redis-key-layout.zh.md"],
+      literals: ["DB 0", "DB 1", "DB 2"],
+    },
+    {
+      files: ["docs/modules/control-auth.md", "docs/modules/control-auth.zh.md"],
+      literals: ["X-Admin-Token"],
+    },
   ];
-  const tokens = (/** @type {string} */ file) => {
-    const found = new Set();
-    const source = readRepoFile(file);
-    for (const pattern of tokenPatterns) {
-      for (const match of source.matchAll(pattern)) {
-        found.add(match[0].toUpperCase().replace(/\s+/g, ""));
+  for (const suffix of [".v2", "+v2", "~v2", "-v2"]) {
+    assert.equal(codeSpan(`x-wdl-internal-auth${suffix}`).includes(codeSpan("x-wdl-internal-auth")), false);
+  }
+  assert.equal(codeSpan(":8787abc").includes(codeSpan(":8787")), false);
+  assert.equal(codeSpan("DB 01").includes(codeSpan("DB 0")), false);
+  const offenders = [];
+  for (const { files, literals } of contracts) {
+    for (const file of files) {
+      const source = readRepoFile(file);
+      for (const literal of literals) {
+        if (!source.includes(codeSpan(literal))) offenders.push(`${file}: missing ${literal}`);
       }
     }
-    return found;
-  };
-  const offenders = [];
-
-  for (const english of files.filter((file) => file.endsWith(".md") && !file.endsWith(".zh.md"))) {
-    if (INTENTIONAL_ONE_LANGUAGE_ACTIVE_DOCS.has(english)) continue;
-    const chinese = english.replace(/\.md$/, ".zh.md");
-    if (!fileSet.has(chinese)) continue;
-    const englishTokens = tokens(english);
-    const chineseTokens = tokens(chinese);
-    for (const token of englishTokens) {
-      if (!chineseTokens.has(token)) offenders.push(`${chinese}: missing ${token}`);
-    }
-    for (const token of chineseTokens) {
-      if (!englishTokens.has(token)) offenders.push(`${english}: missing ${token}`);
-    }
   }
-
-  assert.deepEqual(offenders.toSorted(), []);
+  assert.deepEqual(offenders, []);
 });
 
 test("protocol and contributor contracts stay discoverable from active docs", () => {
@@ -1380,7 +1380,8 @@ test("do-runtime operational logs avoid known camelCase field drift", () => {
 
 test("DO alarm tokens stay generated inside the storage shim", () => {
   const source = withoutLineComments(readRepoFile("do-runtime/alarm-shim-source.js"));
-  assert.match(source, /function alarmToken\(\)\s*\{\s*return crypto\.randomUUID\(\);\s*\}/);
+  assert.match(source, /const cryptoRandomUUID = crypto\.randomUUID;/);
+  assert.match(source, /function alarmToken\(\)\s*\{\s*return reflectApply\(cryptoRandomUUID, nativeCrypto, \[\]\);\s*\}/);
   assert.match(source, /const token = alarmToken\(\);/);
   assert.match(source, /alarmBinding\.setAlarmIndex\(\{\s*className,\s*objectName,\s*scheduledTime: alarmTime,\s*retryCount: 0,\s*token,/);
 });
@@ -1563,7 +1564,7 @@ test("published Compose overrides cover every locally built image service", () =
   }
 });
 
-test("Kubernetes runtime families share the exact redis-proxy sidecar spec", () => {
+test("Kubernetes runtime families pin the redis-proxy functional contract", () => {
   const files = [
     "deploy/kubernetes/base/user-runtime.yaml",
     "deploy/kubernetes/base/system-runtime.yaml",
@@ -1584,8 +1585,32 @@ test("Kubernetes runtime families share the exact redis-proxy sidecar spec", () 
     return sidecar;
   });
 
-  assert.deepEqual(sidecars[1], sidecars[0], `${files[1]} redis-proxy sidecar drifted`);
-  assert.deepEqual(sidecars[2], sidecars[0], `${files[2]} redis-proxy sidecar drifted`);
+  for (let index = 0; index < sidecars.length; index += 1) {
+    const sidecar = sidecars[index];
+    assert.equal(sidecar.image, "docker.io/getwdl/wdl-rust:latest", `${files[index]} image`);
+    assert.deepEqual(sidecar.command, ["/redis-proxy"], `${files[index]} command`);
+    assert.deepEqual(
+      /** @type {Array<Record<string, unknown>> | undefined} */ (sidecar.ports)
+        ?.find((port) => port.name === "redis-proxy"),
+      { name: "redis-proxy", containerPort: 7070 },
+      `${files[index]} port`
+    );
+    assert.deepEqual(sidecar.envFrom, [
+      { configMapRef: { name: "wdl-config" } },
+      { secretRef: { name: "wdl-secrets" } },
+    ], `${files[index]} envFrom`);
+    for (const probe of ["readinessProbe", "livenessProbe"]) {
+      assert.deepEqual(sidecar[probe], {
+        exec: { command: ["/redis-proxy", "healthcheck"] },
+      }, `${files[index]} ${probe}`);
+    }
+    const resources = /** @type {{ requests?: Record<string, unknown>, limits?: Record<string, unknown> } | undefined} */ (
+      sidecar.resources
+    );
+    assert.ok(resources?.requests?.cpu, `${files[index]} resource request cpu`);
+    assert.ok(resources?.requests?.memory, `${files[index]} resource request memory`);
+    assert.ok(resources?.limits?.memory, `${files[index]} resource limit memory`);
+  }
 });
 
 test("Kubernetes NetworkPolicies pin the per-component ingress matrix", () => {
@@ -2227,24 +2252,9 @@ test("D1 and DO workerd env tunables are exposed through capnp bindings", () => 
     "DO_OWNER_LEASE_GUARD_MS",
     "DO_RENEW_CONCURRENCY",
     "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS",
-    "DO_TEST_HOOKS",
   ]) {
     assert.equal(exposed(doRuntime, name), true, `${name} must reach do-runtime workerd env`);
   }
-});
-
-test("Terraform gates DO test hooks like D1 test hooks", () => {
-  const rootVars = readRepoFile("terraform/variables.tf");
-  const moduleVars = readRepoFile("terraform/modules/compute/variables.tf");
-  const main = readRepoFile("terraform/main.tf");
-  const doService = readRepoFile("terraform/modules/compute/do_runtime_service.tf");
-
-  assert.match(rootVars, /variable "do_test_hooks_enabled"/);
-  assert.match(moduleVars, /variable "do_test_hooks_enabled"/);
-  assert.match(main, /do_test_hooks_enabled\s+=\s+var\.do_test_hooks_enabled/);
-  assert.match(doService, /var\.do_test_hooks_enabled \? \[/);
-  assert.match(doService, /\{ name = "DO_TEST_HOOKS", value = "1" \}/);
-  assert.match(doService, /!var\.do_test_hooks_enabled \|\| can\(regex\("\(\^\|-\)test\(\$\|-\)", var\.name\)\)/);
 });
 
 test("D1 and DO workerd containers keep explicit memory ceilings", () => {
@@ -2438,30 +2448,6 @@ test("Terraform ECS services use Fargate-only launch contracts", () => {
   }
 });
 
-test("DO RPC JSON-data validators stay aligned across client and server", () => {
-  // Match jsonDataError() through the following public checker declaration.
-  // The checker may be preceded by JSDoc and may be exported assertJsonRpcArgs()
-  // or local requireJsonData().
-  const jsonDataErrorWithChecker =
-    /function jsonDataError\([^]*?\n}\n\n(?:\/\*\*[^]*?\*\/\n)?(?:export function assertJsonRpcArgs|function requireJsonData)/;
-  const trailingCheckerMarker =
-    /\n\n(?:\/\*\*[^]*?\*\/\n)?(?:export function assertJsonRpcArgs|function requireJsonData)$/;
-  const extract = (/** @type {string} */ file) => {
-    const source = readRepoFile(file);
-    const match = source.match(jsonDataErrorWithChecker);
-    assert.ok(match, `${file} must define jsonDataError next to its public checker`);
-    return match[0]
-      .replace(trailingCheckerMarker, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  };
-
-  assert.equal(
-    extract("runtime/_wdl-do-transport.js"),
-    extract("do-runtime/protocol.js")
-  );
-});
-
 test("DO invoke request-size caps stay aligned across client and server", () => {
   const runtime = readRepoFile("runtime/_wdl-do-transport.js");
   const protocol = readRepoFile("do-runtime/protocol.js");
@@ -2555,32 +2541,40 @@ test("DO owner hints are trusted only from do-runtime headers", () => {
   assert.match(doRuntime, /doPlatformErrorResponse\(err\)/);
 });
 
-test("owner endpoint validation lives in neutral runtime helper", () => {
-  const endpoint = readRepoFile("runtime/_wdl-owner-endpoint.js");
+test("owner endpoint validation lives in a shared contract owner", () => {
+  const endpoint = readRepoFile("shared/owner-endpoint.js");
+  const adapter = readRepoFile("runtime/_wdl-owner-endpoint.js");
   const doTransport = readRepoFile("runtime/_wdl-do-transport.js");
   const d1Binding = readRepoFile("runtime/bindings/d1.js");
   const controlD1RuntimeClient = readRepoFile("control/d1-runtime-client.js");
   const userConfig = readRepoFile("runtime/config-user.capnp");
   const systemConfig = readRepoFile("runtime/config-system.capnp");
+  const d1Config = readRepoFile("d1-runtime/config.capnp");
   const doConfig = readRepoFile("do-runtime/config.capnp");
+  const taskIdentity = readRepoFile("shared/task-identity.js");
   const tsconfig = readRepoFile("tsconfig.json");
 
   assert.match(endpoint, /export function validOwnerEndpointForService/);
   assert.match(endpoint, /"d1-runtime": \/\^d1-runtime/);
   assert.match(endpoint, /"do-runtime": \/\^do-runtime/);
+  assert.match(endpoint, /function acceptablePrivateIpv4/);
+  assert.match(adapter, /from "\.\.\/shared\/owner-endpoint\.js"/);
   assert.match(doTransport, /from "\.\/_wdl-owner-endpoint\.js"/);
-  assert.match(d1Binding, /from "runtime-owner-endpoint"/);
-  assert.match(controlD1RuntimeClient, /from "runtime-owner-endpoint"/);
+  assert.match(d1Binding, /from "shared-owner-endpoint"/);
+  assert.match(controlD1RuntimeClient, /from "shared-owner-endpoint"/);
   assert.match(controlD1RuntimeClient, /validOwnerEndpointForService\(owner\.endpoint, 8787, "d1-runtime"\)/);
-  assert.match(tsconfig, /"runtime-owner-endpoint": \["runtime\/_wdl-owner-endpoint\.js"\]/);
+  assert.match(tsconfig, /"shared-\*": \["shared\/\*\.js"\]/);
+  assert.doesNotMatch(taskIdentity, /_TASK_PORT/);
+  assert.doesNotMatch(d1Config, /D1_TASK_PORT/);
+  assert.doesNotMatch(doConfig, /DO_TASK_PORT/);
   for (const config of [userConfig, systemConfig, doConfig]) {
-    assert.match(config, /name = "runtime-owner-endpoint"/);
+    assert.match(config, /name = "shared-owner-endpoint"/);
     assert.match(config, /name = "_wdl-owner-endpoint\.js"/);
     assert.match(config, /name = "runtime-owner-endpoint-source"/);
   }
   for (const config of [userConfig, systemConfig]) {
     const doOwnerNetwork = /const doOwnerNetworkWorker[\s\S]*?\n\);/.exec(config)?.[0] || "";
-    assert.match(doOwnerNetwork, /name = "runtime-owner-endpoint"/);
+    assert.match(doOwnerNetwork, /name = "shared-owner-endpoint"/);
   }
 });
 

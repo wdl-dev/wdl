@@ -14,6 +14,7 @@ const doOwnerClientModule = await importOwnerClientModule("do-runtime/owner-clie
   "do-runtime-protocol": protocolUrl,
   "shared-internal-auth": ownerHarness.internalAuthUrl,
   "shared-owner-forwarder": ownerHarness.ownerForwarderUrl,
+  "shared-owner-lease": ownerHarness.ownerLeaseUrl,
   "do-runtime-state": ownerHarness.stateUrl,
 });
 

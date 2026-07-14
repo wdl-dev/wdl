@@ -43,7 +43,7 @@ export const DO_OWNER_REGISTRY_TEST_STATE = {
   redisState,
   store: redisState.strings,
   ownedScopes: new Map(),
-  taskIdentity: { taskId: "task-a", endpoint: "task-a:8788" },
+  taskIdentity: { taskId: "task-a", endpoint: "do-runtime-a:8788" },
   watchedKeys: redisState.watched,
   metricIncrements: [],
   logEntries: [],
@@ -61,7 +61,7 @@ export function resetDoOwnerRegistryTestState() {
   const testState = DO_OWNER_REGISTRY_TEST_STATE;
   resetFakeRedisState(testState.redisState);
   testState.ownedScopes.clear();
-  testState.taskIdentity = { taskId: "task-a", endpoint: "task-a:8788" };
+  testState.taskIdentity = { taskId: "task-a", endpoint: "do-runtime-a:8788" };
   testState.metricIncrements = [];
   testState.logEntries = [];
   testState.redisTimeMs = Date.now();
@@ -129,6 +129,8 @@ const src = applyModuleReplacements(readRepositoryFile("do-runtime/owner-registr
   [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
   [/from "do-runtime-state";/, `from ${JSON.stringify(stateUrl)};`],
   [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
+  [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
+  [/from "shared-owner-endpoint";/, `from ${JSON.stringify(repositoryFileUrl("shared/owner-endpoint.js"))};`],
 ]);
 
 const registry = await import(moduleDataUrl(src));
@@ -140,6 +142,7 @@ export const {
   ownerGenerationKeyOf,
   ownerLeaseGuardMs,
   ownerKeyOf,
+  parseOwner,
   renewOwnedScopes,
   releaseOwner,
   resolveDoOwner,

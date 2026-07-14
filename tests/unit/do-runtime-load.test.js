@@ -254,10 +254,16 @@ test("DO runtime load: applies the host-binding wrapper before the alarm wrapper
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function deleteAllSqlStorage/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /export function wrapDurableObjectClass/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /delete out\[ALARMS_BINDING\];/);
+  assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /const objectDefineProperty = Object\.defineProperty;/);
+  assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /return new NativeProxy\(storage,/);
   assert.doesNotMatch(loaded.modules["_wdl-do-alarm-shim.js"], /delete out\.__WDL_HOST_BINDINGS_WRAPPED__/);
   const wrapper = loaded.modules["_wdl-do-runtime-wrapper.js"];
   assert.match(wrapper, /import \* as user from "\.\/_wdl-wrapper\.js";/);
   assert.match(wrapper, /import \{ wrapDurableObjectClass \} from "\.\/_wdl-do-alarm-shim\.js";/);
+  assert.ok(
+    wrapper.indexOf('from "./_wdl-do-alarm-shim.js";') <
+      wrapper.indexOf('import * as user from "./_wdl-wrapper.js";')
+  );
   assert.match(wrapper, /export class Room extends wrapDurableObjectClass\(user\.Room, "Room"\)/);
 });
 

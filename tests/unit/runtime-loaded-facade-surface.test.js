@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-shared-module.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 
 const requestIdFromOptionsStub = `const requestIdFromOptions = (options) => {
   if (!options || typeof options !== "object") return null;
@@ -77,4 +78,21 @@ test("loaded R2 facade does not expose the runtime RPC stub handle", () => {
     "put",
     "resumeMultipartUpload",
   ]);
+});
+
+test("loaded D1 and R2 facades use WeakMap intrinsics captured before tenant evaluation", async () => {
+  const fail = () => {
+    throw new Error("tenant WeakMap method was called");
+  };
+  await withMockedProperty(WeakMap.prototype, "get", fail, () =>
+    withMockedProperty(WeakMap.prototype, "has", fail, () =>
+      withMockedProperty(WeakMap.prototype, "set", fail, async () => {
+        const db = new d1Facade.D1Database({ query: async () => ({ results: [] }) });
+        assert.deepEqual(await db.prepare("SELECT 1").all(), { results: [] });
+
+        const bucket = new r2Facade.R2Bucket({ head: async () => null });
+        assert.equal(await bucket.head("key"), null);
+      })
+    )
+  );
 });

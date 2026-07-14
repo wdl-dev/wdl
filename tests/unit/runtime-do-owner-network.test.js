@@ -13,14 +13,14 @@ import {
 } from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
-import { validOwnerEndpointForService } from "../../runtime/_wdl-owner-endpoint.js";
+import { validOwnerEndpointForService } from "../../shared/owner-endpoint.js";
 
-const OWNER_ENDPOINT_URL = repositoryFileUrl("runtime/_wdl-owner-endpoint.js");
+const OWNER_ENDPOINT_URL = repositoryFileUrl("shared/owner-endpoint.js");
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 
 async function loadWorker() {
   const source = applyModuleReplacements(readRepositoryFile("runtime/do-owner-network.js"), [
-    [/from "runtime-owner-endpoint";/g, `from ${JSON.stringify(OWNER_ENDPOINT_URL)};`],
+    [/from "shared-owner-endpoint";/g, `from ${JSON.stringify(OWNER_ENDPOINT_URL)};`],
     [/from "shared-internal-auth";/g, `from ${JSON.stringify(sharedInternalAuthUrl())};`],
   ]);
   return await import(moduleDataUrl(source));
@@ -64,6 +64,7 @@ test("do owner network rejects invalid owner endpoints before forwarding", async
       "http://d1-runtime-a:8787/internal/do/invoke",
       "http://do-runtime-a:8787/internal/do/invoke",
       "http://169.254.169.254:8788/internal/do/invoke",
+      "http://8.8.8.8:8788/internal/do/invoke",
       "http://evil.test:8788/internal/do/invoke",
     ]) {
       const response = await worker.fetch(new Request(url));

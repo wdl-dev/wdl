@@ -56,6 +56,12 @@ test("D1 protocol: db key includes namespace and database id", () => {
   assert.notEqual(dbKeyOf("tenant-a", "main"), dbKeyOf("tenant-b", "main"));
 });
 
+test("D1 protocol: db keys reject non-canonical runtime namespaces and database ids", () => {
+  assert.throws(() => dbKeyOf("admin", "main"), /namespace is invalid/);
+  assert.throws(() => dbKeyOf("tenant-a", "db/child"), /databaseId is invalid/);
+  assert.throws(() => dbKeyOf("tenant-a", "a".repeat(129)), /databaseId is invalid/);
+});
+
 test("D1 protocol: slot hash is stable and bounded", () => {
   const slot = slotOf("tenant-a", "main", 128);
   assert.equal(slot, slotOf("tenant-a", "main", 128));
@@ -386,7 +392,12 @@ test("D1 protocol: invalid request shape throws protocol error", () => {
 });
 
 test("D1 protocol: classifies user-facing errors by category", () => {
-  for (const code of ["owner-lease-too-short", "lease-budget-exhausted"]) {
+  for (const code of [
+    "owner-record-invalid",
+    "owner-endpoint-invalid",
+    "owner-lease-too-short",
+    "lease-budget-exhausted",
+  ]) {
     assert.deepEqual(
       classifyD1Error(new D1ProtocolError(503, code, "lease budget low")),
       {

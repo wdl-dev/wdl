@@ -147,6 +147,16 @@ assets_cdn_domain              = ""
 assets_cdn_acm_certificate_arn = ""
 ```
 
+The application stack accepts at least two pre-existing subnet ids. It validates
+that each subnet belongs to `vpc_id`, uses an RFC1918 or `100.64.0.0/10` IPv4 CIDR,
+and occupies a different Availability Zone so each D1/DO EFS file system creates
+at most one mount target per AZ. The subnet `map_public_ip_on_launch` flag is not a
+private-routing proof; ECS services explicitly disable public task IP assignment.
+Foundation keeps its three-AZ default and applies the same address contract to the
+VPC and every subnet before provisioning. Unsupported ranges or duplicate-AZ
+subnets fail during planning rather than after tasks start claiming owner records
+or creating EFS mount targets.
+
 Initialize the application root with its own `terraform/backend.hcl` and apply:
 
 ```sh
@@ -411,9 +421,8 @@ Manager secrets.
 
 ### Test Hooks
 
-`d1_test_hooks_enabled` and `do_test_hooks_enabled` default to `false` and are
-guarded to test-named compute stacks. Keep both disabled for normal live-ready
-service state.
+`d1_test_hooks_enabled` defaults to `false` and is guarded to test-named compute
+stacks. Keep it disabled for normal live-ready service state.
 
 ## Validation
 

@@ -66,10 +66,10 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-bindings-do", esModule = embed "bindings/do.js"),
     (name = "runtime-bindings-internal-auth-backend", esModule = embed "bindings/internal-auth-backend.js"),
     (name = "runtime-do-transport", esModule = embed "_wdl-do-transport.js"),
-    (name = "runtime-owner-endpoint", esModule = embed "_wdl-owner-endpoint.js"),
-    # _wdl-do-transport.js imports the same helper by relative file path, while
-    # host bindings import it by bare module name. Workerd needs both entries.
-    (name = "_wdl-owner-endpoint.js", esModule = embed "_wdl-owner-endpoint.js"),
+    (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
+    # Injected DO transport uses a relative module name; host modules use the
+    # shared bare name. Both resolve to the same shared contract owner.
+    (name = "_wdl-owner-endpoint.js", esModule = embed "../shared/owner-endpoint.js"),
     (name = "runtime-owner-hint-cache", esModule = embed "_wdl-owner-hint-cache.js"),
     (name = "shared-d1-data-field", esModule = embed "../shared/d1-data-field.js"),
     (name = "shared-d1-params", esModule = embed "../shared/d1-params.js"),
@@ -83,7 +83,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-r2-utils-source", text = embed "r2-utils.js"),
     (name = "runtime-do-client-source", text = embed "do-client.js"),
     (name = "runtime-do-transport-source", text = embed "_wdl-do-transport.js"),
-    (name = "runtime-owner-endpoint-source", text = embed "_wdl-owner-endpoint.js"),
+    (name = "runtime-owner-endpoint-source", text = embed "../shared/owner-endpoint.js"),
     (name = "runtime-owner-hint-cache-source", text = embed "_wdl-owner-hint-cache.js"),
     (name = "runtime-request-id-source", text = embed "_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "workflows-client.js"),
@@ -92,6 +92,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "errors.js", esModule = embed "../shared/errors.js"),
     (name = "shared-errors", esModule = embed "../shared/errors.js"),
     (name = "shared-base64", esModule = embed "../shared/base64.js"),
+    (name = "shared-version", esModule = embed "../shared/version.js"),
     (name = "shared-observability", esModule = embed "../shared/observability.js"),
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-ns-pattern", esModule = embed "../shared/ns-pattern.js"),
@@ -140,7 +141,7 @@ const loaderWorker :Workerd.Worker = (
 const doOwnerNetworkWorker :Workerd.Worker = (
   modules = [
     (name = "worker", esModule = embed "do-owner-network.js"),
-    (name = "runtime-owner-endpoint", esModule = embed "_wdl-owner-endpoint.js"),
+    (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
     (name = "shared-internal-auth", esModule = embed "../shared/internal-auth.js"),
   ],
   compatibilityDate = "2026-04-24",
@@ -158,11 +159,12 @@ const controlWorker :Workerd.Worker = (
     (name = "control-json-body",     esModule = embed "../control/json-body.js"),
     (name = "control-optimistic",    esModule = embed "../control/optimistic.js"),
     (name = "shared-owner-lease",    esModule = embed "../shared/owner-lease.js"),
+    (name = "shared-optimistic-retry", esModule = embed "../shared/optimistic-retry.js"),
     (name = "control-workflows-client", esModule = embed "../control/workflows-client.js"),
     (name = "control-lib",           esModule = embed "../control/lib.js"),
     (name = "control-d1-model",          esModule = embed "../control/d1-model.js"),
     (name = "control-d1-runtime-client", esModule = embed "../control/d1-runtime-client.js"),
-    (name = "runtime-owner-endpoint",    esModule = embed "_wdl-owner-endpoint.js"),
+    (name = "shared-owner-endpoint",     esModule = embed "../shared/owner-endpoint.js"),
     (name = "control-d1-lifecycle",      esModule = embed "../control/d1-lifecycle.js"),
     (name = "control-d1-migrations",     esModule = embed "../control/d1-migrations.js"),
     (name = "control-d1-store",          esModule = embed "../control/d1-store.js"),
@@ -249,7 +251,7 @@ const controlWorker :Workerd.Worker = (
     (name = "runtime-r2-utils-source", text = embed "r2-utils.js"),
     (name = "runtime-do-client-source", text = embed "do-client.js"),
     (name = "runtime-do-transport-source", text = embed "_wdl-do-transport.js"),
-    (name = "runtime-owner-endpoint-source", text = embed "_wdl-owner-endpoint.js"),
+    (name = "runtime-owner-endpoint-source", text = embed "../shared/owner-endpoint.js"),
     (name = "runtime-owner-hint-cache-source", text = embed "_wdl-owner-hint-cache.js"),
     (name = "runtime-request-id-source", text = embed "_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "workflows-client.js"),

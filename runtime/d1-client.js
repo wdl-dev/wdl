@@ -9,6 +9,10 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
 
 const D1_SESSION_CONSTRAINT_FIRST_PRIMARY = "first-primary";
 const D1_SESSION_CONSTRAINT_FIRST_UNCONSTRAINED = "first-unconstrained";
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicWeakMapGet = WeakMap.prototype.get;
+const intrinsicWeakMapHas = WeakMap.prototype.has;
+const intrinsicWeakMapSet = WeakMap.prototype.set;
 
 /**
  * @typedef {string | number | null | undefined | number[]} D1Param
@@ -92,10 +96,25 @@ const databaseState = /** @type {WeakMap<object, D1DatabaseState>} */ (new WeakM
 const sessionState = /** @type {WeakMap<object, D1SessionState>} */ (new WeakMap());
 const statementState = /** @type {WeakMap<object, D1StatementState>} */ (new WeakMap());
 
+/** @param {WeakMap<object, unknown>} map @param {object} key */
+function weakMapGet(map, key) {
+  return intrinsicReflectApply(intrinsicWeakMapGet, map, [key]);
+}
+
+/** @param {WeakMap<object, unknown>} map @param {object} key */
+function weakMapHas(map, key) {
+  return intrinsicReflectApply(intrinsicWeakMapHas, map, [key]);
+}
+
+/** @param {WeakMap<object, unknown>} map @param {object} key @param {unknown} value */
+function weakMapSet(map, key, value) {
+  intrinsicReflectApply(intrinsicWeakMapSet, map, [key, value]);
+}
+
 /** @param {object} dbOrSession */
 function rootDatabase(dbOrSession) {
-  if (databaseState.has(dbOrSession)) return dbOrSession;
-  const session = sessionState.get(dbOrSession);
+  if (weakMapHas(databaseState, dbOrSession)) return dbOrSession;
+  const session = /** @type {D1SessionState | undefined} */ (weakMapGet(sessionState, dbOrSession));
   if (session) return session.db;
   throw new D1Error("D1_ERROR: invalid D1 database/session object", {
     code: "invalid-database",
@@ -105,14 +124,14 @@ function rootDatabase(dbOrSession) {
 
 /** @param {object} db */
 function requestIdFor(db) {
-  const state = databaseState.get(db);
+  const state = /** @type {D1DatabaseState | undefined} */ (weakMapGet(databaseState, db));
   if (!state) return null;
   return requestIdFromOptions(state.requestIdOptions);
 }
 
 /** @param {object} statement */
 function serializeStatement(statement) {
-  const state = statementState.get(statement);
+  const state = /** @type {D1StatementState | undefined} */ (weakMapGet(statementState, statement));
   if (!state) {
     throw new D1Error("D1_ERROR: batch() expects D1PreparedStatement values", {
       code: "invalid-batch",
@@ -143,7 +162,7 @@ function prepareFor(dbOrSession, statement) {
  */
 async function sendFor(dbOrSession, mode, statements) {
   const db = rootDatabase(dbOrSession);
-  const state = databaseState.get(db);
+  const state = /** @type {D1DatabaseState | undefined} */ (weakMapGet(databaseState, db));
   if (!state) throw new D1Error("D1_ERROR: invalid D1 database object", {
     code: "invalid-database",
     category: "invalid-request",
@@ -181,7 +200,7 @@ async function batchFor(dbOrSession, statements) {
   /** @type {SerializedStatement[]} */
   const serialized = [];
   for (const statement of statements) {
-    const state = statementState.get(statement);
+    const state = /** @type {D1StatementState | undefined} */ (weakMapGet(statementState, statement));
     if (!state) {
       throw new D1Error("D1_ERROR: batch() expects D1PreparedStatement values", {
         code: "invalid-batch",
@@ -208,13 +227,13 @@ export class D1PreparedStatement {
    * @param {object} [owner]
    */
   constructor(dbOrSession, statement, params = [], owner = dbOrSession) {
-    statementState.set(this, { dbOrSession, statement, params, owner });
+    weakMapSet(statementState, this, { dbOrSession, statement, params, owner });
   }
 
   /** @param {...unknown} values */
   bind(...values) {
     try {
-      const state = statementState.get(this);
+      const state = /** @type {D1StatementState | undefined} */ (weakMapGet(statementState, this));
       if (!state) throw new Error("invalid prepared statement");
       return new D1PreparedStatement(
         state.dbOrSession,
@@ -232,7 +251,7 @@ export class D1PreparedStatement {
 
   /** @param {string} [columnName] */
   async first(columnName) {
-    const state = statementState.get(this);
+    const state = /** @type {D1StatementState | undefined} */ (weakMapGet(statementState, this));
     if (!state) throw new D1Error("D1_ERROR: invalid prepared statement", {
       code: "invalid-statement",
       category: "invalid-request",
@@ -255,7 +274,7 @@ export class D1PreparedStatement {
   }
 
   async run() {
-    const state = statementState.get(this);
+    const state = /** @type {D1StatementState | undefined} */ (weakMapGet(statementState, this));
     if (!state) throw new D1Error("D1_ERROR: invalid prepared statement", {
       code: "invalid-statement",
       category: "invalid-request",
@@ -264,7 +283,7 @@ export class D1PreparedStatement {
   }
 
   async all() {
-    const state = statementState.get(this);
+    const state = /** @type {D1StatementState | undefined} */ (weakMapGet(statementState, this));
     if (!state) throw new D1Error("D1_ERROR: invalid prepared statement", {
       code: "invalid-statement",
       category: "invalid-request",
@@ -274,7 +293,7 @@ export class D1PreparedStatement {
 
   /** @param {{ columnNames?: boolean }} [options] */
   async raw(options = {}) {
-    const state = statementState.get(this);
+    const state = /** @type {D1StatementState | undefined} */ (weakMapGet(statementState, this));
     if (!state) throw new D1Error("D1_ERROR: invalid prepared statement", {
       code: "invalid-statement",
       category: "invalid-request",
@@ -297,7 +316,7 @@ export class D1DatabaseSession {
    */
   constructor(db, constraintOrBookmark = D1_SESSION_CONSTRAINT_FIRST_UNCONSTRAINED) {
     const normalized = String(constraintOrBookmark ?? "").trim() || D1_SESSION_CONSTRAINT_FIRST_UNCONSTRAINED;
-    sessionState.set(this, { db, bookmarkOrConstraint: normalized });
+    weakMapSet(sessionState, this, { db, bookmarkOrConstraint: normalized });
   }
 
   /** @param {unknown} statement */
@@ -311,7 +330,7 @@ export class D1DatabaseSession {
   }
 
   getBookmark() {
-    const state = sessionState.get(this);
+    const state = /** @type {D1SessionState | undefined} */ (weakMapGet(sessionState, this));
     if (!state) return null;
     const { bookmarkOrConstraint } = state;
     if (
@@ -330,7 +349,7 @@ export class D1Database {
    * @param {{ requestId?: unknown, requestIdProvider?: unknown }} [options]
    */
   constructor(stub, options = {}) {
-    databaseState.set(this, {
+    weakMapSet(databaseState, this, {
       stub,
       requestIdOptions: options,
     });

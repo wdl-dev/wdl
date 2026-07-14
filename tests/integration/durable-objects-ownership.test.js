@@ -384,8 +384,8 @@ test("do-runtime replicas forward a sharded object owner scope instead of splitt
       worker: "counter",
       doStorageId,
       className: "Counter",
-      taskId: "stale-task",
-      endpoint: "stale-task:8788",
+      taskId: "missing-owner",
+      endpoint: "do-runtime-missing:8788",
       generation: 42,
       leaseExpiresAt: Date.now() - 1000,
     });

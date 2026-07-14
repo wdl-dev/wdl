@@ -10,7 +10,7 @@ const VERSION_RE = /^v([1-9][0-9]*)$/;
  * @returns {string}
  */
 export function formatVersion(n) {
-  if (typeof n !== "number" || !Number.isInteger(n) || n < 1) {
+  if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 1) {
     throw new Error(`invalid version number ${n}`);
   }
   return `v${n}`;
@@ -24,7 +24,9 @@ export function formatVersion(n) {
 export function parseVersion(tag) {
   if (typeof tag !== "string") return null;
   const m = tag.match(VERSION_RE);
-  return m ? Number.parseInt(m[1], 10) : null;
+  if (!m) return null;
+  const parsed = Number.parseInt(m[1], 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 // `v:` infix separates the integer-indexed bundle namespace from sibling

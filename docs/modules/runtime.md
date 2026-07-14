@@ -156,7 +156,9 @@ Service bindings are frozen at caller deploy time. Control resolves target names
 worker, version, and entrypoint, stores them in caller metadata, and runtime loads that
 exact target version on first use. Promoting the target later does not move existing
 callers; caller redeploy is the refresh boundary. This version pinning makes rollback
-and version delete referrer checks deterministic.
+and version delete referrer checks deterministic. Runtime revalidates the persisted
+pinned version with the canonical positive JavaScript-safe-integer grammar before
+materializing the binding.
 
 Cross-namespace service bindings require a target `[[exports]]` entry for the bound
 entrypoint, including `entrypoint = "default"` for the default export. The entry's

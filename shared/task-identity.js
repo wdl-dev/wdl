@@ -15,6 +15,7 @@ const DEFAULT_IDENTITY_TIMEOUT_MS = 1000;
  *   serviceLabel: string,
  *   unavailableCode: string,
  *   createError: ErrorFactory,
+ *   validateEndpoint?: (endpoint: string, port: number) => boolean,
  * }} TaskIdentityResolverOptions
  * @typedef {Record<string, unknown>} EnvLike
  */
@@ -55,6 +56,7 @@ export function createTaskIdentityResolver({
   serviceLabel,
   unavailableCode,
   createError,
+  validateEndpoint = undefined,
 }) {
   /** @type {TaskIdentity | null} */
   let cachedIdentity = null;
@@ -69,13 +71,12 @@ export function createTaskIdentityResolver({
     return createError(503, unavailableCode, message);
   }
 
-  /**
-   * @param {EnvLike} env
-   * @returns {number}
-   */
-  function taskPort(env) {
-    const raw = Number(envValueOr(env[`${envPrefix}_TASK_PORT`], defaultPort));
-    return Number.isFinite(raw) && raw > 0 ? raw : defaultPort;
+  /** @param {TaskIdentity} identity */
+  function requireValidEndpoint(identity) {
+    if (validateEndpoint?.(identity.endpoint, defaultPort) === false) {
+      throw error(`${serviceLabel} task endpoint is invalid`);
+    }
+    return identity;
   }
 
   /**
@@ -140,7 +141,7 @@ export function createTaskIdentityResolver({
     if (!taskId || !endpoint) {
       throw error(`${envPrefix}_TASK_ID and ${envPrefix}_TASK_ENDPOINT must be configured together`);
     }
-    return { taskId, endpoint, source: "env" };
+    return requireValidEndpoint({ taskId, endpoint, source: "env" });
   }
 
   /**
@@ -154,11 +155,11 @@ export function createTaskIdentityResolver({
     if (!taskId) throw error("ECS task metadata did not include TaskARN");
     const privateIpv4 = firstPrivateIpv4(metadata, env);
     if (!privateIpv4) throw error("ECS task metadata did not include a private IPv4 address");
-    return {
+    return requireValidEndpoint({
       taskId,
-      endpoint: `${privateIpv4}:${taskPort(env)}`,
+      endpoint: `${privateIpv4}:${defaultPort}`,
       source: "ecs-metadata",
-    };
+    });
   }
 
   /**

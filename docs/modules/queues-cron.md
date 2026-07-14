@@ -36,6 +36,12 @@ Scheduler owns runtime delivery:
 - Cron code lives under `rust/scheduler/src/cron/`.
 - Queue registry, consume, delayed delivery, DLQ, and orphan handling live under
   `rust/scheduler/src/queue/`.
+- Before constructing a cron runtime worker id, scheduler revalidates the projection's
+  route namespace, worker name, and version with the canonical `wdl-rust-common`
+  grammar. Invalid cron refs are removed before slot advance or runtime dispatch, and
+  cron sweep does not recreate refs from malformed worker metadata. Queue consumer
+  projections remain trusted Control-owned internal state; scheduler does not add a
+  second worker identity/version validator for unsupported direct Redis writes.
 - Scheduler defaults to one replica in deployment, and current dispatch paths are
   multi-replica safe. Extra replicas improve runtime concurrency but do not imply
   zero-gap deployment: production rollout may still use stop-before-start semantics and
@@ -91,7 +97,9 @@ Cron uses wall-clock minute slots:
    computes each entry's next fire time with croner and the configured timezone, rounds
    it to the minute slot, and writes refs into slot buckets. This is repair logic, not
    the authority. Control uses JavaScript `croner` only for the initial promote-time
-   slot placement; scheduler uses Rust `croner` for repair and advancement.
+   slot placement; scheduler uses Rust `croner` for repair and advancement. Worker
+   hashes without canonical identity or metadata are skipped instead of reseeding
+   invalid refs, and emit a bounded `invalid_identity` or `invalid_meta` reason.
 3. Cron refs carry the entry generation. At fire time scheduler re-reads
    `crons:<ns>:<worker>` and compares `gen`; missing metadata, corrupt JSON, or
    generation mismatch makes the ref stale and removes it from the slot.
@@ -260,8 +268,10 @@ Important cron signals:
 - `cron_queue_lag_ms{outcome=...}`
 - `cron_bucket_size`
 - `cron_stale_refs_cleaned`
+- `cron_sweep_entries_skipped`
+- `cron_sweep_workers_skipped`
 - Logs: `cron_fired`, `cron_lease_lost`, `cron_ref_stale`, `cron_ref_stale_advanced`,
-  `cron_reconcile`
+  `cron_sweep_entry_skipped`, `cron_sweep_worker_skipped`, `cron_reconcile`
 
 Important queue signals:
 

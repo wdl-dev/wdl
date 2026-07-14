@@ -19,7 +19,7 @@ import {
 } from "shared-d1-query-wire";
 import { metrics } from "runtime-metrics";
 import { createOwnerHintCache } from "runtime-owner-hint-cache";
-import { validOwnerEndpointForService } from "runtime-owner-endpoint";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { withInternalAuth } from "shared-internal-auth";
 import { errorMessage } from "shared-errors";
@@ -33,7 +33,9 @@ const OWNER_HINT_STALE_CODES = new Set([
   "not-owner",
   "owner-not-ready",
   "owner-unavailable",
+  "owner-record-invalid",
   "owner-endpoint-missing",
+  "owner-endpoint-invalid",
   "forward-hop-exhausted",
   "owner-claim-raced",
   "owner-takeover-raced",
@@ -147,8 +149,8 @@ function ownerHintFromHeaders(headers) {
   if (
     !taskId ||
     !validOwnerEndpointForService(endpoint, 8787, "d1-runtime") ||
-    !Number.isInteger(generation) ||
-    generation < 0
+    !Number.isSafeInteger(generation) ||
+    generation <= 0
   ) {
     return null;
   }

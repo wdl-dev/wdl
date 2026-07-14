@@ -12,8 +12,10 @@ import {
 } from "../helpers/load-shared-module.js";
 import { runtimeProxyBindingStubUrl, sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
-const OWNER_ENDPOINT_URL = repositoryFileUrl("runtime/_wdl-owner-endpoint.js");
+const OWNER_ENDPOINT_URL = repositoryFileUrl("shared/owner-endpoint.js");
 const STALE_OWNER_HINT_ERRORS = [
+  "owner-record-invalid",
+  "owner-endpoint-invalid",
   "task-draining",
   "owner-lease-expired",
   "owner-lease-too-short",
@@ -94,7 +96,7 @@ const stubSourceReplacements = [
   ],
   [/import \{ createOwnerHintCache \} from "runtime-owner-hint-cache";/g, ownerHintCacheSource],
   [
-    /import \{ validOwnerEndpointForService \} from "runtime-owner-endpoint";/g,
+    /import \{ validOwnerEndpointForService \} from "shared-owner-endpoint";/g,
     `import { validOwnerEndpointForService } from ${JSON.stringify(OWNER_ENDPOINT_URL)};`,
   ],
   [/from "runtime-bindings-proxy";/g, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
@@ -304,80 +306,31 @@ test("D1 runtime stub: learned owner hints survive new binding instances", async
   });
 });
 
-test("D1 runtime stub: owner hints preserve zero and reject fractional generations", async () => {
-  const { db, makeDb, calls } = makeRuntimeDb(() => d1Response({
-    success: true,
-    results: [{ via: "router" }],
-  }, {
-    headers: {
-      "x-wdl-d1-owner-task-id": "task-a",
-      "x-wdl-d1-owner-endpoint": "d1-runtime-a:8787",
-      "x-wdl-d1-owner-generation": "0",
-    },
-  }));
-  await db.query("all", [{ sql: "select 1", params: [] }]);
+test("D1 runtime stub rejects non-canonical owner generations", async () => {
+  for (const rawGeneration of ["0", "1.5", "9007199254740992", null]) {
+    clearD1OwnerHintsForTest();
+    const fixture = makeRuntimeDb(() => d1Response({
+      success: true,
+      results: [{ via: "router" }],
+    }, {
+      headers: {
+        "x-wdl-d1-owner-task-id": "task-a",
+        "x-wdl-d1-owner-endpoint": "d1-runtime-a:8787",
+        ...(rawGeneration == null ? {} : { "x-wdl-d1-owner-generation": rawGeneration }),
+      },
+    }));
+    await fixture.db.query("all", [{ sql: "select 1", params: [] }]);
 
-  /** @type {string[]} */
-  const directCalls = [];
-  await withMockedFetch(async (/** @type {any} */ url) => {
-    directCalls.push(String(url));
-    return d1Response({ success: true, results: [{ via: "owner" }] });
-  }, async () => {
-    await makeDb().query("all", [{ sql: "select 2", params: [] }]);
-  });
-  assert.equal(calls.length, 1);
-  assert.deepEqual(directCalls, ["http://d1-runtime-a:8787/internal/d1/query"]);
-
-  clearD1OwnerHintsForTest();
-  const bad = makeRuntimeDb(() => d1Response({
-    success: true,
-    results: [],
-  }, {
-    headers: {
-      "x-wdl-d1-owner-task-id": "task-b",
-      "x-wdl-d1-owner-endpoint": "d1-runtime-b:8787",
-      "x-wdl-d1-owner-generation": "1.5",
-    },
-  }));
-  await bad.db.query("all", [{ sql: "select 3", params: [] }]);
-  let unexpectedFractionalFetchCalled = false;
-  await withMockedFetch(async () => {
-    unexpectedFractionalFetchCalled = true;
-    return d1Response({ success: true, results: [] });
-  }, async () => {
-    await bad.makeDb().query("all", [{ sql: "select 4", params: [] }]);
-  });
-  assert.equal(
-    unexpectedFractionalFetchCalled,
-    false,
-    "expected no direct fetch for fractional generation, but fetch was called"
-  );
-  assert.equal(bad.calls.length, 2);
-
-  clearD1OwnerHintsForTest();
-  const missing = makeRuntimeDb(() => d1Response({
-    success: true,
-    results: [],
-  }, {
-    headers: {
-      "x-wdl-d1-owner-task-id": "task-c",
-      "x-wdl-d1-owner-endpoint": "d1-runtime-c:8787",
-    },
-  }));
-  await missing.db.query("all", [{ sql: "select 5", params: [] }]);
-  let unexpectedMissingGenerationFetchCalled = false;
-  await withMockedFetch(async () => {
-    unexpectedMissingGenerationFetchCalled = true;
-    return d1Response({ success: true, results: [] });
-  }, async () => {
-    await missing.makeDb().query("all", [{ sql: "select 6", params: [] }]);
-  });
-  assert.equal(
-    unexpectedMissingGenerationFetchCalled,
-    false,
-    "expected no direct fetch without owner generation, but fetch was called"
-  );
-  assert.equal(missing.calls.length, 2);
+    let unexpectedDirectFetch = false;
+    await withMockedFetch(async () => {
+      unexpectedDirectFetch = true;
+      return d1Response({ success: true, results: [{ via: "owner" }] });
+    }, async () => {
+      await fixture.makeDb().query("all", [{ sql: "select 2", params: [] }]);
+    });
+    assert.equal(unexpectedDirectFetch, false, String(rawGeneration));
+    assert.equal(fixture.calls.length, 2, String(rawGeneration));
+  }
 });
 
 test("D1 runtime stub: accepts Kubernetes headless owner endpoints", async () => {

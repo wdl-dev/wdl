@@ -5,16 +5,22 @@ import {
   applyModuleReplacements,
   moduleDataUrl,
   readRepositoryFile,
+  repositoryFileUrl,
   sharedModuleDataUrl,
 } from "../helpers/load-shared-module.js";
 import { doProtocolDataUrl } from "../helpers/load-do-protocol.js";
 
 const PROTOCOL_URL = doProtocolDataUrl();
 const SHARED_TASK_IDENTITY_URL = sharedModuleDataUrl("shared/task-identity.js");
+const SHARED_OWNER_ENDPOINT_URL = repositoryFileUrl("shared/owner-endpoint.js");
 const src = applyModuleReplacements(readRepositoryFile("do-runtime/task-identity.js"), [
   [
     /import \{ createTaskIdentityResolver \} from "shared-task-identity";/,
     `import { createTaskIdentityResolver } from ${JSON.stringify(SHARED_TASK_IDENTITY_URL)};`,
+  ],
+  [
+    /import \{ validOwnerEndpointForService \} from "shared-owner-endpoint";/,
+    `import { validOwnerEndpointForService } from ${JSON.stringify(SHARED_OWNER_ENDPOINT_URL)};`,
   ],
   [
     /import \{ DoRuntimeError \} from "do-runtime-protocol";/,
@@ -65,6 +71,13 @@ test("DO task identity: env task id and endpoint win", async () => {
   });
 });
 
+test("DO task identity: public owner endpoints are rejected", () => {
+  assert.throws(
+    () => taskIdentityFromEnv({ DO_TASK_ID: "task-a", DO_TASK_ENDPOINT: "8.8.8.8:8788" }),
+    (err) => isRuntimeError(err, 503, "task_identity_unavailable")
+  );
+});
+
 test("DO task identity: partial env identity is rejected", () => {
   assert.throws(
     () => taskIdentityFromEnv({ DO_TASK_ID: "task-only" }),
@@ -81,11 +94,11 @@ test("DO task identity: ECS metadata yields task arn and private IPv4 endpoint",
         Networks: [{ IPv4Addresses: ["10.0.42.17"] }],
       },
     ],
-  }, { DO_TASK_PORT: "9798" });
+  });
 
   assert.deepEqual(identity, {
     taskId: "arn:aws:ecs:us-east-1:123456789012:task/cluster/abc",
-    endpoint: "10.0.42.17:9798",
+    endpoint: "10.0.42.17:8788",
     source: "ecs-metadata",
   });
 });

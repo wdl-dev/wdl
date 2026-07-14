@@ -133,10 +133,11 @@ Key families:
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
   `/internal/workflows/tick` endpoint; scheduler never reads or writes DO alarm state
   directly.
-- Workflows revalidates persisted DO alarm namespace, worker, and version identity with
-  the `wdl-rust-common` owners before dispatch. Runtime run dispatch and progress
-  callbacks share one system-vs-user runtime endpoint selector inside the workflows
-  crate.
+- Workflows rejects non-canonical worker versions before persisting DO alarm jobs,
+  revalidates persisted alarm identity before dispatch, and validates an active route
+  version before using it as a retarget. These checks use the `wdl-rust-common` owners.
+  Runtime run dispatch and progress callbacks share one system-vs-user runtime endpoint
+  selector inside the workflows crate.
 - 32 scheduling shards partition ready/due work.
 - Ready tokens are deduplicated hints; instance hash state is authority.
 - Execution commits are fenced by `generation`, `runToken`, active instance status, and
@@ -184,6 +185,9 @@ canonicalizes against the current active route before writing DB 2, so new durab
 business processes start on the active version. Existing instances replay against their
 stored `frozenVersion`; promotion does not change their code. Worker-version delete is
 blocked by `wf:by-version` while non-expired instances still reference the version.
+Runtime validates every dispatched `frozenVersion` with the same positive
+JavaScript-safe-integer version parser used by bundle keys; malformed persisted tags
+fail before worker loading.
 
 Scheduling is hint-based but state-authoritative:
 

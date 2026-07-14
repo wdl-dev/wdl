@@ -1,4 +1,4 @@
-import { validOwnerEndpointForService } from "runtime-owner-endpoint";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import { withInternalAuth } from "shared-internal-auth";
 
 /**

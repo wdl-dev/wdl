@@ -79,9 +79,7 @@ resource "aws_ecs_task_definition" "do_runtime" {
         { name = "DO_TASK_CONTAINER_NAME", value = "do-runtime" },
         { name = "DO_OWNER_TTL_SECONDS", value = "120" },
         { name = "D1_QUERY_TIMEOUT_MS", value = "30000" },
-        ], var.do_test_hooks_enabled ? [
-        { name = "DO_TEST_HOOKS", value = "1" },
-      ] : [], local.r2_s3_env)
+      ], local.r2_s3_env)
 
       secrets = concat([
         { name = "R2_S3_ACCESS_KEY_ID", valueFrom = "${var.runtime_r2_secret_arn}:access_key_id::" },
@@ -116,10 +114,6 @@ resource "aws_ecs_task_definition" "do_runtime" {
       error_message = "do_runtime_container_memory must leave task-level memory reservation for the redis-proxy sidecar and additional task headroom."
     }
 
-    precondition {
-      condition     = !var.do_test_hooks_enabled || can(regex("(^|-)test($|-)", var.name))
-      error_message = "do_test_hooks_enabled may only be enabled for test-named compute stacks."
-    }
   }
 }
 

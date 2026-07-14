@@ -1,4 +1,5 @@
 import { envValueOr } from "shared-env";
+import { withOptimisticRetries } from "shared-optimistic-retry";
 
 const utf8Decoder = new TextDecoder();
 const OWNER_GENERATION_COUNTER = /^(?:0|[1-9]\d*)$/;
@@ -44,7 +45,7 @@ export function parseOwnerRecord(raw) {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const record = /** @type {Record<string, unknown>} */ (parsed);
-  if (!Number.isInteger(record.generation) || /** @type {number} */ (record.generation) < 0) {
+  if (!Number.isSafeInteger(record.generation) || /** @type {number} */ (record.generation) <= 0) {
     return null;
   }
   if (
@@ -127,7 +128,11 @@ export async function currentOwnerGenerationCounter(session, generationKey) {
  */
 export async function nextOwnerGeneration(session, generationKey, currentGeneration = 0) {
   const currentCounter = await currentOwnerGenerationCounter(session, generationKey);
-  return Math.max(currentCounter + 1, currentGeneration + 1);
+  const previousGeneration = Math.max(currentCounter, currentGeneration);
+  if (!Number.isSafeInteger(previousGeneration) || previousGeneration >= Number.MAX_SAFE_INTEGER) {
+    throw new Error(`Owner generation counter is exhausted: ${generationKey}`);
+  }
+  return previousGeneration + 1;
 }
 
 /**
@@ -142,41 +147,6 @@ export function boundedPositiveIntEnv(env, name, fallback, max) {
   if (!Number.isFinite(raw) || raw <= 0) return fallback;
   const upper = Number.isFinite(max) && max > 0 ? Math.trunc(max) : Infinity;
   return Math.max(1, Math.min(Math.trunc(raw), upper));
-}
-
-/**
- * @template T
- * @param {(attempt: number) => Promise<T>} operation
- * @param {{
- *   attempts: number,
- *   isRetryableError?: (err: unknown) => boolean,
- *   onRetryableError?: (err: unknown, attempt: number) => void,
- *   shouldRetryResult?: (result: T, attempt: number) => boolean,
- *   onExhausted: () => T | Promise<T>,
- * }} options
- * @returns {Promise<T>}
- */
-export async function withOptimisticRetries(operation, {
-  attempts,
-  isRetryableError = () => false,
-  onRetryableError,
-  shouldRetryResult,
-  onExhausted,
-}) {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      const result = await operation(attempt);
-      if (shouldRetryResult?.(result, attempt)) continue;
-      return result;
-    } catch (err) {
-      if (isRetryableError(err)) {
-        onRetryableError?.(err, attempt);
-        continue;
-      }
-      throw err;
-    }
-  }
-  return await onExhausted();
 }
 
 /**

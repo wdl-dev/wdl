@@ -83,7 +83,7 @@ Key families：
 - Instance 冻结创建时的 worker version/class identity。
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。
 - Scheduler 也通过同一个 `/internal/workflows/tick` endpoint 唤醒 Workflows-owned internal DO alarm jobs；scheduler 不直接读写 DO alarm state。
-- Workflows 在 dispatch 前用 `wdl-rust-common` owner 重新校验持久化 DO alarm 的 namespace、worker 和 version identity。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
+- Workflows 在持久化 DO alarm job 前拒绝 non-canonical worker version，在 dispatch 前重新校验持久化 alarm identity，并在把 active route 用作 retarget 前校验其 version。这些检查共用 `wdl-rust-common` owner。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
 - 32 个 scheduling shards 划分 ready/due work。
 - Ready token 是去重 hint；instance hash state 是权威状态。
 - Execution commit 同时用 `generation`、`runToken`、active instance status 和未过期 run lease fence。Step commit/register 接受同一 run 的 `running` 或 `waiting` 状态，因此一个并行 sibling 进入 retry/wait 后，另一个 sibling 仍可完成；completed runtime terminal 要求 `running`，failed runtime terminal 在 run lease 仍有效时也可以关闭由非法未 await suspending step 造成的同一 run `waiting` 状态。如果 lease 已过期，workflows 只恢复 ready hint，让下一次 claim 在新 lease 下 replay。Lifecycle commit 只用 generation fence，并在同一个 Lua commit 内 rotate `generation`。
@@ -98,7 +98,7 @@ Workflow execution 使用两条 channel：
 1. Loaded worker 通过 reserved `__WDL_WORKFLOWS_BACKEND__` Fetcher binding 调 workflows。Runtime 从 bundle metadata 附加 identity；workflows 不信任 tenant body 中的 namespace、worker、version、workflow key、class 或 instance identity。
 2. workflows 把已 claim 的 run dispatch 回 runtime `:8088` 上的 `/internal/workflows/run`。Runtime 加载 frozen worker version 并调用 `className.run(event, stepFacade)`。
 
-Create/restart 与 replay 的 version pinning 不同。新的 `create()` 或 `restart()` 写 DB 2 前会按当前 active route canonicalize，因此新的 durable business process 从 active version 开始。已有 instance 使用自己存的 `frozenVersion` replay；promotion 不会改变它的代码。只要 non-expired instance 仍引用某个 version，`wf:by-version` 就会阻止 worker-version delete。
+Create/restart 与 replay 的 version pinning 不同。新的 `create()` 或 `restart()` 写 DB 2 前会按当前 active route canonicalize，因此新的 durable business process 从 active version 开始。已有 instance 使用自己存的 `frozenVersion` replay；promotion 不会改变它的代码。只要 non-expired instance 仍引用某个 version，`wf:by-version` 就会阻止 worker-version delete。Runtime 会用 bundle key 共用的正 JavaScript-safe-integer version parser 校验每个 dispatch 的 `frozenVersion`；malformed persisted tag 会在加载 worker 前失败。
 
 Scheduling 是 hint-based，但状态权威在 instance hash：
 

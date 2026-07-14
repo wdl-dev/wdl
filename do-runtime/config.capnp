@@ -63,10 +63,10 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "runtime-bindings-do", esModule = embed "../runtime/bindings/do.js"),
     (name = "runtime-bindings-internal-auth-backend", esModule = embed "../runtime/bindings/internal-auth-backend.js"),
     (name = "runtime-do-transport", esModule = embed "../runtime/_wdl-do-transport.js"),
-    (name = "runtime-owner-endpoint", esModule = embed "../runtime/_wdl-owner-endpoint.js"),
-    # _wdl-do-transport.js imports the same helper by relative file path, while
-    # host bindings import it by bare module name. Workerd needs both entries.
-    (name = "_wdl-owner-endpoint.js", esModule = embed "../runtime/_wdl-owner-endpoint.js"),
+    (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
+    # Injected DO transport uses a relative module name; host modules use the
+    # shared bare name. Both resolve to the same shared contract owner.
+    (name = "_wdl-owner-endpoint.js", esModule = embed "../shared/owner-endpoint.js"),
     (name = "runtime-owner-hint-cache", esModule = embed "../runtime/_wdl-owner-hint-cache.js"),
     (name = "runtime-metrics", esModule = embed "../runtime/metrics.js"),
     (name = "runtime-state", esModule = embed "../runtime/runtime.js"),
@@ -80,7 +80,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "runtime-r2-utils-source", text = embed "../runtime/r2-utils.js"),
     (name = "runtime-do-client-source", text = embed "../runtime/do-client.js"),
     (name = "runtime-do-transport-source", text = embed "../runtime/_wdl-do-transport.js"),
-    (name = "runtime-owner-endpoint-source", text = embed "../runtime/_wdl-owner-endpoint.js"),
+    (name = "runtime-owner-endpoint-source", text = embed "../shared/owner-endpoint.js"),
     (name = "runtime-owner-hint-cache-source", text = embed "../runtime/_wdl-owner-hint-cache.js"),
     (name = "runtime-request-id-source", text = embed "../runtime/_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "../runtime/workflows-client.js"),
@@ -98,6 +98,7 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-owner-forwarder", esModule = embed "../shared/owner-forwarder.js"),
     (name = "shared-owner-lease", esModule = embed "../shared/owner-lease.js"),
+    (name = "shared-optimistic-retry", esModule = embed "../shared/optimistic-retry.js"),
     (name = "shared-owner-protocol", esModule = embed "../shared/owner-protocol.js"),
     (name = "shared-redis", esModule = embed "../shared/redis.js"),
     (name = "shared-redis-command-client", esModule = embed "../shared/redis-command-client.js"),
@@ -152,7 +153,6 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "R2_S3_REGION", fromEnvironment = "R2_S3_REGION"),
     (name = "DO_TASK_ID", fromEnvironment = "DO_TASK_ID"),
     (name = "DO_TASK_ENDPOINT", fromEnvironment = "DO_TASK_ENDPOINT"),
-    (name = "DO_TASK_PORT", fromEnvironment = "DO_TASK_PORT"),
     (name = "DO_TASK_IDENTITY_TIMEOUT_MS", fromEnvironment = "DO_TASK_IDENTITY_TIMEOUT_MS"),
     (name = "DO_TASK_CONTAINER_NAME", fromEnvironment = "DO_TASK_CONTAINER_NAME"),
     (name = "ECS_CONTAINER_METADATA_URI_V4", fromEnvironment = "ECS_CONTAINER_METADATA_URI_V4"),
@@ -160,7 +160,6 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "DO_OWNER_LEASE_GUARD_MS", fromEnvironment = "DO_OWNER_LEASE_GUARD_MS"),
     (name = "DO_RENEW_CONCURRENCY", fromEnvironment = "DO_RENEW_CONCURRENCY"),
     (name = "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS", fromEnvironment = "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS"),
-    (name = "DO_TEST_HOOKS", fromEnvironment = "DO_TEST_HOOKS"),
     (name = "LOG_LEVEL", fromEnvironment = "LOG_LEVEL"),
   ],
 );

@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
+  readRepositoryJson,
   readRepositoryModuleSource,
   repositoryFileUrl,
   repositoryModuleDataUrl,
@@ -33,8 +34,12 @@ const SHARED_REDIS_URL = sharedRedisStubUrl();
 const { libUrl: CONTROL_LIB_URL } = await compileControlGraph();
 const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl(
   "runtime/load/env-build.js",
-  importSpecifierReplacements({ "shared-ns-pattern": SHARED_NS_PATTERN_URL })
+  importSpecifierReplacements({
+    "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+    "shared-version": SHARED_VERSION_URL,
+  })
 );
+const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 const FETCH_STUB = { fetch() {} };
 const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "control-lib": CONTROL_LIB_URL,
@@ -104,6 +109,7 @@ const LOAD_TEST_RUNTIME_DIR = path.join(LOAD_TEST_DIR, "runtime");
 const LOAD_TEST_SUBMODULE_DIR = path.join(LOAD_TEST_RUNTIME_DIR, "load");
 const ENV_BUILD_SOURCE = readRepositoryModuleSource("runtime/load/env-build.js", importSpecifierReplacements({
   "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+  "shared-version": SHARED_VERSION_URL,
 }));
 mkdirSync(LOAD_TEST_SUBMODULE_DIR, { recursive: true });
 writeFileSync(path.join(LOAD_TEST_RUNTIME_DIR, "load.js"), src);
@@ -757,7 +763,36 @@ test("buildWorkerEnv: D1 binding requires databaseId", () => {
         "https://assets.example",
         makeCtx()
       ),
-    /D1 binding but missing databaseId/
+    /D1 binding but has invalid databaseId/
+  );
+});
+
+test("buildWorkerEnv: D1 bindings revalidate namespace and database id grammar", () => {
+  assert.throws(
+    () => buildWorkerEnv(
+      { bindings: { DB: { type: "d1", databaseId: "db/child" } } },
+      {},
+      {},
+      "demo",
+      "app",
+      "v1",
+      "https://assets.example",
+      makeCtx()
+    ),
+    /invalid databaseId/
+  );
+  assert.throws(
+    () => buildWorkerEnv(
+      { bindings: { DB: { type: "d1", databaseId: "main" } } },
+      {},
+      {},
+      "admin",
+      "app",
+      "v1",
+      "https://assets.example",
+      makeCtx()
+    ),
+    /invalid namespace/
   );
 });
 
@@ -793,6 +828,26 @@ test("buildWorkerEnv: service binding requires service and version", () => {
       ),
     /service binding but missing service\/version/
   );
+});
+
+test("buildWorkerEnv: stored service binding versions match the shared fixture", () => {
+  for (const { tag, parsed } of versionFixture.cases) {
+    if (parsed != null || tag === "") continue;
+    assert.throws(
+      () => buildWorkerEnv(
+        { bindings: { AUTH: { type: "service", service: "auth", version: tag } } },
+        {},
+        {},
+        "demo",
+        "app",
+        "v1",
+        "https://assets.example",
+        makeCtx()
+      ),
+      /service binding but has invalid version/,
+      tag
+    );
+  }
 });
 
 test("buildWorkerEnv: stored service binding cannot target runtime-reserved entrypoints", () => {

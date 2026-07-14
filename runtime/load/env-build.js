@@ -1,11 +1,14 @@
 import {
   BINDING_NAME_RE,
+  D1_DATABASE_ID_RE,
   RESERVED_OBJECT_KEYS,
   WDL_RESERVED_BINDING_RE,
   WDL_RESERVED_ENTRYPOINT_RE,
   isValidJsIdentifier,
   isValidJsClassDeclarationName,
+  isValidRuntimeLoadNs,
 } from "shared-ns-pattern";
+import { parseVersion } from "shared-version";
 
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
@@ -91,8 +94,11 @@ function materializeQueueBinding({ name, spec, ns, ctx }) {
 /** @param {RuntimeBindingMaterializerArgs} args */
 function materializeD1Binding({ name, spec, ns, ctx }) {
   const databaseId = spec.databaseId;
-  if (typeof databaseId !== "string" || !databaseId) {
-    throw new Error(`Binding "${name}" is a D1 binding but missing databaseId`);
+  if (!isValidRuntimeLoadNs(ns)) {
+    throw new Error(`Binding "${name}" is a D1 binding but has invalid namespace`);
+  }
+  if (typeof databaseId !== "string" || !D1_DATABASE_ID_RE.test(databaseId)) {
+    throw new Error(`Binding "${name}" is a D1 binding but has invalid databaseId`);
   }
   return {
     value: ctx.exports.D1Database({
@@ -163,6 +169,9 @@ function materializeServiceBinding({ name, spec, ns, worker, nsSecrets, workerSe
     throw new Error(
       `Binding "${name}" is a service binding but missing service/version (control should have pinned these at deploy time)`
     );
+  }
+  if (parseVersion(spec.version) == null) {
+    throw new Error(`Binding "${name}" is a service binding but has invalid version (redeploy ${ns}/${worker})`);
   }
   if (spec.ns != null && (typeof spec.ns !== "string" || !spec.ns)) {
     throw new Error(`Binding "${name}" is a service binding but has invalid ns (redeploy ${ns}/${worker})`);

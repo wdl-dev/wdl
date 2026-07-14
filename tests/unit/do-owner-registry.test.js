@@ -10,6 +10,7 @@ import {
   ownerGenerationKeyOf,
   ownerLeaseGuardMs,
   ownerKeyOf,
+  parseOwner,
   renewOwnedScopes,
   releaseOwner,
   resetDoOwnerRegistryTestState,
@@ -60,12 +61,36 @@ function ownerRecord(overrides = {}) {
     worker: "chat",
     doStorageId: DO_STORAGE_ID,
     taskId: "task-a",
-    endpoint: "task-a:8788",
+    endpoint: "do-runtime-a:8788",
     generation: 7,
     leaseExpiresAt: Date.now() + LEASE_DURATION_MS,
     ...overrides,
   };
 }
+
+test("DO owner registry rejects malformed persisted owner endpoints", () => {
+  const owner = ownerRecord();
+  assert.deepEqual(parseOwner(JSON.stringify(owner), OWNER_KEY), owner);
+  assert.equal(parseOwner(null, OWNER_KEY), null);
+  assert.throws(
+    () => parseOwner(JSON.stringify(ownerRecord({ endpoint: "8.8.8.8:8788" })), OWNER_KEY),
+    /DO owner record is invalid/
+  );
+  assert.throws(
+    () => parseOwner(JSON.stringify(ownerRecord({ ownerKey: `${DO_STORAGE_ID}:Room:shard1` })), OWNER_KEY),
+    /DO owner record is invalid/
+  );
+  for (const invalidScope of [
+    { ns: "tenant:other" },
+    { worker: "chat:other" },
+  ]) {
+    assert.throws(
+      () => parseOwner(JSON.stringify(ownerRecord(invalidScope)), OWNER_KEY),
+      /DO owner record is invalid/
+    );
+  }
+  assert.throws(() => parseOwner("{not-json", OWNER_KEY), /DO owner record is invalid/);
+});
 
 test("DO owner registry: keys encode owner scope and generation separately", () => {
   assert.equal(ownerKeyOf(OWNER_KEY), "do:owner:scope:do_0123456789abcdef0123456789abcdef%3ARoom%3Ashard0");
@@ -73,6 +98,43 @@ test("DO owner registry: keys encode owner scope and generation separately", () 
     ownerGenerationKeyOf(OWNER_KEY),
     "do:owner:scope:do_0123456789abcdef0123456789abcdef%3ARoom%3Ashard0:generation"
   );
+});
+
+test("DO owner registry: records stored under another owner scope fail closed", async () => {
+  const misplacedStorageId = "do_fedcba9876543210fedcba9876543210";
+  const misplacedOwnerKey = `${misplacedStorageId}:Room:shard1`;
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), JSON.stringify(ownerRecord({
+    ownerKey: misplacedOwnerKey,
+    hostId: misplacedOwnerKey,
+    doStorageId: misplacedStorageId,
+  })));
+
+  await assert.rejects(
+    resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
+    /DO owner record is invalid/
+  );
+  assert.deepEqual(doOwnerRegistryWriteCommands(), []);
+});
+
+test("DO owner registry: records for another bundle scope fail closed before pointer lookup", async () => {
+  const misplacedPointerKey = "worker:do-storage:other:worker";
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(misplacedPointerKey, DO_STORAGE_ID);
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), JSON.stringify(ownerRecord({
+    ns: "other",
+    worker: "worker",
+  })));
+
+  await assert.rejects(
+    resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
+    /DO owner record is invalid/
+  );
+  assert.equal(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.some((command) => (
+      command[0] === "get" && command[1] === misplacedPointerKey
+    )),
+    false
+  );
+  assert.deepEqual(doOwnerRegistryWriteCommands(), []);
 });
 
 test("DO owner registry: lease guard config bounds values and permits test disable", () => {
@@ -126,7 +188,7 @@ test("DO owner registry: claim retries WatchError before surfacing owner", async
 
 test("DO owner registry: lost owner state cannot validate an old owner from another task", async () => {
   setStoragePointer();
-  DO_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "task-b:8788" };
+  DO_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "do-runtime-b:8788" };
 
   const owner = await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke());
 
@@ -144,13 +206,13 @@ test("DO owner registry: lost owner state cannot validate an old owner from anot
 
 test("DO owner registry: same task reclaims generation one after owner state loss", async () => {
   setStoragePointer();
-  DO_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "task-b:8788" };
+  DO_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "do-runtime-b:8788" };
 
   const owner = await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke());
 
   assert.equal(owner.taskId, "task-b");
   assert.equal(owner.generation, 1);
-  assert.equal(owner.endpoint, "task-b:8788");
+  assert.equal(owner.endpoint, "do-runtime-b:8788");
   assert.deepEqual(await assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, owner), owner);
 });
 
@@ -199,7 +261,7 @@ test("DO owner registry: draining task returns a healthy remote owner", async ()
     ownerKey,
     hostId: ownerKey,
     taskId: "task-b",
-    endpoint: "task-b:8788",
+    endpoint: "do-runtime-b:8788",
   });
   setStoragePointer();
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(ownerKey), JSON.stringify(owner));
@@ -234,7 +296,7 @@ test("DO owner registry: expired takeover bumps generation monotonically", async
     ownerKey,
     hostId: ownerKey,
     taskId: "task-b",
-    endpoint: "task-b:8788",
+    endpoint: "do-runtime-b:8788",
     generation: 11,
     leaseExpiresAt: redisNow - EXPIRED_LEASE_AGE_MS,
   });
@@ -481,7 +543,7 @@ test("DO owner registry: renewOwnedScopes forgets owners lost to another task", 
   const remoteOwner = {
     ...owner,
     taskId: "task-b",
-    endpoint: "task-b:8788",
+    endpoint: "do-runtime-b:8788",
     generation: 9,
   };
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(ownerKey), JSON.stringify(remoteOwner));
@@ -510,7 +572,7 @@ test("DO owner registry: renewOwnedScopes logs lease loss with in-flight dispatc
   const remoteOwner = {
     ...owner,
     taskId: "task-b",
-    endpoint: "task-b:8788",
+    endpoint: "do-runtime-b:8788",
     generation: 9,
   };
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(ownerKey), JSON.stringify(remoteOwner));

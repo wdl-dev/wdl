@@ -62,6 +62,54 @@ const DO_BLOCKING_ALARM_WORKER = readFileSync(
   "utf8"
 );
 
+const DO_ACCESSOR_ALARM_WORKER = `
+const instances = new WeakMap();
+
+export class AccessorAlarm {
+  #ctx;
+
+  constructor(ctx) {
+    this.#ctx = ctx;
+    instances.set(this, true);
+  }
+
+  #assertReceiver() {
+    if (!instances.has(this)) throw new TypeError("invalid AccessorAlarm receiver");
+  }
+
+  get fetch() {
+    this.#assertReceiver();
+    return async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/schedule") {
+        await this.#ctx.storage.setAlarm(Date.now() - 1000);
+        return Response.json({ pending: true });
+      }
+      return Response.json({
+        alarms: (await this.#ctx.storage.get("alarms")) ?? 0,
+        pending: await this.#ctx.storage.getAlarm(),
+      });
+    };
+  }
+
+  get alarm() {
+    this.#assertReceiver();
+    return async () => {
+      const alarms = (await this.#ctx.storage.get("alarms")) ?? 0;
+      await this.#ctx.storage.put("alarms", alarms + 1);
+    };
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const id = env.ACCESSORS.idFromName(url.searchParams.get("name") || "main");
+    return await env.ACCESSORS.get(id).fetch("https://do.internal" + url.pathname);
+  },
+};
+`;
+
 /**
  * @param {string} ns
  * @param {string} worker
@@ -250,6 +298,34 @@ test("do-runtime shim supports storage alarms on SQLite-backed Durable Objects",
   assert.equal(spoofJson.alarms, 1);
   assert.equal(spoofJson.alarmDuringHandlerWasNull, 1);
   assert.equal(spoofJson.pending, null);
+});
+
+test("do-runtime alarm wrapper preserves accessor handler receivers through host proxies", async () => {
+  const ns = uniqueNs("do-alarm-accessor");
+  await deployAndPromote(ns, "alarms", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_ACCESSOR_ALARM_WORKER },
+    bindings: {
+      ACCESSORS: { type: "do", className: "AccessorAlarm" },
+    },
+  });
+
+  const scheduled = await gatewayFetch(ns, "/alarms/schedule?name=alice");
+  const scheduledText = await scheduled.text();
+  assert.equal(scheduled.status, 200, scheduledText);
+  assert.deepEqual(responseJson({ body: scheduledText }), { pending: true });
+
+  const status = await waitForJson(
+    "accessor-backed DO alarm",
+    async () => {
+      const response = await gatewayFetch(ns, "/alarms/status?name=alice");
+      const body = await response.text();
+      assert.equal(response.status, 200, body);
+      return responseJson({ body });
+    },
+    (json) => json.alarms === 1 && json.pending === null
+  );
+  assert.deepEqual(status, { alarms: 1, pending: null });
 });
 
 test("scheduler replicas: Workflows DO alarm tick delivers a due alarm once", async () => {

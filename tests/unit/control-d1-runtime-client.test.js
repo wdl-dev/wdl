@@ -29,7 +29,7 @@ const {
   "shared-d1-query-wire": d1QueryWireDataUrl(),
   "shared-respond": repositoryFileUrl("shared/respond.js"),
   "shared-internal-auth": sharedInternalAuthUrl(),
-  "runtime-owner-endpoint": repositoryFileUrl("runtime/_wdl-owner-endpoint.js"),
+  "shared-owner-endpoint": repositoryFileUrl("shared/owner-endpoint.js"),
 }));
 
 /** @template {Record<string, unknown>} T @param {T} env */
@@ -87,30 +87,28 @@ test("control D1 runtime client query sends request timeout signal", async () =>
   });
 });
 
-test("control D1 runtime client preserves zero owner generation hints", async () => {
-  const result = await d1RuntimeQuery(withInternalAuthEnv({
-    D1_BACKEND: {
-      async fetch() {
-        return d1Response(
-          { success: true, results: [] },
-          {
-            headers: {
-              "x-wdl-d1-owner-task-id": "task-a",
-              "x-wdl-d1-owner-endpoint": "10.0.0.9:8787",
-              "x-wdl-d1-owner-generation": "0",
-            },
-          }
-        );
+test("control D1 runtime client rejects non-positive and unsafe owner generation hints", async () => {
+  for (const rawGeneration of ["0", "9007199254740992"]) {
+    const result = await d1RuntimeQuery(withInternalAuthEnv({
+      D1_BACKEND: {
+        async fetch() {
+          return d1Response(
+            { success: true, results: [] },
+            {
+              headers: {
+                "x-wdl-d1-owner-task-id": "task-a",
+                "x-wdl-d1-owner-endpoint": "10.0.0.9:8787",
+                "x-wdl-d1-owner-generation": rawGeneration,
+              },
+            }
+          );
+        },
       },
-    },
-  }), "tenant-a", "db1", "all", [{ sql: "select 1", params: [] }]);
+    }), "tenant-a", "db1", "all", [{ sql: "select 1", params: [] }]);
 
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.owner, {
-    taskId: "task-a",
-    endpoint: "10.0.0.9:8787",
-    generation: 0,
-  });
+    assert.equal(result.ok, true);
+    assert.equal(result.owner, null, rawGeneration);
+  }
 });
 
 test("control D1 runtime client rejects fractional owner generation hints", async () => {

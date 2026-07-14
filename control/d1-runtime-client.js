@@ -13,7 +13,7 @@ import {
 } from "shared-d1-query-wire";
 import { sanitizeJsonErrorDetails } from "shared-respond";
 import { withInternalAuth } from "shared-internal-auth";
-import { validOwnerEndpointForService } from "runtime-owner-endpoint";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 
 /**
  * @typedef {{ fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> }} Fetcher
@@ -33,7 +33,7 @@ function d1OwnerGenerationFromHeaders(headers) {
   const raw = headers.get("x-wdl-d1-owner-generation");
   if (raw == null || raw === "") return null;
   const generation = Number(raw);
-  return Number.isInteger(generation) && generation >= 0 ? generation : null;
+  return Number.isSafeInteger(generation) && generation > 0 ? generation : null;
 }
 
 /**

@@ -120,10 +120,13 @@ variable "vpc_id" {
 
 variable "private_subnet_ids" {
   type        = list(string)
-  description = "Private subnet ids across at least three AZs for ECS tasks, EFS mount targets, and ElastiCache."
+  description = "Private subnet ids across at least two AZs for ECS tasks, EFS mount targets, and ElastiCache."
   validation {
-    condition     = length(var.private_subnet_ids) >= 3
-    error_message = "Provide at least three private subnet ids across different AZs."
+    condition = (
+      length(var.private_subnet_ids) >= 2 &&
+      length(var.private_subnet_ids) == length(distinct(var.private_subnet_ids))
+    )
+    error_message = "Provide at least two unique private subnet ids."
   }
 }
 
@@ -163,12 +166,6 @@ variable "d1_test_hooks_enabled" {
   type        = bool
   default     = false
   description = "Enable D1 internal test hooks in d1-runtime. Keep false outside disposable/test environments."
-}
-
-variable "do_test_hooks_enabled" {
-  type        = bool
-  default     = false
-  description = "Enable DO internal test hooks in do-runtime. Keep false outside disposable/test environments."
 }
 
 variable "gateway_cpu" {

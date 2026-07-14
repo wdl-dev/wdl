@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { bundleKey } from "../../../shared/version.js";
 
 import { redisHGetJson } from "./redis.js";
 
@@ -13,6 +14,6 @@ export function cronId(cron, timezone) {
  * @param {string} version
  */
 export function readMeta(ns, name, version) {
-  const key = `worker:${ns}:${name}:v:${version.slice(1)}`;
+  const key = bundleKey(ns, name, version);
   return redisHGetJson(key, "__meta__", { label: `${key} __meta__` });
 }

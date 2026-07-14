@@ -1,0 +1,16 @@
+{
+  "cases": [
+    { "tag": "v1", "parsed": 1 },
+    { "tag": "v42", "parsed": 42 },
+    { "tag": "v9007199254740991", "parsed": 9007199254740991 },
+    { "tag": "", "parsed": null },
+    { "tag": "v", "parsed": null },
+    { "tag": "v0", "parsed": null },
+    { "tag": "v01", "parsed": null },
+    { "tag": "V1", "parsed": null },
+    { "tag": "v1a", "parsed": null },
+    { "tag": "v9007199254740992", "parsed": null },
+    { "tag": "v18446744073709551615", "parsed": null },
+    { "tag": "v999999999999999999999999999999", "parsed": null }
+  ]
+}

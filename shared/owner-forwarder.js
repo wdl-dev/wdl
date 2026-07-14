@@ -1,5 +1,6 @@
 import { withInternalAuth } from "shared-internal-auth";
 import { errorMessage } from "shared-errors";
+import { validOwnerEndpointForService } from "shared-owner-endpoint";
 
 export const MAX_OWNER_FORWARD_HOPS = 2;
 
@@ -35,6 +36,8 @@ function withRequestId(headers, requestId) {
  * @param {{
  *   env: Record<string, unknown>,
  *   endpoint?: string | null,
+ *   endpointPort: number,
+ *   endpointService: "d1-runtime" | "do-runtime",
  *   pathname: string,
  *   method?: string,
  *   requestId?: string | null,
@@ -49,6 +52,7 @@ function withRequestId(headers, requestId) {
  *   buildHeaders(nextHopCount: number): HeadersInit,
  *   logFields(): Record<string, unknown>,
  *   missingEndpointError(): Error,
+ *   invalidEndpointError(): Error,
  *   hopExhaustedError(): Error,
  *   unavailableError(err: unknown): Error,
  *   isTimeoutError?: (err: unknown) => boolean,
@@ -58,6 +62,8 @@ function withRequestId(headers, requestId) {
 export async function forwardOwnerRequest({
   env,
   endpoint,
+  endpointPort,
+  endpointService,
   pathname,
   method = "POST",
   requestId = null,
@@ -72,11 +78,15 @@ export async function forwardOwnerRequest({
   buildHeaders,
   logFields,
   missingEndpointError,
+  invalidEndpointError,
   hopExhaustedError,
   unavailableError,
   isTimeoutError = undefined,
 }) {
   if (!endpoint) throw missingEndpointError();
+  if (!validOwnerEndpointForService(endpoint, endpointPort, endpointService)) {
+    throw invalidEndpointError();
+  }
   const nextHopCount = hopCount + 1;
   if (nextHopCount > MAX_OWNER_FORWARD_HOPS) throw hopExhaustedError();
   try {

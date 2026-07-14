@@ -1,4 +1,8 @@
 use serde::Deserialize;
+use wdl_rust_common::{
+    identity::{is_valid_route_ns, is_valid_worker_name},
+    version::parse_version_tag,
+};
 
 const CRON_WORKER_KEY_PREFIX: &str = "crons:";
 pub(crate) const CRON_WORKER_KEY_SCAN_PATTERN: &str = "crons:*:*";
@@ -38,7 +42,7 @@ pub(crate) fn cron_worker_key(ns: &str, worker: &str) -> String {
 
 pub(crate) fn parse_cron_worker_key(key: &str) -> Option<(&str, &str)> {
     let (ns, worker) = key.strip_prefix(CRON_WORKER_KEY_PREFIX)?.split_once(':')?;
-    if ns.is_empty() || worker.is_empty() || worker.contains(':') {
+    if !is_valid_route_ns(ns) || !is_valid_worker_name(worker) {
         return None;
     }
     Some((ns, worker))
@@ -56,6 +60,9 @@ pub(crate) fn parse_ref(reference: &str) -> Option<RefParts> {
     if parts.iter().any(|part| part.is_empty()) {
         return None;
     }
+    if !is_valid_route_ns(parts[0]) || !is_valid_worker_name(parts[1]) {
+        return None;
+    }
     let r#gen = parts[3].parse::<i64>().ok()?;
     Some(RefParts {
         ns: parts[0].to_string(),
@@ -63,6 +70,15 @@ pub(crate) fn parse_ref(reference: &str) -> Option<RefParts> {
         cron_id: parts[2].to_string(),
         r#gen,
     })
+}
+
+fn validated_cron_meta_version(meta: CronMeta) -> Option<String> {
+    parse_version_tag(&meta.version).ok()?;
+    Some(meta.version)
+}
+
+pub(crate) fn cron_meta_version(raw: &str) -> Option<String> {
+    validated_cron_meta_version(serde_json::from_str::<CronMeta>(raw).ok()?)
 }
 
 pub(crate) fn classify_ref(
@@ -82,12 +98,15 @@ pub(crate) fn classify_ref(
     let Ok(entry) = serde_json::from_str::<CronEntry>(&entry_str) else {
         return RefVerdict::Corrupt;
     };
+    let Some(active_version) = validated_cron_meta_version(meta) else {
+        return RefVerdict::Corrupt;
+    };
     if entry.r#gen != parts.r#gen {
         return RefVerdict::Stale("gen_mismatch");
     }
     RefVerdict::Fire {
         entry,
-        active_version: meta.version,
+        active_version,
     }
 }
 
@@ -96,7 +115,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::test_fixtures::scheduler_projection_contract;
+    use crate::test_fixtures::{scheduler_projection_contract, version_tag_cases};
 
     #[test]
     fn cron_projection_contract_matches_control_writer() {
@@ -148,6 +167,9 @@ mod tests {
         assert!(parse_ref("demo:hello::7").is_none());
         assert!(parse_ref("demo:hello:abc123:x").is_none());
         assert!(parse_ref("demo:hello:abc123:").is_none());
+        assert!(parse_ref("__platform__:hello:abc123:7").is_none());
+        assert!(parse_ref("Demo:hello:abc123:7").is_none());
+        assert!(parse_ref("demo:/bad:abc123:7").is_none());
     }
 
     #[test]
@@ -157,6 +179,9 @@ mod tests {
         assert_eq!(parse_cron_worker_key("crons::worker"), None);
         assert_eq!(parse_cron_worker_key("crons:demo:"), None);
         assert_eq!(parse_cron_worker_key("crons:demo:worker:extra"), None);
+        assert_eq!(parse_cron_worker_key("crons:__platform__:worker"), None);
+        assert_eq!(parse_cron_worker_key("crons:Demo:worker"), None);
+        assert_eq!(parse_cron_worker_key("crons:demo:/bad"), None);
     }
 
     #[test]
@@ -181,6 +206,29 @@ mod tests {
                 assert_eq!(entry.timezone, "UTC");
             }
             _ => panic!("expected fire verdict"),
+        }
+    }
+
+    #[test]
+    fn classify_ref_versions_match_cross_language_fixture() {
+        let parts = RefParts {
+            ns: "demo".to_string(),
+            worker: "hello".to_string(),
+            cron_id: "abc".to_string(),
+            r#gen: 3,
+        };
+        let entry = Some(json!({ "cron": "*/5 * * * *", "timezone": "UTC", "gen": 3 }).to_string());
+        for (version, valid) in version_tag_cases() {
+            let verdict = classify_ref(
+                &parts,
+                Some(json!({ "version": version }).to_string()),
+                entry.clone(),
+            );
+            assert_eq!(
+                matches!(verdict, RefVerdict::Fire { .. }),
+                valid,
+                "{version:?}"
+            );
         }
     }
 

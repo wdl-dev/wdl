@@ -64,6 +64,12 @@ partial batch result; that is a result envelope, not a generic JSON error envelo
 Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime facade. The facade
 rejects an oversized `Content-Length` before reading, and streamed bodies are read
 incrementally so the cap is enforced before buffering the full body.
+DO RPC method names use the JavaScript identifier grammar and are capped at 256 ASCII
+bytes by both the runtime client and do-runtime protocol reader.
+DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
+and storage id. They do not accept inline worker source.
+DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without
+leading zeroes.
 
 ## Redis / Storage Contracts
 
@@ -150,6 +156,9 @@ when the logical worker is gone or now points at a different `doStorageId`.
   internal alarm jobs to ready, claims one job under a DB 2 run token, and calls
   do-runtime `/internal/do/alarms/dispatch`. do-runtime still constructs the native
   `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path.
+- Alarm mutation, retarget, dispatch, and whole-worker storage cleanup accept only the
+  canonical positive JavaScript-safe-integer worker version grammar. Invalid internal or
+  persisted versions fail before a job is stored or a worker invoke is attempted.
 - Alarm due times are Unix millisecond timestamps supplied to `setAlarm()`. Workflows
   and do-runtime both evaluate those timestamps with their local wall clocks; if a
   backend ready hint reaches do-runtime before the SQLite alarm row is locally due,
@@ -218,7 +227,15 @@ interrupt.
 - Tenant-visible DO metadata and errors must not include owner task ids, backend
   endpoints, or raw transport error text.
 - Owner hints are trusted only when returned by do-runtime headers and validated against
-  endpoint grammar.
+  endpoint grammar. Owner hints and invoke fences must carry a positive
+  JavaScript-safe-integer generation.
+- Task identities and persisted owner records are validated on write and read. A
+  persisted record's `ownerKey`, `hostId`, storage id, class, and shard must reconstruct
+  the Redis scope under which it was read. During owner resolution, its canonical
+  namespace and worker must also match the invoking bundle before do-runtime reads that
+  bundle's active storage pointer. Owner forwarding accepts only the DO service/headless
+  DNS forms or private RFC1918/100.64 IPv4 addresses on port 8788; invalid records fail
+  closed before internal auth is attached.
 - Owner-hint and ownership-error defense is layered: tenant response bodies and
   tenant-supplied control headers are ignored, only do-runtime control headers are
   trusted, and endpoint grammar/acceptable-address checks must pass for hints.
@@ -226,6 +243,11 @@ interrupt.
   modules and capture the intrinsics used for private-header stripping, request bounds,
   invoke serialization, replay classification, and endpoint validation. Tenant prototype
   mutation cannot rewrite a trusted target or replay policy after those checks.
+- The injected alarm shim also evaluates before the tenant module and captures the
+  request, response, numeric, proxy, and reflection operations that classify internal
+  alarms, update their SQLite state, and install the storage facade. Tenant top-level
+  mutation of those intrinsics cannot redirect an internal alarm to the tenant fetch
+  handler or prevent that facade installation.
 - do-runtime supervisor must call local `127.0.0.1:8788` drain/renew endpoints; Service
   Connect aliases may hit a different task.
 

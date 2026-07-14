@@ -240,8 +240,8 @@ function withRequestContext(context, arg, fn) {
 
 function wrapClassInstance(instance, requestContext) {
   return createProxy(instance, {
-    get(target, prop, receiver) {
-      const value = reflectGet(target, prop, receiver);
+    get(target, prop) {
+      const value = reflectGet(target, prop, target);
       if (typeof value !== "function") return value;
       return function(...args) {
         return withRequestContext(requestContext, args[0], () => applyFunction(value, target, args));

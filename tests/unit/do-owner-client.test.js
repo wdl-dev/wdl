@@ -103,6 +103,14 @@ test("DO owner client forwards invoke requests with owner fence and hop headers"
   assert.equal(DO_OWNER_CLIENT_TEST_STATE.logs.at(-1).fields.path, "/internal/do/storage/delete");
 });
 
+test("DO owner client rejects invalid endpoints before authenticated forwarding", async () => {
+  await assert.rejects(
+    mod.forwardToOwner(invoke(), env(), { ...owner(), endpoint: "8.8.8.8:8788" }, "req-invalid", 0),
+    (err) => doErrorMatches(err, { status: 503, code: "owner_unavailable" })
+  );
+  assert.equal(DO_OWNER_CLIENT_TEST_STATE.fetches.length, 0);
+});
+
 test("DO owner client maps exhausted forward hops to a stable 503 code", async () => {
   await assert.rejects(
     mod.forwardToOwner(invoke(), env(), owner(), "req-2", 2),

@@ -23,6 +23,7 @@ const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 const SHARED_SECRET_KEYS_URL = repositoryFileUrl("shared/secret-keys.js");
 const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl("runtime/load/env-build.js", [
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
+  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
 ]);
 const { libUrl: PRODUCTION_CONTROL_LIB_URL } = await compileControlGraph();
 const env = {

@@ -5,6 +5,7 @@ const DATA_FIELD_URL = repositoryFileUrl("shared/d1-data-field.js");
 const FNV_URL = repositoryFileUrl("shared/fnv1a32.js");
 const BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
 
 export function d1ProtocolDataUrl() {
   const queryWireUrl = d1QueryWireDataUrl();
@@ -15,6 +16,7 @@ export function d1ProtocolDataUrl() {
       `import { fnv1a32CodeUnits } from ${JSON.stringify(FNV_URL)};`],
     [/from "shared-bounded-body";/g, `from ${JSON.stringify(BOUNDED_BODY_URL)};`],
     [/from "shared-errors";/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
+    [/from "shared-ns-pattern";/g, `from ${JSON.stringify(NS_PATTERN_URL)};`],
     [/from "shared-d1-query-wire";/g, `from ${JSON.stringify(queryWireUrl)};`],
   ]);
 }
