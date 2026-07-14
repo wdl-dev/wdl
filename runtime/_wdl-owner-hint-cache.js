@@ -1,3 +1,52 @@
+// This module is evaluated before tenant code. Keep cache state inaccessible
+// after tenant top-level evaluation mutates the shared isolate realm.
+const IntrinsicMap = Map;
+const IntrinsicNumber = Number;
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicMapClear = Map.prototype.clear;
+const intrinsicMapDelete = Map.prototype.delete;
+const intrinsicMapGet = Map.prototype.get;
+const intrinsicMapKeys = Map.prototype.keys;
+const intrinsicMapSet = Map.prototype.set;
+const intrinsicMapSizeGet = /** @type {(this: Map<unknown, unknown>) => number} */ (
+  Object.getOwnPropertyDescriptor(Map.prototype, "size")?.get
+);
+const intrinsicNumberIsInteger = Number.isInteger;
+const intrinsicMapIteratorNext = Object.getPrototypeOf(
+  intrinsicReflectApply(intrinsicMapKeys, new IntrinsicMap(), [])
+).next;
+
+/** @param {Map<unknown, unknown>} map */
+function mapSize(map) {
+  return intrinsicReflectApply(intrinsicMapSizeGet, map, []);
+}
+
+/** @param {Map<unknown, unknown>} map @param {unknown} key */
+function mapGet(map, key) {
+  return intrinsicReflectApply(intrinsicMapGet, map, [key]);
+}
+
+/** @param {Map<unknown, unknown>} map @param {unknown} key @param {unknown} value */
+function mapSet(map, key, value) {
+  intrinsicReflectApply(intrinsicMapSet, map, [key, value]);
+}
+
+/** @param {Map<unknown, unknown>} map @param {unknown} key */
+function mapDelete(map, key) {
+  return intrinsicReflectApply(intrinsicMapDelete, map, [key]);
+}
+
+/** @param {Map<unknown, unknown>} map */
+function mapClear(map) {
+  intrinsicReflectApply(intrinsicMapClear, map, []);
+}
+
+/** @param {Map<unknown, unknown>} map */
+function firstMapKey(map) {
+  const iterator = intrinsicReflectApply(intrinsicMapKeys, map, []);
+  return intrinsicReflectApply(intrinsicMapIteratorNext, iterator, []).value;
+}
+
 /**
  * @param {{
  *   defaultMaxEntries?: number,
@@ -9,14 +58,16 @@ export function createOwnerHintCache({
   keyFor = (value) => value,
 } = {}) {
   /** @type {Map<unknown, unknown>} */
-  const entries = new Map();
+  const entries = new IntrinsicMap();
   /** @type {number | null} */
   let maxEntriesForTest = null;
 
   function maxEntries() {
     const override = maxEntriesForTest;
-    return typeof override === "number" && Number.isInteger(override) && override > 0
-      ? Number(override)
+    return typeof override === "number" &&
+      intrinsicReflectApply(intrinsicNumberIsInteger, IntrinsicNumber, [override]) &&
+      override > 0
+      ? override
       : defaultMaxEntries;
   }
 
@@ -27,22 +78,22 @@ export function createOwnerHintCache({
   }
 
   function trim() {
-    while (entries.size > maxEntries()) {
-      const oldestKey = entries.keys().next().value;
+    while (mapSize(entries) > maxEntries()) {
+      const oldestKey = firstMapKey(entries);
       if (oldestKey === undefined) break;
-      entries.delete(oldestKey);
+      mapDelete(entries, oldestKey);
     }
   }
 
   return {
     clearForTest() {
-      entries.clear();
+      mapClear(entries);
       maxEntriesForTest = null;
     },
 
     /** @param {number | null} maxEntriesValue */
     setMaxEntriesForTest(maxEntriesValue) {
-      entries.clear();
+      mapClear(entries);
       maxEntriesForTest = maxEntriesValue;
     },
 
@@ -50,10 +101,10 @@ export function createOwnerHintCache({
     get(value) {
       const key = keyOf(value);
       if (key == null) return null;
-      const hint = entries.get(key);
+      const hint = mapGet(entries, key);
       if (!hint) return null;
-      entries.delete(key);
-      entries.set(key, hint);
+      mapDelete(entries, key);
+      mapSet(entries, key, hint);
       return hint;
     },
 
@@ -64,8 +115,8 @@ export function createOwnerHintCache({
     set(value, hint) {
       const key = keyOf(value);
       if (key == null) return false;
-      entries.delete(key);
-      entries.set(key, hint);
+      mapDelete(entries, key);
+      mapSet(entries, key, hint);
       trim();
       return true;
     },
@@ -74,7 +125,7 @@ export function createOwnerHintCache({
     delete(value) {
       const key = keyOf(value);
       if (key == null) return false;
-      return entries.delete(key);
+      return mapDelete(entries, key);
     },
   };
 }

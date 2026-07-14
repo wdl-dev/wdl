@@ -1079,7 +1079,7 @@ async function validateOutgoingRefsForCommit(iso, { outgoingRefs }) {
       });
     }
     const targetMeta = targetMetas[index];
-    if (typeof targetMeta !== "string") {
+    if (typeof targetMeta !== "string" || targetMeta.length === 0) {
       throw new DeployAbort(409, "target_drift", {
         target: {
           ns: ref.targetNs,

@@ -297,7 +297,7 @@ async function assertOutgoingDependenciesPresent(iso, targetLabel, outgoingRefs)
       bundleKey(ref.targetNs, ref.targetWorker, ref.targetVersion),
       "__meta__"
     );
-    if (targetMetaRaw == null) {
+    if (typeof targetMetaRaw !== "string" || targetMetaRaw.length === 0) {
       throw new RoutingError(
         409,
         "service_binding_dependency_missing",

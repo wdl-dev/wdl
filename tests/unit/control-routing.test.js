@@ -292,6 +292,31 @@ test("promoteWithRoutes watches and rejects missing service-binding target bundl
   assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
 });
 
+test("promoteWithRoutes rejects empty service-binding target metadata", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    bindings: {
+      TARGET: {
+        type: "service",
+        ns: "other",
+        service: "api",
+        version: "v3",
+      },
+    },
+  });
+  redis.state.hashes.set(productionBundleKey("other", "api", "v3"), { __meta__: "" });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      const shaped = assertRoutingErrorShape(err, 409, "service_binding_dependency_missing");
+      assert.equal(shaped.details.broken_dependency.targetNs, "other");
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
 test("promoteWithRoutes batches service-binding dependency watches", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {

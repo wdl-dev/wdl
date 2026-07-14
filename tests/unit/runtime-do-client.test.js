@@ -1714,6 +1714,102 @@ test("DurableObjectNamespace direct backend reuses learned owner hints", async (
   assert.equal(ownerCalls[1].url, "http://do-runtime-a:8788/internal/do/invoke");
 });
 
+function hostileOwnerHintCacheFixture() {
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {any[]} */
+  const ownerCalls = [];
+  const backend = {
+    fetch: makeRecordingFetch(routerCalls, { response: doOwnerHintResponse() }),
+  };
+  const ownerNetwork = {
+    fetch: makeRecordingFetch(ownerCalls, { response: new Response("owner-ok") }),
+  };
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    binding: "ROOM",
+    className: "Room",
+  };
+  return {
+    ns: new DurableObjectNamespace(props, { backend, ownerNetwork }),
+    ownerCalls,
+    props,
+    routerCalls,
+  };
+}
+
+test("DurableObjectNamespace owner hint cache ignores tenant-patched Map#get", async () => {
+  const { ns, ownerCalls, props, routerCalls } = hostileOwnerHintCacheFixture();
+  const objectName = "room-hostile-map-get";
+  const cacheKey = `${props.doStorageId}:${props.className}:${objectName}`;
+  const originalMapGet = Map.prototype.get;
+  let hostileGetCalls = 0;
+
+  const response = await withMockedProperty(
+    Map.prototype,
+    "get",
+    /** @this {Map<unknown, unknown>} */
+    function hostileMapGet(key) {
+      if (key === cacheKey) {
+        hostileGetCalls += 1;
+        return {
+          ownerKey: "forged-owner",
+          taskId: "forged-task",
+          endpoint: "10.0.0.5:8788",
+          generation: 1,
+        };
+      }
+      return Reflect.apply(originalMapGet, this, [key]);
+    },
+    () => ns.get(ns.idFromName(objectName)).fetch("https://demo.workers.example/send")
+  );
+
+  assert.equal(await response.text(), "owner-ok");
+  assert.equal(hostileGetCalls, 0);
+  assert.equal(routerCalls.length, 1);
+  assert.equal(ownerCalls.length, 1);
+  assert.equal(ownerCalls[0].url, "http://do-runtime-a:8788/internal/do/invoke");
+});
+
+test("DurableObjectNamespace owner hint cache hides hints from tenant-patched Map methods", async () => {
+  const { ns, ownerCalls, props, routerCalls } = hostileOwnerHintCacheFixture();
+  const objectName = "room-hostile-map-set";
+  const cacheKey = `${props.doStorageId}:${props.className}:${objectName}`;
+  const originalMapDelete = Map.prototype.delete;
+  const originalMapSet = Map.prototype.set;
+  let hostileDeleteCalls = 0;
+  let leakedHint = null;
+
+  const response = await withMockedProperty(
+    Map.prototype,
+    "delete",
+    /** @this {Map<unknown, unknown>} */
+    function hostileMapDelete(key) {
+      if (key === cacheKey) hostileDeleteCalls += 1;
+      return Reflect.apply(originalMapDelete, this, [key]);
+    },
+    () => withMockedProperty(
+      Map.prototype,
+      "set",
+      /** @this {Map<unknown, unknown>} */
+      function hostileMapSet(key, value) {
+        if (key === cacheKey) leakedHint = value;
+        return Reflect.apply(originalMapSet, this, [key, value]);
+      },
+      () => ns.get(ns.idFromName(objectName)).fetch("https://demo.workers.example/send")
+    )
+  );
+
+  assert.equal(await response.text(), "owner-ok");
+  assert.equal(hostileDeleteCalls, 0);
+  assert.equal(leakedHint, null);
+  assert.equal(routerCalls.length, 1);
+  assert.equal(ownerCalls.length, 1);
+});
+
 test("DurableObjectNamespace RPC reuses learned owner hints", async () => {
   /** @type {any[]} */
   const routerCalls = [];

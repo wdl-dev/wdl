@@ -138,7 +138,7 @@ Auth 子合同：
 - Control JSON error 形状是 `{ error, message }`；details 只能 additive。
 - Details 可以增加字段，但不能覆盖 `error`、`message` 或 legacy `reason`。Auth reject reason 是 `error` machine code；日志可以把 `reason` 作为诊断上下文。
 - `control/errors.js::ControlAbort` 是 Control tier 内的基础 coded abort contract。Routing 和 Auth 保留各自 boundary-specific error class；Deploy 可以在 commit cleanup 需要独立 catch boundary 时 subclass `ControlAbort`。
-- `control/json-body.js` 持有 bounded Control JSON parsing 及其 `400`/`413` wire mapping；`control/optimistic.js` 把 strict `WatchError` recognition 和 Redis session 绑定到 `shared/owner-lease.js` 持有的 retry loop。
+- `control/json-body.js` 持有 bounded Control JSON parsing 及其 `400`/`413` wire mapping；`control/optimistic.js` 把 strict `WatchError` recognition 和 Redis session 绑定到 `shared/optimistic-retry.js` 持有的 retry loop。
 - `control/lib.js::parseBundleMeta()` 是 persisted bundle `__meta__` 的唯一 parser。它要求值是 JSON object，并通过 error factory 让 routing、workflows、delete、deploy 和 env-budget 保留各自的 catch boundary。Bundle 缺失的语义仍由具体 use site 持有：当 projection 变更、唯一性证明、lifecycle cleanup、workflow view 或 environment budget 必须消费 metadata 才能产生正确结果时，只要权威 route 或 index 仍指向该 bundle，缺失就 fail closed。Deploy discovery/link preflight 不把缺失归类为 `corrupt_meta`；watched commit 会以 `target_drift` 拒绝缺失的 pinned service target。
 - Delegated issue 的 409 reason 有不同 retry 语义：`delegated_issue_busy` 表示 issuer/template lock 清除后可重试；`active_quota_exceeded` 在已有 delegated credential 过期或 revoke 前不应重试；`namespace_collision` 表示 Auth 已耗尽 configured candidate retry budget。
 - Control 5xx response 使用 generic/safe message。Internal exception text、auth Redis diagnostic、backend message 和 provider error 应进入日志；除非 endpoint 明确拥有某个 diagnostic response field，否则不进入客户端 body。

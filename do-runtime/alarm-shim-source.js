@@ -503,8 +503,8 @@ export function wrapDurableObjectClass(Base, className) {
       // only the alarm binding here so __WDL_HOST_BINDINGS_WRAPPED can survive
       // through the two-layer wrapper contract.
       super(constructorCtx, withoutInternalEnv(env));
-      // Resolve through the host wrapper so prototype methods, class fields,
-      // and accessors retain the real instance as their receiver.
+      // Resolve once through the host wrapper after construction so prototype
+      // methods, class fields, and accessors retain the real instance receiver.
       const tenantFetch = reflectGet(this, "fetch", this);
       const wrappedCtx = wrapCtx(constructorCtx, alarmBinding, className);
       try {

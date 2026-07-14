@@ -282,7 +282,7 @@ Auth-specific contract:
   `ControlAbort` where commit cleanup requires a distinct catch boundary.
 - `control/json-body.js` owns bounded Control JSON parsing and its `400`/`413` wire
   mapping. `control/optimistic.js` binds strict `WatchError` recognition and Redis
-  sessions to the retry loop owned by `shared/owner-lease.js`.
+  sessions to the retry loop owned by `shared/optimistic-retry.js`.
 - `control/lib.js::parseBundleMeta()` is the single parser for persisted bundle
   `__meta__`. It requires a JSON object and accepts an error factory so routing,
   workflows, delete, deploy, and env-budget paths retain their own catch boundaries.

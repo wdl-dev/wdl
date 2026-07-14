@@ -1463,6 +1463,40 @@ test("commitWithWatch reads workflow defs with own-property discipline", async (
   ]);
 });
 
+/** @param {any} redis */
+function platformBindingCommitArgs(redis) {
+  return {
+    redis,
+    ns: "tenant-a",
+    name: "caller",
+    version: "v1",
+    prepared: {
+      meta: {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "esm" } },
+        bindings: {
+          PLATFORM: {
+            type: "service",
+            ns: "__platform__",
+            service: "platformApi",
+            version: "v1",
+            entrypoint: "Api",
+          },
+        },
+      },
+      normalized: [["worker.js", "export default {}"]],
+    },
+    outgoingRefs: [{
+      binding: "PLATFORM",
+      targetNs: "__platform__",
+      targetWorker: "platformApi",
+      targetVersion: "v1",
+    }],
+    d1Refs: [],
+    controlEnv: {},
+  };
+}
+
 test("commitWithWatch rejects platform binding target drift before commit", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
@@ -1486,36 +1520,7 @@ test("commitWithWatch rejects platform binding target drift before commit", asyn
   };
 
   await assert.rejects(
-    () => commitWithWatch({
-      redis,
-      ns: "tenant-a",
-      name: "caller",
-      version: "v1",
-      prepared: {
-        meta: {
-          mainModule: "worker.js",
-          modules: { "worker.js": { type: "esm" } },
-          bindings: {
-            PLATFORM: {
-              type: "service",
-              ns: "__platform__",
-              service: "platformApi",
-              version: "v1",
-              entrypoint: "Api",
-            },
-          },
-        },
-        normalized: [["worker.js", "export default {}"]],
-      },
-      outgoingRefs: [{
-        binding: "PLATFORM",
-        targetNs: "__platform__",
-        targetWorker: "platformApi",
-        targetVersion: "v1",
-      }],
-      d1Refs: [],
-      controlEnv: {},
-    }),
+    () => commitWithWatch(platformBindingCommitArgs(redis)),
     (err) => {
       const deployErr = /** @type {any} */ (err);
       assert.equal(deployErr.code, "target_drift");
@@ -1529,6 +1534,41 @@ test("commitWithWatch rejects platform binding target drift before commit", asyn
 
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta, null);
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("routes:__platform__"));
+  assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker:__platform__:platformApi:v:1"));
+  assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker-delete-lock:__platform__:platformApi"));
+});
+
+test("commitWithWatch rejects empty platform binding target metadata before commit", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
+    ["routes:__platform__", { platformApi: "v1" }],
+    ["worker:__platform__:platformApi:v:1", { "__meta__": "" }],
+  ]);
+  /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta = null;
+  /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.execFailures = 0;
+
+  const redis = {
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  await assert.rejects(
+    () => commitWithWatch(platformBindingCommitArgs(redis)),
+    (err) => {
+      const deployErr = /** @type {any} */ (err);
+      assert.equal(deployErr.code, "target_drift");
+      assert.equal(deployErr.details.target.ns, "__platform__");
+      assert.equal(deployErr.details.target.worker, "platformApi");
+      assert.equal(deployErr.details.target.version, "v1");
+      assert.equal(deployErr.details.target.reason, "bundle_missing");
+      return true;
+    }
+  );
+
+  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta, null);
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker:__platform__:platformApi:v:1"));
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("worker-delete-lock:__platform__:platformApi"));
 });
