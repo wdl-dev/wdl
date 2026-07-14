@@ -39,6 +39,7 @@ import { diffCrons, nextFireMs, slotMsFor } from "control-cron-index";
 import { isReservedNs, ROUTES_ALLOWED_RESERVED_NS } from "shared-ns-pattern";
 import { PLATFORM_TIER_RESERVED_NS } from "shared-auth-roles";
 import { queueConsumerKey } from "shared-queue-keys";
+import { WatchError } from "shared-redis";
 import {
   computeAffectedHosts,
   computeNsHostDeltas,
@@ -155,7 +156,16 @@ function parseCronMeta(raw, logContext) {
 async function readMeta(iso, ns, workerName, version) {
   if (!version) return null;
   const raw = await iso.hGet(bundleKey(ns, workerName, version), "__meta__");
+  if (raw == null) await retryIfRouteChanged(iso, ns, workerName, version);
   return routingBundleMeta(ns, workerName, version, raw);
+}
+
+/** @param {RedisIso} iso @param {string} ns @param {string} workerName @param {string} version */
+async function retryIfRouteChanged(iso, ns, workerName, version) {
+  // A watched route can move after its snapshot but before the dependent
+  // metadata read. Retry that race; a stable route still fails as corruption.
+  const currentVersion = await iso.hGet(routesKey(ns), workerName);
+  if (currentVersion !== version) throw new WatchError();
 }
 
 /**
@@ -429,6 +439,14 @@ async function assertPlatformAsAvailable(iso, ns, workerName, newExports) {
     for (let i = 0; i < routeEntries.length; i += 1) {
       const [otherWorker, otherVersion] = routeEntries[i];
       const rawMeta = rawMetas[i];
+      if (rawMeta == null) {
+        await retryIfRouteChanged(
+          iso,
+          otherNs,
+          otherWorker,
+          /** @type {string} */ (otherVersion)
+        );
+      }
       const otherMeta = routingBundleMeta(
         otherNs,
         otherWorker,
@@ -718,6 +736,7 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
 
     const srcMetaRaw = await iso.hGet(srcKey, "__meta__");
     if (srcMetaRaw == null) {
+      await retryIfRouteChanged(iso, ns, workerName, currentVersion);
       throw new RoutingError(
         500,
         "bundle_copy_failed",

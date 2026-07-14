@@ -6,6 +6,7 @@ import {
 } from "./load-shared-module.js";
 import { controlSharedStubUrl } from "./control-shared-stub.js";
 import { compileControlGraph } from "./load-control-lib.js";
+import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
 
 const {
   sharedNsUrl,
@@ -22,6 +23,7 @@ const {
 } = await compileControlGraph();
 
 const controlSharedUrl = controlSharedStubUrl();
+const sharedRedisUrl = sharedRedisStubUrl();
 
 export const CONTROL_ROUTING_TEST_URL = moduleDataUrl(applyModuleReplacements(readRepositoryFile("control/routing.js"), [
   ...importSpecifierReplacements({
@@ -36,6 +38,7 @@ export const CONTROL_ROUTING_TEST_URL = moduleDataUrl(applyModuleReplacements(re
     "shared-ns-pattern": sharedNsUrl,
     "shared-auth-roles": sharedAuthRolesUrl,
     "shared-queue-keys": sharedQueueKeysUrl,
+    "shared-redis": sharedRedisUrl,
     "control-routing-route-plan": routePlanUrl,
   }),
 ]));
