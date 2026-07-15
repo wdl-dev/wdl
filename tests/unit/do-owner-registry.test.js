@@ -217,6 +217,16 @@ test("DO owner registry: first claim refuses a worker under whole-delete lock", 
     }
   );
   assert.ok(DO_OWNER_REGISTRY_TEST_STATE.watchedKeys.includes(DELETE_LOCK_KEY));
+  assert.deepEqual(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.filter((command) => command[0] === "getManyWithTime"),
+    [["getManyWithTime", [ownerKeyOf(OWNER_KEY), DELETE_LOCK_KEY]]]
+  );
+  assert.equal(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.some((command) => (
+      command[0] === "get" && command[1] === DELETE_LOCK_KEY
+    )),
+    false
+  );
   assert.deepEqual(doOwnerRegistryWriteCommands(), []);
 });
 

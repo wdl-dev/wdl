@@ -85,6 +85,7 @@ test("workflows handler lists active workflow definitions from bundle metadata",
     ["hGetAll", "routes:demo"],
     ["hGetMany", [["worker:demo:api:v:2", "__meta__"]]],
     ["hGetAllMany", ["wf:defs:demo:api"]],
+    ["hGetAll", "routes:demo"],
   ]);
   assert.deepEqual(state.logs, [{
     level: "info",
@@ -141,6 +142,219 @@ for (const [label, rawMeta] of [
     }
   });
 }
+
+test("workflows handler retries a list snapshot split by whole-worker delete", async () => {
+  const state = resetWorkflowsHandlerState();
+  const redis = /** @type {any} */ (state.redis);
+  redis.hGetMany = async (/** @type {Array<[string, string]>} */ pairs) => {
+    redis.commands.push(["hGetMany", pairs]);
+    redis.hashes.set("routes:demo", {});
+    redis.hashes.set("worker:demo:api:v:2", {});
+    return pairs.map(() => null);
+  };
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows"),
+    ns: "demo",
+    subPath: [],
+    requestId: "rid-list-delete-race",
+  });
+
+  await assertJsonResponse(response, 200, {
+    namespace: "demo",
+    workflows: [],
+  });
+  assert.deepEqual(state.logs, [{
+    level: "info",
+    event: "workflows_listed",
+    fields: { request_id: "rid-list-delete-race", namespace: "demo", count: 0 },
+  }]);
+});
+
+test("workflows handler returns worker_not_found when whole-delete wins metadata resolution", async () => {
+  const state = resetWorkflowsHandlerState();
+  const redis = /** @type {any} */ (state.redis);
+  const originalHGet = redis.hGet.bind(redis);
+  redis.hGet = async (/** @type {string} */ key, /** @type {string} */ field) => {
+    if (key === "worker:demo:api:v:2" && field === "__meta__") {
+      redis.commands.push(["hGet", key, field]);
+      redis.hashes.set("routes:demo", {});
+      redis.hashes.set("worker:demo:api:v:2", {});
+      return null;
+    }
+    return await originalHGet(key, field);
+  };
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows/api/orders/instances/order-1"),
+    ns: "demo",
+    subPath: ["api", "orders", "instances", "order-1"],
+    requestId: "rid-resolve-delete-race",
+  });
+
+  await assertJsonResponse(response, 404, {
+    error: "worker_not_found",
+    message: "Worker demo/api is not active",
+  });
+  assert.equal(redis.commands.some((/** @type {unknown[]} */ command) => command[0] === "fetch"), false);
+});
+
+test("workflows handler returns contention when workflow resolution never stabilizes", async () => {
+  const state = resetWorkflowsHandlerState();
+  const redis = /** @type {any} */ (state.redis);
+  const originalHGet = redis.hGet.bind(redis);
+  const nextVersions = new Map([
+    ["worker:demo:api:v:2", "v3"],
+    ["worker:demo:api:v:3", "v4"],
+  ]);
+  redis.hGet = async (/** @type {string} */ key, /** @type {string} */ field) => {
+    const nextVersion = field === "__meta__" ? nextVersions.get(key) : undefined;
+    if (nextVersion) {
+      redis.commands.push(["hGet", key, field]);
+      redis.hashes.set("routes:demo", { api: nextVersion });
+      return null;
+    }
+    return await originalHGet(key, field);
+  };
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows/api/orders/instances/order-1"),
+    ns: "demo",
+    subPath: ["api", "orders", "instances", "order-1"],
+    requestId: "rid-resolve-contention",
+  });
+
+  await assertJsonResponse(response, 503, {
+    error: "workflow_metadata_contention",
+    message: "Internal error",
+    namespace: "demo",
+    worker: "api",
+  });
+  assert.equal(redis.commands.filter((/** @type {unknown[]} */ command) =>
+    command[0] === "hGet" && String(command[1]).startsWith("worker:demo:api:v:")
+  ).length, 2);
+  assert.equal(redis.commands.some((/** @type {unknown[]} */ command) => command[0] === "fetch"), false);
+});
+
+for (const [label, rawMeta] of [
+  ["missing", null],
+  ["empty", ""],
+  ["malformed", "SECRET_TOKEN_ABC"],
+  ["non-object", "[]"],
+]) {
+  test(`workflows handler reports stable ${label} metadata despite sibling route churn`, async () => {
+    const state = resetWorkflowsHandlerState();
+    const redis = /** @type {any} */ (state.redis);
+    const emptyMeta = JSON.stringify({ workflows: [] });
+    redis.hashes.set("worker:demo:api:v:2", rawMeta == null ? {} : { "__meta__": rawMeta });
+    redis.hashes.set("worker:demo:billing:v:1", { "__meta__": emptyMeta });
+    redis.hashes.set("worker:demo:billing:v:2", { "__meta__": emptyMeta });
+    const routeSnapshots = [
+      { api: "v2", billing: "v1" },
+      { api: "v2", billing: "v2" },
+      { api: "v2", billing: "v2" },
+      { api: "v2", billing: "v3" },
+    ];
+    redis.hGetAll = async (/** @type {string} */ key) => {
+      redis.commands.push(["hGetAll", key]);
+      if (key === "routes:demo") return routeSnapshots.shift() ?? routeSnapshots.at(-1) ?? {};
+      return redis.hashes.get(key) ?? {};
+    };
+
+    const response = await handle({
+      method: "GET",
+      url: new URL("http://control/ns/demo/workflows"),
+      ns: "demo",
+      subPath: [],
+      requestId: `rid-stable-${label}-with-sibling-churn`,
+    });
+
+    await assertJsonResponse(response, 500, {
+      namespace: "demo",
+      worker: "api",
+      version: "v2",
+      error: "corrupt_meta",
+      message: "Internal error",
+    });
+    assert.equal(routeSnapshots.length, 2);
+  });
+}
+
+test("workflows handler returns contention when list routes never stabilize", async () => {
+  const state = resetWorkflowsHandlerState();
+  const redis = /** @type {any} */ (state.redis);
+  const meta = redis.hashes.get("worker:demo:api:v:2")["__meta__"];
+  redis.hashes.set("worker:demo:api:v:3", { "__meta__": meta });
+  const routeSnapshots = [
+    { api: "v2" },
+    { api: "v3" },
+    { api: "v3" },
+    { api: "v4" },
+  ];
+  redis.hGetAll = async (/** @type {string} */ key) => {
+    redis.commands.push(["hGetAll", key]);
+    if (key === "routes:demo") return routeSnapshots.shift() ?? {};
+    return redis.hashes.get(key) ?? {};
+  };
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows"),
+    ns: "demo",
+    subPath: [],
+    requestId: "rid-list-contention",
+  });
+
+  await assertJsonResponse(response, 503, {
+    error: "workflow_metadata_contention",
+    message: "Internal error",
+    namespace: "demo",
+  });
+  assert.equal(routeSnapshots.length, 0);
+});
+
+test("workflows handler does not combine active metadata with redeployed workflow defs", async () => {
+  const state = resetWorkflowsHandlerState();
+  const redis = /** @type {any} */ (state.redis);
+  redis.hashes.set("worker:demo:api:v:2", { "__meta__": JSON.stringify({ workflows: [] }) });
+  const originalHGetAll = redis.hGetAll.bind(redis);
+  let redeployed = false;
+  redis.hGetAll = async (/** @type {string} */ key) => {
+    if (key === "wf:defs:demo:api" && !redeployed) {
+      redeployed = true;
+      redis.hashes.set("routes:demo", { api: "v3" });
+      redis.hashes.set("worker:demo:api:v:3", { "__meta__": JSON.stringify({ workflows: [] }) });
+      redis.hashes.set(key, {
+        orders: JSON.stringify({ workflowKey: "wf_new", className: "NewOrderWorkflow" }),
+      });
+    }
+    return await originalHGetAll(key);
+  };
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows/api/orders/instances/order-1"),
+    ns: "demo",
+    subPath: ["api", "orders", "instances", "order-1"],
+    requestId: "rid-redeploy-defs-race",
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(redis.commands.at(-1), ["fetch", "http://workflows/internal/workflows/status", {
+    ns: "demo",
+    worker: "api",
+    frozenVersion: "v3",
+    workflowName: "orders",
+    workflowKey: "wf_new",
+    className: "NewOrderWorkflow",
+    instanceId: "order-1",
+    options: {},
+    requestId: "rid-redeploy-defs-race",
+  }]);
+});
 
 test("workflows handler lists empty namespaces without batch reads", async () => {
   const state = resetWorkflowsHandlerState();

@@ -20,6 +20,7 @@ import {
 import { bundleKey, routesKey } from "shared-version";
 
 const LIFECYCLE_ACTIONS = new Set(["pause", "resume", "restart", "terminate"]);
+const MAX_WORKFLOW_SNAPSHOT_ATTEMPTS = 2;
 
 /**
  * @typedef {import("shared-redis").RedisClient} RedisClient
@@ -158,19 +159,50 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
  * @param {string} ns
  */
 async function listWorkflowDefinitions({ redis }, ns) {
-  const routes = await redis.hGetAll(routesKey(ns));
-  /** @type {Array<[string, string]>} */
-  const routeEntries = [];
-  for (const [worker, activeVersion] of Object.entries(routes)) {
-    if (typeof activeVersion === "string" && activeVersion) routeEntries.push([worker, activeVersion]);
+  for (let attempt = 0; attempt < MAX_WORKFLOW_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const routes = await redis.hGetAll(routesKey(ns));
+    /** @type {Array<[string, string]>} */
+    const routeEntries = [];
+    for (const [worker, activeVersion] of Object.entries(routes)) {
+      if (typeof activeVersion === "string" && activeVersion) routeEntries.push([worker, activeVersion]);
+    }
+    if (routeEntries.length === 0) return { namespace: ns, workflows: [] };
+    const [metaRaws, defsRaws] = await readWorkflowListRaws({ redis }, ns, routeEntries);
+    const currentRoutes = await redis.hGetAll(routesKey(ns));
+    /** @type {Array<Record<string, unknown> | undefined>} */
+    const metas = new Array(routeEntries.length);
+    for (let index = 0; index < routeEntries.length; index += 1) {
+      const [worker, activeVersion] = routeEntries[index];
+      if (currentRoutes[worker] === activeVersion) {
+        metas[index] = workflowBundleMeta(ns, worker, activeVersion, metaRaws[index]);
+      }
+    }
+    if (!sameRouteSnapshot(routes, currentRoutes)) continue;
+    return buildWorkflowDefinitionList(
+      ns,
+      routeEntries,
+      /** @type {Record<string, unknown>[]} */ (metas),
+      defsRaws
+    );
   }
-  if (routeEntries.length === 0) return { namespace: ns, workflows: [] };
-  const [metaRaws, defsRaws] = await readWorkflowListRaws({ redis }, ns, routeEntries);
+  throw new ControlAbort(503, "workflow_metadata_contention", {
+    message: "Workflow metadata changed while it was being read",
+    namespace: ns,
+  });
+}
+
+/**
+ * @param {string} ns
+ * @param {Array<[string, string]>} routeEntries
+ * @param {Array<Record<string, unknown>>} metas
+ * @param {Array<Record<string, string | null | undefined>>} defsRaws
+ */
+function buildWorkflowDefinitionList(ns, routeEntries, metas, defsRaws) {
   /** @type {ListedWorkflowEntry[]} */
   const workflows = [];
   for (let i = 0; i < routeEntries.length; i += 1) {
     const [worker, activeVersion] = routeEntries[i];
-    const meta = workflowBundleMeta(ns, worker, activeVersion, metaRaws[i]);
+    const meta = metas[i];
     const activeByName = new Map();
     for (const workflow of workflowsFromMeta(meta)) {
       activeByName.set(workflow.name, workflow);
@@ -206,6 +238,12 @@ async function listWorkflowDefinitions({ redis }, ns) {
   return { namespace: ns, workflows: sortedWorkflows };
 }
 
+/** @param {Record<string, unknown>} left @param {Record<string, unknown>} right */
+function sameRouteSnapshot(left, right) {
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => right[key] === left[key]);
+}
+
 /**
  * @param {RedisDeps} deps
  * @param {string} ns
@@ -224,15 +262,34 @@ async function resolveWorkflow({ redis }, ns, worker, workflowName) {
       message: `Invalid workflow name ${JSON.stringify(workflowName)}. Must match ${WORKFLOW_NAME_RE}.`,
     });
   }
-  const activeVersion = await redis.hGet(routesKey(ns), worker);
-  if (!activeVersion) {
-    throw new ControlAbort(404, "worker_not_found", {
-      message: `Worker ${ns}/${worker} is not active`,
-    });
-  }
-  const meta = await readBundleMeta({ redis }, ns, worker, activeVersion);
-  const workflow = workflowsFromMeta(meta).find((entry) => entry.name === workflowName);
-  if (workflow) {
+  for (let attempt = 0; attempt < MAX_WORKFLOW_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const active = await readActiveWorkflowMeta({ redis }, ns, worker);
+    if (!active) continue;
+    const { activeVersion, meta } = active;
+    const activeWorkflow = workflowsFromMeta(meta).find((entry) => entry.name === workflowName);
+    /** @type {WorkflowEntry | undefined} */
+    let workflow = activeWorkflow;
+    if (!workflow) {
+      const defs = await readWorkflowDefs({ redis }, ns, worker);
+      const def = Object.hasOwn(defs, workflowName)
+        ? defs[workflowName]
+        : undefined;
+      if (def) {
+        workflow = {
+          name: workflowName,
+          binding: null,
+          className: def.className,
+          workflowKey: def.workflowKey,
+          retired: true,
+        };
+      }
+    }
+    if (!activeWorkflow && await redis.hGet(routesKey(ns), worker) !== activeVersion) continue;
+    if (!workflow) {
+      throw new ControlAbort(404, "workflow_not_found", {
+        message: `Workflow ${ns}/${worker}/${workflowName} is not exported`,
+      });
+    }
     return {
       workflow,
       request: {
@@ -245,34 +302,28 @@ async function resolveWorkflow({ redis }, ns, worker, workflowName) {
       },
     };
   }
+  throw new ControlAbort(503, "workflow_metadata_contention", {
+    message: `Workflow metadata changed while ${ns}/${worker} was being read`,
+    namespace: ns,
+    worker,
+  });
+}
 
-  const defs = await readWorkflowDefs({ redis }, ns, worker);
-  const def = Object.hasOwn(defs, workflowName)
-    ? defs[workflowName]
-    : undefined;
-  if (!def) {
-    throw new ControlAbort(404, "workflow_not_found", {
-      message: `Workflow ${ns}/${worker}/${workflowName} is not exported`,
+/**
+ * @param {RedisDeps} deps
+ * @param {string} ns
+ * @param {string} worker
+ * @returns {Promise<{ activeVersion: string, meta: Record<string, unknown> } | null>}
+ */
+async function readActiveWorkflowMeta({ redis }, ns, worker) {
+  const activeVersion = await redis.hGet(routesKey(ns), worker);
+  if (!activeVersion) {
+    throw new ControlAbort(404, "worker_not_found", {
+      message: `Worker ${ns}/${worker} is not active`,
     });
   }
-  const retiredWorkflow = {
-    name: workflowName,
-    binding: null,
-    className: def.className,
-    workflowKey: def.workflowKey,
-    retired: true,
-  };
-  return {
-    workflow: retiredWorkflow,
-    request: {
-      ns,
-      worker,
-      frozenVersion: activeVersion,
-      workflowName: retiredWorkflow.name,
-      workflowKey: retiredWorkflow.workflowKey,
-      className: retiredWorkflow.className,
-    },
-  };
+  const meta = await readBundleMeta({ redis }, ns, worker, activeVersion);
+  return meta ? { activeVersion, meta } : null;
 }
 
 /**
@@ -370,12 +421,13 @@ async function readWorkflowListRaws({ redis }, ns, routeEntries) {
  * @param {string} ns
  * @param {string} worker
  * @param {string} version
- * @returns {Promise<Record<string, unknown>>}
+ * @returns {Promise<Record<string, unknown> | null>}
  */
 async function readBundleMeta({ redis }, ns, worker, version) {
   let raw;
   try {
     raw = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
+    if (raw == null && await redis.hGet(routesKey(ns), worker) !== version) return null;
   } catch (err) {
     requireControlLog()("error", "workflow_metadata_unavailable", {
       namespace: ns,

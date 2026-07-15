@@ -259,13 +259,22 @@ export class RedisSession {
   }
   /** @param {string} key */
   async getWithTime(key) {
-    const [value, time] = await this._execPipeline("GET_TIME_PIPELINE", [
-      ["GET", key],
+    const { values, nowMs } = await this.getManyWithTime([key]);
+    return {
+      value: values[0],
+      nowMs,
+    };
+  }
+  /** @param {string[]} keys */
+  async getManyWithTime(keys) {
+    if (keys.length === 0) throw new Error("getManyWithTime requires at least one key");
+    const replies = await this._execPipeline("GET_TIME_PIPELINE", [
+      ...keys.map((key) => /** @type {RedisCommand} */ (["GET", key])),
       ["TIME"],
     ]);
     return {
-      value: decodeBulk(value),
-      nowMs: decodeRedisTimeMs(time),
+      values: replies.slice(0, -1).map(decodeBulk),
+      nowMs: decodeRedisTimeMs(replies.at(-1)),
     };
   }
   async time() { return decodeRedisTimeMs(await this._exec("TIME")); }

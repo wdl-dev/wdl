@@ -9,6 +9,7 @@ const {
   ownerProtocolKeys,
   readOwnerRecord,
   readOwnerRecordWithRedisTime,
+  readOwnerSnapshotWithRedisTime,
   stageOwnerClaim,
   stageOwnerRelease,
   stageOwnerRenew,
@@ -66,6 +67,25 @@ test("owner protocol helpers reject invalid Redis time from combined owner reads
     }, "owner-key", (/** @type {string | Uint8Array | ArrayBuffer | null | undefined} */ raw) => ({ raw })),
     /Redis server time is invalid/
   );
+});
+
+test("owner protocol helpers read related owner state in the timed snapshot", async () => {
+  const result = await readOwnerSnapshotWithRedisTime({
+    /** @param {string[]} keys */
+    async getManyWithTime(keys) {
+      assert.deepEqual(keys, ["owner-key", "delete-lock"]);
+      return {
+        values: ["raw-owner", "whole:token"],
+        nowMs: 1_700_000_000_456,
+      };
+    },
+  }, "owner-key", ["delete-lock"], (/** @type {string | Uint8Array | ArrayBuffer | null | undefined} */ raw) => ({ raw }));
+
+  assert.deepEqual(result, {
+    owner: { raw: "raw-owner" },
+    relatedValues: ["whole:token"],
+    nowMs: 1_700_000_000_456,
+  });
 });
 
 test("owner protocol helpers stage claim, renew, and release writes", () => {

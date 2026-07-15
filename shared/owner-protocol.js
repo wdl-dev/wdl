@@ -13,6 +13,7 @@ import {
  *   exec(): Promise<unknown>,
  * }} OwnerWriteMulti
  * @typedef {{ value: string | Uint8Array | ArrayBuffer | null | undefined, nowMs: number }} OwnerReadWithTimeResult
+ * @typedef {{ values: Array<string | Uint8Array | ArrayBuffer | null | undefined>, nowMs: number }} OwnerSnapshotReadWithTimeResult
  */
 /**
  * @template T
@@ -20,6 +21,20 @@ import {
  * @param {string | Uint8Array | ArrayBuffer | null | undefined} raw
  * @returns {T | null}
  */
+
+/**
+ * @template T
+ * @param {string | Uint8Array | ArrayBuffer | null | undefined} value
+ * @param {number} nowMs
+ * @param {OwnerParser<T>} parseOwner
+ * @returns {{ owner: T | null, nowMs: number }}
+ */
+function parseTimedOwnerRead(value, nowMs, parseOwner) {
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+    throw new Error("Redis server time is invalid");
+  }
+  return { owner: parseOwner(value), nowMs };
+}
 
 /**
  * @param {string} prefix
@@ -68,12 +83,22 @@ export async function readOwnerRecord(client, ownerKey, parseOwner) {
  */
 export async function readOwnerRecordWithRedisTime(client, ownerKey, parseOwner) {
   const result = await client.getWithTime(ownerKey);
-  if (!Number.isSafeInteger(result.nowMs) || result.nowMs < 0) {
-    throw new Error("Redis server time is invalid");
-  }
+  return parseTimedOwnerRead(result.value, result.nowMs, parseOwner);
+}
+
+/**
+ * @template T
+ * @param {{ getManyWithTime(keys: string[]): Promise<OwnerSnapshotReadWithTimeResult> }} client
+ * @param {string} ownerKey
+ * @param {string[]} relatedKeys
+ * @param {OwnerParser<T>} parseOwner
+ * @returns {Promise<{ owner: T | null, relatedValues: Array<string | Uint8Array | ArrayBuffer | null | undefined>, nowMs: number }>}
+ */
+export async function readOwnerSnapshotWithRedisTime(client, ownerKey, relatedKeys, parseOwner) {
+  const result = await client.getManyWithTime([ownerKey, ...relatedKeys]);
   return {
-    owner: parseOwner(result.value),
-    nowMs: result.nowMs,
+    ...parseTimedOwnerRead(result.values[0], result.nowMs, parseOwner),
+    relatedValues: result.values.slice(1),
   };
 }
 

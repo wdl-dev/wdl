@@ -108,6 +108,16 @@ test("fake redis session records single and batched hash reads", async () => {
   ]);
 });
 
+test("fake redis getManyWithTime matches the production empty-input contract", async () => {
+  const redis = createFakeRedis();
+  await redis.session(async (session) => {
+    await assert.rejects(
+      session.getManyWithTime([]),
+      /getManyWithTime requires at least one key/
+    );
+  });
+});
+
 test("fake redis supports hash existence and key reads on clients and sessions", async () => {
   const redis = createFakeRedis();
   redis.hashes.set("hash:a", { one: "1", two: "2" });

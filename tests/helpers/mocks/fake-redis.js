@@ -314,6 +314,18 @@ export function createFakeRedisSession(state, options = {}) {
     async getWithTime(key) {
       return { value: await this.get(key), nowMs: await this.time() };
     },
+    /** @param {string[]} keys */
+    async getManyWithTime(keys) {
+      if (keys.length === 0) throw new Error("getManyWithTime requires at least one key");
+      state.commands.push(["getManyWithTime", [...keys]]);
+      return {
+        values: keys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return state.strings.get(key) ?? null;
+        }),
+        nowMs: await this.time(),
+      };
+    },
     async time() {
       return currentFakeRedisTimeMs(state, options);
     },

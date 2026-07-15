@@ -38,6 +38,7 @@ import {
   ownerProtocolKeys,
   readOwnerRecord,
   readOwnerRecordWithRedisTime,
+  readOwnerSnapshotWithRedisTime,
   stageOwnerClaim,
   stageOwnerRelease,
   stageOwnerRenew,
@@ -353,12 +354,13 @@ export async function resolveDoOwner(env, invoke) {
 
   return await withWatchRetries(async () => client.session(async (session) => {
     await session.watch(key, generationKey, workerDeleteLockKey);
-    const { owner: current, nowMs } = await readOwnerRecordWithRedisTime(
+    const { owner: current, relatedValues, nowMs } = await readOwnerSnapshotWithRedisTime(
       session,
       key,
+      [workerDeleteLockKey],
       (raw) => parseOwner(raw, ownerKey, scope)
     );
-    const deleteLockToken = decodeBulk(await session.get(workerDeleteLockKey));
+    const deleteLockToken = decodeBulk(relatedValues[0]);
     if (
       deleteLockToken != null &&
       parseDeleteLockKind(deleteLockToken) !== VERSION_DELETE_LOCK_KIND
