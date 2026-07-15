@@ -36,6 +36,7 @@ Storage cleanup endpoint 是 native facet storage cleanup 和 worker storage cle
 DO protocol error 使用 `{ error, message, details? }`。不同于 admin HTTP 的 flat additive error shape，DO protocol detail 会嵌套在 `details` 下，因为消费者是 runtime/DO client protocol，不是通用 admin JSON parser。未知 internal exception 仍会降级成安全的 `internal_error` / `Internal error` message。Storage delete-worker 在 partial batch result 时可能返回 HTTP 207 和 `{ ok:false, deleted, errors }`；这是 result envelope，不是 generic JSON error envelope。
 Tenant-originated DO fetch body 在 runtime facade 中限制为 1 MiB。Facade 会在读取前拒绝超限的 `Content-Length`，streamed body 会增量读取，因此 limit 会在完整 buffering 前生效。
 DO RPC method name 使用 JavaScript identifier grammar，并由 runtime client 和 do-runtime protocol reader 同时限制为最多 256 ASCII bytes。RPC 参数是最多 1 MiB 的 structural JSON data：接受 finite number、string、boolean、null、dense array 和 plain object。序列化不会调用 `toJSON()` hook；sparse array、circular structure、non-plain object 和 non-JSON value 会在 dispatch 前失败。
+do-runtime 会通过 generated wrapper 截获的私有 fetch dispatch 调用 tenant alarm 和 RPC method；这些 request 携带外层 request id，使 host facade 建立 invocation-local context，且不会把平台 metadata 加入 tenant argument list。
 DO invoke envelope 通过 canonical namespace、worker、version 和 storage id 标识 persisted bundle，不接受 inline worker source。
 DO host id 最多 512 UTF-8 bytes，并使用不带前导零的 canonical `shardN` suffix。
 
@@ -88,7 +89,7 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 Owner resolution 是单写入协议：
 
 1. do-runtime 从 `doStorageId`、class name 和 shard 派生 owner scope。
-2. Claim 或 renew 前 WATCH owner record、generation key 和 active worker storage pointer。
+2. Owner resolution 会 WATCH owner record、generation key、worker delete lock 和 active worker storage pointer。`whole` delete lock 会拒绝 ownership；`version` lock 仍属于 WATCH snapshot，但不会中断 active storage。这个 WATCH 会阻止 claim 在 whole-worker delete 开始后提交。Renew 会单独 WATCH owner record 和 active storage pointer；generation fence 已包含在 owner record 中，不需要再次读取 generation key。
 3. 如果另一个 task 持有 live owner，router 返回该 owner 或 owner-hint header；runtime facade 可以直连重试，但 owner task 仍会重新检查 fence。
 4. 如果 owner 缺失或过期，claimant 在一个 Redis transaction 中递增 monotonic generation counter，并写入带 TTL 的 owner record。
 5. Local dispatch 使用 native facet 前检查 `taskId`、`generation`、lease expiry、active `doStorageId` 和剩余 lease budget。stale generation、expired lease 或 storage pointer 改变都会 fail closed。剩余 lease 小于 `DO_OWNER_LEASE_GUARD_MS`（默认 `1000`）时，owner 会先尝试 same-task、same-generation CAS renew；如果 renew 失败，才 fail closed。这个 guard 缩窄 takeover window，但不是 per-SQL-call 或 SQLite commit-time fence。
@@ -146,7 +147,7 @@ do-runtime 围绕 owner resolution、dispatch、alarm execution、drain、renew 
 ## 已知约束和非目标
 
 - 当前 lifecycle 不会在 worker delete 时物理清除 native facet SQLite storage。
-- Whole-worker delete 会删除 active `worker:do-storage:<ns>:<worker>` pointer，并在 delete commit 后请求 Workflows 删除 internal DO alarm jobs；pointer 消失后，旧 facet 的 late `setAlarm()` 写入会被忽略。Cleanup 会 fence 到被删除的 `doStorageId`，因此同名 worker 以新 storage id redeploy 后不会被旧 delete 扫掉。如果 best-effort cleanup 失败，远期残留 alarm job 可能留在 DB 2 直到到期；随后 dispatch 会因为 storage pointer 已消失而自清理。`do:objects:<doStorageId>` 会作为未来 platform cleanup 的 tombstone 保留。
+- Whole-worker delete 会删除 active `worker:do-storage:<ns>:<worker>` pointer，并在 delete commit 后请求 Workflows 删除 internal DO alarm jobs；pointer 消失后，旧 facet 的 late `setAlarm()` 写入会被忽略。Cleanup 会 fence 到被删除的 `doStorageId`，因此同名 worker 以新 storage id redeploy 后不会被旧 delete 扫掉。如果 best-effort cleanup 失败，远期残留 alarm job 可能留在 DB 2 直到到期；随后 dispatch 会因为 storage pointer 已消失而自清理。First owner claim 会 WATCH 同一把 per-worker delete lock 和 storage pointer；只有 `whole` lock kind 会拒绝 ownership，因此删除 inactive version 不会中断 active worker，而 whole-worker delete 也不会漏掉最终 owner scan 之后创建的 owner/generation state。`do:objects:<doStorageId>` 会作为未来 platform cleanup 的 tombstone 保留。
 - DO object registry 写入是 best-effort。Registry 写失败时 dispatch 会继续，因此 tombstone set 可能不完整；未来 cleanup 必须容忍缺失 member，并把 active storage pointer、owner/alarm state 当成更强的 lifecycle signal。
 - Gateway-held WebSocket recovery 只对 client connection continuity 做 best-effort。Backend DO facet 在初始 `101` 之后不会逐消息 re-fence；owner handoff 安全依赖 reconnect/rebind 行为，以及创建 backend facet 前运行的 owner-side dispatch fence。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
 - Owner-hinted WebSocket direct retry 失败不会 fall back 到 router，因为最终 101 必须来自 owner endpoint。

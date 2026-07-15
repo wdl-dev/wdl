@@ -68,7 +68,7 @@
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |
 | `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
 | `shared/ns-pattern.js` | Platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、module path、reserved object-key 和 reserved namespace grammars。 |
-| `shared/version.js` | Worker version formatting，以及 worker 和 route-plane Redis key helpers。 |
+| `shared/version.js` | Worker version formatting，以及 worker、route-plane 和 lifecycle Redis key helpers。 |
 | `shared/workerd-compat-flags.js` | 上游 workerd experimental compatibility enable flags 的 pinned mirror，用于在 cold-load 前拒绝 tenant metadata。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |

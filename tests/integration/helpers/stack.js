@@ -182,7 +182,7 @@ export async function waitForScheduler() {
   redisHSet(consumerKey, {
     worker: "probe",
     version: "v1",
-    max_batch_size: "1000",
+    max_batch_size: "100",
     max_batch_timeout_ms: "1000",
     max_retries: "0",
     retry_delay_secs: "0",

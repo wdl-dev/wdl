@@ -36,7 +36,9 @@ workers:<ns>                    Set, worker names with worker-owned lifecycle st
 worker:<ns>:<name>:next_version String, monotonic version counter, survives delete
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes plus __meta__
-worker-delete-lock:<ns>:<name>  String EX 30, per-worker delete critical-section lock
+worker-delete-lock:<ns>:<name>  String EX 30, per-worker delete critical-section lock;
+                               value is whole:<token> or version:<token>; DO first-owner
+                               claim WATCHes it and only whole fences ownership
 worker-version-referrers:<ns>:<name>:<version>
                                 Set, canonical JSON version-pinned caller refs
 hosts:<ns>                      Set, declared operator host intent

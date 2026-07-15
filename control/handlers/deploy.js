@@ -5,7 +5,8 @@ import {
   getControlS3,
   runOptimistic,
   stageBundleCommit, buildS3CleanupTaskId, recordS3CleanupIntent,
-  ControlAbort, controlAbortResponse, codedErrorResponse,
+  ControlAbort, controlAbortResponse, codedErrorLogFields, codedErrorResponse,
+  secretEnvelopeErrorResponse,
 } from "control-shared";
 import { PLATFORM_TIER_RESERVED_NS } from "shared-auth-roles";
 import {
@@ -64,6 +65,13 @@ const DEPLOY_ASSET_UPLOAD_CONCURRENCY = 8;
 // fields: commit aborts need cleanup/log handling, while request errors are
 // pre-commit shape rejections.
 class DeployAbort extends ControlAbort {}
+
+/** @param {Record<string, unknown>} details */
+function deployAbortLogContext(details) {
+  const { databaseId, ...context } = details;
+  if (databaseId !== undefined) context.database_id = databaseId;
+  return context;
+}
 
 /**
  * @typedef {import("control-shared").ControlLogger} ControlLogger
@@ -524,7 +532,7 @@ async function uploadDeployAssets({
     )
   );
   if (firstFailure) {
-    const { assetPath, key, err } = firstFailure;
+    const { key, err } = firstFailure;
     log("error", "asset_upload_failed", {
       request_id: requestId,
       namespace: ns,
@@ -542,7 +550,7 @@ async function uploadDeployAssets({
       response: jsonError(
         502,
         "asset_upload_failed",
-        `Asset upload failed for ${assetPath}: ${errMessage(err)}`,
+        "Asset upload failed",
         { ...(warnings.length ? { warnings } : {}) }
       ),
     };
@@ -715,20 +723,33 @@ async function commitPreparedDeploy({
     }
     const warningDetails = warnings.length ? { warnings } : {};
     if (err instanceof DeployAbort) {
-      log("warn", "deploy_rejected", {
+      log(err.status >= 500 ? "error" : "warn", "deploy_rejected", {
         request_id: requestId,
         namespace: ns,
         worker: name,
         version,
-        status: err.status,
-        reason: err.code,
-        ...err.details,
+        ...codedErrorLogFields(err, err.code, { context: deployAbortLogContext(err.details) }),
       });
       return { response: controlAbortResponse(err, warningDetails) };
     }
     if (err instanceof WorkerEnvBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
     if (err instanceof WorkerCodeBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
-    if (err instanceof SecretEnvelopeError) return { response: jsonError(503, err.code, err.message, warningDetails) };
+    if (err instanceof SecretEnvelopeError) {
+      return {
+        response: secretEnvelopeErrorResponse({
+          err,
+          log,
+          event: "deploy_rejected",
+          fields: {
+            request_id: requestId,
+            namespace: ns,
+            worker: name,
+            version,
+          },
+          responseDetails: warningDetails,
+        }),
+      };
+    }
     throw err;
   }
   return { commitDurationMs: Date.now() - commitStartedAt };
@@ -758,8 +779,7 @@ export async function handle({ request, env, ns, name, requestId }) {
         request_id: requestId,
         namespace: ns,
         worker: name,
-        status: err.status,
-        reason: err.code,
+        ...codedErrorLogFields(err, "link_error"),
       });
       return codedErrorResponse(err, "link_error");
     }
@@ -884,7 +904,7 @@ async function scheduleDeployAbortCleanup({
     warnings.push({
       kind: "assets_cleanup_task_failed",
       prefix,
-      reason: errMessage(err),
+      reason: "cleanup_task_write_failed",
     });
   }
 }

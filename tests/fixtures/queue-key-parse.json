@@ -24,7 +24,8 @@
   ],
   "consumer": [
     { "key": "queue-consumer:demo:jobs", "parsed": { "ns": "demo", "queue": "jobs" } },
-    { "key": "queue-consumer:__platform__:jobs-1", "parsed": { "ns": "__platform__", "queue": "jobs-1" } },
+    { "key": "queue-consumer:__system__:jobs-1", "parsed": { "ns": "__system__", "queue": "jobs-1" } },
+    { "key": "queue-consumer:__platform__:jobs-1", "parsed": null },
     { "key": "queue-consumer:demo", "parsed": null },
     { "key": "queue-consumer:", "parsed": null },
     { "key": "queue-consumer:admin:jobs", "parsed": null },

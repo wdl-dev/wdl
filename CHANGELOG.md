@@ -10,6 +10,8 @@
 - Normalized `PLATFORM_DOMAIN` across routing tiers, stopped `/whoami` from advertising the internal `workers.local` fallback as a public namespace URL, and aligned Compose/Kubernetes/test wiring with the consolidated owners.
 - Removed the unreachable DO inline worker-code test hook and its Terraform switch; do-runtime invoke paths now accept only canonical persisted bundle identities and reject non-canonical or oversized host ids.
 - Added Terraform plan-time validation for application subnets: every supplied subnet must belong to the configured VPC, use an RFC1918 or `100.64.0.0/10` IPv4 CIDR, and occupy a distinct Availability Zone. Existing unsupported subnet selections now fail during planning.
+- Aligned scheduler and Workflows Compose, Kubernetes, and ECS stop windows with their 25-second application drain so rollout and scale-in do not terminate in-flight work before the configured drain completes.
+- Upgraded `@wdl-dev/aws-sigv4` to 3.0.1; WDL's S3-only URL-input paths preserve their existing signatures while adopting stable request snapshots, fail-closed redirects, lowercase region validation, and non-blocking response cleanup.
 
 ## wdl.20260701.1 - 2026-07-08
 

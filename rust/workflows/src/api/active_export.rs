@@ -1,5 +1,5 @@
 use serde_json::Value as JsonValue;
-use wdl_rust_common::version::routes_key;
+use wdl_rust_common::version::{routes_key, worker_delete_lock_key};
 
 use crate::{AppState, WorkflowError, WorkflowResult};
 
@@ -190,7 +190,7 @@ pub(super) async fn ensure_worker_not_deleting(
     ns: &str,
     worker: &str,
 ) -> WorkflowResult<()> {
-    let lock_key = format!("worker-delete-lock:{ns}:{worker}");
+    let lock_key = worker_delete_lock_key(ns, worker);
     let lock_exists: i64 = state
         .control_redis
         .with_conn(async |mut conn| {

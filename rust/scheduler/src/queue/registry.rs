@@ -3,9 +3,13 @@ use std::future::Future;
 use std::sync::Arc;
 
 use redis::{AsyncCommands, Value};
+use wdl_rust_common::identity::{is_valid_route_ns, is_valid_worker_name};
+use wdl_rust_common::queue_keys::is_valid_queue_name;
+use wdl_rust_common::version::parse_version_tag;
 
 use crate::{
-    AppState, CONSUMER_GROUP, QueueState, SchedulerResult, indexed_data_keys, indexed_keys,
+    AppState, CONSUMER_GROUP, MAX_BATCH_SIZE_CAP, QueueState, SchedulerResult, indexed_data_keys,
+    indexed_keys,
 };
 
 use super::{
@@ -16,9 +20,9 @@ use super::{
 
 const QUEUE_RECONCILE_CONSUMER_HASH_BATCH_SIZE: usize = 128;
 
-pub(crate) fn finite_or(value: Option<&String>, fallback: i64) -> i64 {
+fn finite_or(value: Option<&String>, fallback: i64) -> i64 {
     value
-        .and_then(|v| v.parse::<i64>().ok())
+        .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(fallback)
 }
 
@@ -27,15 +31,25 @@ pub(crate) fn hydrate_consumer(
     queue: &str,
     hash: &HashMap<String, String>,
 ) -> Option<Consumer> {
-    let worker = hash.get("worker")?.clone();
-    let version = hash.get("version")?.clone();
-    let max_batch_size = finite_or(hash.get("max_batch_size"), 10).max(1) as usize;
+    if !is_valid_route_ns(ns) || !is_valid_queue_name(queue) {
+        return None;
+    }
+    let worker = hash
+        .get("worker")
+        .filter(|value| is_valid_worker_name(value))
+        .cloned()?;
+    let version = hash
+        .get("version")
+        .filter(|value| parse_version_tag(value).is_ok())
+        .cloned()?;
+    let max_batch_size =
+        finite_or(hash.get("max_batch_size"), 10).clamp(1, MAX_BATCH_SIZE_CAP as i64) as usize;
     let max_batch_timeout_ms = finite_or(hash.get("max_batch_timeout_ms"), 5000);
     let max_retries = finite_or(hash.get("max_retries"), 3);
     let retry_delay_secs = finite_or(hash.get("retry_delay_secs"), 0).max(0);
     let dead_letter_queue = hash
         .get("dead_letter_queue")
-        .filter(|v| !v.is_empty())
+        .filter(|value| !value.is_empty())
         .cloned();
     Some(Consumer {
         ns: ns.to_string(),
@@ -226,10 +240,7 @@ where
     let hash = load_hash(queue_consumer_key(ns, queue)).await?;
     let consumer = hydrate_consumer(ns, queue, &hash);
     write_resolved_consumer(queues, stream_key, consumer.as_ref()).await;
-    let Some(consumer) = consumer else {
-        return Ok(None);
-    };
-    Ok(Some(consumer))
+    Ok(consumer)
 }
 
 async fn write_resolved_consumer(
@@ -246,8 +257,10 @@ async fn write_resolved_consumer(
     } else {
         queues.registry.write().await.remove(stream_key)
     };
-    if previous.as_ref() != consumer {
+    let registry_changed = previous.as_ref() != consumer;
+    if registry_changed {
         refresh_consumer_streams_for(queues).await;
+        queues.delayed_changed.notify_one();
     }
 }
 
@@ -262,6 +275,16 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect()
+    }
+
+    fn valid_consumer_hash(worker: &str, version: &str) -> HashMap<String, String> {
+        str_map(&[
+            ("worker", worker),
+            ("version", version),
+            ("max_batch_size", "10"),
+            ("max_batch_timeout_ms", "5000"),
+            ("max_retries", "3"),
+        ])
     }
 
     #[test]
@@ -307,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_consumer_preserves_defaults_and_explicit_zeroes() {
+    fn hydrate_consumer_preserves_defaults_and_runtime_batch_cap() {
         let defaults = hydrate_consumer(
             "demo",
             "jobs",
@@ -347,12 +370,14 @@ mod tests {
             &str_map(&[
                 ("worker", "w"),
                 ("version", "v3"),
+                ("max_batch_size", "1000"),
                 ("max_retries", "0"),
                 ("max_batch_timeout_ms", "0"),
                 ("retry_delay_secs", "0"),
             ]),
         )
         .unwrap();
+        assert_eq!(zeroes.max_batch_size, MAX_BATCH_SIZE_CAP);
         assert_eq!(zeroes.max_retries, 0);
         assert_eq!(zeroes.max_batch_timeout_ms, 0);
         assert_eq!(zeroes.retry_delay_secs, 0);
@@ -377,36 +402,23 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_consumer_falls_back_for_invalid_or_incomplete_hashes() {
-        let invalid = hydrate_consumer(
-            "demo",
-            "jobs",
-            &str_map(&[
-                ("worker", "w"),
-                ("version", "v1"),
-                ("max_batch_size", "bogus"),
-                ("max_retries", "nan"),
-                ("retry_delay_secs", "bogus"),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(invalid.max_batch_size, 10);
-        assert_eq!(invalid.max_retries, 3);
-        assert_eq!(invalid.retry_delay_secs, 0);
-
+    fn hydrate_consumer_rejects_noncanonical_dispatch_identity() {
+        assert!(hydrate_consumer("demo", "jobs", &HashMap::new()).is_none());
         assert!(hydrate_consumer("demo", "jobs", &str_map(&[("version", "v1")])).is_none());
         assert!(hydrate_consumer("demo", "jobs", &str_map(&[("worker", "w")])).is_none());
+        assert!(
+            hydrate_consumer("__platform__", "jobs", &valid_consumer_hash("w", "v1")).is_none()
+        );
+        assert!(
+            hydrate_consumer("demo", "jobs", &valid_consumer_hash("bad:worker", "v1")).is_none()
+        );
+        assert!(hydrate_consumer("demo", "jobs", &valid_consumer_hash("w", "v01")).is_none());
     }
 
     #[test]
     fn sorted_consumer_streams_returns_stable_key_snapshot() {
         let mut registry = HashMap::new();
-        let jobs = hydrate_consumer(
-            "demo",
-            "jobs",
-            &str_map(&[("worker", "w"), ("version", "v1")]),
-        )
-        .unwrap();
+        let jobs = hydrate_consumer("demo", "jobs", &valid_consumer_hash("w", "v1")).unwrap();
         registry.insert(queue_stream_key("demo", "z"), jobs.clone());
         registry.insert(queue_stream_key("demo", "a"), jobs);
 
@@ -421,12 +433,8 @@ mod tests {
     async fn resolve_consumer_loads_authoritative_hash_and_refreshes_registry() {
         let queues = QueueState::default();
         let stream_key = queue_stream_key("demo", "jobs");
-        let stale = hydrate_consumer(
-            "demo",
-            "jobs",
-            &str_map(&[("worker", "old-worker"), ("version", "v1")]),
-        )
-        .unwrap();
+        let stale =
+            hydrate_consumer("demo", "jobs", &valid_consumer_hash("old-worker", "v1")).unwrap();
         queues
             .registry
             .write()
@@ -439,6 +447,8 @@ mod tests {
             ("worker", "fresh-worker"),
             ("version", "v2"),
             ("max_batch_size", "4"),
+            ("max_batch_timeout_ms", "5000"),
+            ("max_retries", "3"),
         ]);
         let consumer = resolve_consumer_with_hash_loader(&queues, &stream_key, "demo", "jobs", {
             let loaded_keys = loaded_keys.clone();
@@ -477,31 +487,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_consumer_removes_stale_registry_when_authoritative_hash_is_missing() {
-        let queues = QueueState::default();
-        let stream_key = queue_stream_key("demo", "jobs");
-        let stale = hydrate_consumer(
-            "demo",
-            "jobs",
-            &str_map(&[("worker", "old-worker"), ("version", "v1")]),
-        )
-        .unwrap();
-        queues
-            .registry
-            .write()
-            .await
-            .insert(stream_key.clone(), stale);
-        refresh_consumer_streams_for(&queues).await;
+    async fn resolve_consumer_treats_missing_or_invalid_identity_as_absent() {
+        for authoritative in [
+            HashMap::new(),
+            str_map(&[("worker", "worker"), ("version", "invalid")]),
+        ] {
+            let queues = QueueState::default();
+            let stream_key = queue_stream_key("demo", "jobs");
+            let stale =
+                hydrate_consumer("demo", "jobs", &valid_consumer_hash("old-worker", "v1")).unwrap();
+            queues
+                .registry
+                .write()
+                .await
+                .insert(stream_key.clone(), stale);
+            refresh_consumer_streams_for(&queues).await;
 
-        let consumer =
-            resolve_consumer_with_hash_loader(&queues, &stream_key, "demo", "jobs", |_| async {
-                Ok::<_, redis::RedisError>(HashMap::new())
-            })
+            let consumer = resolve_consumer_with_hash_loader(
+                &queues,
+                &stream_key,
+                "demo",
+                "jobs",
+                |_| async { Ok::<_, redis::RedisError>(authoritative) },
+            )
             .await
             .unwrap();
 
-        assert_eq!(consumer, None);
-        assert!(!queues.registry.read().await.contains_key(&stream_key));
-        assert!(queues.consumer_streams.read().await.is_empty());
+            assert_eq!(consumer, None);
+            assert!(!queues.registry.read().await.contains_key(&stream_key));
+            assert!(queues.consumer_streams.read().await.is_empty());
+        }
     }
 }

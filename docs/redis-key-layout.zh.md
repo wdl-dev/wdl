@@ -21,7 +21,7 @@ workers:<ns>                    Set, 有 worker-owned lifecycle state 的 worker
 worker:<ns>:<name>:next_version String, 单调 version counter，delete 后保留
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes + __meta__
-worker-delete-lock:<ns>:<name>  String EX 30, 每个 worker 的 delete critical-section lock
+worker-delete-lock:<ns>:<name>  String EX 30, 每个 worker 的 delete critical-section lock；value 是 whole:<token> 或 version:<token>；DO first-owner claim 会 WATCH，且只有 whole 阻止 ownership
 worker-version-referrers:<ns>:<name>:<version>
                                 Set, canonical JSON 的 version-pinned caller ref
 hosts:<ns>                      Set, operator 声明的 host intent

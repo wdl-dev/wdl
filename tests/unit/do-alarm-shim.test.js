@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DO_ALARM_SHIM_SOURCE } from "../../do-runtime/alarm-shim-source.js";
+import {
+  DO_ALARM_SHIM_SOURCE,
+} from "../../do-runtime/alarm-shim-source.js";
 import { makeDoAlarmBinding, makeDoAlarmStorage } from "../helpers/do-alarm-shim-fixture.js";
 import { applyModuleReplacements, moduleDataUrl } from "../helpers/load-shared-module.js";
 import { withMockedGlobal, withMockedProperty } from "../helpers/mock-global.js";
@@ -31,6 +33,41 @@ test("DO alarm shim: error formatting cannot replace the original failure", () =
   assert.deepEqual(formatWrappedError(proxy), {
     error_name: "Error",
     error_message: "Unknown error",
+  });
+});
+
+test("DO alarm shim: internal RPC dispatch invokes tenant methods without adding arguments", async () => {
+  const { storage } = makeDoAlarmStorage();
+  class RpcRoom {
+    /** @param {{ storage: unknown }} ctx */
+    constructor(ctx) {
+      this.ctx = ctx;
+    }
+    async inspect(/** @type {unknown} */ value) {
+      await Promise.resolve();
+      return { value };
+    }
+  }
+  const Wrapped = wrapDurableObjectClass(RpcRoom, "Room");
+  const instance = new Wrapped(
+    { storage, id: "alice" },
+    { __WDL_DO_ALARMS__: makeDoAlarmBinding([]) }
+  );
+  /** @param {string} method */
+  const request = (method) => new Request("https://do.internal/__wdl_rpc", {
+    method: "POST",
+    headers: { "x-wdl-do-internal-rpc": "1", "x-request-id": "rid-rpc" },
+    body: JSON.stringify({ method, args: ["value"] }),
+  });
+  await assertJsonResponse(await instance.fetch(request("inspect")), 200, {
+    ok: true,
+    result: {
+      value: "value",
+    },
+  });
+  await assertJsonResponse(await instance.fetch(request("missing")), 404, {
+    error: "do_rpc_method_not_found",
+    message: "Durable Object RPC method missing was not found",
   });
 });
 
@@ -790,4 +827,59 @@ test("DO alarm shim: deleteAll deleteAlarm false preserves alarm row without bac
   assert.deepEqual(calls, []);
   assert.deepEqual(state.row, { ...initial, last_error: null });
   assert.equal(kv.size, 0);
+});
+
+test("DO alarm shim: deleteAll ignores tenant-patched array iteration", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  /** @type {string[]} */
+  const dropped = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "preserve-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(initial);
+  const originalExec = storage.sql.exec;
+  /** @param {string} statement @param {...unknown} params */
+  storage.sql.exec = function exec(statement, ...params) {
+    if (statement.startsWith("SELECT type, name FROM sqlite_master")) {
+      return [
+        { type: "table", name: "tenant_table" },
+        { type: "table", name: "_wdl_do_alarms" },
+      ];
+    }
+    if (statement === 'DROP TABLE IF EXISTS "tenant_table"') {
+      dropped.push(statement);
+      return [];
+    }
+    return Reflect.apply(originalExec, this, [statement, ...params]);
+  };
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+  const originalIterator = Array.prototype[Symbol.iterator];
+
+  await withMockedProperty(Map.prototype, "keys", () => {
+    throw new Error("tenant Map.keys");
+  }, () => withMockedProperty(
+    Array.prototype,
+    Symbol.iterator,
+    /** @this {any[]} */ function hostileIterator() {
+      const first = this[0];
+      if (
+        (this.length === 1 && first?.deleteAlarm === false) ||
+        (first && typeof first === "object" && "type" in first)
+      ) {
+        return Reflect.apply(originalIterator, [], []);
+      }
+      return Reflect.apply(originalIterator, this, []);
+    },
+    async () => {
+      await wrapped.deleteAll({ deleteAlarm: false });
+    }
+  ));
+
+  assert.deepEqual(dropped, ['DROP TABLE IF EXISTS "tenant_table"']);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(state.row, { ...initial, last_error: null });
 });

@@ -72,6 +72,8 @@ const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const ALARM_INTERNAL_URL = "https://do.internal/__wdl_alarm";
 const ALARM_INTERNAL_HEADER = "x-wdl-do-internal-alarm";
+const RPC_INTERNAL_URL = "https://do.internal/__wdl_rpc";
+const RPC_INTERNAL_HEADER = "x-wdl-do-internal-rpc";
 const CONNECT_HEADERS = {
   ns: "x-wdl-do-ns",
   worker: "x-wdl-do-worker",
@@ -94,10 +96,12 @@ const OWNER_HINT_PROTOCOL_HEADERS = [
 ];
 const CONNECT_INTERNAL_HEADER_NAMES = new Set([
   INTERNAL_AUTH_HEADER,
+  DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   ...Object.values(CONNECT_HEADERS),
   ...OWNER_HINT_PROTOCOL_HEADERS,
   "x-wdl-do-forwarded",
   "x-wdl-do-hop-count",
+  RPC_INTERNAL_HEADER,
 ]);
 const LOCAL_ACTOR_ENVELOPE_HEADER = "x-wdl-do-local-envelope";
 const LOCAL_ACTOR_ENVELOPE_MARKER = "binary";
@@ -596,6 +600,7 @@ export function buildForwardRequest(spec) {
   // User-controlled DO fetches must not be able to spoof internal Workflows
   // alarm delivery; only the alarm builder may attach this.
   request.headers.delete(ALARM_INTERNAL_HEADER);
+  request.headers.delete(RPC_INTERNAL_HEADER);
   request.headers.delete(INTERNAL_AUTH_HEADER);
   return request;
 }
@@ -756,14 +761,31 @@ export function encodeDoInvokeRequest(invoke) {
   });
 }
 
-/** @param {JsonRecord} alarm */
-export function buildAlarmRequest(alarm) {
+/** @param {JsonRecord} alarm @param {string | null} requestId */
+export function buildAlarmRequest(alarm, requestId) {
   return new Request(ALARM_INTERNAL_URL, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       [ALARM_INTERNAL_HEADER]: "1",
+      ...(requestId ? { "x-request-id": requestId } : {}),
     },
     body: JSON.stringify(alarm),
+  });
+}
+
+/**
+ * @param {RpcInfo} rpc
+ * @param {string | null} requestId
+ */
+export function buildRpcRequest(rpc, requestId) {
+  return new Request(RPC_INTERNAL_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      [RPC_INTERNAL_HEADER]: "1",
+      ...(requestId ? { "x-request-id": requestId } : {}),
+    },
+    body: JSON.stringify({ method: rpc.method, args: rpc.args }),
   });
 }

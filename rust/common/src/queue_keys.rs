@@ -1,6 +1,6 @@
 //! Queue Redis key helpers shared by producer and scheduler services.
 
-use crate::identity::is_valid_runtime_load_ns;
+use crate::identity::{is_valid_route_ns, is_valid_runtime_load_ns};
 
 pub const QUEUE_CONSUMER_INDEX_KEY: &str = "queue:index:consumers";
 pub const QUEUE_STREAM_INDEX_KEY: &str = "queue:index:streams";
@@ -48,22 +48,22 @@ pub fn queue_consumer_key(ns: &str, queue: &str) -> String {
 pub fn parse_stream_key(key: &str) -> Option<(String, String)> {
     let rest = key.strip_prefix("queue:")?;
     let rest = rest.strip_suffix(":s")?;
-    split_queue_key_rest(rest)
+    split_queue_key_rest(rest, is_valid_runtime_load_ns)
 }
 
 pub fn parse_delayed_key(key: &str) -> Option<(String, String)> {
     let rest = key.strip_prefix("queue-delayed:")?;
-    split_queue_key_rest(rest)
+    split_queue_key_rest(rest, is_valid_runtime_load_ns)
 }
 
 pub fn parse_consumer_key(key: &str) -> Option<(String, String)> {
     let rest = key.strip_prefix("queue-consumer:")?;
-    split_queue_key_rest(rest)
+    split_queue_key_rest(rest, is_valid_route_ns)
 }
 
-fn split_queue_key_rest(rest: &str) -> Option<(String, String)> {
+fn split_queue_key_rest(rest: &str, is_valid_ns: fn(&str) -> bool) -> Option<(String, String)> {
     let (ns, queue) = rest.split_once(':')?;
-    if !is_valid_runtime_load_ns(ns) || !is_valid_queue_name(queue) {
+    if !is_valid_ns(ns) || !is_valid_queue_name(queue) {
         return None;
     }
     Some((ns.to_string(), queue.to_string()))

@@ -17,7 +17,7 @@ resource "aws_ecs_task_definition" "scheduler" {
     image       = var.rust_image
     essential   = true
     command     = ["/scheduler"]
-    stopTimeout = 20
+    stopTimeout = 30
 
     environment = [
       { name = "REDIS_URL", value = "redis://${local.redis_addr}" },

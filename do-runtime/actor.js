@@ -5,6 +5,7 @@ import {
   buildAlarmRequest,
   buildFacetName,
   buildForwardRequest,
+  buildRpcRequest,
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   DO_OWNERSHIP_CODE,
   doPlatformErrorResponse,
@@ -25,7 +26,6 @@ import {
   metrics,
   SERVICE,
 } from "do-runtime-state";
-import { errorMessage } from "shared-errors";
 import { formatError } from "shared-observability";
 import { rebuildResponseWithHeaders } from "shared-respond";
 
@@ -156,10 +156,10 @@ export class WdlDoHostActor extends DurableObject {
           id: invoke.objectName,
         }));
         if (invoke.kind === "alarm") {
-          return await facet.fetch(buildAlarmRequest(invoke.alarm));
+          return await facet.fetch(buildAlarmRequest(invoke.alarm, requestId));
         }
         if (invoke.kind === "rpc") {
-          return await dispatchRpc(facet, invoke.rpc);
+          return await dispatchRpc(facet, invoke.rpc, requestId);
         }
         return await facet.fetch(buildForwardRequest(invoke.request));
       });
@@ -177,8 +177,8 @@ export class WdlDoHostActor extends DurableObject {
       throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
     }
     try {
-      const { owner, leaseRemainingMs } = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
       await this.rememberObject(invoke);
+      const { owner, leaseRemainingMs } = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
       return withoutOwnershipErrorControlHeader(
         await this.dispatchWithLeaseBudget(invoke, owner, leaseRemainingMs, run)
       );
@@ -267,31 +267,8 @@ function withoutOwnershipErrorControlHeader(response) {
 /**
  * @param {DoFacet} facet
  * @param {{ method: string, args: unknown[] }} rpc
+ * @param {string | null} requestId
  */
-async function dispatchRpc(facet, rpc) {
-  // Facets are workerd JSRPC stubs; reading a method returns a forwarder
-  // already bound to that stub, unlike ordinary unbound JavaScript methods.
-  const methods = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (facet));
-  const fn = methods[rpc.method];
-  if (typeof fn !== "function") {
-    return Response.json({
-      error: "do_rpc_method_not_found",
-      message: `Durable Object RPC method ${rpc.method} was not found`,
-    }, { status: 404 });
-  }
-  try {
-    return Response.json({ ok: true, result: await fn(...rpc.args) });
-  } catch (err) {
-    const errorObject = err && typeof err === "object" ? err : {};
-    // The stack captured from fn(...) is tenant method execution, not
-    // do-runtime framework internals, so it belongs on the tenant RPC boundary.
-    // Runtime failures still go through the platform error mapper, which
-    // intentionally hides internal stack traces and infrastructure details.
-    return Response.json({
-      error: "do_rpc_error",
-      name: "name" in errorObject && typeof errorObject.name === "string" ? errorObject.name : "Error",
-      message: errorMessage(err),
-      ...("stack" in errorObject && typeof errorObject.stack === "string" && errorObject.stack ? { stack: errorObject.stack } : {}),
-    }, { status: 500 });
-  }
+export async function dispatchRpc(facet, rpc, requestId) {
+  return await facet.fetch(buildRpcRequest(rpc, requestId));
 }

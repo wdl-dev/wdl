@@ -35,6 +35,7 @@ const redisState = createFakeRedisState();
  * @property {Array<{ level: string, event: string, fields: Record<string, unknown> }>} logEntries
  * @property {number} redisTimeMs
  * @property {number[]} redisTimeSequence
+ * @property {(() => void) | null} onExecFailure
  * @property {boolean} draining
  * @property {number} inFlightDispatches
  */
@@ -49,6 +50,7 @@ export const DO_OWNER_REGISTRY_TEST_STATE = {
   logEntries: [],
   redisTimeMs: Date.now(),
   redisTimeSequence: [],
+  onExecFailure: null,
   draining: false,
   inFlightDispatches: 0,
 };
@@ -66,6 +68,7 @@ export function resetDoOwnerRegistryTestState() {
   testState.logEntries = [];
   testState.redisTimeMs = Date.now();
   testState.redisTimeSequence = [];
+  testState.onExecFailure = null;
   testState.draining = false;
   testState.inFlightDispatches = 0;
 }
@@ -114,6 +117,7 @@ export function createRedisClient() {
       if (Array.isArray(sequence) && sequence.length) return sequence.shift();
       return testState().redisTimeMs;
     },
+    onExecFailure: () => testState().onExecFailure?.(),
   });
 }
 `);

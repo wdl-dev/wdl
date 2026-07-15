@@ -130,6 +130,11 @@ Stateful storage:
   multi-replica safe, but rollout can still pause scheduling because ECS uses
   stop-before-start replacement.
 - Workflows is a separate Rust service.
+- By default, Scheduler and Workflows drain in-flight work for up to 25 seconds.
+  Compose, Kubernetes, and Terraform ECS pin 30-second stop windows so the platform
+  does not terminate either process before its default application drain closes.
+  Deployments that override `SCHEDULER_SHUTDOWN_DRAIN_MS` or
+  `WORKFLOWS_SHUTDOWN_DRAIN_MS` should review the corresponding stop window.
 - Gateway, user-runtime, and system-runtime can be horizontally replicated behind the
   environment's load balancing and service discovery layer. Local route caches, loaded
   isolates, and owner hints are optimizations, not authority.

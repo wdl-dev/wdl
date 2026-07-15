@@ -119,12 +119,15 @@ Control lifecycle operations are split so each critical transition has one autho
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.
   S3 object cleanup is enqueued only after Redis commit succeeds.
-- Worker delete lock values and `s3cleanup:<id>` task ids are server-generated random
-  values. `x-request-id` is diagnostic only and may be reused by clients or retries; it
-  must not become a lock token or cleanup-task id. Delete, D1 migration, and delegated
-  issue locks use the token-fenced primitive in `shared/redis-lock.js`; release is
-  token-scoped and best-effort because TTL expiry bounds a leaked advisory lock and a
-  release error must not replace the operation's real result.
+- Worker delete lock values are a `whole:` or `version:` operation kind followed by a
+  server-generated random token; `s3cleanup:<id>` task ids are also server-generated.
+  `x-request-id` is diagnostic only and may be reused by clients or retries; it must not
+  become a lock token or cleanup-task id. Delete, D1 migration, and delegated issue locks
+  use the token-fenced primitive in `shared/redis-lock.js`; release is token-scoped and
+  best-effort because TTL expiry bounds a leaked advisory lock and a release error must
+  not replace the operation's real result. Before a final lifecycle mutation, version
+  and whole-worker delete refresh the token once, then verify it inside the final WATCH
+  snapshot so an expired request cannot commit under a replacement holder's lock.
 - Auth is not a middleware convention. `parseControlRoute()` assigns an action, control
   sends that action and namespace to auth, and auth evaluates the stored token record
   against `shared/auth-roles.js`. Dispatcher code should not infer permissions from URL
@@ -194,7 +197,7 @@ Key families:
 | `ns-hosts:<ns>` | Set | Control | Active host reverse index for a namespace. | Promote/reconcile maintains SADD/SREM deltas in the same EXEC. |
 | `patterns:<host>` | Hash | Control | Pattern-host route slots; values are compact `v2` tab-separated projections. | Reconcile/promote updates and publishes pattern invalidation. |
 | `worker-version-referrers:<ns>:<worker>:<version>` | Set | Control | Rebuildable service-binding referrer index. | Blocks version delete while callers reference the version. |
-| `worker-delete-lock:<ns>:<worker>` | String EX | Control | Per-worker delete critical-section lock. | Expires automatically; execute delete releases by completion. |
+| `worker-delete-lock:<ns>:<worker>` | String EX | Control | Per-worker delete critical-section lock; value is `whole:<token>` or `version:<token>`. | Expires automatically; execute delete releases by completion. Only `whole` fences new DO ownership. |
 | `secrets:<ns>`, `secrets:<ns>:<worker>` | Hash | Control | Namespace and worker secret stores; values are `WDL-ENC:` envelopes. Control encrypts writes; redis-proxy decrypts only during `/runtime/load`. | Deleted by secret lifecycle or worker delete. |
 | `queue:__system__:worker-delete-s3-cleanup:s` | DB 1 Stream | Control/s3-cleanup worker | Best-effort post-commit object cleanup queue; logical queue name is `worker-delete-s3-cleanup`. | Enqueued only after Redis delete commit succeeds; enqueue failure returns `cleanup_queue_failed` warning. |
 | `auth:token:<tokenId>` | Hash | Auth | Authoritative token record. | Revoke/expiry delete active record and write tombstone fields. |
@@ -298,7 +301,8 @@ Auth-specific contract:
   candidate retry budget.
 - Control 5xx responses use generic/safe messages. Internal exception text, auth Redis
   diagnostics, backend messages, and provider errors belong in logs unless the endpoint
-  explicitly owns a diagnostic response field.
+  explicitly owns a diagnostic response field. Structured coded-error diagnostic strings
+  are truncated to 2,048 characters before log emission.
 - Deploy returns `worker_code_invalid` when final WorkerCode would collide with injected
   WDL runtime/do-runtime reserved module names or lacks required bundle metadata, and
   `worker_code_too_large` when final WorkerCode, including runtime/do-runtime-injected

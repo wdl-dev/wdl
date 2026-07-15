@@ -31,13 +31,19 @@ export function hasDoRuntimeInjectedModules(meta) {
 function generateDoRuntimeWrapperModule(userMainSpecifier, classNames) {
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
   const alarmShim = JSON.stringify(`./${DO_ALARM_SHIM_MODULE}`);
-  const wrappedClasses = classNames.map((name) => `
-export class ${name} extends wrapDurableObjectClass(user.${name}, ${JSON.stringify(name)}) {}
+  const wrappedClasses = classNames.map((name, index) => `
+const __WdlWrappedDurableObject${index}__ = ({
+  [${JSON.stringify(name)}]: class extends __WdlWrapDurableObjectClass__(
+    __WdlUserModule__.${name},
+    ${JSON.stringify(name)}
+  ) {},
+})[${JSON.stringify(name)}];
+export { __WdlWrappedDurableObject${index}__ as ${name} };
 `).join("");
   return `
-import { wrapDurableObjectClass } from ${alarmShim};
+import { wrapDurableObjectClass as __WdlWrapDurableObjectClass__ } from ${alarmShim};
 
-import * as user from ${userMain};
+import * as __WdlUserModule__ from ${userMain};
 export * from ${userMain};
 
 ${wrappedClasses}

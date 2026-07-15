@@ -1,5 +1,6 @@
 export const DO_ALARM_SHIM_SOURCE = `
 const ALARM_HEADER = "x-wdl-do-internal-alarm";
+const RPC_HEADER = "x-wdl-do-internal-rpc";
 const ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const ALARM_TABLE = "_wdl_do_alarms";
 
@@ -14,11 +15,13 @@ const NativeResponse = Response;
 const NativeString = String;
 const nativeCrypto = crypto;
 const arrayAt = Array.prototype.at;
+const arrayIsArray = Array.isArray;
 const arrayPush = Array.prototype.push;
 const cryptoRandomUUID = crypto.randomUUID;
 const dateGetTime = Date.prototype.getTime;
 const dateNow = Date.now;
 const headersGet = Headers.prototype.get;
+const mapForEach = Map.prototype.forEach;
 const mathTrunc = Math.trunc;
 const numberIsFinite = Number.isFinite;
 const numberIsInteger = Number.isInteger;
@@ -139,9 +142,11 @@ function ensureAlarmTable(storage) {
 
 function readAlarmRow(storage) {
   ensureAlarmTable(storage);
-  return [...storage.sql.exec(
+  const result = storage.sql.exec(
     "SELECT scheduled_time, retry_count, in_flight, token FROM " + ALARM_TABLE + " WHERE id = 1"
-  )][0] || null;
+  );
+  const rows = arrayIsArray(result) ? result : [...result];
+  return rows[0] || null;
 }
 
 function writeAlarmRow(storage, row) {
@@ -333,21 +338,26 @@ function sqlObjectDropStatement(row) {
 
 async function deleteAllKvStorage(storage) {
   const entries = await storage.list();
-  const keys = [...entries.keys()];
+  const keys = [];
+  reflectApply(mapForEach, entries, [(_value, key) => {
+    reflectApply(arrayPush, keys, [key]);
+  }]);
   if (keys.length) await storage.delete(keys);
 }
 
 function deleteAllSqlStorage(storage, deleteAlarm) {
-  const rows = [...storage.sql.exec(
+  const result = storage.sql.exec(
     "SELECT type, name FROM sqlite_master " +
       "WHERE type IN ('trigger', 'view', 'table', 'index') " +
       "ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'table' THEN 2 ELSE 3 END"
-  )];
+  );
+  const rows = arrayIsArray(result) ? result : [...result];
   // workerd permits this connection-level PRAGMA; integration coverage pins it
   // because database-level PRAGMA writes are not part of the public DO SQL API.
   storage.sql.exec("PRAGMA foreign_keys = OFF");
   try {
-    for (const row of rows) {
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
       if (NativeString(row.name) === ALARM_TABLE && !deleteAlarm) continue;
       const statement = sqlObjectDropStatement(row);
       if (statement) storage.sql.exec(statement);
@@ -420,8 +430,8 @@ function wrapStorage(storage, alarmBinding, className, objectName, sideEffects =
             throw new TypeError("deleteAll() cannot be used inside transactionSync(); use transaction()");
           }
           return (async () => {
-            const [options, ...rest] = args;
-            if (rest.length) throw new TypeError("deleteAll() accepts at most one options argument");
+            if (args.length > 1) throw new TypeError("deleteAll() accepts at most one options argument");
+            const options = args[0];
             const deleteAlarm = options?.deleteAlarm !== false;
             const alarmRow = readAlarmRow(alarmStorage);
             const preservedAlarm = deleteAlarm ? null : alarmRow;
@@ -535,6 +545,29 @@ export function wrapDurableObjectClass(Base, className) {
             }
             completeStorageAlarm(this.ctx.storage, claim.token);
             return reflectApply(responseJson, NativeResponse, [{ ok: true }]);
+          }
+          if (reflectApply(headersGet, headers, [RPC_HEADER]) === "1") {
+            const rpc = await reflectApply(requestJson, request, []);
+            try {
+              const tenantMethod = reflectGet(this, rpc.method, this);
+              if (typeof tenantMethod !== "function") {
+                return reflectApply(responseJson, NativeResponse, [{
+                  error: "do_rpc_method_not_found",
+                  message: "Durable Object RPC method " + rpc.method + " was not found",
+                }, { status: 404 }]);
+              }
+              const result = await reflectApply(tenantMethod, this, rpc.args);
+              return reflectApply(responseJson, NativeResponse, [{ ok: true, result }]);
+            } catch (err) {
+              const formatted = formatWrappedError(err);
+              const stack = safeErrorString(safeErrorField(err, "stack"));
+              return reflectApply(responseJson, NativeResponse, [{
+                error: "do_rpc_error",
+                name: formatted.error_name,
+                message: formatted.error_message,
+                ...(stack ? { stack } : {}),
+              }, { status: 500 }]);
+            }
           }
           if (typeof tenantFetch !== "function") {
             return new NativeResponse("Durable Object class has no fetch handler", { status: 500 });

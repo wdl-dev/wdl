@@ -2,7 +2,7 @@ import {
   jsonResponse,
   jsonError,
   readJsonBody,
-  formatError,
+  codedErrorLogFields,
   codedErrorResponse,
   requireControlLog,
   requireControlRedis,
@@ -47,13 +47,12 @@ export async function handle({ request, env, ns, name, requestId }) {
     });
   } catch (err) {
     if (err instanceof RoutingError) {
-      log("warn", "worker_promote_rejected", {
+      log(err.status >= 500 ? "error" : "warn", "worker_promote_rejected", {
         request_id: requestId,
         namespace: ns,
         worker: name,
         version: body.version,
-        status: err.status,
-        ...formatError(err),
+        ...codedErrorLogFields(err, "routing_error"),
         ...(err.details.attempts ? { attempts: err.details.attempts } : {}),
       });
       return codedErrorResponse(err, "routing_error");

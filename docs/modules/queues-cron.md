@@ -40,8 +40,9 @@ Scheduler owns runtime delivery:
   route namespace, worker name, and version with the canonical `wdl-rust-common`
   grammar. Invalid cron refs are removed before slot advance or runtime dispatch, and
   cron sweep does not recreate refs from malformed worker metadata. Queue consumer
-  projections remain trusted Control-owned internal state; scheduler does not add a
-  second worker identity/version validator for unsupported direct Redis writes.
+  dispatch identities are also revalidated before use. A noncanonical identity makes
+  the projection unusable and follows absent-consumer handling, so queued backlog may
+  move to the orphan stream.
 - Scheduler defaults to one replica in deployment, and current dispatch paths are
   multi-replica safe. Extra replicas improve runtime concurrency but do not imply
   zero-gap deployment: production rollout may still use stop-before-start semantics and
@@ -143,7 +144,8 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    failures that cannot become valid by retrying the same bytes, such as queue-message
    decode failures or invalid queue dispatch bodies, go directly to DLQ without
    consuming the retry budget. Aggregate request-body-too-large responses are split
-   and retried with smaller batches first.
+   and retried with smaller batches first. Scheduler bounds each runtime response body
+   to 1 MiB before parsing it.
 5. The delayed loop wakes from `queue-delayed-wake` and from wall-clock sleeps until the
    next due delayed member. Each due member first takes a `queue-delayed-claim:*` lease
    sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the winner moves it back to the main

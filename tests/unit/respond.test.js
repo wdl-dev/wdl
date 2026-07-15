@@ -17,6 +17,22 @@ import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.j
 
 const OBSERVABILITY_CONTRACT = readRepositoryJson("tests/fixtures/observability-contract.json");
 
+/** @param {Promise<unknown>} promise */
+async function settlesWithinTestWindow(promise) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve(false), 100);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 test("discardResponseBody cancels response bodies", async () => {
   let cancelled = false;
   const response = new Response(new ReadableStream({
@@ -38,6 +54,21 @@ test("discardResponseBody ignores cancellation failures", async () => {
   }));
 
   await discardResponseBody(response);
+});
+
+test("discardResponseBody does not wait for cancellation cleanup", async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream({
+    cancel() {
+      cancelled = true;
+      return new Promise(() => {});
+    },
+  }));
+
+  const settled = await settlesWithinTestWindow(discardResponseBody(response));
+
+  assert.equal(settled, true);
+  assert.equal(cancelled, true);
 });
 
 // Node's Response doesn't accept `webSocket` in init, so the 101 branch

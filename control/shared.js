@@ -11,11 +11,12 @@ import { internalErrorResponse, jsonError, jsonResponse, sanitizeJsonErrorDetail
 import { withInternalAuth } from "shared-internal-auth";
 import { errorMessage } from "shared-errors";
 import { randomHex } from "shared-random-id";
-import { deleteLockKey } from "control-lib";
 import {
   DECLARED_HOSTS_KEY,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
+  deleteLockKey,
+  formatDeleteLockToken,
   hostDeclarationsKey,
   namespaceFromHostsKey,
 } from "shared-version";
@@ -36,8 +37,11 @@ import {
 } from "control-workflows-client";
 import {
   ControlAbort,
+  controlAbortLogDetails,
+  codedErrorLogFields,
   codedErrorResponse,
   controlAbortResponse,
+  secretEnvelopeErrorResponse,
 } from "control-errors";
 import { runOptimistic, withOptimisticRetries } from "control-optimistic";
 import {
@@ -48,6 +52,7 @@ import {
   acquireTokenLock,
   createTokenLock,
   releaseTokenLock,
+  renewTokenLock,
 } from "shared-redis-lock";
 
 export const ROUTES_CHANNEL = "routes:invalidate";
@@ -89,7 +94,14 @@ let s3Initialized = false;
 let r2Initialized = false;
 
 export { formatError, internalErrorResponse, jsonError, jsonResponse };
-export { ControlAbort, codedErrorResponse, controlAbortResponse };
+export {
+  ControlAbort,
+  controlAbortLogDetails,
+  codedErrorLogFields,
+  codedErrorResponse,
+  controlAbortResponse,
+  secretEnvelopeErrorResponse,
+};
 export { runOptimistic, withOptimisticRetries };
 export { DEFAULT_JSON_BODY_MAX_BYTES, readJsonBody };
 
@@ -424,19 +436,36 @@ export function buildS3CleanupTaskId() {
 }
 
 // Normal paths release this advisory lock in finally; the TTL only bounds
-// leaks after a crash. The token fences release, not the protected operation.
+// leaks after a crash. Delete transactions also verify this token under their
+// final WATCH so an expired request cannot commit under a replacement holder.
 const DELETE_LOCK_TTL_SECONDS = 30;
 /**
  * @param {RedisClient} redis
  * @param {string} ns
  * @param {string} worker
+ * @param {"whole" | "version"} kind
  */
-export async function acquireDeleteLock(redis, ns, worker) {
+export async function acquireDeleteLock(redis, ns, worker, kind) {
   const key = deleteLockKey(ns, worker);
   const lock = createTokenLock(key);
+  lock.token = formatDeleteLockToken(kind, lock.token);
   return await acquireTokenLock(redis, lock, { ttlSeconds: DELETE_LOCK_TTL_SECONDS })
     ? lock.token
     : null;
+}
+
+/**
+ * @param {RedisClient} redis
+ * @param {string} ns
+ * @param {string} worker
+ * @param {string} token
+ */
+export async function renewDeleteLock(redis, ns, worker, token) {
+  return await renewTokenLock(
+    redis,
+    { key: deleteLockKey(ns, worker), token },
+    DELETE_LOCK_TTL_SECONDS
+  );
 }
 
 // Compare-and-delete so we don't free a token a TTL-expired-then-reacquired

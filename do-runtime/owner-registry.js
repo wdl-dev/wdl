@@ -42,7 +42,12 @@ import {
   stageOwnerRelease,
   stageOwnerRenew,
 } from "shared-owner-protocol";
-import { doStorageIdKey } from "shared-version";
+import {
+  VERSION_DELETE_LOCK_KIND,
+  deleteLockKey,
+  doStorageIdKey,
+  parseDeleteLockKind,
+} from "shared-version";
 
 const DEFAULT_OWNER_TTL_SECONDS = 120;
 const DEFAULT_RENEW_CONCURRENCY = 8;
@@ -248,7 +253,7 @@ async function readOwnerWithTimeFromClient(client, ownerKey) {
 
 /**
  * @param {RedisLike} session
- * @param {DoOwner | null | undefined} owner
+ * @param {Pick<DoOwner, "ns" | "worker" | "doStorageId"> | null | undefined} owner
  */
 async function ownerStoragePointerCurrent(session, owner) {
   if (!owner?.doStorageId || !isValidBundleScope(owner)) return false;
@@ -343,16 +348,31 @@ export async function resolveDoOwner(env, invoke) {
   const ownerKey = buildOwnerKey(scope);
   const key = ownerKeyOf(ownerKey);
   const generationKey = ownerGenerationKeyOf(ownerKey);
+  const workerDeleteLockKey = deleteLockKey(scope.ns, scope.worker);
+  const storagePointerKey = doStorageIdKey(scope.ns, scope.worker);
 
   return await withWatchRetries(async () => client.session(async (session) => {
-    await session.watch(key, generationKey);
+    await session.watch(key, generationKey, workerDeleteLockKey);
     const { owner: current, nowMs } = await readOwnerRecordWithRedisTime(
       session,
       key,
       (raw) => parseOwner(raw, ownerKey, scope)
     );
+    const deleteLockToken = decodeBulk(await session.get(workerDeleteLockKey));
+    if (
+      deleteLockToken != null &&
+      parseDeleteLockKind(deleteLockToken) !== VERSION_DELETE_LOCK_KIND
+    ) {
+      await session.unwatch();
+      forgetOwnedScope(ownerKey);
+      throw new DoRuntimeError(
+        503,
+        DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE,
+        `DO scope ${ownerKey} worker is being deleted`
+      );
+    }
     if (current && !ownerLeaseExpired(current, nowMs)) {
-      await session.watch(doStorageIdKey(scope.ns, scope.worker));
+      await session.watch(storagePointerKey);
       if (!await ownerStoragePointerCurrent(session, current)) {
         await session.unwatch();
         forgetOwnedScope(ownerKey);
@@ -389,6 +409,16 @@ export async function resolveDoOwner(env, invoke) {
 
     if (isDraining()) {
       throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
+    }
+    await session.watch(storagePointerKey);
+    if (!await ownerStoragePointerCurrent(session, scope)) {
+      await session.unwatch();
+      forgetOwnedScope(ownerKey);
+      throw new DoRuntimeError(
+        503,
+        DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE,
+        `DO scope ${ownerKey} no longer matches active worker storage`
+      );
     }
     const generation = await nextOwnerGeneration(session, generationKey, current?.generation);
     const owner = ownerRecordFor(env, invoke, localTask, generation, nowMs);
@@ -475,9 +505,9 @@ export async function renewOwner(env, owner) {
   const client = redisClient(env);
   const key = ownerKeyOf(owner.ownerKey);
   return await withWatchRetries(async () => client.session(async (session) => {
-    // Redis WATCH observes explicit writes/deletes, not passive TTL expiry.
-    // Renewal is therefore a freshness optimization; generation fencing remains
-    // the authority if a peer claims the scope in the tiny expiry window.
+    // Valkey expiration deletes invalidate WATCH just like explicit writes.
+    // Generation fencing remains authoritative if a peer claims the scope after
+    // the lease expires and before this renewal commits.
     await session.watch(key);
     const { owner: current, nowMs } = await readOwnerWithTimeFromClient(session, owner.ownerKey);
     if (!current || !ownerFenceMatches(current, owner)) {

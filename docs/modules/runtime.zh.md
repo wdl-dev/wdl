@@ -82,8 +82,9 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 - workerLoader cache 没有 LRU。Runtime 给每个 loaded worker 注入 `__WdlAbort__`，并在 active-version cold-load 时 evict sibling historical versions。
 - Service-binding cold load 会记录 loaded version，但不 evict sibling，因为 service binding 可能有意指向 frozen historical version。
 - Internal active-version scheduled/queue dispatch 会 opt into sibling eviction；frozen workflow dispatch 不会。
-- 只要注入 privileged internal Fetcher，wrapper generation 就会避免 raw env 暴露给未包装 entrypoint。Host-wrapper runtime 会在 tenant module 前执行，并捕获所有参与 handler/env wrapping 决策和 request-context cleanup 的 intrinsic，因此 tenant 顶层 prototype mutation 不能绕过这条边界或遗留 stale request context。
-- Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。
+- 只要注入 privileged internal Fetcher，wrapper generation 就会避免 raw env 暴露给未包装 entrypoint。Host-wrapper runtime 会在 tenant module 前执行，并捕获参与 handler/env wrapping 决策的 intrinsic，因此 tenant 顶层 prototype mutation 不能绕过 env 边界。
+- Host facade request id 使用 invocation-local `AsyncLocalStorage` store。已有 `nodejs_compat` 配置会保持不变；否则 Runtime 会把 standalone `no_nodejs_als` 替换为范围更窄的 `nodejs_als` flag。持久 Durable Object 实例上的并发调用不会再覆盖同一个共享 context，wrapper 也不会检查、修改或替换 tenant 返回值。Native Promise 和 `async` continuation 会保留 context；custom thenable 不属于受支持的 request-id propagation boundary。没有新 request id 的嵌套 handler 调用会继承当前 ALS context，而不是把它清空。
+- Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。do-runtime alarm 和 RPC 通过携带外层 request id 的私有 fetch dispatch 进入，使 generated wrapper 建立 invocation-local context，而不会把平台 metadata 加入 tenant method argument。
 - Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error` response，并带 request id。异常细节输出到结构化日志/live tail，不复制进客户端 body；throwable 自身无法转成字符串时，tail formatting 也不能反向覆盖原始异常。
 - Internal scheduled、queue 和 workflow dispatch route 使用 result envelope 表达 handler outcome。Tenant handler error 是 scheduler/workflow 协议中的 outcome state，不是 generic platform transport error。
 - Runtime 没有 route-cache invalidation protocol。`workerLoader` cache key 是不可变 worker id，因此 promote 后的新 version 是新 key，会自然 cold-load。

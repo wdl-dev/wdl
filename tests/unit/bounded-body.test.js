@@ -77,3 +77,31 @@ test("readBoundedStreamBytes supports caller-owned overflow errors", async () =>
   );
   assert.equal(cancelled, true);
 });
+
+test("readBoundedStreamBytes rejects without waiting for stream cancellation", async () => {
+  let cancelled = false;
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]));
+    },
+    cancel() {
+      cancelled = true;
+      return new Promise(() => {});
+    },
+  });
+  let timeout;
+  try {
+    await assert.rejects(
+      Promise.race([
+        readBoundedStreamBytes(stream, 2, () => new TypeError("custom limit")),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("body reader waited for stream cancellation")), 1000);
+        }),
+      ]),
+      /custom limit/
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+  assert.equal(cancelled, true);
+});

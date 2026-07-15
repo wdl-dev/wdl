@@ -7,16 +7,15 @@ import {
   jsonResponse, jsonError,
   requireControlLog, requireControlRedis,
   errMessage,
-  acquireDeleteLock, releaseDeleteLock,
+  acquireDeleteLock, releaseDeleteLock, renewDeleteLock,
   assertWorkflowDeleteAllowed, cleanupDoAlarmsForWorker,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
-  ControlAbort, controlAbortResponse,
+  ControlAbort, codedErrorLogFields, controlAbortResponse,
   withOptimisticRetries,
   ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, PATTERNS_CHANNEL,
 } from "control-shared";
 import {
   workerVersionsKey, referrersKey,
-  deleteLockKey,
   doObjectRegistryKey,
   doOwnerScopeScanPatternForStorage,
   doStorageIdKey,
@@ -25,7 +24,14 @@ import {
   bundleAssetPrefix,
   parseBundleMeta,
 } from "control-lib";
-import { bundleKey, hostsKey, patternsKey, routesKey } from "shared-version";
+import {
+  WHOLE_DELETE_LOCK_KIND,
+  bundleKey,
+  deleteLockKey,
+  hostsKey,
+  patternsKey,
+  routesKey,
+} from "shared-version";
 import { workerSecretsKey } from "shared-secret-keys";
 import { decodeBulk, WatchError } from "shared-redis";
 import { queueConsumerScanPrefix } from "shared-queue-keys";
@@ -91,6 +97,14 @@ function throwWholeDeleteContention(ns, name) {
   });
 }
 
+/** @param {string} ns @param {string} name @returns {never} */
+function throwDeleteLockExpired(ns, name) {
+  throw new WholeDeleteError(409, "deleting", {
+    namespace: ns, name,
+    message: "worker delete lock expired; retry the request",
+  });
+}
+
 // Raised when collection or an under-WATCH check observes state that
 // changed across reads; callers retry from a fresh snapshot.
 class DriftSignal extends Error {
@@ -112,7 +126,7 @@ export async function handle({ request, env: _env, url, ns, name, principal, req
   // client's pipe closes cleanly.
   await request.text().catch(() => {});
 
-  const lockToken = await acquireDeleteLock(redis, ns, name);
+  const lockToken = await acquireDeleteLock(redis, ns, name, WHOLE_DELETE_LOCK_KIND);
   if (!lockToken) {
     log("warn", "worker_delete_rejected", {
       request_id: requestId,
@@ -128,16 +142,15 @@ export async function handle({ request, env: _env, url, ns, name, principal, req
     let outcome;
     try {
       outcome = await executeWholeDelete({
-        redis, ns, name, principal, requestId, log,
+        redis, ns, name, principal, requestId, log, lockToken,
       });
     } catch (err) {
       if (err instanceof ControlAbort) {
-        log("warn", "worker_delete_rejected", {
+        log(err.status >= 500 ? "error" : "warn", "worker_delete_rejected", {
           request_id: requestId,
           namespace: ns,
           worker: name,
-          status: err.status,
-          reason: err.code,
+          ...codedErrorLogFields(err),
         });
         return controlAbortResponse(err);
       }
@@ -216,7 +229,11 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
   let workflowBlocker = null;
   try {
     collected = await withOptimisticRetries(
-      async () => await collectDeleteInputs({ redis, ns, name }),
+      async () => {
+        const snapshot = await collectDeleteInputs({ redis, ns, name });
+        await assertDryRunActiveVersionRetained(redis, snapshot);
+        return snapshot;
+      },
       {
         attempts: MAX_DELETE_ATTEMPTS,
         isRetryableError: (err) => err instanceof DriftSignal,
@@ -226,15 +243,21 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
     await assertWorkflowDeleteAllowed({ ns, worker: name });
   } catch (err) {
     if (err instanceof WholeDeleteError) {
-      log("warn", "worker_dry_run_rejected", {
+      log(err.status >= 500 ? "error" : "warn", "worker_dry_run_rejected", {
         request_id: requestId, namespace: ns, worker: name,
-        status: err.status, reason: err.code,
+        ...codedErrorLogFields(err),
       });
       return controlAbortResponse(err, { dryRun: true });
     }
     if (err instanceof ControlAbort && err.code === "workflow_instances_active") {
       workflowBlocker = err;
     } else if (err instanceof ControlAbort) {
+      log(err.status >= 500 ? "error" : "warn", "worker_dry_run_rejected", {
+        request_id: requestId,
+        namespace: ns,
+        worker: name,
+        ...codedErrorLogFields(err),
+      });
       return controlAbortResponse(err, { dryRun: true });
     } else {
       throw err;
@@ -298,12 +321,13 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, principal?: AccessPrincipal | null, requestId: string, log: ControlLogger }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, principal?: AccessPrincipal | null, requestId: string, log: ControlLogger, lockToken: string }} args
  * @returns {Promise<DeleteOutcome>}
  */
-async function executeWholeDelete({ redis, ns, name, principal, requestId, log }) {
+async function executeWholeDelete({ redis, ns, name, principal, requestId, log, lockToken }) {
   return await withOptimisticRetries(async () => {
     const collected = await collectDeleteInputs({ redis, ns, name });
+    assertActiveVersionRetained(collected);
     let workflowBlocker = null;
     try {
       await assertWorkflowDeleteAllowed({ ns, worker: name, allowCleanup: true });
@@ -323,7 +347,10 @@ async function executeWholeDelete({ redis, ns, name, principal, requestId, log }
       throw workflowBlocker;
     }
     if (!hasWorkerLifecycle) {
-      await deleteResidualDoRedis(redis, collected);
+      if (!await renewDeleteLock(redis, ns, name, lockToken)) {
+        throwDeleteLockExpired(ns, name);
+      }
+      await deleteResidualDoRedis(redis, collected, lockToken);
       await cleanupDoAlarmsOrWarn({
         ns, worker: name, doStorageId: collected.doStorageId, requestId, log,
       });
@@ -355,9 +382,12 @@ async function executeWholeDelete({ redis, ns, name, principal, requestId, log }
         blockers,
       });
     }
+    if (!await renewDeleteLock(redis, ns, name, lockToken)) {
+      throwDeleteLockExpired(ns, name);
+    }
 
     const result = await runSessionEXEC({
-      redis, ns, name, principal, requestId, collected,
+      redis, ns, name, principal, requestId, collected, lockToken,
     });
     await cleanupDoAlarmsOrWarn({
       ns, worker: name, doStorageId: collected.doStorageId, requestId, log,
@@ -369,6 +399,33 @@ async function executeWholeDelete({ redis, ns, name, principal, requestId, log }
     isRetryableError: (err) => err instanceof DriftSignal || err instanceof WatchError,
     onExhausted: () => throwWholeDeleteContention(ns, name),
   });
+}
+
+/** @param {DeleteInputs} collected */
+function assertActiveVersionRetained(collected) {
+  if (!collected.activeVersion || collected.retainedVersions.includes(collected.activeVersion)) return;
+  throw new WholeDeleteError(409, "projection_drift", {
+    namespace: collected.ns,
+    name: collected.name,
+    active_version: collected.activeVersion,
+    reason: "active_not_in_worker_versions",
+  });
+}
+
+/** @param {RedisClient} redis @param {DeleteInputs} collected */
+async function assertDryRunActiveVersionRetained(redis, collected) {
+  if (!collected.activeVersion || collected.retainedVersions.includes(collected.activeVersion)) return;
+  const [retainedVersions, activeVersion] = await Promise.all([
+    redis.zRange(workerVersionsKey(collected.ns, collected.name), 0, -1),
+    redis.hGet(routesKey(collected.ns), collected.name),
+  ]);
+  if (
+    activeVersion !== collected.activeVersion ||
+    !arraysShallowEqual(retainedVersions, collected.retainedVersions)
+  ) {
+    throw new DriftSignal("active version or retained versions changed during dry-run");
+  }
+  assertActiveVersionRetained(collected);
 }
 
 /** @param {DeleteInputs} collected */
@@ -386,15 +443,14 @@ function describeDoStorageRetention(collected) {
  */
 async function scanDoOwnerKeys(redis, doStorageId) {
   if (!doStorageId) return [];
-  /** @type {string[]} */
-  const keys = [];
+  const keys = new Set();
   let cursor = "0";
   do {
     const [next, found] = await redis.scan(cursor, doOwnerScopeScanPatternForStorage(doStorageId), 100);
-    keys.push(...found);
+    for (const key of found) keys.add(key);
     cursor = next;
   } while (cursor !== "0");
-  return keys;
+  return [...keys];
 }
 
 /**
@@ -403,36 +459,73 @@ async function scanDoOwnerKeys(redis, doStorageId) {
  * @param {string} name
  */
 async function scanQueueConsumerKeysForWorker(redis, ns, name) {
-  /** @type {string[]} */
-  const queueConsumerKeys = [];
+  const queueConsumerKeys = new Set();
   const prefix = queueConsumerScanPrefix(ns);
   let cursor = "0";
   do {
-    const [next, keys] = await redis.scan(cursor, `${prefix}*`, 100);
+    const [next, found] = await redis.scan(cursor, `${prefix}*`, 100);
+    const keys = [...new Set(found)];
     const workers = typeof redis.hGetMany === "function"
       ? await redis.hGetMany(keys.map((k) => [k, "worker"]))
       : await mapConcurrent(keys, DELETE_COLLECT_READ_CONCURRENCY, (k) =>
         redis.hGet(k, "worker")
       );
     for (let i = 0; i < keys.length; i += 1) {
-      if (workers[i] === name) queueConsumerKeys.push(keys[i]);
+      if (workers[i] === name) queueConsumerKeys.add(keys[i]);
     }
     cursor = next;
   } while (cursor !== "0");
-  return queueConsumerKeys;
+  return [...queueConsumerKeys];
 }
 
 /**
  * @param {RedisClient} redis
  * @param {DeleteInputs} collected
+ * @param {string} lockToken
  */
-async function deleteResidualDoRedis(redis, collected) {
-  if (collected.doOwnerKeys.length) {
-    await redis.del(...collected.doOwnerKeys);
-  }
-  if (collected.doStorageId) {
-    await redis.del(doStorageIdKey(collected.ns, collected.name));
-  }
+async function deleteResidualDoRedis(redis, collected, lockToken) {
+  await redis.session(async (iso) => {
+    const lockKey = deleteLockKey(collected.ns, collected.name);
+    const storageKey = doStorageIdKey(collected.ns, collected.name);
+    await iso.watch(
+      lockKey,
+      routesKey(collected.ns),
+      workerVersionsKey(collected.ns, collected.name),
+      workerSecretsKey(collected.ns, collected.name),
+      storageKey,
+      ...collected.doOwnerKeys,
+    );
+
+    if (await iso.get(lockKey) !== lockToken) {
+      await iso.unwatch();
+      throwDeleteLockExpired(collected.ns, collected.name);
+    }
+    const activeVersion = await iso.hGet(routesKey(collected.ns), collected.name);
+    const retainedVersions = await iso.zRange(workerVersionsKey(collected.ns, collected.name), 0, -1);
+    const hasWorkerSecrets = (await iso.exists(workerSecretsKey(collected.ns, collected.name))) > 0;
+    if (activeVersion || retainedVersions.length > 0 || hasWorkerSecrets) {
+      await iso.unwatch();
+      throw new DriftSignal("worker lifecycle appeared during residual cleanup");
+    }
+    if (await iso.get(storageKey) !== collected.doStorageId) {
+      await iso.unwatch();
+      throw new DriftSignal("DO storage pointer changed during residual cleanup");
+    }
+    const currentOwnerKeys = await scanDoOwnerKeys(iso, collected.doStorageId);
+    if (!arraysShallowEqual(currentOwnerKeys.toSorted(), collected.doOwnerKeys.toSorted())) {
+      await iso.unwatch();
+      throw new DriftSignal("DO owner keys changed during residual cleanup");
+    }
+
+    if (!collected.doStorageId && collected.doOwnerKeys.length === 0) {
+      await iso.unwatch();
+      return;
+    }
+    const multi = iso.multi();
+    if (collected.doOwnerKeys.length) multi.del(...collected.doOwnerKeys);
+    if (collected.doStorageId) multi.del(storageKey);
+    await multi.exec();
+  });
 }
 
 /**
@@ -543,23 +636,13 @@ async function collectDeleteInputs({ redis, ns, name }) {
   // pattern slot on it — SREMing because we just happen to own a slot
   // there would strand those other workers from their declared host.
   const hostsInActiveRoutes = [...new Set(activeRoutes.map((r) => r.host))];
-  const hostsLosingNsOwnership = [];
   const hostPatternReads = await redis.hGetAllMany(hostsInActiveRoutes.map((host) => patternsKey(host)));
-  for (let i = 0; i < hostsInActiveRoutes.length; i += 1) {
-    const h = hostsInActiveRoutes[i];
-    const patternsOnHost = hostPatternReads[i];
-    const ourSlots = new Set(
-      activeRoutes.filter((r) => r.host === h).map((r) => r.slot)
-    );
-    let someoneElseFromNs = false;
-    for (const [slot, raw] of Object.entries(patternsOnHost)) {
-      if (ourSlots.has(slot)) continue;
-      if (typeof raw !== "string") continue;
-      const parsed = decodePatternProjection(raw);
-      if (parsed && parsed.ns === ns) { someoneElseFromNs = true; break; }
-    }
-    if (!someoneElseFromNs) hostsLosingNsOwnership.push(h);
-  }
+  const hostsLosingNsOwnership = findHostsLosingNsOwnership(
+    ns,
+    activeRoutes,
+    hostsInActiveRoutes,
+    hostPatternReads,
+  );
 
   // Drives the EXEC-time channel choice. Empty namespaces need routes:flush
   // because routes:invalidate <ns> would re-add the freshly SREM'd ns to
@@ -660,6 +743,33 @@ function arraysShallowEqual(a, b) {
 }
 
 /**
+ * @param {string} ns
+ * @param {RouteSlot[]} activeRoutes
+ * @param {string[]} hosts
+ * @param {Array<Record<string, string | null | undefined>>} patternRecords
+ */
+function findHostsLosingNsOwnership(ns, activeRoutes, hosts, patternRecords) {
+  const losing = [];
+  for (let i = 0; i < hosts.length; i += 1) {
+    const host = hosts[i];
+    const ourSlots = new Set(
+      activeRoutes.filter((route) => route.host === host).map((route) => route.slot)
+    );
+    let siblingOwnsHost = false;
+    for (const [slot, raw] of Object.entries(patternRecords[i] || {})) {
+      if (ourSlots.has(slot) || typeof raw !== "string") continue;
+      const projection = decodePatternProjection(raw);
+      if (projection?.ns === ns) {
+        siblingOwnsHost = true;
+        break;
+      }
+    }
+    if (!siblingOwnsHost) losing.push(host);
+  }
+  return losing;
+}
+
+/**
  * @template T,U
  * @param {T[]} items
  * @param {number} concurrency
@@ -676,10 +786,10 @@ async function mapConcurrent(items, concurrency, fn) {
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, principal?: AccessPrincipal | null, requestId: string, collected: DeleteInputs }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, principal?: AccessPrincipal | null, requestId: string, collected: DeleteInputs, lockToken: string }} args
  * @returns {Promise<Extract<DeleteOutcome, { noop: false }>>}
  */
-async function runSessionEXEC({ redis, ns, name, principal, requestId, collected }) {
+async function runSessionEXEC({ redis, ns, name, principal, requestId, collected, lockToken }) {
   return await redis.session(async (iso) => {
     const watchKeys = [
       routesKey(ns),
@@ -699,6 +809,11 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
     ];
     await iso.watch(...watchKeys);
 
+    if (await iso.get(deleteLockKey(ns, name)) !== lockToken) {
+      await iso.unwatch();
+      throwDeleteLockExpired(ns, name);
+    }
+
     // Drift guards — normally unreachable for sanctioned control writers once
     // the delete lock is held. Keep whole-worker delete fail-closed if
     // control-owned projections no longer match the collected snapshot.
@@ -707,11 +822,30 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       await iso.unwatch();
       throw new DriftSignal("worker_versions changed during delete");
     }
-    const curActive = (await iso.hGet(routesKey(ns), name)) || null;
+    const curRoutes = await iso.hGetAll(routesKey(ns));
+    const curActive = curRoutes[name] || null;
     if (curActive !== collected.activeVersion) {
       await iso.unwatch();
       throw new DriftSignal("active version changed during delete");
     }
+    if (curActive && !curVersions.includes(curActive)) {
+      await iso.unwatch();
+      throw new WholeDeleteError(409, "projection_drift", {
+        namespace: ns, name,
+        active_version: curActive,
+        reason: "active_not_in_worker_versions",
+      });
+    }
+    const currentNamespaceStillActive = Object.keys(curRoutes).some((worker) => worker !== name);
+    const currentPatternRecords = await iso.hGetAllMany(
+      collected.affectedHosts.map((host) => patternsKey(host))
+    );
+    const currentHostsLosingNsOwnership = findHostsLosingNsOwnership(
+      ns,
+      collected.activeRoutes,
+      collected.affectedHosts,
+      currentPatternRecords,
+    );
     const curHasSecrets = (await iso.exists(workerSecretsKey(ns, name))) > 0;
     if (curHasSecrets !== collected.hasWorkerSecrets) {
       await iso.unwatch();
@@ -773,12 +907,17 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       }
     }
 
+    const commitInputs = {
+      ...collected,
+      hostsLosingNsOwnership: currentHostsLosingNsOwnership,
+      namespaceStillActive: currentNamespaceStillActive,
+    };
     const { cleanupTaskId, cleanupIntent, dedupedPrefixes } =
-      buildWorkerDeleteCleanup(collected, requestId, buildS3CleanupTaskId);
+      buildWorkerDeleteCleanup(commitInputs, requestId, buildS3CleanupTaskId);
 
     const multi = iso.multi();
     stageWorkerDelete(multi, {
-      collected,
+      collected: commitInputs,
       channels: {
         routes: ROUTES_CHANNEL,
         routesFlush: ROUTES_FLUSH_CHANNEL,
@@ -794,7 +933,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       retainedVersions: collected.retainedVersions,
       affectedHosts: collected.affectedHosts,
       queueConsumersRemoved: collected.queueConsumerKeys.length,
-      namespaceStillActive: collected.namespaceStillActive,
+      namespaceStillActive: currentNamespaceStillActive,
       cleanupTaskId,
       cleanupIntent,
       dedupedPrefixes,

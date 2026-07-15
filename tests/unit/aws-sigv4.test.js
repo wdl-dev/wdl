@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { SigV4Client as InstalledSigV4Client } from "@wdl-dev/aws-sigv4";
 import { SigV4Client } from "../../shared/vendor/aws-sigv4.js";
 
 const ACCESS_KEY_ID = "AKIDEXAMPLE";
@@ -8,6 +9,22 @@ const SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 const SESSION_TOKEN = "session-token-example";
 const FIXED_DATETIME = "20260616T010203Z";
 const S3_ENDPOINT = "https://s3.us-east-1.amazonaws.com";
+
+/**
+ * @typedef {{
+ *   fetch(input: Request | string | URL, init?: import("@wdl-dev/aws-sigv4").SigV4RequestInit): Promise<Response>,
+ * }} TestSigV4Client
+ * @typedef {(options: import("@wdl-dev/aws-sigv4").SigV4ClientOptions) => TestSigV4Client} TestSigV4ClientFactory
+ */
+
+/** @type {TestSigV4ClientFactory} */
+const createInstalledClient = (options) => new InstalledSigV4Client(options);
+/** @type {TestSigV4ClientFactory} */
+const createVendoredClient = (options) => new SigV4Client(options);
+const SIGNER_IMPLEMENTATIONS = [
+  { name: "installed package", createClient: createInstalledClient },
+  { name: "vendored bundle", createClient: createVendoredClient },
+];
 
 // Fixed vectors are kept inline so vendored signer changes cannot silently
 // redefine expected output.
@@ -70,32 +87,46 @@ const FIXTURES = [
   },
 ];
 
-test("aws-sigv4 S3 signing matches fixed SigV4 golden vectors", async () => {
-  for (const fixture of FIXTURES) {
-    const client = new SigV4Client({
-      accessKeyId: ACCESS_KEY_ID,
-      secretAccessKey: SECRET_ACCESS_KEY,
-      sessionToken: fixture.sessionToken,
-      service: "s3",
-      region: "us-east-1",
-      cache: new Map(),
-      retries: 0,
-    });
-    const signed = await client.sign(fixture.url, {
-      ...fixture.init,
-      signing: { signingDate: FIXED_DATETIME },
-    });
-    assert.equal(signed.url, fixture.expectedUrl, fixture.name);
-    assert.equal(signed.headers.get("authorization"), fixture.expectedAuthorization, fixture.name);
-    assert.equal(signed.headers.get("x-amz-date"), FIXED_DATETIME, fixture.name);
-    assert.equal(signed.headers.get("x-amz-content-sha256"), fixture.expectedContentSha256, fixture.name);
-    assert.equal(signed.headers.get("x-amz-security-token"), fixture.expectedSecurityToken ?? null, fixture.name);
+test("aws-sigv4 fetch emits fixed S3 SigV4 golden vectors", async () => {
+  for (const implementation of SIGNER_IMPLEMENTATIONS) {
+    for (const fixture of FIXTURES) {
+      const label = `${implementation.name}: ${fixture.name}`;
+      /** @type {Request[]} */
+      const requests = [];
+      const client = implementation.createClient({
+        accessKeyId: ACCESS_KEY_ID,
+        secretAccessKey: SECRET_ACCESS_KEY,
+        sessionToken: fixture.sessionToken,
+        service: "s3",
+        region: "us-east-1",
+        cache: new Map(),
+        retries: 0,
+        fetch: async (input) => {
+          requests.push(/** @type {Request} */ (input));
+          return new Response(null, { status: 200 });
+        },
+      });
+      const response = await client.fetch(fixture.url, /** @type {import("@wdl-dev/aws-sigv4").SigV4RequestInit} */ ({
+        ...fixture.init,
+        signing: { signingDate: FIXED_DATETIME },
+      }));
+      assert.equal(response.status, 200, label);
+      assert.equal(requests.length, 1, label);
+      const signed = requests[0];
+      assert.equal(signed.url, fixture.expectedUrl, label);
+      assert.equal(signed.method, fixture.init.method ?? "GET", label);
+      assert.equal(await signed.clone().text(), fixture.init.body ?? "", label);
+      assert.equal(signed.headers.get("authorization"), fixture.expectedAuthorization, label);
+      assert.equal(signed.headers.get("x-amz-date"), FIXED_DATETIME, label);
+      assert.equal(signed.headers.get("x-amz-content-sha256"), fixture.expectedContentSha256, label);
+      assert.equal(signed.headers.get("x-amz-security-token"), fixture.expectedSecurityToken ?? null, label);
+    }
   }
 });
 
-/** @param {typeof globalThis.fetch} fetch */
-function testClient(fetch) {
-  return new SigV4Client({
+/** @param {typeof globalThis.fetch} fetch @param {TestSigV4ClientFactory} [createClient] */
+function testClient(fetch, createClient = createVendoredClient) {
+  return createClient({
     accessKeyId: ACCESS_KEY_ID,
     secretAccessKey: SECRET_ACCESS_KEY,
     service: "s3",
@@ -122,7 +153,7 @@ test("aws-sigv4 fetch retries idempotent transient responses", async () => {
         url: request.url,
         method: request.method,
         authorization: request.headers.get("authorization"),
-        body: await request.clone().text(),
+        body: await request.text(),
       });
       return new Response(null, { status: calls.length === 1 ? 500 : 200 });
     });
@@ -142,6 +173,31 @@ test("aws-sigv4 fetch retries idempotent transient responses", async () => {
     assert.equal(calls[0].body, body ?? "", method);
     assert.ok(calls[0].authorization?.startsWith("AWS4-HMAC-SHA256 "), method);
     assert.equal(calls[0].authorization, calls[1].authorization, method);
+  }
+});
+
+test("aws-sigv4 retry does not wait for response cancellation", { timeout: 2_000 }, async () => {
+  for (const implementation of SIGNER_IMPLEMENTATIONS) {
+    let calls = 0;
+    let cancellations = 0;
+    const client = testClient(async () => {
+      calls += 1;
+      if (calls === 2) return new Response("ok");
+      return new Response(new ReadableStream({
+        cancel() {
+          cancellations += 1;
+          return new Promise(() => {});
+        },
+      }), { status: 500 });
+    }, implementation.createClient);
+
+    const response = await client.fetch(`${S3_ENDPOINT}/wdl-r2/retry-cancel.txt`, {
+      signing: { signingDate: FIXED_DATETIME },
+    });
+
+    assert.equal(await response.text(), "ok", implementation.name);
+    assert.equal(calls, 2, implementation.name);
+    assert.equal(cancellations, 1, implementation.name);
   }
 });
 

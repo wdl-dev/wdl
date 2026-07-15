@@ -33,6 +33,7 @@ spec:
         app.kubernetes.io/name: wdl
         app.kubernetes.io/component: workflows
     spec:
+      terminationGracePeriodSeconds: 30
       containers:
         - name: workflows
           image: docker.io/getwdl/wdl-rust:latest

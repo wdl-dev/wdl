@@ -17,7 +17,7 @@ resource "aws_ecs_task_definition" "workflows" {
     image       = var.rust_image
     essential   = true
     command     = ["/workflows"]
-    stopTimeout = 20
+    stopTimeout = 30
 
     portMappings = [{
       name          = "workflows-http"

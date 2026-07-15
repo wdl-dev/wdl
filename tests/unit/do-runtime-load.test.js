@@ -11,6 +11,10 @@ import { installMockFetch, withMockedFetch } from "../helpers/mock-fetch.js";
 import { withMockedGlobal } from "../helpers/mock-global.js";
 import { installConsoleMethodCapture } from "../helpers/output-capture.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
+import {
+  DO_RUNTIME_RESERVED_MODULE,
+  doRuntimeInjectedModuleSources,
+} from "../../do-runtime/load-code-budget.js";
 
 /** @type {any} */ (globalThis).__doLoadFetches = [];
 /** @type {any} */ (globalThis).__doLoadResponses = [];
@@ -221,7 +225,9 @@ test("DO runtime load: abort timeout is retried inside the load budget", async (
 
 test("DO runtime load: applies the host-binding wrapper before the alarm wrapper", async () => {
   /** @type {any} */ (globalThis).__doRuntimeHostWrap = (/** @type {any} */ workerCode) => {
-    workerCode.modules["_wdl-wrapper.js"] = "export class Room {}; export default {};";
+    workerCode.modules["_wdl-wrapper.js"] = [
+      "export class Room {}; export default {};",
+    ].join("\n");
     workerCode.mainModule = "_wdl-wrapper.js";
   };
   /** @type {any} */ (globalThis).__doLoadResponses.push(jsonLoadResponse(200, {
@@ -248,7 +254,7 @@ test("DO runtime load: applies the host-binding wrapper before the alarm wrapper
 
   assert.equal(loaded.mainModule, "_wdl-do-runtime-wrapper.js");
   assert.deepEqual(loaded.compatibilityFlags, ["nodejs_compat", "delete_all_preserves_alarm"]);
-  assert.equal(loaded.modules["_wdl-wrapper.js"], "export class Room {}; export default {};");
+  assert.doesNotMatch(loaded.modules["_wdl-wrapper.js"], /__wdlRunWithRequestContext/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function withoutInternalEnv/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function deleteAllKvStorage/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function deleteAllSqlStorage/);
@@ -258,13 +264,44 @@ test("DO runtime load: applies the host-binding wrapper before the alarm wrapper
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /return new NativeProxy\(storage,/);
   assert.doesNotMatch(loaded.modules["_wdl-do-alarm-shim.js"], /delete out\.__WDL_HOST_BINDINGS_WRAPPED__/);
   const wrapper = loaded.modules["_wdl-do-runtime-wrapper.js"];
-  assert.match(wrapper, /import \* as user from "\.\/_wdl-wrapper\.js";/);
-  assert.match(wrapper, /import \{ wrapDurableObjectClass \} from "\.\/_wdl-do-alarm-shim\.js";/);
+  assert.match(wrapper, /import \* as __WdlUserModule__ from "\.\/_wdl-wrapper\.js";/);
+  assert.match(wrapper, /import \{ wrapDurableObjectClass as __WdlWrapDurableObjectClass__ \} from "\.\/_wdl-do-alarm-shim\.js";/);
   assert.ok(
     wrapper.indexOf('from "./_wdl-do-alarm-shim.js";') <
-      wrapper.indexOf('import * as user from "./_wdl-wrapper.js";')
+      wrapper.indexOf('import * as __WdlUserModule__ from "./_wdl-wrapper.js";')
   );
-  assert.match(wrapper, /export class Room extends wrapDurableObjectClass\(user\.Room, "Room"\)/);
+  assert.match(wrapper, /__WdlUserModule__\.Room,\s+"Room"/);
+  assert.doesNotMatch(wrapper, /__wdlRunWithRequestContext/);
+});
+
+test("DO runtime wrapper aliases legal class names without declaration collisions", async () => {
+  const classNames = ["user", "wrapDurableObjectClass"];
+  const injections = Object.fromEntries(doRuntimeInjectedModuleSources("worker.js", {
+    bindings: {
+      USER: { type: "do", className: classNames[0] },
+      WRAPPER: { type: "do", className: classNames[1] },
+    },
+  }, "export function wrapDurableObjectClass() {}"));
+  const userUrl = moduleDataUrl(`
+    export class user {}
+    export class wrapDurableObjectClass {}
+  `);
+  const shimUrl = moduleDataUrl(`
+    export function wrapDurableObjectClass(Base) {
+      return class extends Base {};
+    }
+  `);
+  const source = applyModuleReplacements(injections[DO_RUNTIME_RESERVED_MODULE], [
+    ['from "./_wdl-do-alarm-shim.js"', `from ${JSON.stringify(shimUrl)}`],
+    [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+  ]);
+  const wrapped = await import(moduleDataUrl(source));
+  const userModule = await import(userUrl);
+
+  for (const name of classNames) {
+    assert.equal(wrapped[name].name, name);
+    assert.ok(wrapped[name].prototype instanceof userModule[name]);
+  }
 });
 
 test("DO runtime load: rejects reserved alarm shim module collisions", async () => {

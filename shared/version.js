@@ -105,3 +105,38 @@ export function workerVersionsKey(ns, worker) {
 export function doStorageIdKey(ns, worker) {
   return `worker:do-storage:${ns}:${worker}`;
 }
+
+// Per-worker lifecycle lock. Control owns acquisition/release; other tiers may
+// WATCH it when creating state that whole-worker delete must discover.
+export const WHOLE_DELETE_LOCK_KIND = "whole";
+export const VERSION_DELETE_LOCK_KIND = "version";
+
+/** @param {string} ns @param {string} worker */
+export function deleteLockKey(ns, worker) {
+  return `worker-delete-lock:${ns}:${worker}`;
+}
+
+/**
+ * @param {"whole" | "version"} kind
+ * @param {string} token
+ */
+export function formatDeleteLockToken(kind, token) {
+  if (
+    (kind !== WHOLE_DELETE_LOCK_KIND && kind !== VERSION_DELETE_LOCK_KIND) ||
+    typeof token !== "string" || !token
+  ) {
+    throw new TypeError("invalid worker delete lock token");
+  }
+  return `${kind}:${token}`;
+}
+
+/** @param {unknown} value @returns {"whole" | "version" | null} */
+export function parseDeleteLockKind(value) {
+  if (typeof value !== "string") return null;
+  const separator = value.indexOf(":");
+  if (separator <= 0 || separator === value.length - 1) return null;
+  const kind = value.slice(0, separator);
+  return kind === WHOLE_DELETE_LOCK_KIND || kind === VERSION_DELETE_LOCK_KIND
+    ? kind
+    : null;
+}

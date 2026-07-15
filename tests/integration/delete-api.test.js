@@ -445,7 +445,9 @@ test("POST /delete fail-closes when active route metadata is malformed", async (
   assert.equal(r.status, 500);
   const body = await responseJson(r);
   assert.equal(body.error, "corrupt_meta");
-  assert.equal(body.stage, "active_meta_routes");
+  assert.equal(body.message, "Internal error");
+  assert.equal(body.stage, undefined);
+  assert.equal(body.detail, undefined);
 
   assert.ok(redisHGetAll("patterns:bad-route.workers.example")["/api/*"]);
   assert.equal(redisSIsMember(`ns-hosts:${ns}`, "bad-route.workers.example"), true);
@@ -656,9 +658,9 @@ test("POST /delete on a worker whose active bundle has corrupt __meta__ → 500 
   const body = await responseJson(r);
   assert.equal(body.error, "corrupt_meta");
   assert.equal(body.version, "v1");
-  // v1 is both active AND the only retained; which parse path trips
-  // first is an implementation detail, but it must be one of them.
-  assert.match(body.stage, /meta_parse$/);
+  assert.equal(body.message, "Internal error");
+  assert.equal(body.stage, undefined);
+  assert.equal(body.detail, undefined);
 
   assert.equal(redisHGet(`routes:${ns}`, "api"), preActive);
   assert.deepEqual(redisSMembers(`workers:${ns}`), preWorkers);
@@ -680,7 +682,9 @@ test("POST /delete on a worker whose retained (non-active) bundle has corrupt __
   const body = await responseJson(r);
   assert.equal(body.error, "corrupt_meta");
   assert.equal(body.version, "v1");
-  assert.equal(body.stage, "retained_meta_parse");
+  assert.equal(body.message, "Internal error");
+  assert.equal(body.stage, undefined);
+  assert.equal(body.detail, undefined);
 
   // Active pointer must survive — no partial tear-down.
   assert.equal(redisHGet(`routes:${ns}`, "api"), "v2");
@@ -726,8 +730,10 @@ test("DELETE /versions/<v> with corrupt sibling meta during shared-prefix scan �
   assert.equal(r.status, 500);
   const body = await responseJson(r);
   assert.equal(body.error, "corrupt_meta");
-  assert.equal(body.stage, "sibling_meta_parse");
   assert.equal(body.version, "v2");
+  assert.equal(body.message, "Internal error");
+  assert.equal(body.stage, undefined);
+  assert.equal(body.detail, undefined);
 
   assert.equal(redisExists(`worker:${ns}:w:v:1`), true);
   assert.equal(queueCleanupIntents().length, 0);

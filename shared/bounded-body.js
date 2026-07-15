@@ -32,7 +32,11 @@ export async function readBoundedStreamBytes(
       total += chunk.byteLength;
       if (total > maxBytes) {
         const error = overflowError();
-        await reader.cancel(error).catch(() => {});
+        try {
+          void reader.cancel(error).catch(() => {});
+        } catch {
+          // Cancellation is best-effort; the size error must not wait on it.
+        }
         throw error;
       }
       chunks.push(chunk);

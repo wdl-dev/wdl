@@ -8,7 +8,9 @@ import {
   requireControlRedis,
   runOptimistic,
   stringEnv,
+  codedErrorLogFields,
   codedErrorResponse,
+  secretEnvelopeErrorResponse,
 } from "control-shared";
 import {
   deleteLockKey,
@@ -68,16 +70,41 @@ function secretMutationContentionAbort() {
  * }} args
  */
 function rejectSecretMutation({ abort, requestId, ns, name, key, method, log }) {
-  log("warn", "secret_mutation_rejected", {
+  log(abort.status >= 500 ? "error" : "warn", "secret_mutation_rejected", {
     request_id: requestId,
     namespace: ns,
     worker: name,
     key,
     method,
-    status: abort.status,
-    reason: abort.code,
+    ...codedErrorLogFields(abort),
   });
   return controlAbortResponse(abort);
+}
+
+/**
+ * @param {{
+ *   err: SecretEnvelopeError,
+ *   requestId: string,
+ *   ns: string,
+ *   name: string,
+ *   key: string,
+ *   method: string,
+ *   log: (level: string, event: string, fields: Record<string, unknown>) => void,
+ * }} args
+ */
+function rejectSecretEnvelopeMutation({ err, requestId, ns, name, key, method, log }) {
+  return secretEnvelopeErrorResponse({
+    err,
+    log,
+    event: "secret_mutation_rejected",
+    fields: {
+      request_id: requestId,
+      namespace: ns,
+      worker: name,
+      key,
+      method,
+    },
+  });
 }
 
 /**
@@ -110,12 +137,20 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
     let storedValue = null;
     let putPlaintext = null;
     if (method === "PUT") {
-      const put = await readEncryptedSecretPutValue({
-        request,
-        env,
-        hashKey: secretsKey,
-        fieldName: key,
-      });
+      let put;
+      try {
+        put = await readEncryptedSecretPutValue({
+          request,
+          env,
+          hashKey: secretsKey,
+          fieldName: key,
+        });
+      } catch (err) {
+        if (err instanceof SecretEnvelopeError) {
+          return rejectSecretEnvelopeMutation({ err, requestId, ns, name, key, method, log });
+        }
+        throw err;
+      }
       if ("response" in put) return put.response;
       storedValue = put.encrypted;
       putPlaintext = put.plaintext;
@@ -217,9 +252,7 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
           worker: name,
           key,
           method,
-          status: err.status,
-          reason: err.code,
-          error_detail: errMessage(err.cause),
+          ...codedErrorLogFields(err, err.code, { errorDetail: errMessage(err.cause) }),
         });
         return codedErrorResponse(err, err.code);
       }
@@ -242,9 +275,19 @@ export async function handle({ request, env, method, ns, name, subPath, requestI
           });
           return rejectSecretMutation({ abort, requestId, ns, name, key, method, log });
         }
+        log(err.status >= 500 ? "error" : "warn", "secret_mutation_rejected", {
+          request_id: requestId,
+          namespace: ns,
+          worker: name,
+          key,
+          method,
+          ...codedErrorLogFields(err, "routing_error"),
+        });
         return codedErrorResponse(err, err.code);
       }
-      if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+      if (err instanceof SecretEnvelopeError) {
+        return rejectSecretEnvelopeMutation({ err, requestId, ns, name, key, method, log });
+      }
       throw err;
     }
   }

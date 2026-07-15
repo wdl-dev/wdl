@@ -5,6 +5,8 @@ use serde_json::Value as JsonValue;
 use crate::{AppState, Config};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 
+const MAX_RUNTIME_RESPONSE_BYTES: usize = 1024 * 1024;
+
 pub(crate) struct RuntimeResponse {
     pub(crate) status: Option<u16>,
     pub(crate) json: Option<JsonValue>,
@@ -70,7 +72,17 @@ pub(crate) async fn post_runtime(
         };
     };
     let status = response.status().as_u16();
-    let text = response.text().await.unwrap_or_default();
+    let text = match read_runtime_response(response).await {
+        Ok(text) => text,
+        Err(error) => {
+            return RuntimeResponse {
+                status: Some(status),
+                json: None,
+                text: None,
+                error: Some(error),
+            };
+        }
+    };
     let parsed = serde_json::from_str::<JsonValue>(&text).ok();
     RuntimeResponse {
         status: Some(status),
@@ -78,6 +90,32 @@ pub(crate) async fn post_runtime(
         text: Some(text),
         error: None,
     }
+}
+
+async fn read_runtime_response(mut response: reqwest::Response) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RUNTIME_RESPONSE_BYTES as u64)
+    {
+        return Err("runtime response body exceeds 1048576 bytes".to_string());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| format!("failed to read runtime response body: {err}"))?
+    {
+        append_runtime_response_chunk(&mut body, &chunk)?;
+    }
+    String::from_utf8(body).map_err(|_| "runtime response body is not valid UTF-8".to_string())
+}
+
+fn append_runtime_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), String> {
+    if body.len().saturating_add(chunk.len()) > MAX_RUNTIME_RESPONSE_BYTES {
+        return Err("runtime response body exceeds 1048576 bytes".to_string());
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -113,6 +151,18 @@ mod tests {
                 error: Some("ECONNREFUSED".to_string()),
             }),
             "error"
+        );
+    }
+
+    #[test]
+    fn runtime_response_body_accepts_the_limit_and_rejects_the_next_byte() {
+        let mut body = Vec::new();
+        let exact_limit = vec![b'a'; MAX_RUNTIME_RESPONSE_BYTES];
+        append_runtime_response_chunk(&mut body, &exact_limit).unwrap();
+        assert_eq!(body.len(), MAX_RUNTIME_RESPONSE_BYTES);
+        assert_eq!(
+            append_runtime_response_chunk(&mut body, b"x"),
+            Err("runtime response body exceeds 1048576 bytes".to_string())
         );
     }
 }

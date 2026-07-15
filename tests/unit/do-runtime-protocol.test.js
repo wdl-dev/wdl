@@ -24,6 +24,7 @@ const {
   buildFacetName,
   buildAlarmRequest,
   buildForwardRequest,
+  buildRpcRequest,
   encodeDoInvokeRequest,
   buildLocalActorRequest,
   doErrorResponse,
@@ -255,9 +256,10 @@ test("normalizes do alarm invoke request", async () => {
   assert.deepEqual(invoke.alarm, { retryCount: 2, isRetry: true, token: "alarm-token" });
   assert.equal("request" in invoke ? invoke.request : undefined, undefined);
 
-  const request = buildAlarmRequest(invoke.alarm);
+  const request = buildAlarmRequest(invoke.alarm, "rid-alarm");
   assert.equal(request.method, "POST");
   assert.equal(request.headers.get("x-wdl-do-internal-alarm"), "1");
+  assert.equal(request.headers.get("x-request-id"), "rid-alarm");
   assert.deepEqual(await request.json(), { retryCount: 2, isRetry: true, token: "alarm-token" });
 });
 
@@ -275,6 +277,22 @@ test("normalizes do rpc invoke request", () => {
   assert.equal(invoke.hostId, CHAT_ROOM_HOST_ID);
   assert.equal("request" in invoke, false);
   assert.deepEqual("rpc" in invoke ? invoke.rpc : null, {
+    method: "addMessage",
+    args: ["hello", { role: "user" }],
+  });
+});
+
+test("builds private rpc dispatch requests", async () => {
+  const request = buildRpcRequest({
+    method: "addMessage",
+    args: ["hello", { role: "user" }],
+  }, "rid-rpc");
+
+  assert.equal(request.method, "POST");
+  assert.equal(request.url, "https://do.internal/__wdl_rpc");
+  assert.equal(request.headers.get("x-wdl-do-internal-rpc"), "1");
+  assert.equal(request.headers.get("x-request-id"), "rid-rpc");
+  assert.deepEqual(await request.json(), {
     method: "addMessage",
     args: ["hello", { role: "user" }],
   });
@@ -375,6 +393,7 @@ test("builds forwarded Request for user durable object fetch", async () => {
       headers: {
         ...BASE_BODY.request.headers,
         "x-wdl-do-internal-alarm": "1",
+        "x-wdl-do-internal-rpc": "1",
         "x-wdl-internal-auth": "platform-token",
       },
     },
@@ -386,6 +405,7 @@ test("builds forwarded Request for user durable object fetch", async () => {
   assert.equal(request.url, "https://demo.workers.example/messages");
   assert.equal(request.headers.get("content-type"), "text/plain");
   assert.equal(request.headers.get("x-wdl-do-internal-alarm"), null);
+  assert.equal(request.headers.get("x-wdl-do-internal-rpc"), null);
   assert.equal(request.headers.get("x-wdl-internal-auth"), null);
   assert.equal(await request.text(), "hello");
 });
@@ -402,6 +422,7 @@ test("normalizes DO connect without exposing internal auth to tenant code", () =
       "x-wdl-do-object-name": "room-a",
       "x-wdl-do-request-url": "https://demo.workers.example/ws",
       "x-wdl-internal-auth": "platform-token",
+      "x-wdl-do-ownership-error": "stale_owner_generation",
       "x-tenant-visible": "ok",
     },
   }));
@@ -519,6 +540,7 @@ test("normalizes do websocket connect request from internal headers", () => {
       "x-wdl-do-owner-endpoint": "do-runtime-a:8788",
       "x-wdl-do-owner-generation": "4",
       "x-wdl-do-owner-hint": "1",
+      "x-wdl-do-ownership-error": "stale_owner_generation",
     },
   });
   const invoke = normalizeDoConnectRequest(request);
@@ -538,6 +560,7 @@ test("normalizes do websocket connect request from internal headers", () => {
   assert.equal(invoke.request.headers.some(([name]) => name === "x-wdl-do-owner-generation"), false);
   assert.equal(invoke.request.headers.some(([name]) => name === "x-wdl-do-owner-endpoint"), false);
   assert.equal(invoke.request.headers.some(([name]) => name === "x-wdl-do-owner-hint"), false);
+  assert.equal(invoke.request.headers.some(([name]) => name === "x-wdl-do-ownership-error"), false);
   assert.ok(invoke.request.headers.some(([name, value]) => name === "upgrade" && value === "websocket"));
   assert.ok(invoke.request.headers.some(([name, value]) => name === "x-request-id" && value === "rid-1"));
 });

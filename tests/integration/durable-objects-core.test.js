@@ -14,6 +14,7 @@ import {
   DO_RPC_WORKER,
   DO_WORKER,
 } from "./helpers/durable-objects.js";
+import { redisDel, redisSetEx } from "./helpers/redis.js";
 
 setupIntegrationSuite();
 
@@ -61,6 +62,33 @@ test("worker Durable Object binding routes through do-runtime and preserves obje
     storage: 1,
     body: "from-worker",
   });
+});
+
+test("version-delete lock does not interrupt active Durable Object traffic", async () => {
+  const ns = uniqueNs("do-version-delete");
+  await deployAndPromote(ns, "counter", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WORKER },
+    bindings: {
+      COUNTER: { type: "do", className: "Counter" },
+    },
+  });
+
+  const lockKey = `worker-delete-lock:${ns}:counter`;
+  redisSetEx(lockKey, "version:integration-token", 30);
+  try {
+    const response = await gatewayFetch(ns, "/counter?name=alice");
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    assert.deepEqual(responseJson({ body: text }), {
+      objectId: "alice",
+      memory: 1,
+      storage: 1,
+      body: "from-worker",
+    });
+  } finally {
+    redisDel(lockKey);
+  }
 });
 
 test("tenant top-level intrinsic patches cannot bypass host env wrapping", async () => {
@@ -130,6 +158,7 @@ test("Durable Object RPC dispatches class methods with structured args", async (
   await deployAndPromote(ns, "rooms", {
     mainModule: "worker.js",
     modules: { "worker.js": DO_RPC_WORKER },
+    compatibilityFlags: ["no_nodejs_als"],
     bindings: {
       ROOM: { type: "do", className: "Room" },
     },
@@ -205,4 +234,21 @@ test("Durable Object RPC dispatches class methods with structured args", async (
       meta: { role: "peer" },
     },
   });
+
+  const requestId = "rid-do-rpc-context";
+  const context = await gatewayFetch(ns, "/rooms/request-id?name=alice&to=bob", {
+    headers: { "x-request-id": requestId },
+  });
+  const contextText = await context.text();
+  assert.equal(context.status, 200, contextText);
+  assert.deepEqual(responseJson({ body: contextText }), { requestId });
+
+  const nestedContext = await gatewayFetch(
+    ns,
+    "/rooms/nested-request-id?name=alice&to=bob",
+    { headers: { "x-request-id": requestId } }
+  );
+  const nestedContextText = await nestedContext.text();
+  assert.equal(nestedContext.status, 200, nestedContextText);
+  assert.deepEqual(responseJson({ body: nestedContextText }), { requestId });
 });

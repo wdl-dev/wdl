@@ -5,10 +5,12 @@ import {
   requireControlLog,
   requireControlRedis,
   stringEnv,
+  codedErrorLogFields,
   codedErrorResponse,
   runOptimistic,
   ControlAbort,
   controlAbortResponse,
+  secretEnvelopeErrorResponse,
 } from "control-shared";
 import {
   invalidSecretMutationKeyResponse,
@@ -36,21 +38,40 @@ class NamespaceSecretAbort extends ControlAbort {}
  * @param {{ log: import("control-shared").ControlLogger, requestId: string, nsName: string, secretKey: string, method: string }} context
  */
 function namespaceSecretMutationErrorResponse(err, { log, requestId, nsName, secretKey, method }) {
-  if (err instanceof NamespaceSecretAbort) return controlAbortResponse(err);
+  if (err instanceof NamespaceSecretAbort) {
+    log(err.status >= 500 ? "error" : "warn", "ns_secret_mutation_rejected", {
+      request_id: requestId,
+      namespace: nsName,
+      key: secretKey,
+      method,
+      ...codedErrorLogFields(err),
+    });
+    return controlAbortResponse(err);
+  }
   if (err instanceof BundleMetaError) {
     log("error", "ns_secret_mutation_rejected", {
       request_id: requestId,
       namespace: nsName,
       key: secretKey,
       method,
-      status: err.status,
-      reason: err.code,
-      error_detail: errMessage(err.cause),
+      ...codedErrorLogFields(err, err.code, { errorDetail: errMessage(err.cause) }),
     });
     return codedErrorResponse(err, err.code);
   }
   if (err instanceof WorkerEnvBudgetError) return codedErrorResponse(err, err.code);
-  if (err instanceof SecretEnvelopeError) return jsonError(503, err.code, err.message);
+  if (err instanceof SecretEnvelopeError) {
+    return secretEnvelopeErrorResponse({
+      err,
+      log,
+      event: "ns_secret_mutation_rejected",
+      fields: {
+        request_id: requestId,
+        namespace: nsName,
+        key: secretKey,
+        method,
+      },
+    });
+  }
   return null;
 }
 
@@ -199,12 +220,21 @@ export async function handle({ request, env, method, nsName, secretKey, requestI
   if (method === "PUT" && secretKey !== undefined) {
     const invalidKey = invalidSecretMutationKeyResponse(secretKey);
     if (invalidKey) return invalidKey;
-    const put = await readEncryptedSecretPutValue({
-      request,
-      env,
-      hashKey: nsSecretHashKey,
-      fieldName: secretKey,
-    });
+    let put;
+    try {
+      put = await readEncryptedSecretPutValue({
+        request,
+        env,
+        hashKey: nsSecretHashKey,
+        fieldName: secretKey,
+      });
+    } catch (err) {
+      const response = namespaceSecretMutationErrorResponse(err, {
+        log, requestId, nsName, secretKey, method,
+      });
+      if (response) return response;
+      throw err;
+    }
     if ("response" in put) return put.response;
     try {
       await mutateNamespaceSecret({

@@ -5,9 +5,10 @@ import {
   loadDoHostActor,
   resetDoHostActorHarness,
 } from "../helpers/load-do-host-actor.js";
+import { assertJsonResponse } from "../helpers/response-json.js";
 import { delay } from "../helpers/timing.js";
 
-const { WdlDoHostActor } = await loadDoHostActor();
+const { WdlDoHostActor, dispatchRpc } = await loadDoHostActor();
 const harness = doHostActorHarnessState();
 
 beforeEach(() => {
@@ -38,6 +39,43 @@ function invoke(overrides = {}) {
     ...overrides,
   };
 }
+
+test("DO host actor: RPC dispatch passes request id through the internal wrapper boundary", async () => {
+  /** @type {Array<{ url: string, header: string | null, requestId: string | null, body: unknown }>} */
+  const calls = [];
+  const facet = {
+    async fetch(/** @type {Request} */ request) {
+      const body = await request.json();
+      calls.push({
+        url: request.url,
+        header: request.headers.get("x-wdl-do-internal-rpc"),
+        requestId: request.headers.get("x-request-id"),
+        body,
+      });
+      return Response.json({ ok: true, result: body });
+    },
+  };
+
+  const response = await dispatchRpc(
+    facet,
+    { method: "inspect", args: ["value"] },
+    "rid-rpc"
+  );
+
+  await assertJsonResponse(response, 200, {
+    ok: true,
+    result: {
+      method: "inspect",
+      args: ["value"],
+    },
+  });
+  assert.deepEqual(calls, [{
+    url: "https://do.internal/__wdl_rpc",
+    header: "1",
+    requestId: "rid-rpc",
+    body: { method: "inspect", args: ["value"] },
+  }]);
+});
 
 test("DO host actor: lease budget aborts a facet when the owner fence stops renewing", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
@@ -120,6 +158,41 @@ test("DO host actor: expired initial lease aborts before tenant dispatch", async
   assert.deepEqual(harness.forgottenOwners, [owner.ownerKey]);
   assert.deepEqual(harness.aborts.map((entry) => entry.name), ["Room:alice"]);
   assert.equal(harness.logs.at(-1).fields.reason, "expired");
+});
+
+test("DO host actor: registry delay completes before the owner fence snapshot", async () => {
+  const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  const registryStarted = Promise.withResolvers();
+  const releaseRegistry = Promise.withResolvers();
+  const owner = {
+    ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
+    taskId: "task-a",
+    generation: 7,
+    leaseExpiresAt: Date.now() - 1,
+  };
+  harness.assertResponses = [owner];
+  harness.registryWait = releaseRegistry.promise;
+  harness.registryWaitStarted = () => registryStarted.resolve(undefined);
+  let ran = false;
+
+  const dispatch = host.dispatchWithFence(invoke({
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+  }), () => {
+    ran = true;
+    return new Response("should not run");
+  });
+  const first = await Promise.race([
+    registryStarted.promise.then(() => "registry"),
+    dispatch.then(() => "dispatch-resolved", () => "dispatch-rejected"),
+  ]);
+
+  assert.equal(first, "registry");
+  assert.equal(harness.assertCalls, 0);
+  releaseRegistry.resolve(undefined);
+  await assert.rejects(dispatch, /owner lease has expired/);
+
+  assert.equal(ran, false);
+  assert.equal(harness.assertCalls, 1);
 });
 
 test("DO host actor: lease budget reschedules when renew extended the owner fence", async () => {

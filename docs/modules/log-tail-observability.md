@@ -145,6 +145,11 @@ Common rules:
   `request_id` on `request_complete`; Rust sidecars sanitize inbound ids and log them
   where request middleware owns completion. Control's Redis `PUBLISH` path logs the id
   locally but does not put it in the pub/sub payload.
+- Loaded-worker host facades keep request ids in invocation-local ALS across native
+  Promise and `async` continuations. Private do-runtime fetch, alarm, and RPC dispatches
+  carry the id in `x-request-id`. Custom thenables are not a supported propagation
+  boundary; the wrapper does not inspect or replace tenant return values to extend it.
+  Nested handler calls without a new id inherit the current ALS context.
 - Logs use snake_case fields. Only `level=error` is emitted on stderr; debug/info/warn
   JSON log lines go to stdout so log routing stays identical across JS, Rust, and
   embedded workerd shims.

@@ -86,6 +86,7 @@ const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicPromiseThen = Promise.prototype.then;
+const intrinsicReadableStreamCancel = ReadableStream.prototype.cancel;
 const intrinsicReadableStreamGetReader = ReadableStream.prototype.getReader;
 const intrinsicReadableStreamReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
 const intrinsicReadableStreamReaderRead = ReadableStreamDefaultReader.prototype.read;
@@ -326,6 +327,20 @@ function cancelStreamReader(reader) {
     intrinsicReflectApply(intrinsicPromiseThen, promise, [undefined, () => {}]);
   } catch {
     // Cancellation is best-effort after the bounded reader has already rejected.
+  }
+}
+
+/** @param {Response} response */
+function cancelResponseBody(response) {
+  // This source is injected into loaded workers, so keep cleanup local rather
+  // than adding shared-respond as another injected facade module.
+  try {
+    const body = responseBody(response);
+    if (!body) return;
+    const promise = intrinsicReflectApply(intrinsicReadableStreamCancel, body, []);
+    intrinsicReflectApply(intrinsicPromiseThen, promise, [undefined, () => {}]);
+  } catch {
+    // Best-effort cleanup only; the replacement response owns behavior.
   }
 }
 
@@ -800,8 +815,10 @@ function validOwnerEndpoint(endpoint) {
 export async function followOwnerHint(response, ownerFetch, pathname, init) {
   const hint = await ownerHintFromResponse(response);
   if (!hint || typeof ownerFetch !== "function") return response;
+  cancelResponseBody(response);
   const direct = await ownerFetch(ownerRequestUrl(hint, pathname), init);
   if (ownerEndpointUnavailableResponse(direct)) {
+    cancelResponseBody(direct);
     throw new Error(`DO owner endpoint returned ${responseStatus(direct)}`);
   }
   return direct;
@@ -846,10 +863,13 @@ export async function dispatchDoRequestWithOwnerHint({
     try {
       const direct = await ownerFetch(ownerRequestUrl(cachedHint, ownerPath), init);
       if (await ownerHintFromResponse(direct)) {
+        cancelResponseBody(direct);
         clearHint();
       } else if (await staleCachedResponse(direct)) {
+        cancelResponseBody(direct);
         clearHint();
       } else if (ownerEndpointUnavailableResponse(direct)) {
+        cancelResponseBody(direct);
         clearHint();
         if (replayOwnerUnavailable) {
           return await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
@@ -883,6 +903,14 @@ export async function dispatchDoRequestWithOwnerHint({
   rememberHint(hinted);
   try {
     const direct = await followOwnerHint(routed, ownerFetch, ownerPath, init);
+    if (await ownerHintFromResponse(direct)) {
+      cancelResponseBody(direct);
+      clearHint();
+      if (replayOwnerUnavailable) {
+        return await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
+      }
+      return ownerUnavailableResponse();
+    }
     const learned = ownerHintFromHeaders(responseHeaders(direct));
     if (learned) rememberHint(learned);
     return direct;
@@ -925,6 +953,7 @@ async function dispatchDoWithHintCache({
     replayOwnerUnavailable,
   });
   if (retryOwnerRace && await retryableOwnerRaceResponse(response)) {
+    cancelResponseBody(response);
     cache.delete(hintKey);
     response = await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
   }

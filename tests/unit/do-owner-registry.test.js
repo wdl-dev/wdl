@@ -34,6 +34,7 @@ const INVALID_RENEW_TIME_BASES = [1234.5, NaN, Infinity, -Infinity, -1];
 const DO_STORAGE_ID = "do_0123456789abcdef0123456789abcdef";
 const OWNER_KEY = `${DO_STORAGE_ID}:Room:shard0`;
 const STORAGE_POINTER_KEY = "worker:do-storage:tenant:chat";
+const DELETE_LOCK_KEY = "worker-delete-lock:tenant:chat";
 
 beforeEach(resetDoOwnerRegistryTestState);
 
@@ -145,6 +146,7 @@ test("DO owner registry: lease guard config bounds values and permits test disab
 });
 
 test("DO owner registry: claim writes owner generation counter", async () => {
+  setStoragePointer();
   const owner = await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke());
 
   assert.equal(owner.taskId, "task-a");
@@ -176,6 +178,7 @@ test("DO owner registry: corrupt generation counter fails closed", async () => {
 });
 
 test("DO owner registry: claim retries WatchError before surfacing owner", async () => {
+  setStoragePointer();
   DO_OWNER_REGISTRY_TEST_STATE.redisState.execFailures = 1;
 
   const owner = await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke());
@@ -183,7 +186,67 @@ test("DO owner registry: claim retries WatchError before surfacing owner", async
   assert.equal(owner.taskId, "task-a");
   assert.equal(owner.generation, 1);
   assert.equal(DO_OWNER_REGISTRY_TEST_STATE.redisState.execFailures, 0);
-  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.redisState.watchBatches.length, 2);
+  assert.equal(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.watchBatches.filter((keys) =>
+      keys.includes(ownerKeyOf(OWNER_KEY))
+    ).length,
+    2
+  );
+});
+
+test("DO owner registry: first claim requires the active worker storage pointer", async () => {
+  await assert.rejects(
+    resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "stale_owner_storage");
+      return true;
+    }
+  );
+  assert.deepEqual(doOwnerRegistryWriteCommands(), []);
+});
+
+test("DO owner registry: first claim refuses a worker under whole-delete lock", async () => {
+  setStoragePointer();
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(DELETE_LOCK_KEY, "whole:delete-token");
+
+  await assert.rejects(
+    resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "stale_owner_storage");
+      return true;
+    }
+  );
+  assert.ok(DO_OWNER_REGISTRY_TEST_STATE.watchedKeys.includes(DELETE_LOCK_KEY));
+  assert.deepEqual(doOwnerRegistryWriteCommands(), []);
+});
+
+test("DO owner registry: version delete lock does not interrupt active storage", async () => {
+  setStoragePointer();
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(DELETE_LOCK_KEY, "version:delete-token");
+
+  const owner = await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke());
+
+  assert.equal(owner.taskId, "task-a");
+  assert.equal(owner.generation, 1);
+  assert.ok(DO_OWNER_REGISTRY_TEST_STATE.watchedKeys.includes(DELETE_LOCK_KEY));
+});
+
+test("DO owner registry: delete lock appearing before claim commit aborts the claim", async () => {
+  setStoragePointer();
+  DO_OWNER_REGISTRY_TEST_STATE.redisState.execFailures = 1;
+  DO_OWNER_REGISTRY_TEST_STATE.onExecFailure = () => {
+    DO_OWNER_REGISTRY_TEST_STATE.store.set(DELETE_LOCK_KEY, "whole:delete-token");
+  };
+
+  await assert.rejects(
+    resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "stale_owner_storage");
+      return true;
+    }
+  );
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.has(ownerKeyOf(OWNER_KEY)), false);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.has(ownerGenerationKeyOf(OWNER_KEY)), false);
 });
 
 test("DO owner registry: lost owner state cannot validate an old owner from another task", async () => {
@@ -300,6 +363,7 @@ test("DO owner registry: expired takeover bumps generation monotonically", async
     generation: 11,
     leaseExpiresAt: redisNow - EXPIRED_LEASE_AGE_MS,
   });
+  setStoragePointer();
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(ownerKey), JSON.stringify(staleOwner));
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerGenerationKeyOf(ownerKey), "7");
 

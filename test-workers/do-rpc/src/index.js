@@ -44,6 +44,30 @@ export class Room extends DurableObject {
       result: await target.addMessage(text, { role: "peer" }),
     };
   }
+
+  async forwardRequestId(targetName) {
+    const target = this.env.ROOM.get(this.env.ROOM.idFromName(targetName));
+    const response = await target.fetch(new Request("https://do.internal/request-id"));
+    return response.text();
+  }
+
+  async nestedForwardRequestId(targetName) {
+    const response = await this.fetch(new Request(
+      `https://do.internal/forward-request-id?to=${encodeURIComponent(targetName)}`
+    ));
+    return response.text();
+  }
+
+  fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/forward-request-id") {
+      const target = this.env.ROOM.get(this.env.ROOM.idFromName(
+        url.searchParams.get("to") || "peer"
+      ));
+      return target.fetch(new Request("https://do.internal/request-id"));
+    }
+    return new Response(request.headers.get("x-request-id") || "");
+  }
 }
 
 export default {
@@ -84,6 +108,16 @@ export default {
         url.searchParams.get("to") || "peer",
         "forwarded"
       ));
+    }
+    if (url.pathname === "/request-id") {
+      return Response.json({
+        requestId: await stub.forwardRequestId(url.searchParams.get("to") || "peer"),
+      });
+    }
+    if (url.pathname === "/nested-request-id") {
+      return Response.json({
+        requestId: await stub.nestedForwardRequestId(url.searchParams.get("to") || "peer"),
+      });
     }
     return Response.json(await stub.addMessage("hello", { role: "user" }));
   },

@@ -2,6 +2,7 @@ import {
   jsonResponse,
   jsonError,
   readJsonBody,
+  codedErrorLogFields,
   codedErrorResponse,
   requireControlLog,
   requireControlRedis,
@@ -39,6 +40,11 @@ export async function handle({ request, env, method, nsName, requestId }) {
       return jsonResponse(200, { namespace: nsName, hosts });
     } catch (err) {
       if (err instanceof RoutingError) {
+        log(err.status >= 500 ? "error" : "warn", "hosts_reconcile_rejected", {
+          request_id: requestId,
+          namespace: nsName,
+          ...codedErrorLogFields(err, "routing_error"),
+        });
         return codedErrorResponse(err, "routing_error");
       }
       throw err;

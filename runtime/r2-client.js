@@ -46,6 +46,13 @@ function bytesToArrayBuffer(bytes) {
   );
 }
 
+/** @param {ReadableStreamDefaultReader<Uint8Array>} reader @param {unknown} reason */
+function cancelReaderBestEffort(reader, reason) {
+  try {
+    void reader.cancel(reason).catch(() => {});
+  } catch {}
+}
+
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
 async function readStreamWithLimit(stream, operation) {
   const reader = stream.getReader();
@@ -59,9 +66,10 @@ async function readStreamWithLimit(stream, operation) {
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.byteLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
-        await reader.cancel(
+        cancelReaderBestEffort(
+          reader,
           `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
-        ).catch(() => {});
+        );
         assertR2BufferSize(total, operation);
       }
       chunks.push(chunk);
@@ -100,9 +108,10 @@ function cappedReadableStream(stream, operation) {
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.byteLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
-        await reader.cancel(
+        cancelReaderBestEffort(
+          reader,
           `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
-        ).catch(() => {});
+        );
         try { reader.releaseLock(); } catch {}
         try {
           assertR2BufferSize(total, operation);

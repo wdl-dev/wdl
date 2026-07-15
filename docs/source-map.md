@@ -71,7 +71,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | Platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
-| `shared/version.js` | Worker version formatting plus worker and route-plane Redis key helpers. |
+| `shared/version.js` | Worker version formatting plus worker, route-plane, and lifecycle Redis key helpers. |
 | `shared/workerd-compat-flags.js` | Pinned mirror of upstream workerd experimental compatibility enable flags used to reject tenant metadata before cold-load. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |

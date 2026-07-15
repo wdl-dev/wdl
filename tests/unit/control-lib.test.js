@@ -178,6 +178,34 @@ test("parseBundleMeta delegates error construction without changing parse contex
   assert.ok(captured.cause instanceof TypeError);
 });
 
+test("parseBundleMeta does not retain malformed persisted input in diagnostics", () => {
+  const marker = "SECRET_TOKEN_ABC";
+  /** @type {{ reason: string, cause: unknown } | null} */
+  let failure = null;
+  const expected = new Error("routing-owned error");
+
+  assert.throws(
+    () => parseBundleMeta(marker, {
+      ns: "demo",
+      worker: "api",
+      version: "v3",
+      makeError(/** @type {{ namespace: string, worker: string, version: string, message: string, reason: string, cause: unknown }} */ value) {
+        failure = value;
+        return expected;
+      },
+    }),
+    (err) => err === expected
+  );
+
+  assert.ok(failure);
+  const captured = /** @type {{ reason: string, cause: unknown }} */ (
+    /** @type {unknown} */ (failure)
+  );
+  assert.equal(captured.reason, "__meta__ is not valid JSON");
+  assert.ok(captured.cause instanceof SyntaxError);
+  assert.equal(JSON.stringify({ reason: captured.reason }).includes(marker), false);
+});
+
 test("encodeReferrerMember: key order is canonical (alphabetical) regardless of caller shape", () => {
   const a = encodeReferrerMember({
     binding: "AUTH", callerNs: "demo", callerWorker: "api", callerVersion: "v3",

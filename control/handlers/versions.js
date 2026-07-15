@@ -1,9 +1,9 @@
 import {
   jsonResponse, jsonError,
-  acquireDeleteLock, releaseDeleteLock,
+  acquireDeleteLock, releaseDeleteLock, renewDeleteLock,
   assertWorkflowDeleteAllowed,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
-  ControlAbort, controlAbortResponse,
+  ControlAbort, codedErrorLogFields, controlAbortResponse,
   requireControlLog,
   requireControlRedis,
   runOptimistic,
@@ -22,7 +22,13 @@ import {
   stageWorkerVersionIndexDelete,
   stageWorkerVersionIndexRemove,
 } from "control-lifecycle-indexes";
-import { parseVersion, bundleKey, routesKey } from "shared-version";
+import {
+  VERSION_DELETE_LOCK_KIND,
+  bundleKey,
+  deleteLockKey,
+  parseVersion,
+  routesKey,
+} from "shared-version";
 import { workerSecretsKey } from "shared-secret-keys";
 
 const MAX_DELETE_ATTEMPTS = 5;
@@ -69,7 +75,7 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
     return jsonError(400, "invalid_version", `Version must be "v<int>", got ${JSON.stringify(version)}`);
   }
 
-  const lockToken = await acquireDeleteLock(redis, ns, name);
+  const lockToken = await acquireDeleteLock(redis, ns, name, VERSION_DELETE_LOCK_KIND);
   if (!lockToken) {
     log("warn", "version_delete_rejected", {
       request_id: requestId,
@@ -86,18 +92,23 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
     let result;
     try {
       await assertWorkflowDeleteAllowed({ ns, worker: name, version, allowCleanup: true });
+      if (!await renewDeleteLock(redis, ns, name, lockToken)) {
+        throw new VersionDeleteError(409, "deleting", {
+          namespace: ns, name, version,
+          message: "worker delete lock expired; retry the request",
+        });
+      }
       result = await executeVersionDelete({
-        redis, ns, name, version, principal, requestId,
+        redis, ns, name, version, principal, requestId, lockToken,
       });
     } catch (err) {
       if (err instanceof ControlAbort) {
-        log("warn", "version_delete_rejected", {
+        log(err.status >= 500 ? "error" : "warn", "version_delete_rejected", {
           request_id: requestId,
           namespace: ns,
           worker: name,
           version,
-          status: err.status,
-          reason: err.code,
+          ...codedErrorLogFields(err),
         });
         return controlAbortResponse(err);
       }
@@ -138,9 +149,9 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, version: string, principal?: AccessPrincipal | null, requestId: string }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, version: string, principal?: AccessPrincipal | null, requestId: string, lockToken: string }} args
  */
-async function executeVersionDelete({ redis, ns, name, version, principal, requestId }) {
+async function executeVersionDelete({ redis, ns, name, version, principal, requestId, lockToken }) {
   return await runOptimistic(redis, {
     attempts: MAX_DELETE_ATTEMPTS,
     onExhausted: () => {
@@ -151,12 +162,21 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     },
   }, async (iso) => {
     await iso.watch(
+      deleteLockKey(ns, name),
       routesKey(ns),
       workerVersionsKey(ns, name),
       workerSecretsKey(ns, name),
       bundleKey(ns, name, version),
       referrersKey(ns, name, version),
     );
+
+    if (await iso.get(deleteLockKey(ns, name)) !== lockToken) {
+      await iso.unwatch();
+      throw new VersionDeleteError(409, "deleting", {
+        namespace: ns, name, version,
+        message: "worker delete lock expired; retry the request",
+      });
+    }
 
     const currentActive = await iso.hGet(routesKey(ns), name);
     if (currentActive === version) {
@@ -184,8 +204,10 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
       ns,
       worker: name,
       version,
-      makeError: () => new VersionDeleteError(500, "corrupt_meta", {
+      makeError: ({ reason }) => new VersionDeleteError(500, "corrupt_meta", {
         namespace: ns, name, version,
+        stage: "target_meta_parse",
+        detail: reason,
       }),
     });
 

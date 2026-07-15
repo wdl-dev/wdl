@@ -394,13 +394,21 @@ test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
 });
 
 test("worker delete lock key stays aligned across control and workflows", () => {
-  const controlLib = withoutLineComments(readRepoFile("control/lib.js"));
+  const sharedVersion = withoutLineComments(readRepoFile("shared/version.js"));
+  const commonVersion = withoutLineComments(readRepoFile("rust/common/src/version.rs"));
   const controlShared = withoutLineComments(readRepoFile("control/shared.js"));
   const workflowsActiveExport = withoutLineComments(readRepoFile("rust/workflows/src/api/active_export.rs"));
 
-  assert.match(controlLib, /`worker-delete-lock:\$\{ns\}:\$\{worker\}`/);
+  assert.match(sharedVersion, /`worker-delete-lock:\$\{ns\}:\$\{worker\}`/);
+  assert.match(commonVersion, /format!\("worker-delete-lock:\{ns\}:\{worker\}"\)/);
   assert.match(controlShared, /\bdeleteLockKey\(ns, worker\)/);
-  assert.match(workflowsActiveExport, /format!\("worker-delete-lock:\{ns\}:\{worker\}"\)/);
+  assert.match(workflowsActiveExport, /\bworker_delete_lock_key\(ns, worker\)/);
+
+  const rustOwner = "rust/common/src/version.rs";
+  const offenders = rustFiles("rust").filter((file) =>
+    file !== rustOwner && withoutLineComments(readRepoFile(file)).includes("worker-delete-lock:")
+  );
+  assert.deepEqual(offenders, []);
 });
 
 test("product success payloads use camelCase fields", () => {

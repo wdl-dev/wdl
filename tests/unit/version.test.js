@@ -6,13 +6,19 @@ import {
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
   NAMESPACES_KEY,
+  VERSION_DELETE_LOCK_KIND,
+  WHOLE_DELETE_LOCK_KIND,
   bundleKey,
+  deleteLockKey,
+  doStorageIdKey,
+  formatDeleteLockToken,
   formatVersion,
   hostDeclarationsKey,
   hostsKey,
   namespaceFromHostsKey,
   nextVersionKey,
   nsHostsKey,
+  parseDeleteLockKind,
   parseVersion,
 } from "../../shared/version.js";
 
@@ -80,4 +86,25 @@ test("route-plane registry key helpers compose and parse canonical keys", () => 
 
 test("nextVersionKey composes the worker version counter key", () => {
   assert.equal(nextVersionKey("demo", "hello"), "worker:demo:hello:next_version");
+});
+
+test("worker lifecycle key helpers compose canonical keys", () => {
+  assert.equal(doStorageIdKey("demo", "hello"), "worker:do-storage:demo:hello");
+  assert.equal(deleteLockKey("demo", "hello"), "worker-delete-lock:demo:hello");
+});
+
+test("worker delete lock tokens carry the operation kind", () => {
+  assert.equal(
+    formatDeleteLockToken(WHOLE_DELETE_LOCK_KIND, "abc123"),
+    "whole:abc123"
+  );
+  assert.equal(
+    formatDeleteLockToken(VERSION_DELETE_LOCK_KIND, "abc123"),
+    "version:abc123"
+  );
+  assert.equal(parseDeleteLockKind("whole:abc123"), WHOLE_DELETE_LOCK_KIND);
+  assert.equal(parseDeleteLockKind("version:abc123"), VERSION_DELETE_LOCK_KIND);
+  assert.equal(parseDeleteLockKind("unknown:abc123"), null);
+  assert.equal(parseDeleteLockKind("whole:"), null);
+  assert.equal(parseDeleteLockKind("legacy-token"), null);
 });

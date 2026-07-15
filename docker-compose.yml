@@ -315,6 +315,7 @@ services:
   scheduler:
     <<: *rust-sidecar-image
     command: ["/scheduler"]
+    stop_grace_period: 30s
     environment:
       <<: *internal-auth-env
       REDIS_URL: redis://redis:6379
@@ -359,6 +360,7 @@ services:
   workflows:
     <<: *rust-sidecar-image
     command: ["/workflows"]
+    stop_grace_period: 30s
     environment:
       <<: *internal-auth-env
       REDIS_URL: redis://redis:6379

@@ -23,7 +23,7 @@ Scheduler 负责实际投递：
 
 - Cron 代码在 `rust/scheduler/src/cron/`。
 - Queue registry、consume、delayed delivery、DLQ 和 orphan 处理在 `rust/scheduler/src/queue/`。
-- Scheduler 在构造 cron runtime worker id 前会用 canonical `wdl-rust-common` grammar 重新校验 projection 的 route namespace、worker name 和 version。非法 cron ref 会在 slot advance 或 runtime dispatch 前移除，cron sweep 也不会从 malformed worker metadata 重新播种 ref。Queue consumer projection 仍是受信任的 Control-owned internal state；scheduler 不为不受支持的 direct Redis write 增加第二套 worker identity/version validator。
+- Scheduler 在构造 cron runtime worker id 前会用 canonical `wdl-rust-common` grammar 重新校验 projection 的 route namespace、worker name 和 version。非法 cron ref 会在 slot advance 或 runtime dispatch 前移除，cron sweep 也不会从 malformed worker metadata 重新播种 ref。Queue consumer 的 dispatch identity 也会在使用前重新校验；noncanonical identity 会使 projection 不可用，并按 consumer absent 处理，因此 backlog 可能进入 orphan stream。
 - 部署上 scheduler 默认 1 个副本，当前 dispatch 路径具备多副本安全性。增加副本可以提高运行时并发，但不等于部署零中断：生产 rollout 仍可采用 stop-before-start 语义，并短暂暂停调度。
 
 ## 接口
@@ -74,7 +74,7 @@ Queue dispatch 是 stream-driven，不是 wall-clock driven：
 1. Producer 把 message envelope 写入 DB 1 stream；当 `delivery_delay` 或 retry delay 非零时，先写入 delayed ZSET。
 2. Scheduler reconcile `queue:index:*` discovery set，为 live stream 创建固定的 `wdl-scheduler` consumer group，并维护一个内存中的 known delayed queue 集合。空 queue index 可以从权威 hash、stream 和 delayed ZSET 一次性 backfill；之后 projection 由 writer 维护，stale-index cleanup 由 reconcile 负责。
 3. Consume loop 使用 `XREADGROUP` 读取 main stream，并按 `max_batch_size` 组 batch 投递，且 hard cap 为 `100`。每次 read 会用当前 active stream set 的 consumer batch-size snapshot 限制 `COUNT`，避免一次 poll 把超过当前 consumer 单批 dispatch 能力的 entries 放进 PEL。PEL reap 在 consumer 仍存在时使用同一 per-consumer cap；consumer 已消失的 orphan movement 仍可按 hard cap 分页。Consume 和 PEL reap 可以在 queue semaphore 下按 stream 并行 dispatch。每条 dispatch path 在向 runtime 发送 message 前都会重读该 stream 的权威 `queue-consumer` hash 并刷新内存 registry，因此 consumer promote 后，一旦 message 被选中，就不需要等下一次 reconcile tick 才使用新版本。当前模型里 `max_batch_timeout_ms` 不是 batching wait window。
-4. Runtime 返回 queue outcome envelope。Scheduler 解析 explicit `ack`、explicit `retry`、batch retry 和 implicit ack，然后用 Redis pipeline 执行 `XACK`/`XDEL`、delayed retry `ZADD`、DLQ append 或 immediate retry write。不会因为重试同一批 bytes 变好的平台失败，例如 queue message decode failure 或非法 queue dispatch body，会直接进 DLQ，不消耗 retry budget。聚合 request-body-too-large 会先拆成更小 batch 重试。
+4. Runtime 返回 queue outcome envelope。Scheduler 解析 explicit `ack`、explicit `retry`、batch retry 和 implicit ack，然后用 Redis pipeline 执行 `XACK`/`XDEL`、delayed retry `ZADD`、DLQ append 或 immediate retry write。不会因为重试同一批 bytes 变好的平台失败，例如 queue message decode failure 或非法 queue dispatch body，会直接进 DLQ，不消耗 retry budget。聚合 request-body-too-large 会先拆成更小 batch 重试；scheduler 在解析前把每个 runtime response body 限制为 1 MiB。
 5. Delayed loop 由 `queue-delayed-wake` 和下一条 due member 的 wall-clock sleep 唤醒。每个到期 member 会先取得 `queue-delayed-claim:*` lease，TTL 为 `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`；抢到的副本把它移回 main stream，或在 consumer 已消失时移入 orphan stream。
 6. Orphan / Pending-Entry cleanup 是诊断和保护机制。它防止 consumer 删除或 scheduler crash 路径静默丢消息，但 main queue stream 仍是 durable backlog，并且故意不 trim。Delayed ZSET 和 orphan stream-tail migration 受 `QUEUE_SWEEP_BATCH_SIZE` 分页控制，默认 `100`。
 

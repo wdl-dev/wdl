@@ -205,11 +205,20 @@ opaque cold-load failures under the current stock binary.
   workflow dispatches do not.
 - Wrapper generation hides raw env from unwrapped entrypoints whenever privileged
   internal Fetchers are injected. Its host-wrapper runtime evaluates before tenant
-  modules and captures every intrinsic used to decide handler or env wrapping and to
-  settle request-context cleanup, so tenant top-level prototype mutation cannot bypass
-  that boundary or retain stale request context.
+  modules and captures the intrinsics used to decide handler or env wrapping, so tenant
+  top-level prototype mutation cannot bypass the env boundary.
+- Host facade request ids use an invocation-local `AsyncLocalStorage` store. Runtime
+  ensures that the loaded worker has ALS support: an existing `nodejs_compat` setup is
+  left unchanged; otherwise a standalone `no_nodejs_als` is replaced by the narrow
+  `nodejs_als` flag. Concurrent calls on a persistent Durable Object instance therefore
+  cannot overwrite one shared context. The wrapper does not inspect, mutate, or replace
+  tenant return values. Native Promise and `async` continuations retain context; custom
+  thenables are not a supported request-id propagation boundary. A nested handler call
+  without a new request id inherits the current ALS context instead of clearing it.
 - Request context wrappers swap facade objects into env and propagate request id where
-  that event class can carry it.
+  that event class can carry it. do-runtime alarm and RPC calls enter through private
+  fetch dispatches carrying the outer request id, so the generated wrapper establishes
+  invocation-local context without adding platform metadata to tenant method arguments.
 - An uncaught tenant `fetch()` exception maps to a platform `502 runtime_error`
   response with the request id. Exception details are emitted to structured logs/live
   tail and are not copied into the client body. Tail formatting cannot replace the

@@ -96,7 +96,7 @@ test("workflows handler lists active workflow definitions from bundle metadata",
 for (const [label, rawMeta] of [
   ["missing", null],
   ["empty", ""],
-  ["malformed", "{bad"],
+  ["malformed", "SECRET_TOKEN_ABC"],
   ["non-object", "[]"],
 ]) {
   test(`workflows handler fails closed on ${label} active bundle metadata`, async () => {
@@ -115,9 +115,30 @@ for (const [label, rawMeta] of [
     });
 
     await assertJsonResponse(response, 500, {
+      namespace: "demo",
+      worker: "api",
+      version: "v2",
       error: "corrupt_meta",
-      message: "Corrupt __meta__ for demo/api/v2",
+      message: "Internal error",
     });
+    const rejection = state.logs.find((/** @type {any} */ entry) =>
+      entry.event === "workflow_request_rejected"
+    );
+    assert.ok(rejection);
+    assert.equal(rejection.level, "error");
+    assert.equal(rejection.fields.request_id, `rid-${label}-meta`);
+    assert.equal(rejection.fields.namespace, "demo");
+    assert.equal(rejection.fields.worker, "api");
+    assert.equal(rejection.fields.status, 500);
+    assert.equal(rejection.fields.reason, "corrupt_meta");
+    assert.equal(rejection.fields.error_message, "Corrupt __meta__ for demo/api/v2");
+    assert.equal(rejection.fields.metadata_version, "v2");
+    assert.equal(rejection.fields.stage, "bundle_meta_parse");
+    assert.equal(typeof rejection.fields.error_detail, "string");
+    if (label === "malformed") {
+      assert.equal(rejection.fields.error_detail, "__meta__ is not valid JSON");
+      assert.equal(JSON.stringify(state.logs).includes(String(rawMeta)), false);
+    }
   });
 }
 
@@ -167,19 +188,32 @@ test("workflows handler preserves metadata-unavailable error shape for batched r
 
   await assertJsonResponse(response, 500, {
     error: "workflow_metadata_unavailable",
-    message: "Workflow metadata is unavailable",
+    message: "Internal error",
     namespace: "demo",
     worker_count: 2,
   });
-  assert.deepEqual(state.logs, [{
-    level: "error",
-    event: "workflow_metadata_unavailable",
-    fields: {
-      namespace: "demo",
-      worker_count: 2,
-      error_message: "redis unavailable",
+  assert.deepEqual(state.logs, [
+    {
+      level: "error",
+      event: "workflow_metadata_unavailable",
+      fields: {
+        namespace: "demo",
+        worker_count: 2,
+        error_message: "redis unavailable",
+      },
     },
-  }]);
+    {
+      level: "error",
+      event: "workflow_request_rejected",
+      fields: {
+        request_id: "rid-meta-fail",
+        namespace: "demo",
+        status: 500,
+        reason: "workflow_metadata_unavailable",
+        error_message: "Workflow metadata is unavailable",
+      },
+    },
+  ]);
 });
 
 test("workflows handler wraps workflow definition batch read failures", async () => {
@@ -204,19 +238,32 @@ test("workflows handler wraps workflow definition batch read failures", async ()
 
   await assertJsonResponse(response, 500, {
     error: "workflow_metadata_unavailable",
-    message: "Workflow metadata is unavailable",
+    message: "Internal error",
     namespace: "demo",
     worker_count: 2,
   });
-  assert.deepEqual(state.logs, [{
-    level: "error",
-    event: "workflow_metadata_unavailable",
-    fields: {
-      namespace: "demo",
-      worker_count: 2,
-      error_message: "defs unavailable",
+  assert.deepEqual(state.logs, [
+    {
+      level: "error",
+      event: "workflow_metadata_unavailable",
+      fields: {
+        namespace: "demo",
+        worker_count: 2,
+        error_message: "defs unavailable",
+      },
     },
-  }]);
+    {
+      level: "error",
+      event: "workflow_request_rejected",
+      fields: {
+        request_id: "rid-defs-fail",
+        namespace: "demo",
+        status: 500,
+        reason: "workflow_metadata_unavailable",
+        error_message: "Workflow metadata is unavailable",
+      },
+    },
+  ]);
 });
 
 test("workflows handler resolves retired workflow definitions from wf:defs", async () => {
@@ -365,12 +412,25 @@ test("workflows handler fails closed when workflows backend is unavailable", asy
 
   await assertJsonResponse(response, 503, {
     error: "workflow_internal_dispatch_failed",
-    message: "Workflow backend is unavailable",
+    message: "Internal error",
   });
   assert.deepEqual(state.redis.commands, [
     ["hGet", "routes:demo", "api"],
     ["hGet", "worker:demo:api:v:2", "__meta__"],
   ]);
+  assert.deepEqual(state.logs, [{
+    level: "error",
+    event: "workflow_request_rejected",
+    fields: {
+      request_id: "rid-down",
+      namespace: "demo",
+      worker: "api",
+      workflow: "orders",
+      status: 503,
+      reason: "workflow_internal_dispatch_failed",
+      error_message: "Workflow backend is unavailable",
+    },
+  }]);
 });
 
 test("workflows handler hides backend 5xx messages but logs diagnostics", async () => {
@@ -399,9 +459,11 @@ test("workflows handler hides backend 5xx messages but logs diagnostics", async 
   await assertJsonResponse(response, 500, {
     upstream_status: 500,
     error: "redis_error",
-    message: "Workflow backend request failed",
+    message: "Internal error",
   });
-  assert.deepEqual(state.logs.at(-1), {
+  assert.deepEqual(state.logs.find((/** @type {any} */ entry) =>
+    entry.event === "workflow_backend_error"
+  ), {
     level: "error",
     event: "workflow_backend_error",
     fields: {
@@ -432,9 +494,11 @@ test("workflows handler hides backend fetch exceptions but logs diagnostics", as
 
   await assertJsonResponse(response, 503, {
     error: "workflow_internal_dispatch_failed",
-    message: "Workflow backend request failed",
+    message: "Internal error",
   });
-  assert.deepEqual(state.logs.at(-1), {
+  assert.deepEqual(state.logs.find((/** @type {any} */ entry) =>
+    entry.event === "workflow_backend_request_failed"
+  ), {
     level: "error",
     event: "workflow_backend_request_failed",
     fields: {

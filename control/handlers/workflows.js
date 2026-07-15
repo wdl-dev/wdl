@@ -8,6 +8,7 @@ import {
 } from "control-lib";
 import {
   ControlAbort,
+  codedErrorLogFields,
   controlAbortResponse,
   errMessage,
   jsonError,
@@ -50,6 +51,18 @@ export async function handle({ method, url, ns, subPath, requestId }) {
     return await handleInner({ method, url, ns, subPath, requestId });
   } catch (err) {
     if (err instanceof ControlAbort) {
+      if (err.status >= 500) {
+        const detailWorker = typeof err.details?.worker === "string"
+          ? err.details.worker
+          : subPath[0];
+        requireControlLog()("error", "workflow_request_rejected", {
+          request_id: requestId,
+          namespace: ns,
+          ...(detailWorker ? { worker: detailWorker } : {}),
+          ...(subPath[1] ? { workflow: subPath[1] } : {}),
+          ...codedErrorLogFields(err),
+        });
+      }
       return controlAbortResponse(err);
     }
     throw err;
@@ -313,7 +326,14 @@ function workflowBundleMeta(ns, worker, version, raw) {
     ns,
     worker,
     version,
-    makeError: ({ message }) => new ControlAbort(500, "corrupt_meta", { message }),
+    makeError: ({ message, reason }) => new ControlAbort(500, "corrupt_meta", {
+      message,
+      namespace: ns,
+      worker,
+      version,
+      stage: "bundle_meta_parse",
+      detail: reason,
+    }),
   });
 }
 

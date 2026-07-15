@@ -21,6 +21,9 @@ import {
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
 const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
+const NODEJS_ALS_COMPATIBILITY_FLAG = "nodejs_als";
+const NODEJS_COMPATIBILITY_FLAG = "nodejs_compat";
+const NO_NODEJS_ALS_COMPATIBILITY_FLAG = "no_nodejs_als";
 const utf8Decoder = new TextDecoder();
 
 /**
@@ -331,6 +334,18 @@ export function injectRuntimeModulesForHostBindings(
   }
   for (const [name, source] of runtimeInjectedModuleSources(originalMain, meta, runtimeSources, plan)) {
     workerCode.modules[name] = source;
+  }
+  if (plan.needsHostBindingWrapper) {
+    const flags = Array.isArray(workerCode.compatibilityFlags)
+      ? /** @type {string[]} */ (workerCode.compatibilityFlags)
+      : [];
+    if (!flags.includes(NODEJS_COMPATIBILITY_FLAG)) {
+      const normalized = flags.filter((flag) => flag !== NO_NODEJS_ALS_COMPATIBILITY_FLAG);
+      if (!normalized.includes(NODEJS_ALS_COMPATIBILITY_FLAG)) {
+        normalized.push(NODEJS_ALS_COMPATIBILITY_FLAG);
+      }
+      workerCode.compatibilityFlags = normalized;
+    }
   }
   workerCode.mainModule = "_wdl-wrapper.js";
   return workerCode;

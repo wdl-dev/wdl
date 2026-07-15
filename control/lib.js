@@ -18,8 +18,8 @@ import {
 } from "shared-ns-pattern";
 import { PLATFORM_TIER_RESERVED_NS, ROLES } from "shared-auth-roles";
 import { errorMessage } from "shared-errors";
-import { doStorageIdKey, routesKey, workerVersionsKey } from "shared-version";
-export { doStorageIdKey, routesKey, workerVersionsKey };
+import { deleteLockKey, doStorageIdKey, routesKey, workerVersionsKey } from "shared-version";
+export { deleteLockKey, doStorageIdKey, routesKey, workerVersionsKey };
 export { validateModulePath };
 export { WORKER_NAME_RE };
 export { WORKFLOW_NAME_RE };
@@ -73,8 +73,8 @@ export function parseBundleMeta(raw, { ns, worker, version, makeError }) {
   let parsed;
   try {
     parsed = JSON.parse(raw);
-  } catch (err) {
-    fail(err);
+  } catch {
+    fail(new SyntaxError("__meta__ is not valid JSON"));
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     fail(new TypeError("__meta__ must be a JSON object"));
@@ -337,11 +337,6 @@ export function extractD1Refs(metaBindings) {
 /** @param {string} ns @param {string} worker @param {string} version */
 export function referrersKey(ns, worker, version) {
   return `worker-version-referrers:${ns}:${worker}:${version}`;
-}
-
-/** @param {string} ns @param {string} worker */
-export function deleteLockKey(ns, worker) {
-  return `worker-delete-lock:${ns}:${worker}`;
 }
 
 /** @param {string} ns */

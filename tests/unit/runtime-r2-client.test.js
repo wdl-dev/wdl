@@ -3,6 +3,28 @@ import assert from "node:assert/strict";
 import { R2Bucket, R2Object, R2ObjectBody } from "../../runtime/r2-client.js";
 import { R2_OBJECT_MAX_BUFFER_BYTES } from "../../runtime/r2-utils.js";
 
+/**
+ * @param {Promise<unknown>} promise
+ * @returns {Promise<{ status: "fulfilled", value: unknown } | { status: "rejected", reason: unknown } | { status: "pending" }>}
+ */
+async function settlementWithinTestWindow(promise) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+  try {
+    return await Promise.race([
+      promise.then(
+        (value) => ({ status: /** @type {const} */ ("fulfilled"), value }),
+        (reason) => ({ status: /** @type {const} */ ("rejected"), reason }),
+      ),
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve({ status: /** @type {const} */ ("pending") }), 100);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 test("R2Bucket.list validates limit before host binding call", async () => {
   const bucket = new R2Bucket({
     async list() {
@@ -298,6 +320,33 @@ test("R2Bucket.put keeps single-chunk ReadableStream bytes without re-copying", 
   assert.equal(observed, chunk);
 });
 
+test("R2Bucket.put rejects an oversized stream without waiting for cancel", async () => {
+  let cancelled = false;
+  let hostCalls = 0;
+  const bucket = new R2Bucket({
+    async put() {
+      hostCalls += 1;
+      return null;
+    },
+  });
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(R2_OBJECT_MAX_BUFFER_BYTES + 1));
+    },
+    cancel() {
+      cancelled = true;
+      return new Promise(() => {});
+    },
+  });
+
+  const outcome = await settlementWithinTestWindow(bucket.put("huge.bin", stream));
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(String("reason" in outcome ? outcome.reason : ""), /exceeds the 25 MiB WDL R2 limit/);
+  assert.equal(cancelled, true);
+  assert.equal(hostCalls, 0);
+});
+
 test("R2Bucket.get returns R2Object when host binding returns no body", async () => {
   const bucket = new R2Bucket({
     async get() {
@@ -408,6 +457,36 @@ test("R2ObjectBody raw body stream enforces the object byte cap", async () => {
     () => reader.read(),
     /R2 get: object is .* exceeds the 25 MiB WDL R2 limit/
   );
+});
+
+test("R2ObjectBody byte cap does not wait for underlying cancel", async () => {
+  let cancelled = false;
+  const obj = new R2ObjectBody({
+    key: "huge.bin",
+    version: "",
+    size: R2_OBJECT_MAX_BUFFER_BYTES + 1,
+    etag: "abc",
+    httpEtag: '"abc"',
+    uploaded: Date.now(),
+    httpMetadata: {},
+    customMetadata: {},
+    checksums: {},
+    storageClass: "Standard",
+  }, new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(R2_OBJECT_MAX_BUFFER_BYTES + 1));
+    },
+    cancel() {
+      cancelled = true;
+      return new Promise(() => {});
+    },
+  }));
+
+  const outcome = await settlementWithinTestWindow(obj.body.getReader().read());
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(String("reason" in outcome ? outcome.reason : ""), /exceeds the 25 MiB WDL R2 limit/);
+  assert.equal(cancelled, true);
 });
 
 test("R2Bucket multipart upload methods fail with WDL-specific errors", () => {

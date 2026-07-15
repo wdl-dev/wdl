@@ -34,7 +34,7 @@ export function echoResponseWithRequestId(response, requestId) {
  */
 export async function discardResponseBody(response) {
   try {
-    await response.body?.cancel();
+    void response.body?.cancel().catch(() => {});
   } catch {
     // Best-effort cleanup only; the caller's status/error path owns behavior.
   }

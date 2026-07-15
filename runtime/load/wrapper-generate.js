@@ -12,21 +12,36 @@ const DEFAULT_EXPORT_CLASS_TEST_SOURCE = "/^\\s*class\\b/.test(source)";
 
 export const HOST_BINDING_RUNTIME_MODULE_NAME = "_wdl-host-wrapper-runtime.js";
 export const HOST_BINDING_RUNTIME_SOURCE = `
+import { AsyncLocalStorage } from "node:async_hooks";
+
 const IntrinsicObject = Object;
-const IntrinsicPromise = Promise;
 const IntrinsicProxy = Proxy;
 const IntrinsicReflect = Reflect;
 const IntrinsicSymbol = Symbol;
+const intrinsicAsyncLocalStorageGetStore = AsyncLocalStorage.prototype.getStore;
+const intrinsicAsyncLocalStorageRun = AsyncLocalStorage.prototype.run;
 const intrinsicArrayForEach = Array.prototype.forEach;
 const intrinsicFunctionToString = Function.prototype.toString;
 const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectKeys = Object.keys;
-const intrinsicPromiseResolve = Promise.resolve;
-const intrinsicPromiseThen = Promise.prototype.then;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicReflectGet = Reflect.get;
 const intrinsicRegExpTest = RegExp.prototype.test;
+const requestContext = new AsyncLocalStorage();
+
+intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [
+  requestContext,
+  "getStore",
+  {
+    configurable: false,
+    enumerable: false,
+    value() {
+      return intrinsicReflectApply(intrinsicAsyncLocalStorageGetStore, requestContext, []);
+    },
+    writable: false,
+  },
+]);
 
 export function applyFunction(fn, receiver, args) {
   return intrinsicReflectApply(fn, receiver, args);
@@ -69,19 +84,21 @@ export function regexpTest(regexp, value) {
   return intrinsicReflectApply(intrinsicRegExpTest, regexp, [value]);
 }
 
-export function settleWithFinally(value, callback) {
-  const promise = intrinsicReflectApply(intrinsicPromiseResolve, IntrinsicPromise, [value]);
-  return intrinsicReflectApply(intrinsicPromiseThen, promise, [
-    (result) => {
-      callback();
-      return result;
-    },
-    (error) => {
-      callback();
-      throw error;
-    },
+export function currentRequestId() {
+  const requestId = intrinsicReflectApply(intrinsicAsyncLocalStorageGetStore, requestContext, []);
+  return typeof requestId === "string" && requestId ? requestId : null;
+}
+
+export function runWithRequestContext(requestId, callback) {
+  if (typeof requestId !== "string" || !requestId) {
+    return intrinsicReflectApply(callback, undefined, []);
+  }
+  return intrinsicReflectApply(intrinsicAsyncLocalStorageRun, requestContext, [
+    requestId,
+    callback,
   ]);
 }
+
 `;
 
 /** @param {string} userMainSpecifier */
@@ -142,44 +159,34 @@ export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, 
   const starExport = hidesRawEnvExports
     ? "// Internal Fetcher bindings are present; only wrapped entrypoints are re-exported."
     : `export * from ${userMain};`;
-  const namedEntrypoints = entrypointNames.map((/** @type {string} */ name) => `
-export class ${name} extends user.${name} {
-  constructor(ctx, env) {
-    const requestContext = createRequestContext();
-    super(ctx, wrapEnv(env, requestContext));
-    return wrapClassInstance(this, requestContext);
-  }
-}
+  const namedEntrypoints = entrypointNames.map((/** @type {string} */ name, index) => `
+const __WdlWrappedEntrypoint${index}__ = ({
+  [${JSON.stringify(name)}]: class extends __WdlUserModule__.${name} {
+    constructor(ctx, env) {
+      super(ctx, wrapEnv(env));
+      return wrapClassInstance(this);
+    }
+  },
+})[${JSON.stringify(name)}];
+export { __WdlWrappedEntrypoint${index}__ as ${name} };
 `).join("");
   return `
 import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers";
-import {
-  applyFunction,
-  createPrivateSymbol,
-  createProxy,
-  defineProperty,
-  forEachArray,
-  forEachObjectEntry,
-  functionSource,
-  objectKeys,
-  reflectGet,
-  regexpTest,
-  settleWithFinally,
-} from "./${HOST_BINDING_RUNTIME_MODULE_NAME}";
+import * as __WdlHostRuntime__ from "./${HOST_BINDING_RUNTIME_MODULE_NAME}";
 ${d1Import}
 ${r2Import}
 ${doImport}
 ${workflowImport}
-import * as user from ${userMain};
-// Local wrapper subclasses intentionally shadow same-name user exports, so
-// declared entrypoints get facade-aware env even when star exports are present.
+import * as __WdlUserModule__ from ${userMain};
+// Explicit aliases replace same-name star exports without declaring tenant
+// entrypoint names in the generated module's local binding scope.
 ${starExport}
 
 ${WDL_ABORT_SHIM_SOURCE}
 
 export class __WdlWorkflowNotify__ extends WorkerEntrypoint {
-  async fetch(request) {
-    return await notifyWorkflowCallback(request, wrapEnv(this.env, requestIdFromEventArg(request)));
+  fetch(request) {
+    return withRequestContext(request, () => notifyWorkflowCallback(request, wrapEnv(this.env)));
   }
 }
 
@@ -190,7 +197,7 @@ const WORKFLOW_BINDINGS = ${workflowBindingJson};
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
 const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
-const HOST_BINDINGS_WRAPPED = createPrivateSymbol("wdl.host-bindings-wrapped");
+const HOST_BINDINGS_WRAPPED = __WdlHostRuntime__.createPrivateSymbol("wdl.host-bindings-wrapped");
 const INTERNAL_BINDING_RE = /^__WDL_[A-Za-z0-9_]*__$/;
 
 function requestIdFromEventArg(arg) {
@@ -198,59 +205,35 @@ function requestIdFromEventArg(arg) {
   return arg.headers.get("x-request-id");
 }
 
-function createRequestContext(requestId = null) {
-  // workerd constructs a fresh WorkerEntrypoint instance per call; covered by
-  // service-bindings-rpc.test.js. Do not share this object across instances.
-  return { requestId };
+function requestIdOptions() {
+  return { requestIdProvider: __WdlHostRuntime__.currentRequestId };
 }
 
-function requestIdOptions(requestIdOrContext) {
-  if (requestIdOrContext && typeof requestIdOrContext === "object") {
-    return { requestIdProvider: () => requestIdOrContext.requestId };
-  }
-  return { requestId: requestIdOrContext };
+function doOptions(backend, ownerNetwork) {
+  return { ...requestIdOptions(), backend, ownerNetwork };
 }
 
-function doOptions(requestIdOrContext, backend, ownerNetwork) {
-  return { ...requestIdOptions(requestIdOrContext), backend, ownerNetwork };
+function workflowOptions(backend) {
+  return { ...requestIdOptions(), backend };
 }
 
-function workflowOptions(requestIdOrContext, backend) {
-  return { ...requestIdOptions(requestIdOrContext), backend };
+function withRequestContext(arg, fn) {
+  return __WdlHostRuntime__.runWithRequestContext(requestIdFromEventArg(arg), fn);
 }
 
-function withRequestContext(context, arg, fn) {
-  const previous = context.requestId;
-  const requestId = requestIdFromEventArg(arg);
-  if (requestId) context.requestId = requestId;
-  try {
-    const result = fn();
-    if (result && typeof result.then === "function") {
-      return settleWithFinally(result, () => {
-        context.requestId = previous;
-      });
-    }
-    context.requestId = previous;
-    return result;
-  } catch (err) {
-    context.requestId = previous;
-    throw err;
-  }
-}
-
-function wrapClassInstance(instance, requestContext) {
-  return createProxy(instance, {
+function wrapClassInstance(instance) {
+  return __WdlHostRuntime__.createProxy(instance, {
     get(target, prop) {
-      const value = reflectGet(target, prop, target);
+      const value = __WdlHostRuntime__.reflectGet(target, prop, target);
       if (typeof value !== "function") return value;
       return function(...args) {
-        return withRequestContext(requestContext, args[0], () => applyFunction(value, target, args));
+        return withRequestContext(args[0], () => __WdlHostRuntime__.applyFunction(value, target, args));
       };
     },
   });
 }
 
-function wrapEnv(env, requestIdOrContext = null) {
+function wrapEnv(env) {
   // Idempotence is a contract, not an optimization: WorkerEntrypoint methods
   // and default handlers may re-enter with an env already wrapped by this
   // module. A symbol marker cannot be forged by tenant vars/secrets.
@@ -262,26 +245,26 @@ function wrapEnv(env, requestIdOrContext = null) {
   delete out[DO_BACKEND_BINDING];
   delete out[DO_OWNER_NETWORK_BINDING];
   delete out[WORKFLOWS_BACKEND_BINDING];
-  forEachArray(objectKeys(out), (name) => {
-    if (regexpTest(INTERNAL_BINDING_RE, name)) delete out[name];
+  __WdlHostRuntime__.forEachArray(__WdlHostRuntime__.objectKeys(out), (name) => {
+    if (__WdlHostRuntime__.regexpTest(INTERNAL_BINDING_RE, name)) delete out[name];
   });
-  forEachArray(D1_BINDINGS, (name) => {
-    if (out[name] !== undefined) out[name] = new D1Database(out[name], requestIdOptions(requestIdOrContext));
+  __WdlHostRuntime__.forEachArray(D1_BINDINGS, (name) => {
+    if (out[name] !== undefined) out[name] = new D1Database(out[name], requestIdOptions());
   });
-  forEachArray(R2_BINDINGS, (name) => {
-    if (out[name] !== undefined) out[name] = new R2Bucket(out[name], requestIdOptions(requestIdOrContext));
+  __WdlHostRuntime__.forEachArray(R2_BINDINGS, (name) => {
+    if (out[name] !== undefined) out[name] = new R2Bucket(out[name], requestIdOptions());
   });
-  forEachArray(DO_BINDINGS, (name) => {
+  __WdlHostRuntime__.forEachArray(DO_BINDINGS, (name) => {
     if (out[name] !== undefined) {
-      out[name] = new DurableObjectNamespace(out[name], doOptions(requestIdOrContext, doBackend, doOwnerNetwork));
+      out[name] = new DurableObjectNamespace(out[name], doOptions(doBackend, doOwnerNetwork));
     }
   });
-  forEachObjectEntry(WORKFLOW_BINDINGS, (name, metadata) => {
+  __WdlHostRuntime__.forEachObjectEntry(WORKFLOW_BINDINGS, (name, metadata) => {
     if (out[name] !== undefined) {
-      out[name] = new Workflow(out[name] || metadata, workflowOptions(requestIdOrContext, workflowsBackend));
+      out[name] = new Workflow(out[name] || metadata, workflowOptions(workflowsBackend));
     }
   });
-  defineProperty(out, HOST_BINDINGS_WRAPPED, { value: true });
+  __WdlHostRuntime__.defineProperty(out, HOST_BINDINGS_WRAPPED, { value: true });
   return out;
 }
 
@@ -331,13 +314,13 @@ async function notifyWorkflowCallback(request, env) {
 
 function wrapHandler(owner, fn) {
   return function(arg1, env, ctx) {
-    return applyFunction(fn, owner, [arg1, wrapEnv(env, requestIdFromEventArg(arg1)), ctx]);
+    return withRequestContext(arg1, () => __WdlHostRuntime__.applyFunction(fn, owner, [arg1, wrapEnv(env), ctx]));
   };
 }
 
 const HOST_WRAPPED_HANDLER_KEYS = ["fetch", "scheduled", "queue", "tail"];
 
-const raw = user.default;
+const raw = __WdlUserModule__.default;
 let wrappedDefault = raw;
 
 if (raw && typeof raw === "object") {
@@ -345,7 +328,7 @@ if (raw && typeof raw === "object") {
   const wrapDefaultFunctionKey = (key) => {
     const fn = raw[key];
     if (typeof fn === "function") {
-      defineProperty(wrappedDefault, key, {
+      __WdlHostRuntime__.defineProperty(wrappedDefault, key, {
         value: wrapHandler(raw, fn),
         writable: true,
         enumerable: true,
@@ -353,17 +336,16 @@ if (raw && typeof raw === "object") {
       });
     }
   };
-  forEachArray(HOST_WRAPPED_HANDLER_KEYS, (key) => {
+  __WdlHostRuntime__.forEachArray(HOST_WRAPPED_HANDLER_KEYS, (key) => {
     wrapDefaultFunctionKey(key);
   });
 } else if (typeof raw === "function") {
-  const source = functionSource(raw);
-  if (regexpTest(/^\\s*class\\b/, source)) {
+  const source = __WdlHostRuntime__.functionSource(raw);
+  if (__WdlHostRuntime__.regexpTest(/^\\s*class\\b/, source)) {
     wrappedDefault = class extends raw {
       constructor(ctx, env) {
-        const requestContext = createRequestContext();
-        super(ctx, wrapEnv(env, requestContext));
-        return wrapClassInstance(this, requestContext);
+        super(ctx, wrapEnv(env));
+        return wrapClassInstance(this);
       }
     };
   } else {

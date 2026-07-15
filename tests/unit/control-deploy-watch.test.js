@@ -42,6 +42,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   watchedKeys: null,
   envBudgetError: false,
   envBudgetCalls: [],
+  secretEnvelopeError: null,
   redis: null,
   logs: [],
   metrics: { increment() {}, observe() {} },
@@ -70,6 +71,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.watchedKeys = null;
   CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
   CONTROL_DEPLOY_TEST_STATE.envBudgetCalls = [];
+  CONTROL_DEPLOY_TEST_STATE.secretEnvelopeError = null;
   CONTROL_DEPLOY_TEST_STATE.logs = [];
   CONTROL_DEPLOY_TEST_STATE.metrics = { increment() {}, observe() {} };
   CONTROL_DEPLOY_TEST_STATE.service = "control";
@@ -232,7 +234,17 @@ export async function resolveDatabaseRefFrom(session, ns, databaseRef) {
 }
 `);
 
+const secretEnvelopeUrl = moduleDataUrl(`
+export class SecretEnvelopeError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+`);
+
 const controlEnvBudgetUrl = moduleDataUrl(`
+import { SecretEnvelopeError } from ${JSON.stringify(secretEnvelopeUrl)};
 export class WorkerEnvBudgetError extends Error {
   constructor(message, details = {}) {
     super(message);
@@ -253,15 +265,12 @@ export function assertWorkerLoaderUserEnvBudget() {
   }
   return 0;
 }
-export async function decryptSecretHash() { return {}; }
-`);
-
-const secretEnvelopeUrl = moduleDataUrl(`
-export class SecretEnvelopeError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.code = code;
+export async function decryptSecretHash() {
+  const error = /** @type {any} */ (globalThis).__controlDeployTestState.secretEnvelopeError;
+  if (error) {
+    throw new SecretEnvelopeError(error.code, error.message);
   }
+  return {};
 }
 `);
 
@@ -702,7 +711,11 @@ test("deploy handler classifies empty service target metadata before commit", as
 
   const body = await readJsonResponse(response, 500);
   assert.equal(body.error, "corrupt_meta");
-  assert.equal(body.message, "Corrupt __meta__ for other/api/v1");
+  assert.equal(body.message, "Internal error");
+  assert.ok(CONTROL_DEPLOY_TEST_STATE.logs.some((/** @type {any} */ entry) => (
+    entry.event === "deploy_rejected" &&
+    entry.fields.error_message === "Corrupt __meta__ for other/api/v1"
+  )));
 });
 
 test("deploy handler fails closed instead of hiding empty platform export metadata", async () => {
@@ -730,7 +743,7 @@ test("deploy handler fails closed instead of hiding empty platform export metada
 
   const body = await readJsonResponse(response, 500);
   assert.equal(body.error, "corrupt_meta");
-  assert.equal(body.message, "Corrupt __meta__ for __platform__/auth/v1");
+  assert.equal(body.message, "Internal error");
 });
 
 test("deploy handler schedules cleanup when the first asset upload fails", async () => {
@@ -784,7 +797,10 @@ test("deploy handler schedules cleanup when the first asset upload fails", async
       requestId: "rid-asset-upload-fail",
     });
 
-    assert.equal(response.status, 502);
+    const body = await readJsonResponse(response, 502);
+    assert.equal(body.error, "asset_upload_failed");
+    assert.equal(body.message, "Asset upload failed");
+    assert.doesNotMatch(JSON.stringify(body), /simulated upload failure/);
     assert.deepEqual(/** @type {any} */ (globalThis).__controlDeployTestState.putAssetCalls[0].slice(0, 2), [
       {},
       "assets/demo/style.css",
@@ -959,6 +975,186 @@ test("deploy handler preserves warnings on commit env-budget rejection", async (
     /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetError = false;
+  }
+});
+
+test("deploy handler filters diagnostic aliases from rejection logs", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.execFailures = 10;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async hKeys() {
+      return [];
+    },
+    async hGetAll() {
+      return {};
+    },
+    async hGet() {
+      return null;
+    },
+    async incr() {
+      return 1;
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/contention/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "contention",
+      requestId: "rid-deploy-contention",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "deploy_contention");
+    const rejection = CONTROL_DEPLOY_TEST_STATE.logs.find((/** @type {any} */ entry) =>
+      entry.event === "deploy_rejected"
+    );
+    assert.equal(rejection.fields.version, "v1");
+    assert.equal(rejection.fields.error_message, "exhausted 5 retries; retry later");
+    assert.equal(Object.hasOwn(rejection.fields, "message"), false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+  }
+});
+
+test("deploy handler keeps D1 ids camelCase on the wire and snake_case in logs", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async hKeys() {
+      return [];
+    },
+    async hGetAll() {
+      return {};
+    },
+    async hGet() {
+      return null;
+    },
+    async incr() {
+      return 2;
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  };
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/d1-missing/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+          bindings: {
+            DB: { type: "d1", databaseId: "missing-db" },
+          },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "d1-missing",
+      requestId: "rid-deploy-d1-missing",
+    });
+
+    const body = await readJsonResponse(response, 404);
+    assert.equal(body.error, "d1_database_not_found");
+    assert.equal(body.databaseId, "missing-db");
+    const rejection = CONTROL_DEPLOY_TEST_STATE.logs.find((/** @type {any} */ entry) =>
+      entry.event === "deploy_rejected"
+    );
+    assert.equal(rejection.fields.database_id, "missing-db");
+    assert.equal(Object.hasOwn(rejection.fields, "databaseId"), false);
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+  }
+});
+
+test("deploy handler hides secret provider diagnostics and logs them", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
+    meta: {
+      mainModule: "worker.js",
+      modules: { "worker.js": { type: "module" } },
+    },
+    normalized: [["worker.js", "export default {}"]],
+  };
+  /** @type {any} */ (globalThis).__controlDeployTestState.secretEnvelopeError = {
+    code: "secret_encryption_unconfigured",
+    message: "SECRET_ENVELOPE_LOCAL_KEY_B64 must decode to 32 bytes",
+  };
+
+  installPlatformAuthWarningFixture({
+    async incr() {
+      return 8;
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
+    },
+  });
+
+  try {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/secret-error/deploy", {
+        method: "POST",
+        body: JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default {}" },
+        }),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "secret-error",
+      requestId: "rid-secret-provider",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.equal(body.error, "secret_encryption_unconfigured");
+    assert.equal(body.message, "Internal error");
+    assert.equal(JSON.stringify(body).includes("SECRET_ENVELOPE_LOCAL_KEY_B64"), false);
+    assert.deepEqual(body.warnings, [{
+      binding: "AUTH",
+      platform: "auth",
+      missingCallerSecrets: ["API_TOKEN"],
+    }]);
+    assert.deepEqual(
+      CONTROL_DEPLOY_TEST_STATE.logs.find((/** @type {any} */ entry) =>
+        entry.event === "deploy_rejected"
+      ),
+      {
+        level: "error",
+        event: "deploy_rejected",
+        fields: {
+          request_id: "rid-secret-provider",
+          namespace: "tenant-a",
+          worker: "secret-error",
+          version: "v8",
+          status: 503,
+          reason: "secret_encryption_unconfigured",
+          error_message: "SECRET_ENVELOPE_LOCAL_KEY_B64 must decode to 32 bytes",
+          error_detail: "SECRET_ENVELOPE_LOCAL_KEY_B64 must decode to 32 bytes",
+        },
+      },
+    );
+  } finally {
+    /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = null;
+    /** @type {any} */ (globalThis).__controlDeployTestState.secretEnvelopeError = null;
   }
 });
 

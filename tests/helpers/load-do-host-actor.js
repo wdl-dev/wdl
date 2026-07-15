@@ -19,6 +19,8 @@ import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
  *   assertCalls: number,
  *   forgottenOwners: string[],
  *   registryError?: unknown,
+ *   registryWait?: Promise<void>,
+ *   registryWaitStarted?: (() => void),
  *   abortReject?: ((reason: unknown) => void),
  * }} DoHostActorHarnessState
  */
@@ -52,6 +54,10 @@ export function objectRegistryMember(invoke) {
   return [invoke.className, invoke.objectName].join(":");
 }
 export async function rememberDoObject(env, invoke) {
+  if (globalThis.__doActorTestState.registryWait) {
+    globalThis.__doActorTestState.registryWaitStarted?.();
+    await globalThis.__doActorTestState.registryWait;
+  }
   if (globalThis.__doActorTestState.registryError) throw globalThis.__doActorTestState.registryError;
   globalThis.__doActorTestState.remembered.push({ env, invoke });
 }
@@ -62,6 +68,7 @@ export {
   DO_OWNERSHIP_CODE,
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   DoRuntimeError,
+  buildRpcRequest,
   doPlatformErrorResponse,
 } from ${JSON.stringify(productionProtocolUrl)};
 export function buildFacetName(invoke) {
@@ -149,6 +156,8 @@ export function resetDoHostActorHarness() {
   state.assertCalls = 0;
   state.forgottenOwners = [];
   delete state.registryError;
+  delete state.registryWait;
+  delete state.registryWaitStarted;
   delete state.abortReject;
 }
 

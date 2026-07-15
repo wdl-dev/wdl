@@ -70,6 +70,10 @@ structural JSON data capped at 1 MiB: finite numbers, strings, booleans, null, d
 arrays, and plain objects are accepted. Serialization does not invoke `toJSON()` hooks;
 sparse arrays, circular structures, non-plain objects, and non-JSON values fail before
 dispatch.
+do-runtime invokes tenant alarm and RPC methods through private fetch dispatches
+intercepted by the generated wrapper. Those requests carry the outer request id so the
+host facade establishes invocation-local context without adding platform metadata to
+the tenant argument list.
 DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
 and storage id. They do not accept inline worker source.
 DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without
@@ -186,8 +190,12 @@ when the logical worker is gone or now points at a different `doStorageId`.
 Owner resolution is the single-writer protocol:
 
 1. do-runtime derives an owner scope from `doStorageId`, class name, and shard.
-2. It WATCHes the owner record, generation key, and active worker storage pointer before
-   claiming or renewing.
+2. Owner resolution WATCHes the owner record, generation key, worker delete lock, and
+   active worker storage pointer. A `whole` delete lock rejects ownership; a `version`
+   lock remains part of the watched snapshot but does not interrupt active storage. The
+   WATCH prevents a claim from committing after whole-worker delete starts. Renewal
+   separately WATCHes the owner record and active storage pointer; its generation fence
+   is carried by the owner record rather than a second generation-key read.
 3. If a live owner exists on another task, the router returns that owner or an
    owner-hint header; the runtime facade may retry directly, but the owner task still
    rechecks the fence.
@@ -307,8 +315,11 @@ recovery after the initial 101.
   fenced to the deleted `doStorageId`, so a same-name redeploy with a new storage id is
   not swept by the old delete. If best-effort cleanup fails, a far-future residual alarm
   job can remain in DB 2 until it becomes due; it then self-discards because the storage
-  pointer is gone.
-  `do:objects:<doStorageId>` remains a tombstone for future platform cleanup.
+  pointer is gone. First owner claim watches the same per-worker delete lock and storage
+  pointer; only the `whole` lock kind rejects ownership, so deleting an inactive version
+  does not interrupt the active worker. A whole-worker delete therefore cannot miss
+  owner/generation state created after its final owner scan. `do:objects:<doStorageId>`
+  remains a tombstone for future platform cleanup.
 - DO object registry writes are best-effort. Dispatch continues if the registry write
   fails, so the tombstone set may be incomplete; future cleanup must tolerate missing
   members and treat the active storage pointer plus owner/alarm state as the stronger

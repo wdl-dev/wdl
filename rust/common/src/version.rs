@@ -6,10 +6,10 @@
 //! must use the same grammar so malformed Redis state fails closed instead of
 //! silently normalizing to another worker version.
 //!
-//! `routes_key` / `worker_versions_key` / `do_storage_id_key` mirror
-//! `shared/version.js`'s `routesKey` / `workerVersionsKey` /
-//! `doStorageIdKey`. Control owns these keys; Rust readers must build them
-//! here so a future key-grammar change updates JS and Rust together.
+//! `routes_key` / `worker_versions_key` / `worker_delete_lock_key` /
+//! `do_storage_id_key` mirror `shared/version.js`'s lifecycle key builders.
+//! Control owns these keys; Rust readers must build them here so a future
+//! key-grammar change updates JS and Rust together.
 
 use std::fmt;
 
@@ -54,6 +54,11 @@ pub fn routes_key(ns: &str) -> String {
 /// Retained-version ZSET for a worker: score=int version, member=`v<int>`.
 pub fn worker_versions_key(ns: &str, worker: &str) -> String {
     format!("worker-versions:{ns}:{worker}")
+}
+
+/// Worker-scoped Control mutation lock shared with lifecycle readers.
+pub fn worker_delete_lock_key(ns: &str, worker: &str) -> String {
+    format!("worker-delete-lock:{ns}:{worker}")
 }
 
 /// Logical Worker -> Durable Object storage pointer. Control owns writes; DO
@@ -112,6 +117,10 @@ mod tests {
         assert_eq!(
             worker_versions_key("tenant", "worker"),
             "worker-versions:tenant:worker"
+        );
+        assert_eq!(
+            worker_delete_lock_key("tenant", "worker"),
+            "worker-delete-lock:tenant:worker"
         );
         assert_eq!(
             do_storage_id_key("tenant", "worker"),

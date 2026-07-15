@@ -273,6 +273,44 @@ test("namespace secret PUT stores an envelope instead of plaintext", async () =>
   });
 });
 
+test("namespace secret PUT hides envelope configuration details and logs them", async () => {
+  const logStart = namespaceSecretState.logs.length;
+  await withNamespaceSecretRedis(namespaceSecretState, () => {}, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env: {},
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-unconfigured",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.deepEqual(body, {
+      error: "secret_encryption_unconfigured",
+      message: "Internal error",
+    });
+    assert.deepEqual(namespaceSecretState.logs.slice(logStart), [{
+      level: "error",
+      event: "ns_secret_mutation_rejected",
+      fields: {
+        request_id: "rid-secret-unconfigured",
+        namespace: "demo",
+        key: "TOKEN",
+        method: "PUT",
+        status: 503,
+        reason: "secret_encryption_unconfigured",
+        error_message: "SECRET_ENVELOPE_KID must be a canonical local provider kid",
+        error_detail: "SECRET_ENVELOPE_KID must be a canonical local provider kid",
+      },
+    }]);
+    assert.equal(redis.ops.length, 0);
+  });
+});
+
 test("namespace secret mutation rejects invalid keys through shared validator", async () => {
   await withNamespaceSecretRedis(namespaceSecretState, () => {}, async (redis) => {
     const response = await handle({
@@ -426,6 +464,7 @@ test("namespace secret PUT returns corrupt_meta for invalid retained bundle meta
         method: "PUT",
         status: 500,
         reason: "corrupt_meta",
+        error_message: "Corrupt __meta__ for demo/api/v1",
         error_detail: "__meta__ must be a JSON object",
       },
     });
@@ -705,6 +744,47 @@ const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/w
 ]);
 const { handle: workerHandle } = await import(moduleDataUrl(workerSrc));
 
+test("worker secret PUT hides envelope configuration details and logs them", async () => {
+  const state = workerSecretState;
+  const logStart = state.logs.length;
+  await withWorkerSecretRedis(state, () => {}, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env: {},
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-unconfigured",
+    });
+
+    const body = await readJsonResponse(response, 503);
+    assert.deepEqual(body, {
+      error: "secret_encryption_unconfigured",
+      message: "Internal error",
+    });
+    assert.deepEqual(workerSecretRejectionLogsSince(logStart), [{
+      level: "error",
+      event: "secret_mutation_rejected",
+      fields: {
+        request_id: "rid-worker-secret-unconfigured",
+        namespace: "demo",
+        worker: "api",
+        key: "TOKEN",
+        method: "PUT",
+        status: 503,
+        reason: "secret_encryption_unconfigured",
+        error_message: "SECRET_ENVELOPE_KID must be a canonical local provider kid",
+        error_detail: "SECRET_ENVELOPE_KID must be a canonical local provider kid",
+      },
+    }]);
+    assert.equal(redis.ops.length, 0);
+  });
+});
+
 test("worker secret PUT encrypts before WATCH retries and reuses the envelope", async () => {
   const state = workerSecretState;
   await withWorkerSecretRedis(state, (redis) => {
@@ -773,7 +853,7 @@ test("worker secret PUT returns corrupt_meta for invalid active bundle metadata"
 
     const body = await readJsonResponse(response, 500);
     assert.equal(body.error, "corrupt_meta");
-    assert.equal(body.message, "Corrupt __meta__ for demo/api/v1");
+    assert.equal(body.message, "Internal error");
     assert.equal(body.detail, undefined);
     assert.deepEqual(redisHSetAttempts(redis, "secrets:demo:api"), []);
   });
@@ -816,6 +896,7 @@ test("worker secret PUT logs retained metadata diagnostics without exposing them
         method: "PUT",
         status: 500,
         reason: "corrupt_meta",
+        error_message: "Corrupt __meta__ for demo/api/v1",
         error_detail: "__meta__ must be a JSON object",
       },
     });
@@ -910,6 +991,7 @@ test("worker secret PUT maps active bump delete-lock errors to deleting", async 
         method: "PUT",
         status: 409,
         reason: "deleting",
+        error_message: "deleting",
       },
     }]);
   });
@@ -938,7 +1020,7 @@ test("worker secret PUT maps active bump contention to secret mutation contentio
     assert.equal(body.error, "secret_mutation_contention");
     assert.equal(redis.ops.some((op) => op[0] === "hSet" && op[1] === "secrets:demo:api"), false);
     assert.deepEqual(workerSecretRejectionLogsSince(logStart), [{
-      level: "warn",
+      level: "error",
       event: "secret_mutation_rejected",
       fields: {
         request_id: "rid-worker-secret-bump-contention",
@@ -948,6 +1030,7 @@ test("worker secret PUT maps active bump contention to secret mutation contentio
         method: "PUT",
         status: 503,
         reason: "secret_mutation_contention",
+        error_message: "active version changed during secret mutation; retry later",
       },
     }]);
   });
@@ -984,6 +1067,7 @@ test("worker secret DELETE precheck logs direct mutation aborts through the shar
         method: "DELETE",
         status: 409,
         reason: "deleting",
+        error_message: "deleting",
       },
     }]);
   });
