@@ -249,6 +249,11 @@ export class RedisSession {
   async incr(key) { return /** @type {number} */ (await this._exec("INCR", key)); }
   /** @param {string} key */
   async get(key) { return decodeBulk(await this._exec("GET", key)); }
+  /** @param {string} key @param {RedisArg} value @param {RedisSetOptions} [opts] */
+  async set(key, value, opts = {}) {
+    const reply = await this._exec(...buildSetArgs(key, value, opts));
+    return reply === null ? null : decodeBulk(reply);
+  }
   /** @param {string[]} keys */
   async getMany(keys) {
     const replies = /** @type {unknown[]} */ (await this._execPipeline(

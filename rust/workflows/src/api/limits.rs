@@ -17,7 +17,8 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        MAX_WORKFLOW_JSON_BODY_BYTES, MAX_WORKFLOW_RESULT_BYTES, WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
+        MAX_CREATE_BATCH_SIZE, MAX_WORKFLOW_JSON_BODY_BYTES, MAX_WORKFLOW_RESULT_BYTES,
+        WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
     };
 
     #[derive(Deserialize)]
@@ -25,6 +26,7 @@ mod tests {
     struct WorkflowLimitsContract {
         result_bytes_max: usize,
         backend_request_bytes_max: usize,
+        create_batch_max: usize,
         payload_too_large_code: String,
     }
 
@@ -40,6 +42,7 @@ mod tests {
             contract.backend_request_bytes_max,
             MAX_WORKFLOW_JSON_BODY_BYTES
         );
+        assert_eq!(contract.create_batch_max, MAX_CREATE_BATCH_SIZE);
         assert_eq!(
             contract.payload_too_large_code,
             WORKFLOW_PAYLOAD_TOO_LARGE_CODE

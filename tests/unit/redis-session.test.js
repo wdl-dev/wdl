@@ -379,6 +379,17 @@ test("RedisSession.hSet supports object form", async () => {
   );
 });
 
+test("RedisSession.set supports atomic lock options on the held socket", async () => {
+  const socket = makeFakeSocket([bytes("+OK\r\n")]);
+  const { connect } = scriptedConnect(socket);
+  const session = new RedisSession("x", { connect });
+  await session.open();
+
+  assert.equal(await session.set("lock", "token", { nx: true, ttl: 30 }), "OK");
+  assert.match(decode(socket._writes[0]), /SET\r\n.*lock\r\n.*token\r\n.*EX\r\n.*30\r\n.*NX\r\n/s);
+  await session.close();
+});
+
 test("RedisSession.sAdd/sRem accept scalar or array", async () => {
   const socket = makeFakeSocket([bytes(":1\r\n:2\r\n")]);
   const { connect } = scriptedConnect(socket);

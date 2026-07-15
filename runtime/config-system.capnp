@@ -319,6 +319,7 @@ const authWorker :Workerd.Worker = (
     (name = "shared-hex",            esModule = embed "../shared/hex.js"),
     (name = "shared-random-id",      esModule = embed "../shared/random-id.js"),
     (name = "shared-redis-lock",      esModule = embed "../shared/redis-lock.js"),
+    (name = "shared-optimistic-retry", esModule = embed "../shared/optimistic-retry.js"),
   ],
   compatibilityDate = "2026-04-24",
   compatibilityFlags = ["nodejs_compat"],

@@ -3,6 +3,7 @@ import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { recordBindingOperation } from "runtime-metrics";
 import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { discardResponseBody } from "shared-respond";
+import { bytesToBase64 } from "shared-base64";
 import { S3_TRANSIENT_RETRIES, fetchRetryableS3Post } from "shared-s3-retry";
 import {
   assertR2BufferSize,
@@ -49,8 +50,7 @@ function r2Binding(bucket) {
 /** @param {BufferSource} bytes */
 async function sha256Base64(bytes) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  // SHA-256 digests are fixed 32-byte values, so spreading here is bounded.
-  return btoa(String.fromCharCode(...new Uint8Array(digest)));
+  return bytesToBase64(new Uint8Array(digest));
 }
 
 /**

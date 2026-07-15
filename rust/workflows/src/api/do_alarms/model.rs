@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use wdl_rust_common::hash::fnv1a32;
 use wdl_rust_common::identity::{is_valid_runtime_load_ns, is_valid_worker_name};
 use wdl_rust_common::version::parse_version_tag;
 
@@ -85,30 +86,19 @@ pub(crate) struct DoAlarmTickCounters {
     pub(crate) skipped: usize,
 }
 
-pub(super) fn validate_non_empty(value: &str, field: &'static str) -> WorkflowResult<()> {
-    if value.is_empty() {
-        return Err(WorkflowError::invalid_request(format!(
-            "{field} is required"
-        )));
-    }
-    Ok(())
-}
-
 pub(super) fn validate_set_request(req: &DoAlarmSetRequest) -> WorkflowResult<()> {
-    // These identity fields arrive from the private do-runtime alarm shim. They are
-    // hashed into job ids before touching Redis key names, so non-empty validation
-    // preserves the internal contract without imposing tenant namespace/name grammar
-    // on Durable Object class names or object names.
-    validate_non_empty(&req.ns, "ns")?;
-    validate_non_empty(&req.worker, "worker")?;
-    validate_non_empty(&req.version, "version")?;
-    if parse_version_tag(&req.version).is_err() {
-        return Err(WorkflowError::invalid_request("version is invalid"));
-    }
-    validate_non_empty(&req.do_storage_id, "doStorageId")?;
-    validate_non_empty(&req.class_name, "className")?;
-    validate_non_empty(&req.object_name, "objectName")?;
-    validate_non_empty(&req.token, "token")?;
+    // The job id is hashed, but the by-worker index embeds ns/worker directly.
+    // Validate the complete dispatch identity before either key family is built.
+    validate_protocol_request_field(&req.ns, "ns", is_valid_runtime_load_ns)?;
+    validate_protocol_request_field(&req.worker, "worker", is_valid_worker_name)?;
+    validate_protocol_request_field(&req.version, "version", |value| {
+        parse_version_tag(value).is_ok()
+    })?;
+    validate_protocol_request_field(&req.do_storage_id, "doStorageId", is_storage_id)?;
+    validate_protocol_request_field(&req.class_name, "className", is_class_name)?;
+    validate_opaque_request_field(&req.object_name, "objectName")?;
+    validate_opaque_request_field(&req.token, "token")?;
+    validate_alarm_host_id(&req.do_storage_id, &req.class_name, &req.object_name)?;
     if req.scheduled_time <= 0 {
         return Err(WorkflowError::invalid_request(
             "scheduledTime must be a positive Unix millisecond timestamp",
@@ -118,12 +108,20 @@ pub(super) fn validate_set_request(req: &DoAlarmSetRequest) -> WorkflowResult<()
 }
 
 pub(super) fn validate_delete_request(req: &DoAlarmDeleteRequest) -> WorkflowResult<()> {
-    validate_non_empty(&req.ns, "ns")?;
-    validate_non_empty(&req.worker, "worker")?;
-    validate_non_empty(&req.do_storage_id, "doStorageId")?;
-    validate_non_empty(&req.class_name, "className")?;
-    validate_non_empty(&req.object_name, "objectName")?;
-    validate_non_empty(&req.token, "token")?;
+    validate_protocol_request_field(&req.ns, "ns", is_valid_runtime_load_ns)?;
+    validate_protocol_request_field(&req.worker, "worker", is_valid_worker_name)?;
+    validate_protocol_request_field(&req.do_storage_id, "doStorageId", is_storage_id)?;
+    validate_protocol_request_field(&req.class_name, "className", is_class_name)?;
+    validate_opaque_request_field(&req.object_name, "objectName")?;
+    validate_opaque_request_field(&req.token, "token")?;
+    validate_alarm_host_id(&req.do_storage_id, &req.class_name, &req.object_name)?;
+    Ok(())
+}
+
+pub(super) fn validate_cleanup_request(req: &DoAlarmCleanupRequest) -> WorkflowResult<()> {
+    validate_protocol_request_field(&req.ns, "ns", is_valid_runtime_load_ns)?;
+    validate_protocol_request_field(&req.worker, "worker", is_valid_worker_name)?;
+    validate_protocol_request_field(&req.do_storage_id, "doStorageId", is_storage_id)?;
     Ok(())
 }
 
@@ -152,6 +150,23 @@ pub(super) fn map_hgetall(flat: Vec<String>) -> HashMap<String, String> {
 }
 
 const MAX_PROTOCOL_STRING_BYTES: usize = 512;
+const DO_HOST_SHARD_COUNT: u32 = 16;
+
+fn alarm_host_id_len(do_storage_id: &str, class_name: &str, object_name: &str) -> usize {
+    let shard = fnv1a32(object_name.as_bytes()) % DO_HOST_SHARD_COUNT;
+    do_storage_id.len() + class_name.len() + ":".len() + ":shard".len() + shard.to_string().len()
+}
+
+fn validate_alarm_host_id(
+    do_storage_id: &str,
+    class_name: &str,
+    object_name: &str,
+) -> WorkflowResult<()> {
+    if alarm_host_id_len(do_storage_id, class_name, object_name) > MAX_PROTOCOL_STRING_BYTES {
+        return Err(WorkflowError::invalid_request("hostId is invalid"));
+    }
+    Ok(())
+}
 
 fn required_field<'a>(
     state: &'a HashMap<String, String>,
@@ -170,6 +185,30 @@ fn invalid_job_field(field: &'static str) -> WorkflowError {
 
 fn has_control_char(value: &str) -> bool {
     value.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+}
+
+fn is_protocol_string(value: &str, valid: impl Fn(&str) -> bool) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PROTOCOL_STRING_BYTES
+        && !has_control_char(value)
+        && valid(value)
+}
+
+fn validate_protocol_request_field(
+    value: &str,
+    field: &'static str,
+    valid: impl Fn(&str) -> bool,
+) -> WorkflowResult<()> {
+    if !is_protocol_string(value, valid) {
+        return Err(WorkflowError::invalid_request(format!(
+            "{field} is invalid"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_opaque_request_field(value: &str, field: &'static str) -> WorkflowResult<()> {
+    validate_protocol_request_field(value, field, |_| true)
 }
 
 fn is_class_name(value: &str) -> bool {
@@ -193,18 +232,18 @@ fn protocol_string_field<'a>(
     valid: impl Fn(&str) -> bool,
 ) -> WorkflowResult<&'a str> {
     let value = required_field(state, field)?;
-    if value.len() > MAX_PROTOCOL_STRING_BYTES || has_control_char(value) || !valid(value) {
+    if !is_protocol_string(value, valid) {
         return Err(invalid_job_field(field));
     }
     Ok(value)
 }
 
-fn object_name_field<'a>(
+fn opaque_string_field<'a>(
     state: &'a HashMap<String, String>,
     field: &'static str,
 ) -> WorkflowResult<&'a str> {
     let value = required_field(state, field)?;
-    if value.len() > MAX_PROTOCOL_STRING_BYTES || has_control_char(value) {
+    if !is_protocol_string(value, |_| true) {
         return Err(invalid_job_field(field));
     }
     Ok(value)
@@ -236,6 +275,12 @@ pub(super) fn job_from_state(
     state: HashMap<String, String>,
 ) -> WorkflowResult<DoAlarmJob> {
     parse_positive_i64_field(&state, "dueAtMs")?;
+    let do_storage_id = protocol_string_field(&state, "doStorageId", is_storage_id)?;
+    let class_name = protocol_string_field(&state, "className", is_class_name)?;
+    let object_name = opaque_string_field(&state, "objectName")?;
+    if alarm_host_id_len(do_storage_id, class_name, object_name) > MAX_PROTOCOL_STRING_BYTES {
+        return Err(invalid_job_field("hostId"));
+    }
     Ok(DoAlarmJob {
         job_id,
         ns: protocol_string_field(&state, "ns", is_valid_runtime_load_ns)?.to_string(),
@@ -244,11 +289,11 @@ pub(super) fn job_from_state(
             parse_version_tag(value).is_ok()
         })?
         .to_string(),
-        do_storage_id: protocol_string_field(&state, "doStorageId", is_storage_id)?.to_string(),
-        class_name: protocol_string_field(&state, "className", is_class_name)?.to_string(),
-        object_name: object_name_field(&state, "objectName")?.to_string(),
-        row_token: required_field(&state, "rowToken")?.to_string(),
-        run_token: required_field(&state, "runToken")?.to_string(),
+        do_storage_id: do_storage_id.to_string(),
+        class_name: class_name.to_string(),
+        object_name: object_name.to_string(),
+        row_token: opaque_string_field(&state, "rowToken")?.to_string(),
+        run_token: opaque_string_field(&state, "runToken")?.to_string(),
         retry_count: parse_u64_field(&state, "retryCount")?,
     })
 }
@@ -271,6 +316,31 @@ mod tests {
         }
     }
 
+    fn valid_delete_request() -> DoAlarmDeleteRequest {
+        DoAlarmDeleteRequest {
+            ns: "demo".to_string(),
+            worker: "alarms".to_string(),
+            do_storage_id: "do_abc".to_string(),
+            class_name: "AlarmCounter".to_string(),
+            object_name: "alpha".to_string(),
+            token: "row-token".to_string(),
+        }
+    }
+
+    fn fixture_string(value: &serde_json::Value) -> String {
+        if let Some(value) = value.as_str() {
+            return value.to_string();
+        }
+        value["repeat"]
+            .as_str()
+            .expect("fixture repeat is a string")
+            .repeat(
+                value["count"]
+                    .as_u64()
+                    .expect("fixture count is an integer") as usize,
+            )
+    }
+
     fn valid_job_state() -> HashMap<String, String> {
         HashMap::from([
             ("ns".to_string(), "demo".to_string()),
@@ -284,6 +354,126 @@ mod tests {
             ("retryCount".to_string(), "0".to_string()),
             ("dueAtMs".to_string(), "123456789".to_string()),
         ])
+    }
+
+    #[test]
+    fn do_alarm_mutation_ingress_rejects_noncanonical_identity() {
+        for (field, value) in [
+            ("ns", "Demo"),
+            ("worker", "bad:worker"),
+            ("version", "v01"),
+            ("doStorageId", "DO_ABC"),
+            ("className", "bad-name"),
+            ("objectName", "bad\nname"),
+            ("token", "bad\ntoken"),
+        ] {
+            let mut req = valid_set_request();
+            match field {
+                "ns" => req.ns = value.to_string(),
+                "worker" => req.worker = value.to_string(),
+                "version" => req.version = value.to_string(),
+                "doStorageId" => req.do_storage_id = value.to_string(),
+                "className" => req.class_name = value.to_string(),
+                "objectName" => req.object_name = value.to_string(),
+                "token" => req.token = value.to_string(),
+                _ => unreachable!(),
+            }
+            let err = validate_set_request(&req).expect_err("invalid set request");
+            assert_eq!(err.code, "invalid_request");
+            assert!(err.message.contains(field), "{}", err.message);
+        }
+
+        let delete = DoAlarmDeleteRequest {
+            ns: "bad:ns".to_string(),
+            worker: "alarms".to_string(),
+            do_storage_id: "do_abc".to_string(),
+            class_name: "AlarmCounter".to_string(),
+            object_name: "alpha".to_string(),
+            token: "row-token".to_string(),
+        };
+        assert!(validate_delete_request(&delete).is_err());
+
+        let cleanup = DoAlarmCleanupRequest {
+            ns: "demo".to_string(),
+            worker: "alarms".to_string(),
+            do_storage_id: "bad/storage".to_string(),
+        };
+        assert!(validate_cleanup_request(&cleanup).is_err());
+    }
+
+    #[test]
+    fn do_alarm_protocol_fields_match_cross_language_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/do-alarm-identity.json"
+        ))
+        .expect("DO alarm identity fixture parses");
+        assert_eq!(
+            fixture["maxBytes"].as_u64(),
+            Some(MAX_PROTOCOL_STRING_BYTES as u64)
+        );
+        assert_eq!(
+            fixture["hostShardCount"].as_u64(),
+            Some(DO_HOST_SHARD_COUNT as u64)
+        );
+        for case in fixture["cases"]
+            .as_array()
+            .expect("DO alarm identity fixture cases is an array")
+        {
+            let do_storage_id = fixture_string(&case["doStorageId"]);
+            let class_name = fixture_string(&case["className"]);
+            let object_name = fixture_string(&case["objectName"]);
+            let token = fixture_string(&case["token"]);
+            let mut set = valid_set_request();
+            set.do_storage_id = do_storage_id.clone();
+            set.class_name = class_name.clone();
+            set.object_name = object_name.clone();
+            set.token = token.clone();
+            let mut delete = valid_delete_request();
+            delete.do_storage_id = do_storage_id;
+            delete.class_name = class_name;
+            delete.object_name = object_name;
+            delete.token = token;
+            let valid = case["valid"].as_bool().expect("valid is a boolean");
+            assert_eq!(
+                validate_set_request(&set).is_ok(),
+                valid,
+                "set:{}",
+                case["name"].as_str().expect("name is a string")
+            );
+            assert_eq!(
+                validate_delete_request(&delete).is_ok(),
+                valid,
+                "delete:{}",
+                case["name"].as_str().expect("name is a string")
+            );
+            let mut state = valid_job_state();
+            state.insert("doStorageId".to_string(), set.do_storage_id.clone());
+            state.insert("className".to_string(), set.class_name.clone());
+            state.insert("objectName".to_string(), set.object_name.clone());
+            state.insert("rowToken".to_string(), set.token.clone());
+            assert_eq!(
+                job_from_state("job".to_string(), state).is_ok(),
+                valid,
+                "persisted:{}",
+                case["name"].as_str().expect("name is a string")
+            );
+        }
+    }
+
+    #[test]
+    fn do_alarm_json_rejects_unpaired_surrogate_object_names() {
+        let request = r#"{
+            "ns":"demo",
+            "worker":"alarms",
+            "version":"v1",
+            "doStorageId":"do_abc",
+            "className":"AlarmCounter",
+            "objectName":"\ud800",
+            "scheduledTime":123456789,
+            "retryCount":0,
+            "token":"row-token"
+        }"#;
+        assert!(serde_json::from_str::<DoAlarmSetRequest>(request).is_err());
     }
 
     #[test]

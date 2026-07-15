@@ -37,37 +37,6 @@ test("token lock owner acquires and renews with the canonical Redis options", as
   ]);
 });
 
-test("token lock owner supports session-local transactional acquisition", async () => {
-  /** @type {unknown[][]} */
-  const calls = [];
-  const multi = {
-    /** @param {string} key @param {string} token @param {Record<string, unknown>} options */
-    set(key, token, options) {
-      calls.push(["set", key, token, options]);
-      return this;
-    },
-    async exec() {
-      calls.push(["exec"]);
-      return ["OK"];
-    },
-  };
-  const client = {
-    async set() { throw new Error("direct SET must not run"); },
-    async delIfEq() { return 1; },
-    multi() { return multi; },
-  };
-  const lock = { key: "lock:auth", token: "token" };
-
-  assert.equal(await acquireTokenLock(client, lock, {
-    ttlSeconds: 30,
-    transactional: true,
-  }), true);
-  assert.deepEqual(calls, [
-    ["set", "lock:auth", "token", { nx: true, ttl: 30 }],
-    ["exec"],
-  ]);
-});
-
 test("token lock release is token-scoped and never masks the primary outcome", async () => {
   /** @type {unknown[][]} */
   const seen = [];

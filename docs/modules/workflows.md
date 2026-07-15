@@ -133,9 +133,12 @@ Key families:
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
   `/internal/workflows/tick` endpoint; scheduler never reads or writes DO alarm state
   directly.
-- Workflows rejects non-canonical worker versions before persisting DO alarm jobs,
-  revalidates persisted alarm identity before dispatch, and validates an active route
-  version before using it as a retarget. These checks use the `wdl-rust-common` owners.
+- Workflows rejects non-canonical DO alarm identity before persisting jobs, revalidates
+  persisted alarm identity before dispatch, and validates an active route
+  version before using it as a retarget. Namespace, worker, and version checks reuse
+  `wdl-rust-common`; do-runtime protocol grammar and identity helpers own the canonical
+  alarm-specific fields and aggregate 512-byte DO host-id contract. Workflows mirrors
+  and revalidates that contract before persistence and dispatch.
   Runtime run dispatch and progress callbacks share one system-vs-user runtime endpoint
   selector inside the workflows crate.
 - 32 scheduling shards partition ready/due work.
@@ -159,6 +162,8 @@ Key families:
   (`step.sleep`, `step.sleepUntil`, `step.waitForEvent`) remain exclusive and must not
   overlap another in-flight step because they suspend the whole workflow run.
 - Termination is an explicit non-success terminal outcome and uses error retention.
+- `Workflow.createBatch()` accepts at most 100 entries per call. Runtime prevalidation
+  and Rust admission share this pinned limit.
 - A single workflow result is capped at 1 MiB and a runtime-to-workflows backend JSON
   request at 2 MiB. Runtime prevalidation and the Rust backend share the pinned
   `workflow_payload_too_large` contract. The per-instance aggregate payload cap is

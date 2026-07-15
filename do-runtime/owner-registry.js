@@ -44,6 +44,7 @@ import {
   stageOwnerRenew,
 } from "shared-owner-protocol";
 import {
+  DO_OWNER_SCOPE_PREFIX,
   VERSION_DELETE_LOCK_KIND,
   deleteLockKey,
   doStorageIdKey,
@@ -54,7 +55,6 @@ const DEFAULT_OWNER_TTL_SECONDS = 120;
 const DEFAULT_RENEW_CONCURRENCY = 8;
 const MAX_RENEW_CONCURRENCY = 64;
 const DEFAULT_OWNER_LEASE_GUARD_MS = 1_000;
-const OWNER_PREFIX = "do:owner:scope:";
 const OWNER_CLAIM_RETRIES = 3;
 const OWNER_RENEW_FRACTION = 0.5;
 const DO_OWNER_PORT = 8788;
@@ -94,12 +94,12 @@ export function renewConcurrency(env) {
 
 /** @param {string} ownerKey */
 export function ownerKeyOf(ownerKey) {
-  return ownerProtocolKeys(OWNER_PREFIX, ownerKey).ownerKey;
+  return ownerProtocolKeys(DO_OWNER_SCOPE_PREFIX, ownerKey).ownerKey;
 }
 
 /** @param {string} ownerKey */
 export function ownerGenerationKeyOf(ownerKey) {
-  return ownerProtocolKeys(OWNER_PREFIX, ownerKey).generationKey;
+  return ownerProtocolKeys(DO_OWNER_SCOPE_PREFIX, ownerKey).generationKey;
 }
 
 /** @param {unknown} value @returns {value is BundleScope & Record<string, unknown>} */

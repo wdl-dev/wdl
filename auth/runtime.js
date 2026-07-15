@@ -19,6 +19,7 @@ import {
 import {
   actionCategory,
 } from "shared-auth-roles";
+import { withOptimisticRetries } from "shared-optimistic-retry";
 
 /**
  * @typedef {import("shared-redis").RedisSession} RedisSession
@@ -256,28 +257,31 @@ async function ensureBootstrapHash(redis, requestId, logAuth, desiredHash) {
     return true;
   };
 
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
+  await withOptimisticRetries(
+    async () => {
       if (typeof redis.session === "function") await redis.session(rotateBootstrap);
       else await rotateBootstrap(/** @type {RedisAuthSession} */ (redis));
-      bootstrapMissingLogged = false;
-      verifyBootstrapHash = desiredHash;
-      logAuth("info", "auth_bootstrap", requestId, {
-        outcome: "ok",
-        token_id: BOOTSTRAP_TOKEN_ID,
-        rotated: rotatedFromExisting,
-      });
-      return;
-    } catch (err) {
-      if (err instanceof WatchError) continue;
-      throw err;
+      return true;
+    },
+    {
+      attempts: 5,
+      isRetryableError: (err) => err instanceof WatchError,
+      onExhausted: () => {
+        logAuth("error", "auth_bootstrap", requestId, {
+          outcome: "error",
+          reason: "bootstrap_watch_exhausted",
+        });
+        throw new Error("bootstrap upsert WATCH retry exhausted");
+      },
     }
-  }
-  logAuth("error", "auth_bootstrap", requestId, {
-    outcome: "error",
-    reason: "bootstrap_watch_exhausted",
+  );
+  bootstrapMissingLogged = false;
+  verifyBootstrapHash = desiredHash;
+  logAuth("info", "auth_bootstrap", requestId, {
+    outcome: "ok",
+    token_id: BOOTSTRAP_TOKEN_ID,
+    rotated: rotatedFromExisting,
   });
-  throw new Error("bootstrap upsert WATCH retry exhausted");
 }
 
 /** @param {AuthLogger} logAuth @param {string | null} requestId @param {string} command @param {unknown} err @returns {never} */

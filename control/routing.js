@@ -24,6 +24,8 @@ import { decodePatternProjection, encodePatternProjection } from "shared-route-p
 import {
   DECLARED_HOSTS_KEY,
   NAMESPACES_KEY,
+  PATTERNS_CHANNEL,
+  ROUTES_CHANNEL,
   bundleKey,
   formatVersion,
   hostDeclarationsKey,
@@ -49,9 +51,6 @@ import {
 } from "control-routing-route-plan";
 
 const MAX_ATTEMPTS = 5;
-const PATTERNS_CHANNEL = "patterns:invalidate";
-const ROUTES_CHANNEL = "routes:invalidate";
-
 /**
  * @typedef {import("shared-route-projection").PatternProjection} PatternProjection
  * @typedef {Pick<PatternProjection, "kind" | "value"> & { host: string, slot: string }} RoutePattern

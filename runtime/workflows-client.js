@@ -199,6 +199,7 @@ export class Workflow {
       throw new Error("Workflow backend is not configured");
     }
     const metadata = this.#metadata;
+    const requestId = requestIdFromOptions(this.#options);
     const body = {
       ...fields,
       ns: metadata.ns,
@@ -207,11 +208,14 @@ export class Workflow {
       workflowName: metadata.name,
       workflowKey: metadata.workflowKey,
       className: metadata.className,
-      requestId: requestIdFromOptions(this.#options),
+      requestId,
     };
     const response = await this.#backend.fetch(`${WORKFLOWS_BASE_URL}/${endpoint}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...(requestId ? { "x-request-id": requestId } : {}),
+      },
       body: JSON.stringify(body),
     });
     return await readWorkflowResponse(response);

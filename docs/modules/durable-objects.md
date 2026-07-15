@@ -76,6 +76,9 @@ host facade establishes invocation-local context without adding platform metadat
 the tenant argument list.
 DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
 and storage id. They do not accept inline worker source.
+Tenant-facing DO object names and ids must be well-formed Unicode strings. Lone UTF-16
+surrogates are rejected by `idFromName()` / `idFromString()` before hashing or dispatch;
+do-runtime alarm ingress and Workflows revalidation enforce the same boundary.
 DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without
 leading zeroes.
 

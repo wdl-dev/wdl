@@ -240,9 +240,9 @@ pub(crate) async fn create_batch(
         ));
     }
     if req.entries.len() > MAX_CREATE_BATCH_SIZE {
-        return Err(WorkflowError::request_too_large(
-            "createBatch exceeds 100 instance limit",
-        ));
+        return Err(WorkflowError::request_too_large(format!(
+            "createBatch exceeds {MAX_CREATE_BATCH_SIZE} instance limit"
+        )));
     }
     let req = request_with_active_version(state, req).await?;
     validate_identity(&req)?;

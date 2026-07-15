@@ -186,7 +186,7 @@ export function doOwnerHintCacheKey(props, objectName) {
 }
 
 /** @param {Response} response */
-export async function staleDoOwnerHintResponse(response) {
+export function staleDoOwnerHintResponse(response) {
   if (responseStatus(response) < 400) return false;
   const code = responseHeader(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER);
   return code !== null && setHas(OWNER_HINT_STALE_CODES, code);
@@ -660,7 +660,7 @@ export async function rpcResultFromResponse(response) {
 }
 
 /** @param {Response} response */
-export async function retryableOwnerRaceResponse(response) {
+export function retryableOwnerRaceResponse(response) {
   if (responseStatus(response) !== 503) return false;
   const code = responseHeader(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER);
   return code !== null && setHas(OWNER_RACE_RETRY_CODES, code);
@@ -748,7 +748,7 @@ export function connectHeaders(props, objectName, request, requestId) {
  * @param {DoOwnerHint} owner
  * @param {string} pathname
  */
-export function ownerRequestUrl(owner, pathname) {
+function ownerRequestUrl(owner, pathname) {
   if (!validOwnerEndpoint(owner.endpoint)) {
     throw new Error("Invalid DO owner endpoint");
   }
@@ -792,7 +792,7 @@ export function ownerHintFromHeaders(headers) {
 }
 
 /** @param {Response} response */
-export async function ownerHintFromResponse(response) {
+function ownerHintFromResponse(response) {
   if (responseStatus(response) !== 409) return null;
   // Only do-runtime-authored headers are trusted. Tenant DO code controls the
   // response body and may intentionally return a do_owner_hint-shaped 409.
@@ -806,121 +806,11 @@ function validOwnerEndpoint(endpoint) {
   return validOwnerEndpointForService(endpoint, 8788, "do-runtime");
 }
 
-/**
- * @param {Response} response
- * @param {DoFetch | typeof fetch | null | undefined} ownerFetch
- * @param {string} pathname
- * @param {RequestInit} init
- */
-export async function followOwnerHint(response, ownerFetch, pathname, init) {
-  const hint = await ownerHintFromResponse(response);
-  if (!hint || typeof ownerFetch !== "function") return response;
-  cancelResponseBody(response);
-  const direct = await ownerFetch(ownerRequestUrl(hint, pathname), init);
-  if (ownerEndpointUnavailableResponse(direct)) {
-    cancelResponseBody(direct);
-    throw new Error(`DO owner endpoint returned ${responseStatus(direct)}`);
-  }
-  return direct;
-}
-
-export function ownerUnavailableResponse() {
+function ownerUnavailableResponse() {
   return Response.json(
     { error: "owner_unavailable", message: "DO owner is unavailable; request outcome may be unknown" },
     { status: 503 }
   );
-}
-
-/**
- * @param {{
- *   routerFetch: DoFetch,
- *   routerUrl: string,
- *   ownerFetch: DoFetch | typeof fetch | null | undefined,
- *   ownerPath: string,
- *   init: RequestInit,
- *   cachedHint?: DoOwnerHint | null,
- *   rememberHint?: (hint: DoOwnerHint) => void,
- *   clearHint?: () => void,
- *   staleCachedResponse?: (response: Response) => Promise<boolean>,
- *   bypassOwnerHintResponse?: (response: Response) => Promise<boolean>,
- *   replayOwnerUnavailable?: boolean,
- * }} options
- */
-export async function dispatchDoRequestWithOwnerHint({
-  routerFetch,
-  routerUrl,
-  ownerFetch,
-  ownerPath,
-  init,
-  cachedHint = null,
-  rememberHint = (_hint) => {},
-  clearHint = () => {},
-  staleCachedResponse = async (_response) => false,
-  bypassOwnerHintResponse = async (_response) => false,
-  replayOwnerUnavailable = false,
-}) {
-  if (cachedHint && typeof ownerFetch === "function") {
-    try {
-      const direct = await ownerFetch(ownerRequestUrl(cachedHint, ownerPath), init);
-      if (await ownerHintFromResponse(direct)) {
-        cancelResponseBody(direct);
-        clearHint();
-      } else if (await staleCachedResponse(direct)) {
-        cancelResponseBody(direct);
-        clearHint();
-      } else if (ownerEndpointUnavailableResponse(direct)) {
-        cancelResponseBody(direct);
-        clearHint();
-        if (replayOwnerUnavailable) {
-          return await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
-        }
-        return ownerUnavailableResponse();
-      } else {
-        const learned = ownerHintFromHeaders(responseHeaders(direct));
-        if (learned) rememberHint(learned);
-        return direct;
-      }
-    } catch {
-      clearHint();
-      if (replayOwnerUnavailable) {
-        return await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
-      }
-      return ownerUnavailableResponse();
-    }
-  }
-
-  const routed = await routerFetch(routerUrl, init);
-  if (await bypassOwnerHintResponse(routed)) return routed;
-  const hinted = await ownerHintFromResponse(routed);
-  if (!hinted || typeof ownerFetch !== "function") {
-    if (hinted) rememberHint(hinted);
-    else {
-      const learned = ownerHintFromHeaders(responseHeaders(routed));
-      if (learned) rememberHint(learned);
-    }
-    return routed;
-  }
-  rememberHint(hinted);
-  try {
-    const direct = await followOwnerHint(routed, ownerFetch, ownerPath, init);
-    if (await ownerHintFromResponse(direct)) {
-      cancelResponseBody(direct);
-      clearHint();
-      if (replayOwnerUnavailable) {
-        return await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
-      }
-      return ownerUnavailableResponse();
-    }
-    const learned = ownerHintFromHeaders(responseHeaders(direct));
-    if (learned) rememberHint(learned);
-    return direct;
-  } catch {
-    clearHint();
-    if (replayOwnerUnavailable) {
-      return await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
-    }
-    return ownerUnavailableResponse();
-  }
 }
 
 /**
@@ -937,27 +827,84 @@ async function dispatchDoWithHintCache({
   hintKey,
   replayOwnerUnavailable = false,
 }, retryOwnerRace) {
-  let response = await dispatchDoRequestWithOwnerHint({
-    routerFetch,
-    routerUrl,
-    ownerFetch,
-    ownerPath,
-    init,
-    cachedHint: /** @type {DoOwnerHint | null} */ (cache.get(hintKey)),
-    rememberHint: (hint) => cache.set(hintKey, hint),
-    clearHint: () => cache.delete(hintKey),
-    staleCachedResponse: staleDoOwnerHintResponse,
-    bypassOwnerHintResponse: retryOwnerRace
-      ? retryableOwnerRaceResponse
-      : async (_response) => false,
-    replayOwnerUnavailable,
-  });
-  if (retryOwnerRace && await retryableOwnerRaceResponse(response)) {
-    cancelResponseBody(response);
-    cache.delete(hintKey);
-    response = await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
+  /** @param {DoOwnerHint} hint */
+  const rememberHint = (hint) => cache.set(hintKey, hint);
+  const clearHint = () => cache.delete(hintKey);
+  const replayOrUnavailable = async () => replayOwnerUnavailable
+    ? await routerFetch(routerUrl, withoutOwnerHintOptIn(init))
+    : ownerUnavailableResponse();
+  /** @param {Response} response */
+  const finish = async (response) => {
+    let result = response;
+    if (retryOwnerRace && retryableOwnerRaceResponse(result)) {
+      cancelResponseBody(result);
+      clearHint();
+      result = await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
+    }
+    return stripOwnerHintHeaders(result);
+  };
+
+  const cachedHint = /** @type {DoOwnerHint | null} */ (cache.get(hintKey));
+  if (cachedHint && typeof ownerFetch === "function") {
+    /** @type {Response} */
+    let direct;
+    try {
+      direct = await ownerFetch(ownerRequestUrl(cachedHint, ownerPath), init);
+    } catch {
+      clearHint();
+      return await finish(await replayOrUnavailable());
+    }
+    if (ownerHintFromResponse(direct) || staleDoOwnerHintResponse(direct)) {
+      cancelResponseBody(direct);
+      clearHint();
+    } else if (ownerEndpointUnavailableResponse(direct)) {
+      cancelResponseBody(direct);
+      clearHint();
+      return await finish(await replayOrUnavailable());
+    } else {
+      const learned = ownerHintFromHeaders(responseHeaders(direct));
+      if (learned) rememberHint(learned);
+      return await finish(direct);
+    }
   }
-  return stripOwnerHintHeaders(response);
+
+  const routed = await routerFetch(routerUrl, init);
+  if (retryOwnerRace && retryableOwnerRaceResponse(routed)) {
+    return await finish(routed);
+  }
+
+  const hinted = ownerHintFromResponse(routed);
+  if (!hinted || typeof ownerFetch !== "function") {
+    if (hinted) rememberHint(hinted);
+    else {
+      const learned = ownerHintFromHeaders(responseHeaders(routed));
+      if (learned) rememberHint(learned);
+    }
+    return await finish(routed);
+  }
+
+  rememberHint(hinted);
+  cancelResponseBody(routed);
+  /** @type {Response} */
+  let direct;
+  try {
+    direct = await ownerFetch(ownerRequestUrl(hinted, ownerPath), init);
+    if (ownerEndpointUnavailableResponse(direct)) {
+      cancelResponseBody(direct);
+      throw new Error(`DO owner endpoint returned ${responseStatus(direct)}`);
+    }
+  } catch {
+    clearHint();
+    return await finish(await replayOrUnavailable());
+  }
+  if (ownerHintFromResponse(direct)) {
+    cancelResponseBody(direct);
+    clearHint();
+    return await finish(await replayOrUnavailable());
+  }
+  const learned = ownerHintFromHeaders(responseHeaders(direct));
+  if (learned) rememberHint(learned);
+  return await finish(direct);
 }
 
 /** @param {DoOwnerHintDispatchOptions} options */
@@ -974,13 +921,13 @@ export async function dispatchDoConnectWithHintCache(options) {
 }
 
 /** @param {Response} response */
-export function ownerEndpointUnavailableResponse(response) {
+function ownerEndpointUnavailableResponse(response) {
   return setHas(OWNER_ENDPOINT_UNAVAILABLE_STATUSES, responseStatus(response)) &&
     !ownerHintFromHeaders(responseHeaders(response));
 }
 
 /** @param {RequestInit} init */
-export function withoutOwnerHintOptIn(init) {
+function withoutOwnerHintOptIn(init) {
   const headers = init.headers instanceof IntrinsicHeaders
     ? copyHeaders(init.headers)
     : new IntrinsicHeaders(init.headers || {});
@@ -989,7 +936,7 @@ export function withoutOwnerHintOptIn(init) {
 }
 
 /** @param {Response} response */
-export function stripOwnerHintHeaders(response) {
+function stripOwnerHintHeaders(response) {
   const headers = copyHeaders(responseHeaders(response));
   forEachArray(DO_OWNER_HINT_STRIP_HEADERS, (name) => {
     headerDelete(headers, name);

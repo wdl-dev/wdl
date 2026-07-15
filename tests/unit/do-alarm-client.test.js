@@ -22,6 +22,9 @@ export class DoRuntimeError extends Error {
 export function nonEmptyAlarmString(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
+export function isWellFormedUnicodeString(value) {
+  return typeof value === "string" && value.isWellFormed();
+}
 `);
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
@@ -193,6 +196,19 @@ test("alarm input validation remains local before backend calls", async () => {
       },
     ),
     /retryCount must be a non-negative integer/,
+  );
+  await assert.rejects(
+    () => mod.setAlarmIndex(
+      alarmEnv({ WORKFLOWS_BACKEND: workflowsBackend() }),
+      props,
+      {
+        className: "Room",
+        objectName: "\ud800",
+        scheduledTime: 123456,
+        token: "row-token",
+      },
+    ),
+    /objectName must contain well-formed Unicode/,
   );
   assert.equal(calls.length, 0);
 });

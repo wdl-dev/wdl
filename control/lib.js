@@ -18,8 +18,20 @@ import {
 } from "shared-ns-pattern";
 import { PLATFORM_TIER_RESERVED_NS, ROLES } from "shared-auth-roles";
 import { errorMessage } from "shared-errors";
-import { deleteLockKey, doStorageIdKey, routesKey, workerVersionsKey } from "shared-version";
-export { deleteLockKey, doStorageIdKey, routesKey, workerVersionsKey };
+import {
+  deleteLockKey,
+  doOwnerScopeScanPatternForStorage,
+  doStorageIdKey,
+  routesKey,
+  workerVersionsKey,
+} from "shared-version";
+export {
+  deleteLockKey,
+  doOwnerScopeScanPatternForStorage,
+  doStorageIdKey,
+  routesKey,
+  workerVersionsKey,
+};
 export { validateModulePath };
 export { WORKER_NAME_RE };
 export { WORKFLOW_NAME_RE };
@@ -377,11 +389,6 @@ export function d1DatabaseTombstoneKey(ns, databaseId) {
 /** @param {string} ns */
 export function d1DatabaseTombstonesKey(ns) {
   return `d1:database-tombstones:${ns}`;
-}
-
-/** @param {string} storageId */
-export function doOwnerScopeScanPatternForStorage(storageId) {
-  return `do:owner:scope:${encodeURIComponent(`${storageId}:`)}*`;
 }
 
 /** @param {string} storageId */

@@ -11,6 +11,7 @@ const REPO_ROOT = path.resolve(__dirname, "../..");
 const SHARED_ENV_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/env.js")).href;
 const SHARED_ERRORS_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/errors.js")).href;
 const SHARED_BASE64_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/base64.js")).href;
+const SHARED_NS_PATTERN_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/ns-pattern.js")).href;
 const SHARED_VERSION_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/version.js")).href;
 const SHARED_HEX_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/hex.js")).href;
 const SHARED_OPTIMISTIC_RETRY_URL = pathToFileURL(
@@ -93,6 +94,7 @@ export function repositoryModuleDataUrl(relativePath, replacements = []) {
 export function runtimeLibModuleDataUrl() {
   return repositoryModuleDataUrl("runtime/lib.js", importSpecifierReplacements({
     "shared-base64": SHARED_BASE64_URL,
+    "shared-ns-pattern": SHARED_NS_PATTERN_URL,
     "shared-version": SHARED_VERSION_URL,
     "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
   }));

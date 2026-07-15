@@ -8,6 +8,7 @@ import {
 } from "../../runtime/do-client.js";
 import {
   MAX_DO_REQUEST_HEADER_BYTES,
+  dispatchDoInvokeWithHintCache,
   fetchInvokeInit,
   ownerHintFromHeaders,
   requestSpec,
@@ -1389,6 +1390,80 @@ test("DurableObjectNamespace direct backend ignores hints attached to owner-race
   assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null);
 });
 
+test("DO owner-race router retry failures do not trigger another replay", async (t) => {
+  await t.test("fresh owner response", async () => {
+    let routerCalls = 0;
+    let ownerCalls = 0;
+    const ownerMetadata = new Headers(doOwnerHintHeaders());
+    ownerMetadata.delete("x-wdl-do-owner-hint");
+
+    await assert.rejects(
+      dispatchDoInvokeWithHintCache({
+        routerFetch: async () => {
+          routerCalls += 1;
+          if (routerCalls === 1) return doOwnerHintResponse();
+          if (routerCalls === 2) throw new Error("owner-race router retry failed");
+          return new Response("unexpected replay");
+        },
+        routerUrl: "http://do-runtime/internal/do/invoke",
+        ownerFetch: async () => {
+          ownerCalls += 1;
+          return Response.json({ error: "owner_claim_raced", message: "retry" }, {
+            status: 503,
+            headers: doOwnershipErrorHeaders("owner_claim_raced", ownerMetadata),
+          });
+        },
+        ownerPath: "/internal/do/invoke",
+        init: { method: "GET" },
+        cache: new Map(),
+        hintKey: "room-a",
+        replayOwnerUnavailable: true,
+      }),
+      /owner-race router retry failed/
+    );
+    assert.equal(ownerCalls, 1);
+    assert.equal(routerCalls, 2);
+  });
+
+  await t.test("cached endpoint fallback", async () => {
+    const hint = ownerHintFromHeaders(doOwnerHintResponse().headers);
+    assert.ok(hint);
+    const cache = new Map();
+    cache.set("room-a", hint);
+    let routerCalls = 0;
+    let ownerCalls = 0;
+
+    await assert.rejects(
+      dispatchDoInvokeWithHintCache({
+        routerFetch: async () => {
+          routerCalls += 1;
+          if (routerCalls === 1) {
+            return Response.json({ error: "owner_claim_raced", message: "retry" }, {
+              status: 503,
+              headers: doOwnershipErrorHeaders("owner_claim_raced"),
+            });
+          }
+          if (routerCalls === 2) throw new Error("owner-race router retry failed");
+          return new Response("unexpected replay");
+        },
+        routerUrl: "http://do-runtime/internal/do/invoke",
+        ownerFetch: async () => {
+          ownerCalls += 1;
+          return new Response("owner timeout", { status: 504 });
+        },
+        ownerPath: "/internal/do/invoke",
+        init: { method: "GET" },
+        cache,
+        hintKey: "room-a",
+        replayOwnerUnavailable: true,
+      }),
+      /owner-race router retry failed/
+    );
+    assert.equal(ownerCalls, 1);
+    assert.equal(routerCalls, 2);
+  });
+});
+
 test("DurableObjectNamespace direct backend retries owner lease budget errors once", async () => {
   for (const error of ["owner_lease_expired", "owner_lease_too_short"]) {
     /** @type {any[]} */
@@ -2477,7 +2552,12 @@ test("DurableObjectNamespace replays safe GET after stale cached owner endpoint 
     fetch: makeRecordingFetch(routerCalls, {
       response: () => routerCalls.length === 1
         ? doOwnerHintResponse({ endpoint, generation: 11 })
-        : new Response("router-ok"),
+        : routerCalls.length === 2
+          ? Response.json({ error: "owner_claim_raced", message: "retry" }, {
+              status: 503,
+              headers: doOwnershipErrorHeaders("owner_claim_raced"),
+            })
+          : new Response("router-ok"),
     }),
   };
   const ownerNetwork = {
@@ -2501,8 +2581,9 @@ test("DurableObjectNamespace replays safe GET after stale cached owner endpoint 
   assert.equal(await ns.get(id).fetch("https://demo.workers.example/two").then((r) => r.text()), "router-ok");
 
   assert.equal(ownerCalls.length, 2);
-  assert.equal(routerCalls.length, 2);
+  assert.equal(routerCalls.length, 3);
   assert.equal(headerValue(routerCalls[1].init.headers, "x-wdl-do-accept-owner-hint"), null);
+  assert.equal(headerValue(routerCalls[2].init.headers, "x-wdl-do-accept-owner-hint"), null);
 });
 
 test("DurableObjectNamespace drops stale cached owner hints after owner lease budget errors", async () => {
@@ -2551,8 +2632,15 @@ test("DurableObjectNamespace drops stale cached owner hints after owner lease bu
   }
 });
 
-test("DurableObjectNamespace facade rejects foreign ids", () => {
+test("DurableObjectNamespace facade rejects foreign ids", async () => {
   const ns = new DurableObjectNamespace({ fetchObject() {} });
   assert.throws(() => ns.idFromName(""), /requires a non-empty string/);
+  for (const value of ["\ud800", "\udc00"]) {
+    assert.throws(() => ns.idFromName(value), /requires well-formed Unicode/);
+    assert.throws(() => ns.idFromString(value), /requires well-formed Unicode/);
+  }
+  await withMockedProperty(String.prototype, "isWellFormed", () => true, () => {
+    assert.throws(() => ns.idFromName("\ud800"), /requires well-formed Unicode/);
+  });
   assert.throws(() => ns.get({ name: "room-a" }), /requires an id returned by this namespace/);
 });

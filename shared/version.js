@@ -67,6 +67,9 @@ export function patternsKey(host) {
 
 export const NAMESPACES_KEY = "namespaces";
 export const DECLARED_HOSTS_KEY = "declared-hosts";
+export const ROUTES_CHANNEL = "routes:invalidate";
+export const ROUTES_FLUSH_CHANNEL = "routes:flush";
+export const PATTERNS_CHANNEL = "patterns:invalidate";
 const HOSTS_PREFIX = "hosts:";
 const NS_HOSTS_PREFIX = "ns-hosts:";
 const HOST_DECLARATIONS_PREFIX = "host-declarations:";
@@ -104,6 +107,15 @@ export function workerVersionsKey(ns, worker) {
 /** @param {string} ns @param {string} worker */
 export function doStorageIdKey(ns, worker) {
   return `worker:do-storage:${ns}:${worker}`;
+}
+
+// DO runtime owns the records; Control uses the storage-scoped pattern during
+// whole-worker cleanup. Keep both sides on the same encoded Redis prefix.
+export const DO_OWNER_SCOPE_PREFIX = "do:owner:scope:";
+
+/** @param {string} storageId */
+export function doOwnerScopeScanPatternForStorage(storageId) {
+  return `${DO_OWNER_SCOPE_PREFIX}${encodeURIComponent(`${storageId}:`)}*`;
 }
 
 // Per-worker lifecycle lock. Control owns acquisition/release; other tiers may

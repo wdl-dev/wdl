@@ -3,7 +3,6 @@ import { randomHex } from "shared-random-id";
 /**
  * @typedef {{ key: string, token: string }} TokenLock
  * @typedef {{ set(key: string, value: string, options: { nx?: boolean, ttl?: number, ifeq?: string }): Promise<unknown> }} TokenLockSetClient
- * @typedef {{ multi(): { set(key: string, value: string, options: { nx: true, ttl: number }): { exec(): Promise<unknown> } } }} TokenLockTransactionalClient
  * @typedef {{ delIfEq(key: string, value: string): Promise<unknown> }} TokenLockReleaseClient
  */
 
@@ -13,20 +12,11 @@ export function createTokenLock(key) {
 }
 
 /**
- * @param {TokenLockSetClient | TokenLockTransactionalClient} client
+ * @param {TokenLockSetClient} client
  * @param {TokenLock} lock
- * @param {{ ttlSeconds: number, transactional?: boolean }} options
+ * @param {{ ttlSeconds: number }} options
  */
-export async function acquireTokenLock(client, lock, { ttlSeconds, transactional = false }) {
-  if (transactional) {
-    if (!("multi" in client) || typeof client.multi !== "function") {
-      throw new TypeError("transactional token lock requires multi()");
-    }
-    const reply = await client.multi()
-      .set(lock.key, lock.token, { nx: true, ttl: ttlSeconds })
-      .exec();
-    return Array.isArray(reply) && reply[0] === "OK";
-  }
+export async function acquireTokenLock(client, lock, { ttlSeconds }) {
   if (!("set" in client) || typeof client.set !== "function") {
     throw new TypeError("token lock acquire requires set()");
   }

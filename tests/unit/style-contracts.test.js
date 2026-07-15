@@ -270,22 +270,6 @@ test("runtime workflow instance id grammar matches shared control grammar", () =
   );
 });
 
-test("runtime workflow dispatch identity grammar mirrors shared grammar", () => {
-  const shared = readRepoFile("shared/ns-pattern.js");
-  assert.equal(
-    extractRegex("runtime/lib.js", "ROUTE_NS_RE"),
-    `/^(?:${extractStringConst(shared, "NS_PATTERN")}|__system__)$/`
-  );
-  assert.deepEqual(
-    extractStringSetConst(readRepoFile("runtime/lib.js"), "RESERVED_TENANT_NS"),
-    extractStringSetConst(shared, "RESERVED_TENANT_NS")
-  );
-  assert.equal(
-    extractRegex("runtime/lib.js", "WORKER_NAME_RE"),
-    extractRegex("shared/ns-pattern.js", "WORKER_NAME_RE")
-  );
-});
-
 test("D1 object field setters stay shared across wire and transport codecs", () => {
   assert.match(readRepoFile("shared/d1-data-field.js"), /export function setDataField\(/);
   for (const file of ["shared/d1-query-wire.js", "shared/d1-transport.js"]) {
@@ -909,24 +893,6 @@ test("Redis command metric allow-list covers shared Redis wrappers", () => {
     [],
     `add to REDIS_COMMAND_LABELS in shared/observability.js: ${missing.join(", ")}`
   );
-});
-
-test("route invalidation channel literals stay aligned across control and gateway", () => {
-  const shared = withoutLineComments(readRepoFile("control/shared.js"));
-  const routing = withoutLineComments(readRepoFile("control/routing.js"));
-  const gateway = withoutLineComments(readRepoFile("gateway/runtime.js"));
-  const routesChannel = extractStringConst(shared, "ROUTES_CHANNEL");
-  const routesFlushChannel = extractStringConst(shared, "ROUTES_FLUSH_CHANNEL");
-  const patternsChannel = extractStringConst(shared, "PATTERNS_CHANNEL");
-
-  assert.equal(extractStringConst(routing, "ROUTES_CHANNEL"), routesChannel);
-  assert.equal(extractStringConst(routing, "PATTERNS_CHANNEL"), patternsChannel);
-  assert.match(
-    gateway,
-    new RegExp(`\\[\\s*"${RegExp.escape(routesChannel)}",\\s*"${RegExp.escape(routesFlushChannel)}",\\s*"${RegExp.escape(patternsChannel)}"\\s*\\]`)
-  );
-  assert.match(gateway, new RegExp(`channel === "${RegExp.escape(routesFlushChannel)}"`));
-  assert.match(gateway, new RegExp(`channel === "${RegExp.escape(patternsChannel)}"`));
 });
 
 test("declared-host Redis key literals stay aligned across control, gateway, and docs", () => {
@@ -2520,16 +2486,6 @@ test("internal binary protocol content-types stay centralized in transport const
 test("DO owner hints are trusted only from do-runtime headers", () => {
   const runtime = readRepoFile("runtime/_wdl-do-transport.js");
   const doRuntime = readRepoFile("do-runtime/index.js");
-  const match = runtime.match(
-    /export async function ownerHintFromResponse\(response\) \{[^]*?\n}\n\n(?:\/\*\*[^]*?\*\/\n)?export async function followOwnerHint/
-  );
-  assert.ok(match, "runtime DO transport must keep ownerHintFromResponse next to followOwnerHint");
-  const ownerHintFromResponse = match[0];
-
-  assert.match(ownerHintFromResponse, /const headers = responseHeaders\(response\)/);
-  assert.match(ownerHintFromResponse, /ownerHintFromHeaders\(headers\)/);
-  assert.doesNotMatch(ownerHintFromResponse, /response\.clone\(\)\.json\(\)/);
-  assert.doesNotMatch(ownerHintFromResponse, /\.json\(\)/);
 
   const wrapper = doRuntime.match(/function withOwnerHintHeaders\(response, owner\) \{[^]*?\n}\n\n/)?.[0] || "";
   assert.match(wrapper, /headers\.delete\(DO_OWNER_HINT_CONTROL_HEADER\)/);

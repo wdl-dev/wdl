@@ -38,6 +38,7 @@ Tenant-originated DO fetch body 在 runtime facade 中限制为 1 MiB。Facade �
 DO RPC method name 使用 JavaScript identifier grammar，并由 runtime client 和 do-runtime protocol reader 同时限制为最多 256 ASCII bytes。RPC 参数是最多 1 MiB 的 structural JSON data：接受 finite number、string、boolean、null、dense array 和 plain object。序列化不会调用 `toJSON()` hook；sparse array、circular structure、non-plain object 和 non-JSON value 会在 dispatch 前失败。
 do-runtime 会通过 generated wrapper 截获的私有 fetch dispatch 调用 tenant alarm 和 RPC method；这些 request 携带外层 request id，使 host facade 建立 invocation-local context，且不会把平台 metadata 加入 tenant argument list。
 DO invoke envelope 通过 canonical namespace、worker、version 和 storage id 标识 persisted bundle，不接受 inline worker source。
+Tenant-facing DO object name/id 必须是 well-formed Unicode string。`idFromName()` / `idFromString()` 会在 hash 或 dispatch 前拒绝 lone UTF-16 surrogate；do-runtime alarm ingress 和 Workflows revalidation 执行相同边界。
 DO host id 最多 512 UTF-8 bytes，并使用不带前导零的 canonical `shardN` suffix。
 
 ## Redis / Storage 合同

@@ -826,7 +826,7 @@ test("delegatedIssue: local lock budget is measured from lock acquisition", asyn
   });
 });
 
-test("delegatedIssue: releases issue lock when SET reply is lost after apply", async () => {
+test("delegatedIssue: leaves an uncertain applied lock for TTL expiry after a lost SET reply", async () => {
   const { auth } = await freshAuth();
   const issuer = await auth.issue({
     kind: "token-issuer",
@@ -836,22 +836,66 @@ test("delegatedIssue: releases issue lock when SET reply is lost after apply", a
   const state = authMockState();
   const lockKey = delegatedIssueLockKey(issuer.tokenId);
   let lostReplyInjected = false;
-  state.beforeMultiExec = (/** @type {unknown[][]} */ cmds) => {
-    if (lostReplyInjected) return;
-    const lockSet = cmds.find((cmd) => cmd[0] === "SET" && cmd[1] === lockKey);
-    if (!lockSet) return;
+  let nowMs = 1_750_000_000_000;
+  state.afterSetAppliedBeforeReply = (/** @type {string} */ key) => {
+    if (lostReplyInjected || key !== lockKey) return;
     lostReplyInjected = true;
-    state.strings.set(lockKey, lockSet[2]);
-    state.keyVersions.set(lockKey, (state.keyVersions.get(lockKey) || 0) + 1);
     throw new Error("lost delegated issue lock SET reply");
+  };
+
+  await withMockedProperty(Date, "now", () => nowMs, async () => {
+    await assert.rejects(
+      () => auth.delegatedIssue({ issuerTokenId: issuer.tokenId, template: "wdl-chat-ns-pool" }),
+      /lost delegated issue lock SET reply/
+    );
+    assert.equal(lostReplyInjected, true);
+    assert.equal(state.strings.has(lockKey), true);
+    assert.equal(state.expirations.get(lockKey), nowMs + 30_000);
+    assert.equal(state.commands.at(-1)?.command, "SET");
+    assert.equal(state.commands.at(-1)?.ok, false);
+    assert.equal(state.commands.some((/** @type {any} */ event) => event.command === "DELIFEQ"), false);
+
+    nowMs += 29_999;
+    await assert.rejects(
+      () => auth.delegatedIssue({ issuerTokenId: issuer.tokenId, template: "wdl-chat-ns-pool" }),
+      (err) => /** @type {any} */ (err).reason === "delegated_issue_busy"
+    );
+
+    nowMs += 2;
+    const issued = await auth.delegatedIssue({
+      issuerTokenId: issuer.tokenId,
+      template: "wdl-chat-ns-pool",
+    });
+    assert.equal(issued.kind, "ns");
+    assert.equal(state.strings.has(lockKey), false);
+    assert.equal(state.expirations.has(lockKey), false);
+  });
+});
+
+test("delegatedIssue: leaves its lock for TTL expiry when the final EXEC reply is lost", async () => {
+  const { auth } = await freshAuth();
+  const issuer = await auth.issue({
+    kind: "token-issuer",
+    issueTemplates: ["wdl-chat-ns-pool"],
+    issuerTokenId: "bootstrap",
+  });
+  const state = authMockState();
+  const lockKey = delegatedIssueLockKey(issuer.tokenId);
+  state.afterMultiExecAppliedBeforeReply = () => {
+    throw new Error("lost delegated issue EXEC reply");
   };
 
   await assert.rejects(
     () => auth.delegatedIssue({ issuerTokenId: issuer.tokenId, template: "wdl-chat-ns-pool" }),
-    /lost delegated issue lock SET reply/
+    /lost delegated issue EXEC reply/
   );
-  assert.equal(lostReplyInjected, true);
-  assert.equal(state.strings.has(lockKey), false);
+  const committed = [...state.hashes.values()].filter((/** @type {any} */ record) =>
+    record.created_by === issuer.tokenId && record.issue_template === "wdl-chat-ns-pool");
+  assert.equal(committed.length, 1);
+  assert.equal(state.strings.has(lockKey), true);
+  assert.equal(state.commands.at(-1)?.command, "MULTI_EXEC");
+  assert.equal(state.commands.at(-1)?.ok, false);
+  assert.equal(state.commands.some((/** @type {any} */ event) => event.command === "DELIFEQ"), false);
 });
 
 test("delegatedIssue: issue lock release failure warns without failing issued token", async () => {
@@ -915,6 +959,36 @@ test("delegatedIssue: issue lock WATCH prevents writing if the lock changes befo
     command: "MULTI_EXEC",
     duration_ms: 0,
   }]);
+  assert.equal(
+    [...state.hashes.values()].filter((/** @type {any} */ record) =>
+      record.created_by === issuer.tokenId && record.issue_template === "wdl-chat-ns-pool").length,
+    0
+  );
+});
+
+test("delegatedIssue: issuer revoke invalidates the final token write", async () => {
+  const { auth } = await freshAuth();
+  const issuer = await auth.issue({
+    kind: "token-issuer",
+    issueTemplates: ["wdl-chat-ns-pool"],
+    issuerTokenId: "bootstrap",
+  });
+  const state = authMockState();
+  const issuerKey = `auth:token:${issuer.tokenId}`;
+  let revoked = false;
+  state.beforeMultiExec = (/** @type {unknown[][]} */ cmds) => {
+    if (revoked || !cmds.some((cmd) => cmd[0] === "HSET" && cmd[1] !== issuerKey)) return;
+    revoked = true;
+    state.hashes.get(issuerKey).revoked_at = "2026-07-16T00:00:00.000Z";
+    state.keyVersions.set(issuerKey, (state.keyVersions.get(issuerKey) || 0) + 1);
+  };
+
+  await assert.rejects(
+    () => auth.delegatedIssue({ issuerTokenId: issuer.tokenId, template: "wdl-chat-ns-pool" }),
+    (err) => /** @type {any} */ (err).reason === "delegated_issue_busy"
+  );
+  assert.equal(revoked, true);
+  assert.equal(state.hashes.get(issuerKey).revoked_at, "2026-07-16T00:00:00.000Z");
   assert.equal(
     [...state.hashes.values()].filter((/** @type {any} */ record) =>
       record.created_by === issuer.tokenId && record.issue_template === "wdl-chat-ns-pool").length,

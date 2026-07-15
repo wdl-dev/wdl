@@ -1,0 +1,142 @@
+{
+  "maxBytes": 512,
+  "hostShardCount": 16,
+  "cases": [
+    {
+      "name": "canonical",
+      "doStorageId": "do_abc-123",
+      "className": "AlarmCounter",
+      "objectName": "alpha",
+      "token": "row-token",
+      "valid": true
+    },
+    {
+      "name": "empty-object-name",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": "",
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "empty-token",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": "alpha",
+      "token": "",
+      "valid": false
+    },
+    {
+      "name": "storage-id-grammar",
+      "doStorageId": "bad/storage",
+      "className": "AlarmCounter",
+      "objectName": "alpha",
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "class-name-grammar",
+      "doStorageId": "do_abc",
+      "className": "1Alarm",
+      "objectName": "alpha",
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "one-digit-shard-aggregate-max",
+      "doStorageId": { "repeat": "a", "count": 496 },
+      "className": "ChatRoom",
+      "objectName": "zero",
+      "token": "row-token",
+      "valid": true
+    },
+    {
+      "name": "one-digit-shard-aggregate-over-limit",
+      "doStorageId": { "repeat": "a", "count": 497 },
+      "className": "ChatRoom",
+      "objectName": "zero",
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "two-digit-shard-aggregate-max",
+      "doStorageId": { "repeat": "a", "count": 495 },
+      "className": "ChatRoom",
+      "objectName": "alpha",
+      "token": "row-token",
+      "valid": true
+    },
+    {
+      "name": "two-digit-shard-aggregate-over-limit",
+      "doStorageId": { "repeat": "a", "count": 496 },
+      "className": "ChatRoom",
+      "objectName": "alpha",
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "object-name-control-character",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": "bad\u000bname",
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "object-name-supplementary-scalar",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": "\ud83d\ude00",
+      "token": "row-token",
+      "valid": true
+    },
+    {
+      "name": "supplementary-scalar-two-digit-shard-over-limit",
+      "doStorageId": { "repeat": "a", "count": 496 },
+      "className": "ChatRoom",
+      "objectName": "\ud83d\ude80",
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "object-name-utf8-max",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": { "repeat": "\u00e9", "count": 256 },
+      "token": "row-token",
+      "valid": true
+    },
+    {
+      "name": "object-name-utf8-over-limit",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": { "repeat": "\u00e9", "count": 257 },
+      "token": "row-token",
+      "valid": false
+    },
+    {
+      "name": "token-control-character",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": "alpha",
+      "token": "bad\u000btoken",
+      "valid": false
+    },
+    {
+      "name": "token-utf8-max",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": "alpha",
+      "token": { "repeat": "\u00e9", "count": 256 },
+      "valid": true
+    },
+    {
+      "name": "token-utf8-over-limit",
+      "doStorageId": "do_abc",
+      "className": "AlarmCounter",
+      "objectName": "alpha",
+      "token": { "repeat": "\u00e9", "count": 257 },
+      "valid": false
+    }
+  ]
+}

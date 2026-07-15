@@ -47,8 +47,8 @@ export class FakeRedisWatchError extends Error {
 export function sharedRedisStubUrl(extraSource = "") {
   return moduleDataUrl(`
 import { FakeRedisWatchError as WatchError } from ${JSON.stringify(import.meta.url)};
-export { WatchError };
-export { decodeBulk } from ${JSON.stringify(SHARED_REDIS_RESP_URL)};
+import { decodeBulk } from ${JSON.stringify(SHARED_REDIS_RESP_URL)};
+export { WatchError, decodeBulk };
 ${extraSource}
 `);
 }

@@ -83,13 +83,14 @@ Key families：
 - Instance 冻结创建时的 worker version/class identity。
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。
 - Scheduler 也通过同一个 `/internal/workflows/tick` endpoint 唤醒 Workflows-owned internal DO alarm jobs；scheduler 不直接读写 DO alarm state。
-- Workflows 在持久化 DO alarm job 前拒绝 non-canonical worker version，在 dispatch 前重新校验持久化 alarm identity，并在把 active route 用作 retarget 前校验其 version。这些检查共用 `wdl-rust-common` owner。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
+- Workflows 在持久化 DO alarm job 前拒绝 non-canonical alarm identity，在 dispatch 前重新校验持久化 alarm identity，并在把 active route 用作 retarget 前校验其 version。其中 namespace、worker、version 校验复用 `wdl-rust-common`；do-runtime protocol grammar 与 identity helper 拥有 canonical alarm-specific field 和 aggregate 512-byte DO host-id 合同，Workflows 在持久化和 dispatch 前镜像并重新校验该合同。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
 - 32 个 scheduling shards 划分 ready/due work。
 - Ready token 是去重 hint；instance hash state 是权威状态。
 - Execution commit 同时用 `generation`、`runToken`、active instance status 和未过期 run lease fence。Step commit/register 接受同一 run 的 `running` 或 `waiting` 状态，因此一个并行 sibling 进入 retry/wait 后，另一个 sibling 仍可完成；completed runtime terminal 要求 `running`，failed runtime terminal 在 run lease 仍有效时也可以关闭由非法未 await suspending step 造成的同一 run `waiting` 状态。如果 lease 已过期，workflows 只恢复 ready hint，让下一次 claim 在新 lease 下 replay。Lifecycle commit 只用 generation fence，并在同一个 Lua commit 内 rotate `generation`。
 - Runtime replay cache 只是 advisory。DB 2 step state 是权威。
 - Runtime 可以并发发起多个 `step.do`，常见形式是 `Promise.all`；每次调用按用户代码调用顺序分配 deterministic ordinal，从当前已完成 step frontier 记录 DAG dependencies，并在 run fence 下独立 commit。`step.do` callback 不能启动另一个 workflow step，即使在 callback 的 `await` 之后也不允许；并行 sibling promise 应在 run body 中、callback 代码进入 in-flight 之前创建。如果 run 在已启动 step settle 前返回，会按 invalid run 失败，所以用户代码必须 await 并发 step promise。Suspending operation（`step.sleep`、`step.sleepUntil`、`step.waitForEvent`）仍保持互斥，不能和其它 in-flight step 重叠，因为它们会 suspend 整个 workflow run。
 - Termination 是显式 non-success terminal outcome，使用 error retention。
+- `Workflow.createBatch()` 每次调用最多接受 100 项；Runtime prevalidation 与 Rust admission 共享这项 pinned limit。
 - 单个 workflow result 的上限是 1 MiB，runtime-to-workflows backend JSON request 的上限是 2 MiB。Runtime prevalidation 和 Rust backend 共享 pinned `workflow_payload_too_large` contract。每个 instance 的 aggregate payload cap 是 16 MiB。Step/event 超 cap 写入会让请求失败；runtime terminal result 超 cap 会在同一事务内把 instance 转成 failed。
 - Workflows 语义 request cap 使用 `request_too_large`；它不同于 control/runtime 协议中的 HTTP-body parser `request_body_too_large`。除此之外，HTTP 边界上的 workflow error 使用平台 `{ error, message }` envelope。Client-facing proxy 应把 workflows 5xx 当作 backend/platform failure，不应依赖 response body 中的 raw backend diagnostic message。
 

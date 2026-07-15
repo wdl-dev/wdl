@@ -15,6 +15,7 @@ export const WORKFLOWS_INTERNAL_TIMEOUT_MS = 5_000;
  *   headers: () => HeadersInit,
  *   endpoint: string,
  *   body: unknown,
+ *   requestId?: string | null,
  *   log?: WorkflowClientLogger | null,
  *   logEvent: string,
  *   logFields?: Record<string, unknown>,
@@ -28,6 +29,7 @@ export async function postWorkflowsInternalRequest({
   headers,
   endpoint,
   body,
+  requestId = null,
   log = null,
   logEvent,
   logFields = {},
@@ -39,9 +41,13 @@ export async function postWorkflowsInternalRequest({
   }
 
   try {
+    const requestHeaders = new Headers(headers());
+    if (typeof requestId === "string" && requestId) {
+      requestHeaders.set("x-request-id", requestId);
+    }
     const response = await workflows.fetch(`http://workflows/internal/${endpoint}`, {
       method: "POST",
-      headers: headers(),
+      headers: requestHeaders,
       body: JSON.stringify(body),
       ...(timeoutMs === null ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
     });
@@ -52,6 +58,7 @@ export async function postWorkflowsInternalRequest({
   } catch (err) {
     log?.("error", logEvent, {
       ...logFields,
+      ...(typeof requestId === "string" && requestId ? { request_id: requestId } : {}),
       error_message: errorMessage(err),
     });
     throw makeError("request_failed");
@@ -70,6 +77,7 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
    * @param {{
    *   endpoint: string,
    *   body: unknown,
+   *   requestId?: string | null,
    *   logEvent: string,
    *   logFields?: Record<string, unknown>,
    *   errorDetails?: Record<string, unknown>,
@@ -81,6 +89,7 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
   return async function postWorkflowsInternal({
     endpoint,
     body,
+    requestId = null,
     logEvent,
     logFields = {},
     errorDetails = {},
@@ -93,6 +102,7 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
       headers,
       endpoint,
       body,
+      requestId,
       log: getLog(),
       logEvent,
       logFields,

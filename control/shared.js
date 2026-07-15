@@ -15,6 +15,9 @@ import {
   DECLARED_HOSTS_KEY,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
+  PATTERNS_CHANNEL,
+  ROUTES_CHANNEL,
+  ROUTES_FLUSH_CHANNEL,
   deleteLockKey,
   formatDeleteLockToken,
   hostDeclarationsKey,
@@ -55,9 +58,7 @@ import {
   renewTokenLock,
 } from "shared-redis-lock";
 
-export const ROUTES_CHANNEL = "routes:invalidate";
-export const ROUTES_FLUSH_CHANNEL = "routes:flush";
-export const PATTERNS_CHANNEL = "patterns:invalidate";
+export { PATTERNS_CHANNEL, ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL };
 
 /**
  * @typedef {import("shared-observability").RedisCommandEvent} RedisCommandEvent
@@ -542,9 +543,9 @@ export async function recordCleanupIntentOrWarn({
 }
 
 /**
- * @param {{ ns: string, worker: string, version?: string, allowCleanup?: boolean }} args
+ * @param {{ ns: string, worker: string, version?: string, allowCleanup?: boolean, requestId?: string | null }} args
  */
-export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefined, allowCleanup = false }) {
+export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefined, allowCleanup = false, requestId = null }) {
   const context = {
     namespace: ns,
     worker,
@@ -558,6 +559,7 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
       ...(version ? { version } : {}),
       ...(allowCleanup ? { allowCleanup: true } : {}),
     },
+    requestId,
     logEvent: "workflow_lifecycle_check_failed",
     logFields: context,
     errorDetails: context,
@@ -595,13 +597,14 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
 }
 
 /**
- * @param {{ ns: string, worker: string, doStorageId: string }} args
+ * @param {{ ns: string, worker: string, doStorageId: string, requestId?: string | null }} args
  */
-export async function cleanupDoAlarmsForWorker({ ns, worker, doStorageId }) {
+export async function cleanupDoAlarmsForWorker({ ns, worker, doStorageId, requestId = null }) {
   const context = { namespace: ns, worker };
   const { response, body } = await postWorkflowsInternal({
     endpoint: "workflows/do-alarms/cleanup-worker",
     body: { ns, worker, doStorageId },
+    requestId,
     logEvent: "workflow_do_alarm_cleanup_failed",
     logFields: context,
     errorDetails: context,

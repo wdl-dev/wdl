@@ -3,6 +3,7 @@ import { beforeEach, test } from "node:test";
 
 import { doProtocolDataUrl } from "../helpers/load-do-protocol.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
+import { readJsonResponse } from "../helpers/response-json.js";
 import {
   importSpecifierReplacements,
   moduleDataUrl,
@@ -255,6 +256,80 @@ test("do-runtime alarm dispatch endpoint invokes the local alarm shim path", asy
   const hostFetches = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches);
   const [fetchCall] = hostFetches;
   assert.equal(fetchCall.input.url, "https://do-runtime.internal/invoke");
+});
+
+test("do-runtime alarm dispatch delegates object identity validation", async () => {
+  const hostFetches = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches);
+  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      ns: "tenant",
+      worker: "alarms",
+      version: "v7",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+      objectName: "\ud800",
+      retryCount: 0,
+      token: "row-token",
+    }),
+  }), env());
+
+  const body = await readJsonResponse(response, 400, "unpaired surrogate objectName");
+  assert.equal(body.error, "invalid_request");
+  assert.equal(hostFetches.length, 0);
+});
+
+test("do-runtime alarm dispatch requires retryCount and token before dispatch", async () => {
+  const hostFetches = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches);
+  const validBody = {
+    ns: "tenant",
+    worker: "alarms",
+    version: "v7",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+    objectName: "alice",
+    retryCount: 0,
+    token: "row-token",
+  };
+  for (const { label, field, value } of [
+    { label: "missing retryCount", field: "retryCount", value: undefined },
+    { label: "null retryCount", field: "retryCount", value: null },
+    { label: "missing token", field: "token", value: undefined },
+    { label: "null token", field: "token", value: null },
+  ]) {
+    const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...validBody, [field]: value }),
+    }), env());
+
+    const body = await readJsonResponse(response, 400, label);
+    assert.equal(body.error, "invalid_request", label);
+    assert.equal(hostFetches.length, 0, label);
+  }
+});
+
+test("do-runtime alarm dispatch delegates retryCount validation before dispatch", async () => {
+  const hostFetches = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches);
+  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      ns: "tenant",
+      worker: "alarms",
+      version: "v7",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+      objectName: "alice",
+      retryCount: "2",
+      token: "row-token",
+    }),
+  }), env());
+
+  const body = await readJsonResponse(response, 400, "non-number retryCount");
+  assert.equal(body.error, "invalid_request");
+  assert.equal(hostFetches.length, 0);
 });
 
 test("do-runtime alarm dispatch rejects non-canonical versions from the shared fixture", async () => {

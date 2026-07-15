@@ -11,7 +11,15 @@ import {
   recordRedisCommand,
 } from "shared-observability";
 import { isValidRouteNs } from "shared-ns-pattern";
-import { DECLARED_HOSTS_KEY, NAMESPACES_KEY, patternsKey, routesKey } from "shared-version";
+import {
+  DECLARED_HOSTS_KEY,
+  NAMESPACES_KEY,
+  PATTERNS_CHANNEL,
+  ROUTES_CHANNEL,
+  ROUTES_FLUSH_CHANNEL,
+  patternsKey,
+  routesKey,
+} from "shared-version";
 import { isCanonicalPatternHost, sortPatterns } from "gateway-lib";
 
 /** @type {Set<string> | null} */
@@ -147,7 +155,7 @@ export function ensureGatewaySubscriber(redisAddr) {
   if (subscriber) return null;
   subscriber = new RedisSubscriber(
     redisAddr,
-    ["routes:invalidate", "routes:flush", "patterns:invalidate"],
+    [ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, PATTERNS_CHANNEL],
     {
       onConnect: () => {
         subscriberConnected = 1;
@@ -171,7 +179,7 @@ export function ensureGatewaySubscriber(redisAddr) {
       },
       onMessage: (channel, payload) => {
         const value = utf8Decoder.decode(payload);
-        if (channel === "patterns:invalidate") {
+        if (channel === PATTERNS_CHANNEL) {
           if (value === "*") {
             clearPatternState();
           } else if (isCanonicalPatternHost(value)) {
@@ -191,14 +199,14 @@ export function ensureGatewaySubscriber(redisAddr) {
           log("info", "patterns_invalidated", { host: value });
           return;
         }
-        if (channel === "routes:flush") {
+        if (channel === ROUTES_FLUSH_CHANNEL) {
           clearRouteState();
           metrics.increment("subscriber_invalidations", { service: "gateway", scope: "all" });
           log("info", "routes_invalidated_all", {});
           return;
         }
-        // routes:invalidate owns routeCache + knownNs only; the patterns cache
-        // is invalidated exclusively via patterns:invalidate so channel
+        // The route channel owns routeCache + knownNs only; the patterns cache
+        // is invalidated exclusively via the pattern channel so channel
         // semantics stay orthogonal.
         if (!isValidRouteNs(value)) {
           log("warn", "routes_invalidation_ignored", {

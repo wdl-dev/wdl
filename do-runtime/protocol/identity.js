@@ -9,6 +9,14 @@ import { DoRuntimeError } from "do-runtime-protocol-errors";
 import { fnv1a32Utf8 } from "shared-fnv1a32";
 
 const utf8Encoder = new TextEncoder();
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicStringIsWellFormed = String.prototype.isWellFormed;
+
+/** @param {unknown} value */
+export function isWellFormedUnicodeString(value) {
+  return typeof value === "string" &&
+    intrinsicReflectApply(intrinsicStringIsWellFormed, value, []);
+}
 
 /** @param {string} value */
 function byteLength(value) {
@@ -18,11 +26,14 @@ function byteLength(value) {
 /**
  * @param {unknown} value
  * @param {string} field
- * @param {RegExp} pattern
+ * @param {RegExp | null} pattern
  */
 function requireIdentityString(value, field, pattern) {
   if (typeof value !== "string" || value.length === 0) {
     throw new DoRuntimeError(400, "invalid_request", `${field} must be a non-empty string`);
+  }
+  if (!isWellFormedUnicodeString(value)) {
+    throw new DoRuntimeError(400, "invalid_request", `${field} must contain well-formed Unicode`);
   }
   if (byteLength(value) > MAX_ID_BYTES) {
     throw new DoRuntimeError(400, "invalid_request", `${field} is too large`);
@@ -33,7 +44,7 @@ function requireIdentityString(value, field, pattern) {
       throw new DoRuntimeError(400, "invalid_request", `${field} must not contain control characters`);
     }
   }
-  if (!pattern.test(value)) {
+  if (pattern && !pattern.test(value)) {
     throw new DoRuntimeError(400, "invalid_request", `${field} is not valid`);
   }
 }
@@ -43,11 +54,12 @@ function requireIdentityString(value, field, pattern) {
  * @param {number} [shardCount]
  */
 export function shardForObjectName(objectName, shardCount = DO_HOST_SHARD_COUNT) {
+  requireIdentityString(objectName, "objectName", null);
   const count = Number(shardCount);
   if (!Number.isInteger(count) || count <= 0) {
     throw new DoRuntimeError(500, "invalid_shard_count", "DO host shard count must be a positive integer");
   }
-  return fnv1a32Utf8(String(objectName)) % count;
+  return fnv1a32Utf8(objectName) % count;
 }
 
 /**

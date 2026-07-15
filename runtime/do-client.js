@@ -17,10 +17,27 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
 const ownerHintCache = createOwnerHintCache();
 const intrinsicObjectHasOwn = Object.hasOwn;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicStringIsWellFormed = String.prototype.isWellFormed;
 
 /** @param {object} object @param {PropertyKey} key */
 function objectHasOwn(object, key) {
   return intrinsicReflectApply(intrinsicObjectHasOwn, undefined, [object, key]);
+}
+
+/** @param {string} value */
+function isWellFormedUnicodeString(value) {
+  return intrinsicReflectApply(intrinsicStringIsWellFormed, value, []);
+}
+
+/** @param {unknown} value @param {string} method */
+function requireObjectIdString(value, method) {
+  if (typeof value !== "string" || !value) {
+    throw new TypeError(`DurableObjectNamespace.${method}() requires a non-empty string`);
+  }
+  if (!isWellFormedUnicodeString(value)) {
+    throw new TypeError(`DurableObjectNamespace.${method}() requires well-formed Unicode`);
+  }
+  return value;
 }
 
 /**
@@ -276,18 +293,12 @@ export class DurableObjectNamespace {
 
   /** @param {string} name */
   idFromName(name) {
-    if (typeof name !== "string" || !name) {
-      throw new TypeError("DurableObjectNamespace.idFromName() requires a non-empty string");
-    }
-    return new DurableObjectId(name);
+    return new DurableObjectId(requireObjectIdString(name, "idFromName"));
   }
 
   /** @param {string} value */
   idFromString(value) {
-    if (typeof value !== "string" || !value) {
-      throw new TypeError("DurableObjectNamespace.idFromString() requires a non-empty string");
-    }
-    return new DurableObjectId(value);
+    return new DurableObjectId(requireObjectIdString(value, "idFromString"));
   }
 
   newUniqueId() {

@@ -59,7 +59,7 @@ are outside this map unless they own runtime or deployable service behavior.
 |---|---|
 | `shared/redis.js`, `shared/redis-*.js` | Public Redis import surface plus split RESP codec, per-call client, WATCH/MULTI session, and subscriber loop modules. Runtime hot paths prefer the Rust redis-proxy sidecar. |
 | `shared/redis-lock.js` | Token-fenced Redis lock creation, acquire, renewal, and best-effort token-scoped release shared by Control and Auth. |
-| `shared/optimistic-retry.js` | Generic bounded optimistic retry loop used by Control and the D1/DO owner-lease adapters. |
+| `shared/optimistic-retry.js` | Generic bounded optimistic retry loop used by Control, Auth, and the D1/DO owner-lease adapters. |
 | `shared/owner-endpoint.js`, `shared/owner-lease.js`, `shared/owner-protocol.js`, `shared/owner-forwarder.js` | Shared owner endpoint grammar, lease parsing, generation counters, key derivation, fence matching, staged Redis owner writes, and authenticated forwarding mechanics used by Control and the D1/DO runtimes. |
 | `shared/auth-roles.js` | Role table, principal validation, reserved namespace policy, and auth action capabilities. |
 | `shared/auth-token.js` | Shared `x-admin-token` sanitizer used by control and auth. |
@@ -71,7 +71,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | Platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
-| `shared/version.js` | Worker version formatting plus worker, route-plane, and lifecycle Redis key helpers. |
+| `shared/version.js` | Worker version formatting plus worker, route-plane, lifecycle, DO owner-scope key, and route-invalidation channel helpers. |
 | `shared/workerd-compat-flags.js` | Pinned mirror of upstream workerd experimental compatibility enable flags used to reject tenant metadata before cold-load. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |

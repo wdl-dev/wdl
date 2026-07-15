@@ -8,7 +8,11 @@ import {
   MAX_ID_BYTES,
 } from "do-runtime-protocol-wire-grammar";
 import { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
-import { hostIdForObject, shardForObjectName } from "do-runtime-protocol-identity";
+import {
+  hostIdForObject,
+  isWellFormedUnicodeString,
+  shardForObjectName,
+} from "do-runtime-protocol-identity";
 import { formatWorkerId } from "shared-worker-id";
 import {
   BodyTooLargeError,
@@ -21,7 +25,12 @@ import { parseVersion } from "shared-version";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
-export { hostIdForObject, hostIdForShard, shardForObjectName } from "do-runtime-protocol-identity";
+export {
+  hostIdForObject,
+  hostIdForShard,
+  isWellFormedUnicodeString,
+  shardForObjectName,
+} from "do-runtime-protocol-identity";
 
 export const DO_OWNERSHIP_CODE = Object.freeze({
   OWNER_CLAIM_RACED: "owner_claim_raced",
@@ -199,6 +208,9 @@ function requireRecord(value, field) {
 function requireString(value, field, { maxBytes = MAX_ID_BYTES, pattern = null } = {}) {
   if (typeof value !== "string" || value.length === 0) {
     throw new DoRuntimeError(400, "invalid_request", `${field} must be a non-empty string`);
+  }
+  if (!isWellFormedUnicodeString(value)) {
+    throw new DoRuntimeError(400, "invalid_request", `${field} must contain well-formed Unicode`);
   }
   if (byteLength(value) > maxBytes) {
     throw new DoRuntimeError(400, "invalid_request", `${field} is too large`);
@@ -395,8 +407,12 @@ function normalizeInvokeKind(value) {
  */
 function normalizeAlarmInfo(value) {
   const input = value == null ? {} : requireRecord(value, "alarm");
-  const retryCount = input.retryCount == null ? 0 : Number(input.retryCount);
-  if (!Number.isInteger(retryCount) || retryCount < 0) {
+  const retryCount = input.retryCount == null ? 0 : input.retryCount;
+  if (
+    typeof retryCount !== "number" ||
+    !Number.isInteger(retryCount) ||
+    retryCount < 0
+  ) {
     throw new DoRuntimeError(400, "invalid_request", "alarm.retryCount must be a non-negative integer");
   }
   const token = input.token == null ? undefined : requireString(input.token, "alarm.token");

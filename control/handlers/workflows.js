@@ -483,9 +483,9 @@ async function callWorkflowsRust(endpoint, body) {
   const { response, body: parsed } = await postWorkflowsInternal({
     endpoint: `workflows/${endpoint}`,
     body,
+    requestId: body.requestId || null,
     logEvent: "workflow_backend_request_failed",
     logFields: {
-      request_id: body.requestId || null,
       endpoint,
     },
     timeoutMs: null,

@@ -3,13 +3,18 @@ import assert from "node:assert/strict";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   DECLARED_HOSTS_KEY,
+  DO_OWNER_SCOPE_PREFIX,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
   NAMESPACES_KEY,
+  PATTERNS_CHANNEL,
+  ROUTES_CHANNEL,
+  ROUTES_FLUSH_CHANNEL,
   VERSION_DELETE_LOCK_KIND,
   WHOLE_DELETE_LOCK_KIND,
   bundleKey,
   deleteLockKey,
+  doOwnerScopeScanPatternForStorage,
   doStorageIdKey,
   formatDeleteLockToken,
   formatVersion,
@@ -82,6 +87,9 @@ test("route-plane registry key helpers compose and parse canonical keys", () => 
   assert.equal(namespaceFromHostsKey("routes:demo"), "");
   assert.equal(nsHostsKey("demo"), "ns-hosts:demo");
   assert.equal(hostDeclarationsKey("app.example"), "host-declarations:app.example");
+  assert.equal(ROUTES_CHANNEL, "routes:invalidate");
+  assert.equal(ROUTES_FLUSH_CHANNEL, "routes:flush");
+  assert.equal(PATTERNS_CHANNEL, "patterns:invalidate");
 });
 
 test("nextVersionKey composes the worker version counter key", () => {
@@ -90,6 +98,11 @@ test("nextVersionKey composes the worker version counter key", () => {
 
 test("worker lifecycle key helpers compose canonical keys", () => {
   assert.equal(doStorageIdKey("demo", "hello"), "worker:do-storage:demo:hello");
+  assert.equal(DO_OWNER_SCOPE_PREFIX, "do:owner:scope:");
+  assert.equal(
+    doOwnerScopeScanPatternForStorage("do_abc"),
+    "do:owner:scope:do_abc%3A*"
+  );
   assert.equal(deleteLockKey("demo", "hello"), "worker-delete-lock:demo:hello");
 });
 

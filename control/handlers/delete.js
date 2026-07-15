@@ -240,7 +240,7 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
         onExhausted: () => throwWholeDeleteContention(ns, name),
       }
     );
-    await assertWorkflowDeleteAllowed({ ns, worker: name });
+    await assertWorkflowDeleteAllowed({ ns, worker: name, requestId });
   } catch (err) {
     if (err instanceof WholeDeleteError) {
       log(err.status >= 500 ? "error" : "warn", "worker_dry_run_rejected", {
@@ -330,7 +330,7 @@ async function executeWholeDelete({ redis, ns, name, principal, requestId, log, 
     assertActiveVersionRetained(collected);
     let workflowBlocker = null;
     try {
-      await assertWorkflowDeleteAllowed({ ns, worker: name, allowCleanup: true });
+      await assertWorkflowDeleteAllowed({ ns, worker: name, allowCleanup: true, requestId });
     } catch (err) {
       if (err instanceof ControlAbort && err.code === "workflow_instances_active") {
         workflowBlocker = err;
@@ -534,7 +534,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
 async function cleanupDoAlarmsOrWarn({ ns, worker, doStorageId, requestId, log }) {
   if (!doStorageId) return;
   try {
-    await cleanupDoAlarmsForWorker({ ns, worker, doStorageId });
+    await cleanupDoAlarmsForWorker({ ns, worker, doStorageId, requestId });
   } catch (err) {
     log("warn", "worker_do_alarm_cleanup_failed", {
       request_id: requestId,

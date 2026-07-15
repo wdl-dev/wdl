@@ -38,3 +38,26 @@ test("control shared stub enforces streamed request limits through shared bounde
   await readJsonResponse(result.response, 413);
   assert.equal(canceled, true);
 });
+
+test("control shared stub matches production internal-auth header validation", async () => {
+  const missing = await import(controlSharedStubUrl("export const state = { env: {} };"));
+  assert.throws(
+    () => missing.controlInternalJsonHeaders(),
+    /WDL_INTERNAL_AUTH_TOKEN must be configured/,
+  );
+
+  const invalid = await import(controlSharedStubUrl(`
+    export const state = { env: { WDL_INTERNAL_AUTH_TOKEN: "bad token" } };
+  `));
+  assert.throws(
+    () => invalid.controlInternalJsonHeaders(),
+    /visible ASCII without whitespace or commas/,
+  );
+
+  const valid = await import(controlSharedStubUrl(`
+    export const state = { env: { WDL_INTERNAL_AUTH_TOKEN: "test-token" } };
+  `));
+  const headers = valid.controlInternalJsonHeaders();
+  assert.equal(headers.get("content-type"), "application/json");
+  assert.equal(headers.get("x-wdl-internal-auth"), "test-token");
+});

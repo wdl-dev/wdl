@@ -148,16 +148,26 @@ async function releaseDelegatedIssueLock(session, lock, runtime, requestId) {
 
 /**
  * @param {import("shared-redis").RedisSession} session
- * @param {string} key
- * @param {string} token
+ * @param {{ key: string, token: string }} lock
+ * @param {ReturnType<typeof bindAuthRuntime>} runtime
+ * @param {string} issuerTokenId
+ * @param {string} templateId
  */
-async function watchDelegatedIssueLockHeld(session, key, token) {
-  await session.watch(key);
-  const current = await session.get(key);
-  if (current !== token) {
+async function watchDelegatedIssuePrerequisites(
+  session,
+  lock,
+  runtime,
+  issuerTokenId,
+  templateId,
+) {
+  await session.watch(lock.key, tokenKey(issuerTokenId));
+  const current = await session.get(lock.key);
+  if (current !== lock.token) {
     throw new AuthPolicyError(409, "delegated_issue_busy",
       "delegated issue lock expired before the token could be issued; retry");
   }
+  const issuer = await runtime.readRecord(session, issuerTokenId);
+  validateIssuerForDelegatedIssue(issuer, templateId);
 }
 
 /** @param {number} lockAttemptStartedAtMs */
@@ -477,20 +487,23 @@ export default class Auth extends WorkerEntrypoint {
       const lockKey = delegatedIssueLockKey(issuerTokenId, templateId);
       const issueLock = createTokenLock(lockKey);
       const lockAttemptStartedAtMs = Date.now();
+      let locked;
       try {
-        const locked = await acquireTokenLock(session, issueLock, {
+        locked = await acquireTokenLock(session, issueLock, {
           ttlSeconds: DELEGATED_ISSUE_LOCK_TTL_SECONDS,
-          transactional: true,
         });
-        if (!locked) {
-          throw new AuthPolicyError(409, "delegated_issue_busy",
-            "delegated issue is already in progress");
-        }
       } catch (err) {
-        await releaseDelegatedIssueLock(session, issueLock, runtime, requestId);
+        // A failed SET reply has an unknown server-side outcome and leaves this
+        // RESP session untrustworthy. The lock TTL is the recovery path.
         return runtime.rethrowPolicy(requestId, "delegated_issue", err);
       }
+      if (!locked) {
+        return runtime.rethrowPolicy(requestId, "delegated_issue",
+          new AuthPolicyError(409, "delegated_issue_busy",
+            "delegated issue is already in progress"));
+      }
 
+      let canReleaseIssueLock = true;
       try {
         const nowMs = Date.now();
         const tokenRecords = await scanTokenRecords(runtime, session);
@@ -505,7 +518,13 @@ export default class Auth extends WorkerEntrypoint {
         }
         const namespaceChoice = await chooseDelegatedNamespace(session, tokenRecords, template);
         assertDelegatedIssueLockLocalBudget(lockAttemptStartedAtMs);
-        await watchDelegatedIssueLockHeld(session, issueLock.key, issueLock.token);
+        await watchDelegatedIssuePrerequisites(
+          session,
+          issueLock,
+          runtime,
+          issuerTokenId,
+          templateId,
+        );
         const tokenId = generateTokenId();
         const { ns, label } = namespaceChoice;
         const expiresAt = new Date(nowMs + template.ttlSeconds * 1000).toISOString();
@@ -534,6 +553,10 @@ export default class Auth extends WorkerEntrypoint {
             throw new AuthPolicyError(409, "delegated_issue_busy",
               "delegated issue lock changed before the token could be issued; retry");
           }
+          // Any other EXEC failure has an unknown transaction outcome. Keep
+          // the lock and let its TTL bound recovery rather than retrying an
+          // issuance that may already have committed.
+          canReleaseIssueLock = false;
           throw err;
         }
         runtime.recordLifecycleOk("delegated_issue", requestId, {
@@ -557,7 +580,9 @@ export default class Auth extends WorkerEntrypoint {
       } catch (err) {
         return runtime.rethrowPolicy(requestId, "delegated_issue", err);
       } finally {
-        await releaseDelegatedIssueLock(session, issueLock, runtime, requestId);
+        if (canReleaseIssueLock) {
+          await releaseDelegatedIssueLock(session, issueLock, runtime, requestId);
+        }
       }
     });
   }

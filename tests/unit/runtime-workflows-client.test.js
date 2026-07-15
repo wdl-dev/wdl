@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { Workflow } from "../../runtime/workflows-client.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
+
+const workflowLimits = /** @type {{ createBatchMax: number }} */ (
+  readRepositoryJson("tests/fixtures/workflow-limits.json")
+);
 
 /**
  * @param {Record<string, unknown>} [runtimeOptions]
@@ -65,6 +70,7 @@ test("Workflow.create preserves runtime metadata from params override", async ()
   assert.equal(fetchCalls, 1);
   assert.equal(capturedUrl, "http://workflows/internal/workflows/create");
   assert.equal(capturedInit?.method, "POST");
+  assert.equal(new Headers(capturedInit?.headers).get("x-request-id"), "runtime-request");
   assert.equal(typeof capturedInit?.body, "string");
   assert.deepEqual(capturedRequestBody, {
     ns: "tenant-a",
@@ -227,6 +233,16 @@ test("Workflow.create supports omitted requestId in context", async () => {
   assert.equal(created.id, "inst-3");
   assert.ok(capturedBody, "workflow backend request body should be captured");
   assert.equal(capturedBody.requestId, null);
+});
+
+test("Workflow.createBatch limit matches the cross-language fixture", async () => {
+  const workflow = createWorkflowForTest();
+  await assert.rejects(
+    () => workflow.createBatch(Array.from({ length: workflowLimits.createBatchMax + 1 }, (_, index) => ({
+      id: `inst-${index}`,
+    }))),
+    new RegExp(`exceeds ${workflowLimits.createBatchMax} item limit`),
+  );
 });
 
 test("Workflow.createBatch accepts backend-skipped ids", async () => {

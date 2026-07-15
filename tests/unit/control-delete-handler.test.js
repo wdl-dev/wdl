@@ -15,11 +15,14 @@ import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 const { libUrl: productionControlLibUrl, lifecycleIndexesUrl } = await compileControlGraph();
+const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 
 const controlSharedExtraSource = `
-export const ROUTES_CHANNEL = "routes:invalidate";
-export const ROUTES_FLUSH_CHANNEL = "routes:flush";
-export const PATTERNS_CHANNEL = "patterns:invalidate";
+export {
+  PATTERNS_CHANNEL,
+  ROUTES_CHANNEL,
+  ROUTES_FLUSH_CHANNEL,
+} from ${JSON.stringify(sharedVersionUrl)};
 export async function acquireDeleteLock(_redis, _ns, _worker, kind) {
   /** @type {any} */ (globalThis).__deleteHandlerState.lockKinds.push(kind);
   return "lock-token";
@@ -89,8 +92,6 @@ export function extractD1Refs() { return []; }
 export function extractOutgoingRefs() { return []; }
 export function formatReferrerBlocker(members) { return { referrers: members }; }
 `);
-
-const sharedVersionUrl = repositoryFileUrl("shared/version.js");
 
 const sharedSecretKeysUrl = repositoryFileUrl("shared/secret-keys.js");
 
@@ -539,8 +540,12 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, true);
   assert.deepEqual(testState.lockKinds, ["whole"]);
-  assert.deepEqual(testState.workflowChecks, [{ ns: "demo", worker: "api", allowCleanup: true }]);
-  assert.deepEqual(testState.doAlarmCleanups, [{ ns: "demo", worker: "api", doStorageId: "do_old" }]);
+  assert.deepEqual(testState.workflowChecks, [{
+    ns: "demo", worker: "api", allowCleanup: true, requestId: "rid-delete",
+  }]);
+  assert.deepEqual(testState.doAlarmCleanups, [{
+    ns: "demo", worker: "api", doStorageId: "do_old", requestId: "rid-delete",
+  }]);
   assert.equal(body.assets.queueHint, "failed");
   assert.deepEqual(body.assets.warnings, [{
     code: "cleanup_queue_failed",
@@ -1043,7 +1048,9 @@ test("worker delete dry-run includes workflow lifecycle blockers", async () => {
   delete /** @type {any} */ (globalThis).__deleteHandlerWorkflowBlocker;
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, false);
-  assert.deepEqual(testState.workflowChecks, [{ ns: "demo", worker: "api" }]);
+  assert.deepEqual(testState.workflowChecks, [{
+    ns: "demo", worker: "api", requestId: "rid-dry-run-workflows",
+  }]);
   assert.deepEqual(body.workflowBlocker, {
     error: "workflow_instances_active",
     message: "demo/api has active workflow instances",
@@ -1126,6 +1133,7 @@ test("worker delete reports workflow and version referrer blockers together", as
       ns: "demo",
       worker: "api",
       allowCleanup: true,
+      requestId: "rid-delete-both-blockers",
     }]);
     assert.deepEqual(testState.doAlarmCleanups, []);
     assert.equal(testState.releaseCalls, 1);
@@ -1165,6 +1173,7 @@ test("worker delete keeps DO alarm jobs when version referrers block deletion", 
     ns: "demo",
     worker: "api",
     allowCleanup: true,
+    requestId: "rid-delete-version-blocker",
   }]);
   assert.deepEqual(testState.doAlarmCleanups, []);
   assert.equal(testState.multiCalls.length, 0);
@@ -1186,7 +1195,12 @@ test("worker delete logs post-commit DO alarm cleanup failure without rolling ba
 
     const body = await readJsonResponse(response, 200);
     assert.equal(body.deleted, true);
-    assert.deepEqual(testState.doAlarmCleanups, [{ ns: "demo", worker: "api", doStorageId: "do_old" }]);
+    assert.deepEqual(testState.doAlarmCleanups, [{
+      ns: "demo",
+      worker: "api",
+      doStorageId: "do_old",
+      requestId: "rid-delete-alarm-cleanup-failed",
+    }]);
     assert.ok(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"));
     assert.ok(testState.logs.some((/** @type {any} */ entry) =>
       entry.level === "warn" &&
@@ -1233,6 +1247,7 @@ test("worker delete keeps workflow blocker even when worker lifecycle is already
       ns: "demo",
       worker: "api",
       allowCleanup: true,
+      requestId: "rid-delete-workflow-no-lifecycle",
     }]);
     assert.equal(testState.releaseCalls, 1);
     assert.deepEqual(testState.cleanupIntents, []);
@@ -1261,7 +1276,12 @@ test("worker delete retry compensates DO alarm cleanup when stale storage pointe
 
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, false);
-  assert.deepEqual(testState.doAlarmCleanups, [{ ns: "demo", worker: "api", doStorageId: "do_old" }]);
+  assert.deepEqual(testState.doAlarmCleanups, [{
+    ns: "demo",
+    worker: "api",
+    doStorageId: "do_old",
+    requestId: "rid-delete-noop-alarm-cleanup",
+  }]);
   assert.deepEqual(testState.multiCalls, [
     ["DEL", "worker:do-storage:demo:api"],
     ["EXEC"],
@@ -1330,8 +1350,12 @@ test("worker delete reports queueHint none when no content cleanup is needed", a
 
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, true);
-  assert.deepEqual(testState.workflowChecks, [{ ns: "demo", worker: "api", allowCleanup: true }]);
-  assert.deepEqual(testState.doAlarmCleanups, [{ ns: "demo", worker: "api", doStorageId: "do_old" }]);
+  assert.deepEqual(testState.workflowChecks, [{
+    ns: "demo", worker: "api", allowCleanup: true, requestId: "rid-delete-no-cleanup",
+  }]);
+  assert.deepEqual(testState.doAlarmCleanups, [{
+    ns: "demo", worker: "api", doStorageId: "do_old", requestId: "rid-delete-no-cleanup",
+  }]);
   assert.equal(body.assets.queueHint, "none");
   assert.deepEqual(body.assets.warnings, []);
   assert.deepEqual(testState.cleanupIntents, []);
@@ -1363,6 +1387,7 @@ test("version delete reports cleanup_queue_failed when data-plane cleanup enqueu
     worker: "api",
     version: "v1",
     allowCleanup: true,
+    requestId: "rid-version-delete",
   }]);
   assert.equal(body.assets.queueHint, "failed");
   assert.deepEqual(body.assets.warnings, [{
@@ -1514,6 +1539,7 @@ test("version delete reports queueHint none when no content cleanup is needed", 
     worker: "api",
     version: "v1",
     allowCleanup: true,
+    requestId: "rid-version-delete-no-cleanup",
   }]);
   assert.equal(body.assets.queueHint, "none");
   assert.deepEqual(body.assets.warnings, []);

@@ -602,7 +602,12 @@ test("assertWorkflowDeleteAllowed hides transport diagnostics from response deta
   };
 
   await assert.rejects(
-    () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", version: "v2" }),
+    () => assertWorkflowDeleteAllowed({
+      ns: "demo",
+      worker: "api",
+      version: "v2",
+      requestId: "rid-lifecycle-failure",
+    }),
     (err) => {
       assert.ok(err instanceof ControlAbort);
       const abort = /** @type {InstanceType<typeof ControlAbort>} */ (err);
@@ -620,6 +625,7 @@ test("assertWorkflowDeleteAllowed hides transport diagnostics from response deta
       namespace: "demo",
       worker: "api",
       version: "v2",
+      request_id: "rid-lifecycle-failure",
       error_message: "connect ECONNREFUSED workflows",
     },
   });
@@ -688,11 +694,13 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
       assert.equal(new Headers(init?.headers).get("x-wdl-internal-auth"), TEST_INTERNAL_AUTH_TOKEN);
       const endpoint = String(url);
       if (endpoint.endsWith("/lifecycle/check-delete")) {
+        assert.equal(new Headers(init?.headers).get("x-request-id"), "rid-lifecycle");
         assert.equal(init?.signal, undefined);
         requestBodies.lifecycle = parseJsonObjectRequestBody(init, "workflow lifecycle request body");
         return Response.json({ allowed: true });
       }
       assert.ok(init?.signal instanceof AbortSignal);
+      assert.equal(new Headers(init?.headers).get("x-request-id"), "rid-cleanup");
       fetchSignals.push(init.signal);
       requestBodies.cleanup = parseJsonObjectRequestBody(init, "DO alarm cleanup request body");
       return Response.json({ ok: true });
@@ -700,8 +708,12 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
   };
 
   try {
-    await assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", version: "v2" });
-    await cleanupDoAlarmsForWorker({ ns: "demo", worker: "api", doStorageId: "do_old" });
+    await assertWorkflowDeleteAllowed({
+      ns: "demo", worker: "api", version: "v2", requestId: "rid-lifecycle",
+    });
+    await cleanupDoAlarmsForWorker({
+      ns: "demo", worker: "api", doStorageId: "do_old", requestId: "rid-cleanup",
+    });
   } finally {
     for (const handle of timeoutHandles) clearTimeout(handle);
     restoreTimeout();

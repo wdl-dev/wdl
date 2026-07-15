@@ -137,7 +137,7 @@ Central owners:
 
 Common rules:
 
-- `x-request-id` propagates across gateway, control/runtime, loaded workers, and D1
+- `x-request-id` propagates across gateway, control/runtime, loaded workers, D1, and Workflows
   where possible. Missing inbound ids are minted at ingress. Header adapters consider
   only the first comma-delimited token; ids containing bytes outside visible ASCII,
   quotes, backslashes, or more than 128 bytes are treated as absent. JS entrypoints using

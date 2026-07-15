@@ -1,4 +1,8 @@
-import { DoRuntimeError, nonEmptyAlarmString } from "do-runtime-protocol";
+import {
+  DoRuntimeError,
+  isWellFormedUnicodeString,
+  nonEmptyAlarmString,
+} from "do-runtime-protocol";
 import { errorMessage } from "shared-errors";
 import { withInternalAuth } from "shared-internal-auth";
 
@@ -37,6 +41,9 @@ function requiredString(value, field) {
   const text = nonEmptyAlarmString(value);
   if (text === null) {
     throw new TypeError(`DO alarm ${field} must be a non-empty string`);
+  }
+  if (!isWellFormedUnicodeString(text)) {
+    throw new TypeError(`DO alarm ${field} must contain well-formed Unicode`);
   }
   return text;
 }

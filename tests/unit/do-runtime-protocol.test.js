@@ -10,6 +10,7 @@ import {
   retryableOwnerRaceResponse,
   staleDoOwnerHintResponse,
 } from "../../runtime/_wdl-do-transport.js";
+import { DO_HOST_SHARD_COUNT, MAX_ID_BYTES } from "../../do-runtime/protocol/wire-grammar.js";
 import {
   doOwnerHintHeaders,
   doOwnershipErrorHeaders,
@@ -38,8 +39,11 @@ const {
   readJsonBody,
 } = await loadDoProtocol();
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
+const doAlarmIdentityFixture = /** @type {any} */ (
+  readRepositoryJson("tests/fixtures/do-alarm-identity.json")
+);
 
-test("DO ownership errors stay aligned with runtime hint and retry handling", async () => {
+test("DO ownership errors stay aligned with runtime hint and retry handling", () => {
   const ownershipCodes = new Set(Object.values(DO_OWNERSHIP_CODE));
   /** @type {Set<string>} */
   const ownerRaceRetryCodes = new Set([
@@ -51,16 +55,16 @@ test("DO ownership errors stay aligned with runtime hint and retry handling", as
   ]);
   for (const code of ownershipCodes) {
     const untrusted = Response.json({ error: code }, { status: 503 });
-    assert.equal(await staleDoOwnerHintResponse(untrusted), false, code);
-    assert.equal(await retryableOwnerRaceResponse(untrusted), false, code);
+    assert.equal(staleDoOwnerHintResponse(untrusted), false, code);
+    assert.equal(retryableOwnerRaceResponse(untrusted), false, code);
 
     const response = Response.json({ error: code }, {
       status: 503,
       headers: doOwnershipErrorHeaders(code),
     });
-    assert.equal(await staleDoOwnerHintResponse(response), true, code);
+    assert.equal(staleDoOwnerHintResponse(response), true, code);
     assert.equal(
-      await retryableOwnerRaceResponse(response),
+      retryableOwnerRaceResponse(response),
       ownerRaceRetryCodes.has(code),
       code
     );
@@ -566,14 +570,17 @@ test("normalizes do websocket connect request from internal headers", () => {
 });
 
 test("rejects invalid do alarm retry counts", () => {
-  assert.throws(
-    () => normalizeDoInvokeRequest({
-      ...BASE_BODY,
-      kind: "alarm",
-      alarm: { retryCount: -1 },
-    }),
-    /alarm\.retryCount must be a non-negative integer/
-  );
+  for (const retryCount of [-1, 1.5, "2", true, false, "", [], [2]]) {
+    assert.throws(
+      () => normalizeDoInvokeRequest({
+        ...BASE_BODY,
+        kind: "alarm",
+        alarm: { retryCount },
+      }),
+      /alarm\.retryCount must be a non-negative integer/,
+      `retryCount=${JSON.stringify(retryCount)}`
+    );
+  }
 });
 
 test("rejects invalid owner fence generation", () => {
@@ -597,6 +604,37 @@ test("rejects invalid class names", () => {
     () => hostIdForShard(DO_STORAGE_ID, "not-valid-name", 0),
     (err) => err instanceof DoRuntimeError && err.status === 400 && err.code === "invalid_request"
   );
+});
+
+/** @param {string | { repeat: string, count: number }} value */
+function fixtureString(value) {
+  return typeof value === "string" ? value : value.repeat.repeat(value.count);
+}
+
+test("DO alarm ingress matches the cross-language identity fixture", () => {
+  assert.equal(doAlarmIdentityFixture.maxBytes, MAX_ID_BYTES);
+  assert.equal(doAlarmIdentityFixture.hostShardCount, DO_HOST_SHARD_COUNT);
+  for (const entry of doAlarmIdentityFixture.cases) {
+    const input = {
+      ...BASE_BODY,
+      kind: "alarm",
+      doStorageId: fixtureString(entry.doStorageId),
+      className: fixtureString(entry.className),
+      objectName: fixtureString(entry.objectName),
+      alarm: { retryCount: 0, token: fixtureString(entry.token) },
+    };
+    if (entry.valid) {
+      assert.doesNotThrow(() => normalizeDoInvokeRequest(input), entry.name);
+    } else {
+      assert.throws(
+        () => normalizeDoInvokeRequest(input),
+        (err) => err instanceof DoRuntimeError &&
+          err.status === 400 &&
+          err.code === "invalid_request",
+        entry.name
+      );
+    }
+  }
 });
 
 test("rejects bare numeric versions", () => {
@@ -758,6 +796,19 @@ test("rejects invalid header names and control characters", () => {
     }),
     /objectName must not contain control characters/
   );
+});
+
+test("rejects unpaired surrogates in DO object identities", () => {
+  for (const objectName of ["\ud800", "\udc00"]) {
+    assert.throws(
+      () => normalizeDoInvokeRequest({ ...BASE_BODY, objectName }),
+      /objectName must contain well-formed Unicode/,
+    );
+    assert.throws(
+      () => hostIdForObject(BASE_BODY.doStorageId, BASE_BODY.className, objectName),
+      /objectName must contain well-formed Unicode/,
+    );
+  }
 });
 
 test("maps invalid JSON bodies to protocol errors", async () => {

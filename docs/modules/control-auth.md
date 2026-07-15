@@ -240,10 +240,11 @@ Auth-specific contract:
   non-diagnostic action is `auth.delegated_token.issue`. A delegated issue request
   accepts only `{ template }`;
   caller-provided `kind`, `ns`, `label`, `expiresAt`, or template allowlist fields are
-  rejected. Auth re-reads the issuer token record, verifies it is active and has the
-  template allowlist entry, applies the code-defined Auth template registry, then
-  writes a target token with `created_by`, `issue_template`, and
-  `issue_template_version` metadata. Active quota is a live credential capacity guard
+  rejected. Auth re-reads the issuer token record under the final issue-lock WATCH,
+  verifies it is active and has the template allowlist entry, applies the code-defined
+  Auth template registry, then writes a target token with `created_by`,
+  `issue_template`, and `issue_template_version` metadata. Active quota is a live
+  credential capacity guard
   based on `created_by + issue_template + expires_at`; it is not an environment quota.
   Generated namespaces are ordinary tenant namespace strings embedded in the issued
   token record. Auth serializes issue for each issuer/template with

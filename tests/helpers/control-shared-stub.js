@@ -12,6 +12,7 @@ import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
 
 const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_INTERNAL_AUTH_URL = repositoryFileUrl("shared/internal-auth.js");
 const SHARED_RANDOM_ID_URL = repositoryFileUrl("shared/random-id.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_OPTIMISTIC_RETRY_URL = repositoryFileUrl("shared/optimistic-retry.js");
@@ -40,6 +41,7 @@ import { ControlAbort, controlAbortLogDetails, codedErrorLogFields, codedErrorRe
 import { runOptimistic, withOptimisticRetries } from ${JSON.stringify(CONTROL_OPTIMISTIC_URL)};
 import { readJsonBody } from ${JSON.stringify(CONTROL_JSON_BODY_URL)};
 import { errorMessage as errMessage } from ${JSON.stringify(SHARED_ERRORS_URL)};
+import { withInternalAuth } from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};
 import { randomHex } from ${JSON.stringify(SHARED_RANDOM_ID_URL)};
 import { formatError } from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};
 export {
@@ -89,10 +91,7 @@ export function getControlR2() {
   return state.r2;
 }
 export function controlInternalJsonHeaders() {
-  const token = state.env?.WDL_INTERNAL_AUTH_TOKEN;
-  return token
-    ? { "content-type": "application/json", "x-wdl-internal-auth": token }
-    : { "content-type": "application/json" };
+  return withInternalAuth({ "content-type": "application/json" }, state.env);
 }
 export const postWorkflowsInternal = createPostWorkflowsInternal({
   getWorkflows: () => state.workflows,

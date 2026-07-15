@@ -1,6 +1,7 @@
 // Pure helpers for the runtime worker.
 
 import { base64ToBytes, bytesToBase64 } from "shared-base64";
+import { WORKER_NAME_RE, isValidRouteNs } from "shared-ns-pattern";
 import { parseVersion } from "shared-version";
 import { isWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
 
@@ -96,7 +97,7 @@ export function workerQueueAttempts(internalAttempts) {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) + 1 : 1;
 }
 
-// Mirror of control/lib.js#deepFreeze — bundle meta is immutable on the
+// Mirror of control/bundle.js#deepFreeze — bundle meta is immutable on the
 // wire, so the post-parse object should be too.
 /** @template T @param {T} obj @returns {T} */
 function deepFreeze(obj) {
@@ -109,10 +110,6 @@ function deepFreeze(obj) {
 const DEFAULT_COMPATIBILITY_DATE = "2026-04-24";
 const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
 const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
-const ROUTE_NS_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|__system__)$/;
-const RESERVED_TENANT_NS = new Set(["admin"]);
-const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
-
 // Loaded workers may declare an older compatibilityDate than the platform
 // workers. Keep enhanced error serialization as a floor only before the date
 // where workerd made it the default; newer dates reject the explicit flag.
@@ -298,8 +295,8 @@ function requiredPatternString(body, field, pattern, description) {
 
 /** @param {Record<string, unknown> | null} body */
 function requiredRouteNs(body) {
-  const ns = requiredPatternString(body, "ns", ROUTE_NS_RE, "a route namespace");
-  if (RESERVED_TENANT_NS.has(ns)) {
+  const ns = requiredString(body, "ns");
+  if (!isValidRouteNs(ns)) {
     throw new Error("ns must be a route namespace");
   }
   return ns;
