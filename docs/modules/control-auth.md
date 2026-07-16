@@ -50,7 +50,7 @@ Worker lifecycle:
 
 | Method | Path | Contract |
 |---|---|---|
-| `GET` | `/ns/<ns>/workers` | Lists workers with namespace-owned state, including deploy-only, active, and secret-only workers. |
+| `GET` | `/ns/<ns>/workers` | Lists workers with namespace-owned state, including deploy-only, active, secret-only, and workflow-definitions-only workers. Each result reports `hasSecrets` and `hasWorkflowDefs`. |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | Lists retained versions and active status. |
 | `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata. Python modules and upstream experimental compatibility flags are rejected before commit. |
 | `POST` | `/ns/<ns>/worker/<name>/promote` | Promotes `{"version":"vN"}` through the WATCH/MULTI routing path. Host declaration failures are 403; live pattern conflicts are 409; exhausted transaction contention is 503. |

@@ -4,9 +4,9 @@ use crate::{AppState, WorkflowResult, by_version_key, by_worker_key};
 
 use super::super::{
     LIFECYCLE_BLOCKER_LIMIT, LifecycleBlocker, LifecycleCheckRequest, LifecycleCheckResponse,
-    PendingCreateCleanup, cleanup_pending_create_identity, is_pending_create,
-    parse_workflow_referrer_member, pending_create_cleanup_from_state, pending_create_expired,
-    read_state_by_id, require_non_empty,
+    PendingCreateCleanup, active_pending_restart_blockers, cleanup_pending_create_identity,
+    is_pending_create, parse_workflow_referrer_member, pending_create_cleanup_from_state,
+    pending_create_expired, read_state_by_id, require_non_empty,
 };
 
 enum LifecycleMemberState {
@@ -55,8 +55,22 @@ pub(crate) async fn check_delete_lifecycle(
         Some(version) => by_version_key(&req.ns, &req.worker, version),
         None => by_worker_key(&req.ns, &req.worker),
     };
+    let (pending_count, mut blockers) = match &req.version {
+        Some(version) => {
+            active_pending_restart_blockers(
+                state,
+                &req.ns,
+                &req.worker,
+                version,
+                req.allow_cleanup,
+                LIFECYCLE_BLOCKER_LIMIT,
+            )
+            .await?
+        }
+        None => (0, Vec::new()),
+    };
     let count_key = key.clone();
-    let count: usize = state
+    let referrer_count: usize = state
         .redis
         .with_conn(async |mut conn| {
             redis::cmd("SCARD")
@@ -65,6 +79,7 @@ pub(crate) async fn check_delete_lifecycle(
                 .await
         })
         .await?;
+    let count = referrer_count.saturating_add(pending_count);
     if count == 0 {
         return Ok(LifecycleCheckResponse {
             allowed: true,
@@ -72,8 +87,14 @@ pub(crate) async fn check_delete_lifecycle(
             blockers: Vec::new(),
         });
     }
+    if blockers.len() >= LIFECYCLE_BLOCKER_LIMIT {
+        return Ok(LifecycleCheckResponse {
+            allowed: false,
+            count,
+            blockers,
+        });
+    }
     let mut cursor = 0_u64;
-    let mut blockers = Vec::new();
     let mut expired_pending = Vec::new();
     loop {
         let scan_key = key.clone();

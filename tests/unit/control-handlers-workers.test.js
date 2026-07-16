@@ -38,7 +38,7 @@ const { handle } = await import(moduleDataUrl(src));
 
 function resetWorkersHandlerState() {
   const redis = createFakeRedis();
-  redis.sets.set("workers:demo", new Set(["beta", "alpha"]));
+  redis.sets.set("workers:demo", new Set(["gamma", "beta", "alpha"]));
   redis.hashes.set("routes:demo", { alpha: "v2" });
   redis.zsets.set("worker-versions:demo:alpha", new Map([
     ["v1", 1],
@@ -46,6 +46,7 @@ function resetWorkersHandlerState() {
   ]));
   redis.zsets.set("worker-versions:demo:beta", new Map([["v1", 1]]));
   redis.hashes.set("secrets:demo:beta", { TOKEN: "WDL-ENC:test" });
+  redis.hashes.set("wf:defs:demo:gamma", { flow: "{}" });
   let sessions = 0;
   const session = redis.session.bind(redis);
   redis.session = async (fn) => {
@@ -72,6 +73,7 @@ test("workers handler lists namespace state through one Redis session", async ()
         versions: ["v1", "v2"],
         versionCount: 2,
         hasSecrets: false,
+        hasWorkflowDefs: false,
       },
       {
         name: "beta",
@@ -79,6 +81,15 @@ test("workers handler lists namespace state through one Redis session", async ()
         versions: ["v1"],
         versionCount: 1,
         hasSecrets: true,
+        hasWorkflowDefs: false,
+      },
+      {
+        name: "gamma",
+        activeVersion: null,
+        versions: [],
+        versionCount: 0,
+        hasSecrets: false,
+        hasWorkflowDefs: true,
       },
     ],
   });
@@ -88,15 +99,20 @@ test("workers handler lists namespace state through one Redis session", async ()
     ["zRangeMany", [
       "worker-versions:demo:alpha",
       "worker-versions:demo:beta",
+      "worker-versions:demo:gamma",
     ], 0, -1],
     ["existsMany", [
       "secrets:demo:alpha",
       "secrets:demo:beta",
+      "secrets:demo:gamma",
+      "wf:defs:demo:alpha",
+      "wf:defs:demo:beta",
+      "wf:defs:demo:gamma",
     ]],
   ]);
   assert.deepEqual(state.logs, [{
     level: "info",
     event: "workers_listed",
-    fields: { request_id: "rid-workers", namespace: "demo", count: 2 },
+    fields: { request_id: "rid-workers", namespace: "demo", count: 3 },
   }]);
 });

@@ -61,7 +61,7 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
   ownerHintCacheSource:
     "export function createOwnerHintCache() { return {}; }",
   requestIdSource:
-    "export function requestIdFromOptions() { return null; }",
+    "export function requestIdFromOptions() { return null; } export function sanitizeRequestId() { return null; }",
   workflowsClientSource:
     "export class Workflow { constructor(metadata) { this.metadata = metadata; } }",
 });

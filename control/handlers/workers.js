@@ -1,5 +1,5 @@
 import { jsonResponse, jsonError, requireControlLog, requireControlRedis } from "control-shared";
-import { routesKey, workersIndexKey, workerVersionsKey } from "control-lib";
+import { routesKey, workflowDefsKey, workersIndexKey, workerVersionsKey } from "control-lib";
 import { workerSecretsKey } from "shared-secret-keys";
 
 /** @param {{ method: string, nsName: string, requestId: string }} args */
@@ -18,8 +18,11 @@ export async function handle({ method, nsName, requestId }) {
 
     const versionKeys = names.map((name) => workerVersionsKey(nsName, name));
     const secretKeys = names.map((name) => workerSecretsKey(nsName, name));
+    const definitionKeys = names.map((name) => workflowDefsKey(nsName, name));
     const versionsByWorker = await session.zRangeMany(versionKeys, 0, -1);
-    const secretFlags = await session.existsMany(secretKeys);
+    const stateFlags = await session.existsMany([...secretKeys, ...definitionKeys]);
+    const secretFlags = stateFlags.slice(0, names.length);
+    const definitionFlags = stateFlags.slice(names.length);
 
     return names.map((name, idx) => {
       const activeVersion = routesHash[name] || null;
@@ -30,6 +33,7 @@ export async function handle({ method, nsName, requestId }) {
         versions,
         versionCount: versions.length,
         hasSecrets: Boolean(secretFlags[idx]),
+        hasWorkflowDefs: Boolean(definitionFlags[idx]),
       };
     });
   });

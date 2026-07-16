@@ -72,7 +72,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | Platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
 | `shared/version.js` | Worker version formatting plus worker, route-plane, lifecycle, DO owner-scope key, and route-invalidation channel helpers. |
-| `shared/workerd-compat-flags.js` | Pinned mirror of upstream workerd experimental compatibility enable flags used to reject tenant metadata before cold-load. |
+| `shared/workerd-compat-flags.js` | Pinned upstream mirror of experimental enable flags plus WDL-owned dynamic-worker date and error-serialization policy. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |
 | `shared/d1-*.js`, `shared/sql-splitter.js` | D1 parameter, data-field, transport, timeout, query-wire, and SQL splitting utilities shared by runtime, d1-runtime, control, and tests. |
@@ -112,7 +112,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `examples/` | Manual demos and reference projects. Tests should not silently depend on them unless the fixture graduates to `test-workers/`. |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner. |
 | `scripts/compile-workerd-configs.js` | Compiles workerd Cap'n Proto configs into `dist/workerd-configs/*.bin`. |
-| `scripts/extract-workerd-experimental-compat-flags.mjs` | Pin-bump flag extractor. |
+| `scripts/extract-workerd-experimental-compat-flags.mjs` | Pin-bump experimental-flag extractor. |
 
 ## Infrastructure
 

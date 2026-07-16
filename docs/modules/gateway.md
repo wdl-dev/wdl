@@ -34,9 +34,10 @@ responses before they cross back onto the public socket.
 
 The `ADMIN_HOST` branch is infrastructure traffic, not a loaded-worker request.
 It does not set `x-worker-id` or `x-worker-prefix`. `PLATFORM_DOMAIN` and
-`ADMIN_HOST` are environment-configurable. All tiers normalize `PLATFORM_DOMAIN` as a
-plain lowercase hostname without trailing dots and default it to `workers.local`;
-admin-host short-circuiting remains unset by default.
+`ADMIN_HOST` are environment-configurable. All tiers normalize `PLATFORM_DOMAIN` as an
+ALB-compatible ASCII DNS hostname of at most 126 bytes, with an alphabetic final label,
+and default it to `workers.local`; one trailing dot is removed and the result is
+lowercased. Admin-host short-circuiting remains unset by default.
 
 ## Interfaces
 

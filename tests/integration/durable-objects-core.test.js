@@ -251,4 +251,13 @@ test("Durable Object RPC dispatches class methods with structured args", async (
   const nestedContextText = await nestedContext.text();
   assert.equal(nestedContext.status, 200, nestedContextText);
   assert.deepEqual(responseJson({ body: nestedContextText }), { requestId });
+
+  const reenteredContext = await gatewayFetch(
+    ns,
+    "/rooms/reenter-request-id?name=alice&to=bob",
+    { headers: { "x-request-id": requestId } }
+  );
+  const reenteredContextText = await reenteredContext.text();
+  assert.equal(reenteredContext.status, 200, reenteredContextText);
+  assert.deepEqual(responseJson({ body: reenteredContextText }), { requestId });
 });

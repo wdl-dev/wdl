@@ -1,12 +1,24 @@
 /*
- * Mirrors workerd v1.20260701.1 src/workerd/io/compatibility-date.capnp.
- * Regenerate on every workerd pin bump from an upstream workerd source checkout:
+ * The experimental flags mirror workerd v1.20260701.1
+ * src/workerd/io/compatibility-date.capnp. Refresh them on every workerd pin
+ * bump from an upstream source checkout:
  *
  * node scripts/extract-workerd-experimental-compat-flags.mjs \
  *   /path/to/workerd/src/workerd/io/compatibility-date.capnp
+ *
+ * The dynamic-worker minimum/default dates and required error-serialization
+ * behavior below are WDL policy rather than upstream mirror data.
  */
 
 export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260701.1";
+
+// WDL supports one forward-only dynamic-worker compatibility surface. Static
+// platform workers keep their independently pinned workerd service dates.
+export const MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE = "2026-04-01";
+export const DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE = "2026-04-24";
+export const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
+export const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
+export const LEGACY_ERROR_SERIALIZATION_FLAG = "legacy_error_serialization";
 
 export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "allow_insecure_inefficient_logged_eval",

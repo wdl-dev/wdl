@@ -13,6 +13,7 @@ import {
   RESERVED_OBJECT_KEYS,
   RESERVED_TENANT_NS,
   WDL_RESERVED_ENTRYPOINT_RE,
+  MAX_DO_CLASS_NAME_BYTES,
   isValidJsIdentifier,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
@@ -142,9 +143,14 @@ const BINDING_VALIDATORS = Object.assign(Object.create(null), /** @type {Record<
   },
   do(b, name) {
     const className = b.className;
-    if (typeof className !== "string" || !isValidJsClassDeclarationName(className)) {
+    if (
+      typeof className !== "string" ||
+      !isValidJsClassDeclarationName(className) ||
+      className.length > MAX_DO_CLASS_NAME_BYTES
+    ) {
       throw new Error(
-        `bindings.${name}: do className must be a valid JS class declaration name, got ${JSON.stringify(className)}`
+        `bindings.${name}: do className must be a valid JS class declaration name of at most ` +
+          `${MAX_DO_CLASS_NAME_BYTES} bytes, got ${JSON.stringify(className)}`
       );
     }
     assertNotRuntimeReservedEntrypoint(`bindings.${name}`, className);

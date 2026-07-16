@@ -80,7 +80,7 @@ function cancellableDoOwnerHintResponse(onCancel, options = {}) {
   });
 }
 
-test("DurableObjectNamespace facade forwards fetch with object name and request id", async () => {
+test("DurableObjectNamespace fetch uses its private request-id provider", async () => {
   /** @type {any[]} */
   const calls = [];
   const ns = new DurableObjectNamespace({
@@ -89,6 +89,7 @@ test("DurableObjectNamespace facade forwards fetch with object name and request 
       return new Response("ok", { status: 201 });
     },
   }, { requestIdProvider: () => "rid-1" });
+  Reflect.set(ns, "requestId", () => "tenant-rid");
 
   const id = ns.idFromName("room-a");
   const response = await ns.get(id).fetch("https://demo.workers.example/chat", {
@@ -199,6 +200,7 @@ test("DurableObjectNamespace direct backend keeps binding/backend in private fie
 
   const response = await ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
     method: "POST",
+    headers: { "x-request-id": "tenant-forged" },
     body: "hello",
   });
 
@@ -215,6 +217,8 @@ test("DurableObjectNamespace direct backend keeps binding/backend in private fie
   assert.equal(body.doStorageId, "do_0123456789abcdef0123456789abcdef");
   assert.equal(body.className, "Room");
   assert.equal(body.objectName, "room-a");
+  const forwardedRequest = /** @type {{ headers: HeadersInit }} */ (body.request);
+  assert.equal(new Headers(forwardedRequest.headers).get("x-request-id"), "rid-1");
   assert.equal(Buffer.from(bodyBytes).toString("utf8"), "hello");
 });
 
@@ -317,7 +321,7 @@ test("DurableObjectNamespace fetch rejects oversized invoke envelopes before tra
   );
 });
 
-test("DurableObjectNamespace stub forwards arbitrary RPC methods", async () => {
+test("DurableObjectNamespace RPC uses its private request-id provider", async () => {
   /** @type {any[]} */
   const calls = [];
   const backend = {
@@ -331,6 +335,7 @@ test("DurableObjectNamespace stub forwards arbitrary RPC methods", async () => {
     binding: "ROOM",
     className: "Room",
   }, { backend, requestIdProvider: () => "rid-rpc" });
+  Reflect.set(ns, "requestId", () => "tenant-rid");
 
   const stub = ns.get(ns.idFromName("room-a"));
   const result = await Reflect.get(stub, "addMessage")("hi", { role: "user" });
@@ -2290,6 +2295,7 @@ test("DurableObjectNamespace facade uses direct upgrade path for websockets", as
       Connection: "Upgrade",
       Upgrade: "websocket",
       "Sec-WebSocket-Key": "abc",
+      "x-request-id": "tenant-forged",
     },
   });
 
@@ -2441,17 +2447,22 @@ test("DurableObjectNamespace websocket path does not fall back to router after o
     className: "Room",
   }, { backend, ownerNetwork });
 
-  const response = await ns.get(ns.idFromName("room-hint-ws-fail")).fetch("https://demo.workers.example/ws", {
+  let liveResponseJsonCalls = 0;
+  const response = await withMockedProperty(Response, "json", () => {
+    liveResponseJsonCalls += 1;
+    return new Response("forged", { status: 200 });
+  }, () => ns.get(ns.idFromName("room-hint-ws-fail")).fetch("https://demo.workers.example/ws", {
     headers: {
       Connection: "Upgrade",
       Upgrade: "websocket",
       "Sec-WebSocket-Key": "abc",
     },
-  });
+  }));
 
   const body = await readJsonResponse(response, 503);
   assert.equal(body.error, "owner_unavailable");
   assert.equal(routerCalls.length, 1);
+  assert.equal(liveResponseJsonCalls, 0);
 });
 
 test("DurableObjectNamespace POST fetch does not replay through router after direct owner failure", async () => {

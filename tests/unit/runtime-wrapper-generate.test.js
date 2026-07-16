@@ -7,10 +7,25 @@ import {
   generateAbortShimWrapperModule,
   generateHostBindingWrapperModule,
 } from "../../runtime/load/wrapper-generate.js";
-import { applyModuleReplacements, moduleDataUrl } from "../helpers/load-shared-module.js";
-import { installMockProperty } from "../helpers/mock-global.js";
+import {
+  applyModuleReplacements,
+  moduleDataUrl,
+  repositoryFileUrl,
+} from "../helpers/load-shared-module.js";
+import {
+  installMockProperty,
+  withMockedProperty,
+  withMockedPropertyDescriptor,
+} from "../helpers/mock-global.js";
 
-const hostBindingRuntime = await import(moduleDataUrl(HOST_BINDING_RUNTIME_SOURCE));
+const HOST_BINDING_RUNTIME_TEST_SOURCE = applyModuleReplacements(HOST_BINDING_RUNTIME_SOURCE, [
+  [
+    'from "./_wdl-request-id.js"',
+    `from ${JSON.stringify(repositoryFileUrl("runtime/_wdl-request-id.js"))}`,
+  ],
+]);
+const hostBindingRuntime = await import(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE));
+const hostRequestContext = hostBindingRuntime.createRequestContext();
 
 function generatedWrappers() {
   return {
@@ -65,6 +80,7 @@ test("host wrapper runtime captures platform intrinsics before user module evalu
   for (const intrinsic of [
     "Array.prototype.forEach",
     "Function.prototype.toString",
+    "Headers.prototype.get",
     "Object.defineProperty",
     "Object.entries",
     "Object.keys",
@@ -73,9 +89,12 @@ test("host wrapper runtime captures platform intrinsics before user module evalu
     "Reflect.apply",
     "Reflect.get",
     "RegExp.prototype.test",
+    'Object.getOwnPropertyDescriptor(Request.prototype, "headers")',
   ]) {
     assert.match(HOST_BINDING_RUNTIME_SOURCE, new RegExp(RegExp.escape(intrinsic)));
   }
+  assert.match(HOST_BINDING_RUNTIME_SOURCE, /import \{ sanitizeRequestId \} from "\.\/_wdl-request-id\.js"/);
+  assert.doesNotMatch(HOST_BINDING_RUNTIME_SOURCE, /\benterWith\b/);
   assert.doesNotMatch(source, /Object\.(?:defineProperty|entries|keys)\(/);
   assert.doesNotMatch(source, /for \(const .* of /);
   assert.doesNotMatch(source, /Function\.prototype\.toString\.call/);
@@ -84,41 +103,83 @@ test("host wrapper runtime captures platform intrinsics before user module evalu
 test("host wrapper request context is invocation-local and preserves return identity", async () => {
   const firstStarted = Promise.withResolvers();
   const releaseFirst = Promise.withResolvers();
-  const firstResult = hostBindingRuntime.runWithRequestContext("rid-first", () => {
+  const firstResult = hostRequestContext.runWithRequestContext("rid-first", () => {
     const result = (async () => {
-      assert.equal(hostBindingRuntime.currentRequestId(), "rid-first");
+      assert.equal(hostRequestContext.currentRequestId(), "rid-first");
       firstStarted.resolve(undefined);
       await releaseFirst.promise;
-      return hostBindingRuntime.currentRequestId();
+      return hostRequestContext.currentRequestId();
     })();
-    assert.equal(hostBindingRuntime.currentRequestId(), "rid-first");
+    assert.equal(hostRequestContext.currentRequestId(), "rid-first");
     return result;
   });
 
   await firstStarted.promise;
-  assert.equal(hostBindingRuntime.currentRequestId(), null);
-  const secondResult = hostBindingRuntime.runWithRequestContext("rid-second", async () => {
+  assert.equal(hostRequestContext.currentRequestId(), null);
+  const secondResult = hostRequestContext.runWithRequestContext("rid-second", async () => {
     await Promise.resolve();
-    return hostBindingRuntime.currentRequestId();
+    return hostRequestContext.currentRequestId();
   });
   assert.equal(await secondResult, "rid-second");
   releaseFirst.resolve(undefined);
   assert.equal(await firstResult, "rid-first");
-  assert.equal(hostBindingRuntime.currentRequestId(), null);
+  assert.equal(hostRequestContext.currentRequestId(), null);
 
   const nativePromise = Promise.resolve("same");
   assert.equal(
-    hostBindingRuntime.runWithRequestContext("rid-identity", () => nativePromise),
+    hostRequestContext.runWithRequestContext("rid-identity", () => nativePromise),
     nativePromise
   );
 });
 
-test("host wrapper request context inherits when a nested call has no new id", () => {
-  const nested = hostBindingRuntime.runWithRequestContext("rid-outer", () =>
-    hostBindingRuntime.runWithRequestContext(null, () => hostBindingRuntime.currentRequestId()));
+test("host wrapper request context is outermost-only", () => {
+  const withoutChildId = hostRequestContext.runWithRequestContext("rid-outer", () =>
+    hostRequestContext.runWithRequestContext(null, () => hostRequestContext.currentRequestId()));
+  const withChildId = hostRequestContext.runWithRequestContext("rid-outer", () =>
+    hostRequestContext.runWithRequestContext("tenant-rid", () => hostRequestContext.currentRequestId()));
+  const withoutParentId = hostRequestContext.runWithRequestContext(null, () =>
+    hostRequestContext.runWithRequestContext("tenant-rid", () => hostRequestContext.currentRequestId()));
 
-  assert.equal(nested, "rid-outer");
-  assert.equal(hostBindingRuntime.currentRequestId(), null);
+  assert.equal(withoutChildId, "rid-outer");
+  assert.equal(withChildId, "rid-outer");
+  assert.equal(withoutParentId, null);
+  assert.equal(hostRequestContext.currentRequestId(), null);
+});
+
+test("host wrapper request context rejects malformed child request ids", () => {
+  const inherited = hostRequestContext.runWithRequestContext("rid-outer", () =>
+    hostRequestContext.runWithRequestContext("bad\\id", () => hostRequestContext.currentRequestId()));
+
+  assert.equal(inherited, "rid-outer");
+  assert.equal(hostRequestContext.currentRequestId(), null);
+});
+
+test("host wrapper runtime keeps independently created request-context stores separate", () => {
+  assert.equal(hostBindingRuntime.currentRequestId, undefined);
+  assert.equal(hostBindingRuntime.runWithRequestContext, undefined);
+  const tenantContext = hostBindingRuntime.createRequestContext();
+
+  const observed = hostRequestContext.runWithRequestContext("rid-parent", () =>
+    tenantContext.runWithRequestContext("tenant-rid", () => hostRequestContext.currentRequestId()));
+
+  assert.equal(observed, "rid-parent");
+  assert.equal(hostRequestContext.currentRequestId(), null);
+});
+
+test("host wrapper request-id extraction ignores tenant-patched request intrinsics", async () => {
+  const request = new Request("https://worker.example", {
+    headers: { "x-request-id": "rid-real" },
+  });
+  await withMockedProperty(Headers.prototype, "get", () => "rid-forged", async () => {
+    await withMockedPropertyDescriptor(Request.prototype, "headers", {
+      configurable: true,
+      get() {
+        return new Headers({ "x-request-id": "rid-forged" });
+      },
+    }, async () => {
+      assert.equal(hostBindingRuntime.requestIdFromEventArg(request), "rid-real");
+    });
+  });
 });
 
 test("generated host wrappers alias legal entrypoint names without declaration collisions", async () => {
@@ -157,7 +218,7 @@ test("generated host wrappers alias legal entrypoint names without declaration c
     ),
     [
       ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
-      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_SOURCE))}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
       ['from "./_wdl-d1-client.js"', `from ${JSON.stringify(d1Url)}`],
       ['from "./_wdl-r2-client.js"', `from ${JSON.stringify(r2Url)}`],
       ['from "./_wdl-do-client.js"', `from ${JSON.stringify(doUrl)}`],
@@ -174,25 +235,28 @@ test("generated host wrappers alias legal entrypoint names without declaration c
   }
 });
 
-test("host wrapper context uses captured AsyncLocalStorage intrinsics", async () => {
+test("host wrapper context uses captured AsyncLocalStorage intrinsics", () => {
   const restoreRun = installMockProperty(AsyncLocalStorage.prototype, "run", () => {
     throw new Error("live AsyncLocalStorage.run must not run");
   });
-  const restoreGetStore = installMockProperty(AsyncLocalStorage.prototype, "getStore", () => {
-    throw new Error("live AsyncLocalStorage.getStore must not run");
-  });
   let result;
   try {
-    result = hostBindingRuntime.runWithRequestContext("rid-captured", async () => {
-      await Promise.resolve();
-      return hostBindingRuntime.currentRequestId();
+    const requestContext = hostBindingRuntime.createRequestContext();
+    result = requestContext.runWithRequestContext("rid-captured", () => {
+      const restoreGetStore = installMockProperty(AsyncLocalStorage.prototype, "getStore", () => {
+        throw new Error("live AsyncLocalStorage.getStore must not run");
+      });
+      try {
+        return requestContext.currentRequestId();
+      } finally {
+        restoreGetStore();
+      }
     });
   } finally {
-    restoreGetStore();
     restoreRun();
   }
 
-  assert.equal(await result, "rid-captured");
+  assert.equal(result, "rid-captured");
 });
 
 test("host wrapper does not inspect or replace tenant return values", () => {
@@ -205,9 +269,9 @@ test("host wrapper does not inspect or replace tenant return values", () => {
     },
   });
 
-  const result = hostBindingRuntime.runWithRequestContext("rid-object", () => value);
+  const result = hostRequestContext.runWithRequestContext("rid-object", () => value);
 
   assert.equal(result, value);
   assert.equal(thenReads, 0);
-  assert.equal(hostBindingRuntime.currentRequestId(), null);
+  assert.equal(hostRequestContext.currentRequestId(), null);
 });

@@ -719,13 +719,16 @@ function workerSecretRejectionLogsSince(start) {
 const workerControlSharedUrl = controlSharedHarnessUrl(WORKER_SECRET_STATE_GLOBAL);
 const workerLibStubUrl = moduleDataUrl(`
 ${validateSecretKeyStubSource}
+export { workflowDefsKey } from ${JSON.stringify(PRODUCTION_CONTROL_LIB_URL)};
 export const deleteLockKey = (ns, worker) => \`worker-delete-lock:\${ns}:\${worker}\`;
 export const workerVersionsKey = (ns, worker) => \`worker-versions:\${ns}:\${worker}\`;
 export const routesKey = (ns) => \`routes:\${ns}\`;
 export const workersIndexKey = (ns) => \`workers:\${ns}\`;
 `);
 const lifecycleStubUrl = moduleDataUrl(`
-export function stageWorkerHidden() {}
+export function stageWorkerHidden(multi, ns, name) {
+  multi.sRem(\`workers:\${ns}\`, name);
+}
 export function stageWorkerVisible(multi, ns, name) {
   multi.sAdd(\`workers:\${ns}\`, name);
 }
@@ -955,6 +958,39 @@ test("worker secret PUT active precheck reads the shared fake Redis state", asyn
       "worker-delete-lock:demo:api",
       "worker-versions:demo:api",
     ]);
+  });
+});
+
+test("worker secret DELETE keeps a definitions-only worker discoverable", async () => {
+  const state = workerSecretState;
+  const encrypted = await encryptSecretValue("plain", {
+    env,
+    hashKey: "secrets:demo:api",
+    fieldName: "TOKEN",
+  });
+  await withWorkerSecretRedis(state, (redis) => {
+    redis.hashes.delete("routes:demo");
+    redis.hashes.set("secrets:demo:api", { TOKEN: encrypted });
+    redis.hashes.set("wf:defs:demo:api", { flow: "{}" });
+    redis.sets.set("workers:demo", new Set(["api"]));
+  }, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "DELETE",
+      }),
+      env,
+      method: "DELETE",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-definitions-only",
+    });
+
+    const body = await readJsonResponse(response, 200);
+    assert.equal(body.deleted, true);
+    assert.equal(redis.hashes.has("secrets:demo:api"), false);
+    assert.equal(redis.sets.get("workers:demo")?.has("api"), true);
+    assert.equal(redis.watched.includes("wf:defs:demo:api"), true);
   });
 });
 

@@ -15,6 +15,7 @@ import {
 import {
   deleteLockKey,
   routesKey,
+  workflowDefsKey,
   workerVersionsKey,
 } from "control-lib";
 import {
@@ -491,6 +492,7 @@ async function stageWorkerSecretForBump({
 async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, plaintext = null, controlEnv }) {
   const secretsKey = workerSecretsKey(ns, name);
   const nsSecretHashKey = nsSecretsKey(ns);
+  const defsKey = workflowDefsKey(ns, name);
   return await runOptimistic(redis, {
     attempts: MAX_SECRET_ATTEMPTS,
     onExhausted: () => {
@@ -506,6 +508,7 @@ async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, 
       routesKey(ns),
       workerVersionsKey(ns, name),
     ];
+    if (method === "DELETE") watches.push(defsKey);
     await iso.watch(...watches);
 
     const callerLock = await iso.get(deleteLockKey(ns, name));
@@ -527,7 +530,7 @@ async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, 
       }
       if (hkeys.length === 1 && hkeys[0] === key) {
         if (retainedVersions.length === 0) {
-          removeFromWorkersIndex = true;
+          removeFromWorkersIndex = (await iso.exists(defsKey)) === 0;
         }
       }
     }

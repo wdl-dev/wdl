@@ -329,13 +329,29 @@ test("bundleToWorkerCode: uses meta.compatibilityDate when set", () => {
     mkBundle(
       {
         mainModule: "w.js",
-        compatibilityDate: "2024-01-01",
+        compatibilityDate: "2026-04-01",
         modules: { "w.js": { type: "module" } },
       },
       { "w.js": enc.encode("x") }
     )
   );
-  assert.equal(code.compatibilityDate, "2024-01-01");
+  assert.equal(code.compatibilityDate, "2026-04-01");
+});
+
+test("bundleToWorkerCode: rejects compatibilityDate below the WDL dynamic-worker floor", () => {
+  assert.throws(
+    () => bundleToWorkerCode(
+      mkBundle(
+        {
+          mainModule: "w.js",
+          compatibilityDate: "2026-03-31",
+          modules: { "w.js": { type: "module" } },
+        },
+        { "w.js": enc.encode("x") }
+      )
+    ),
+    /meta\.compatibilityDate 2026-03-31 is older than WDL supports \(2026-04-01\)/
+  );
 });
 
 test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date platform floor, meta is frozen", () => {
@@ -399,6 +415,33 @@ test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup",
     )
   );
   assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat"]);
+});
+
+test("bundleToWorkerCode: incompatible error serialization flags fail closed", () => {
+  /** @type {[string | undefined, string, RegExp][]} */
+  const cases = [
+    ["2026-04-20", "legacy_error_serialization", /requires enhanced error serialization/],
+    ["2026-04-21", "legacy_error_serialization", /requires enhanced error serialization/],
+    ["2026-04-21", "enhanced_error_serialization", /became the workerd default/],
+    [undefined, "enhanced_error_serialization", /became the workerd default/],
+  ];
+  for (const [compatibilityDate, flag, message] of cases) {
+    assert.throws(
+      () => bundleToWorkerCode(
+        mkBundle(
+          {
+            mainModule: "w.js",
+            ...(compatibilityDate ? { compatibilityDate } : {}),
+            compatibilityFlags: [flag],
+            modules: { "w.js": { type: "module" } },
+          },
+          { "w.js": enc.encode("x") }
+        )
+      ),
+      message,
+      `${flag} should be rejected for ${compatibilityDate ?? "the default date"}`
+    );
+  }
 });
 
 test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibilityFlags in bundle bytes", () => {

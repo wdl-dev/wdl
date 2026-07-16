@@ -162,6 +162,10 @@ pub(crate) fn by_version_key(ns: &str, worker: &str, version: &str) -> String {
     format!("wf:by-version:{ns}:{worker}:{version}")
 }
 
+pub(crate) fn pending_version_key(ns: &str, worker: &str, version: &str) -> String {
+    format!("wf:pending-version:{ns}:{worker}:{version}")
+}
+
 pub(crate) fn retention_key() -> &'static str {
     "wf:retention"
 }

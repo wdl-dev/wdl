@@ -91,7 +91,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 
 | 字段 | WDL 行为 |
 |---|---|
-| `name`、`main`、`compatibility_date`、`compatibility_flags` | 存入 immutable bundle metadata。Control 会在 commit 前拒绝格式错误、未来日期或当前 bundled workerd 不支持的 `compatibility_date`；包含 runtime/do-runtime 注入模块和生成 workflow keys 后的最终 WorkerCode 必须落在 workerd 64 MiB `workerLoader` code limit 内。 |
+| `name`、`main`、`compatibility_date`、`compatibility_flags` | 存入 immutable bundle metadata。Control 会拒绝早于 `2026-04-01` 的显式 `compatibility_date`，并在 commit 前拒绝格式错误、未来日期或当前 bundled workerd 不支持的值；包含 runtime/do-runtime 注入模块和生成 workflow keys 后的最终 WorkerCode 必须落在 workerd 64 MiB `workerLoader` code limit 内。 |
 | `[vars]` | 接受 string、number、boolean，并 stringified 进 `env`；vars、namespace/worker secrets、runtime 注入的 binding/workflow env value 必须落在 WDL 留有 headroom 的 workerd 1 MiB `workerLoader` env budget 内。 |
 | `[[kv_namespaces]]` | `id` 是 platform-local KV namespace id，不是 Cloudflare UUID。 |
 | `[[r2_buckets]]` | `binding` 加 `bucket_name` 映射为平台 S3 bucket 下的 namespace-scoped virtual R2 bucket。 |
@@ -111,8 +111,8 @@ WDL 遵循 Wrangler selected-env 继承规则：
 
 下游 CLI 可以用自己的命令形状暴露这些 surface，但平台侧行为是固定的：
 
-- Worker list 从 control 读取 active version、retained version 和 secret-only entry。
-- Worker deletion hard-delete route、retained version、worker secret、queue consumer 和 cron，并在 Redis commit 后 stage asset cleanup。
+- Worker list 从 control 读取 active version、retained version、secret-only entry 和 workflow-definitions-only entry。
+- Worker deletion hard-delete route、retained version、worker secret、workflow definition、queue consumer 和 cron，并在 Redis commit 后 stage asset cleanup。
 - Version deletion hard-delete 一个 retained non-active version。
 - Secret mutation 必须显式选择 worker scope 或 namespace scope，避免误写 namespace-wide secret。提交的空字符串是已设置 secret，不是 unset。
 - D1 命令管理 namespace D1 database 和 forward-only migration file。Migration filename 是 migration id；已 apply 的文件不应 rename 或编辑。

@@ -82,7 +82,9 @@ Internal:
 
 Workflows exclusively owns Valkey DB 2 for instance execution state. Control owns
 `wf:defs:<ns>:<worker>` in DB 0 for deploy-time workflow key allocation and stable
-identity.
+identity. The hash retains retired names until whole-worker delete. Definition listing
+enumerates that retired history for currently active workers; deploy and single-workflow
+status/lifecycle paths read only the names they need.
 
 Key concepts:
 
@@ -117,6 +119,7 @@ Key families:
 | `wf:by-worker:<ns>:<worker>` | Set | workflows | Instance discovery by worker. | Used by list/delete checks; entries are removed by retention/delete cleanup. |
 | `wf:by-workflow:<ns>:<worker>:<workflowKey>` | ZSET | workflows | Per-workflow instance list index ordered for bounded pagination. | Retention/delete cleanup removes the sorted-set member. |
 | `wf:by-version:<ns>:<worker>:<version>` | Set | workflows | Frozen-version referrer index. | Blocks version delete while live instances reference the version. |
+| `wf:pending-version:<ns>:<worker>:<version>` | ZSET | workflows | Short-lived restart target-version blockers, scored by expiry time. | Version-delete checks active members; restart renews only a live member and atomically validates it before creating the durable `wf:by-version` referrer. Members expire after 30 seconds, and the ZSET has a refreshed 60-second key TTL for physical cleanup. |
 | `wf:retention` | ZSET | workflows | Terminal retention due index. | Retention tick deletes expired terminal instances. |
 | `wf:internal:do-alarm:{<jobId>}:state` | Hash | workflows | Authoritative backend job state for one Durable Object SQLite alarm row. | Successful delivery, retry exhaustion, explicit delete, and worker cleanup remove the job. |
 | `wf:internal:do-alarm:due:<shard>` | ZSET | workflows | DO alarm due index. Score is due timestamp in milliseconds. | Tick promotion moves eligible jobs to ready. |
@@ -128,6 +131,12 @@ Key families:
 
 - Workflows are same-worker only in V2.
 - Instances freeze the worker version/class identity they were created with.
+- Control fails closed on malformed active workflow entries and malformed `wf:defs`
+  records encountered by an operation; management paths return `corrupt_meta`, while
+  deploy returns `workflow_definition_corrupt` when reusing a damaged historical
+  definition. Damaged authoritative metadata is not exposed as a normal missing or
+  retired workflow. Normal deploy and single-workflow paths do not scan unrelated
+  historical definitions.
 - Scheduler only wakes workflows; workflows owns admission, fairness, shard ticks,
   ready/due movement, and runtime dispatch.
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
@@ -190,6 +199,10 @@ canonicalizes against the current active route before writing DB 2, so new durab
 business processes start on the active version. Existing instances replay against their
 stored `frozenVersion`; promotion does not change their code. Worker-version delete is
 blocked by `wf:by-version` while non-expired instances still reference the version.
+Before restart revalidates the active export, it publishes a short-lived target-version
+blocker. Its final DB 2 transition atomically creates the durable referrer and removes
+that blocker, so version delete cannot pass between active-version resolution and the
+restart commit.
 Runtime validates every dispatched `frozenVersion` with the same positive
 JavaScript-safe-integer version parser used by bundle keys; malformed persisted tags
 fail before worker loading.

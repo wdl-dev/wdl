@@ -44,7 +44,7 @@ Control / CLI：
 
 ## Redis / Storage 合同
 
-Workflows 独占 Valkey DB 2 作为 instance execution state。Control 在 DB 0 拥有 `wf:defs:<ns>:<worker>`，用于 deploy-time workflow key allocation 和稳定 identity。
+Workflows 独占 Valkey DB 2 作为 instance execution state。Control 在 DB 0 拥有 `wf:defs:<ns>:<worker>`，用于 deploy-time workflow key allocation 和稳定 identity。该 Hash 会保留 retired name 直到 whole-worker delete；definition list 只会为当前 active worker 枚举这段 retired history，而 deploy 和单个 workflow 的 status/lifecycle 路径只读取自己需要的 name。
 
 关键概念：
 
@@ -70,6 +70,7 @@ Key families：
 | `wf:by-worker:<ns>:<worker>` | Set | workflows | 按 worker 发现 instance 的索引。 | list/delete check 使用；retention/delete cleanup 移除 entry。 |
 | `wf:by-workflow:<ns>:<worker>:<workflowKey>` | ZSET | workflows | 按 workflow key 分页列 instance 的有序索引。 | retention/delete cleanup 删除 sorted-set member。 |
 | `wf:by-version:<ns>:<worker>:<version>` | Set | workflows | frozen-version referrer index。 | live instance 仍引用该 version 时阻止 version delete。 |
+| `wf:pending-version:<ns>:<worker>:<version>` | ZSET | workflows | 按过期时间计分的短期 restart target-version blocker。 | Version-delete 检查 active member；restart 只续租未过期 member，并在创建持久 `wf:by-version` referrer 前原子复核。Member 30 秒后过期，ZSET key 使用随写入刷新的 60 秒 TTL 做物理回收。 |
 | `wf:retention` | ZSET | workflows | terminal retention due index。 | Retention tick 删除过期 terminal instance。 |
 | `wf:internal:do-alarm:{<jobId>}:state` | Hash | workflows | 单个 Durable Object SQLite alarm row 的 backend job 权威状态。 | 成功 delivery、retry 耗尽、显式 delete 和 worker cleanup 会移除 job。 |
 | `wf:internal:do-alarm:due:<shard>` | ZSET | workflows | DO alarm due index。score 是 due timestamp milliseconds。 | Tick promotion 把到期 job 移到 ready。 |
@@ -81,6 +82,7 @@ Key families：
 
 - V2 workflow 只支持 same-worker。
 - Instance 冻结创建时的 worker version/class identity。
+- Control 会对当前操作实际读到的 malformed active workflow entry 和 malformed `wf:defs` record fail closed；管理路径返回 `corrupt_meta`，deploy 在复用损坏的历史 definition 时返回 `workflow_definition_corrupt`。损坏的权威 metadata 不会被暴露为正常的 missing 或 retired workflow。正常 deploy 和单个 workflow 路径不会扫描无关的历史 definition。
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。
 - Scheduler 也通过同一个 `/internal/workflows/tick` endpoint 唤醒 Workflows-owned internal DO alarm jobs；scheduler 不直接读写 DO alarm state。
 - Workflows 在持久化 DO alarm job 前拒绝 non-canonical alarm identity，在 dispatch 前重新校验持久化 alarm identity，并在把 active route 用作 retarget 前校验其 version。其中 namespace、worker、version 校验复用 `wdl-rust-common`；do-runtime protocol grammar 与 identity helper 拥有 canonical alarm-specific field 和 aggregate 512-byte DO host-id 合同，Workflows 在持久化和 dispatch 前镜像并重新校验该合同。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
@@ -99,7 +101,7 @@ Workflow execution 使用两条 channel：
 1. Loaded worker 通过 reserved `__WDL_WORKFLOWS_BACKEND__` Fetcher binding 调 workflows。Runtime 从 bundle metadata 附加 identity；workflows 不信任 tenant body 中的 namespace、worker、version、workflow key、class 或 instance identity。
 2. workflows 把已 claim 的 run dispatch 回 runtime `:8088` 上的 `/internal/workflows/run`。Runtime 加载 frozen worker version 并调用 `className.run(event, stepFacade)`。
 
-Create/restart 与 replay 的 version pinning 不同。新的 `create()` 或 `restart()` 写 DB 2 前会按当前 active route canonicalize，因此新的 durable business process 从 active version 开始。已有 instance 使用自己存的 `frozenVersion` replay；promotion 不会改变它的代码。只要 non-expired instance 仍引用某个 version，`wf:by-version` 就会阻止 worker-version delete。Runtime 会用 bundle key 共用的正 JavaScript-safe-integer version parser 校验每个 dispatch 的 `frozenVersion`；malformed persisted tag 会在加载 worker 前失败。
+Create/restart 与 replay 的 version pinning 不同。新的 `create()` 或 `restart()` 写 DB 2 前会按当前 active route canonicalize，因此新的 durable business process 从 active version 开始。已有 instance 使用自己存的 `frozenVersion` replay；promotion 不会改变它的代码。只要 non-expired instance 仍引用某个 version，`wf:by-version` 就会阻止 worker-version delete。Restart 在重新校验 active export 前写入一个短期 target-version blocker，最终 DB 2 transition 会原子地建立持久 `wf:by-version` referrer 并删除该 blocker，因此 version delete 不能从 active-version resolution 和 restart commit 之间穿过。Runtime 会用 bundle key 共用的正 JavaScript-safe-integer version parser 校验每个 dispatch 的 `frozenVersion`；malformed persisted tag 会在加载 worker 前失败。
 
 Scheduling 是 hint-based，但状态权威在 instance hash：
 

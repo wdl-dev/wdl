@@ -148,12 +148,6 @@ Stateful storage:
   changes should document which services can use `FARGATE_SPOT`; stateful runtimes and
   singleton control loops should stay on on-demand Fargate unless their interruption
   semantics are re-reviewed.
-- The application Terraform root accepts at least two existing subnets. Every subnet
-  must belong to the configured VPC, use an RFC1918 or `100.64.0.0/10` IPv4 CIDR, and
-  occupy a distinct Availability Zone because each D1/DO EFS file system creates one
-  mount target per supplied subnet. Foundation keeps a three-AZ default. The subnet
-  `map_public_ip_on_launch` flag is not used as a routing classifier; ECS services
-  explicitly disable public task IP assignment.
 - In addition to the Fargate task memory limit, D1 and DO workerd containers set
   explicit container memory hard limits. DO also reserves memory for its local
   redis-proxy sidecar.

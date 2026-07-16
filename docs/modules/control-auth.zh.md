@@ -34,7 +34,7 @@ Worker lifecycle：
 
 | Method | Path | 合同 |
 |---|---|---|
-| `GET` | `/ns/<ns>/workers` | 列出有 namespace-owned state 的 worker，包括 deploy-only、active 和 secret-only worker。 |
+| `GET` | `/ns/<ns>/workers` | 列出有 namespace-owned state 的 worker，包括 deploy-only、active、secret-only 和 workflow-definitions-only worker；每一项都会返回 `hasSecrets` 和 `hasWorkflowDefs`。 |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | 列出 retained versions 和 active status。 |
 | `POST` | `/ns/<ns>/worker/<name>/deploy` | 从 shorthand code 或完整 module manifest 创建新的 immutable version；routes、crons、queue consumers、service refs、platform refs、assets、vars、bindings 和 `exports` 都是 version metadata。Python modules 和上游 experimental compatibility flags 会在 commit 前被拒绝。 |
 | `POST` | `/ns/<ns>/worker/<name>/promote` | 通过 WATCH/MULTI routing path promote `{"version":"vN"}`。Host declaration 失败是 403；live pattern conflict 是 409；transaction contention 耗尽是 503。 |

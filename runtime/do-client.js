@@ -100,7 +100,7 @@ class DurableObjectStub {
         const real = Reflect.get(target, prop, receiver);
         if (real !== undefined) return real;
         /** @param {...unknown} args */
-        const method = (...args) => target.namespace.rpcObject(target.id.name, prop, args, target.namespace.requestId());
+        const method = (...args) => target.namespace.rpcObject(target.id.name, prop, args);
         return method;
       },
     });
@@ -109,7 +109,7 @@ class DurableObjectStub {
   /** @param {RequestInfo | URL} input @param {RequestInit} [init] */
   async fetch(input, init = undefined) {
     const request = new Request(input, init);
-    return await this.namespace.fetchObject(this.id.name, request, this.namespace.requestId());
+    return await this.namespace.fetchObject(this.id.name, request);
   }
 }
 
@@ -195,12 +195,13 @@ export class DurableObjectNamespace {
     }
   }
 
-  requestId() {
-    return requestIdFromOptions(this.#requestIdOptions, { providerFirst: false });
+  #currentRequestId() {
+    return requestIdFromOptions(this.#requestIdOptions);
   }
 
-  /** @param {string} objectName @param {Request} request @param {string | null} [requestId] */
-  async fetchObject(objectName, request, requestId = null) {
+  /** @param {string} objectName @param {Request} request */
+  async fetchObject(objectName, request) {
+    const requestId = this.#currentRequestId();
     if (this.#bindingFetchObject && !isWebSocketUpgrade(request)) {
       return await this.#bindingFetchObject(objectName, request, requestId);
     }
@@ -237,8 +238,9 @@ export class DurableObjectNamespace {
     );
   }
 
-  /** @param {string} objectName @param {string} method @param {unknown[]} args @param {string | null} [requestId] */
-  async rpcObject(objectName, method, args, requestId = null) {
+  /** @param {string} objectName @param {string} method @param {unknown[]} args */
+  async rpcObject(objectName, method, args) {
+    const requestId = this.#currentRequestId();
     if (this.#bindingRpcObject) {
       return await this.#bindingRpcObject(objectName, method, args, requestId);
     }

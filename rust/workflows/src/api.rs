@@ -16,6 +16,7 @@ mod limits;
 mod model;
 mod payload;
 mod pending_create;
+mod pending_restart;
 mod progress;
 mod redis_script;
 mod retention;
@@ -25,7 +26,7 @@ mod status;
 mod tick;
 use active_export::{
     ensure_worker_not_deleting, request_with_active_version, verify_active_workflow_current,
-    verify_active_workflow_export, verify_workflow_def,
+    verify_workflow_def,
 };
 pub(crate) use create::{create_batch, create_instance};
 pub(crate) use do_alarms::{
@@ -71,6 +72,10 @@ use pending_create::{
     cleanup_pending_create_identity, finalize_created_instance, is_pending_create,
     pending_create_cleanup_from_state, pending_create_expired, pending_create_token,
     public_state_or_empty, wait_for_public_create_state,
+};
+use pending_restart::{
+    active_pending_restart_blockers, create_pending_restart, pending_restart_marker,
+    remove_pending_restart, renew_pending_restart,
 };
 use progress::{
     spawn_progress_from_identity, spawn_progress_from_request, spawn_progress_from_step,

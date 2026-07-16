@@ -124,47 +124,6 @@ pub(super) async fn verify_workflow_def_values(
     Ok(())
 }
 
-pub(super) async fn verify_active_workflow_export(
-    state: &AppState,
-    req: &WorkflowRequest,
-) -> WorkflowResult<()> {
-    let key = bundle_key(&req.ns, &req.worker, &req.frozen_version)?;
-    let raw: Option<String> = state
-        .control_redis
-        .with_conn(async |mut conn| {
-            redis::cmd("HGET")
-                .arg(key)
-                .arg("__meta__")
-                .query_async(&mut conn)
-                .await
-        })
-        .await?;
-    let raw = raw.ok_or_else(|| {
-        WorkflowError::not_exported("Workflow is not exported by the active worker version")
-    })?;
-    let meta: JsonValue = serde_json::from_str(&raw).map_err(|err| {
-        WorkflowError::invalid_state(format!("Active worker metadata is corrupt: {err}"))
-    })?;
-    let workflows = meta
-        .get("workflows")
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| {
-            WorkflowError::not_exported("Workflow is not exported by the active worker version")
-        })?;
-    let exported = workflows.iter().any(|entry| {
-        entry.get("name").and_then(JsonValue::as_str) == Some(req.workflow_name.as_str())
-            && entry.get("workflowKey").and_then(JsonValue::as_str)
-                == Some(req.workflow_key.as_str())
-            && entry.get("className").and_then(JsonValue::as_str) == Some(req.class_name.as_str())
-    });
-    if !exported {
-        return Err(WorkflowError::not_exported(
-            "Workflow is not exported by the active worker version",
-        ));
-    }
-    Ok(())
-}
-
 pub(super) async fn verify_active_workflow_current(
     state: &AppState,
     req: &WorkflowRequest,
@@ -179,7 +138,7 @@ pub(super) async fn verify_active_workflow_current(
     .await?;
     if active.version != req.frozen_version || active.class_name != req.class_name {
         return Err(WorkflowError::not_exported(
-            "Workflow active worker export changed during create",
+            "Workflow active worker export changed during mutation",
         ));
     }
     Ok(())
@@ -202,7 +161,7 @@ pub(super) async fn ensure_worker_not_deleting(
         .await?;
     if lock_exists > 0 {
         return Err(WorkflowError::deleting(
-            "Worker is being deleted; workflow creation is blocked",
+            "Worker is being deleted; workflow mutation is blocked",
         ));
     }
     Ok(())

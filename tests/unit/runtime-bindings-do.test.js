@@ -42,7 +42,7 @@ function bindingWithBackend(backend) {
   });
 }
 
-test("DO connect headers strip tenant protocol hop and owner hint headers", () => {
+test("DO connect headers strip tenant routing headers and preserve the scope request id", () => {
   const request = new Request("https://tenant.workers.example/ws", {
     headers: {
       "x-wdl-do-hop-count": "99",
@@ -62,12 +62,12 @@ test("DO connect headers strip tenant protocol hop and owner hint headers", () =
   assert.equal(headers.get("x-wdl-do-hop-count"), null);
   assert.equal(headers.get("x-wdl-do-owner-key"), null);
   assert.equal(headers.get("x-wdl-do-owner-generation"), null);
-  assert.equal(headers.get("x-request-id"), "tenant-rid");
+  assert.equal(headers.get("x-request-id"), "scope-rid");
   assert.equal(headers.get("x-wdl-do-ns"), "tenant");
   assert.equal(headers.get("x-wdl-do-object-name"), "room-a");
 });
 
-test("DO fetch requestSpec strips tenant internal owner routing headers", async () => {
+test("DO fetch requestSpec strips tenant routing headers and preserves the scope request id", async () => {
   const { spec } = await requestSpec(new Request("https://tenant.workers.example/send", {
     method: "POST",
     headers: {
@@ -88,7 +88,7 @@ test("DO fetch requestSpec strips tenant internal owner routing headers", async 
   assert.equal(headers.get("x-wdl-do-ownership-error"), null);
   assert.equal(headers.get("x-wdl-do-owner-key"), null);
   assert.equal(headers.get("x-wdl-do-owner-generation"), null);
-  assert.equal(headers.get("x-request-id"), "tenant-rid");
+  assert.equal(headers.get("x-request-id"), "scope-rid");
 });
 
 test("DO fetch requestSpec uses captured header mutation intrinsics", async () => {

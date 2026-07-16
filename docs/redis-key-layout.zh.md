@@ -8,7 +8,7 @@ WDL 使用明确的逻辑切分：
 
 - **`DB 0`，控制面：**bundle、routes/patterns、auth、D1/DO owner state、cron config、queue-consumer config、lifecycle metadata，以及 workflow definition（`wf:defs:*`）。
 - **`DB 1`，数据面：**KV hash bucket、queue stream、delayed queue、orphan stream 和 live log-tail stream。
-- **`DB 2`，workflows：**`wf:schema_version`、instance state、step record/summary、ready/due shard、event 和 event-type index、payload ref、retention index、run lease。
+- **`DB 2`，workflows：**`wf:schema_version`、instance state、step record/summary、ready/due shard、event 和 event-type index、payload ref、retention index、restart target-version blocker、run lease。
 
 Local compose、Kubernetes 和 Terraform 都启用这个切分。Rust service 和 Rust `redis-proxy` 使用 `DATA_REDIS_URL` / `DATA_REDIS_DB` 选择 data-plane Redis connection/database；嵌入的 JS control/log-tail 路径使用 `DATA_REDIS_ADDR` 加 `DATA_REDIS_DB`，因为它们的 RESP client 接收 host:port address。未设置这些 data-plane 变量的部署会把数据面 key 留在 control Redis connection/database，直到显式 opt in。Workflows 不同：未设置 `WORKFLOWS_REDIS_URL` 时 workflows service 仍默认使用 DB 2；只有显式设置 `WORKFLOWS_REDIS_DB=0` 时才使用 DB 0。
 
@@ -43,11 +43,11 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 
 `routes:<ns>` 和 `worker-versions:<ns>:<name>` 只能通过 `shared/version.js#routesKey` / `#workerVersionsKey`（以及它们的 Rust 镜像 `rust/common/src/version.rs#routes_key` / `#worker_versions_key`）构造。Control 是唯一 writer；sanctioned reader 是 gateway（route resolution）和 workflows。workflows 有两条读取路径：workflow create / verify 时的 active-export resolution，以及 fired alarm 的 scheduled version 已不再 retained 时的 internal DO alarm retarget。改 key 语法时必须同时更新 JS helper、Rust helper 和所有 reader。
 
-`workers:<ns>` 表示这个 worker 有 worker-owned lifecycle state：retained bundle、active projection 或 worker-level secrets。Secret-only worker 会被有意列出，并可以 whole-delete。
+`workers:<ns>` 表示这个 worker 有 worker-owned lifecycle state：retained bundle、active projection、worker-level secrets 或 workflow definitions。Secret-only 和 definitions-only worker 会被有意列出，并可以 whole-delete。
 
 ## Route 和 Host Projection
 
-Subdomain routing 读取 `routes:<ns>`。Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>`，并使用 slot value 中嵌入的 `version` 构造 `x-worker-id`，不再查 `routes:<ns>`。Pattern slot value 是由 `shared/route-projection.js` 编码的紧凑 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` record，不再是 JSON。Promote 在同一个 Redis transaction 中更新两套 projection。
+Subdomain routing 读取 `routes:<ns>`。Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>`，并使用 slot value 中嵌入的 `version` 构造 `x-worker-id`，不再查 `routes:<ns>`。Pattern slot value 是由 `shared/route-projection.js` 编码的紧凑 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` record，不再是 JSON。Promote 在同一个 Redis transaction 中更新两套 projection。Control mutation 和 delete 路径遇到无法 decode 的非空 slot 时会 fail closed，不会把未知 owner 当成空槽。
 
 `hosts:<ns>` 是 operator intent：这个 namespace 被允许使用这些 host。`declared-hosts` 是 gateway 对“至少被一个 namespace 声明过的 host”的 gate。`host-declarations:<host>` 记录声明该 host 的 namespace，因此一个 namespace 移除声明时，不会在另一个 namespace 仍声明该 host 的情况下清掉全局 gate。`POST /reload` 会先从 `hosts:<ns>` 重建这两个声明索引，再发布 gateway cache invalidation；这给 operator-managed host declaration 提供显式 repair/backfill 路径。`ns-hosts:<ns>` 是 active reverse index：这个 namespace 当前在这些 host 上拥有至少一个 slot。`hosts:<ns>` 应是 superset。Host reconcile 会先用 `ns-hosts:<ns>` 做 fast path，再扫描 `patterns:<host>`。
 
@@ -97,4 +97,5 @@ Routes、crons、queue consumers、bindings、vars、exports、workflow definiti
 - Queue main stream 不做 trim，因为 at-least-once delivery 是合同。DLQ、orphan、log-tail 这类诊断 stream 可以使用有界 approximate trim。
 - Secret hash value 在 steady state 下是 `WDL-ENC:` envelope。`/runtime/load` 没有 plaintext fallback。
 - Workflows 拥有 DB 2 instance state。`wf:ready:cursor` 是内部 ready-shard 公平性 cursor。Control 只拥有 DB 0 的 `wf:defs:*`；其他 tier 不应直接写 DB 2。
+- `wf:pending-version:<ns>:<worker>:<version>` 是 Workflows-owned、30 秒的 restart blocker。Version-delete 会将它与 `wf:by-version` 一起检查；续租不能复活已过期 member，restart 成功的 DB 2 script 会在创建持久 version referrer 前再次验证 lease。ZSET key 使用随写入刷新的 60 秒 TTL，确保遗留 marker key 会被物理回收。
 - Workflows 还拥有 DB 2 中的 internal `wf:internal:do-alarm:*` jobs，用于 Durable Object alarm backend scheduling。do-runtime 通过 workflows HTTP API 写 alarm，而不是直接写这些 key。`wf:internal:do-alarm:ready:cursor` 是内部 ready-shard 公平性 cursor，不是租户状态。

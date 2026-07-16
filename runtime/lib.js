@@ -3,7 +3,14 @@
 import { base64ToBytes, bytesToBase64 } from "shared-base64";
 import { WORKER_NAME_RE, isValidRouteNs } from "shared-ns-pattern";
 import { parseVersion } from "shared-version";
-import { isWorkerdExperimentalCompatFlag } from "shared-workerd-compat-flags";
+import {
+  DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE,
+  ENHANCED_ERROR_SERIALIZATION_FLAG,
+  LEGACY_ERROR_SERIALIZATION_FLAG,
+  MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
+  isWorkerdExperimentalCompatFlag,
+} from "shared-workerd-compat-flags";
 
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
@@ -107,9 +114,6 @@ function deepFreeze(obj) {
   return Object.freeze(obj);
 }
 
-const DEFAULT_COMPATIBILITY_DATE = "2026-04-24";
-const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
-const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
 // Loaded workers may declare an older compatibilityDate than the platform
 // workers. Keep enhanced error serialization as a floor only before the date
 // where workerd made it the default; newer dates reject the explicit flag.
@@ -146,6 +150,19 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
     if (isWorkerdExperimentalCompatFlag(f)) {
       throw new Error(
         `meta.compatibilityFlags contains experimental workerd flag ${JSON.stringify(f)}, which WDL does not support for tenant workers`
+      );
+    }
+    if (f === LEGACY_ERROR_SERIALIZATION_FLAG) {
+      throw new Error(
+        `meta.compatibilityFlags contains unsupported flag ${JSON.stringify(f)}; WDL requires enhanced error serialization`
+      );
+    }
+    if (
+      f === ENHANCED_ERROR_SERIALIZATION_FLAG &&
+      compatibilityDate >= ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE
+    ) {
+      throw new Error(
+        `meta.compatibilityFlags contains ${JSON.stringify(f)}, which became the workerd default on ${ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE} and must not be specified for compatibilityDate ${compatibilityDate}`
       );
     }
     out.push(f);
@@ -222,7 +239,12 @@ export function bundleToWorkerCode(hash) {
   // methods cannot shadow RPC method names on bindings.
   const compatibilityDate = typeof meta.compatibilityDate === "string" && meta.compatibilityDate
     ? meta.compatibilityDate
-    : DEFAULT_COMPATIBILITY_DATE;
+    : DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE;
+  if (compatibilityDate < MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE) {
+    throw new Error(
+      `meta.compatibilityDate ${compatibilityDate} is older than WDL supports (${MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE})`
+    );
+  }
 
   return {
     compatibilityDate,

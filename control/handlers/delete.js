@@ -19,6 +19,7 @@ import {
   doObjectRegistryKey,
   doOwnerScopeScanPatternForStorage,
   doStorageIdKey,
+  workflowDefsKey,
   extractD1Refs, extractOutgoingRefs,
   formatReferrerBlocker,
   bundleAssetPrefix,
@@ -70,6 +71,7 @@ const DELETE_COLLECT_READ_CONCURRENCY = 16;
  *   hostsLosingNsOwnership: string[],
  *   namespaceStillActive: boolean,
  *   hasWorkerSecrets: boolean,
+ *   hasWorkflowDefs: boolean,
  * }} DeleteInputs
  * @typedef {{ retained: boolean, objects: number, doStorageId?: string }} DoStorageRetention
  * @typedef {{ taskId: string, prefixes: string[], source: Record<string, unknown>, nowMs?: number }} CleanupIntent
@@ -88,6 +90,19 @@ const DELETE_COLLECT_READ_CONCURRENCY = 16;
  */
 
 class WholeDeleteError extends ControlAbort {}
+
+/** @param {unknown} raw @param {string} host @param {string} slot */
+function requirePatternProjection(raw, host, slot) {
+  const projection = decodePatternProjection(raw);
+  if (!projection) {
+    throw new WholeDeleteError(500, "corrupt_pattern_projection", {
+      host,
+      slot,
+      stage: "pattern_projection_parse",
+    });
+  }
+  return projection;
+}
 
 /** @param {string} ns @param {string} name @returns {never} */
 function throwWholeDeleteContention(ns, name) {
@@ -273,7 +288,8 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
   const noop =
     !collected.activeVersion &&
     collected.retainedVersions.length === 0 &&
-    !collected.hasWorkerSecrets;
+    !collected.hasWorkerSecrets &&
+    !collected.hasWorkflowDefs;
 
   log("info", "worker_delete_dry_run", {
     request_id: requestId,
@@ -296,6 +312,7 @@ async function handleDryRun({ redis, ns, name, principal, requestId, log }) {
     queueConsumersRemoved: collected.queueConsumerKeys.length,
     namespaceStillActive: collected.namespaceStillActive,
     hasWorkerSecrets: collected.hasWorkerSecrets,
+    hasWorkflowDefs: collected.hasWorkflowDefs,
     durableObjects: {
       storageRetention: describeDoStorageRetention(collected),
     },
@@ -342,7 +359,8 @@ async function executeWholeDelete({ redis, ns, name, principal, requestId, log, 
     const hasWorkerLifecycle =
       collected.activeVersion ||
       collected.retainedVersions.length > 0 ||
-      collected.hasWorkerSecrets;
+      collected.hasWorkerSecrets ||
+      collected.hasWorkflowDefs;
     if (workflowBlocker && !hasWorkerLifecycle) {
       throw workflowBlocker;
     }
@@ -492,6 +510,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
       routesKey(collected.ns),
       workerVersionsKey(collected.ns, collected.name),
       workerSecretsKey(collected.ns, collected.name),
+      workflowDefsKey(collected.ns, collected.name),
       storageKey,
       ...collected.doOwnerKeys,
     );
@@ -503,7 +522,8 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
     const activeVersion = await iso.hGet(routesKey(collected.ns), collected.name);
     const retainedVersions = await iso.zRange(workerVersionsKey(collected.ns, collected.name), 0, -1);
     const hasWorkerSecrets = (await iso.exists(workerSecretsKey(collected.ns, collected.name))) > 0;
-    if (activeVersion || retainedVersions.length > 0 || hasWorkerSecrets) {
+    const hasWorkflowDefs = (await iso.exists(workflowDefsKey(collected.ns, collected.name))) > 0;
+    if (activeVersion || retainedVersions.length > 0 || hasWorkerSecrets || hasWorkflowDefs) {
       await iso.unwatch();
       throw new DriftSignal("worker lifecycle appeared during residual cleanup");
     }
@@ -651,6 +671,7 @@ async function collectDeleteInputs({ redis, ns, name }) {
   const namespaceStillActive = otherActive.length > 0;
 
   const hasWorkerSecrets = (await redis.exists(workerSecretsKey(ns, name))) > 0;
+  const hasWorkflowDefs = (await redis.exists(workflowDefsKey(ns, name))) > 0;
 
   return {
     ns,
@@ -671,6 +692,7 @@ async function collectDeleteInputs({ redis, ns, name }) {
     hostsLosingNsOwnership,
     namespaceStillActive,
     hasWorkerSecrets,
+    hasWorkflowDefs,
   };
 }
 
@@ -757,9 +779,9 @@ function findHostsLosingNsOwnership(ns, activeRoutes, hosts, patternRecords) {
     );
     let siblingOwnsHost = false;
     for (const [slot, raw] of Object.entries(patternRecords[i] || {})) {
-      if (ourSlots.has(slot) || typeof raw !== "string") continue;
-      const projection = decodePatternProjection(raw);
-      if (projection?.ns === ns) {
+      if (ourSlots.has(slot)) continue;
+      const projection = requirePatternProjection(raw, host, slot);
+      if (projection.ns === ns) {
         siblingOwnsHost = true;
         break;
       }
@@ -798,6 +820,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       doStorageIdKey(ns, name),
       workerVersionsKey(ns, name),
       workerSecretsKey(ns, name),
+      workflowDefsKey(ns, name),
       ...(collected.doObjectRegistry ? [collected.doObjectRegistry] : []),
       ...collected.doOwnerKeys,
       ...collected.affectedHosts.map((h) => patternsKey(h)),
@@ -851,6 +874,11 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       await iso.unwatch();
       throw new DriftSignal("secrets presence changed during delete");
     }
+    const curHasWorkflowDefs = (await iso.exists(workflowDefsKey(ns, name))) > 0;
+    if (curHasWorkflowDefs !== collected.hasWorkflowDefs) {
+      await iso.unwatch();
+      throw new DriftSignal("workflow definitions presence changed during delete");
+    }
     if (collected.doObjectRegistry) {
       const curDoObjectMembers = await iso.sMembers(collected.doObjectRegistry);
       if (!arraysShallowEqual(curDoObjectMembers.toSorted(), collected.doObjectMembers.toSorted())) {
@@ -887,9 +915,9 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
 
     for (const r of collected.activeRoutes) {
       const held = await iso.hGet(patternsKey(r.host), r.slot);
-      if (!held) continue;
-      const parsed = decodePatternProjection(held);
-      if (parsed && (parsed.ns !== ns || parsed.worker !== name)) {
+      if (held == null) continue;
+      const parsed = requirePatternProjection(held, r.host, r.slot);
+      if (parsed.ns !== ns || parsed.worker !== name) {
         await iso.unwatch();
         throw new WholeDeleteError(409, "projection_drift", {
           host: r.host, slot: r.slot, owner: parsed,

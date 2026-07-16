@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import * as hostWrapperRuntime from "./_wdl-host-wrapper-runtime.js";
+import wrappedWorker from "./_wdl-wrapper.js";
 
 export class Room extends DurableObject {
   constructor(ctx, env) {
@@ -46,9 +48,13 @@ export class Room extends DurableObject {
   }
 
   async forwardRequestId(targetName) {
+    this.env.ROOM.requestId = () => "tenant-rid";
     const target = this.env.ROOM.get(this.env.ROOM.idFromName(targetName));
-    const response = await target.fetch(new Request("https://do.internal/request-id"));
-    return response.text();
+    const tenantContext = hostWrapperRuntime.createRequestContext();
+    return tenantContext.runWithRequestContext("tenant-rid", async () => {
+      const response = await target.fetch(new Request("https://do.internal/request-id"));
+      return response.text();
+    });
   }
 
   async nestedForwardRequestId(targetName) {
@@ -73,6 +79,12 @@ export class Room extends DurableObject {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/reenter-request-id" && url.searchParams.get("nested") !== "1") {
+      url.searchParams.set("nested", "1");
+      return wrappedWorker.fetch(new Request(url, {
+        headers: { "x-request-id": "tenant-rid" },
+      }), env, {});
+    }
     const id = env.ROOM.idFromName(url.searchParams.get("name") || "main");
     const stub = env.ROOM.get(id);
     if (url.pathname === "/fail") {
@@ -110,6 +122,11 @@ export default {
       ));
     }
     if (url.pathname === "/request-id") {
+      return Response.json({
+        requestId: await stub.forwardRequestId(url.searchParams.get("to") || "peer"),
+      });
+    }
+    if (url.pathname === "/reenter-request-id") {
       return Response.json({
         requestId: await stub.forwardRequestId(url.searchParams.get("to") || "peer"),
       });

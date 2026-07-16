@@ -73,14 +73,17 @@ dispatch.
 do-runtime invokes tenant alarm and RPC methods through private fetch dispatches
 intercepted by the generated wrapper. Those requests carry the outer request id so the
 host facade establishes invocation-local context without adding platform metadata to
-the tenant argument list.
+the tenant argument list. Nested DO fetch/connect requests discard tenant-supplied
+`x-request-id` values and, when the ambient parent context is available, propagate its
+sanitized request id. Request ids remain untrusted diagnostic metadata.
 DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
 and storage id. They do not accept inline worker source.
 Tenant-facing DO object names and ids must be well-formed Unicode strings. Lone UTF-16
 surrogates are rejected by `idFromName()` / `idFromString()` before hashing or dispatch;
 do-runtime alarm ingress and Workflows revalidation enforce the same boundary.
 DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without
-leading zeroes.
+leading zeroes. DO binding class names use the ASCII JavaScript class-name grammar and
+are capped at 468 bytes at deploy, so every shard suffix fits the aggregate host-id cap.
 
 ## Redis / Storage Contracts
 

@@ -466,6 +466,38 @@ test("bumpActiveAndPromote also rewrites full queue consumer projection", async 
   });
 });
 
+test("bumpActiveAndPromote batches pattern projection reads across hosts", async () => {
+  const redis = makeRedis();
+  const routes = ["api.example", "admin.example"].map((host) => ({
+    host,
+    slot: "/*",
+    kind: "prefix",
+    value: "/",
+  }));
+  seedBundle(redis, "v1", { routes });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.sets.set("hosts:demo", new Set(routes.map((route) => route.host)));
+  for (const route of routes) {
+    redis.state.hashes.set(`patterns:${route.host}`, {
+      [route.slot]: patternProjection("demo", "worker", "v1", route.kind, route.value),
+    });
+  }
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.deepEqual(
+    redis.state.commands.filter(([command]) => command === "hGetAllMany"),
+    [["hGetAllMany", ["patterns:api.example", "patterns:admin.example"]]]
+  );
+  assert.equal(
+    redis.state.commands.some(([command, key]) =>
+      command === "hGetAll" && typeof key === "string" && key.startsWith("patterns:")
+    ),
+    false
+  );
+});
+
 test("bumpActiveAndPromote retries when active changes before source metadata read", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {});
@@ -644,6 +676,40 @@ test("bumpActiveAndPromote rejects active routes that no longer declare their ho
   );
 });
 
+/** @type {Array<[string, string, number, string]>} */
+const bumpProjectionFailureCases = [
+  ["malformed", "not-a-projection", 500, "corrupt_pattern_projection"],
+  ["foreign", patternProjection("other", "site", "v7", "prefix", "/"), 409, "route_conflict"],
+];
+for (const [label, held, expectedStatus, expectedCode] of bumpProjectionFailureCases) {
+  test(`bumpActiveAndPromote fails closed on ${label} held pattern projections`, async () => {
+    const redis = makeRedis();
+    seedBundle(redis, "v1", {
+      routes: [{
+        host: "app.workers.example",
+        slot: "/*",
+        kind: "prefix",
+        value: "/",
+      }],
+    });
+    redis.state.hashes.set("routes:demo", { worker: "v1" });
+    redis.state.hashes.set("patterns:app.workers.example", { "/*": held });
+    redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
+    redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+    await assert.rejects(
+      bumpActiveAndPromote(redis, "demo", "worker"),
+      (err) => {
+        assertRoutingErrorShape(err, expectedStatus, expectedCode);
+        return true;
+      }
+    );
+
+    assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+    assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
+  });
+}
+
 test("bumpActiveAndPromote rejects malformed cron metadata", async () => {
   const redis = makeRedis();
   /** @type {Array<{ level: string, event: string, fields: any }>} */
@@ -756,6 +822,30 @@ test("promoteWithRoutes rejects a custom host already owned by another namespace
       assert.equal(shaped.details.host, "app.workers.example");
       assert.equal(shaped.details.slot, "/*");
       assert.equal(Object.hasOwn(shaped.details, "held"), false);
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
+test("promoteWithRoutes fails closed on malformed occupied pattern projections", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    routes: [{
+      host: "app.workers.example",
+      slot: "/*",
+      kind: "prefix",
+      value: "/",
+    }],
+  });
+  redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
+  redis.state.hashes.set("patterns:app.workers.example", { "/*": "not-a-projection" });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      const shaped = assertRoutingErrorShape(err, 500, "corrupt_pattern_projection");
+      assert.deepEqual(shaped.details, { host: "app.workers.example", slot: "/*" });
       return true;
     }
   );

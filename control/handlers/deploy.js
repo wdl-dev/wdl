@@ -42,7 +42,12 @@ import {
 } from "control-topology";
 import { formatVersion, parseVersion, bundleKey, nextVersionKey, routesKey } from "shared-version";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
-import { isReservedNs, isValidRouteNs, ROUTES_ALLOWED_RESERVED_NS } from "shared-ns-pattern";
+import {
+  isReservedNs,
+  isValidRouteNs,
+  ROUTES_ALLOWED_RESERVED_NS,
+  WORKFLOW_KEY_RE,
+} from "shared-ns-pattern";
 import { putAsset, inferContentType } from "control-s3";
 import { generateAssetsToken, assetsPrefixFor } from "shared-assets-token";
 import { resolveDatabaseRefFrom } from "control-d1-store";
@@ -1126,26 +1131,16 @@ async function materializeCommittedMetadata(iso, { ns, name, prepared, resolvedD
   const workflowDefUpdates = [];
   if (Array.isArray(committedMeta.workflows) && committedMeta.workflows.length) {
     const defsKey = workflowDefsKey(ns, name);
-    const rawDefs = await iso.hMGet(defsKey, committedMeta.workflows.map((workflow) => workflow.name));
-    for (const [index, workflow] of committedMeta.workflows.entries()) {
-      const rawDef = rawDefs[index];
+    const existingDefRaws = await iso.hMGet(
+      defsKey,
+      committedMeta.workflows.map((workflow) => workflow.name)
+    );
+    for (let index = 0; index < committedMeta.workflows.length; index += 1) {
+      const workflow = committedMeta.workflows[index];
+      const existingDef = parsePersistedWorkflowDef(workflow.name, existingDefRaws[index]);
       let workflowKey;
-      if (rawDef) {
-        /** @type {JsonObject} */
-        let parsed;
-        try {
-          parsed = /** @type {JsonObject} */ (JSON.parse(rawDef));
-        } catch {
-          throw new DeployAbort(500, "workflow_definition_corrupt", {
-            workflow: workflow.name,
-          });
-        }
-        if (typeof parsed?.workflowKey !== "string" || !/^wf_[0-9a-f]{32}$/.test(parsed.workflowKey)) {
-          throw new DeployAbort(500, "workflow_definition_corrupt", {
-            workflow: workflow.name,
-          });
-        }
-        workflowKey = parsed.workflowKey;
+      if (existingDef) {
+        workflowKey = existingDef.workflowKey;
       } else {
         workflowKey = newWorkflowKey();
       }
@@ -1173,6 +1168,35 @@ async function materializeCommittedMetadata(iso, { ns, name, prepared, resolvedD
   }
   deepFreeze(committedMeta);
   return { committedMeta, workflowDefUpdates, doStorageId };
+}
+
+/**
+ * @param {string} workflowName
+ * @param {string | null | undefined} rawDef
+ * @returns {{ workflowKey: string } | null}
+ */
+function parsePersistedWorkflowDef(workflowName, rawDef) {
+  if (rawDef == null) return null;
+  /** @type {JsonObject | null} */
+  let parsed;
+  try {
+    parsed = typeof rawDef === "string"
+      ? /** @type {JsonObject} */ (JSON.parse(rawDef))
+      : null;
+  } catch {
+    parsed = null;
+  }
+  if (
+    !parsed ||
+    Array.isArray(parsed) ||
+    typeof parsed.workflowKey !== "string" ||
+    !WORKFLOW_KEY_RE.test(parsed.workflowKey)
+  ) {
+    throw new DeployAbort(500, "workflow_definition_corrupt", {
+      workflow: workflowName,
+    });
+  }
+  return { workflowKey: parsed.workflowKey };
 }
 
 /**

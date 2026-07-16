@@ -4,8 +4,8 @@ use super::{
 };
 use crate::api::{canonical_json, retry_due_at_ms, retry_policy};
 use crate::{
-    InstanceKeys, config_from_env, due_key, ready_active_key, ready_key, schema_version_key,
-    validate_instance_id_value,
+    InstanceKeys, config_from_env, due_key, pending_version_key, ready_active_key, ready_key,
+    schema_version_key, validate_instance_id_value,
 };
 use wdl_rust_common::test_env::with_temp_envs;
 // Source-contract tests below intentionally couple to these module paths. If
@@ -285,6 +285,14 @@ fn workflow_ready_key_uses_fixed_shards() {
     assert_eq!(ready_active_key(), "wf:ready:active");
     assert_eq!(ready_key(0), "wf:ready:0");
     assert_eq!(ready_key(31), "wf:ready:31");
+}
+
+#[test]
+fn pending_restart_key_is_scoped_to_the_target_version() {
+    assert_eq!(
+        pending_version_key("demo", "orders", "v3"),
+        "wf:pending-version:demo:orders:v3"
+    );
 }
 
 #[test]

@@ -65,6 +65,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-bindings-do", esModule = embed "bindings/do.js"),
     (name = "runtime-bindings-internal-auth-backend", esModule = embed "bindings/internal-auth-backend.js"),
     (name = "runtime-do-transport", esModule = embed "_wdl-do-transport.js"),
+    (name = "_wdl-request-id.js", esModule = embed "_wdl-request-id.js"),
     (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
     # Injected DO transport uses a relative module name; host modules use the
     # shared bare name. Both resolve to the same shared contract owner.

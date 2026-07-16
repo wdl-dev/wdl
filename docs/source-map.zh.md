@@ -69,7 +69,7 @@
 | `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
 | `shared/ns-pattern.js` | Platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、module path、reserved object-key 和 reserved namespace grammars。 |
 | `shared/version.js` | Worker version formatting，以及 worker、route-plane、lifecycle、DO owner-scope key 与 route invalidation channel helpers。 |
-| `shared/workerd-compat-flags.js` | 上游 workerd experimental compatibility enable flags 的 pinned mirror，用于在 cold-load 前拒绝 tenant metadata。 |
+| `shared/workerd-compat-flags.js` | 上游 workerd experimental enable flags 的 pinned mirror，以及 WDL-owned dynamic-worker 日期和 error-serialization policy。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire 和 SQL splitting utilities。 |
@@ -109,7 +109,7 @@
 | `examples/` | 手工 demo 和 reference projects。测试不应悄悄依赖它们，除非 fixture 明确迁入 `test-workers/`。 |
 | `scripts/run-integration-tests.js` | Integration worker-pool runner。 |
 | `scripts/compile-workerd-configs.js` | 把 workerd Cap'n Proto configs 编译成 `dist/workerd-configs/*.bin`。 |
-| `scripts/extract-workerd-experimental-compat-flags.mjs` | pin bump flag 提取脚本。 |
+| `scripts/extract-workerd-experimental-compat-flags.mjs` | pin bump experimental flag 提取脚本。 |
 
 ## Infrastructure
 

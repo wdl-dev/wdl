@@ -14,8 +14,8 @@ WDL uses a deliberate logical split:
 - **`DB 1`, data plane:** KV hash buckets, queue streams, delayed queues, orphan streams,
   and live log-tail streams.
 - **`DB 2`, workflows:** `wf:schema_version`, instance state, step records/summaries,
-  ready/due shards, events and event-type indexes, payload refs, retention indexes, and
-  run leases.
+  ready/due shards, events and event-type indexes, payload refs, retention indexes,
+  restart target-version blockers, and run leases.
 
 Local compose, Kubernetes, and Terraform enable this split. Rust services and the
 Rust `redis-proxy` use `DATA_REDIS_URL` / `DATA_REDIS_DB` to select the
@@ -74,8 +74,8 @@ scheduled version is no longer retained. A key-grammar change must update the JS
 helper, the Rust helper, and every reader together.
 
 `workers:<ns>` means the worker has worker-owned lifecycle state: retained bundle,
-active projection, or worker-level secrets. Secret-only workers are intentionally listed
-and whole-deletable.
+active projection, worker-level secrets, or workflow definitions. Secret-only and
+definitions-only workers are intentionally listed and whole-deletable.
 
 ## Route And Host Projection
 
@@ -84,7 +84,8 @@ then reads `patterns:<host>` and uses the slot value's embedded `version` to con
 `x-worker-id` without consulting `routes:<ns>`. Pattern slot values are compact
 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` records encoded by
 `shared/route-projection.js`, not JSON. Promote updates both projections in the same
-Redis transaction.
+Redis transaction. Control mutation and delete paths fail closed on a nonempty slot that
+cannot be decoded; they do not treat an unknown owner as an empty slot.
 
 `hosts:<ns>` is operator intent: the namespace is allowed to use those hosts.
 `declared-hosts` is a gateway gate for hosts declared by at least one namespace.
@@ -164,6 +165,11 @@ Cross-cutting constraints:
 - Workflows owns DB 2 instance state. `wf:ready:cursor` is the internal ready-shard
   fairness cursor. Control owns only DB 0 `wf:defs:*`; other tiers must not write DB 2
   directly.
+- `wf:pending-version:<ns>:<worker>:<version>` is a Workflows-owned, 30-second restart
+  blocker. Version-delete checks it with `wf:by-version`; renewals cannot resurrect an
+  expired member, and the successful-restart DB 2 script revalidates the lease before
+  replacing it with the durable version referrer. The ZSET key has a refreshed
+  60-second TTL so abandoned marker keys are physically reclaimed.
 - Workflows also owns internal DB 2 `wf:internal:do-alarm:*` jobs for Durable Object
   alarm backend scheduling. do-runtime writes alarms through the workflows HTTP API
   instead of writing those keys directly. `wf:internal:do-alarm:ready:cursor` is the

@@ -2,43 +2,6 @@ locals {
   name = var.name_prefix
 }
 
-data "aws_subnet" "private_contract" {
-  for_each = toset(var.private_subnet_ids)
-
-  id = each.value
-
-  lifecycle {
-    postcondition {
-      condition     = self.vpc_id == var.vpc_id
-      error_message = "Private subnet ${self.id} must belong to vpc_id ${var.vpc_id}."
-    }
-    postcondition {
-      condition = try(
-        (
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[0]) == 10 &&
-          tonumber(split("/", self.cidr_block)[1]) >= 8
-          ) || (
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[0]) == 100 &&
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[1]) >= 64 &&
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[1]) <= 127 &&
-          tonumber(split("/", self.cidr_block)[1]) >= 10
-          ) || (
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[0]) == 172 &&
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[1]) >= 16 &&
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[1]) <= 31 &&
-          tonumber(split("/", self.cidr_block)[1]) >= 12
-          ) || (
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[0]) == 192 &&
-          tonumber(split(".", cidrhost(self.cidr_block, 0))[1]) == 168 &&
-          tonumber(split("/", self.cidr_block)[1]) >= 16
-        ),
-        false,
-      )
-      error_message = "Private subnet ${self.id} must use an IPv4 CIDR within RFC1918 or 100.64.0.0/10."
-    }
-  }
-}
-
 module "data" {
   source = "./modules/data"
 
@@ -52,13 +15,10 @@ module "data" {
 module "compute" {
   source = "./modules/compute"
 
-  name               = local.name
-  region             = var.region
-  vpc_id             = var.vpc_id
-  private_subnet_ids = var.private_subnet_ids
-  private_subnet_availability_zone_ids = toset([
-    for subnet in data.aws_subnet.private_contract : subnet.availability_zone_id
-  ])
+  name                    = local.name
+  region                  = var.region
+  vpc_id                  = var.vpc_id
+  private_subnet_ids      = var.private_subnet_ids
   alb_https_listener_arn  = var.alb_https_listener_arn
   alb_security_group_id   = var.alb_security_group_id
   platform_domain         = var.platform_domain

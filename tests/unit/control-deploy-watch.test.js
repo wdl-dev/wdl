@@ -1540,6 +1540,60 @@ test("commitWithWatch assigns stable workflow keys into bundle meta and wf:defs"
   ]);
 });
 
+test("commitWithWatch reads only workflow definitions declared by the new bundle", async () => {
+  const duplicateKey = "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  /** @type {unknown[][]} */
+  const workflowDefReads = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
+    ["wf:defs:tenant-a:orders", {
+      orders: JSON.stringify({ workflowKey: duplicateKey, className: "OrderWorkflow" }),
+      historical: "not-json",
+    }],
+  ]);
+  /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta = null;
+  /** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys = [];
+  /** @type {any} */ (globalThis).__controlDeployTestState.execFailures = 0;
+
+  const redis = {
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      const session = makeSession();
+      const hMGet = session.hMGet.bind(session);
+      session.hMGet = async (key, fields) => {
+        workflowDefReads.push([key, [...fields]]);
+        return await hMGet(key, fields);
+      };
+      return await fn(session);
+    },
+  };
+
+  await commitWithWatch({
+    redis,
+    ns: "tenant-a",
+    name: "orders",
+    version: "v1",
+    prepared: {
+      meta: {
+        mainModule: "worker.js",
+        modules: { "worker.js": { type: "esm" } },
+        workflows: [
+          { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+        ],
+      },
+      normalized: [["worker.js", "export default {}"]],
+    },
+    outgoingRefs: [],
+    d1Refs: [],
+    controlEnv: {},
+  });
+  assert.equal(
+    /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.workflows[0].workflowKey,
+    duplicateKey
+  );
+  assert.deepEqual(workflowDefReads, [["wf:defs:tenant-a:orders", ["orders"]]]);
+});
+
 test("commitWithWatch checks code budget after workflow keys are materialized", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([

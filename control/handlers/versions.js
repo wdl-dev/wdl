@@ -14,6 +14,7 @@ import {
   extractOutgoingRefs, formatReferrerBlocker,
   bundleAssetPrefix,
   parseBundleMeta,
+  workflowDefsKey,
 } from "control-lib";
 import {
   stageD1ReferrerRemovals,
@@ -168,6 +169,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
       routesKey(ns),
       workerVersionsKey(ns, name),
       workerSecretsKey(ns, name),
+      workflowDefsKey(ns, name),
       bundleKey(ns, name, version),
       referrersKey(ns, name, version),
     );
@@ -252,6 +254,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     }
 
     const hasWorkerSecrets = (await iso.exists(workerSecretsKey(ns, name))) > 0;
+    const hasWorkflowDefs = (await iso.exists(workflowDefsKey(ns, name))) > 0;
     const lastRetainedNoActive =
       currentVersions.length === 1 &&
       currentVersions[0] === version &&
@@ -271,11 +274,10 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
       databaseIdFor: (ref) => /** @type {string} */ (ref.databaseId),
     });
     if (lastRetainedNoActive) {
-      // Single-version DELETE must never touch worker secrets — that's
-      // whole-delete's job. A worker with secrets but no bundles /
-      // active projection stays in workers:<ns> as a secret-only entry.
+      // Single-version DELETE leaves non-version lifecycle state for
+      // whole-delete. Keep those workers discoverable through workers:<ns>.
       stageWorkerVersionIndexDelete(multi, ns, name);
-      if (!hasWorkerSecrets) {
+      if (!hasWorkerSecrets && !hasWorkflowDefs) {
         stageWorkerHidden(multi, ns, name);
       }
     }

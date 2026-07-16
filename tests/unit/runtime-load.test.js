@@ -1758,7 +1758,7 @@ test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserv
 test("wrapWorkerCodeForHostBindings: normalizes standalone ALS compatibility flags", () => {
   for (const [input, expected] of [
     [["no_nodejs_als"], ["nodejs_als"]],
-    [["streams_enable_constructors", "no_nodejs_als"], ["streams_enable_constructors", "nodejs_als"]],
+    [["no_global_navigator", "no_nodejs_als"], ["no_global_navigator", "nodejs_als"]],
     [["nodejs_compat", "no_nodejs_als"], ["nodejs_compat", "no_nodejs_als"]],
   ]) {
     const workerCode = {
@@ -1835,6 +1835,13 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
     mainModule: "worker.js",
     modules: {
       "worker.js": `
+        import * as hostRuntime from "./_wdl-host-wrapper-runtime.js";
+        export function hostRuntimeContextExports() {
+          return {
+            currentRequestId: typeof hostRuntime.currentRequestId,
+            runWithRequestContext: typeof hostRuntime.runWithRequestContext,
+          };
+        }
         export class Api {
           constructor(ctx, env) { this.env = env; }
           dbConstructorName() { return this.env.DB?.constructor?.name; }
@@ -1872,7 +1879,6 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
       const stubbed = name === "_wdl-wrapper.js"
         ? source
           .replace(`from "cloudflare:workers"`, `from "./_cf_workers_stub.js"`)
-          .replace("function withRequestContext", "export function withRequestContext")
         : source;
       writeFileSync(file, stubbed);
     }
@@ -1892,33 +1898,10 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
       assert.ok(new wrapped[name]({}, { DB: { raw: true } }) instanceof user[name]);
     }
 
-    const request = new Request("https://demo.workers.example", {
-      headers: { "x-request-id": "rid-instance" },
+    assert.deepEqual(wrapped.hostRuntimeContextExports(), {
+      currentRequestId: "undefined",
+      runWithRequestContext: "undefined",
     });
-    const contextRuntime = await import(`file://${path.join(dir, "_wdl-host-wrapper-runtime.js")}`);
-    const firstStarted = Promise.withResolvers();
-    const releaseFirst = Promise.withResolvers();
-    const first = wrapped.withRequestContext(request, () => {
-      const result = (async () => {
-        firstStarted.resolve(undefined);
-        await releaseFirst.promise;
-        return contextRuntime.currentRequestId();
-      })();
-      return result;
-    });
-    await firstStarted.promise;
-
-    const secondRequest = new Request("https://demo.workers.example", {
-      headers: { "x-request-id": "rid-second" },
-    });
-    const second = wrapped.withRequestContext(secondRequest, async () => {
-      await Promise.resolve();
-      return contextRuntime.currentRequestId();
-    });
-    assert.equal(await second, "rid-second");
-    releaseFirst.resolve(undefined);
-    assert.equal(await first, "rid-instance");
-    assert.equal(contextRuntime.currentRequestId(), null);
 
     let thenReads = 0;
     const stateful = {};

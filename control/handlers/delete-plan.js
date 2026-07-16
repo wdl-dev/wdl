@@ -35,6 +35,7 @@ import { workerSecretsKey } from "shared-secret-keys";
  *   hostsLosingNsOwnership: string[],
  *   namespaceStillActive: boolean,
  *   hasWorkerSecrets: boolean,
+ *   hasWorkflowDefs: boolean,
  * }} DeleteInputs
  * @typedef {import("control-lifecycle-indexes").RedisMulti} RedisMulti
  * @typedef {{ routes: string, routesFlush: string, patterns: string }} DeleteChannels

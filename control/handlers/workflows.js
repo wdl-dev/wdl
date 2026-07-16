@@ -18,6 +18,11 @@ import {
   requireControlRedis,
 } from "control-shared";
 import { bundleKey, routesKey } from "shared-version";
+import {
+  BINDING_NAME_RE,
+  WORKFLOW_KEY_RE,
+  isValidJsClassDeclarationName,
+} from "shared-ns-pattern";
 
 const LIFECYCLE_ACTIONS = new Set(["pause", "resume", "restart", "terminate"]);
 const MAX_WORKFLOW_SNAPSHOT_ATTEMPTS = 2;
@@ -216,7 +221,7 @@ function buildWorkflowDefinitionList(ns, routeEntries, metas, defsRaws) {
         workflowKey: workflow.workflowKey,
       });
     }
-    const defs = parseWorkflowDefs(defsRaws[i]);
+    const defs = parseWorkflowDefs(defsRaws[i], { ns, worker });
     for (const [name, def] of Object.entries(defs)) {
       if (activeByName.has(name)) continue;
       workflows.push({
@@ -270,10 +275,7 @@ async function resolveWorkflow({ redis }, ns, worker, workflowName) {
     /** @type {WorkflowEntry | undefined} */
     let workflow = activeWorkflow;
     if (!workflow) {
-      const defs = await readWorkflowDefs({ redis }, ns, worker);
-      const def = Object.hasOwn(defs, workflowName)
-        ? defs[workflowName]
-        : undefined;
+      const def = await readWorkflowDef({ redis }, ns, worker, workflowName);
       if (def) {
         workflow = {
           name: workflowName,
@@ -284,7 +286,7 @@ async function resolveWorkflow({ redis }, ns, worker, workflowName) {
         };
       }
     }
-    if (!activeWorkflow && await redis.hGet(routesKey(ns), worker) !== activeVersion) continue;
+    if (await redis.hGet(routesKey(ns), worker) !== activeVersion) continue;
     if (!workflow) {
       throw new ControlAbort(404, "workflow_not_found", {
         message: `Workflow ${ns}/${worker}/${workflowName} is not exported`,
@@ -330,37 +332,62 @@ async function readActiveWorkflowMeta({ redis }, ns, worker) {
  * @param {RedisDeps} deps
  * @param {string} ns
  * @param {string} worker
- * @returns {Promise<RetiredWorkflowDefs>}
+ * @param {string} workflowName
+ * @returns {Promise<RetiredWorkflowDef | null>}
  */
-async function readWorkflowDefs({ redis }, ns, worker) {
-  return parseWorkflowDefs(await redis.hGetAll(workflowDefsKey(ns, worker)));
+async function readWorkflowDef({ redis }, ns, worker, workflowName) {
+  const raw = await redis.hGet(workflowDefsKey(ns, worker), workflowName);
+  return parseWorkflowDef(workflowName, raw, { ns, worker });
+}
+
+/**
+ * @param {string} name
+ * @param {string | null | undefined} value
+ * @param {{ ns: string, worker: string }} context
+ * @returns {RetiredWorkflowDef | null}
+ */
+function parseWorkflowDef(name, value, context) {
+  if (value == null) return null;
+  let parsed;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : null;
+  } catch {
+    parsed = null;
+  }
+  if (
+    !isValidWorkflowName(name) ||
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    typeof parsed.workflowKey !== "string" ||
+    !WORKFLOW_KEY_RE.test(parsed.workflowKey) ||
+    !isValidJsClassDeclarationName(parsed.className)
+  ) {
+    throw new ControlAbort(500, "corrupt_meta", {
+      message: `Corrupt workflow definition for ${context.ns}/${context.worker}`,
+      namespace: context.ns,
+      worker: context.worker,
+      stage: "workflow_defs_parse",
+    });
+  }
+  return {
+    workflowKey: parsed.workflowKey,
+    className: parsed.className,
+  };
 }
 
 /**
  * @param {Record<string, string | null | undefined>} raw
+ * @param {{ ns: string, worker: string }} context
  * @returns {RetiredWorkflowDefs}
  */
-function parseWorkflowDefs(raw) {
+function parseWorkflowDefs(raw, context) {
   /** @type {RetiredWorkflowDefs} */
   const defs = Object.create(null);
   for (const [name, value] of Object.entries(raw || {})) {
-    if (typeof value !== "string") continue;
-    try {
-      const parsed = JSON.parse(value);
-      if (
-        parsed &&
-        typeof parsed.workflowKey === "string" &&
-        typeof parsed.className === "string"
-      ) {
-        defs[name] = {
-          workflowKey: parsed.workflowKey,
-          className: parsed.className,
-        };
-      }
-    } catch {
-      // Corrupt retired definitions are ignored here; execution paths still
-      // fail closed inside workflows when they validate a concrete def.
-    }
+    const parsed = parseWorkflowDef(name, value, context);
+    if (!parsed) continue;
+    defs[name] = parsed;
   }
   return defs;
 }
@@ -373,7 +400,7 @@ function parseWorkflowDefs(raw) {
  * @returns {Record<string, unknown>}
  */
 function workflowBundleMeta(ns, worker, version, raw) {
-  return parseBundleMeta(raw, {
+  const meta = parseBundleMeta(raw, {
     ns,
     worker,
     version,
@@ -385,6 +412,40 @@ function workflowBundleMeta(ns, worker, version, raw) {
       stage: "bundle_meta_parse",
       detail: reason,
     }),
+  });
+  const workflows = meta.workflows;
+  if (workflows !== undefined) {
+    if (!Array.isArray(workflows)) {
+      throw corruptWorkflowEntries(ns, worker, version);
+    }
+    const names = new Set();
+    const bindings = new Set();
+    const workflowKeys = new Set();
+    for (const entry of workflows) {
+      if (
+        !isActiveWorkflowMeta(entry) ||
+        names.has(entry.name) ||
+        bindings.has(entry.binding) ||
+        workflowKeys.has(entry.workflowKey)
+      ) {
+        throw corruptWorkflowEntries(ns, worker, version);
+      }
+      names.add(entry.name);
+      bindings.add(entry.binding);
+      workflowKeys.add(entry.workflowKey);
+    }
+  }
+  return meta;
+}
+
+/** @param {string} ns @param {string} worker @param {string} version */
+function corruptWorkflowEntries(ns, worker, version) {
+  return new ControlAbort(500, "corrupt_meta", {
+    message: `Corrupt workflow metadata for ${ns}/${worker}/${version}`,
+    namespace: ns,
+    worker,
+    version,
+    stage: "workflow_entries_parse",
   });
 }
 
@@ -454,7 +515,7 @@ function workflowsFromMeta(meta) {
     meta && typeof meta === "object" ? meta : null
   );
   if (!record || !Array.isArray(record.workflows)) return [];
-  return record.workflows.filter(isActiveWorkflowMeta);
+  return /** @type {ActiveWorkflowMeta[]} */ (record.workflows);
 }
 
 /**
@@ -467,10 +528,10 @@ function isActiveWorkflowMeta(entry) {
   );
   return Boolean(
     record &&
-    typeof record.name === "string" &&
-    typeof record.binding === "string" &&
-    typeof record.className === "string" &&
-    typeof record.workflowKey === "string",
+    isValidWorkflowName(record.name) &&
+    typeof record.binding === "string" && BINDING_NAME_RE.test(record.binding) &&
+    isValidJsClassDeclarationName(record.className) &&
+    typeof record.workflowKey === "string" && WORKFLOW_KEY_RE.test(record.workflowKey),
   );
 }
 

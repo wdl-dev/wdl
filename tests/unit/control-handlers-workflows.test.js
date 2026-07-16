@@ -10,19 +10,24 @@ import {
 } from "../helpers/load-shared-module.js";
 import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
-import { assertJsonResponse } from "../helpers/response-json.js";
+import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 const WORKFLOWS_HANDLER_GLOBAL = "__workflowsHandlerState";
+const ACTIVE_WORKFLOW_KEY = `wf_${"1".repeat(32)}`;
+const NEW_WORKFLOW_KEY = `wf_${"2".repeat(32)}`;
+const RETIRED_WORKFLOW_KEY = `wf_${"3".repeat(32)}`;
 const { libUrl: productionControlLibUrl } = await compileControlGraph();
 const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 
 const { handle } = await importControlHandler("control/handlers/workflows.js", {
   globalName: WORKFLOWS_HANDLER_GLOBAL,
   replacements: {
     "control-lib": productionControlLibUrl,
     "shared-internal-auth": sharedInternalAuthUrl(),
+    "shared-ns-pattern": sharedNsPatternUrl,
     "shared-version": sharedVersionUrl,
   },
 });
@@ -33,7 +38,7 @@ function resetWorkflowsHandlerState() {
       name: "orders",
       binding: "ORDERS",
       className: "OrderWorkflow",
-      workflowKey: "wf_1234",
+      workflowKey: ACTIVE_WORKFLOW_KEY,
     }],
   });
   const state = createControlHandlerState({
@@ -78,7 +83,7 @@ test("workflows handler lists active workflow definitions from bundle metadata",
       name: "orders",
       binding: "ORDERS",
       className: "OrderWorkflow",
-      workflowKey: "wf_1234",
+      workflowKey: ACTIVE_WORKFLOW_KEY,
     }],
   });
   assert.deepEqual(state.redis.commands, [
@@ -142,6 +147,92 @@ for (const [label, rawMeta] of [
     }
   });
 }
+
+test("workflows handler fails closed on malformed active workflow entries", async () => {
+  const state = resetWorkflowsHandlerState();
+  state.redis.hashes.set("worker:demo:api:v:2", {
+    "__meta__": JSON.stringify({
+      workflows: [{
+        name: "orders",
+        binding: "ORDERS",
+        className: "OrderWorkflow",
+      }],
+    }),
+  });
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows"),
+    ns: "demo",
+    subPath: [],
+    requestId: "rid-malformed-workflow-entry",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  assert.equal(body.stage, undefined);
+  const rejection = state.logs.find((/** @type {any} */ entry) =>
+    entry.event === "workflow_request_rejected"
+  );
+  assert.equal(rejection.fields.stage, "workflow_entries_parse");
+});
+
+test("workflows handler rejects active workflows that share a workflow key", async () => {
+  const state = resetWorkflowsHandlerState();
+  state.redis.hashes.set("worker:demo:api:v:2", {
+    "__meta__": JSON.stringify({
+      workflows: [
+        {
+          name: "orders",
+          binding: "ORDERS",
+          className: "OrderWorkflow",
+          workflowKey: ACTIVE_WORKFLOW_KEY,
+        },
+        {
+          name: "billing",
+          binding: "BILLING",
+          className: "BillingWorkflow",
+          workflowKey: ACTIVE_WORKFLOW_KEY,
+        },
+      ],
+    }),
+  });
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows"),
+    ns: "demo",
+    subPath: [],
+    requestId: "rid-duplicate-active-workflow-key",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  const rejection = state.logs.find((/** @type {any} */ entry) =>
+    entry.event === "workflow_request_rejected"
+  );
+  assert.equal(rejection.fields.stage, "workflow_entries_parse");
+});
+
+test("workflows handler fails closed on malformed persisted workflow definitions", async () => {
+  const state = resetWorkflowsHandlerState();
+  state.redis.hashes.set("wf:defs:demo:api", { retired: "not-json" });
+
+  const response = await handle({
+    method: "GET",
+    url: new URL("http://control/ns/demo/workflows"),
+    ns: "demo",
+    subPath: [],
+    requestId: "rid-malformed-workflow-def",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_meta");
+  const rejection = state.logs.find((/** @type {any} */ entry) =>
+    entry.event === "workflow_request_rejected"
+  );
+  assert.equal(rejection.fields.stage, "workflow_defs_parse");
+});
 
 test("workflows handler retries a list snapshot split by whole-worker delete", async () => {
   const state = resetWorkflowsHandlerState();
@@ -320,18 +411,18 @@ test("workflows handler does not combine active metadata with redeployed workflo
   const state = resetWorkflowsHandlerState();
   const redis = /** @type {any} */ (state.redis);
   redis.hashes.set("worker:demo:api:v:2", { "__meta__": JSON.stringify({ workflows: [] }) });
-  const originalHGetAll = redis.hGetAll.bind(redis);
+  const originalHGet = redis.hGet.bind(redis);
   let redeployed = false;
-  redis.hGetAll = async (/** @type {string} */ key) => {
-    if (key === "wf:defs:demo:api" && !redeployed) {
+  redis.hGet = async (/** @type {string} */ key, /** @type {string} */ field) => {
+    if (key === "wf:defs:demo:api" && field === "orders" && !redeployed) {
       redeployed = true;
       redis.hashes.set("routes:demo", { api: "v3" });
       redis.hashes.set("worker:demo:api:v:3", { "__meta__": JSON.stringify({ workflows: [] }) });
       redis.hashes.set(key, {
-        orders: JSON.stringify({ workflowKey: "wf_new", className: "NewOrderWorkflow" }),
+        orders: JSON.stringify({ workflowKey: NEW_WORKFLOW_KEY, className: "NewOrderWorkflow" }),
       });
     }
-    return await originalHGetAll(key);
+    return await originalHGet(key, field);
   };
 
   const response = await handle({
@@ -348,7 +439,7 @@ test("workflows handler does not combine active metadata with redeployed workflo
     worker: "api",
     frozenVersion: "v3",
     workflowName: "orders",
-    workflowKey: "wf_new",
+    workflowKey: NEW_WORKFLOW_KEY,
     className: "NewOrderWorkflow",
     instanceId: "order-1",
     options: {},
@@ -486,7 +577,7 @@ test("workflows handler resolves retired workflow definitions from wf:defs", asy
   state.redis.hashes.set("worker:demo:api:v:3", { "__meta__": JSON.stringify({ workflows: [] }) });
   state.redis.hashes.set("wf:defs:demo:api", {
     orders: JSON.stringify({
-      workflowKey: "wf_retired",
+      workflowKey: RETIRED_WORKFLOW_KEY,
       className: "OldOrderWorkflow",
     }),
   });
@@ -505,7 +596,7 @@ test("workflows handler resolves retired workflow definitions from wf:defs", asy
     worker: "api",
     frozenVersion: "v3",
     workflowName: "orders",
-    workflowKey: "wf_retired",
+    workflowKey: RETIRED_WORKFLOW_KEY,
     className: "OldOrderWorkflow",
     instanceId: "order-1",
     requestId: "rid-retired",
@@ -518,7 +609,7 @@ test("workflows handler rejects restart for retired workflow definitions", async
   state.redis.hashes.set("worker:demo:api:v:3", { "__meta__": JSON.stringify({ workflows: [] }) });
   state.redis.hashes.set("wf:defs:demo:api", {
     orders: JSON.stringify({
-      workflowKey: "wf_retired",
+      workflowKey: RETIRED_WORKFLOW_KEY,
       className: "OldOrderWorkflow",
     }),
   });
@@ -574,12 +665,13 @@ test("workflows handler resolves active workflow identity before lifecycle proxy
   assert.deepEqual(state.redis.commands, [
     ["hGet", "routes:demo", "api"],
     ["hGet", "worker:demo:api:v:2", "__meta__"],
+    ["hGet", "routes:demo", "api"],
     ["fetch", "http://workflows/internal/workflows/resume", {
       ns: "demo",
       worker: "api",
       frozenVersion: "v2",
       workflowName: "orders",
-      workflowKey: "wf_1234",
+      workflowKey: ACTIVE_WORKFLOW_KEY,
       className: "OrderWorkflow",
       instanceId: "order-1",
       requestId: "rid-resume",
@@ -604,7 +696,7 @@ test("workflows handler forwards status includeSteps options", async () => {
     worker: "api",
     frozenVersion: "v2",
     workflowName: "orders",
-    workflowKey: "wf_1234",
+    workflowKey: ACTIVE_WORKFLOW_KEY,
     className: "OrderWorkflow",
     instanceId: "order-1",
     options: { includeSteps: true, stepLimit: 10 },
@@ -631,6 +723,7 @@ test("workflows handler fails closed when workflows backend is unavailable", asy
   assert.deepEqual(state.redis.commands, [
     ["hGet", "routes:demo", "api"],
     ["hGet", "worker:demo:api:v:2", "__meta__"],
+    ["hGet", "routes:demo", "api"],
   ]);
   assert.deepEqual(state.logs, [{
     level: "error",
@@ -741,6 +834,7 @@ test("workflows handler rejects invalid status query options before backend disp
   assert.deepEqual(state.redis.commands, [
     ["hGet", "routes:demo", "api"],
     ["hGet", "worker:demo:api:v:2", "__meta__"],
+    ["hGet", "routes:demo", "api"],
   ]);
 });
 
@@ -762,5 +856,6 @@ test("workflows handler rejects snake_case status query options", async () => {
   assert.deepEqual(state.redis.commands, [
     ["hGet", "routes:demo", "api"],
     ["hGet", "worker:demo:api:v:2", "__meta__"],
+    ["hGet", "routes:demo", "api"],
   ]);
 });

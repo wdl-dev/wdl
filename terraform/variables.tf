@@ -120,13 +120,10 @@ variable "vpc_id" {
 
 variable "private_subnet_ids" {
   type        = list(string)
-  description = "Private subnet ids across at least two AZs for ECS tasks, EFS mount targets, and ElastiCache."
+  description = "Private subnet ids across at least three AZs for ECS tasks, EFS mount targets, and ElastiCache."
   validation {
-    condition = (
-      length(var.private_subnet_ids) >= 2 &&
-      length(var.private_subnet_ids) == length(distinct(var.private_subnet_ids))
-    )
-    error_message = "Provide at least two unique private subnet ids."
+    condition     = length(var.private_subnet_ids) >= 3
+    error_message = "Provide at least three private subnet ids across different AZs."
   }
 }
 

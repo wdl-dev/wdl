@@ -6,16 +6,23 @@ use crate::{
 };
 
 use super::super::{
-    InstanceResponse, InstanceRouteKeys, WorkflowRequest, eval_script, identity_from_state,
-    instance_id, payload_bytes_arg, read_public_state, request_with_active_version,
-    validate_identity, verify_active_workflow_export, verify_workflow_def,
-    workflow_referrer_member,
+    InstanceResponse, InstanceRouteKeys, WorkflowRequest, create_pending_restart,
+    ensure_worker_not_deleting, eval_script, identity_from_state, instance_id, payload_bytes_arg,
+    pending_restart_marker, read_public_state, remove_pending_restart, renew_pending_restart,
+    request_with_active_version, validate_identity, verify_active_workflow_current,
+    verify_workflow_def, workflow_referrer_member,
 };
 use super::common::{
     TransitionSignal, next_generation, stale_transition_response, successful_transition_response,
 };
 
 const RESTART_SCRIPT: &str = r#"
+local marker_score = redis.call("ZSCORE", KEYS[16], ARGV[12])
+local marker_time = redis.call("TIME")
+local marker_now = tonumber(marker_time[1]) * 1000 + math.floor(tonumber(marker_time[2]) / 1000)
+if not marker_score or tonumber(marker_score) <= marker_now then
+  return -1
+end
 local status = redis.call("HGET", KEYS[1], "status")
 if not status then
   return 0
@@ -36,6 +43,7 @@ redis.call("HDEL", KEYS[1], "outputRef", "errorRef", "errorCode", "errorMessage"
 redis.call("HDEL", KEYS[1], "runToken", "runLeaseExpiresAtMs", "waitingEventIndexPrefix")
 redis.call("SADD", KEYS[7], ARGV[6])
 redis.call("SADD", KEYS[13], ARGV[10])
+redis.call("ZREM", KEYS[16], ARGV[12])
 redis.call("ZREM", KEYS[8], ARGV[6])
 redis.call("SREM", KEYS[9], ARGV[7])
 redis.call("SADD", KEYS[10], ARGV[7])
@@ -45,14 +53,14 @@ redis.call("ZADD", KEYS[14], ARGV[3], ARGV[11])
 return 1
 "#;
 
+const RESTART_LEASE_EXPIRED: i64 = -1;
+
 pub(crate) async fn restart_instance(
     state: &AppState,
     req: WorkflowRequest,
 ) -> WorkflowResult<InstanceResponse> {
     let req = request_with_active_version(state, req).await?;
     validate_identity(&req)?;
-    verify_active_workflow_export(state, &req).await?;
-    verify_workflow_def(state, &req).await?;
     let id = instance_id(&req)?.to_string();
     let mut existing = read_public_state(state, &req).await?;
     if existing.is_empty() {
@@ -84,6 +92,28 @@ pub(crate) async fn restart_instance(
         })
         .await?
         .ok_or_else(|| WorkflowError::payload_missing("Workflow params payload is missing"))?;
+    ensure_worker_not_deleting(state, &req.ns, &req.worker).await?;
+    let pending_restart = pending_restart_marker(state, &req, &id);
+    create_pending_restart(state, &pending_restart).await?;
+    if let Err(err) = verify_active_workflow_current(state, &req).await {
+        remove_pending_restart(state, &pending_restart).await?;
+        return Err(err);
+    }
+    if let Err(err) = verify_workflow_def(state, &req).await {
+        remove_pending_restart(state, &pending_restart).await?;
+        return Err(err);
+    }
+    // Refresh immediately before the final delete-lock check. A version delete
+    // that starts on either side of this check sees the lock or this blocker.
+    if !renew_pending_restart(state, &pending_restart).await? {
+        return Err(WorkflowError::conflict(
+            "Workflow restart target lease expired; retry restart",
+        ));
+    }
+    if let Err(err) = ensure_worker_not_deleting(state, &req.ns, &req.worker).await {
+        remove_pending_restart(state, &pending_restart).await?;
+        return Err(err);
+    }
     let shard = keys.shard();
     let ready = keys.ready();
     let due = keys.due();
@@ -102,7 +132,7 @@ pub(crate) async fn restart_instance(
     let stored_payloads_key = payloads_key.clone();
     let request_version = req.frozen_version.clone();
     let params_bytes = payload_bytes_arg(&params_json);
-    let updated: i64 = eval_script(
+    let updated: i64 = match eval_script(
         state,
         RESTART_SCRIPT,
         &[
@@ -121,6 +151,7 @@ pub(crate) async fn restart_instance(
             ready_active_key(),
             &by_workflow,
             &event_index_key,
+            &pending_restart.key,
         ],
         &[
             &expected_generation,
@@ -134,10 +165,24 @@ pub(crate) async fn restart_instance(
             &params_bytes,
             &shard_arg,
             &identity.instance_id,
+            &pending_restart.member,
         ],
     )
-    .await?;
+    .await
+    {
+        Ok(updated) => updated,
+        Err(err) => {
+            remove_pending_restart(state, &pending_restart).await?;
+            return Err(err);
+        }
+    };
+    if updated == RESTART_LEASE_EXPIRED {
+        return Err(WorkflowError::conflict(
+            "Workflow restart target lease expired; retry restart",
+        ));
+    }
     if updated != 1 {
+        remove_pending_restart(state, &pending_restart).await?;
         return stale_transition_response(state, &identity, &id).await;
     }
     existing.insert("status".to_string(), "queued".to_string());
@@ -189,10 +234,21 @@ mod tests {
 
     #[test]
     fn restart_updates_class_name_for_active_version() {
+        assert!(
+            RESTART_SCRIPT
+                .contains(r#"local marker_score = redis.call("ZSCORE", KEYS[16], ARGV[12])"#)
+        );
+        assert!(RESTART_SCRIPT.contains(r#"local marker_time = redis.call("TIME")"#));
         assert!(RESTART_SCRIPT.contains(r#""className", ARGV[5]"#));
         assert!(RESTART_SCRIPT.contains(r#"redis.call("SADD", KEYS[7], ARGV[6])"#));
         assert!(RESTART_SCRIPT.contains(r#"redis.call("SADD", KEYS[13], ARGV[10])"#));
+        assert!(RESTART_SCRIPT.contains(r#"redis.call("ZREM", KEYS[16], ARGV[12])"#));
         assert!(RESTART_SCRIPT.contains(r#"redis.call("ZADD", KEYS[14], ARGV[3], ARGV[11])"#));
+        let lease_check = RESTART_SCRIPT.find("if not marker_score").unwrap();
+        let first_write = RESTART_SCRIPT
+            .find(r#"redis.call("DEL", KEYS[2])"#)
+            .unwrap();
+        assert!(lease_check < first_write);
     }
 
     #[test]

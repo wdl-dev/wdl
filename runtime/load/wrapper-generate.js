@@ -13,6 +13,7 @@ const DEFAULT_EXPORT_CLASS_TEST_SOURCE = "/^\\s*class\\b/.test(source)";
 export const HOST_BINDING_RUNTIME_MODULE_NAME = "_wdl-host-wrapper-runtime.js";
 export const HOST_BINDING_RUNTIME_SOURCE = `
 import { AsyncLocalStorage } from "node:async_hooks";
+import { sanitizeRequestId } from "./_wdl-request-id.js";
 
 const IntrinsicObject = Object;
 const IntrinsicProxy = Proxy;
@@ -22,26 +23,14 @@ const intrinsicAsyncLocalStorageGetStore = AsyncLocalStorage.prototype.getStore;
 const intrinsicAsyncLocalStorageRun = AsyncLocalStorage.prototype.run;
 const intrinsicArrayForEach = Array.prototype.forEach;
 const intrinsicFunctionToString = Function.prototype.toString;
+const intrinsicHeadersGet = Headers.prototype.get;
 const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectKeys = Object.keys;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicReflectGet = Reflect.get;
 const intrinsicRegExpTest = RegExp.prototype.test;
-const requestContext = new AsyncLocalStorage();
-
-intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [
-  requestContext,
-  "getStore",
-  {
-    configurable: false,
-    enumerable: false,
-    value() {
-      return intrinsicReflectApply(intrinsicAsyncLocalStorageGetStore, requestContext, []);
-    },
-    writable: false,
-  },
-]);
+const intrinsicRequestHeadersGetter = Object.getOwnPropertyDescriptor(Request.prototype, "headers").get;
 
 export function applyFunction(fn, receiver, args) {
   return intrinsicReflectApply(fn, receiver, args);
@@ -84,19 +73,37 @@ export function regexpTest(regexp, value) {
   return intrinsicReflectApply(intrinsicRegExpTest, regexp, [value]);
 }
 
-export function currentRequestId() {
-  const requestId = intrinsicReflectApply(intrinsicAsyncLocalStorageGetStore, requestContext, []);
-  return typeof requestId === "string" && requestId ? requestId : null;
+export function requestIdFromEventArg(arg) {
+  if (!arg || typeof arg !== "object") return null;
+  try {
+    const headers = intrinsicReflectApply(intrinsicRequestHeadersGetter, arg, []);
+    const requestId = intrinsicReflectApply(intrinsicHeadersGet, headers, ["x-request-id"]);
+    return sanitizeRequestId(requestId);
+  } catch {
+    return null;
+  }
 }
 
-export function runWithRequestContext(requestId, callback) {
-  if (typeof requestId !== "string" || !requestId) {
-    return intrinsicReflectApply(callback, undefined, []);
-  }
-  return intrinsicReflectApply(intrinsicAsyncLocalStorageRun, requestContext, [
-    requestId,
-    callback,
-  ]);
+export function createRequestContext() {
+  const requestContext = new AsyncLocalStorage();
+  return {
+    currentRequestId() {
+      const store = intrinsicReflectApply(intrinsicAsyncLocalStorageGetStore, requestContext, []);
+      const requestId = store?.requestId;
+      return typeof requestId === "string" && requestId ? requestId : null;
+    },
+    runWithRequestContext(requestId, callback) {
+      const activeStore = intrinsicReflectApply(intrinsicAsyncLocalStorageGetStore, requestContext, []);
+      if (activeStore !== undefined) {
+        return intrinsicReflectApply(callback, undefined, []);
+      }
+      const canonicalRequestId = sanitizeRequestId(requestId);
+      return intrinsicReflectApply(intrinsicAsyncLocalStorageRun, requestContext, [
+        { requestId: canonicalRequestId },
+        callback,
+      ]);
+    },
+  };
 }
 
 `;
@@ -199,14 +206,14 @@ const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
 const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
 const HOST_BINDINGS_WRAPPED = __WdlHostRuntime__.createPrivateSymbol("wdl.host-bindings-wrapped");
 const INTERNAL_BINDING_RE = /^__WDL_[A-Za-z0-9_]*__$/;
+const REQUEST_CONTEXT = __WdlHostRuntime__.createRequestContext();
 
 function requestIdFromEventArg(arg) {
-  if (!arg || !arg.headers || typeof arg.headers.get !== "function") return null;
-  return arg.headers.get("x-request-id");
+  return __WdlHostRuntime__.requestIdFromEventArg(arg);
 }
 
 function requestIdOptions() {
-  return { requestIdProvider: __WdlHostRuntime__.currentRequestId };
+  return { requestIdProvider: REQUEST_CONTEXT.currentRequestId };
 }
 
 function doOptions(backend, ownerNetwork) {
@@ -218,7 +225,7 @@ function workflowOptions(backend) {
 }
 
 function withRequestContext(arg, fn) {
-  return __WdlHostRuntime__.runWithRequestContext(requestIdFromEventArg(arg), fn);
+  return REQUEST_CONTEXT.runWithRequestContext(requestIdFromEventArg(arg), fn);
 }
 
 function wrapClassInstance(instance) {

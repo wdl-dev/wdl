@@ -1,4 +1,5 @@
 import { validOwnerEndpointForService } from "./_wdl-owner-endpoint.js";
+import { sanitizeRequestId } from "./_wdl-request-id.js";
 
 export const DO_INVOKE_URL = "http://do-runtime/internal/do/invoke";
 export const DO_CONNECT_URL = "http://do-runtime/internal/do/connect";
@@ -75,7 +76,6 @@ const intrinsicHeadersAppend = Headers.prototype.append;
 const intrinsicHeadersDelete = Headers.prototype.delete;
 const intrinsicHeadersForEach = Headers.prototype.forEach;
 const intrinsicHeadersGet = Headers.prototype.get;
-const intrinsicHeadersHas = Headers.prototype.has;
 const intrinsicHeadersSet = Headers.prototype.set;
 const intrinsicJsonStringify = JSON.stringify;
 const intrinsicNumberIsFinite = Number.isFinite;
@@ -86,6 +86,7 @@ const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicPromiseThen = Promise.prototype.then;
+const intrinsicResponseJson = Response.json;
 const intrinsicReadableStreamCancel = ReadableStream.prototype.cancel;
 const intrinsicReadableStreamGetReader = ReadableStream.prototype.getReader;
 const intrinsicReadableStreamReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
@@ -233,10 +234,6 @@ function headerValue(headers, name) {
 }
 
 /** @param {Headers} headers @param {string} name */
-function headerHas(headers, name) {
-  return intrinsicReflectApply(intrinsicHeadersHas, headers, [name]);
-}
-
 /** @param {Headers} headers @param {string} name @param {string} value */
 function headerSet(headers, name, value) {
   intrinsicReflectApply(intrinsicHeadersSet, headers, [name, value]);
@@ -677,9 +674,9 @@ export async function requestSpec(request, requestId) {
   forEachArray(DO_FETCH_STRIP_HEADERS, (name) => {
     headerDelete(forwardedHeaders, name);
   });
-  if (requestId && !headerHas(forwardedHeaders, "x-request-id")) {
-    headerSet(forwardedHeaders, "x-request-id", requestId);
-  }
+  headerDelete(forwardedHeaders, "x-request-id");
+  const canonicalRequestId = sanitizeRequestId(requestId);
+  if (canonicalRequestId) headerSet(forwardedHeaders, "x-request-id", canonicalRequestId);
   const method = stringToUpperCase(requestMethod(forwarded));
   const headers = headerEntries(forwardedHeaders);
   enforceRequestHeadersBudget(headers);
@@ -739,7 +736,9 @@ export function connectHeaders(props, objectName, request, requestId) {
   headerSet(headers, DO_CONNECT_HEADERS.className, props.className);
   headerSet(headers, DO_CONNECT_HEADERS.objectName, objectName);
   headerSet(headers, DO_CONNECT_HEADERS.requestUrl, requestUrl(request));
-  if (requestId && !headerHas(headers, "x-request-id")) headerSet(headers, "x-request-id", requestId);
+  headerDelete(headers, "x-request-id");
+  const canonicalRequestId = sanitizeRequestId(requestId);
+  if (canonicalRequestId) headerSet(headers, "x-request-id", canonicalRequestId);
   headerSet(headers, DO_ACCEPT_OWNER_HINT_HEADER, "1");
   return headers;
 }
@@ -807,10 +806,10 @@ function validOwnerEndpoint(endpoint) {
 }
 
 function ownerUnavailableResponse() {
-  return Response.json(
+  return intrinsicReflectApply(intrinsicResponseJson, IntrinsicResponse, [
     { error: "owner_unavailable", message: "DO owner is unavailable; request outcome may be unknown" },
     { status: 503 }
-  );
+  ]);
 }
 
 /**

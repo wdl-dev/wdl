@@ -2027,6 +2027,7 @@ test("workflow instance state is owned by workflows DB2", () => {
     "wf:by-worker:",
     "wf:by-workflow:",
     "wf:by-version:",
+    "wf:pending-version:",
     "wf:retention",
   ];
   const allowed = new Set([
@@ -2539,6 +2540,23 @@ test("owner endpoint validation lives in a shared contract owner", () => {
   for (const config of [userConfig, systemConfig]) {
     const doOwnerNetwork = /const doOwnerNetworkWorker[\s\S]*?\n\);/.exec(config)?.[0] || "";
     assert.match(doOwnerNetwork, /name = "shared-owner-endpoint"/);
+  }
+});
+
+test("DO transport relative dependencies are registered in host and loaded-worker module graphs", () => {
+  const codeBudget = readRepoFile("runtime/load/code-budget.js");
+  assert.match(codeBudget, /\["_wdl-request-id\.js", sources\.requestIdSource\]/);
+  assert.match(codeBudget, /\["_wdl-do-transport\.js", sources\.doTransportSource\]/);
+
+  for (const file of [
+    "runtime/config-user.capnp",
+    "runtime/config-system.capnp",
+    "do-runtime/config.capnp",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(source, /name = "runtime-do-transport", esModule = embed/);
+    assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
+    assert.match(source, /name = "runtime-request-id-source", text = embed/);
   }
 });
 

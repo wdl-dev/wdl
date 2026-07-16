@@ -153,6 +153,7 @@ const { handle: handleVersions } = await importControlHandler("control/handlers/
  *   activeVersion?: string | null,
  *   assetPrefix?: string | null,
  *   hasWorkerSecrets?: boolean,
+ *   hasWorkflowDefs?: boolean,
  *   doStorageId?: string | null,
  *   doStorageIdDuringExec?: string | null,
  *   doOwnerKeys?: string[],
@@ -176,6 +177,7 @@ function resetDeleteHandlerState({
   activeVersion = "v1",
   assetPrefix = "assets/demo/api/v1/",
   hasWorkerSecrets = false,
+  hasWorkflowDefs = false,
   doStorageId = "do_old",
   doStorageIdDuringExec = doStorageId,
   doOwnerKeys = [],
@@ -277,7 +279,9 @@ function resetDeleteHandlerState({
     },
     /** @param {string} key */
     async exists(key) {
-      return key === "secrets:demo:api" && hasWorkerSecrets ? 1 : 0;
+      if (key === "secrets:demo:api") return hasWorkerSecrets ? 1 : 0;
+      if (key === "wf:defs:demo:api") return hasWorkflowDefs ? 1 : 0;
+      return 0;
     },
     /** @param {string} key */
     async sMembers(key) { return versionReferrers(key); },
@@ -375,7 +379,9 @@ function resetDeleteHandlerState({
     },
     /** @param {string} key */
     async exists(key) {
-      return key === "secrets:demo:api" && hasWorkerSecrets ? 1 : 0;
+      if (key === "secrets:demo:api") return hasWorkerSecrets ? 1 : 0;
+      if (key === "wf:defs:demo:api") return hasWorkflowDefs ? 1 : 0;
+      return 0;
     },
     /** @param {unknown[]} args */
     async del(...args) { multiCalls.push(["DEL", ...args]); },
@@ -399,13 +405,14 @@ function resetDeleteHandlerState({
   });
 }
 
-/** @param {{ assetPrefix?: string | null, bundleMetaRaw?: string | null, retainedVersions?: string[], siblingMetaRaw?: string | null, lockTokenDuringExec?: string | null }} [opts] */
+/** @param {{ assetPrefix?: string | null, bundleMetaRaw?: string | null, retainedVersions?: string[], siblingMetaRaw?: string | null, lockTokenDuringExec?: string | null, hasWorkflowDefs?: boolean }} [opts] */
 function resetVersionDeleteHandlerState({
   assetPrefix = "assets/demo/api/v1/",
   bundleMetaRaw,
   retainedVersions = ["v1"],
   siblingMetaRaw = null,
   lockTokenDuringExec = "lock-token",
+  hasWorkflowDefs = false,
 } = {}) {
   const meta = bundleMetaRaw === undefined
     ? JSON.stringify({
@@ -415,8 +422,11 @@ function resetVersionDeleteHandlerState({
     : bundleMetaRaw;
   /** @type {unknown[][]} */
   const multiCalls = [];
+  /** @type {string[][]} */
+  const watchBatches = [];
   const session = {
-    async watch() {},
+    /** @param {string[]} keys */
+    async watch(...keys) { watchBatches.push(keys); },
     async unwatch() {},
     /** @param {string} key */
     async get(key) {
@@ -436,7 +446,10 @@ function resetVersionDeleteHandlerState({
       return [];
     },
     async sMembers() { return []; },
-    async exists() { return 0; },
+    /** @param {string} key */
+    async exists(key) {
+      return key === "wf:defs:demo:api" && hasWorkflowDefs ? 1 : 0;
+    },
     multi() {
       return {
         /** @param {unknown[]} args */
@@ -462,6 +475,7 @@ function resetVersionDeleteHandlerState({
     redis,
     metrics: { increment() {}, observe() {} },
     service: "control",
+    watchBatches,
     workflowChecks: [],
   });
 }
@@ -908,6 +922,34 @@ test("worker delete recomputes sibling host ownership under WATCH", async () => 
   ), false);
 });
 
+test("worker delete fails closed on malformed held pattern projections", async () => {
+  const host = "app.example";
+  const slot = "target-slot";
+  const testState = resetDeleteHandlerState({
+    assetPrefix: null,
+    bundleMetaRaw: JSON.stringify({
+      bindings: {},
+      routes: [{ host, slot }],
+    }),
+    patternRecordsDuringExec: {
+      [`patterns:${host}`]: { [slot]: "not-a-projection" },
+    },
+  });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-corrupt-pattern",
+  });
+
+  const body = await readJsonResponse(response, 500);
+  assert.equal(body.error, "corrupt_pattern_projection");
+  assert.equal(testState.multiCalls.some((call) => call[0] === "EXEC"), false);
+});
+
 test("worker delete cannot commit after its delete lock token is replaced", async () => {
   const testState = resetDeleteHandlerState({
     assetPrefix: null,
@@ -1336,6 +1378,59 @@ test("worker delete noop skips DO alarm cleanup when old storage id is absent", 
   assert.equal(testState.multiCalls.length, 0);
 });
 
+test("worker delete removes orphaned workflow definitions without active versions", async () => {
+  const testState = resetDeleteHandlerState({
+    activeVersion: null,
+    assetPrefix: null,
+    doStorageId: null,
+    queueConsumerWorker: null,
+    retainedVersions: [],
+    hasWorkflowDefs: true,
+  });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-orphan-workflow-defs",
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.deleted, true);
+  assert.ok(testState.watchBatches.some((keys) => keys.includes("wf:defs:demo:api")));
+  assert.ok(testState.multiCalls.some((call) =>
+    call[0] === "DEL" && call.includes("wf:defs:demo:api")
+  ));
+});
+
+test("worker delete dry-run reports orphaned workflow definitions", async () => {
+  const testState = resetDeleteHandlerState({
+    activeVersion: null,
+    assetPrefix: null,
+    doStorageId: null,
+    queueConsumerWorker: null,
+    retainedVersions: [],
+    hasWorkflowDefs: true,
+  });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete?dry_run=1", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete?dry_run=1"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-dry-run-orphan-workflow-defs",
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.deleted, true);
+  assert.equal(body.hasWorkflowDefs, true);
+  assert.deepEqual(body.versionsDeleted, []);
+  assert.equal(testState.multiCalls.length, 0);
+});
+
 test("worker delete reports queueHint none when no content cleanup is needed", async () => {
   const testState = resetDeleteHandlerState({ assetPrefix: null });
 
@@ -1431,6 +1526,28 @@ test("version delete cannot commit after its delete lock token is replaced", asy
   assert.equal(body.error, "deleting");
   assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
   assert.deepEqual(testState.cleanupIntents, []);
+});
+
+test("version delete keeps a definitions-only worker discoverable", async () => {
+  const testState = resetVersionDeleteHandlerState({
+    assetPrefix: null,
+    hasWorkflowDefs: true,
+  });
+
+  const response = await handleVersions({
+    method: "DELETE",
+    ns: "demo",
+    name: "api",
+    subPath: ["v1"],
+    principal: { kind: "ops" },
+    requestId: "rid-version-delete-workflow-defs",
+  });
+
+  await readJsonResponse(response, 200);
+  assert.ok(testState.watchBatches.some((keys) => keys.includes("wf:defs:demo:api")));
+  assert.equal(testState.multiCalls.some((call) =>
+    call[0] === "SREM" && call[1] === "workers:demo" && call[2] === "api"
+  ), false);
 });
 
 test("version delete classifies non-object bundle metadata as corrupt", async () => {

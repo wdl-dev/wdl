@@ -149,7 +149,10 @@ Common rules:
   Promise and `async` continuations. Private do-runtime fetch, alarm, and RPC dispatches
   carry the id in `x-request-id`. Custom thenables are not a supported propagation
   boundary; the wrapper does not inspect or replace tenant return values to extend it.
-  Nested handler calls without a new id inherit the current ALS context.
+  Ordinary nested handler calls without a new id inherit the current ALS context.
+  Tenant code can deliberately switch the isolate's ambient ALS frame, so this
+  propagation is best-effort diagnostic correlation rather than an authorization or
+  integrity boundary.
 - Logs use snake_case fields. Only `level=error` is emitted on stderr; debug/info/warn
   JSON log lines go to stdout so log routing stays identical across JS, Rust, and
   embedded workerd shims.

@@ -17,10 +17,37 @@ import { parseStdoutJson } from "../helpers/json-payload.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { withCapturedConsole } from "../helpers/output-capture.js";
+import { withMockedPropertyDescriptor } from "../helpers/mock-global.js";
+import {
+  requestIdFromOptions,
+  sanitizeRequestId as sanitizeRuntimeRequestId,
+} from "../../runtime/_wdl-request-id.js";
 
 const REQUEST_ID_FIXTURES = readRepositoryJson("tests/fixtures/request-id-sanitizer.json");
 const OBSERVABILITY_CONTRACT = readRepositoryJson("tests/fixtures/observability-contract.json");
 const OBSERVABILITY_NOOP = await import(OBSERVABILITY_NOOP_URL);
+
+test("loaded-runtime request-id sanitizer matches the shared contract", () => {
+  for (const fixture of REQUEST_ID_FIXTURES) {
+    assert.equal(sanitizeRuntimeRequestId(fixture.raw), fixture.sanitized);
+  }
+});
+
+test("loaded-runtime request-id options ignore inherited values", async () => {
+  await withMockedPropertyDescriptor(/** @type {any} */ (Object.prototype), "requestId", {
+    configurable: true,
+    value: "inherited-value",
+  }, async () => {
+    await withMockedPropertyDescriptor(/** @type {any} */ (Object.prototype), "requestIdProvider", {
+      configurable: true,
+      value: () => "inherited-provider",
+    }, async () => {
+      assert.equal(requestIdFromOptions({}), null);
+      assert.equal(requestIdFromOptions({ requestId: "own-value" }), "own-value");
+      assert.equal(requestIdFromOptions({ requestIdProvider: () => "own-provider" }), "own-provider");
+    });
+  });
+});
 
 test("generateRequestId produces 16 lowercase hex chars", () => {
   for (let i = 0; i < 20; i++) {

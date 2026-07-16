@@ -71,7 +71,7 @@ const MAX_ATTEMPTS = 5;
  * @typedef {{ routes?: RoutePattern[], crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
  * @typedef {Record<string, Record<string, string | null | undefined>>} HostState
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
- * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, get: (key: string) => Promise<string | null | undefined>, exists: (key: string) => Promise<number>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, zRange: (key: string, start: number, stop: number) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
+ * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, hGetAllMany: (keys: string[]) => Promise<Array<Record<string, string | null | undefined>>>, get: (key: string) => Promise<string | null | undefined>, exists: (key: string) => Promise<number>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, zRange: (key: string, start: number, stop: number) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
  * @typedef {{ hGet: (key: string, field: string) => Promise<string | null | undefined>, incr: (key: string) => Promise<number>, session: <T>(fn: (iso: RedisIso) => Promise<T>) => Promise<T> }} RedisClient
  */
 
@@ -85,6 +85,20 @@ export class RoutingError extends Error {
     this.code = code;
     this.details = details;
   }
+}
+
+/** @param {unknown} raw @param {string} host @param {string} slot */
+function requirePatternProjection(raw, host, slot) {
+  const projection = decodePatternProjection(raw);
+  if (!projection) {
+    throw new RoutingError(
+      500,
+      "corrupt_pattern_projection",
+      `Pattern projection for ${host}${slot} is corrupt`,
+      { host, slot }
+    );
+  }
+  return projection;
 }
 
 /** @param {Array<string | null | undefined | false>} keys @returns {string[]} */
@@ -373,16 +387,20 @@ async function readHostStateAndAssertRouteConflicts(iso, ns, workerName, newRout
   const hostState = {};
   /** @type {Map<string, { foreign: { slot: string, held: PatternProjection } | null, slots: Map<string, PatternProjection> }>} */
   const analysisByHost = new Map();
-  for (const h of affectedHosts) {
-    const state = await iso.hGetAll(patternsKey(h));
+  const hosts = [...affectedHosts];
+  const states = hosts.length > 0
+    ? await iso.hGetAllMany(hosts.map((host) => patternsKey(host)))
+    : [];
+  for (let index = 0; index < hosts.length; index += 1) {
+    const h = hosts[index];
+    const state = states[index];
     hostState[h] = state;
     /** @type {{ slot: string, held: PatternProjection } | null} */
     let foreign = null;
     /** @type {Map<string, PatternProjection>} */
     const slots = new Map();
     for (const [slot, raw] of Object.entries(state)) {
-      const held = decodePatternProjection(raw);
-      if (!held) continue;
+      const held = requirePatternProjection(raw, h, slot);
       slots.set(slot, held);
       if (!foreign && held.ns && held.ns !== ns) foreign = { slot, held };
     }
@@ -755,6 +773,13 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     const affectedHosts = new Set();
     for (const r of routes) affectedHosts.add(r.host);
     await watchKeys(iso, [...affectedHosts].map((h) => patternsKey(h)));
+    await readHostStateAndAssertRouteConflicts(
+      iso,
+      ns,
+      workerName,
+      routes,
+      affectedHosts
+    );
 
     // Scheduler builds x-worker-id from cron __meta__.version.
     const cronKey = cronWorkerKey(ns, workerName);
@@ -875,8 +900,8 @@ export async function reconcileHosts(redis, ns, body, platformDomain) {
       if (!reverseFlags[i]) continue;
       const entries = await iso.hGetAll(patternsKey(h));
       for (const [slot, raw] of Object.entries(entries)) {
-        const parsed = decodePatternProjection(raw);
-        if (parsed && parsed.ns === ns) {
+        const parsed = requirePatternProjection(raw, h, slot);
+        if (parsed.ns === ns) {
           throw new RoutingError(
             409,
             "host_in_use",

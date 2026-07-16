@@ -4,6 +4,7 @@ import { loadControlLib } from "../helpers/load-control-lib.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { RESERVED_NS } from "../../shared/ns-pattern.js";
 import {
+  MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
   WORKERD_EXPERIMENTAL_COMPAT_FLAGS,
   WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION,
 } from "../../shared/workerd-compat-flags.js";
@@ -625,6 +626,17 @@ test("prepareBundle: durable object binding requires className-shaped class", ()
   );
   assert.equal(meta.bindings.ROOMS.type, "do");
   assert.equal(meta.bindings.ROOMS.className, "Room");
+
+  const maxClassName = `R${"o".repeat(467)}`;
+  assert.doesNotThrow(() => prepareBundle("w.js", { "w.js": "x" }, {
+    bindings: { ROOMS: { type: "do", className: maxClassName } },
+  }));
+  assert.throws(
+    () => prepareBundle("w.js", { "w.js": "x" }, {
+      bindings: { ROOMS: { type: "do", className: `${maxClassName}m` } },
+    }),
+    /at most 468 bytes/
+  );
 });
 
 test("prepareBundle: queue binding requires queue-name-shaped 'id'", () => {
@@ -838,6 +850,42 @@ test("prepareBundle: experimental workerd compatibility flags are rejected", () 
   );
 });
 
+test("prepareBundle: error serialization flags match the effective compatibility date", () => {
+  assert.doesNotThrow(() => prepareBundle(
+    "w.js",
+    { "w.js": "x" },
+    {
+      compatibilityDate: "2026-04-20",
+      compatibilityFlags: ["enhanced_error_serialization"],
+    }
+  ));
+
+  /** @type {[string | undefined, string][]} */
+  const cases = [
+    ["2026-04-20", "legacy_error_serialization"],
+    ["2026-04-21", "legacy_error_serialization"],
+    ["2026-04-21", "enhanced_error_serialization"],
+    [undefined, "enhanced_error_serialization"],
+  ];
+  for (const [compatibilityDate, flag] of cases) {
+    assert.throws(
+      () => prepareBundle(
+        "w.js",
+        { "w.js": "x" },
+        { compatibilityDate, compatibilityFlags: [flag] }
+      ),
+      (err) => {
+        if (!(err instanceof Error)) return false;
+        const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
+        return coded.code === "compatibility_flag_unsupported" &&
+          coded.status === 400 &&
+          coded.message.includes(flag);
+      },
+      `${flag} should be rejected for ${compatibilityDate ?? "the default date"}`
+    );
+  }
+});
+
 test("prepareBundle: compatibilityDate validates shape before commit", () => {
   assert.equal(
     prepareBundle("w.js", { "w.js": "x" }, { compatibilityDate: "2026-04-24" }).meta.compatibilityDate,
@@ -865,6 +913,14 @@ test("validateCompatibilityDate rejects future and unsupported workerd dates", (
   assert.equal(
     validateCompatibilityDate("2026-06-20", new Date("2026-06-30T00:00:00Z")),
     "2026-06-20"
+  );
+  assert.equal(
+    validateCompatibilityDate(MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE, new Date("2026-06-30T00:00:00Z")),
+    MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE
+  );
+  assert.throws(
+    () => validateCompatibilityDate("2026-03-31", new Date("2026-06-30T00:00:00Z")),
+    /older than WDL supports/
   );
   assert.throws(
     () => validateCompatibilityDate("2026-06-15", new Date("2026-06-14T00:00:00Z")),
@@ -2075,6 +2131,10 @@ test("projectAccessPrincipal returns only the public principal shape", () => {
 test("configuredHostname accepts plain hosts and rejects URL injection shapes", () => {
   assert.equal(configuredHostname(" Workers.Local. "), "workers.local");
   assert.equal(configuredHostname("workers.local."), "workers.local");
+  assert.equal(
+    configuredHostname(`${"a".repeat(63)}.${"b".repeat(58)}.com`),
+    `${"a".repeat(63)}.${"b".repeat(58)}.com`
+  );
   for (const bad of [
     "",
     "  ",
@@ -2082,6 +2142,20 @@ test("configuredHostname accepts plain hosts and rejects URL injection shapes", 
     "workers.local/path",
     "workers.local:8080",
     "workers local",
+    "workers.example#oops",
+    "workers.example?query",
+    "workers@example",
+    "workers..example",
+    ".workers.example",
+    "workers.example..",
+    "-workers.example",
+    "workers-.example",
+    "wörkers.example",
+    "K.example",
+    "workers.123",
+    `${"a".repeat(64)}.example`,
+    `${"a".repeat(63)}.${"b".repeat(59)}.com`,
+    `${"a".repeat(250)}.com`,
     null,
   ]) {
     assert.equal(configuredHostname(bad), null, `expected ${JSON.stringify(bad)} rejected`);
@@ -2093,7 +2167,7 @@ test("platformDomainFromEnv normalizes configured values and owns the default", 
   assert.equal(platformDomainFromEnv({ PLATFORM_DOMAIN: " Workers.Example. " }), "workers.example");
   assert.throws(
     () => platformDomainFromEnv({ PLATFORM_DOMAIN: "workers.example:8443" }),
-    /plain hostname/
+    /ALB-compatible ASCII DNS hostname/
   );
 });
 

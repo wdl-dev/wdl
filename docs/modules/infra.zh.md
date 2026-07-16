@@ -35,8 +35,7 @@ Local compose 是开发便利环境，不是 production delivery contract。它�
 
 ## 接口
 
-- 公开入口通过 ALB/gateway。Terraform-managed ALB ingress 可以在同一个 gateway
-  service 上承载 admin host、platform wildcard、canonical site host 和额外 exact public host。
+- 公开入口通过 ALB/gateway。Terraform-managed ALB ingress 可以在同一个 gateway service 上承载 admin host、platform wildcard、canonical site host 和额外 exact public host。
 - Admin-host ingress 通过 gateway 的 `ADMIN_HOST` 分支进入 system-runtime control。
 - Local Compose private service hop 使用 `envoy/envoy.yaml` 和编译进 `dist/workerd-configs` 的 `*-local.capnp` workerd config。
 - ECS Service Connect 覆盖 runtime、D1、DO 和 workflows service target。
@@ -85,7 +84,6 @@ Stateful storage：
 - D1/DO 使用 owner lease、monotonic generation fence 和本地 drain/renew。超过 1 个 task 时需要稳定的 per-replica storage identity，并确保 supervisor drain/renew 只走私有本地入口，不能通过 service alias 打到其他 replica。
 - 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
-- Application Terraform root 接受至少两个既有 subnet。每个 subnet 都必须属于指定 VPC、使用 RFC1918 或 `100.64.0.0/10` IPv4 CIDR，并且位于不同 Availability Zone，因为 D1/DO 的每个 EFS file system 都会为每个传入 subnet 创建一个 mount target。Foundation 仍默认创建三个 AZ。Subnet 的 `map_public_ip_on_launch` flag 不用于判断 routing 类型；ECS service 会显式关闭 task public IP assignment。
 - 除了 Fargate task memory limit，D1 和 DO 的 workerd container 还会设置显式 container memory hard limit。DO 还会给本地 redis-proxy sidecar 保留内存。
 - Terraform Fargate service 在服务能容忍 overlapping capacity 时应使用 rolling replacement。D1/DO 使用 sequential replacement；scheduler 作为 singleton control loop 保持 stop-before-start。D1/DO 和 scheduler 都关闭 Availability Zone rebalancing，让 replacement 遵循各自显式 deployment strategy。
 
