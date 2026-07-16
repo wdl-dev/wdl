@@ -10,7 +10,9 @@ import {
   MAX_DO_REQUEST_HEADER_BYTES,
   dispatchDoInvokeWithHintCache,
   fetchInvokeInit,
+  isWebSocketUpgrade,
   ownerHintFromHeaders,
+  replayOwnerUnavailableForFetch,
   requestSpec,
   rpcInvokeBody,
 } from "../../runtime/_wdl-do-transport.js";
@@ -437,7 +439,7 @@ test("DurableObjectNamespace RPC rejects invalid and reserved methods before tra
   await assert.rejects(Reflect.get(stub, "alarm")(), /rpc\.method is reserved/);
 });
 
-test("DO RPC validation uses captured JSON and method intrinsics", async () => {
+test("DO RPC validation uses captured JSON intrinsics", async () => {
   const props = {
     ns: "tenant",
     worker: "chat",
@@ -458,15 +460,9 @@ test("DO RPC validation uses captured JSON and method intrinsics", async () => {
       (error) => error instanceof TypeError && error.message === "rpc.args[0] must be a finite number"
     );
   });
-  await withMockedProperty(RegExp.prototype, "test", () => true, () => {
-    assert.throws(
-      () => rpcInvokeBody(props, "room-a", "not-valid-method", []),
-      (error) => error instanceof TypeError && error.message === "rpc.method is not valid"
-    );
-  });
 });
 
-test("DO RPC method bounds match server normalization", () => {
+test("do-runtime owns the DO RPC method byte limit", () => {
   const props = {
     ns: "tenant",
     worker: "chat",
@@ -485,13 +481,15 @@ test("DO RPC method bounds match server normalization", () => {
       kind: "rpc",
       rpc: { method, args: [] },
     };
+    const envelope = rpcInvokeBody(props, "room-a", method, []);
     if (!valid) {
-      assert.throws(() => rpcInvokeBody(props, "room-a", method, []), /rpc\.method is not valid/);
-      assert.throws(() => normalizeDoInvokeRequest(metadata), /rpc\.method is too large/);
+      assert.throws(
+        () => normalizeDoInvokeRequest(decodeDoEnvelope(envelope).metadata),
+        /rpc\.method is too large/
+      );
       continue;
     }
-    const envelope = rpcInvokeBody(props, "room-a", method, []);
-    const invoke = normalizeDoInvokeRequest(decodeDoEnvelope(envelope).metadata);
+    const invoke = normalizeDoInvokeRequest(metadata);
     assert.equal("rpc" in invoke ? invoke.rpc.method : null, method);
   }
 });
@@ -609,7 +607,6 @@ test("DurableObjectNamespace RPC retries owner claim races once", async () => {
   /** @type {any[]} */
   const calls = [];
   let cancellations = 0;
-  let hostileCancelCalls = 0;
   const backend = {
     fetch: makeRecordingFetch(calls, {
       response: () => calls.length === 1
@@ -630,24 +627,12 @@ test("DurableObjectNamespace RPC retries owner claim races once", async () => {
     binding: "ROOM",
     className: "Room",
   }, { backend });
-  const streamCancel = ReadableStream.prototype.cancel;
-
-  const result = await withMockedProperty(
-    ReadableStream.prototype,
-    "cancel",
-    /** @this {ReadableStream} */
-    function hostileCancel(reason) {
-      hostileCancelCalls += 1;
-      return Reflect.apply(streamCancel, this, [reason]);
-    },
-    () => Reflect.get(ns.get(ns.idFromName("room-a")), "addMessage")("hello")
-  );
+  const result = await Reflect.get(ns.get(ns.idFromName("room-a")), "addMessage")("hello");
 
   assert.equal(result, "claimed");
   assert.equal(calls.length, 2);
   assert.equal(calls[1].init.headers.get("x-wdl-do-accept-owner-hint"), null);
   assert.equal(cancellations, 1);
-  assert.equal(hostileCancelCalls, 0);
 });
 
 test("DurableObjectNamespace direct backend preserves binary request bodies", async () => {
@@ -865,54 +850,6 @@ test("DurableObjectNamespace retry policy uses the captured Request method gette
   assert.equal(/** @type {any} */ (metadata.request).method, "POST");
 });
 
-test("DurableObjectNamespace retry policy uses captured string case intrinsics", async () => {
-  /** @type {any[]} */
-  const calls = [];
-  const backend = {
-    fetch: makeRecordingFetch(calls, {
-      response: Response.json({ error: "owner_unavailable", message: "outcome unknown" }, {
-        status: 503,
-        headers: doOwnershipErrorHeaders("owner_unavailable"),
-      }),
-    }),
-  };
-  const ns = new DurableObjectNamespace({
-    ns: "tenant",
-    worker: "chat",
-    version: "v1",
-    doStorageId: "do_0123456789abcdef0123456789abcdef",
-    binding: "ROOM",
-    className: "Room",
-  }, { backend });
-  let upperReads = 0;
-
-  const response = await withMockedProperty(
-    String.prototype,
-    "toUpperCase",
-    function mockedToUpperCase() {
-      upperReads += 1;
-      return upperReads === 1 ? "POST" : "GET";
-    },
-    () => withMockedProperty(
-      String.prototype,
-      "toLowerCase",
-      function mockedToLowerCase() {
-        return "websocket";
-      },
-      () => ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/send", {
-        method: "POST",
-        body: "side effect",
-      })
-    )
-  );
-
-  assert.equal(response.status, 503);
-  assert.equal(calls.length, 1);
-  assert.equal(upperReads, 0);
-  const { metadata } = decodeDoEnvelope(calls[0].init.body);
-  assert.equal(/** @type {any} */ (metadata.request).method, "POST");
-});
-
 test("DurableObjectNamespace strips owner metadata with patched Headers methods", async () => {
   const backend = {
     fetch: makeRecordingFetch([], {
@@ -960,39 +897,6 @@ test("DurableObjectNamespace strips owner metadata with patched Headers methods"
   assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
 });
 
-test("DO requestSpec header budget uses captured array iteration", async () => {
-  const iteratorSymbol = Symbol.iterator;
-  const arrayIterator = Array.prototype[Symbol.iterator];
-  const request = new Request("https://demo.workers.example/send", {
-    headers: { "x-oversized": "a".repeat(MAX_DO_REQUEST_HEADER_BYTES + 1) },
-  });
-
-  await withMockedProperty(
-    /** @type {any} */ (Array.prototype),
-    iteratorSymbol,
-    /** @this {unknown[]} */
-    function targetedIterator() {
-      const first = this[0];
-      if (
-        (Array.isArray(first) && first[0] === "x-oversized") ||
-        first === "x-oversized"
-      ) {
-        return {
-          next: () => ({ done: true, value: undefined }),
-          [iteratorSymbol]() { return this; },
-        };
-      }
-      return Reflect.apply(arrayIterator, this, []);
-    },
-    async () => {
-      await assert.rejects(
-        () => requestSpec(request, null),
-        /fetch headers exceed 65536 bytes/
-      );
-    }
-  );
-});
-
 test("DO requestSpec header budget uses captured TextEncoder.encode", async () => {
   const textEncode = TextEncoder.prototype.encode;
   let hostileEncodeCalls = 0;
@@ -1021,6 +925,54 @@ test("DO requestSpec header budget uses captured TextEncoder.encode", async () =
   assert.equal(hostileEncodeCalls, 0);
 });
 
+test("DO request method and upgrade decisions use captured string normalization", async () => {
+  const post = new Request("https://example.com/objects", {
+    method: "POST",
+    body: "payload",
+  });
+  const websocket = new Request("https://example.com/socket", {
+    headers: { Upgrade: "WebSocket" },
+  });
+  const ordinary = new Request("https://example.com/fetch");
+  const originalToLowerCase = String.prototype.toLowerCase;
+  const originalToUpperCase = String.prototype.toUpperCase;
+  /** @type {{ method: string, body: Uint8Array | null, replay: boolean, websocket: boolean, ordinary: boolean } | undefined} */
+  let observed;
+
+  await withMockedProperty(
+    String.prototype,
+    "toUpperCase",
+    /** @this {string} */ function hostileToUpperCase() {
+      const normalized = Reflect.apply(originalToUpperCase, this, []);
+      return normalized === "POST" ? "GET" : normalized;
+    },
+    () => withMockedProperty(
+      String.prototype,
+      "toLowerCase",
+      /** @this {string} */ function hostileToLowerCase() {
+        const normalized = Reflect.apply(originalToLowerCase, this, []);
+        return normalized === "" ? "websocket" : normalized;
+      },
+      async () => {
+        const { spec, bodyBytes } = await requestSpec(post, null);
+        observed = {
+          method: spec.method,
+          body: bodyBytes,
+          replay: replayOwnerUnavailableForFetch(post),
+          websocket: isWebSocketUpgrade(websocket),
+          ordinary: isWebSocketUpgrade(ordinary),
+        };
+      },
+    ),
+  );
+
+  assert.equal(observed?.method, "POST");
+  assert.equal(new TextDecoder().decode(observed?.body ?? undefined), "payload");
+  assert.equal(observed?.replay, false);
+  assert.equal(observed?.websocket, true);
+  assert.equal(observed?.ordinary, false);
+});
+
 function chunkedBodyRequest() {
   return new Request("https://demo.workers.example/send", /** @type {RequestInit} */ (/** @type {unknown} */ ({
     method: "POST",
@@ -1034,54 +986,6 @@ function chunkedBodyRequest() {
     duplex: "half",
   })));
 }
-
-test("DO requestSpec body collection uses captured Array.push", async () => {
-  const arrayPush = Array.prototype.push;
-  let hostilePushCalls = 0;
-
-  const { bodyBytes } = await withMockedProperty(
-    Array.prototype,
-    "push",
-    /** @this {unknown[]} */
-    function targetedPush(value) {
-      if (value instanceof Uint8Array) {
-        hostilePushCalls += 1;
-        return this.length;
-      }
-      return Reflect.apply(arrayPush, this, [value]);
-    },
-    () => requestSpec(chunkedBodyRequest(), null)
-  );
-
-  assert.equal(hostilePushCalls, 0);
-  assert.deepEqual(bodyBytes, Uint8Array.of(1, 2, 3, 4));
-});
-
-test("DO requestSpec body copying uses captured array iteration", async () => {
-  const iteratorSymbol = Symbol.iterator;
-  const arrayIterator = Array.prototype[Symbol.iterator];
-  let hostileIteratorCalls = 0;
-
-  const { bodyBytes } = await withMockedProperty(
-    /** @type {any} */ (Array.prototype),
-    iteratorSymbol,
-    /** @this {unknown[]} */
-    function targetedIterator() {
-      if (this[0] instanceof Uint8Array) {
-        hostileIteratorCalls += 1;
-        return {
-          next: () => ({ done: true, value: undefined }),
-          [iteratorSymbol]() { return this; },
-        };
-      }
-      return Reflect.apply(arrayIterator, this, []);
-    },
-    () => requestSpec(chunkedBodyRequest(), null)
-  );
-
-  assert.equal(hostileIteratorCalls, 0);
-  assert.deepEqual(bodyBytes, Uint8Array.of(1, 2, 3, 4));
-});
 
 test("DO requestSpec body copying uses captured Uint8Array.set", async () => {
   const uint8ArraySet = Uint8Array.prototype.set;
@@ -2255,24 +2159,13 @@ test("DO requestSpec rejects oversized streams without waiting for cancel", asyn
     body,
     duplex: "half",
   }));
-  let hostileCatchCalls = 0;
-
-  await withMockedProperty(
-    Promise.prototype,
-    "catch",
-    function hostileCatch() {
-      hostileCatchCalls += 1;
-      throw new Error("tenant Promise.catch must not run");
-    },
-    () => assert.rejects(
-      withTestTimeout(
-        requestSpec(request, "rid-cancel"),
-        "requestSpec waited for stream cancel"
-      ),
-      /Durable Object fetch body exceeds/
-    )
+  await assert.rejects(
+    withTestTimeout(
+      requestSpec(request, "rid-cancel"),
+      "requestSpec waited for stream cancel"
+    ),
+    /Durable Object fetch body exceeds/
   );
-  assert.equal(hostileCatchCalls, 0);
 });
 
 test("DurableObjectNamespace facade uses direct upgrade path for websockets", async () => {

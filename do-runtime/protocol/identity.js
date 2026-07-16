@@ -9,13 +9,10 @@ import { DoRuntimeError } from "do-runtime-protocol-errors";
 import { fnv1a32Utf8 } from "shared-fnv1a32";
 
 const utf8Encoder = new TextEncoder();
-const intrinsicReflectApply = Reflect.apply;
-const intrinsicStringIsWellFormed = String.prototype.isWellFormed;
 
 /** @param {unknown} value */
 export function isWellFormedUnicodeString(value) {
-  return typeof value === "string" &&
-    intrinsicReflectApply(intrinsicStringIsWellFormed, value, []);
+  return typeof value === "string" && value.isWellFormed();
 }
 
 /** @param {string} value */

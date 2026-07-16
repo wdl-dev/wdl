@@ -172,9 +172,6 @@ export class Workflow {
       callback: opts.callback ?? null,
     });
     const responseId = validateInstanceId(body.id);
-    if (responseId !== id) {
-      throw new Error(`Workflow create response id mismatch: expected ${id}, got ${responseId}`);
-    }
     return this.#instance(responseId);
   }
 
@@ -199,19 +196,9 @@ export class Workflow {
     if (!Array.isArray(body.instances)) {
       throw new Error("Workflow createBatch response must include instances");
     }
-    const expectedIds = new Set(entries.map((entry) => entry.instanceId));
-    const returnedIds = new Set();
     return body.instances.map((entry, index) => {
       const instance = ensureObject(entry, "Workflow createBatch response entry");
       const id = validateCreateBatchResponseId(instance.id, index);
-      if (!expectedIds.has(id)) {
-        const expected = [...expectedIds].join(", ");
-        throw new Error(`Workflow createBatch response id mismatch: unexpected ${id}; expected one of ${expected}`);
-      }
-      if (returnedIds.has(id)) {
-        throw new Error(`Workflow createBatch response contains duplicate id ${id}`);
-      }
-      returnedIds.add(id);
       return this.#instance(id);
     });
   }
@@ -221,9 +208,6 @@ export class Workflow {
     validateInstanceId(id);
     const body = await this.#call("get", { instanceId: id });
     const responseId = validateInstanceId(body.id);
-    if (responseId !== id) {
-      throw new Error(`Workflow get response id mismatch: expected ${id}, got ${responseId}`);
-    }
     return this.#instance(responseId);
   }
 

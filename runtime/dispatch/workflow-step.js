@@ -30,42 +30,36 @@ import {
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayCache} WorkflowReplayCache
  */
 
-/** @param {Record<string, unknown>} record @param {string} field */
-function readFailureField(record, field) {
+/** @param {unknown} value @param {"name" | "message"} field */
+function readThrowableField(value, field) {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+    return undefined;
+  }
   try {
-    return { readable: true, value: record[field] };
+    return /** @type {Record<string, unknown>} */ (value)[field];
   } catch {
-    return { readable: false, value: undefined };
+    return undefined;
   }
 }
 
 /** @param {unknown} err */
 export function workflowError(err) {
-  const record = err !== null && (typeof err === "object" || typeof err === "function")
-    ? /** @type {Record<string, unknown>} */ (err)
-    : null;
-  const nameField = record
-    ? readFailureField(record, "name")
-    : { readable: true, value: undefined };
-  const messageField = record
-    ? readFailureField(record, "message")
-    : { readable: true, value: undefined };
-  const name = typeof nameField.value === "string" && nameField.value
-    ? nameField.value
-    : "Error";
-  let message = "Unknown error";
-  if (messageField.readable && typeof messageField.value === "string") {
-    message = messageField.value;
-  } else if (!record && err == null) {
-    message = "Workflow run failed";
-  } else if (!record) {
+  const rawName = readThrowableField(err, "name");
+  const rawMessage = readThrowableField(err, "message");
+  let message = "Workflow run failed";
+  if (typeof rawMessage === "string") {
+    message = rawMessage;
+  } else if (err != null) {
     try {
       message = String(err);
     } catch {
-      // Keep the stable fallback.
+      // Some valid thrown values have no usable primitive conversion.
     }
   }
-  return { name, message };
+  return {
+    name: typeof rawName === "string" && rawName ? rawName : "Error",
+    message,
+  };
 }
 
 /**
@@ -114,9 +108,7 @@ export function isWorkflowSuspended(err) {
 /** @param {unknown} err */
 export function isWorkflowSuspensionSignal(err) {
   if (isWorkflowSuspended(err)) return true;
-  if (err === null || (typeof err !== "object" && typeof err !== "function")) return false;
-  const name = readFailureField(/** @type {Record<string, unknown>} */ (err), "name");
-  return name.readable && name.value === "WorkflowSuspended";
+  return readThrowableField(err, "name") === "WorkflowSuspended";
 }
 
 /** @param {unknown} value */

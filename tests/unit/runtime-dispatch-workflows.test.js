@@ -1902,8 +1902,16 @@ test("handleWorkflowRunDispatch commits failed step.do errors", async () => {
   assert.equal(scope.errors.length, 1);
 });
 
-test("handleWorkflowRunDispatch rejects swallowed terminal step.do failures", async () => {
+test("handleWorkflowRunDispatch commits hostile terminal step.do failures", async () => {
   const scope = makeScope();
+  const throwable = new Proxy(Object.create(null), {
+    get() {
+      throw new Error("throwable field trap");
+    },
+    getPrototypeOf() {
+      throw new Error("throwable prototype trap");
+    },
+  });
   const backend = makeWorkflowBackend(async (url) => {
     if (url.endsWith("/claim-step")) return Response.json({ state: "run" });
     if (url.endsWith("/commit-step-error")) return Response.json({ state: "failed" });
@@ -1930,7 +1938,7 @@ test("handleWorkflowRunDispatch rejects swallowed terminal step.do failures", as
           async run(/** @type {any} */ _event, /** @type {any} */ step) {
             try {
               await step.do("charge", async () => {
-                throw new TypeError("card declined");
+                throw throwable;
               });
             } catch {
               return "swallowed";
@@ -1944,10 +1952,23 @@ test("handleWorkflowRunDispatch rejects swallowed terminal step.do failures", as
   const body = await readJsonResponse(res, 200);
   assert.equal(body.outcome, "failed");
   assert.deepEqual(body.error, {
-    name: "TypeError",
-    message: "card declined",
+    name: "Error",
+    message: "Workflow run failed",
   });
+  assert.deepEqual(backend.calls[2].body.error, body.error);
   assert.equal(scope.errors.length, 1);
+});
+
+test("workflowError falls back when throwable conversion throws", () => {
+  const throwable = {
+    toString() {
+      throw new Error("conversion failed");
+    },
+  };
+  assert.deepEqual(workflowError(throwable), {
+    name: "Error",
+    message: "Workflow run failed",
+  });
 });
 
 test("workflow internal error codes cannot be forged with Error.name", async () => {

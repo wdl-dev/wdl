@@ -193,10 +193,10 @@ Runtime must treat Redis bundle metadata as control-authored, but still revalida
 reserved runtime entrypoint and binding names when materializing older stored metadata.
 It also fails closed if older metadata has a `compatibilityDate` before `2026-04-01`,
 contains Python module entries or upstream experimental compatibility flags, disables
-WDL's required enhanced error serialization, or explicitly enables that behavior after
-it became the workerd default. The date floor and enhanced-serialization requirement
-are WDL forward-only policy; the remaining checks prevent unsupported metadata from
-reaching the current stock workerd binary as an opaque cold-load failure.
+WDL's required enhanced error serialization, or violates another WDL-owned metadata
+contract. The date floor and enhanced-serialization requirement are WDL forward-only
+policy. Workerd remains responsible for rejecting redundant or otherwise incompatible
+upstream flags during cold load.
 
 ## Ownership / Concurrency / Failure Semantics
 
@@ -210,25 +210,17 @@ reaching the current stock workerd binary as an opaque cold-load failure.
   internal Fetchers are injected. Its host-wrapper runtime evaluates before tenant
   modules and captures the intrinsics used to decide handler or env wrapping, so tenant
   top-level prototype mutation cannot bypass the env boundary.
-- Host facade request ids use an invocation-local `AsyncLocalStorage` store. Runtime
-  ensures that the loaded worker has ALS support: an existing `nodejs_compat` setup is
-  left unchanged; otherwise a standalone `no_nodejs_als` is replaced by the narrow
-  `nodejs_als` flag. Concurrent calls on a persistent Durable Object instance therefore
-  cannot overwrite one shared context. The wrapper does not inspect, mutate, or replace
-  tenant return values. Native Promise and `async` continuations retain context; custom
-  thenables are not a supported request-id propagation boundary. Only the outermost
-  generated-wrapper invocation establishes the ALS store, including a store whose
-  request id is null, so ordinary nested wrapper calls inherit it instead of replacing
-  it with a second id. Tenant code shares the isolate's ambient ALS machinery and can
-  deliberately bind or restore another ambient frame, so loaded-worker propagation is
-  best-effort against tenant interference, not a security boundary. Request ids are
-  untrusted diagnostic metadata and must never authorize, fence, or deduplicate work.
-  Request-id syntax is owned by the injected canonical request-id module rather than
-  copied into the wrapper runtime.
+- Generated wrappers pass request ids directly to per-request facade objects. Persistent
+  class instances keep a small mutable diagnostic context that is refreshed when a
+  wrapped handler starts; concurrent or deliberately re-entrant calls may therefore
+  observe another invocation's id. Propagation is best-effort observability, not a
+  security or correctness boundary, and Runtime does not rewrite tenant compatibility
+  flags to support it. Request ids must never authorize, fence, or deduplicate work.
+  Request-id syntax remains owned by the injected canonical request-id module.
 - Request context wrappers swap facade objects into env and propagate request id where
   that event class can carry it. do-runtime alarm and RPC calls enter through private
-  fetch dispatches carrying the outer request id, so the generated wrapper establishes
-  invocation-local context without adding platform metadata to tenant method arguments.
+  fetch dispatches carrying the outer request id, without adding platform metadata to
+  tenant method arguments.
 - An uncaught tenant `fetch()` exception maps to a platform `502 runtime_error`
   response with the request id. Exception details are emitted to structured logs/live
   tail and are not copied into the client body. Tail formatting cannot replace the

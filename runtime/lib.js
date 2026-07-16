@@ -116,7 +116,7 @@ function deepFreeze(obj) {
 
 // Loaded workers may declare an older compatibilityDate than the platform
 // workers. Keep enhanced error serialization as a floor only before the date
-// where workerd made it the default; newer dates reject the explicit flag.
+// where workerd made it the default; workerd owns later flag compatibility.
 /** @param {string} compatibilityDate */
 function platformFloorCompatFlags(compatibilityDate) {
   const out = [];
@@ -155,14 +155,6 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
     if (f === LEGACY_ERROR_SERIALIZATION_FLAG) {
       throw new Error(
         `meta.compatibilityFlags contains unsupported flag ${JSON.stringify(f)}; WDL requires enhanced error serialization`
-      );
-    }
-    if (
-      f === ENHANCED_ERROR_SERIALIZATION_FLAG &&
-      compatibilityDate >= ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE
-    ) {
-      throw new Error(
-        `meta.compatibilityFlags contains ${JSON.stringify(f)}, which became the workerd default on ${ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE} and must not be specified for compatibilityDate ${compatibilityDate}`
       );
     }
     out.push(f);

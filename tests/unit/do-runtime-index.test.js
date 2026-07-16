@@ -547,8 +547,17 @@ test("do-runtime returns owner hints instead of forwarding when caller accepts t
   });
 });
 
-test("do-runtime connect local owner responses carry owner hint headers", async () => {
-  /** @type {any} */ (globalThis).__doIndexHostResponse = new Response("maintenance", { status: 503 });
+test("do-runtime connect strips tenant owner hint control markers", async () => {
+  /** @type {any} */ (globalThis).__doIndexHostResponse = new Response("maintenance", {
+    status: 503,
+    headers: {
+      "x-wdl-do-owner-hint": "1",
+      "x-wdl-do-owner-key": "tenant-forged-owner",
+      "x-wdl-do-owner-task-id": "tenant-forged-task",
+      "x-wdl-do-owner-endpoint": "do-runtime-forged:8788",
+      "x-wdl-do-owner-generation": "99",
+    },
+  });
 
   const response = await app.fetch(internalRequest("https://do-runtime/internal/do/connect", {
     method: "GET",

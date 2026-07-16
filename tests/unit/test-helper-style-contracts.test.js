@@ -4,25 +4,9 @@ import { readdirSync } from "node:fs";
 
 import { readRepoFile, repoPath, withoutLineComments } from "../helpers/source-scan.js";
 import {
-  extractCapnpConstBlock,
   scannedTestFiles,
-  stripCapnpComments,
   withoutStringAndTemplateLiterals,
 } from "../helpers/style-contract-scanner.js";
-
-test("Cap'n Proto comment stripping preserves hashes inside strings", () => {
-  const source = `
-const demo :Config = (
-  url = "https://example.test/path#fragment",
-  nested = (value = "escaped \\"# hash"), # trailing comment
-); # final comment
-`;
-  const stripped = stripCapnpComments(source);
-  assert.match(stripped, /path#fragment/);
-  assert.match(stripped, /escaped \\"# hash/);
-  assert.doesNotMatch(stripped, /trailing comment|final comment/);
-  assert.match(extractCapnpConstBlock(source, "demo"), /path#fragment/);
-});
 
 test("test files use moduleDataUrl/repositoryFileUrl instead of raw fs+URL boilerplate", () => {
   // Skips:

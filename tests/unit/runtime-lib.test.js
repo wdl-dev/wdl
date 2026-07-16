@@ -417,13 +417,11 @@ test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup",
   assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat"]);
 });
 
-test("bundleToWorkerCode: incompatible error serialization flags fail closed", () => {
+test("bundleToWorkerCode: legacy error serialization fails closed", () => {
   /** @type {[string | undefined, string, RegExp][]} */
   const cases = [
     ["2026-04-20", "legacy_error_serialization", /requires enhanced error serialization/],
     ["2026-04-21", "legacy_error_serialization", /requires enhanced error serialization/],
-    ["2026-04-21", "enhanced_error_serialization", /became the workerd default/],
-    [undefined, "enhanced_error_serialization", /became the workerd default/],
   ];
   for (const [compatibilityDate, flag, message] of cases) {
     assert.throws(
@@ -442,6 +440,21 @@ test("bundleToWorkerCode: incompatible error serialization flags fail closed", (
       `${flag} should be rejected for ${compatibilityDate ?? "the default date"}`
     );
   }
+});
+
+test("bundleToWorkerCode: leaves redundant positive flags to workerd", () => {
+  const code = bundleToWorkerCode(
+    mkBundle(
+      {
+        mainModule: "w.js",
+        compatibilityDate: "2026-04-21",
+        compatibilityFlags: ["enhanced_error_serialization"],
+        modules: { "w.js": { type: "module" } },
+      },
+      { "w.js": enc.encode("x") }
+    )
+  );
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization"]);
 });
 
 test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibilityFlags in bundle bytes", () => {

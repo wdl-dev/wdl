@@ -13,9 +13,6 @@ import {
   validateModulePath,
 } from "shared-ns-pattern";
 import {
-  DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE,
-  ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE,
-  ENHANCED_ERROR_SERIALIZATION_FLAG,
   LEGACY_ERROR_SERIALIZATION_FLAG,
   MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
   firstWorkerdExperimentalCompatFlag,
@@ -153,8 +150,8 @@ export function normalizeModule(value) {
 // like { compatibilityFlags: "nodejs_compat" } or { flag: true } drops
 // the user's declaration and leaves only the platform floor — looks
 // healthy, isn't.
-/** @param {unknown} flags @param {string} compatibilityDate */
-function validateCompatibilityFlags(flags, compatibilityDate) {
+/** @param {unknown} flags */
+function validateCompatibilityFlags(flags) {
   if (flags === undefined || flags === null) return;
   if (!Array.isArray(flags)) {
     throw new Error(
@@ -181,16 +178,6 @@ function validateCompatibilityFlags(flags, compatibilityDate) {
       400,
       "compatibility_flag_unsupported",
       `${JSON.stringify(LEGACY_ERROR_SERIALIZATION_FLAG)} is not supported because WDL requires enhanced error serialization`
-    );
-  }
-  if (
-    compatibilityDate >= ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE &&
-    flags.includes(ENHANCED_ERROR_SERIALIZATION_FLAG)
-  ) {
-    throw new BundleConfigError(
-      400,
-      "compatibility_flag_unsupported",
-      `${JSON.stringify(ENHANCED_ERROR_SERIALIZATION_FLAG)} became the workerd default on ${ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE} and must not be specified for compatibilityDate ${compatibilityDate}`
     );
   }
 }
@@ -316,10 +303,7 @@ export function prepareBundle(mainModule, rawModules, extras = {}) {
   }
   validateBindings(extras.bindings);
   const compatibilityDate = validateCompatibilityDate(extras.compatibilityDate);
-  validateCompatibilityFlags(
-    extras.compatibilityFlags,
-    compatibilityDate ?? DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE
-  );
+  validateCompatibilityFlags(extras.compatibilityFlags);
   const vars = normalizeVars(extras.vars);
   // Null-proto: any path slipping past validateModulePath can't take
   // the __proto__ setter path on assignment.

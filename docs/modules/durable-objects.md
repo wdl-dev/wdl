@@ -64,18 +64,20 @@ partial batch result; that is a result envelope, not a generic JSON error envelo
 Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime facade. The facade
 rejects an oversized `Content-Length` before reading, and streamed bodies are read
 incrementally so the cap is enforced before buffering the full body.
-DO RPC method names use the JavaScript identifier grammar and are capped at 256 ASCII
-bytes by both the runtime client and do-runtime protocol reader. RPC arguments are
+DO RPC method names use the JavaScript identifier grammar. The do-runtime protocol
+reader caps them at 256 ASCII bytes. RPC arguments are
 structural JSON data capped at 1 MiB: finite numbers, strings, booleans, null, dense
 arrays, and plain objects are accepted. Serialization does not invoke `toJSON()` hooks;
 sparse arrays, circular structures, non-plain objects, and non-JSON values fail before
 dispatch.
 do-runtime invokes tenant alarm and RPC methods through private fetch dispatches
 intercepted by the generated wrapper. Those requests carry the outer request id so the
-host facade establishes invocation-local context without adding platform metadata to
-the tenant argument list. Nested DO fetch/connect requests discard tenant-supplied
-`x-request-id` values and, when the ambient parent context is available, propagate its
-sanitized request id. Request ids remain untrusted diagnostic metadata.
+host facade can propagate it without adding platform metadata to the tenant argument
+list. Persistent class instances use a small mutable diagnostic context, so concurrent
+or re-entrant calls may observe another invocation's id. Nested DO fetch/connect
+requests discard tenant-supplied `x-request-id` values and propagate the sanitized
+context id when available. Request ids remain best-effort, untrusted diagnostic
+metadata.
 DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
 and storage id. They do not accept inline worker source.
 Tenant-facing DO object names and ids must be well-formed Unicode strings. Lone UTF-16

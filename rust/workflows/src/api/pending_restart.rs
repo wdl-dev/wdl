@@ -16,19 +16,6 @@ redis.call("PEXPIRE", KEYS[1], ARGV[3])
 return 1
 "#;
 
-const RENEW_PENDING_RESTART_SCRIPT: &str = r#"
-local time = redis.call("TIME")
-local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", now)
-local current = redis.call("ZSCORE", KEYS[1], ARGV[1])
-if not current then
-  return 0
-end
-redis.call("ZADD", KEYS[1], now + tonumber(ARGV[2]), ARGV[1])
-redis.call("PEXPIRE", KEYS[1], ARGV[3])
-return 1
-"#;
-
 const READ_PENDING_RESTART_SCRIPT: &str = r#"
 local time = redis.call("TIME")
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
@@ -77,22 +64,6 @@ pub(super) async fn create_pending_restart(
     )
     .await?;
     Ok(())
-}
-
-pub(super) async fn renew_pending_restart(
-    state: &AppState,
-    marker: &PendingRestartMarker,
-) -> WorkflowResult<bool> {
-    let marker_ttl = PENDING_RESTART_TTL_MS.to_string();
-    let key_ttl = PENDING_RESTART_KEY_TTL_MS.to_string();
-    let renewed: i64 = eval_script(
-        state,
-        RENEW_PENDING_RESTART_SCRIPT,
-        &[&marker.key],
-        &[&marker.member, &marker_ttl, &key_ttl],
-    )
-    .await?;
-    Ok(renewed == 1)
 }
 
 pub(super) async fn remove_pending_restart(
@@ -182,31 +153,5 @@ mod tests {
         ] {
             assert!(parse_pending_restart_member(member).is_err());
         }
-    }
-
-    #[test]
-    fn pending_restart_scripts_use_redis_time_and_do_not_resurrect_expired_members() {
-        assert!(CREATE_PENDING_RESTART_SCRIPT.contains(r#"redis.call("TIME")"#));
-        assert!(
-            CREATE_PENDING_RESTART_SCRIPT.contains(r#"redis.call("PEXPIRE", KEYS[1], ARGV[3])"#)
-        );
-        assert!(
-            RENEW_PENDING_RESTART_SCRIPT
-                .contains(r#"local current = redis.call("ZSCORE", KEYS[1], ARGV[1])"#)
-        );
-        assert!(RENEW_PENDING_RESTART_SCRIPT.contains("if not current then"));
-        assert!(READ_PENDING_RESTART_SCRIPT.contains(r#"redis.call("TIME")"#));
-        assert!(READ_PENDING_RESTART_SCRIPT.contains("return { count, members }"));
-        assert!(CREATE_PENDING_RESTART_SCRIPT.contains("ZREMRANGEBYSCORE"));
-        assert!(RENEW_PENDING_RESTART_SCRIPT.contains("ZREMRANGEBYSCORE"));
-        let cleanup = RENEW_PENDING_RESTART_SCRIPT
-            .find("ZREMRANGEBYSCORE")
-            .unwrap();
-        let expiry_check = RENEW_PENDING_RESTART_SCRIPT.find("if not current").unwrap();
-        let write = RENEW_PENDING_RESTART_SCRIPT
-            .find(r#"redis.call("ZADD""#)
-            .unwrap();
-        assert!(cleanup < expiry_check);
-        assert!(expiry_check < write);
     }
 }

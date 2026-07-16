@@ -64,19 +64,6 @@ const MAX_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 const MAX_REQUEST_HEADER_COUNT = 128;
 const MAX_REQUEST_HEADER_BYTES = 64 * 1024;
 export const DO_INVOKE_CONTENT_TYPE = "application/vnd.wdl.do-invoke";
-const IntrinsicArray = Array;
-const IntrinsicNumber = Number;
-const IntrinsicObject = Object;
-const IntrinsicWeakSet = WeakSet;
-const intrinsicReflectApply = Reflect.apply;
-const intrinsicArrayIsArray = Array.isArray;
-const intrinsicNumberIsFinite = Number.isFinite;
-const intrinsicObjectEntries = Object.entries;
-const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
-const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
-const intrinsicWeakSetAdd = WeakSet.prototype.add;
-const intrinsicWeakSetDelete = WeakSet.prototype.delete;
-const intrinsicWeakSetHas = WeakSet.prototype.has;
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const ALARM_INTERNAL_URL = "https://do.internal/__wdl_alarm";
@@ -245,47 +232,35 @@ function requireJsonSerializedSize(value, field, maxBytes) {
  * @param {WeakSet<object>} [seen]
  * @returns {string | null}
  */
-function jsonDataError(value, field, seen = new IntrinsicWeakSet()) {
+function jsonDataError(value, field, seen = new WeakSet()) {
   if (value === null) return null;
   const type = typeof value;
   if (type === "string" || type === "boolean") return null;
-  if (type === "number") {
-    return intrinsicReflectApply(intrinsicNumberIsFinite, IntrinsicNumber, [value])
-      ? null
-      : `${field} must be a finite number`;
-  }
+  if (type === "number") return Number.isFinite(value) ? null : `${field} must be a finite number`;
   if (type === "bigint" || type === "function" || type === "symbol" || type === "undefined") {
     return `${field} must be JSON data`;
   }
   if (type !== "object") return `${field} must be JSON data`;
   const objectValue = /** @type {Record<string, unknown> | unknown[]} */ (value);
-  if (intrinsicReflectApply(intrinsicWeakSetHas, seen, [objectValue])) {
-    return `${field} must not be circular`;
-  }
-  intrinsicReflectApply(intrinsicWeakSetAdd, seen, [objectValue]);
-  if (intrinsicReflectApply(intrinsicArrayIsArray, IntrinsicArray, [objectValue])) {
-    const arrayValue = /** @type {unknown[]} */ (objectValue);
-    for (let i = 0; i < arrayValue.length; i++) {
-      if (!(i in arrayValue)) return `${field} must not be sparse`;
-      const error = jsonDataError(arrayValue[i], `${field}[${i}]`, seen);
+  if (seen.has(objectValue)) return `${field} must not be circular`;
+  seen.add(objectValue);
+  if (Array.isArray(objectValue)) {
+    for (let i = 0; i < objectValue.length; i++) {
+      if (!(i in objectValue)) return `${field} must not be sparse`;
+      const error = jsonDataError(objectValue[i], `${field}[${i}]`, seen);
       if (error) return error;
     }
-    intrinsicReflectApply(intrinsicWeakSetDelete, seen, [objectValue]);
+    seen.delete(objectValue);
     return null;
   }
-  const proto = intrinsicReflectApply(intrinsicObjectGetPrototypeOf, IntrinsicObject, [objectValue]);
-  if (proto !== IntrinsicObject.prototype && proto !== null) return `${field} must be a plain JSON object`;
-  const symbols = intrinsicReflectApply(intrinsicObjectGetOwnPropertySymbols, IntrinsicObject, [objectValue]);
-  if (symbols.length > 0) return `${field} must not contain symbol keys`;
-  const entries = /** @type {[string, unknown][]} */ (
-    intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [objectValue])
-  );
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    const error = jsonDataError(entry[1], `${field}.${entry[0]}`, seen);
+  const proto = Object.getPrototypeOf(objectValue);
+  if (proto !== Object.prototype && proto !== null) return `${field} must be a plain JSON object`;
+  if (Object.getOwnPropertySymbols(objectValue).length > 0) return `${field} must not contain symbol keys`;
+  for (const [key, entry] of Object.entries(objectValue)) {
+    const error = jsonDataError(entry, `${field}.${key}`, seen);
     if (error) return error;
   }
-  intrinsicReflectApply(intrinsicWeakSetDelete, seen, [objectValue]);
+  seen.delete(objectValue);
   return null;
 }
 

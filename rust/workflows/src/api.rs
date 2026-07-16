@@ -75,7 +75,7 @@ use pending_create::{
 };
 use pending_restart::{
     active_pending_restart_blockers, create_pending_restart, pending_restart_marker,
-    remove_pending_restart, renew_pending_restart,
+    remove_pending_restart,
 };
 use progress::{
     spawn_progress_from_identity, spawn_progress_from_request, spawn_progress_from_step,

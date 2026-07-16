@@ -166,10 +166,10 @@ Cross-cutting constraints:
   fairness cursor. Control owns only DB 0 `wf:defs:*`; other tiers must not write DB 2
   directly.
 - `wf:pending-version:<ns>:<worker>:<version>` is a Workflows-owned, 30-second restart
-  blocker. Version-delete checks it with `wf:by-version`; renewals cannot resurrect an
-  expired member, and the successful-restart DB 2 script revalidates the lease before
-  replacing it with the durable version referrer. The ZSET key has a refreshed
-  60-second TTL so abandoned marker keys are physically reclaimed.
+  blocker. Version-delete checks it with `wf:by-version`, and the successful-restart
+  DB 2 script atomically revalidates the initial marker before replacing it with the
+  durable version referrer. The ZSET key has a refreshed 60-second TTL so abandoned
+  marker keys are physically reclaimed.
 - Workflows also owns internal DB 2 `wf:internal:do-alarm:*` jobs for Durable Object
   alarm backend scheduling. do-runtime writes alarms through the workflows HTTP API
   instead of writing those keys directly. `wf:internal:do-alarm:ready:cursor` is the

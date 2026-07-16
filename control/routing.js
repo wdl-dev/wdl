@@ -773,13 +773,15 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     const affectedHosts = new Set();
     for (const r of routes) affectedHosts.add(r.host);
     await watchKeys(iso, [...affectedHosts].map((h) => patternsKey(h)));
-    await readHostStateAndAssertRouteConflicts(
-      iso,
-      ns,
-      workerName,
-      routes,
-      affectedHosts
-    );
+    const hosts = [...affectedHosts];
+    const patternStates = hosts.length > 0
+      ? await iso.hGetAllMany(hosts.map((host) => patternsKey(host)))
+      : [];
+    for (let index = 0; index < hosts.length; index += 1) {
+      for (const [slot, raw] of Object.entries(patternStates[index])) {
+        requirePatternProjection(raw, hosts[index], slot);
+      }
+    }
 
     // Scheduler builds x-worker-id from cron __meta__.version.
     const cronKey = cronWorkerKey(ns, workerName);

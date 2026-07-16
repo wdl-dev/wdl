@@ -144,8 +144,7 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    failures that cannot become valid by retrying the same bytes, such as queue-message
    decode failures or invalid queue dispatch bodies, go directly to DLQ without
    consuming the retry budget. Aggregate request-body-too-large responses are split
-   and retried with smaller batches first. Scheduler bounds each runtime response body
-   to 1 MiB before parsing it.
+   and retried with smaller batches first.
 5. The delayed loop wakes from `queue-delayed-wake` and from wall-clock sleeps until the
    next due delayed member. Each due member first takes a `queue-delayed-claim:*` lease
    sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the winner moves it back to the main

@@ -75,7 +75,7 @@ Runtime 通过 `redis-proxy` 从 DB 0 读取不可变 bundle 和 metadata。Data
 - D1 和 DO binding 调用专门 runtime service。
 - R2/ASSETS 使用 S3-compatible object storage。
 
-Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。旧 metadata 如果包含早于 `2026-04-01` 的 `compatibilityDate`、Python module entry、上游 experimental compatibility flag、禁用 WDL 要求的 enhanced error serialization，或在该行为已成为 workerd 默认值后仍显式启用对应 flag，也会 fail closed。日期下限与 enhanced serialization 要求是 WDL 的 forward-only policy；其余检查避免 unsupported metadata 直到当前 stock workerd cold-load 才以 opaque error 失败。
+Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。旧 metadata 如果包含早于 `2026-04-01` 的 `compatibilityDate`、Python module entry、上游 experimental compatibility flag、禁用 WDL 要求的 enhanced error serialization，或违反其他由 WDL 拥有的 metadata contract，也会 fail closed。日期下限与 enhanced serialization 要求是 WDL 的 forward-only policy；冗余或其他不兼容的上游 flag 仍由 workerd 在 cold load 时拒绝。
 
 ## Ownership / 并发 / 失败语义
 
@@ -83,8 +83,8 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 - Service-binding cold load 会记录 loaded version，但不 evict sibling，因为 service binding 可能有意指向 frozen historical version。
 - Internal active-version scheduled/queue dispatch 会 opt into sibling eviction；frozen workflow dispatch 不会。
 - 只要注入 privileged internal Fetcher，wrapper generation 就会避免 raw env 暴露给未包装 entrypoint。Host-wrapper runtime 会在 tenant module 前执行，并捕获参与 handler/env wrapping 决策的 intrinsic，因此 tenant 顶层 prototype mutation 不能绕过 env 边界。
-- Host facade request id 使用 invocation-local `AsyncLocalStorage` store。已有 `nodejs_compat` 配置会保持不变；否则 Runtime 会把 standalone `no_nodejs_als` 替换为范围更窄的 `nodejs_als` flag。持久 Durable Object 实例上的并发调用不会再覆盖同一个共享 context，wrapper 也不会检查、修改或替换 tenant 返回值。Native Promise 和 `async` continuation 会保留 context；custom thenable 不属于受支持的 request-id propagation boundary。只有最外层 generated-wrapper invocation 会建立 ALS store，即使该 store 的 request id 为 null，因此普通嵌套 wrapper 调用会继承它而不是写入第二个 id。Tenant code 与 host 共用 isolate 的 ambient ALS 机制，可以主动 bind 或恢复另一个 ambient frame，因此 loaded-worker propagation 面对 tenant 干预时只是 best-effort，不是安全边界。Request id 是不可信的诊断 metadata，不能用于授权、fence 或去重。Request-id 语法由 injected canonical request-id module 拥有，不在 wrapper runtime 内复制。
-- Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。do-runtime alarm 和 RPC 通过携带外层 request id 的私有 fetch dispatch 进入，使 generated wrapper 建立 invocation-local context，而不会把平台 metadata 加入 tenant method argument。
+- Generated wrapper 会把 request id 直接传给每次请求创建的 facade。持久 class instance 使用一个小型 mutable diagnostic context，并在 wrapped handler 开始时刷新；并发或有意重入的调用因此可能观察到另一次 invocation 的 id。该传播只属于 best-effort observability，不是安全或正确性边界，Runtime 也不会为它重写 tenant compatibility flags。Request id 不能用于授权、fence 或去重；其语法仍由 injected canonical request-id module 拥有。
+- Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。do-runtime alarm 和 RPC 通过携带外层 request id 的私有 fetch dispatch 进入，不会把平台 metadata 加入 tenant method argument。
 - Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error` response，并带 request id。异常细节输出到结构化日志/live tail，不复制进客户端 body；throwable 自身无法转成字符串时，tail formatting 也不能反向覆盖原始异常。
 - Internal scheduled、queue 和 workflow dispatch route 使用 result envelope 表达 handler outcome。Tenant handler error 是 scheduler/workflow 协议中的 outcome state，不是 generic platform transport error。
 - Runtime 没有 route-cache invalidation protocol。`workerLoader` cache key 是不可变 worker id，因此 promote 后的新 version 是新 key，会自然 cold-load。

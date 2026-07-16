@@ -676,39 +676,32 @@ test("bumpActiveAndPromote rejects active routes that no longer declare their ho
   );
 });
 
-/** @type {Array<[string, string, number, string]>} */
-const bumpProjectionFailureCases = [
-  ["malformed", "not-a-projection", 500, "corrupt_pattern_projection"],
-  ["foreign", patternProjection("other", "site", "v7", "prefix", "/"), 409, "route_conflict"],
-];
-for (const [label, held, expectedStatus, expectedCode] of bumpProjectionFailureCases) {
-  test(`bumpActiveAndPromote fails closed on ${label} held pattern projections`, async () => {
-    const redis = makeRedis();
-    seedBundle(redis, "v1", {
-      routes: [{
-        host: "app.workers.example",
-        slot: "/*",
-        kind: "prefix",
-        value: "/",
-      }],
-    });
-    redis.state.hashes.set("routes:demo", { worker: "v1" });
-    redis.state.hashes.set("patterns:app.workers.example", { "/*": held });
-    redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
-    redis.state.strings.set("worker:demo:worker:next_version", "1");
-
-    await assert.rejects(
-      bumpActiveAndPromote(redis, "demo", "worker"),
-      (err) => {
-        assertRoutingErrorShape(err, expectedStatus, expectedCode);
-        return true;
-      }
-    );
-
-    assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
-    assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
+test("bumpActiveAndPromote fails closed on malformed held pattern projections", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    routes: [{
+      host: "app.workers.example",
+      slot: "/*",
+      kind: "prefix",
+      value: "/",
+    }],
   });
-}
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.hashes.set("patterns:app.workers.example", { "/*": "not-a-projection" });
+  redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await assert.rejects(
+    bumpActiveAndPromote(redis, "demo", "worker"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_pattern_projection");
+      return true;
+    }
+  );
+
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+  assert.equal(redis.state.hashes.has(productionBundleKey("demo", "worker", "v2")), false);
+});
 
 test("bumpActiveAndPromote rejects malformed cron metadata", async () => {
   const redis = makeRedis();

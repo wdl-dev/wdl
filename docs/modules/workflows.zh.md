@@ -70,7 +70,7 @@ Key families：
 | `wf:by-worker:<ns>:<worker>` | Set | workflows | 按 worker 发现 instance 的索引。 | list/delete check 使用；retention/delete cleanup 移除 entry。 |
 | `wf:by-workflow:<ns>:<worker>:<workflowKey>` | ZSET | workflows | 按 workflow key 分页列 instance 的有序索引。 | retention/delete cleanup 删除 sorted-set member。 |
 | `wf:by-version:<ns>:<worker>:<version>` | Set | workflows | frozen-version referrer index。 | live instance 仍引用该 version 时阻止 version delete。 |
-| `wf:pending-version:<ns>:<worker>:<version>` | ZSET | workflows | 按过期时间计分的短期 restart target-version blocker。 | Version-delete 检查 active member；restart 只续租未过期 member，并在创建持久 `wf:by-version` referrer 前原子复核。Member 30 秒后过期，ZSET key 使用随写入刷新的 60 秒 TTL 做物理回收。 |
+| `wf:pending-version:<ns>:<worker>:<version>` | ZSET | workflows | 按过期时间计分的短期 restart target-version blocker。 | Version-delete 检查 active member；restart 在创建持久 `wf:by-version` referrer 前原子复核自己的 marker。Member 30 秒后过期，ZSET key 使用 60 秒 TTL 做物理回收。 |
 | `wf:retention` | ZSET | workflows | terminal retention due index。 | Retention tick 删除过期 terminal instance。 |
 | `wf:internal:do-alarm:{<jobId>}:state` | Hash | workflows | 单个 Durable Object SQLite alarm row 的 backend job 权威状态。 | 成功 delivery、retry 耗尽、显式 delete 和 worker cleanup 会移除 job。 |
 | `wf:internal:do-alarm:due:<shard>` | ZSET | workflows | DO alarm due index。score 是 due timestamp milliseconds。 | Tick promotion 把到期 job 移到 ready。 |

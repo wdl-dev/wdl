@@ -97,5 +97,5 @@ Routes、crons、queue consumers、bindings、vars、exports、workflow definiti
 - Queue main stream 不做 trim，因为 at-least-once delivery 是合同。DLQ、orphan、log-tail 这类诊断 stream 可以使用有界 approximate trim。
 - Secret hash value 在 steady state 下是 `WDL-ENC:` envelope。`/runtime/load` 没有 plaintext fallback。
 - Workflows 拥有 DB 2 instance state。`wf:ready:cursor` 是内部 ready-shard 公平性 cursor。Control 只拥有 DB 0 的 `wf:defs:*`；其他 tier 不应直接写 DB 2。
-- `wf:pending-version:<ns>:<worker>:<version>` 是 Workflows-owned、30 秒的 restart blocker。Version-delete 会将它与 `wf:by-version` 一起检查；续租不能复活已过期 member，restart 成功的 DB 2 script 会在创建持久 version referrer 前再次验证 lease。ZSET key 使用随写入刷新的 60 秒 TTL，确保遗留 marker key 会被物理回收。
+- `wf:pending-version:<ns>:<worker>:<version>` 是 Workflows-owned、30 秒的 restart blocker。Version-delete 会将它与 `wf:by-version` 一起检查；restart 成功的 DB 2 script 会在创建持久 version referrer 前原子复验初始 marker。ZSET key 使用随写入刷新的 60 秒 TTL，确保遗留 marker key 会被物理回收。
 - Workflows 还拥有 DB 2 中的 internal `wf:internal:do-alarm:*` jobs，用于 Durable Object alarm backend scheduling。do-runtime 通过 workflows HTTP API 写 alarm，而不是直接写这些 key。`wf:internal:do-alarm:ready:cursor` 是内部 ready-shard 公平性 cursor，不是租户状态。

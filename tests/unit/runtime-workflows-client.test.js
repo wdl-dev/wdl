@@ -312,42 +312,6 @@ test("Workflow.createBatch accepts valid instances array", async () => {
   assert.deepEqual(instances.map((instance) => instance.id), ["inst-1", "inst-2"]);
 });
 
-test("Workflow.createBatch rejects duplicate backend response ids", async () => {
-  const workflow = createWorkflowForTest({
-    backend: {
-      async fetch() {
-        return Response.json({
-          instances: [{ id: "inst-1" }, { id: "inst-1" }],
-        });
-      },
-    },
-  });
-
-  await assert.rejects(
-    () => workflow.createBatch([{ id: "inst-1" }, { id: "inst-2" }]),
-    /Workflow createBatch response contains duplicate id inst-1/
-  );
-});
-
-test("Workflow create and get require matching response ids", async () => {
-  for (const endpoint of ["create", "get"]) {
-    const workflow = createWorkflowForTest({
-      backend: {
-        async fetch() {
-          return Response.json({ id: "inst-other" });
-        },
-      },
-    });
-
-    await assert.rejects(
-      () => endpoint === "create"
-        ? workflow.create({ id: "inst-1" })
-        : workflow.get("inst-1"),
-      new RegExp(`Workflow ${endpoint} response id mismatch`)
-    );
-  }
-});
-
 test("Workflow.create rejects non-object success responses", async () => {
   const workflow = createWorkflowForTest({
     backend: {
@@ -416,27 +380,4 @@ test("Workflow.createBatch accepts backend-skipped ids", async () => {
   assert.equal(instances.length, 1);
   const instanceIds = instances.map((instance) => instance.id);
   assert.deepEqual(instanceIds, ["inst-1"]);
-});
-
-test("Workflow.createBatch rejects unexpected backend ids", async () => {
-  const workflow = createWorkflowForTest({
-    backend: {
-      async fetch() {
-        return Response.json({ instances: [{ id: "inst-1" }, { id: "inst-3" }] });
-      },
-    },
-  });
-
-  await assert.rejects(
-    () => workflow.createBatch([{ id: "inst-1" }, { id: "inst-2" }, { id: "inst-4" }]),
-    /** @param {unknown} error */
-    (error) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /Workflow createBatch response id mismatch/);
-      assert.match(error.message, /inst-3/);
-      assert.match(error.message, /inst-2/);
-      assert.match(error.message, /inst-4/);
-      return true;
-    }
-  );
 });

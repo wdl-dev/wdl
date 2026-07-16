@@ -844,40 +844,36 @@ test("prepareBundle: experimental workerd compatibility flags are rejected", () 
   );
 });
 
-test("prepareBundle: error serialization flags match the effective compatibility date", () => {
-  assert.doesNotThrow(() => prepareBundle(
-    "w.js",
-    { "w.js": "x" },
-    {
-      compatibilityDate: "2026-04-20",
-      compatibilityFlags: ["enhanced_error_serialization"],
-    }
-  ));
-
-  /** @type {[string | undefined, string][]} */
-  const cases = [
-    ["2026-04-20", "legacy_error_serialization"],
-    ["2026-04-21", "legacy_error_serialization"],
-    ["2026-04-21", "enhanced_error_serialization"],
-    [undefined, "enhanced_error_serialization"],
-  ];
-  for (const [compatibilityDate, flag] of cases) {
+test("prepareBundle: rejects legacy error serialization", () => {
+  for (const compatibilityDate of ["2026-04-20", "2026-04-21", undefined]) {
     assert.throws(
       () => prepareBundle(
         "w.js",
         { "w.js": "x" },
-        { compatibilityDate, compatibilityFlags: [flag] }
+        { compatibilityDate, compatibilityFlags: ["legacy_error_serialization"] }
       ),
       (err) => {
         if (!(err instanceof Error)) return false;
         const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
         return coded.code === "compatibility_flag_unsupported" &&
           coded.status === 400 &&
-          coded.message.includes(flag);
+          coded.message.includes("legacy_error_serialization");
       },
-      `${flag} should be rejected for ${compatibilityDate ?? "the default date"}`
+      `legacy_error_serialization should be rejected for ${compatibilityDate ?? "the default date"}`
     );
   }
+});
+
+test("prepareBundle: leaves redundant positive flags to workerd", () => {
+  const { meta } = prepareBundle(
+    "w.js",
+    { "w.js": "x" },
+    {
+      compatibilityDate: "2026-04-21",
+      compatibilityFlags: ["enhanced_error_serialization"],
+    }
+  );
+  assert.deepEqual(meta.compatibilityFlags, ["enhanced_error_serialization"]);
 });
 
 test("prepareBundle: compatibilityDate validates shape before commit", () => {

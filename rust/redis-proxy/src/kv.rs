@@ -310,63 +310,22 @@ impl RawByteBudget {
     }
 }
 
-struct GroupedHmgetRequest {
-    redis_key: String,
+fn apply_grouped_hmget_response(
+    output: &mut [Option<Vec<u8>>],
+    budget: &mut RawByteBudget,
     indices: Vec<usize>,
-    fields: Vec<String>,
-    remaining: usize,
-}
-
-struct GroupedFieldRead {
-    pending: std::vec::IntoIter<GroupedHmgetCommand>,
-    output: Vec<Option<Vec<u8>>>,
-}
-
-impl GroupedFieldRead {
-    fn new(commands: Vec<GroupedHmgetCommand>, output_len: usize) -> Self {
-        Self {
-            pending: commands.into_iter(),
-            output: vec![None; output_len],
-        }
+    preflight_bytes: usize,
+    values: Vec<Option<Vec<u8>>>,
+) -> AppResult<()> {
+    if values.len() != indices.len() {
+        return Err(AppError::internal_error("invalid grouped KV HMGET reply"));
     }
-
-    fn next_request(&mut self, budget: &RawByteBudget) -> AppResult<Option<GroupedHmgetRequest>> {
-        let Some((redis_key, indices, fields)) = self.pending.next() else {
-            return Ok(None);
-        };
-        if indices.len() != fields.len() || indices.iter().any(|index| *index >= self.output.len())
-        {
-            return Err(AppError::internal_error("invalid grouped KV HMGET plan"));
-        }
-        Ok(Some(GroupedHmgetRequest {
-            redis_key,
-            indices,
-            fields,
-            remaining: budget.remaining()?,
-        }))
+    budget.record_preflight(preflight_bytes)?;
+    for (index, value) in indices.into_iter().zip(values) {
+        budget.record_actual(value.as_deref())?;
+        output[index] = value;
     }
-
-    fn apply_response(
-        &mut self,
-        budget: &mut RawByteBudget,
-        request: GroupedHmgetRequest,
-        preflight_bytes: usize,
-        values: Vec<Option<Vec<u8>>>,
-    ) -> AppResult<()> {
-        if values.len() != request.indices.len() {
-            return Err(AppError::internal_error("invalid grouped KV HMGET reply"));
-        }
-        budget.record_preflight(preflight_bytes)?;
-        for (index, value) in request.indices.into_iter().zip(values) {
-            budget.record_actual(value.as_deref())?;
-            self.output[index] = value;
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> Vec<Option<Vec<u8>>> {
-        self.output
-    }
+    Ok(())
 }
 
 async fn load_grouped_fields_with_raw_byte_budget(
@@ -377,18 +336,17 @@ async fn load_grouped_fields_with_raw_byte_budget(
 ) -> AppResult<Vec<Option<Vec<u8>>>> {
     // The preflight total limits transfer between groups; the separate actual
     // total rechecks returned payloads before callers encode a response.
-    let mut read = GroupedFieldRead::new(commands, output_len);
-    while let Some(request) = read.next_request(budget)? {
-        let (preflight_bytes, values) = query_hmget_with_raw_byte_budget(
-            conn,
-            &request.redis_key,
-            request.remaining,
-            &request.fields,
-        )
-        .await?;
-        read.apply_response(budget, request, preflight_bytes, values)?;
+    let mut output = vec![None; output_len];
+    for (redis_key, indices, fields) in commands {
+        if indices.len() != fields.len() || indices.iter().any(|index| *index >= output.len()) {
+            return Err(AppError::internal_error("invalid grouped KV HMGET plan"));
+        }
+        let (preflight_bytes, values) =
+            query_hmget_with_raw_byte_budget(conn, &redis_key, budget.remaining()?, &fields)
+                .await?;
+        apply_grouped_hmget_response(&mut output, budget, indices, preflight_bytes, values)?;
     }
-    Ok(read.finish())
+    Ok(output)
 }
 
 pub(crate) fn kv_put_pipeline(
@@ -950,40 +908,27 @@ mod tests {
     }
 
     #[test]
-    fn grouped_budgeted_reads_decrement_budget_and_restore_input_order() {
-        let commands = vec![
-            (
-                "hash-a".to_string(),
-                vec![2, 0],
-                vec!["v:charlie".to_string(), "v:alpha".to_string()],
-            ),
-            ("hash-b".to_string(), vec![1], vec!["v:bravo".to_string()]),
-        ];
-        let mut read = GroupedFieldRead::new(commands, 3);
+    fn grouped_budgeted_response_restores_input_order() {
+        let mut output = vec![None; 3];
         let mut budget = RawByteBudget::default();
-
-        let first = read.next_request(&budget).unwrap().unwrap();
-        assert_eq!(first.redis_key, "hash-a");
-        assert_eq!(first.remaining, KV_BATCH_RAW_BYTES_MAX);
-        assert_eq!(first.fields, ["v:charlie", "v:alpha"]);
-        read.apply_response(
+        apply_grouped_hmget_response(
+            &mut output,
             &mut budget,
-            first,
+            vec![2, 0],
             1,
             vec![Some(b"ccc".to_vec()), Some(b"aa".to_vec())],
         )
         .unwrap();
-
-        let second = read.next_request(&budget).unwrap().unwrap();
-        assert_eq!(second.redis_key, "hash-b");
-        assert_eq!(second.remaining, KV_BATCH_RAW_BYTES_MAX - 1);
-        assert_eq!(second.fields, ["v:bravo"]);
-        read.apply_response(&mut budget, second, 2, vec![Some(b"bbbb".to_vec())])
-            .unwrap();
-
-        assert!(read.next_request(&budget).unwrap().is_none());
+        apply_grouped_hmget_response(
+            &mut output,
+            &mut budget,
+            vec![1],
+            2,
+            vec![Some(b"bbbb".to_vec())],
+        )
+        .unwrap();
         assert_eq!(
-            read.finish(),
+            output,
             vec![
                 Some(b"aa".to_vec()),
                 Some(b"bbbb".to_vec()),

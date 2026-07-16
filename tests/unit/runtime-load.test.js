@@ -1738,28 +1738,28 @@ test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserv
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-client.js"], /class D1Database/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], /intrinsicArrayForEach/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], /AsyncLocalStorage/);
+  assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], /AsyncLocalStorage/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \* as __WdlHostRuntime__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \* as __WdlUserModule__ from "\.\/src\/worker\.js";/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /Explicit aliases replace same-name star exports/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const D1_BINDINGS = \["DB"\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const R2_BINDINGS = \[\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \[\];/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new D1Database\(out\[name\], requestIdOptions\(\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new D1Database\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /requestIdFromEventArg/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /wrapClassInstance\(this\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /wrapClassInstance\(this, requestContext\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /forEachArray\(HOST_WRAPPED_HANDLER_KEYS/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Api/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /__WdlWrappedEntrypoint\d+__ as Admin/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class default/);
-  assert.deepEqual(/** @type {any} */ (workerCode).compatibilityFlags, ["nodejs_als"]);
+  assert.equal(/** @type {any} */ (workerCode).compatibilityFlags, undefined);
 });
 
-test("wrapWorkerCodeForHostBindings: normalizes standalone ALS compatibility flags", () => {
-  for (const [input, expected] of [
-    [["no_nodejs_als"], ["nodejs_als"]],
-    [["no_global_navigator", "no_nodejs_als"], ["no_global_navigator", "nodejs_als"]],
-    [["nodejs_compat", "no_nodejs_als"], ["nodejs_compat", "no_nodejs_als"]],
+test("wrapWorkerCodeForHostBindings preserves compatibility flags", () => {
+  for (const input of [
+    ["no_nodejs_als"],
+    ["no_global_navigator", "no_nodejs_als"],
+    ["nodejs_compat", "no_nodejs_als"],
   ]) {
     const workerCode = {
       compatibilityFlags: input,
@@ -1769,7 +1769,7 @@ test("wrapWorkerCodeForHostBindings: normalizes standalone ALS compatibility fla
     wrapWorkerCodeForHostBindings(workerCode, {
       bindings: { DB: { type: "d1", databaseId: "main" } },
     });
-    assert.deepEqual(workerCode.compatibilityFlags, expected);
+    assert.deepEqual(workerCode.compatibilityFlags, input);
   }
 });
 
@@ -1902,17 +1902,6 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
       currentRequestId: "undefined",
       runWithRequestContext: "undefined",
     });
-
-    let thenReads = 0;
-    const stateful = {};
-    Object.defineProperty(stateful, "then", {
-      get() {
-        thenReads += 1;
-        return undefined;
-      },
-    });
-    assert.equal(instance.echo(stateful), stateful);
-    assert.equal(thenReads, 0);
   });
 });
 
@@ -2055,7 +2044,7 @@ test("wrapWorkerCodeForHostBindings: injects local R2 facade for R2 bindings", (
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-r2-client.js"], /this\._stub/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const R2_BINDINGS = \["BUCKET"\];/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new R2Bucket\(out\[name\], requestIdOptions\(\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new R2Bucket\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
 });
 
 test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object bindings", () => {
@@ -2074,7 +2063,7 @@ test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object 
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-owner-endpoint.js"], /validOwnerEndpointForService/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \["ROOMS"\];/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new DurableObjectNamespace\(out\[name\], doOptions\(doBackend, doOwnerNetwork\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new DurableObjectNamespace\(out\[name\], doOptions\(requestIdOrContext, doBackend, doOwnerNetwork\)\)/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Room/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from/);
@@ -2110,10 +2099,10 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /this\.name = "NonRetryableError"/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \{ Workflow \}/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const WORKFLOW_BINDINGS = \{"ORDERS":/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(out\[name\] \|\| metadata, workflowOptions\(workflowsBackend\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(out\[name\] \|\| metadata, workflowOptions\(requestIdOrContext, workflowsBackend\)\)/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /withRequestContext\(request, \(\) => notifyWorkflowCallback\(request, wrapEnv\(this\.env\)\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback\(request, wrapEnv\(this\.env, requestIdFromEventArg\(request\)\)\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.OrderWorkflow/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from "\.\/worker\.js";/);
 });

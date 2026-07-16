@@ -263,9 +263,7 @@ function d1RuntimeFailureExtra(extra) {
 
 /** @param {unknown} value @param {string} fallback */
 function d1RuntimeLogToken(value, fallback) {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value)
-    ? value
-    : fallback;
+  return typeof value === "string" && value ? value : fallback;
 }
 
 /**

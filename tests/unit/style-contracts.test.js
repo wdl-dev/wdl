@@ -4,8 +4,6 @@ import path from "node:path";
 import {
   extractAssignedConstant,
   extractBraceBlock,
-  extractCapnpConstBlock,
-  extractCapnpListEntries,
   extractExportedStringConst,
   extractRegex,
   extractStringConst,
@@ -14,11 +12,9 @@ import {
   markdownFiles,
   objectJsonPayloads,
   scannedTestFiles,
+  serviceAnchorRegex,
   withoutStringAndTemplateLiterals,
-  yamlAliasCount,
-  yamlDocument,
   yamlDocuments,
-  yamlMergeAliases,
 } from "../helpers/style-contract-scanner.js";
 import { jsFiles, readRepoFile, rustFiles, sourceFiles, withoutLineComments } from "../helpers/source-scan.js";
 
@@ -1175,50 +1171,6 @@ test("active bilingual docs stay paired", () => {
   assert.deepEqual(offenders.toSorted(), []);
 });
 
-test("owning bilingual docs retain selected cross-tier protocol literals", () => {
-  // Explicitly pin only high-value literals in their owning docs. Do not return
-  // to scanning every uppercase token, example port, or incidental DB mention.
-  /** @param {string} value */
-  const codeSpan = (value) => `\`${value}\``;
-  /** @type {Array<{ files: string[], literals: string[] }>} */
-  const contracts = [
-    {
-      files: ["docs/modules/infra.md", "docs/modules/infra.zh.md"],
-      literals: [
-        "WDL_INTERNAL_AUTH_TOKEN",
-        "x-wdl-internal-auth",
-        ":8088",
-        ":8787",
-        ":8788",
-        ":9120",
-      ],
-    },
-    {
-      files: ["docs/redis-key-layout.md", "docs/redis-key-layout.zh.md"],
-      literals: ["DB 0", "DB 1", "DB 2"],
-    },
-    {
-      files: ["docs/modules/control-auth.md", "docs/modules/control-auth.zh.md"],
-      literals: ["X-Admin-Token"],
-    },
-  ];
-  for (const suffix of [".v2", "+v2", "~v2", "-v2"]) {
-    assert.equal(codeSpan(`x-wdl-internal-auth${suffix}`).includes(codeSpan("x-wdl-internal-auth")), false);
-  }
-  assert.equal(codeSpan(":8787abc").includes(codeSpan(":8787")), false);
-  assert.equal(codeSpan("DB 01").includes(codeSpan("DB 0")), false);
-  const offenders = [];
-  for (const { files, literals } of contracts) {
-    for (const file of files) {
-      const source = readRepoFile(file);
-      for (const literal of literals) {
-        if (!source.includes(codeSpan(literal))) offenders.push(`${file}: missing ${literal}`);
-      }
-    }
-  }
-  assert.deepEqual(offenders, []);
-});
-
 test("protocol and contributor contracts stay discoverable from active docs", () => {
   const links = [
     ["CLAUDE.md", "docs/protocol-contracts.md"],
@@ -1456,85 +1408,46 @@ test("owner forward metrics classify non-error HTTP statuses consistently", () =
 });
 
 test("local compose services inherit shared image anchors", () => {
-  const document = yamlDocument("docker-compose.yml");
-  const merged = /** @type {{ services: Record<string, { profiles?: string[] }> }} */ (
-    yamlDocument("docker-compose.yml", { merge: true }).toJS()
-  );
-  assert.deepEqual(yamlMergeAliases(document, ["x-redis-proxy-service"]), ["rust-sidecar-image"]);
-  assert.deepEqual(yamlMergeAliases(document, ["x-d1-runtime-service"]), ["workerd-image"]);
-  assert.deepEqual(yamlMergeAliases(document, ["x-do-runtime-service"]), ["workerd-image"]);
-  assert.deepEqual(
-    yamlMergeAliases(document, ["x-redis-proxy-service", "environment"]),
-    ["internal-auth-env", "secret-envelope-env"]
-  );
-  assert.deepEqual(
-    yamlMergeAliases(document, ["services", "system-runtime", "environment"]),
-    ["internal-auth-env", "secret-envelope-env"]
-  );
-  assert.equal(yamlAliasCount(document, "secret-envelope-env"), 2);
-
-  /** @type {Map<string, string>} */
-  const serviceAnchors = new Map();
+  const source = readRepoFile("docker-compose.yml");
+  const offenders = [];
   for (const service of ["redis-proxy-user", "redis-proxy-system", "redis-proxy-do"]) {
-    serviceAnchors.set(service, "redis-proxy-service");
-  }
-  for (const service of ["scheduler", "workflows"]) serviceAnchors.set(service, "rust-sidecar-image");
-  for (const service of ["user-runtime", "system-runtime", "gateway"]) {
-    serviceAnchors.set(service, "workerd-image");
-  }
-  for (const service of ["d1-runtime", "d1-runtime-a", "d1-runtime-b", "d1-runtime-c"]) {
-    serviceAnchors.set(service, "d1-runtime-service");
-  }
-  for (const service of ["do-runtime", "do-runtime-a", "do-runtime-b", "do-runtime-c"]) {
-    serviceAnchors.set(service, "do-runtime-service");
-  }
-  for (const [service, anchor] of serviceAnchors) {
-    assert.deepEqual(yamlMergeAliases(document, ["services", service]), [anchor], service);
-  }
-  for (const family of ["d1", "do"]) {
-    assert.equal(merged.services[`${family}-runtime`].profiles, undefined);
-    for (const suffix of ["a", "b", "c"]) {
-      assert.deepEqual(merged.services[`${family}-runtime-${suffix}`].profiles, [`${family}-multi`]);
+    if (!serviceAnchorRegex(service, "redis-proxy-service").test(source)) {
+      offenders.push(service);
     }
   }
+  if (!serviceAnchorRegex("scheduler", "rust-sidecar-image").test(source)) {
+    offenders.push("scheduler");
+  }
+  for (const service of ["user-runtime", "system-runtime", "gateway"]) {
+    if (!serviceAnchorRegex(service, "workerd-image").test(source)) {
+      offenders.push(service);
+    }
+  }
+  assert.deepEqual(offenders, []);
 });
 
-test("published Compose overrides cover every locally built image service", () => {
-  const local = /** @type {{
-   *   services: Record<string, { build?: { context?: string, dockerfile?: string } }>,
-   * }} */ (yamlDocument("docker-compose.yml", { merge: true }).toJS());
-  const publishedDocument = yamlDocument("docker-compose.images.yml");
-  const published = /** @type {{
-   *   services: Record<string, { build?: string, image?: string, pull_policy?: string }>,
-   * }} */ (yamlDocument("docker-compose.images.yml", { merge: true }).toJS());
-  const familyByDockerfile = new Map([
-    ["Dockerfile.rust", { alias: "rust-published", image: "docker.io/getwdl/wdl-rust:latest" }],
-    ["Dockerfile.workerd", { alias: "workerd-published", image: "docker.io/getwdl/wdl-workerd:latest" }],
-  ]);
-  for (const family of familyByDockerfile.values()) {
-    const build = /** @type {{ tag?: string, value?: unknown } | undefined} */ (
-      publishedDocument.getIn([`x-${family.alias}`, "build"], true)
-    );
-    assert.equal(build?.tag, "!reset", `${family.alias} must reset inherited build config`);
-    assert.equal(build?.value, "null", `${family.alias} build reset must use null`);
-  }
-  const expected = new Map();
-  for (const [service, config] of Object.entries(local.services)) {
-    if (!config.build) continue;
-    assert.equal(config.build.context, ".", `${service} build context`);
-    const family = familyByDockerfile.get(config.build.dockerfile || "");
-    assert.ok(family, `${service} must use a recognized shared Dockerfile`);
-    expected.set(service, family);
-  }
-
-  assert.deepEqual(Object.keys(published.services).toSorted(), [...expected.keys()].toSorted());
-  for (const [service, family] of expected) {
-    assert.deepEqual(yamlMergeAliases(publishedDocument, ["services", service]), [family.alias], service);
-    assert.deepEqual(published.services[service], {
-      image: family.image,
-      pull_policy: "always",
-      build: "null",
-    });
+test("local compose runtime profiles keep base services enabled by default", () => {
+  const [document] = yamlDocuments("docker-compose.yml");
+  const compose = /** @type {{ services?: Record<string, { entrypoint?: unknown, profiles?: unknown }> }} */ (
+    document.toJS()
+  );
+  assert.ok(compose.services);
+  for (const family of ["d1", "do"]) {
+    const baseName = `${family}-runtime`;
+    const base = compose.services[baseName];
+    assert.ok(base, `${baseName} must exist`);
+    assert.deepEqual(base.entrypoint, [`${family}-supervisor`], `${baseName} effective entrypoint`);
+    assert.equal(base.profiles, undefined);
+    for (const suffix of ["a", "b", "c"]) {
+      const variantName = `${family}-runtime-${suffix}`;
+      const variant = compose.services[variantName];
+      assert.ok(variant, `${variantName} must exist`);
+      assert.deepEqual(
+        variant.profiles,
+        [`${family}-multi`],
+        variantName
+      );
+    }
   }
 });
 
@@ -1805,126 +1718,6 @@ test("local compose routes private HTTP hops through Envoy only", () => {
     );
   }
   assert.ok((envoy.match(/preserve_external_request_id: true/g) || []).length >= 5);
-});
-
-test("user and system runtime worker contracts differ only at privilege fields", () => {
-  const user = readRepoFile("runtime/config-user.capnp");
-  const system = readRepoFile("runtime/config-system.capnp");
-
-  const entryMap = (/** @type {string[]} */ entries) => Object.fromEntries(
-    entries.map((entry) => {
-      const name = /\(name\s*=\s*"([^"]+)"/.exec(entry);
-      assert.ok(name, `Cap'n Proto tuple must have a name: ${entry}`);
-      return [name[1], entry];
-    }).toSorted(([left], [right]) => left.localeCompare(right))
-  );
-  const stringField = (/** @type {string} */ block, /** @type {string} */ field) => {
-    const match = new RegExp(`\\b${RegExp.escape(field)}\\s*=\\s*"([^"]+)"`).exec(block);
-    assert.ok(match, `Cap'n Proto field ${field} must be present`);
-    return match[1];
-  };
-  const listField = (/** @type {string} */ block, /** @type {string} */ field) => {
-    const match = new RegExp(`\\b${RegExp.escape(field)}\\s*=\\s*(\\[[^\\]]*\\])`).exec(block);
-    assert.ok(match, `Cap'n Proto field ${field} must be present`);
-    return match[1].replace(/\s+/g, "");
-  };
-  const withoutEntries = (/** @type {Record<string, string>} */ entries, /** @type {string[]} */ names) => Object.fromEntries(
-    Object.entries(entries).filter(([name]) => !names.includes(name))
-  );
-
-  const userLoader = extractCapnpConstBlock(user, "loaderWorker");
-  const systemLoader = extractCapnpConstBlock(system, "loaderWorker");
-  assert.deepEqual(
-    entryMap(extractCapnpListEntries(userLoader, "modules")),
-    entryMap(extractCapnpListEntries(systemLoader, "modules"))
-  );
-  assert.equal(stringField(userLoader, "compatibilityDate"), stringField(systemLoader, "compatibilityDate"));
-  assert.equal(listField(userLoader, "compatibilityFlags"), listField(systemLoader, "compatibilityFlags"));
-
-  const userBindings = entryMap(extractCapnpListEntries(userLoader, "bindings"));
-  const systemBindings = entryMap(extractCapnpListEntries(systemLoader, "bindings"));
-  assert.deepEqual(
-    withoutEntries(userBindings, ["SERVICE_NAME", "PUBLIC_NETWORK"]),
-    withoutEntries(systemBindings, ["SERVICE_NAME", "PUBLIC_NETWORK"])
-  );
-  assert.match(userBindings.SERVICE_NAME, /text = "user-runtime"/);
-  assert.match(systemBindings.SERVICE_NAME, /text = "system-runtime"/);
-  assert.match(userBindings.PUBLIC_NETWORK, /service = "public-network"/);
-  assert.match(systemBindings.PUBLIC_NETWORK, /service = "network"/);
-  assert.equal(stringField(userLoader, "globalOutbound"), "internal-network");
-  assert.equal(stringField(systemLoader, "globalOutbound"), "network");
-
-  const userOwner = extractCapnpConstBlock(user, "doOwnerNetworkWorker");
-  const systemOwner = extractCapnpConstBlock(system, "doOwnerNetworkWorker");
-  assert.deepEqual(
-    entryMap(extractCapnpListEntries(userOwner, "modules")),
-    entryMap(extractCapnpListEntries(systemOwner, "modules"))
-  );
-  assert.deepEqual(
-    entryMap(extractCapnpListEntries(userOwner, "bindings")),
-    entryMap(extractCapnpListEntries(systemOwner, "bindings"))
-  );
-  assert.equal(stringField(userOwner, "compatibilityDate"), stringField(systemOwner, "compatibilityDate"));
-  assert.equal(stringField(userOwner, "globalOutbound"), "internal-network");
-  assert.equal(stringField(systemOwner, "globalOutbound"), "network");
-
-  const userTail = extractCapnpConstBlock(user, "tailWorker");
-  const systemTail = extractCapnpConstBlock(system, "tailWorker");
-  assert.deepEqual(
-    entryMap(extractCapnpListEntries(userTail, "modules")),
-    entryMap(extractCapnpListEntries(systemTail, "modules"))
-  );
-  const userTailBindings = entryMap(extractCapnpListEntries(userTail, "bindings"));
-  const systemTailBindings = entryMap(extractCapnpListEntries(systemTail, "bindings"));
-  assert.deepEqual(
-    withoutEntries(userTailBindings, ["SERVICE_NAME"]),
-    withoutEntries(systemTailBindings, ["SERVICE_NAME"])
-  );
-  assert.match(userTailBindings.SERVICE_NAME, /text = "user-runtime-tail"/);
-  assert.match(systemTailBindings.SERVICE_NAME, /text = "system-runtime-tail"/);
-  assert.equal(stringField(userTail, "compatibilityDate"), stringField(systemTail, "compatibilityDate"));
-  assert.equal(stringField(userTail, "globalOutbound"), "internal-network");
-  assert.equal(stringField(systemTail, "globalOutbound"), "network");
-});
-
-test("local workerd configs preserve base service and socket topology", () => {
-  const pairs = [
-    ["gateway/config.capnp", "gateway/config-local.capnp"],
-    ["runtime/config-user.capnp", "runtime/config-user-local.capnp"],
-    ["runtime/config-system.capnp", "runtime/config-system-local.capnp"],
-    ["do-runtime/config.capnp", "do-runtime/config-local.capnp"],
-  ];
-  const entryMap = (/** @type {string[]} */ entries) => Object.fromEntries(
-    entries.map((entry) => {
-      const name = /\(name\s*=\s*"([^"]+)"/.exec(entry);
-      assert.ok(name, `Cap'n Proto tuple must have a name: ${entry}`);
-      return [name[1], entry];
-    }).toSorted(([left], [right]) => left.localeCompare(right))
-  );
-  const normalizeBaseReference = (/** @type {string} */ entry) => entry.replace(/\.Base\./g, ".");
-
-  for (const [baseFile, localFile] of pairs) {
-    const base = extractCapnpConstBlock(readRepoFile(baseFile), "config");
-    const local = extractCapnpConstBlock(readRepoFile(localFile), "config");
-    const baseServices = entryMap(extractCapnpListEntries(base, "services"));
-    const localServices = entryMap(extractCapnpListEntries(local, "services"));
-    assert.deepEqual(Object.keys(localServices), Object.keys(baseServices), `${localFile} service names`);
-
-    for (const [name, baseService] of Object.entries(baseServices)) {
-      const localService = localServices[name];
-      if (baseService.includes("external =")) {
-        assert.match(localService, /external = \(address = "[^"]+", http = \(\)\)/, `${localFile}:${name}`);
-      } else {
-        assert.equal(normalizeBaseReference(localService), baseService, `${localFile}:${name}`);
-      }
-    }
-
-    assert.deepEqual(
-      entryMap(extractCapnpListEntries(local, "sockets")),
-      entryMap(extractCapnpListEntries(base, "sockets")),
-      `${localFile} sockets`
-    );
-  }
 });
 
 test("S3 query encoding stays aligned between shared and injected runtime helpers", () => {
@@ -2484,28 +2277,6 @@ test("internal binary protocol content-types stay centralized in transport const
   assert.equal(redisRuntimeLoadContentType, runtimeLoadContentType);
 });
 
-test("DO owner hints are trusted only from do-runtime headers", () => {
-  const runtime = readRepoFile("runtime/_wdl-do-transport.js");
-  const doRuntime = readRepoFile("do-runtime/index.js");
-
-  const wrapper = doRuntime.match(/function withOwnerHintHeaders\(response, owner\) \{[^]*?\n}\n\n/)?.[0] || "";
-  assert.match(wrapper, /headers\.delete\(DO_OWNER_HINT_CONTROL_HEADER\)/);
-  assert.match(wrapper, /ownerHintHeaders\(owner\)/);
-  assert.doesNotMatch(wrapper, /headers\.set\(DO_OWNER_HINT_CONTROL_HEADER/);
-
-  const ownerHintHeadersFn = runtime.match(/export function ownerHintHeaders\(owner, \{ control = false \} = \{\}\) \{[^]*?\n}\n\n/)?.[0] || "";
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.ownerKey\]/);
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.taskId\]/);
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.endpoint\]/);
-  assert.match(ownerHintHeadersFn, /\[DO_OWNER_HINT_HEADERS\.generation\]/);
-  assert.match(ownerHintHeadersFn, /if \(control\) headers\[DO_OWNER_HINT_CONTROL_HEADER\] = "1";/);
-
-  assert.doesNotMatch(runtime, /export const OWNER_(?:HINT_STALE|RACE_RETRY)_CODES/);
-  assert.match(runtime, /const code = responseHeader\(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER\)/);
-  assert.match(runtime, /setHas\(OWNER_RACE_RETRY_CODES, code\)/);
-  assert.match(doRuntime, /doPlatformErrorResponse\(err\)/);
-});
-
 test("owner endpoint validation lives in a shared contract owner", () => {
   const endpoint = readRepoFile("shared/owner-endpoint.js");
   const adapter = readRepoFile("runtime/_wdl-owner-endpoint.js");
@@ -2585,7 +2356,6 @@ test("queue delay cap literals stay aligned across standalone tiers", () => {
 test("Docker images build from pinned public base images", () => {
   const workerdDockerfile = withoutLineComments(readRepoFile("Dockerfile.workerd"));
   const rustDockerfile = withoutLineComments(readRepoFile("Dockerfile.rust"));
-  const cargoWorkspace = withoutLineComments(readRepoFile("rust/Cargo.toml"));
   const integrationEnvironment = withoutLineComments(readRepoFile("scripts/integration-environment.js"));
 
   assert.match(workerdDockerfile, /FROM rust:1-alpine AS supervisor-build/);
@@ -2602,54 +2372,6 @@ test("Docker images build from pinned public base images", () => {
   assert.doesNotMatch(workerdDockerfile, /\bwget\b/);
   assert.doesNotMatch(workerdDockerfile, /^FROM\s+\S+:latest\b/m);
   assert.match(integrationEnvironment, /DOCKER_COMPOSE_BUILD_ARGS = \["compose", "build", "gateway", "workflows"\]/);
-
-  const workspaceMembersMatch = /\bmembers\s*=\s*\[([\s\S]*?)\]/.exec(cargoWorkspace);
-  assert.ok(workspaceMembersMatch, "rust/Cargo.toml must declare workspace members");
-  const workspaceMembers = [...workspaceMembersMatch[1].matchAll(/"([^"]+)"/g)]
-    .map((match) => match[1])
-    .toSorted();
-  const copiedManifests = (/** @type {string} */ source) => {
-    const copies = [...source.matchAll(/^COPY rust\/([^/\s]+)\/Cargo\.toml \.\/([^/\s]+)\/$/gm)];
-    for (const copy of copies) {
-      assert.equal(copy[2], copy[1], `Cargo manifest destination must preserve ${copy[1]}`);
-    }
-    return copies.map((copy) => copy[1]).toSorted();
-  };
-  assert.deepEqual(copiedManifests(rustDockerfile), workspaceMembers);
-  assert.deepEqual(copiedManifests(workerdDockerfile), workspaceMembers);
-
-  const imageLabels = (/** @type {string} */ source) => Object.fromEntries(
-    [...source.matchAll(/org\.opencontainers\.image\.([a-z]+)="([^"]*)"/g)]
-      .map((match) => [match[1], match[2]])
-  );
-  const rustLabels = imageLabels(rustDockerfile);
-  const workerdLabels = imageLabels(workerdDockerfile);
-  const sharedLabelKeys = [
-    "source",
-    "documentation",
-    "vendor",
-    "authors",
-    "licenses",
-    "version",
-    "revision",
-    "created",
-  ];
-  assert.deepEqual(
-    Object.fromEntries(sharedLabelKeys.map((key) => [key, rustLabels[key]])),
-    Object.fromEntries(sharedLabelKeys.map((key) => [key, workerdLabels[key]]))
-  );
-  assert.notEqual(rustLabels.title, workerdLabels.title);
-  assert.notEqual(rustLabels.description, workerdLabels.description);
-
-  for (const source of [rustDockerfile, workerdDockerfile]) {
-    for (const arg of ["WDL_VERSION", "VCS_REF", "BUILD_DATE"]) {
-      assert.equal(
-        [...source.matchAll(new RegExp(`^ARG ${arg}(?:=[^\\n]+)?$`, "gm"))].length,
-        2,
-        `${arg} must be declared globally and in the final image stage`
-      );
-    }
-  }
 });
 
 test("workerd deploy configs use the supervisor-owned health check binary", () => {

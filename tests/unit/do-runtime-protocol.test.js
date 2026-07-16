@@ -15,7 +15,6 @@ import {
   doOwnerHintHeaders,
   doOwnershipErrorHeaders,
 } from "../helpers/do-owner-hint.js";
-import { withMockedProperty } from "../helpers/mock-global.js";
 
 const {
   DoRuntimeError,
@@ -351,29 +350,6 @@ test("rejects invalid do rpc shapes", () => {
     }),
     /rpc\.args\[0\]\.fn must be JSON data/
   );
-});
-
-test("do-runtime RPC JSON validation uses captured intrinsics", async () => {
-  await withMockedProperty(Object, "entries", () => [], () => {
-    assert.throws(
-      () => normalizeDoInvokeRequest({
-        ...BASE_BODY,
-        kind: "rpc",
-        rpc: { method: "addMessage", args: [{ fn() {} }] },
-      }),
-      (error) => error instanceof Error && error.message === "rpc.args[0].fn must be JSON data"
-    );
-  });
-  await withMockedProperty(Number, "isFinite", () => true, () => {
-    assert.throws(
-      () => normalizeDoInvokeRequest({
-        ...BASE_BODY,
-        kind: "rpc",
-        rpc: { method: "addMessage", args: [Number.NaN] },
-      }),
-      (error) => error instanceof Error && error.message === "rpc.args[0] must be a finite number"
-    );
-  });
 });
 
 test("rejects inline workerCode", () => {

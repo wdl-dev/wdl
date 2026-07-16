@@ -8,9 +8,9 @@ use crate::{
 use super::super::{
     InstanceResponse, InstanceRouteKeys, WorkflowRequest, create_pending_restart,
     ensure_worker_not_deleting, eval_script, identity_from_state, instance_id, payload_bytes_arg,
-    pending_restart_marker, read_public_state, remove_pending_restart, renew_pending_restart,
-    request_with_active_version, validate_identity, verify_active_workflow_current,
-    verify_workflow_def, workflow_referrer_member,
+    pending_restart_marker, read_public_state, remove_pending_restart, request_with_active_version,
+    validate_identity, verify_active_workflow_current, verify_workflow_def,
+    workflow_referrer_member,
 };
 use super::common::{
     TransitionSignal, next_generation, stale_transition_response, successful_transition_response,
@@ -102,13 +102,6 @@ pub(crate) async fn restart_instance(
     if let Err(err) = verify_workflow_def(state, &req).await {
         remove_pending_restart(state, &pending_restart).await?;
         return Err(err);
-    }
-    // Refresh immediately before the final delete-lock check. A version delete
-    // that starts on either side of this check sees the lock or this blocker.
-    if !renew_pending_restart(state, &pending_restart).await? {
-        return Err(WorkflowError::conflict(
-            "Workflow restart target lease expired; retry restart",
-        ));
     }
     if let Err(err) = ensure_worker_not_deleting(state, &req.ns, &req.worker).await {
         remove_pending_restart(state, &pending_restart).await?;

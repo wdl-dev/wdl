@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import path from "node:path";
-import { isAlias, isSeq, parseAllDocuments, parseDocument, visit } from "yaml";
+import { parseAllDocuments } from "yaml";
 
 import { readRepoFile, repoPath } from "./source-scan.js";
 
@@ -53,47 +53,13 @@ export function testSourceFiles(dir) {
   return out;
 }
 
-/**
- * @param {string} file
- * @param {{ merge?: boolean }} [options]
- */
-export function yamlDocument(file, options = {}) {
-  const document = parseDocument(readRepoFile(file), { merge: options.merge === true });
-  assert.equal(document.errors.length, 0, `${file} must parse as YAML`);
-  return document;
-}
-
 /** @param {string} file */
 export function yamlDocuments(file) {
-  const documents = parseAllDocuments(readRepoFile(file));
+  const documents = parseAllDocuments(readRepoFile(file), { merge: true });
   for (const document of documents) {
     assert.equal(document.errors.length, 0, `${file} must parse as YAML`);
   }
   return documents;
-}
-
-/**
- * @param {import("yaml").Document} document
- * @param {(string | number)[]} pathParts
- * @returns {string[]}
- */
-export function yamlMergeAliases(document, pathParts) {
-  const merge = document.getIn([...pathParts, "<<"], true);
-  if (isAlias(merge)) return [merge.source];
-  assert.ok(isSeq(merge), `YAML path ${pathParts.join(".")} must contain a merge alias`);
-  assert.ok(merge.items.every(isAlias), `YAML path ${pathParts.join(".")} merge entries must be aliases`);
-  return merge.items.map((item) => /** @type {import("yaml").Alias} */ (item).source);
-}
-
-/** @param {import("yaml").Document} document @param {string} source */
-export function yamlAliasCount(document, source) {
-  let count = 0;
-  visit(document, {
-    Alias(_key, alias) {
-      if (alias.source === source) count += 1;
-    },
-  });
-  return count;
 }
 
 /** @param {Set<string>} [exempt] */
@@ -197,106 +163,11 @@ export function extractRegex(file, name) {
 }
 
 /**
- * @param {string} source
- * @param {number} openIndex
- * @param {string} open
- * @param {string} close
+ * @param {string} service
+ * @param {string} anchor
  */
-function findClosingDelimiter(source, openIndex, open, close) {
-  let depth = 0;
-  let quote = "";
-  for (let index = openIndex; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote) {
-      if (char === "\\") index += 1;
-      else if (char === quote) quote = "";
-      continue;
-    }
-    if (char === '"') {
-      quote = char;
-    } else if (char === open) {
-      depth += 1;
-    } else if (char === close) {
-      depth -= 1;
-      if (depth === 0) return index;
-    }
-  }
-  return -1;
-}
-
-/** @param {string} source */
-export function stripCapnpComments(source) {
-  let out = "";
-  let quoted = false;
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    if (quoted) {
-      out += char;
-      if (char === "\\") {
-        index += 1;
-        out += source[index] ?? "";
-      } else if (char === '"') {
-        quoted = false;
-      }
-      continue;
-    }
-    if (char === '"') {
-      quoted = true;
-      out += char;
-      continue;
-    }
-    if (char !== "#") {
-      out += char;
-      continue;
-    }
-    while (index < source.length && source[index] !== "\n") {
-      out += " ";
-      index += 1;
-    }
-    if (index < source.length) out += "\n";
-  }
-  return out;
-}
-
-/**
- * Extracts a Cap'n Proto const struct while ignoring comments and formatting.
- * @param {string} source
- * @param {string} name
- */
-export function extractCapnpConstBlock(source, name) {
-  const clean = stripCapnpComments(source);
-  const declaration = new RegExp(`const\\s+${RegExp.escape(name)}\\s+:[^=]+=`).exec(clean);
-  assert.ok(declaration, `Cap'n Proto const ${name} must be present`);
-  const start = clean.indexOf("(", declaration.index + declaration[0].length);
-  assert.notEqual(start, -1, `Cap'n Proto const ${name} must contain a struct value`);
-  const end = findClosingDelimiter(clean, start, "(", ")");
-  assert.notEqual(end, -1, `Cap'n Proto const ${name} must have balanced parentheses`);
-  return clean.slice(start, end + 1);
-}
-
-/**
- * Returns normalized top-level tuple entries from a list field in a Cap'n Proto struct.
- * @param {string} block
- * @param {string} field
- */
-export function extractCapnpListEntries(block, field) {
-  const assignment = new RegExp(`\\b${RegExp.escape(field)}\\s*=\\s*\\[`).exec(block);
-  assert.ok(assignment, `Cap'n Proto field ${field} must be present`);
-  const listStart = block.indexOf("[", assignment.index);
-  const listEnd = findClosingDelimiter(block, listStart, "[", "]");
-  assert.notEqual(listEnd, -1, `Cap'n Proto field ${field} must have balanced brackets`);
-
-  const entries = [];
-  let index = listStart + 1;
-  while (index < listEnd) {
-    const start = block.indexOf("(", index);
-    if (start === -1 || start >= listEnd) break;
-    const end = findClosingDelimiter(block, start, "(", ")");
-    assert.notEqual(end, -1, `Cap'n Proto field ${field} entry must have balanced parentheses`);
-    entries.push(block.slice(start, end + 1).replace(/\s+/g, " ").trim());
-    index = end + 1;
-  }
-  return entries;
+export function serviceAnchorRegex(service, anchor) {
+  return new RegExp(`\\n  ${RegExp.escape(service)}:\\n    <<: \\*${RegExp.escape(anchor)}\\b`);
 }
 
 /**

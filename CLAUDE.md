@@ -114,6 +114,12 @@ shared crate `wdl-rust-common`.
   convergence, not a new abstraction.
 - Do not add fake old/new protocol fallback for in-tree tiers that ship together unless
   there is a real external rollout requirement.
+- After authentication, in-tree tiers that ship together may trust ephemeral RPC output
+  owned by the peer; do not repeat full semantic validation at every hop. Keep strict
+  validation at tenant inputs, persisted-state readers, credential attachment points,
+  and external protocol boundaries. Enforce each invariant at one owning layer, and do
+  not pre-implement a rejection that workerd or the backing platform already performs
+  unless WDL has an independent product policy or must prevent an earlier side effect.
 - If you change a route/body protocol, roll the side that accepts the new shape before
   the side that sends it.
 - If you change Redis ownership, update writers, readers, docs, and style-contract

@@ -358,25 +358,6 @@ test("control D1 runtime failure redacts 5xx diagnostics and keeps safe extra fi
   });
 });
 
-test("control D1 runtime failure log fields reject unbounded or non-token diagnostics", () => {
-  for (const invalid of [" leading-space", "line\nbreak", "x".repeat(129)]) {
-    assert.deepEqual(d1RuntimeFailureLogFields({
-      status: 502,
-      body: {
-        error: invalid,
-        category: invalid,
-        causeCode: invalid,
-        retryable: false,
-      },
-    }), {
-      upstream_status: 502,
-      upstream_code: "d1-runtime-error",
-      upstream_category: "internal",
-      upstream_retryable: false,
-    });
-  }
-});
-
 test("control D1 runtime failure uses the outward status to redact upstream 4xx details", () => {
   assert.deepEqual(d1RuntimeFailure("d1_database_initialize_failed", "demo", "db1", {
     status: 400,

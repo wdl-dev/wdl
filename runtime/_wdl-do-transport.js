@@ -8,7 +8,6 @@ export const MAX_DO_REQUEST_BODY_BYTES = 1024 * 1024;
 export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
-const MAX_DO_RPC_METHOD_BYTES = 256;
 export const DO_ACCEPT_OWNER_HINT_HEADER = "x-wdl-do-accept-owner-hint";
 export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
@@ -68,9 +67,7 @@ const IntrinsicResponse = Response;
 const IntrinsicUint8Array = Uint8Array;
 const IntrinsicWeakSet = WeakSet;
 const intrinsicReflectApply = Reflect.apply;
-const intrinsicArrayForEach = Array.prototype.forEach;
 const intrinsicArrayIsArray = Array.isArray;
-const intrinsicArrayPush = Array.prototype.push;
 const intrinsicDataViewSetUint32 = DataView.prototype.setUint32;
 const intrinsicHeadersAppend = Headers.prototype.append;
 const intrinsicHeadersDelete = Headers.prototype.delete;
@@ -85,14 +82,10 @@ const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
-const intrinsicPromiseThen = Promise.prototype.then;
 const intrinsicResponseJson = Response.json;
-const intrinsicReadableStreamCancel = ReadableStream.prototype.cancel;
 const intrinsicReadableStreamGetReader = ReadableStream.prototype.getReader;
-const intrinsicReadableStreamReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
 const intrinsicReadableStreamReaderRead = ReadableStreamDefaultReader.prototype.read;
 const intrinsicReadableStreamReaderReleaseLock = ReadableStreamDefaultReader.prototype.releaseLock;
-const intrinsicRegExpTest = RegExp.prototype.test;
 const intrinsicSetHas = Set.prototype.has;
 const intrinsicStringToLowerCase = String.prototype.toLowerCase;
 const intrinsicStringToUpperCase = String.prototype.toUpperCase;
@@ -193,16 +186,6 @@ export function staleDoOwnerHintResponse(response) {
   return code !== null && setHas(OWNER_HINT_STALE_CODES, code);
 }
 
-/** @template T @param {T[]} values @param {(value: T) => void} callback */
-function forEachArray(values, callback) {
-  intrinsicReflectApply(intrinsicArrayForEach, values, [callback]);
-}
-
-/** @template T @param {T[]} values @param {T} value */
-function pushArray(values, value) {
-  intrinsicReflectApply(intrinsicArrayPush, values, [value]);
-}
-
 /** @param {Uint8Array} target @param {Uint8Array} source @param {number} offset */
 function setBytes(target, source, offset) {
   intrinsicReflectApply(intrinsicUint8ArraySet, target, [source, offset]);
@@ -255,7 +238,9 @@ function headerEntries(headers) {
   const out = [];
   intrinsicReflectApply(intrinsicHeadersForEach, headers, [
     /** @param {string} value @param {string} name */
-    (value, name) => pushArray(out, [name, value]),
+    (value, name) => {
+      out[out.length] = [name, value];
+    },
   ]);
   return out;
 }
@@ -273,11 +258,6 @@ function stringToLowerCase(value) {
 /** @param {string} value */
 function stringToUpperCase(value) {
   return intrinsicReflectApply(intrinsicStringToUpperCase, value, []);
-}
-
-/** @param {RegExp} regexp @param {string} value */
-function regexpTest(regexp, value) {
-  return intrinsicReflectApply(intrinsicRegExpTest, regexp, [value]);
 }
 
 /** @param {Request} request */
@@ -320,8 +300,7 @@ function releaseStreamReader(reader) {
 /** @param {ReadableStreamDefaultReader<Uint8Array>} reader */
 function cancelStreamReader(reader) {
   try {
-    const promise = intrinsicReflectApply(intrinsicReadableStreamReaderCancel, reader, []);
-    intrinsicReflectApply(intrinsicPromiseThen, promise, [undefined, () => {}]);
+    reader.cancel().catch(() => {});
   } catch {
     // Cancellation is best-effort after the bounded reader has already rejected.
   }
@@ -334,8 +313,7 @@ function cancelResponseBody(response) {
   try {
     const body = responseBody(response);
     if (!body) return;
-    const promise = intrinsicReflectApply(intrinsicReadableStreamCancel, body, []);
-    intrinsicReflectApply(intrinsicPromiseThen, promise, [undefined, () => {}]);
+    body.cancel().catch(() => {});
   } catch {
     // Best-effort cleanup only; the replacement response owns behavior.
   }
@@ -384,38 +362,7 @@ function numberValue(value) {
 
 /** @param {unknown} value */
 function stringifyJson(value) {
-  return intrinsicReflectApply(intrinsicJsonStringify, IntrinsicJSON, [cloneJsonData(value)]);
-}
-
-/** @param {unknown} value @param {WeakSet<object>} [seen] */
-function cloneJsonData(value, seen = new IntrinsicWeakSet()) {
-  if (value === null || typeof value !== "object") return value;
-  const objectValue = /** @type {object} */ (value);
-  if (intrinsicReflectApply(intrinsicWeakSetHas, seen, [objectValue])) {
-    throw new TypeError("Cannot serialize circular JSON data");
-  }
-  intrinsicReflectApply(intrinsicWeakSetAdd, seen, [objectValue]);
-  try {
-    if (intrinsicReflectApply(intrinsicArrayIsArray, IntrinsicArray, [objectValue])) {
-      const source = /** @type {unknown[]} */ (objectValue);
-      const out = new IntrinsicArray(source.length);
-      intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [out, null]);
-      for (let i = 0; i < source.length; i++) out[i] = cloneJsonData(source[i], seen);
-      return out;
-    }
-    const out = /** @type {Record<string, unknown>} */ (
-      intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
-    );
-    const entries = /** @type {[string, unknown][]} */ (
-      intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [objectValue])
-    );
-    forEachArray(entries, (entry) => {
-      out[entry[0]] = cloneJsonData(entry[1], seen);
-    });
-    return out;
-  } finally {
-    intrinsicReflectApply(intrinsicWeakSetDelete, seen, [objectValue]);
-  }
+  return intrinsicReflectApply(intrinsicJsonStringify, IntrinsicJSON, [value]);
 }
 
 /**
@@ -475,7 +422,7 @@ async function readRequestBodyBytes(request) {
         cancelStreamReader(reader);
         throw new TypeError(`Durable Object fetch body exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
       }
-      pushArray(chunks, value);
+      chunks[chunks.length] = value;
     }
   } finally {
     releaseStreamReader(reader);
@@ -483,10 +430,11 @@ async function readRequestBodyBytes(request) {
 
   const body = new IntrinsicUint8Array(total);
   let offset = 0;
-  forEachArray(chunks, (chunk) => {
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
     setBytes(body, chunk, offset);
     offset += byteArrayLength(chunk);
-  });
+  }
   return body;
 }
 
@@ -553,8 +501,7 @@ function cloneJsonRpcData(value, field, seen = new IntrinsicWeakSet()) {
 export function assertRpcMethod(method) {
   if (
     typeof method !== "string" ||
-    byteLength(method) > MAX_DO_RPC_METHOD_BYTES ||
-    !regexpTest(/^[A-Za-z_$][A-Za-z0-9_$]*$/, method)
+    !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(method)
   ) {
     throw new TypeError("rpc.method is not valid");
   }
@@ -579,16 +526,23 @@ export function rpcInvokeBody(props, objectName, method, args) {
   if (byteLength(stringifyJson(stableArgs)) > MAX_DO_REQUEST_BODY_BYTES) {
     throw new TypeError(`rpc.args exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
   }
-  return encodeDoInvokeEnvelope({
-    ns: props.ns,
-    worker: props.worker,
-    version: props.version,
-    doStorageId: props.doStorageId,
-    className: props.className,
-    objectName,
-    kind: "rpc",
-    rpc: { method, args: stableArgs },
-  });
+  const rpc = /** @type {Record<string, unknown>} */ (
+    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
+  );
+  rpc.method = method;
+  rpc.args = stableArgs;
+  const metadata = /** @type {Record<string, unknown>} */ (
+    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
+  );
+  metadata.ns = props.ns;
+  metadata.worker = props.worker;
+  metadata.version = props.version;
+  metadata.doStorageId = props.doStorageId;
+  metadata.className = props.className;
+  metadata.objectName = objectName;
+  metadata.kind = "rpc";
+  metadata.rpc = rpc;
+  return encodeDoInvokeEnvelope(metadata);
 }
 
 /**
@@ -612,18 +566,19 @@ function binaryInvokeHeaders(requestId) {
  */
 export async function fetchInvokeInit(props, objectName, request, requestId) {
   const { spec, bodyBytes } = await requestSpec(request, requestId);
+  const metadata = /** @type {Record<string, unknown>} */ (cloneJsonRpcData({
+    ns: props.ns,
+    worker: props.worker,
+    version: props.version,
+    doStorageId: props.doStorageId,
+    className: props.className,
+    objectName,
+    request: spec,
+  }, "invoke"));
   return {
     method: "POST",
     headers: binaryInvokeHeaders(requestId),
-    body: /** @type {BodyInit} */ (encodeDoInvokeEnvelope({
-      ns: props.ns,
-      worker: props.worker,
-      version: props.version,
-      doStorageId: props.doStorageId,
-      className: props.className,
-      objectName,
-      request: spec,
-    }, bodyBytes)),
+    body: /** @type {BodyInit} */ (encodeDoInvokeEnvelope(metadata, bodyBytes)),
   };
 }
 
@@ -671,9 +626,9 @@ export function retryableOwnerRaceResponse(response) {
 export async function requestSpec(request, requestId) {
   const forwarded = new IntrinsicRequest(request);
   const forwardedHeaders = requestHeaders(forwarded);
-  forEachArray(DO_FETCH_STRIP_HEADERS, (name) => {
-    headerDelete(forwardedHeaders, name);
-  });
+  for (let i = 0; i < DO_FETCH_STRIP_HEADERS.length; i++) {
+    headerDelete(forwardedHeaders, DO_FETCH_STRIP_HEADERS[i]);
+  }
   headerDelete(forwardedHeaders, "x-request-id");
   const canonicalRequestId = sanitizeRequestId(requestId);
   if (canonicalRequestId) headerSet(forwardedHeaders, "x-request-id", canonicalRequestId);
@@ -699,14 +654,15 @@ function enforceRequestHeadersBudget(headers) {
     throw new TypeError(`Durable Object fetch headers exceed ${MAX_DO_REQUEST_HEADER_COUNT} entries`);
   }
   let total = 0;
-  forEachArray(headers, (entry) => {
+  for (let i = 0; i < headers.length; i++) {
+    const entry = headers[i];
     const name = entry[0];
     const value = entry[1];
     total += byteLength(name) + byteLength(value);
     if (total > MAX_DO_REQUEST_HEADER_BYTES) {
       throw new TypeError(`Durable Object fetch headers exceed ${MAX_DO_REQUEST_HEADER_BYTES} bytes`);
     }
-  });
+  }
 }
 
 /** @param {Request} request */
@@ -728,7 +684,9 @@ export function replayOwnerUnavailableForFetch(request) {
  */
 export function connectHeaders(props, objectName, request, requestId) {
   const headers = copyHeaders(requestHeaders(request));
-  forEachArray(DO_CONNECT_STRIP_HEADERS, (name) => headerDelete(headers, name));
+  for (let i = 0; i < DO_CONNECT_STRIP_HEADERS.length; i++) {
+    headerDelete(headers, DO_CONNECT_STRIP_HEADERS[i]);
+  }
   headerSet(headers, DO_CONNECT_HEADERS.ns, props.ns);
   headerSet(headers, DO_CONNECT_HEADERS.worker, props.worker);
   headerSet(headers, DO_CONNECT_HEADERS.version, props.version);
@@ -937,9 +895,9 @@ function withoutOwnerHintOptIn(init) {
 /** @param {Response} response */
 function stripOwnerHintHeaders(response) {
   const headers = copyHeaders(responseHeaders(response));
-  forEachArray(DO_OWNER_HINT_STRIP_HEADERS, (name) => {
-    headerDelete(headers, name);
-  });
+  for (let i = 0; i < DO_OWNER_HINT_STRIP_HEADERS.length; i++) {
+    headerDelete(headers, DO_OWNER_HINT_STRIP_HEADERS[i]);
+  }
   const status = responseStatus(response);
   const init = /** @type {ResponseInit & { webSocket?: WebSocket }} */ ({
     status,
