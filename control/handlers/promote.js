@@ -9,7 +9,7 @@ import {
 } from "control-shared";
 import { parseVersion } from "shared-version";
 import { promoteWithRoutes, RoutingError } from "control-routing";
-import { platformDomainFromEnv } from "control-lib";
+import { platformDomainFromEnv } from "shared-ns-pattern";
 
 /**
  * @param {{ request: Request, env: Record<string, unknown>, ns: string, name: string, requestId: string }} args

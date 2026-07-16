@@ -15,10 +15,8 @@ import {
   ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, PATTERNS_CHANNEL,
 } from "control-shared";
 import {
-  workerVersionsKey, referrersKey,
+  referrersKey,
   doObjectRegistryKey,
-  doOwnerScopeScanPatternForStorage,
-  doStorageIdKey,
   workflowDefsKey,
   extractD1Refs, extractOutgoingRefs,
   formatReferrerBlocker,
@@ -29,14 +27,18 @@ import {
   WHOLE_DELETE_LOCK_KIND,
   bundleKey,
   deleteLockKey,
+  doOwnerScopeScanPatternForStorage,
+  doStorageIdKey,
   hostsKey,
   patternsKey,
   routesKey,
+  workerVersionsKey,
 } from "shared-version";
 import { workerSecretsKey } from "shared-secret-keys";
 import { decodeBulk, WatchError } from "shared-redis";
 import { queueConsumerScanPrefix } from "shared-queue-keys";
 import { decodePatternProjection } from "shared-route-projection";
+import { discardResponseBody } from "shared-respond";
 import { buildWorkerDeleteCleanup, stageWorkerDelete } from "control-handlers-delete-plan";
 
 const MAX_DELETE_ATTEMPTS = 5;
@@ -133,13 +135,13 @@ export async function handle({ request, env: _env, url, ns, name, principal, req
   const log = requireControlLog();
   const dryRun = url.searchParams.get("dry_run") === "1";
 
+  // Flags live in the query. Cancel an unexpected body without buffering it or
+  // allowing a non-settling cancellation to block either delete path.
+  await discardResponseBody(request);
+
   if (dryRun) {
     return handleDryRun({ redis, ns, name, principal, requestId, log });
   }
-
-  // POST body is ignored (flags go in the query), but drain it so the
-  // client's pipe closes cleanly.
-  await request.text().catch(() => {});
 
   const lockToken = await acquireDeleteLock(redis, ns, name, WHOLE_DELETE_LOCK_KIND);
   if (!lockToken) {

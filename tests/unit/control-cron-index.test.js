@@ -7,7 +7,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importRepositoryModule } from "../helpers/load-shared-module.js";
+import { importRepositoryModule, readRepositoryJson } from "../helpers/load-shared-module.js";
+
+const schedulerProjectionContract = /** @type {{ cron: { cronId: string, entry: { cron: string, timezone: string } } }} */ (
+  readRepositoryJson("tests/fixtures/scheduler-projection-contract.json")
+);
 
 const { cronId, diffCrons } = await importRepositoryModule("control/cron-index.js", [
   [/export \{[^}]+\} from "shared-cron-time";/, "/* re-export stubbed for node test */"],
@@ -16,6 +20,16 @@ const { cronId, diffCrons } = await importRepositoryModule("control/cron-index.j
 test("cronId: stable + 10 hex chars", () => {
   assert.equal(cronId("*/5 * * * *", "UTC"), cronId("*/5 * * * *", "UTC"));
   assert.match(cronId("*/5 * * * *", "UTC"), /^[0-9a-f]{10}$/);
+});
+
+test("cronId matches the cross-language scheduler projection fixture", () => {
+  assert.equal(
+    cronId(
+      schedulerProjectionContract.cron.entry.cron,
+      schedulerProjectionContract.cron.entry.timezone
+    ),
+    schedulerProjectionContract.cron.cronId
+  );
 });
 
 test("cronId: differs on cron or timezone", () => {

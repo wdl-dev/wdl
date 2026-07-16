@@ -23,6 +23,7 @@ import {
 } from "control-d1-model";
 import {
   d1RuntimeFailure,
+  d1RuntimeFailureLogFields,
   d1RuntimePublicResult,
   d1RuntimeQuery,
 } from "control-d1-runtime-client";
@@ -50,6 +51,38 @@ function migrationLockKey(ns, databaseId) {
 
 const MIGRATION_LOCK_TTL_SECONDS = 600;
 const MIGRATIONS_TABLE_NAME = "_wdl_d1_migrations";
+
+/**
+ * @param {string} event
+ * @param {string} reason
+ * @param {string} requestId
+ * @param {string} ns
+ * @param {string} databaseId
+ * @param {{ body?: unknown, status: number }} result
+ * @param {Record<string, unknown>} [extra]
+ */
+function logD1MigrationFailure(event, reason, requestId, ns, databaseId, result, extra = {}) {
+  requireControlLog()(result.status >= 500 ? "error" : "warn", event, {
+    request_id: requestId,
+    namespace: ns,
+    database_id: databaseId,
+    status: result.status,
+    reason,
+    ...extra,
+    ...d1RuntimeFailureLogFields(result),
+  });
+}
+
+/**
+ * @param {unknown[]} applied
+ * @param {unknown[]} skipped
+ */
+function migrationProgressLogFields(applied, skipped) {
+  return {
+    applied_count: applied.length,
+    skipped_count: skipped.length,
+  };
+}
 
 /**
  * @param {unknown[]} applied
@@ -174,6 +207,10 @@ export async function listMigrations({ env, ns, databaseId, requestId }) {
   const database = checked.database;
   const applied = await readAppliedMigrationsIfTableExists(env, ns, database.databaseId, requestId);
   if (applied.ok === false) {
+    logD1MigrationFailure(
+      "d1_migrations_list_failed", "d1_migrations_list_failed",
+      requestId, ns, database.databaseId, applied
+    );
     return jsonResponse(applied.status, d1RuntimeFailure("d1_migrations_list_failed", ns, database.databaseId, applied));
   }
   return jsonResponse(200, {
@@ -200,6 +237,10 @@ export async function migrationStatusEndpoint({ request, env, ns, databaseId, re
   }
   const applied = await readAppliedMigrationsIfTableExists(env, ns, database.databaseId, requestId);
   if (applied.ok === false) {
+    logD1MigrationFailure(
+      "d1_migrations_status_failed", "d1_migrations_status_failed",
+      requestId, ns, database.databaseId, applied
+    );
     return jsonResponse(applied.status, d1RuntimeFailure("d1_migrations_status_failed", ns, database.databaseId, applied));
   }
   const migrations = migrationStatus(localMigrations, applied.migrations);
@@ -251,6 +292,11 @@ export async function applyMigrations({ request, env, ns, databaseId, requestId 
   try {
     const existing = await readAppliedMigrations(env, ns, database.databaseId, requestId);
     if (existing.ok === false) {
+      logD1MigrationFailure(
+        "d1_migrations_apply_failed", "d1_migrations_apply_failed",
+        requestId, ns, database.databaseId, existing,
+        migrationProgressLogFields(appliedNow, skipped)
+      );
       return jsonResponse(existing.status, d1RuntimeFailure(
         "d1_migrations_apply_failed",
         ns,
@@ -314,6 +360,11 @@ export async function applyMigrations({ request, env, ns, databaseId, requestId 
         },
       ], requestId);
       if (!result.ok) {
+        logD1MigrationFailure(
+          "d1_migration_apply_failed", "d1_migration_apply_failed",
+          requestId, ns, database.databaseId, result,
+          { migration_id: migration.id, ...migrationProgressLogFields(appliedNow, skipped) }
+        );
         return jsonResponse(result.status, d1RuntimeFailure(
           "d1_migration_apply_failed",
           ns,

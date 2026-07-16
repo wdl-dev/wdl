@@ -149,7 +149,7 @@ export async function abortLoadedWorker({ env, workerId }) {
     await stub.getEntrypoint("__WdlAbort__").abort("wdl-evict");
     return { aborted: false, reason: "no_internal_error" };
   } catch (err) {
-    const msg = errorMessage(err || "");
+    const msg = errorMessage(err);
     if (msg.startsWith(ABORT_SUCCESS_PREFIX)) {
       forgetLoadedWorker(workerId);
       return { aborted: true };
@@ -202,7 +202,7 @@ export async function evictSiblings({ env, workerId, log: logger = null }) {
         worker_id: old,
         triggered_by: workerId,
         reason: result.reason,
-        ...(result.error ? formatError(result.error) : {}),
+        ...(result.reason === "unexpected" ? formatError(result.error) : {}),
       });
     }
   }

@@ -14,11 +14,8 @@ import {
   d1DatabaseNameKey,
   extractD1Refs,
   extractOutgoingRefs,
-  deleteLockKey,
-  doStorageIdKey,
   parseBundleMeta,
   workflowDefsKey,
-  platformDomainFromEnv,
 } from "control-lib";
 import {
   stageD1ReferrerAdds,
@@ -40,11 +37,20 @@ import {
   parseCronList,
   parseQueueConsumers,
 } from "control-topology";
-import { formatVersion, parseVersion, bundleKey, nextVersionKey, routesKey } from "shared-version";
+import {
+  bundleKey,
+  deleteLockKey,
+  doStorageIdKey,
+  formatVersion,
+  nextVersionKey,
+  parseVersion,
+  routesKey,
+} from "shared-version";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import {
   isReservedNs,
   isValidRouteNs,
+  platformDomainFromEnv,
   ROUTES_ALLOWED_RESERVED_NS,
   WORKFLOW_KEY_RE,
 } from "shared-ns-pattern";

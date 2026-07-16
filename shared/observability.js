@@ -29,6 +29,7 @@ const CARDINALITY_WARN_LIMIT = 100;
  *   status: number,
  *   startedAt: number,
  *   error?: unknown,
+ *   hasError?: boolean,
  *   extras?: Record<string, unknown> | null,
  *   probeRoutes?: string[],
  * }} RequestCompleteOptions
@@ -200,10 +201,12 @@ export function recordRequestComplete({
   status,
   startedAt,
   error = null,
+  hasError = false,
   extras = null,
   probeRoutes = DEFAULT_PROBE_ROUTES,
 }) {
   const durationMs = Date.now() - startedAt;
+  const requestHasError = hasError || error !== null;
   const requestLabels = { service, route };
   const statusLabel = String(status);
   if (metrics) {
@@ -211,16 +214,16 @@ export function recordRequestComplete({
     metrics.observe("request_duration_ms", requestLabels, durationMs);
     if (status >= 500) metrics.increment("request_errors", { ...requestLabels, status: statusLabel });
   }
-  if (!probeRoutes.includes(route) || error || status >= 500) {
+  if (!probeRoutes.includes(route) || requestHasError || status >= 500) {
     const pruned = pruneExtras(extras);
-    log(error || status >= 500 ? "error" : "info", "request_complete", {
+    log(requestHasError || status >= 500 ? "error" : "info", "request_complete", {
       request_id: requestId,
       method,
       route,
       status,
       duration_ms: durationMs,
       ...(pruned || {}),
-      ...(error ? formatError(error) : {}),
+      ...(requestHasError ? formatError(error) : {}),
     });
   }
 }
@@ -230,7 +233,7 @@ export function recordRequestComplete({
  * @returns {Record<string, string>}
  */
 export function formatError(err) {
-  if (!err) return { error_message: "Unknown error" };
+  if (err == null) return { error_message: "Unknown error" };
   if (isErrorObject(err)) {
     /** @type {Record<string, string>} */
     const out = {

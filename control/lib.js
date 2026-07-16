@@ -12,31 +12,9 @@ import {
   QUEUE_NAME_RE,
   WDL_RESERVED_BINDING_RE,
   KV_ID_RE,
-  configuredHostname,
-  platformDomainFromEnv,
-  validateModulePath,
 } from "shared-ns-pattern";
 import { PLATFORM_TIER_RESERVED_NS, ROLES } from "shared-auth-roles";
 import { errorMessage } from "shared-errors";
-import {
-  deleteLockKey,
-  doOwnerScopeScanPatternForStorage,
-  doStorageIdKey,
-  routesKey,
-  workerVersionsKey,
-} from "shared-version";
-export {
-  deleteLockKey,
-  doOwnerScopeScanPatternForStorage,
-  doStorageIdKey,
-  routesKey,
-  workerVersionsKey,
-};
-export { validateModulePath };
-export { WORKER_NAME_RE };
-export { WORKFLOW_NAME_RE };
-export { configuredHostname, platformDomainFromEnv };
-
 export const NS_RE = new RegExp(`^${NS_PATTERN}$`);
 export const MAX_QUEUE_DELAY_SECONDS = 86_400;
 const WORKERD_DEPENDENCY_VERSION_RE = /^1\.(\d{4})(\d{2})(\d{2})\.(\d+)$/;

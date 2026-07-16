@@ -1,6 +1,5 @@
 import {
   referrersKey,
-  doStorageIdKey,
   workflowDefsKey,
 } from "control-lib";
 import {
@@ -12,7 +11,14 @@ import {
   stageWorkerHidden,
   stageWorkerVersionIndexRemove,
 } from "control-lifecycle-indexes";
-import { NAMESPACES_KEY, bundleKey, nsHostsKey, patternsKey, routesKey } from "shared-version";
+import {
+  NAMESPACES_KEY,
+  bundleKey,
+  doStorageIdKey,
+  nsHostsKey,
+  patternsKey,
+  routesKey,
+} from "shared-version";
 import { workerSecretsKey } from "shared-secret-keys";
 
 /**

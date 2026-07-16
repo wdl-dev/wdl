@@ -1,4 +1,8 @@
-import { repositoryFileUrl, repositoryModuleDataUrl } from "./load-shared-module.js";
+import {
+  repositoryFileUrl,
+  repositoryModuleDataUrl,
+  sharedModuleDataUrl,
+} from "./load-shared-module.js";
 
 const PARAMS_URL = repositoryFileUrl("shared/d1-params.js");
 const DATA_FIELD_URL = repositoryFileUrl("shared/d1-data-field.js");
@@ -6,6 +10,10 @@ const FNV_URL = repositoryFileUrl("shared/fnv1a32.js");
 const BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
+const D1_TIMEOUT_URL = sharedModuleDataUrl("shared/d1-timeout.js");
+const RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const INTERNAL_AUTH_URL = repositoryFileUrl("shared/internal-auth.js");
+const OWNER_ENDPOINT_URL = repositoryFileUrl("shared/owner-endpoint.js");
 
 export function d1ProtocolDataUrl() {
   const queryWireUrl = d1QueryWireDataUrl();
@@ -34,10 +42,25 @@ export function d1TransportDataUrl() {
   ]);
 }
 
+export function controlD1RuntimeClientDataUrl() {
+  return repositoryModuleDataUrl("control/d1-runtime-client.js", [
+    [/from "shared-d1-timeout";/g, `from ${JSON.stringify(D1_TIMEOUT_URL)};`],
+    [/from "shared-d1-transport";/g, `from ${JSON.stringify(d1TransportDataUrl())};`],
+    [/from "shared-d1-query-wire";/g, `from ${JSON.stringify(d1QueryWireDataUrl())};`],
+    [/from "shared-respond";/g, `from ${JSON.stringify(RESPOND_URL)};`],
+    [/from "shared-internal-auth";/g, `from ${JSON.stringify(INTERNAL_AUTH_URL)};`],
+    [/from "shared-owner-endpoint";/g, `from ${JSON.stringify(OWNER_ENDPOINT_URL)};`],
+  ]);
+}
+
 export async function loadD1Protocol() {
   return await import(d1ProtocolDataUrl());
 }
 
 export async function loadD1QueryWire() {
   return await import(d1QueryWireDataUrl());
+}
+
+export async function loadControlD1RuntimeClient() {
+  return await import(controlD1RuntimeClientDataUrl());
 }

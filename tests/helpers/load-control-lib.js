@@ -42,7 +42,6 @@ export async function compileControlGraph(opts = {}) {
     [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
     [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
-    [/from "shared-version"/g, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
   ]);
 
   const bindingsUrl = freshRepositoryModuleDataUrl("control/bindings.js", [
@@ -62,6 +61,7 @@ export async function compileControlGraph(opts = {}) {
   const lifecycleIndexesUrl = freshRepositoryModuleDataUrl("control/lifecycle-indexes.js", [
     [/from "control-lib"/g, `from ${JSON.stringify(libUrl)}`],
     [/from "shared-queue-keys"/g, `from ${JSON.stringify(SHARED_QUEUE_KEYS_URL)}`],
+    [/from "shared-version"/g, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
   ]);
 
   const cronIndexUrl = freshRepositoryModuleDataUrl("control/cron-index.js", [

@@ -720,9 +720,6 @@ const workerControlSharedUrl = controlSharedHarnessUrl(WORKER_SECRET_STATE_GLOBA
 const workerLibStubUrl = moduleDataUrl(`
 ${validateSecretKeyStubSource}
 export { workflowDefsKey } from ${JSON.stringify(PRODUCTION_CONTROL_LIB_URL)};
-export const deleteLockKey = (ns, worker) => \`worker-delete-lock:\${ns}:\${worker}\`;
-export const workerVersionsKey = (ns, worker) => \`worker-versions:\${ns}:\${worker}\`;
-export const routesKey = (ns) => \`routes:\${ns}\`;
 export const workersIndexKey = (ns) => \`workers:\${ns}\`;
 `);
 const lifecycleStubUrl = moduleDataUrl(`

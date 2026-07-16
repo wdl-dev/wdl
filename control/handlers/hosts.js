@@ -8,7 +8,7 @@ import {
   requireControlRedis,
 } from "control-shared";
 import { reconcileHosts, RoutingError } from "control-routing";
-import { platformDomainFromEnv } from "control-lib";
+import { platformDomainFromEnv } from "shared-ns-pattern";
 import { hostsKey } from "shared-version";
 
 /**

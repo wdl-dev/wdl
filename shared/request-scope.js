@@ -35,6 +35,7 @@ export function createHttpRequestScope({
   let status = 500;
   /** @type {unknown} */
   let requestError = null;
+  let hasRequestError = false;
 
   return {
     requestId,
@@ -46,11 +47,10 @@ export function createHttpRequestScope({
       currentRoute = nextRoute;
     },
 
-    /**
-     * @param {unknown} err
-     */
+    /** @param {unknown} err */
     markError(err) {
       requestError = err;
+      hasRequestError = true;
     },
 
     /**
@@ -77,6 +77,7 @@ export function createHttpRequestScope({
         status,
         startedAt,
         error: requestError,
+        hasError: hasRequestError,
         extras: requestExtras,
         probeRoutes,
       });

@@ -13,8 +13,6 @@ import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.j
 const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 const controlLibUrl = moduleDataUrl(`
 export const NS_RE = /^[a-z0-9-]+$/;
-export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-export { configuredHostname } from ${JSON.stringify(sharedNsPatternUrl)};
 export function configuredPublicUrl() { return null; }
 export function platformVersionFromPackageJson() { return "wdl.test"; }
 export function projectAccessPrincipal(principal) { return principal || null; }
@@ -75,6 +73,7 @@ export async function handle(args) {
 const controlIndex = (await importRepositoryModule("control/index.js", importSpecifierReplacements({
   "control-lib": controlLibUrl,
   "control-shared": controlSharedUrl,
+  "shared-ns-pattern": sharedNsPatternUrl,
   "shared-request-scope": requestScopeUrl,
   "wdl-package-json-source": packageJsonUrl,
   "control-handlers-reload": handlerUrl,

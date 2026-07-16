@@ -2,10 +2,10 @@ import {
   d1DatabaseReferrersKey,
   encodeReferrerMember,
   referrersKey,
-  workerVersionsKey,
   workersIndexKey,
 } from "control-lib";
 import { QUEUE_CONSUMER_INDEX_KEY, queueConsumerKey } from "shared-queue-keys";
+import { workerVersionsKey } from "shared-version";
 
 export const CRON_WORKER_INDEX_KEY = "cron:index:workers";
 

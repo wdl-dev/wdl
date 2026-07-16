@@ -7,9 +7,9 @@
     "slotMs": 1778856600000,
     "slotKey": "cron-slot:1778856600000",
     "slotExpireAt": 1778857200,
-    "cronId": "cron-1",
+    "cronId": "1cb037f29d",
     "gen": 7,
-    "reference": "tenant:worker:cron-1:7",
+    "reference": "tenant:worker:1cb037f29d:7",
     "meta": {
       "version": "v3",
       "seq": 7,

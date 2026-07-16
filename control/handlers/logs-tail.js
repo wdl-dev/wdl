@@ -6,9 +6,8 @@
 import { RedisSession, redisDbFromEnv } from "shared-redis";
 import { envValueOr } from "shared-env";
 import { PLATFORM_TIER_RESERVED_NS } from "shared-auth-roles";
-import { isReservedNs } from "shared-ns-pattern";
+import { isReservedNs, WORKER_NAME_RE } from "shared-ns-pattern";
 import {
-  WORKER_NAME_RE,
   compareStreamIds,
   isValidResumeId,
   isValidWorkerName,

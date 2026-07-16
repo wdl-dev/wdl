@@ -838,6 +838,20 @@ test("recordRequestComplete: error argument flows into log via formatError", () 
   assert.equal(entries[0].fields.error_message, "bad");
 });
 
+test("recordRequestComplete: falsey thrown values remain errors", () => {
+  for (const [error, message] of [[0, "0"], [false, "false"], [null, "Unknown error"], [undefined, "Unknown error"]]) {
+    const { log, entries } = captureLog();
+    recordRequestComplete({
+      service: "runtime", metrics: null, log,
+      method: "POST", requestId: "r", route: "worker_scheduled", status: 200,
+      startedAt: Date.now(), error, hasError: true,
+    });
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].level, "error");
+    assert.equal(entries[0].fields.error_message, message);
+  }
+});
+
 test("setLogLevel ignores unknown names (keeps previous level)", () => {
   setLogLevel("warn");
   try {

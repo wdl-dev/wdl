@@ -1,6 +1,7 @@
 import { jsonResponse, jsonError, requireControlLog, requireControlRedis } from "control-shared";
-import { routesKey, workflowDefsKey, workersIndexKey, workerVersionsKey } from "control-lib";
+import { workflowDefsKey, workersIndexKey } from "control-lib";
 import { workerSecretsKey } from "shared-secret-keys";
+import { routesKey, workerVersionsKey } from "shared-version";
 
 /** @param {{ method: string, nsName: string, requestId: string }} args */
 export async function handle({ method, nsName, requestId }) {

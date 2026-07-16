@@ -317,6 +317,26 @@ test("handleScheduledDispatch records handler errors without turning them into H
   assert.equal(body.error, "scheduled failed");
 });
 
+test("handleScheduledDispatch preserves falsey thrown values", async () => {
+  for (const thrown of [0, false]) {
+    const scope = makeScope();
+    const res = await handleScheduledDispatch({
+      request: jsonRequest({ scheduledTime: 123, cron: "* * * * *" }),
+      scope,
+      stub: makeStub({
+        async scheduled() {
+          throw thrown;
+        },
+      }),
+    });
+
+    const body = await readJsonResponse(res, 200, String(thrown));
+    assert.deepEqual(scope.errors, [thrown]);
+    assert.equal(body.outcome, "error");
+    assert.equal(body.error, String(thrown));
+  }
+});
+
 test("handleScheduledDispatch maps service_binding_extra_handlers exception outcome", async () => {
   const scope = makeScope();
   const res = await handleScheduledDispatch({
@@ -330,7 +350,7 @@ test("handleScheduledDispatch maps service_binding_extra_handlers exception outc
   });
 
   const body = await readJsonResponse(res, 200);
-  assert.deepEqual(scope.errors, []);
+  assert.deepEqual(scope.errors, ["thrown by handler"]);
   assert.equal(body.outcome, "error");
   assert.equal(body.error, "thrown by handler");
 });
@@ -377,6 +397,68 @@ test("handleQueuedDispatch decodes queue messages before JSRPC dispatch", async 
   assert.deepEqual(calls[0].messages[0].body, { ok: true });
   assert.equal(calls[0].messages[0].timestamp.getTime(), 123);
   assert.equal(calls[0].messages[0].attempts, 3);
+});
+
+test("handleQueuedDispatch records service_binding_extra_handlers exception outcome", async () => {
+  const scope = makeScope();
+  const response = await handleQueuedDispatch({
+    request: jsonRequest({
+      queue: "jobs",
+      messages: [{
+        id: "m1",
+        first_seen_ms: "123",
+        attempts: "0",
+        body_b64: btoa("payload"),
+        content_type: "text",
+      }],
+    }),
+    scope,
+    stub: makeStub({
+      async queue() {
+        return {
+          outcome: "exception",
+          ackAll: false,
+          explicitAcks: [],
+          retryMessages: [],
+          retryBatch: { retry: false },
+        };
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.outcome, "ok");
+  assert.equal(body.result.outcome, "exception");
+  assert.deepEqual(scope.errors, ["queue handler threw"]);
+});
+
+test("handleQueuedDispatch preserves falsey thrown values", async () => {
+  for (const thrown of [0, false]) {
+    const scope = makeScope();
+    const res = await handleQueuedDispatch({
+      request: jsonRequest({
+        queue: "jobs",
+        messages: [{
+          id: "m1",
+          first_seen_ms: "123",
+          attempts: "0",
+          body_b64: btoa("payload"),
+          content_type: "text",
+        }],
+      }),
+      scope,
+      stub: makeStub({
+        async queue() {
+          throw thrown;
+        },
+      }),
+    });
+
+    const body = await readJsonResponse(res, 200, String(thrown));
+    assert.deepEqual(scope.errors, [thrown]);
+    assert.equal(body.outcome, "error");
+    assert.equal(body.error, String(thrown));
+  }
 });
 
 test("handleQueuedDispatch maps invalid base64 to a permanent decode failure", async () => {

@@ -81,6 +81,9 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
       body = {
         error: "invalid_d1_runtime_response",
         message: err instanceof Error ? err.message : "invalid d1-runtime response",
+        category: "invalid-response",
+        retryable: false,
+        causeCode: "binary-decode-failed",
       };
     }
   } else {
@@ -88,6 +91,9 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
     body = {
       error: "invalid_d1_runtime_response",
       message: `unsupported d1-runtime response content-type ${contentType || "none"}`,
+      category: "invalid-response",
+      retryable: false,
+      causeCode: "unsupported-content-type",
     };
   }
   const owner = {
@@ -248,7 +254,36 @@ function normalizeD1PublicResult(value) {
  * @returns {Record<string, unknown>}
  */
 function d1RuntimeFailureExtra(extra) {
-  return /** @type {Record<string, unknown>} */ (sanitizeJsonErrorDetails(extra) || {});
+  const sanitized = /** @type {Record<string, unknown>} */ (sanitizeJsonErrorDetails(extra) || {});
+  for (const key of ["upstreamCode", "upstreamCategory", "upstreamRetryable", "upstreamStatus", "detail"]) {
+    delete sanitized[key];
+  }
+  return sanitized;
+}
+
+/** @param {unknown} value @param {string} fallback */
+function d1RuntimeLogToken(value, fallback) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value)
+    ? value
+    : fallback;
+}
+
+/**
+ * Stable diagnostics for Control logs. Raw backend messages stay in the D1
+ * runtime's own request log and are omitted from redacted 5xx responses.
+ *
+ * @param {{ body?: unknown, status?: unknown } | null | undefined} result
+ */
+export function d1RuntimeFailureLogFields(result) {
+  const body = /** @type {Record<string, unknown>} */ (Object(result?.body || {}));
+  const causeCode = d1RuntimeLogToken(body.causeCode, "");
+  return {
+    ...(typeof result?.status === "number" ? { upstream_status: result.status } : {}),
+    upstream_code: d1RuntimeLogToken(body.error, "d1-runtime-error"),
+    upstream_category: d1RuntimeLogToken(body.category, "internal"),
+    upstream_retryable: body.retryable === true,
+    ...(causeCode ? { upstream_cause_code: causeCode } : {}),
+  };
 }
 
 /**
@@ -257,15 +292,31 @@ function d1RuntimeFailureExtra(extra) {
  * @param {string} databaseId
  * @param {{ body?: unknown, status?: unknown } | null | undefined} result
  * @param {Record<string, unknown>} [extra]
+ * @param {{ publicStatus?: number }} [options]
  */
-export function d1RuntimeFailure(error, ns, databaseId, result, extra = {}) {
+export function d1RuntimeFailure(error, ns, databaseId, result, extra = {}, options = {}) {
   const body = /** @type {Record<string, unknown>} */ (Object(result?.body || {}));
-  const upstreamCode = typeof body.error === "string" ? body.error : "d1-runtime-error";
-  return {
+  const status = typeof result?.status === "number" ? result.status : 500;
+  const publicStatus = typeof options.publicStatus === "number" ? options.publicStatus : status;
+  const publicFields = {
     ...d1RuntimeFailureExtra(extra),
     error,
     namespace: ns,
     databaseId,
+  };
+  if (publicStatus < 400 || publicStatus >= 500) {
+    return {
+      ...publicFields,
+      message: "Internal error",
+      upstreamCode: d1RuntimeLogToken(body.error, "d1-runtime-error"),
+      upstreamCategory: d1RuntimeLogToken(body.category, "internal"),
+      upstreamRetryable: body.retryable === true,
+      ...(typeof result?.status === "number" ? { upstreamStatus: result.status } : {}),
+    };
+  }
+  const upstreamCode = typeof body.error === "string" ? body.error : "d1-runtime-error";
+  return {
+    ...publicFields,
     message: typeof body.message === "string"
       ? body.message
       : typeof body.error === "string"

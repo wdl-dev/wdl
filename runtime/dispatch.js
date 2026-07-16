@@ -6,7 +6,7 @@
 import { internalErrorResponse, jsonError, jsonResponse } from "shared-respond";
 import { BodyTooLargeError, readBoundedText } from "shared-bounded-body";
 import { withInternalAuthEntries } from "shared-internal-auth";
-import { errorMessage as sharedErrorMessage } from "shared-errors";
+import { errorMessage } from "shared-errors";
 import {
   decodeQueuedDispatchMessages,
   normalizeWorkflowNotifyBody,
@@ -27,7 +27,8 @@ import {
 } from "runtime-dispatch-workflow-json";
 export { _resetWorkflowReplayCacheForTest } from "runtime-dispatch-workflow-replay-cache";
 import {
-  createStepFacade,
+  createStepController,
+  isWorkflowSuspensionSignal,
   isWorkflowSuspended,
   workflowError,
 } from "runtime-dispatch-workflow-step";
@@ -70,11 +71,6 @@ function workflowBackendForStep(env) {
       });
     },
   };
-}
-
-/** @param {unknown} err */
-function errorMessage(err) {
-  return sharedErrorMessage(err || "");
 }
 
 /** @param {unknown} result */
@@ -199,17 +195,16 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
   let step = null;
   try {
     const entry = stub.getEntrypoint(run.className);
-    step = createStepFacade(run, workflowBackendForStep(env), scope.requestId);
+    step = createStepController(run, workflowBackendForStep(env), scope.requestId);
     if (typeof entry.run !== "function") {
       throw workflowStepError("workflow_invalid_step", `workflow class ${run.className} does not expose run()`);
     }
-    const output = await entry.run(run.event, step);
+    const output = await entry.run(run.event, step.facade);
     if (step.hasInFlightSteps()) {
       step.closeForRunReturn();
       throw workflowStepError("workflow_invalid_step", "workflow run returned while workflow steps were still in flight");
     }
-    const terminalStepFailure = step.terminalStepFailure();
-    if (terminalStepFailure) throw terminalStepFailure;
+    if (step.hasTerminalStepFailure()) throw step.terminalStepFailure();
     if (step.isSuspended()) {
       throw workflowStepError("workflow_invalid_step", "workflow run returned after a step suspension was registered");
     }
@@ -236,10 +231,12 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
     return scope.respond(response);
   } catch (err) {
     let caught = err;
-    if (step?.hasInFlightSteps() && !isWorkflowSuspended(caught)) {
+    const caughtSuspended = Boolean(
+      step?.isSuspended() && isWorkflowSuspensionSignal(caught)
+    );
+    if (step?.hasInFlightSteps() && !caughtSuspended) {
       step.closeForRunReturn();
     }
-    const caughtSuspended = isWorkflowSuspended(caught);
     if (step?.hasInFlightSteps() && caughtSuspended) {
       const settled = await step.waitForInFlightSteps();
       const terminalFailure = settled.find((result) => (
@@ -247,11 +244,16 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
       ));
       if (terminalFailure?.status === "rejected") caught = terminalFailure.reason;
     }
-    if (isWorkflowSuspended(caught)) {
-      const terminalStepFailure = step?.terminalStepFailure();
-      if (terminalStepFailure) caught = terminalStepFailure;
+    let terminalStepError = null;
+    if (step?.hasTerminalStepFailure()) {
+      caught = step.terminalStepFailure();
+      terminalStepError = step.terminalStepError();
     }
-    if (step?.isSuspended() && isWorkflowSuspended(caught)) {
+    if (
+      !terminalStepError &&
+      step?.isSuspended() &&
+      isWorkflowSuspensionSignal(caught)
+    ) {
       const durationMs = Date.now() - startedAt;
       emitRuntimeTailEvent({
         env, ctx, identity,
@@ -269,9 +271,9 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
         duration_ms: durationMs,
       }));
     }
-    scope.markError(caught);
     const durationMs = Date.now() - startedAt;
-    const error = workflowError(caught);
+    const error = terminalStepError ?? workflowError(caught);
+    scope.markError(caught);
     emitRuntimeTailEvent({
       env, ctx, identity,
       event: "worker_workflow",
@@ -357,13 +359,17 @@ export async function handleScheduledDispatch({ request, stub, scope, env, ctx, 
       ? /** @type {Record<string, unknown>} */ (scheduledResult)
       : {};
     if (scheduledRecord.outcome === "exception") {
+      const message = typeof scheduledRecord.error === "string"
+        ? scheduledRecord.error
+        : "scheduled handler threw";
+      scope.markError(message);
       const durationMs = tail.finish({
         outcome: "error",
-        error: typeof scheduledRecord.error === "string" ? scheduledRecord.error : "scheduled handler threw",
+        error: message,
       });
       return scope.respond(jsonResponse(200, {
         outcome: "error",
-        error: typeof scheduledRecord.error === "string" ? scheduledRecord.error : "scheduled handler threw",
+        error: message,
         duration_ms: durationMs,
       }));
     }
@@ -376,13 +382,14 @@ export async function handleScheduledDispatch({ request, stub, scope, env, ctx, 
     }));
   } catch (err) {
     scope.markError(err);
+    const message = errorMessage(err);
     const durationMs = tail.finish({
       outcome: "error",
-      error: errorMessage(err),
+      error: message,
     });
     return scope.respond(jsonResponse(200, {
       outcome: "error",
-      error: errorMessage(err),
+      error: message,
       duration_ms: durationMs,
     }));
   }
@@ -424,23 +431,29 @@ export async function handleQueuedDispatch({ request, stub, scope, env, ctx, ide
       throw new Error("worker does not expose queue()");
     }
     const resp = await entry.queue(queued.queueName, decoded);
+    const result = queueDispatchResult(resp);
+    const handlerFailed = result.outcome === "exception";
+    const message = "queue handler threw";
+    if (handlerFailed) scope.markError(message);
     const durationMs = tail.finish({
-      outcome: "ok",
+      outcome: handlerFailed ? "error" : "ok",
+      ...(handlerFailed ? { error: message } : {}),
     });
     return scope.respond(jsonResponse(200, {
       outcome: "ok",
-      result: queueDispatchResult(resp),
+      result,
       duration_ms: durationMs,
     }));
   } catch (err) {
     scope.markError(err);
+    const message = errorMessage(err);
     const durationMs = tail.finish({
       outcome: "error",
-      error: errorMessage(err),
+      error: message,
     });
     return scope.respond(jsonResponse(200, {
       outcome: "error",
-      error: errorMessage(err),
+      error: message,
       duration_ms: durationMs,
     }));
   }

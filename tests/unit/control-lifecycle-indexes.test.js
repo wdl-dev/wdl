@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { importRepositoryModule, readRepositoryJson } from "../helpers/load-shared-module.js";
+import {
+  importRepositoryModule,
+  readRepositoryJson,
+  repositoryFileUrl,
+} from "../helpers/load-shared-module.js";
 
 const SCHEDULER_PROJECTION_CONTRACT = readRepositoryJson(
   "tests/fixtures/scheduler-projection-contract.json"
 );
+const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
 
 const {
   cronEntryJson,
@@ -27,11 +32,11 @@ const {
 const encodeReferrerMember = ({ callerNs, callerWorker, callerVersion, binding }) =>
   [callerNs, callerWorker, callerVersion, binding].join("\\t");
 const referrersKey = (ns, worker, version) => \`referrers:\${ns}:\${worker}:\${version}\`;
-const workerVersionsKey = (ns, worker) => \`worker-versions:\${ns}:\${worker}\`;
 const workersIndexKey = (ns) => \`workers:\${ns}\`;`],
   [/import \{ QUEUE_CONSUMER_INDEX_KEY, queueConsumerKey \} from "shared-queue-keys";/,
     `const QUEUE_CONSUMER_INDEX_KEY = "queue-consumer-index";
 const queueConsumerKey = (ns, queue) => \`queue-consumer:\${ns}:\${queue}\`;`],
+  [/from "shared-version"/, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
 ]);
 
 function recordMulti() {

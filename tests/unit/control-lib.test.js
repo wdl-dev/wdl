@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadControlLib } from "../helpers/load-control-lib.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
-import { RESERVED_NS } from "../../shared/ns-pattern.js";
+import {
+  RESERVED_NS,
+  configuredHostname,
+  platformDomainFromEnv,
+  validateModulePath,
+} from "../../shared/ns-pattern.js";
 import {
   MIN_DYNAMIC_WORKER_COMPATIBILITY_DATE,
   WORKERD_EXPERIMENTAL_COMPAT_FLAGS,
@@ -27,8 +32,6 @@ const { PLATFORM_TIER_RESERVED_NS } = sharedAuthRoles;
 const {
   NS_RE,
   parseControlRoute,
-  configuredHostname,
-  platformDomainFromEnv,
   configuredPublicUrl,
   parseWorkerdDependencyVersion,
   platformVersionFromPackageJson,
@@ -39,7 +42,6 @@ const {
   parseR2DispatchPath,
   isAdminAcceptableNs,
   validateSecretKey,
-  validateModulePath,
   encodeReferrerMember,
   formatD1ReferrerBlockers,
   formatReferrerBlocker,
@@ -52,11 +54,7 @@ const {
   d1DatabaseTombstoneKey,
   d1DatabaseTombstonesKey,
   doObjectRegistryKey,
-  doOwnerScopeScanPatternForStorage,
-  doStorageIdKey,
   referrersKey,
-  deleteLockKey,
-  workerVersionsKey,
   workersIndexKey,
 } = controlLib;
 const {
@@ -281,15 +279,11 @@ test("extractD1Refs: yields d1 database refs only", () => {
 
 test("control Redis key helpers match canonical schema", () => {
   assert.equal(referrersKey("demo", "api", "v3"),  "worker-version-referrers:demo:api:v3");
-  assert.equal(deleteLockKey("demo", "api"),       "worker-delete-lock:demo:api");
-  assert.equal(workerVersionsKey("demo", "api"),   "worker-versions:demo:api");
   assert.equal(workersIndexKey("demo"),            "workers:demo");
   assert.equal(d1DatabaseNameKey("demo", "main"),  "d1:database-name:demo:main");
   assert.equal(d1DatabaseReferrersKey("demo", "d1_main"), "d1:database-referrers:demo:d1_main");
   assert.equal(d1DatabaseTombstoneKey("demo", "d1_main"), "d1:database-tombstone:demo:d1_main");
   assert.equal(d1DatabaseTombstonesKey("demo"), "d1:database-tombstones:demo");
-  assert.equal(doStorageIdKey("demo", "api"), "worker:do-storage:demo:api");
-  assert.equal(doOwnerScopeScanPatternForStorage("do_abc"), "do:owner:scope:do_abc%3A*");
   assert.equal(doObjectRegistryKey("do_abc"), "do:objects:do_abc");
 });
 
@@ -1303,11 +1297,6 @@ test("normalizeHost: lowercases and strips :port", () => {
   assert.equal(normalizeHost("  api.workers.example  "), "api.workers.example");
 });
 
-test("normalizeHost: idempotent", () => {
-  const once = normalizeHost("API.Workers.example:443");
-  assert.equal(normalizeHost(once), once);
-});
-
 test("normalizeHost: rejects empty / non-string / invalid shapes", () => {
   assert.throws(() => normalizeHost(""), /must not be empty/);
   assert.throws(() => normalizeHost("   "), /must not be empty/);
@@ -1316,6 +1305,11 @@ test("normalizeHost: rejects empty / non-string / invalid shapes", () => {
   assert.throws(() => normalizeHost("has/slash"), /invalid host/);
   assert.throws(() => normalizeHost("has space"), /invalid host/);
   assert.throws(() => normalizeHost("has\ttab"), /invalid host/);
+});
+
+test("normalizeHost: idempotent", () => {
+  const once = normalizeHost("API.Workers.example:443");
+  assert.equal(normalizeHost(once), once);
 });
 
 test("normalizeHost: strips trailing FQDN dot(s)", () => {

@@ -25,6 +25,7 @@ import {
   nsHostsKey,
   parseDeleteLockKind,
   parseVersion,
+  workerVersionsKey,
 } from "../../shared/version.js";
 
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
@@ -97,6 +98,7 @@ test("nextVersionKey composes the worker version counter key", () => {
 });
 
 test("worker lifecycle key helpers compose canonical keys", () => {
+  assert.equal(workerVersionsKey("demo", "hello"), "worker-versions:demo:hello");
   assert.equal(doStorageIdKey("demo", "hello"), "worker:do-storage:demo:hello");
   assert.equal(DO_OWNER_SCOPE_PREFIX, "do:owner:scope:");
   assert.equal(

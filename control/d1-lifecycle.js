@@ -16,6 +16,7 @@ import {
 } from "control-d1-model";
 import {
   d1RuntimeFailure,
+  d1RuntimeFailureLogFields,
   d1RuntimeProbeOwner,
   d1RuntimePublicResult,
   d1RuntimeQuery,
@@ -257,13 +258,22 @@ export async function createDatabase({ request, env, ns, requestId }) {
         reason: rollbackReason,
       });
     }
-    log("warn", "d1_database_initialize_failed", {
+    log("error", "d1_database_initialize_failed", {
       request_id: requestId,
       namespace: ns,
       database_id: database.databaseId,
-      backend_status: initialized.status,
+      status: 503,
+      reason: "d1_database_initialize_failed",
+      ...d1RuntimeFailureLogFields(initialized),
     });
-    return jsonResponse(503, d1RuntimeFailure("d1_database_initialize_failed", ns, database.databaseId, initialized));
+    return jsonResponse(503, d1RuntimeFailure(
+      "d1_database_initialize_failed",
+      ns,
+      database.databaseId,
+      initialized,
+      {},
+      { publicStatus: 503 }
+    ));
   }
 
   const readyAt = new Date().toISOString();
@@ -440,6 +450,14 @@ export async function executeDatabase({ request, env, ns, databaseId, requestId 
 
   const result = await d1RuntimeQuery(env, ns, database.databaseId, mode, statements, requestId);
   if (!result.ok) {
+    log(result.status >= 500 ? "error" : "warn", "d1_database_execute_failed", {
+      request_id: requestId,
+      namespace: ns,
+      database_id: database.databaseId,
+      status: result.status,
+      reason: "d1_execute_failed",
+      ...d1RuntimeFailureLogFields(result),
+    });
     return jsonResponse(result.status, d1RuntimeFailure("d1_execute_failed", ns, database.databaseId, result));
   }
 

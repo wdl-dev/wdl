@@ -12,12 +12,7 @@ import {
   codedErrorResponse,
   secretEnvelopeErrorResponse,
 } from "control-shared";
-import {
-  deleteLockKey,
-  routesKey,
-  workflowDefsKey,
-  workerVersionsKey,
-} from "control-lib";
+import { workflowDefsKey } from "control-lib";
 import {
   invalidSecretMutationKeyResponse,
   readEncryptedSecretPutValue,
@@ -33,6 +28,7 @@ import {
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
+import { deleteLockKey, routesKey, workerVersionsKey } from "shared-version";
 
 const MAX_SECRET_ATTEMPTS = 5;
 

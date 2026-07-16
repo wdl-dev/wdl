@@ -9,7 +9,7 @@ import {
   runOptimistic,
 } from "control-shared";
 import {
-  workerVersionsKey, referrersKey,
+  referrersKey,
   extractD1Refs,
   extractOutgoingRefs, formatReferrerBlocker,
   bundleAssetPrefix,
@@ -29,6 +29,7 @@ import {
   deleteLockKey,
   parseVersion,
   routesKey,
+  workerVersionsKey,
 } from "shared-version";
 import { workerSecretsKey } from "shared-secret-keys";
 

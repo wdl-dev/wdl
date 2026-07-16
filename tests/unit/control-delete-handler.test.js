@@ -77,14 +77,10 @@ const controlLibUrl = moduleDataUrl(`
 export {
   bundleAssetPrefix,
   d1DatabaseReferrersKey,
-  deleteLockKey,
   doObjectRegistryKey,
-  doOwnerScopeScanPatternForStorage,
-  doStorageIdKey,
   encodeReferrerMember,
   parseBundleMeta,
   referrersKey,
-  workerVersionsKey,
   workersIndexKey,
   workflowDefsKey,
 } from ${JSON.stringify(productionControlLibUrl)};
@@ -132,6 +128,7 @@ const { handle } = await importControlHandler("control/handlers/delete.js", {
     "shared-redis": sharedRedisUrl,
     "shared-queue-keys": sharedQueueKeysUrl,
     "shared-route-projection": sharedRouteProjectionUrl,
+    "shared-respond": repositoryFileUrl("shared/respond.js"),
     "control-handlers-delete-plan": deletePlanUrl,
   },
 });
@@ -606,6 +603,36 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
     entry.event === "worker_cleanup_queue_failed" &&
     entry.fields.error_message === "data redis unavailable"
   ));
+});
+
+test("worker delete paths cancel ignored request bodies without awaiting cancellation", { timeout: 1000 }, async () => {
+  for (const suffix of ["", "?dry_run=1"]) {
+    resetDeleteHandlerState();
+    let cancelCalls = 0;
+    const stream = new ReadableStream({
+      cancel() {
+        cancelCalls += 1;
+        return new Promise(() => {});
+      },
+    });
+    const request = new Request(`http://control/ns/demo/worker/api/delete${suffix}`, /** @type {RequestInit} */ ({
+      method: "POST",
+      body: stream,
+      duplex: "half",
+    }));
+
+    const response = await handle({
+      request,
+      url: new URL(request.url),
+      ns: "demo",
+      name: "api",
+      principal: { kind: "ops" },
+      requestId: "rid-delete-body",
+    });
+
+    assert.equal(response.status, 200, suffix || "execute");
+    assert.equal(cancelCalls, 1, suffix || "execute");
+  }
 });
 
 test("worker delete classifies non-object retained bundle metadata as corrupt", async () => {

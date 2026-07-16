@@ -73,6 +73,7 @@ function makeAbortStub({ behavior }) {
                 if (behavior === "internal-error-other") throw new Error("internal error; abort signal aborted");
                 if (behavior === "internal-error-suffix") throw new Error("preamble: internal error; reference = abc");
                 if (behavior === "other-error") throw new Error("kaboom");
+                if (behavior === "false-error") return Promise.reject(false);
                 // no-op: returns cleanly
               },
             };
@@ -185,6 +186,30 @@ test("abortLoadedWorker surfaces unexpected errors as { aborted: false, reason: 
   assert.match(String(result.error?.message || ""), /kaboom/);
   // Entry stays — caller decides what to do with the unexpected error.
   assert.equal(loadedWorkerCount(), 1);
+});
+
+test("evictSiblings preserves falsey unexpected errors in diagnostics", async () => {
+  _resetLoadedWorkersForTest();
+  recordLoadedWorker("alpha:web:v1");
+  recordLoadedWorker("alpha:web:v2");
+  const { log, records } = captureLogs();
+
+  await evictSiblings({
+    env: makeAbortStub({ behavior: "false-error" }),
+    workerId: "alpha:web:v2",
+    log,
+  });
+
+  assert.deepEqual(records.at(-1), {
+    level: "warn",
+    event: "evict_skipped",
+    fields: {
+      worker_id: "alpha:web:v1",
+      triggered_by: "alpha:web:v2",
+      reason: "unexpected",
+      error_message: "false",
+    },
+  });
 });
 
 test("evictSiblings aborts every same-ns/same-name sibling and keeps current loaded", async () => {

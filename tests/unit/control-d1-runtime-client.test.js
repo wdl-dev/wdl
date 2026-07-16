@@ -1,15 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadD1QueryWire, d1QueryWireDataUrl, d1TransportDataUrl } from "../helpers/load-d1-protocol.js";
-import {
-  importRepositoryModule,
-  importSpecifierReplacements,
-  repositoryFileUrl,
-  sharedModuleDataUrl,
-} from "../helpers/load-shared-module.js";
+import { loadControlD1RuntimeClient, loadD1QueryWire } from "../helpers/load-d1-protocol.js";
 import { withRecordingFetch } from "../helpers/mock-fetch.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
-import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 const {
@@ -20,17 +13,11 @@ const {
 } = await loadD1QueryWire();
 const {
   d1RuntimeFailure,
+  d1RuntimeFailureLogFields,
   d1RuntimePublicResult,
   d1RuntimeQuery,
   d1RuntimeReleaseOwner,
-} = await importRepositoryModule("control/d1-runtime-client.js", importSpecifierReplacements({
-  "shared-d1-timeout": sharedModuleDataUrl("shared/d1-timeout.js"),
-  "shared-d1-transport": d1TransportDataUrl(),
-  "shared-d1-query-wire": d1QueryWireDataUrl(),
-  "shared-respond": repositoryFileUrl("shared/respond.js"),
-  "shared-internal-auth": sharedInternalAuthUrl(),
-  "shared-owner-endpoint": repositoryFileUrl("shared/owner-endpoint.js"),
-}));
+} = await loadControlD1RuntimeClient();
 
 /** @template {Record<string, unknown>} T @param {T} env */
 function withInternalAuthEnv(env) {
@@ -186,7 +173,17 @@ test("control D1 runtime client query treats unsupported response content-type a
   assert.equal(result.status, 502);
   assert.equal(result.body.error, "invalid_d1_runtime_response");
   assert.match(result.body.message, /unsupported d1-runtime response content-type/);
+  assert.equal(result.body.category, "invalid-response");
+  assert.equal(result.body.retryable, false);
+  assert.equal(result.body.causeCode, "unsupported-content-type");
   assert.equal(result.owner, null);
+  assert.deepEqual(d1RuntimeFailureLogFields(result), {
+    upstream_status: 502,
+    upstream_code: "invalid_d1_runtime_response",
+    upstream_category: "invalid-response",
+    upstream_retryable: false,
+    upstream_cause_code: "unsupported-content-type",
+  });
 });
 
 test("control D1 runtime client query treats undecodable binary response as upstream failure", async () => {
@@ -209,6 +206,9 @@ test("control D1 runtime client query treats undecodable binary response as upst
   assert.equal(result.ok, false);
   assert.equal(result.status, 502);
   assert.equal(result.body.error, "invalid_d1_runtime_response");
+  assert.equal(result.body.category, "invalid-response");
+  assert.equal(result.body.retryable, false);
+  assert.equal(result.body.causeCode, "binary-decode-failed");
   assert.equal(result.owner, null);
 });
 
@@ -313,13 +313,13 @@ test("control D1 runtime client public result preserves raw row/column payloads"
   );
 });
 
-test("control D1 runtime failure keeps extra fields additive only", () => {
+test("control D1 runtime failure redacts 5xx diagnostics and keeps safe extra fields", () => {
   const body = d1RuntimeFailure("d1_execute_failed", "demo", "db1", {
     status: 502,
     body: {
-      error: "sql-error",
-      message: "near syntax",
-      category: "sql",
+      error: "result-unknown",
+      message: "commit reply was lost",
+      category: "result-unknown",
       retryable: false,
     },
   }, {
@@ -336,11 +336,86 @@ test("control D1 runtime failure keeps extra fields additive only", () => {
     error: "d1_execute_failed",
     namespace: "demo",
     databaseId: "db1",
+    message: "Internal error",
+    upstreamCode: "result-unknown",
+    upstreamCategory: "result-unknown",
+    upstreamRetryable: false,
+    upstreamStatus: 502,
+  });
+  assert.deepEqual(d1RuntimeFailureLogFields({
+    status: 502,
+    body: {
+      error: "result-unknown",
+      message: "commit reply was lost",
+      category: "result-unknown",
+      retryable: false,
+    },
+  }), {
+    upstream_status: 502,
+    upstream_code: "result-unknown",
+    upstream_category: "result-unknown",
+    upstream_retryable: false,
+  });
+});
+
+test("control D1 runtime failure log fields reject unbounded or non-token diagnostics", () => {
+  for (const invalid of [" leading-space", "line\nbreak", "x".repeat(129)]) {
+    assert.deepEqual(d1RuntimeFailureLogFields({
+      status: 502,
+      body: {
+        error: invalid,
+        category: invalid,
+        causeCode: invalid,
+        retryable: false,
+      },
+    }), {
+      upstream_status: 502,
+      upstream_code: "d1-runtime-error",
+      upstream_category: "internal",
+      upstream_retryable: false,
+    });
+  }
+});
+
+test("control D1 runtime failure uses the outward status to redact upstream 4xx details", () => {
+  assert.deepEqual(d1RuntimeFailure("d1_database_initialize_failed", "demo", "db1", {
+    status: 400,
+    body: {
+      error: "sql-error",
+      message: "private initialization SQL",
+      category: "sql",
+      retryable: false,
+    },
+  }, {}, { publicStatus: 503 }), {
+    error: "d1_database_initialize_failed",
+    namespace: "demo",
+    databaseId: "db1",
+    message: "Internal error",
+    upstreamCode: "sql-error",
+    upstreamCategory: "sql",
+    upstreamRetryable: false,
+    upstreamStatus: 400,
+  });
+});
+
+test("control D1 runtime failure preserves client-facing 4xx diagnostics", () => {
+  assert.deepEqual(d1RuntimeFailure("d1_execute_failed", "demo", "db1", {
+    status: 400,
+    body: {
+      error: "sql-error",
+      message: "near syntax",
+      category: "sql",
+      retryable: false,
+    },
+  }), {
+    error: "d1_execute_failed",
+    namespace: "demo",
+    databaseId: "db1",
     message: "near syntax",
     upstreamCode: "sql-error",
     upstreamCategory: "sql",
     upstreamRetryable: false,
-    upstreamStatus: 502,
+    upstreamStatus: 400,
     detail: {
       error: "sql-error",
       message: "near syntax",

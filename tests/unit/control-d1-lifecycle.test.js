@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { controlSharedStubUrl } from "../helpers/control-shared-stub.js";
+import { controlD1RuntimeClientDataUrl } from "../helpers/load-d1-protocol.js";
 import { applyModuleReplacements, moduleDataUrl, readRepositoryFile } from "../helpers/load-shared-module.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
@@ -29,7 +30,9 @@ export function validateDatabaseName() {}
 export function isReadyDatabase(database) { return database?.state === "ready"; }
 `);
 
+const productionBackendUrl = controlD1RuntimeClientDataUrl();
 const backendUrl = moduleDataUrl(`
+export { d1RuntimeFailure, d1RuntimeFailureLogFields } from ${JSON.stringify(productionBackendUrl)};
 export async function d1RuntimeQuery() {
   /** @type {any} */ (globalThis).__d1RuntimeQueryArgs = arguments;
   return /** @type {any} */ (globalThis).__d1RuntimeResult || {
@@ -50,17 +53,6 @@ export async function d1RuntimeReleaseOwner(env, ns, databaseId, owner, requestI
 export async function d1RuntimeProbeOwner(env, ns, databaseId, requestId) {
   /** @type {any} */ (globalThis).__d1ProbeOwnerArgs = { env, ns, databaseId, requestId };
   return /** @type {any} */ (globalThis).__d1ProbeResult || { ok: true, status: 200, body: { owner: null }, owner: null };
-}
-export function d1RuntimeFailure(error, ns, databaseId, result) {
-  return {
-    error,
-    namespace: ns,
-    databaseId,
-    message: result.body.message,
-    upstreamCode: result.body.error,
-    upstreamCategory: result.body.category,
-    upstreamRetryable: result.body.retryable,
-  };
 }
 export function d1RuntimePublicResult(value) {
   /** @type {any} */ (globalThis).__d1RuntimePublicResultArgs = arguments;
@@ -168,7 +160,17 @@ test("listDatabases batches metadata reads and returns ready databases", async (
 });
 
 test("createDatabase: backend initialization failure rolls back provisional metadata", async () => {
-  /** @type {any} */ (globalThis).__d1RuntimeResult = null;
+  /** @type {any} */ (globalThis).__d1LifecycleLogs = [];
+  /** @type {any} */ (globalThis).__d1RuntimeResult = {
+    ok: false,
+    status: 400,
+    body: {
+      error: "sql-error",
+      message: "private initialization SQL",
+      category: "sql",
+      retryable: false,
+    },
+  };
   /** @type {any} */ (globalThis).__d1CommitResult = null;
   /** @type {any} */ (globalThis).__d1ReleasedOwnerArgs = null;
   /** @type {any} */ (globalThis).__d1LifecycleCommitted = false;
@@ -185,10 +187,85 @@ test("createDatabase: backend initialization failure rolls back provisional meta
 
   const body = await readJsonResponse(response, 503);
   assert.equal(body.error, "d1_database_initialize_failed");
+  assert.equal(body.message, "Internal error");
   assert.equal(body.databaseId, "d1_test");
+  assert.equal(body.upstreamCode, "sql-error");
+  assert.equal(body.upstreamCategory, "sql");
+  assert.equal(body.upstreamRetryable, false);
+  assert.equal(body.upstreamStatus, 400);
+  assert.equal(body.detail, undefined);
   assert.equal(/** @type {any} */ (globalThis).__d1LifecycleCommitted, true);
   assert.equal(/** @type {any} */ (globalThis).__d1ProvisionalRolledBack, true);
   assert.equal(/** @type {any} */ (globalThis).__d1ReleasedOwnerArgs, null);
+  assert.deepEqual(/** @type {any} */ (globalThis).__d1LifecycleLogs.at(-1), {
+    level: "error",
+    event: "d1_database_initialize_failed",
+    fields: {
+      request_id: "rid-create-fail",
+      namespace: "demo",
+      database_id: "d1_test",
+      status: 503,
+      reason: "d1_database_initialize_failed",
+      upstream_status: 400,
+      upstream_code: "sql-error",
+      upstream_category: "sql",
+      upstream_retryable: false,
+    },
+  });
+});
+
+test("executeDatabase redacts D1 runtime 5xx diagnostics and logs stable fields", async () => {
+  /** @type {any} */ (globalThis).__d1LifecycleLogs = [];
+  /** @type {any} */ (globalThis).__d1RequireResult = {
+    database: { databaseId: "d1_test", databaseName: "main", state: "ready", createdAt: "now", updatedAt: "now" },
+  };
+  /** @type {any} */ (globalThis).__d1RuntimeResult = {
+    ok: false,
+    status: 503,
+    body: {
+      error: "owner-record-invalid",
+      message: "private owner diagnostic",
+      category: "ownership",
+      retryable: true,
+    },
+  };
+
+  const response = await executeDatabase({
+    request: new Request("http://control/ns/demo/d1/databases/main/query", {
+      method: "POST",
+      body: JSON.stringify({ sql: "select 1" }),
+    }),
+    env: {},
+    ns: "demo",
+    databaseId: "main",
+    requestId: "rid-execute-fail",
+  });
+
+  await assertJsonResponse(response, 503, {
+    error: "d1_execute_failed",
+    namespace: "demo",
+    databaseId: "d1_test",
+    message: "Internal error",
+    upstreamCode: "owner-record-invalid",
+    upstreamCategory: "ownership",
+    upstreamRetryable: true,
+    upstreamStatus: 503,
+  });
+  assert.deepEqual(/** @type {any} */ (globalThis).__d1LifecycleLogs.at(-1), {
+    level: "error",
+    event: "d1_database_execute_failed",
+    fields: {
+      request_id: "rid-execute-fail",
+      namespace: "demo",
+      database_id: "d1_test",
+      status: 503,
+      reason: "d1_execute_failed",
+      upstream_status: 503,
+      upstream_code: "owner-record-invalid",
+      upstream_category: "ownership",
+      upstream_retryable: true,
+    },
+  });
 });
 
 test("createDatabase: ready flip failure releases initialized owner and rolls back provisional metadata", async () => {

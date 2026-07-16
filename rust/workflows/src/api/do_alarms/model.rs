@@ -275,20 +275,25 @@ pub(super) fn job_from_state(
     state: HashMap<String, String>,
 ) -> WorkflowResult<DoAlarmJob> {
     parse_positive_i64_field(&state, "dueAtMs")?;
+    let ns = protocol_string_field(&state, "ns", is_valid_runtime_load_ns)?;
+    let worker = protocol_string_field(&state, "worker", is_valid_worker_name)?;
+    let version = protocol_string_field(&state, "scheduledVersion", |value| {
+        parse_version_tag(value).is_ok()
+    })?;
     let do_storage_id = protocol_string_field(&state, "doStorageId", is_storage_id)?;
     let class_name = protocol_string_field(&state, "className", is_class_name)?;
     let object_name = opaque_string_field(&state, "objectName")?;
     if alarm_host_id_len(do_storage_id, class_name, object_name) > MAX_PROTOCOL_STRING_BYTES {
         return Err(invalid_job_field("hostId"));
     }
+    if job_id != do_alarm_job_id(ns, worker, do_storage_id, class_name, object_name) {
+        return Err(invalid_job_field("jobId"));
+    }
     Ok(DoAlarmJob {
         job_id,
-        ns: protocol_string_field(&state, "ns", is_valid_runtime_load_ns)?.to_string(),
-        worker: protocol_string_field(&state, "worker", is_valid_worker_name)?.to_string(),
-        version: protocol_string_field(&state, "scheduledVersion", |value| {
-            parse_version_tag(value).is_ok()
-        })?
-        .to_string(),
+        ns: ns.to_string(),
+        worker: worker.to_string(),
+        version: version.to_string(),
         do_storage_id: do_storage_id.to_string(),
         class_name: class_name.to_string(),
         object_name: object_name.to_string(),
@@ -354,6 +359,25 @@ mod tests {
             ("retryCount".to_string(), "0".to_string()),
             ("dueAtMs".to_string(), "123456789".to_string()),
         ])
+    }
+
+    fn job_id_for_state(state: &HashMap<String, String>) -> String {
+        do_alarm_job_id(
+            state.get("ns").map(String::as_str).unwrap_or_default(),
+            state.get("worker").map(String::as_str).unwrap_or_default(),
+            state
+                .get("doStorageId")
+                .map(String::as_str)
+                .unwrap_or_default(),
+            state
+                .get("className")
+                .map(String::as_str)
+                .unwrap_or_default(),
+            state
+                .get("objectName")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
     }
 
     #[test]
@@ -451,13 +475,33 @@ mod tests {
             state.insert("className".to_string(), set.class_name.clone());
             state.insert("objectName".to_string(), set.object_name.clone());
             state.insert("rowToken".to_string(), set.token.clone());
+            let job_id = job_id_for_state(&state);
             assert_eq!(
-                job_from_state("job".to_string(), state).is_ok(),
+                job_from_state(job_id, state).is_ok(),
                 valid,
                 "persisted:{}",
                 case["name"].as_str().expect("name is a string")
             );
         }
+    }
+
+    #[test]
+    fn do_alarm_job_state_requires_canonical_job_id() {
+        let state = valid_job_state();
+        let canonical = job_id_for_state(&state);
+        assert!(job_from_state(canonical, state.clone()).is_ok());
+
+        let mut other_state = state.clone();
+        other_state.insert("objectName".to_string(), "other-object".to_string());
+        let other_canonical = job_id_for_state(&other_state);
+        assert_ne!(other_canonical, job_id_for_state(&state));
+
+        let err = match job_from_state(other_canonical, state) {
+            Ok(_) => panic!("mis-keyed DO alarm state must fail closed"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, "workflow_invalid_state");
+        assert!(err.message.contains("jobId"));
     }
 
     #[test]

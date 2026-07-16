@@ -35,6 +35,38 @@ test("Workflow facade does not expose private backend caller", () => {
   assert.equal(typeof workflow.create, "function");
 });
 
+test("Workflow instances do not expose the private caller through patched Function.prototype.bind", async () => {
+  /** @type {string[]} */
+  const endpoints = [];
+  const workflow = createWorkflowForTest({
+    backend: {
+      /** @param {string} url */
+      async fetch(url) {
+        endpoints.push(new URL(url).pathname);
+        return Response.json({ id: "inst-1", status: "running" });
+      },
+    },
+  });
+  const originalBind = Function.prototype.bind;
+  let privateBindCalls = 0;
+  Function.prototype.bind = function (/** @type {any[]} */ ...args) {
+    if (this.name === "#call") privateBindCalls += 1;
+    return Reflect.apply(originalBind, this, args);
+  };
+  try {
+    const instance = await workflow.get("inst-1");
+    await instance.status();
+  } finally {
+    Function.prototype.bind = originalBind;
+  }
+
+  assert.equal(privateBindCalls, 0);
+  assert.deepEqual(endpoints, [
+    "/internal/workflows/get",
+    "/internal/workflows/status",
+  ]);
+});
+
 test("Workflow.create preserves runtime metadata from params override", async () => {
   /** @type {Record<string, unknown> | undefined} */
   let capturedRequestBody;
@@ -90,6 +122,88 @@ test("Workflow.create preserves runtime metadata from params override", async ()
     retention: null,
     callback: { kind: "do", binding: "ROOMS", idFromName: "room-a" },
   });
+});
+
+test("Workflow request identity ignores tenant-patched JSON.stringify", async () => {
+  let capturedBody = "";
+  const workflow = createWorkflowForTest({
+    backend: {
+      /** @param {string} _url @param {RequestInit} init */
+      async fetch(_url, init) {
+        capturedBody = String(init.body);
+        return new Response('{"id":"inst-1"}', {
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+  });
+  const originalStringify = JSON.stringify;
+  let patchedCalls = 0;
+  JSON.stringify = () => {
+    patchedCalls += 1;
+    return '{"ns":"victim","worker":"victim-worker"}';
+  };
+  try {
+    await workflow.create({ id: "inst-1" });
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+
+  assert.equal(patchedCalls, 0);
+  assert.deepEqual(JSON.parse(capturedBody), {
+    instanceId: "inst-1",
+    params: null,
+    retention: null,
+    callback: null,
+    ns: "tenant-a",
+    worker: "shop",
+    frozenVersion: "v7",
+    workflowName: "orders",
+    workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    className: "OrderWorkflow",
+    requestId: null,
+  });
+});
+
+test("Workflow request identity ignores inherited Object.prototype.toJSON", async () => {
+  let capturedBody = "";
+  const workflow = createWorkflowForTest({
+    backend: {
+      /** @param {string} _url @param {RequestInit} init */
+      async fetch(_url, init) {
+        capturedBody = String(init.body);
+        return new Response('{"id":"inst-2"}', {
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+  });
+  const previousDescriptor = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
+  let inheritedCalls = 0;
+  Object.defineProperty(Object.prototype, "toJSON", {
+    configurable: true,
+    value() {
+      inheritedCalls += 1;
+      return { ns: "victim", worker: "victim-worker" };
+    },
+  });
+  try {
+    await workflow.create({ id: "inst-2" });
+  } finally {
+    if (previousDescriptor) {
+      Object.defineProperty(Object.prototype, "toJSON", previousDescriptor);
+    } else {
+      delete /** @type {{ toJSON?: unknown }} */ (Object.prototype).toJSON;
+    }
+  }
+
+  assert.equal(inheritedCalls, 0);
+  const body = JSON.parse(capturedBody);
+  assert.equal(body.ns, "tenant-a");
+  assert.equal(body.worker, "shop");
+  assert.equal(body.frozenVersion, "v7");
+  assert.equal(body.workflowKey, "wf_0123456789abcdef0123456789abcdef");
+  assert.equal(body.className, "OrderWorkflow");
 });
 
 test("Workflow.create forwards explicit non-null retention", async () => {
@@ -196,6 +310,42 @@ test("Workflow.createBatch accepts valid instances array", async () => {
 
   const instances = await workflow.createBatch([{ id: "inst-1" }, { id: "inst-2" }]);
   assert.deepEqual(instances.map((instance) => instance.id), ["inst-1", "inst-2"]);
+});
+
+test("Workflow.createBatch rejects duplicate backend response ids", async () => {
+  const workflow = createWorkflowForTest({
+    backend: {
+      async fetch() {
+        return Response.json({
+          instances: [{ id: "inst-1" }, { id: "inst-1" }],
+        });
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => workflow.createBatch([{ id: "inst-1" }, { id: "inst-2" }]),
+    /Workflow createBatch response contains duplicate id inst-1/
+  );
+});
+
+test("Workflow create and get require matching response ids", async () => {
+  for (const endpoint of ["create", "get"]) {
+    const workflow = createWorkflowForTest({
+      backend: {
+        async fetch() {
+          return Response.json({ id: "inst-other" });
+        },
+      },
+    });
+
+    await assert.rejects(
+      () => endpoint === "create"
+        ? workflow.create({ id: "inst-1" })
+        : workflow.get("inst-1"),
+      new RegExp(`Workflow ${endpoint} response id mismatch`)
+    );
+  }
 });
 
 test("Workflow.create rejects non-object success responses", async () => {

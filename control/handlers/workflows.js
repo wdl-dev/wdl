@@ -1,6 +1,4 @@
 import {
-  WORKER_NAME_RE,
-  WORKFLOW_NAME_RE,
   isValidWorkerName,
   isValidWorkflowName,
   parseBundleMeta,
@@ -20,6 +18,8 @@ import {
 import { bundleKey, routesKey } from "shared-version";
 import {
   BINDING_NAME_RE,
+  WORKER_NAME_RE,
+  WORKFLOW_NAME_RE,
   WORKFLOW_KEY_RE,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";

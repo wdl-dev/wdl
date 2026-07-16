@@ -29,12 +29,12 @@ export function echoResponseWithRequestId(response, requestId) {
 }
 
 /**
- * @param {Response} response
+ * @param {{ body: ReadableStream<Uint8Array> | null }} message
  * @returns {Promise<void>}
  */
-export async function discardResponseBody(response) {
+export async function discardResponseBody(message) {
   try {
-    void response.body?.cancel().catch(() => {});
+    void message.body?.cancel().catch(() => {});
   } catch {
     // Best-effort cleanup only; the caller's status/error path owns behavior.
   }

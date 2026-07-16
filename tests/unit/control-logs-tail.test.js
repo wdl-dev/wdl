@@ -59,9 +59,8 @@ function loadLogsTailHandler(options = {}) {
       `from ${JSON.stringify(SHARED_NS_PATTERN_URL)};`,
     ],
     [
-      /import \{\n {2}WORKER_NAME_RE,\n {2}compareStreamIds,\n {2}isValidResumeId,\n {2}isValidWorkerName,\n\} from "control-lib";/,
-      `const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-       const compareStreamIds = () => 0;
+      /import \{\n {2}compareStreamIds,\n {2}isValidResumeId,\n {2}isValidWorkerName,\n\} from "control-lib";/,
+      `const compareStreamIds = () => 0;
        const isValidResumeId = () => true;
        const isValidWorkerName = (name) => WORKER_NAME_RE.test(name);`,
     ],

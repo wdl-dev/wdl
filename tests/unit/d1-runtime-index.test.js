@@ -122,10 +122,12 @@ export function createHttpRequestScope({ request, service, metrics, log, route, 
   const startedAt = Date.now();
   let status = 500;
   let requestError = null;
+  let hasRequestError = false;
   return {
     requestId,
     markError(err) {
       requestError = err;
+      hasRequestError = true;
       return err;
     },
     respond(response) {
@@ -143,6 +145,7 @@ export function createHttpRequestScope({ request, service, metrics, log, route, 
         status,
         startedAt,
         error: requestError,
+        hasError: hasRequestError,
         probeRoutes,
       });
     },

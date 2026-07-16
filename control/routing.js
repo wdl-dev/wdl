@@ -5,7 +5,6 @@
 import { runOptimistic } from "control-shared";
 import {
   d1DatabaseKey,
-  deleteLockKey,
   extractD1Refs, extractOutgoingRefs,
   parseBundleMeta,
 } from "control-lib";
@@ -27,6 +26,7 @@ import {
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   bundleKey,
+  deleteLockKey,
   formatVersion,
   hostDeclarationsKey,
   hostsKey,
