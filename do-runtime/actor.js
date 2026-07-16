@@ -93,11 +93,14 @@ export class WdlDoHostActor extends DurableObject {
     return facetName;
   }
 
-  /** @param {DoInvoke} invoke */
+  /**
+   * @param {DoInvoke} invoke
+   * @returns {Promise<boolean>} whether registry I/O was attempted
+   */
   async rememberObject(invoke) {
-    if (!("doStorageId" in invoke) || typeof invoke.doStorageId !== "string") return;
+    if (!("doStorageId" in invoke) || typeof invoke.doStorageId !== "string") return false;
     const member = objectRegistryMember(invoke);
-    if (this.registeredObjectMembers.has(member)) return;
+    if (this.registeredObjectMembers.has(member)) return false;
     try {
       await rememberDoObject(this.env, invoke);
     } catch (err) {
@@ -107,10 +110,11 @@ export class WdlDoHostActor extends DurableObject {
         worker_id: workerId,
         ...formatError(err),
       });
-      return;
+      return true;
     }
     this.registeredObjectMembers.add(member);
     metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
+    return true;
   }
 
   /** @param {Request} request */
@@ -177,8 +181,11 @@ export class WdlDoHostActor extends DurableObject {
       throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
     }
     try {
-      await this.rememberObject(invoke);
-      const { owner, leaseRemainingMs } = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
+      let fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
+      if (await this.rememberObject(invoke)) {
+        fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
+      }
+      const { owner, leaseRemainingMs } = fenced;
       return withoutOwnershipErrorControlHeader(
         await this.dispatchWithLeaseBudget(invoke, owner, leaseRemainingMs, run)
       );

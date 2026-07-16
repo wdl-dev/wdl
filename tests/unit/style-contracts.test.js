@@ -1434,15 +1434,19 @@ test("local compose runtime profiles keep base services enabled by default", () 
   assert.ok(compose.services);
   for (const family of ["d1", "do"]) {
     const baseName = `${family}-runtime`;
-    const base = compose.services[baseName];
-    assert.ok(base, `${baseName} must exist`);
-    assert.equal(base.profiles, undefined);
+    const baseService = /** @type {{ profiles?: unknown } | undefined} */ (
+      compose.services[baseName]
+    );
+    assert.ok(baseService, `${baseName} must exist`);
+    assert.equal(baseService.profiles, undefined);
     for (const suffix of ["a", "b", "c"]) {
       const variantName = `${family}-runtime-${suffix}`;
-      const variant = compose.services[variantName];
-      assert.ok(variant, `${variantName} must exist`);
+      const variantService = /** @type {{ profiles?: unknown } | undefined} */ (
+        compose.services[variantName]
+      );
+      assert.ok(variantService, `${variantName} must exist`);
       assert.deepEqual(
-        variant.profiles,
+        variantService.profiles,
         [`${family}-multi`],
         variantName
       );
