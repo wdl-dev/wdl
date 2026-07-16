@@ -47,7 +47,7 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 
 ## Route 和 Host Projection
 
-Subdomain routing 读取 `routes:<ns>`。Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>`，并使用 slot value 中嵌入的 `version` 构造 `x-worker-id`，不再查 `routes:<ns>`。Pattern slot value 是由 `shared/route-projection.js` 编码的紧凑 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` record，不再是 JSON。Promote 在同一个 Redis transaction 中更新两套 projection。Control mutation 和 delete 路径遇到无法 decode 的非空 slot 时会 fail closed，不会把未知 owner 当成空槽。
+Subdomain routing 读取 `routes:<ns>`。Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>`，并直接使用 slot value 中嵌入的 `version` 构造 `x-worker-id`。Pattern slot value 是由 `shared/route-projection.js` 编码的紧凑 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` record。Promote 在同一个 Redis transaction 中更新两套 projection。Control mutation 和 delete 路径遇到无法 decode 的非空 slot 时会 fail closed，不会把未知 owner 当成空槽。
 
 `hosts:<ns>` 是 operator intent：这个 namespace 被允许使用这些 host。`declared-hosts` 是 gateway 对“至少被一个 namespace 声明过的 host”的 gate。`host-declarations:<host>` 记录声明该 host 的 namespace，因此一个 namespace 移除声明时，不会在另一个 namespace 仍声明该 host 的情况下清掉全局 gate。`POST /reload` 会先从 `hosts:<ns>` 重建这两个声明索引，再发布 gateway cache invalidation；这给 operator-managed host declaration 提供显式 repair/backfill 路径。`ns-hosts:<ns>` 是 active reverse index：这个 namespace 当前在这些 host 上拥有至少一个 slot。`hosts:<ns>` 应是 superset。Host reconcile 会先用 `ns-hosts:<ns>` 做 fast path，再扫描 `patterns:<host>`。
 

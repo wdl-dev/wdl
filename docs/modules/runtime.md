@@ -261,7 +261,7 @@ when a matching active tail session exists.
 - Runtime must roll before scheduler/workflows if they depend on a new `:8088` internal
   path or dispatch body.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
-  Historical-version eviction still injects `__WdlAbort__`, but `abortIsolate()` is
+  Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
   available without that flag in the bundled workerd baseline.
 - Removing the broad loaded-worker `experimental` flag intentionally removes access to
   non-GA experimental-only tenant surfaces, such as irrevocable long-term stub storage.
@@ -275,7 +275,7 @@ when a matching active tail session exists.
   workerd fail later with a mixed JS/Python bundle error.
 - The runtime workerd processes still run with process-level `--experimental` because
   upstream workerd 2026-07-01 continues to gate `workerLoader` bindings on that switch.
-  Do not re-add the `experimental` compatibility flag or `allowExperimental` to loaded
+  Do not add the `experimental` compatibility flag or `allowExperimental` to loaded
   WorkerCode unless another upstream API explicitly requires it.
 - Upstream workerd 2026-07-01 caps dynamic worker code at 64 MiB and serialized dynamic
   env at 1 MiB. Control estimates final WorkerCode before version allocation and again

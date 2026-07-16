@@ -170,7 +170,7 @@ when the logical worker is gone or now points at a different `doStorageId`.
   backend reconnect budget and client-message buffering without a code rebuild.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due
   internal alarm jobs to ready, claims one job under a DB 2 run token, and calls
-  do-runtime `/internal/do/alarms/dispatch`. do-runtime still constructs the native
+  do-runtime `/internal/do/alarms/dispatch`. do-runtime constructs a native
   `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path.
 - Alarm mutation, retarget, dispatch, and whole-worker storage cleanup accept only the
   canonical positive JavaScript-safe-integer worker version grammar. Invalid internal or

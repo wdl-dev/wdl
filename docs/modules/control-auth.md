@@ -333,11 +333,10 @@ Auth-specific contract:
   scheduler dispatch open for minutes.
 - All Control-to-Workflows internal POSTs use the canonical transport in
   `control/workflows-client.js`. Callers retain endpoint-specific timeout, non-2xx, and
-  response-body interpretation. Workflow management calls and the
-  unbounded-by-namespace lifecycle delete scan intentionally have no client-side
-  timeout, matching their pre-consolidation behavior, while DO-alarm cleanup explicitly
-  retains its existing five-second bound. Workflow lifecycle blockers fail closed on
-  service errors.
+  response-body interpretation. Workflow management calls and the lifecycle delete scan
+  have no client-side timeout because the scan is unbounded by namespace size. DO-alarm
+  cleanup uses a five-second timeout. Workflow lifecycle blockers fail closed on service
+  errors.
 - AUTH JSRPC errors or Redis explosions are control-plane failures and map to 503
   fail-closed behavior, not tenant-visible authorization fallbacks.
 

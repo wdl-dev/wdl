@@ -114,6 +114,10 @@ shared crate `wdl-rust-common`.
   convergence, not a new abstraction.
 - Do not add fake old/new protocol fallback for in-tree tiers that ship together unless
   there is a real external rollout requirement.
+- Write active repository docs as final-state contracts, not as a history of branch
+  iterations or rejected approaches. Tests should protect observable behavior and
+  durable boundaries; do not pin a refactor's implementation shape unless that shape is
+  itself the contract.
 - After authentication, in-tree tiers that ship together may trust ephemeral RPC output
   owned by the peer; do not repeat full semantic validation at every hop. Keep strict
   validation at tenant inputs, persisted-state readers, credential attachment points,

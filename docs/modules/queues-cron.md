@@ -333,6 +333,6 @@ Representative test anchors:
 - Main queue streams are intentionally untrimmed; backlog is an operational signal.
 - Scheduler multi-replica safety is covered by integration tests for cron due-ref
   claiming, cron sweep recovery, queue reconcile plus consumer-group delivery, delayed
-  queue promotion, PEL reap, and workflow ticks. Durable Object alarms are now driven
-  by the Workflows service, not scheduler. Any new scheduler dispatch path must still
-  be audited for its own Redis lease/fence semantics before assuming replica safety.
+  queue promotion, PEL reap, and workflow ticks. The Workflows service drives Durable
+  Object alarms; scheduler does not. Any new scheduler dispatch path must be audited for
+  its own Redis lease/fence semantics before assuming replica safety.

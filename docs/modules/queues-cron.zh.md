@@ -211,4 +211,4 @@ Runtime tail logs 也会为 loaded worker 执行输出 `worker_scheduled` 和 `w
 - Queue `contentType = "v8"` 被拒绝。
 - Queue consumer `max_concurrency` 被拒绝。
 - Main queue stream 故意不 trim；backlog 是运维信号。
-- 集成测试覆盖了 scheduler 多副本下的 cron due-ref claim、cron sweep recovery、queue reconcile 加 consumer-group delivery、delayed queue promotion、PEL reap 和 workflow tick。Durable Object alarm 现在由 Workflows service 驱动，不再由 scheduler tick。新增 scheduler dispatch 路径前仍必须单独审计它自己的 Redis lease / fence 语义，不能默认具备副本安全性。
+- 集成测试覆盖了 scheduler 多副本下的 cron due-ref claim、cron sweep recovery、queue reconcile 加 consumer-group delivery、delayed queue promotion、PEL reap 和 workflow tick。Durable Object alarm 由 Workflows service 驱动，scheduler 不负责该路径。新增 scheduler dispatch 路径前必须单独审计它自己的 Redis lease / fence 语义，不能默认具备副本安全性。

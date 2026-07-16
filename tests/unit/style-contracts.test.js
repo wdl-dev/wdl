@@ -1428,7 +1428,7 @@ test("local compose services inherit shared image anchors", () => {
 
 test("local compose runtime profiles keep base services enabled by default", () => {
   const [document] = yamlDocuments("docker-compose.yml");
-  const compose = /** @type {{ services?: Record<string, { entrypoint?: unknown, profiles?: unknown }> }} */ (
+  const compose = /** @type {{ services?: Record<string, { profiles?: unknown }> }} */ (
     document.toJS()
   );
   assert.ok(compose.services);
@@ -1436,7 +1436,6 @@ test("local compose runtime profiles keep base services enabled by default", () 
     const baseName = `${family}-runtime`;
     const base = compose.services[baseName];
     assert.ok(base, `${baseName} must exist`);
-    assert.deepEqual(base.entrypoint, [`${family}-supervisor`], `${baseName} effective entrypoint`);
     assert.equal(base.profiles, undefined);
     for (const suffix of ["a", "b", "c"]) {
       const variantName = `${family}-runtime-${suffix}`;

@@ -178,6 +178,13 @@ Refactors should reduce real complexity: duplicated policy, duplicated contract
 grammar, fake compatibility paths, stale stubs, or review burden. A large commit is
 acceptable when it is one coherent direction and its tests cover the touched contract.
 
+Active repository documentation describes the final deployable state. Branch history,
+superseded approaches, and review decisions belong in the pull request or changelog, not
+in normative module docs. Tests should assert observable behavior, negative correctness
+cases, and durable wire, storage, security, or deployment contracts. Do not pin helper
+choice, source layout, or another refactor mechanism unless that structure is itself a
+supported contract.
+
 Use the smallest check that protects the changed behavior, then widen when the change
 crosses a module or language boundary. Cross-language changes usually need:
 

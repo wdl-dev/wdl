@@ -147,7 +147,7 @@ Auth 子合同：
 - Control 在进入 Redis mutation loop 前加密 secret PUT value。加密/provider 失败会返回 control error，不写 plaintext fallback。
 - Worker delete 先 commit Redis lifecycle state；异步 S3 cleanup enqueue 是 best-effort，失败时返回 warning。
 - `s3-cleanup` system worker 会把 cleanup task 持久化在 D1；row 存在后由 cron replay 负责重试。S3 失败使用分钟级 exponential backoff，最高 30 分钟；大前缀 cleanup 每完成一个 S3 List/Delete page 就 checkpoint continuation token，因此正常分页进度不会消耗 failure attempts，也不会在 scheduler timeout 后从头开始。每次 run 只处理一页，所以超大 prefix 会跨多个 cron 或 queue dispatch 排空，而不是让单次 scheduler dispatch 持续数分钟。
-- 所有 Control-to-Workflows internal POST 都使用 `control/workflows-client.js` 的 canonical transport。Caller 继续持有 endpoint-specific timeout、non-2xx 和 response-body interpretation。Workflow 管理调用和按 namespace 大小无上界的 lifecycle delete scan 都刻意不设 client-side timeout，保持 transport 收敛前的语义；DO-alarm cleanup 则显式保留原有五秒边界。Workflow lifecycle blocker 在服务错误时 fail closed。
+- 所有 Control-to-Workflows internal POST 都使用 `control/workflows-client.js` 的 canonical transport。Caller 继续持有 endpoint-specific timeout、non-2xx 和 response-body interpretation。Workflow 管理调用和 lifecycle delete scan 不设 client-side timeout，因为 scan 的规模不受 namespace 上限约束；DO-alarm cleanup 使用五秒 timeout。Workflow lifecycle blocker 在服务错误时 fail closed。
 - AUTH JSRPC 错误或 Redis 爆炸属于控制面失败，映射为 503 fail closed，而不是 tenant-visible authorization fallback。
 
 ## 安全边界
