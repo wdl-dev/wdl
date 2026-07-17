@@ -84,6 +84,7 @@ const intrinsicObjectCreate = Object.create;
 const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
+const intrinsicObjectHasOwn = Object.hasOwn;
 const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicPromiseThen = Promise.prototype.then;
 const intrinsicResponseJson = Response.json;
@@ -464,7 +465,9 @@ function cloneJsonRpcData(value, field, seen = new IntrinsicWeakSet()) {
       const out = new IntrinsicArray(length);
       intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [out, null]);
       for (let i = 0; i < length; i++) {
-        if (!(i in arrayValue)) throw new TypeError(`${field} must not be sparse`);
+        if (!intrinsicReflectApply(intrinsicObjectHasOwn, undefined, [arrayValue, i])) {
+          throw new TypeError(`${field} must not be sparse`);
+        }
         out[i] = cloneJsonRpcData(arrayValue[i], `${field}[${i}]`, seen);
       }
       return out;

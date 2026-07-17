@@ -410,11 +410,23 @@ test("DurableObjectNamespace RPC rejects non-JSON data before transport", async 
   const stub = ns.get(ns.idFromName("room-a"));
   const circular = {};
   circular.self = circular;
+  const sparse = new Array(1);
+  const sparsePrototype = Object.create(Array.prototype);
+  let inheritedSlotReads = 0;
+  Object.defineProperty(sparsePrototype, "0", {
+    get() {
+      inheritedSlotReads += 1;
+      return "inherited";
+    },
+  });
+  Object.setPrototypeOf(sparse, sparsePrototype);
 
   await assert.rejects(Reflect.get(stub, "save")(new Map([["key", "value"]])), /plain JSON object/);
   await assert.rejects(Reflect.get(stub, "save")(new Headers()), /plain JSON object/);
   await assert.rejects(Reflect.get(stub, "save")({ fn() {} }), /rpc\.args\[0\]\.fn must be JSON data/);
   await assert.rejects(Reflect.get(stub, "save")([undefined]), /rpc\.args\[0\]\[0\] must be JSON data/);
+  await assert.rejects(Reflect.get(stub, "save")(sparse), /rpc\.args\[0\] must not be sparse/);
+  assert.equal(inheritedSlotReads, 0);
   await assert.rejects(Reflect.get(stub, "save")(Number.NaN), /finite number/);
   await assert.rejects(Reflect.get(stub, "save")(circular), /must not be circular/);
 });
@@ -458,6 +470,12 @@ test("DO RPC validation uses captured JSON intrinsics", async () => {
     assert.throws(
       () => rpcInvokeBody(props, "room-a", "save", [Number.NaN]),
       (error) => error instanceof TypeError && error.message === "rpc.args[0] must be a finite number"
+    );
+  });
+  await withMockedProperty(Object, "hasOwn", () => true, () => {
+    assert.throws(
+      () => rpcInvokeBody(props, "room-a", "save", [new Array(1)]),
+      (error) => error instanceof TypeError && error.message === "rpc.args[0] must not be sparse"
     );
   });
 });
