@@ -19,7 +19,7 @@ import {
   recordPatternMatchComparisons,
   recordRoutingLookup,
 } from "gateway-runtime";
-import { parseVersion } from "shared-version";
+import { parseVersion } from "shared-worker-contract";
 
 /**
  * @typedef {{

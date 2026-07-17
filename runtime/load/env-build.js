@@ -7,7 +7,7 @@ import {
   isValidJsIdentifier,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
-import { parseVersion } from "shared-version";
+import { parseVersion } from "shared-worker-contract";
 
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";

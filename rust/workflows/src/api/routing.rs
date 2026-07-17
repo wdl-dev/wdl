@@ -1,4 +1,4 @@
-use wdl_rust_common::{hash::fnv1a32, version::worker_bundle_key};
+use wdl_rust_common::{hash::fnv1a32, worker_contract::worker_bundle_key};
 
 use crate::{InstanceKeys, WorkflowError, WorkflowResult, due_key, ready_key};
 

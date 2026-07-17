@@ -5,18 +5,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
-import {
-  applyModuleReplacements,
-  moduleDataUrl,
-  readRepositoryFile,
-  repositoryFileUrl,
-} from "../helpers/load-shared-module.js";
+import { moduleDataUrl } from "../helpers/load-shared-module.js";
+import { compileControlSharedGraph } from "../helpers/load-control-shared.js";
 import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { installMockProperty } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
-import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 
@@ -28,74 +22,19 @@ const controlS3Url = moduleDataUrl(`export function makeS3Client() { return null
 const controlR2Url = moduleDataUrl(`export function makeR2AdminClient() { return null; }`);
 const sharedAuthTokenUrl = moduleDataUrl(`export function extractToken() { return null; }`);
 const sharedAuthRolesUrl = moduleDataUrl(`export function validatePrincipalShape() { return false; }`);
-const sharedBoundedBodyUrl = repositoryFileUrl("shared/bounded-body.js");
-const sharedErrorsUrl = repositoryFileUrl("shared/errors.js");
-const sharedRandomIdUrl = repositoryFileUrl("shared/random-id.js");
-const sharedRedisLockUrl = moduleDataUrl(applyModuleReplacements(
-  readRepositoryFile("shared/redis-lock.js"),
-  [[/from "shared-random-id"/g, `from ${JSON.stringify(sharedRandomIdUrl)}`]]
-));
 const sharedQueueKeysUrl = moduleDataUrl(`export function queueStreamKey() { return ""; }`);
-const sharedRespondUrl = moduleDataUrl(readRepositoryFile("shared/respond.js"));
-const controlLibUrl = moduleDataUrl(`export function deleteLockKey(ns, worker) { return \`worker-delete-lock:\${ns}:\${worker}\`; }`);
-const sharedS3CleanupLifecycleUrl = repositoryFileUrl("shared/s3-cleanup-lifecycle.js");
-const sharedVersionUrl = repositoryFileUrl("shared/version.js");
-const sharedOptimisticRetryUrl = repositoryFileUrl("shared/optimistic-retry.js");
-const controlErrorsUrl = moduleDataUrl(applyModuleReplacements(
-  readRepositoryFile("control/errors.js"),
-  [
-    [/from "shared-errors"/g, `from ${JSON.stringify(sharedErrorsUrl)}`],
-    [/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`],
-  ]
-));
-const controlWorkflowsClientUrl = moduleDataUrl(applyModuleReplacements(
-  readRepositoryFile("control/workflows-client.js"),
-  [
-    [/from "shared-errors"/g, `from ${JSON.stringify(sharedErrorsUrl)}`],
-    [/from "control-errors"/g, `from ${JSON.stringify(controlErrorsUrl)}`],
-  ]
-));
+const { controlSharedUrl, controlWorkflowsClientUrl } = compileControlSharedGraph({
+  sharedRedisUrl,
+  controlS3Url,
+  controlR2Url,
+  sharedAuthTokenUrl,
+  sharedAuthRolesUrl,
+  sharedQueueKeysUrl,
+});
 const { postWorkflowsInternalRequest } = await import(controlWorkflowsClientUrl);
-const controlOptimisticUrl = moduleDataUrl(applyModuleReplacements(
-  readRepositoryFile("control/optimistic.js"),
-  [
-    [/from "shared-redis"/g, `from ${JSON.stringify(sharedRedisUrl)}`],
-    [/from "shared-optimistic-retry"/g, `from ${JSON.stringify(sharedOptimisticRetryUrl)}`],
-  ]
-));
-const controlJsonBodyUrl = moduleDataUrl(applyModuleReplacements(
-  readRepositoryFile("control/json-body.js"),
-  [
-    [/from "shared-bounded-body"/g, `from ${JSON.stringify(sharedBoundedBodyUrl)}`],
-    [/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`],
-  ]
-));
 // Use the same stub constructor imported by control/shared.js so
 // runOptimistic's `instanceof WatchError` check observes the test error.
 const { WatchError: ControlSharedWatchError } = await import(sharedRedisUrl);
-
-const rewritten = applyModuleReplacements(readRepositoryFile("control/shared.js"), [
-  [/from "shared-redis"/g, `from ${JSON.stringify(sharedRedisUrl)}`],
-  [/from "control-s3"/g, `from ${JSON.stringify(controlS3Url)}`],
-  [/from "control-r2"/g, `from ${JSON.stringify(controlR2Url)}`],
-  [/from "shared-auth-token"/g, `from ${JSON.stringify(sharedAuthTokenUrl)}`],
-  [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
-  [/from "shared-bounded-body"/g, `from ${JSON.stringify(sharedBoundedBodyUrl)}`],
-  [/from "shared-errors"/g, `from ${JSON.stringify(sharedErrorsUrl)}`],
-  [/from "shared-random-id"/g, `from ${JSON.stringify(sharedRandomIdUrl)}`],
-  [/from "shared-redis-lock"/g, `from ${JSON.stringify(sharedRedisLockUrl)}`],
-  [/from "shared-queue-keys"/g, `from ${JSON.stringify(sharedQueueKeysUrl)}`],
-  [/from "shared-respond"/g, `from ${JSON.stringify(sharedRespondUrl)}`],
-  [/from "control-lib"/g, `from ${JSON.stringify(controlLibUrl)}`],
-  [/from "shared-s3-cleanup-lifecycle"/g, `from ${JSON.stringify(sharedS3CleanupLifecycleUrl)}`],
-  [/from "shared-version"/g, `from ${JSON.stringify(sharedVersionUrl)}`],
-  [/from "shared-internal-auth"/g, `from ${JSON.stringify(sharedInternalAuthUrl())}`],
-  [/from "shared-observability"/g, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)}`],
-  [/from "control-workflows-client"/g, `from ${JSON.stringify(controlWorkflowsClientUrl)}`],
-  [/from "control-errors"/g, `from ${JSON.stringify(controlErrorsUrl)}`],
-  [/from "control-optimistic"/g, `from ${JSON.stringify(controlOptimisticUrl)}`],
-  [/from "control-json-body"/g, `from ${JSON.stringify(controlJsonBodyUrl)}`],
-]);
 
 const {
   authErrorBody,
@@ -114,7 +53,7 @@ const {
   runOptimistic,
   secretEnvelopeErrorResponse,
   state,
-} = await import(moduleDataUrl(rewritten));
+} = await import(controlSharedUrl);
 
 /**
  * @param {import("node:test").TestContext} t

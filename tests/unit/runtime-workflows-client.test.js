@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { Workflow } from "../../runtime/workflows-client.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
+import { withMockedProperty, withMockedPropertyDescriptor } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 
 const workflowLimits = /** @type {{ createBatchMax: number }} */ (
@@ -49,16 +50,13 @@ test("Workflow instances do not expose the private caller through patched Functi
   });
   const originalBind = Function.prototype.bind;
   let privateBindCalls = 0;
-  Function.prototype.bind = function (/** @type {any[]} */ ...args) {
+  await withMockedProperty(Function.prototype, "bind", function (/** @type {any[]} */ ...args) {
     if (this.name === "#call") privateBindCalls += 1;
     return Reflect.apply(originalBind, this, args);
-  };
-  try {
+  }, async () => {
     const instance = await workflow.get("inst-1");
     await instance.status();
-  } finally {
-    Function.prototype.bind = originalBind;
-  }
+  });
 
   assert.equal(privateBindCalls, 0);
   assert.deepEqual(endpoints, [
@@ -137,17 +135,13 @@ test("Workflow request identity ignores tenant-patched JSON.stringify", async ()
       },
     },
   });
-  const originalStringify = JSON.stringify;
   let patchedCalls = 0;
-  JSON.stringify = () => {
+  await withMockedProperty(JSON, "stringify", () => {
     patchedCalls += 1;
     return '{"ns":"victim","worker":"victim-worker"}';
-  };
-  try {
+  }, async () => {
     await workflow.create({ id: "inst-1" });
-  } finally {
-    JSON.stringify = originalStringify;
-  }
+  });
 
   assert.equal(patchedCalls, 0);
   assert.deepEqual(JSON.parse(capturedBody), {
@@ -178,24 +172,16 @@ test("Workflow request identity ignores inherited Object.prototype.toJSON", asyn
       },
     },
   });
-  const previousDescriptor = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
   let inheritedCalls = 0;
-  Object.defineProperty(Object.prototype, "toJSON", {
+  await withMockedPropertyDescriptor(/** @type {any} */ (Object.prototype), "toJSON", {
     configurable: true,
     value() {
       inheritedCalls += 1;
       return { ns: "victim", worker: "victim-worker" };
     },
-  });
-  try {
+  }, async () => {
     await workflow.create({ id: "inst-2" });
-  } finally {
-    if (previousDescriptor) {
-      Object.defineProperty(Object.prototype, "toJSON", previousDescriptor);
-    } else {
-      delete /** @type {{ toJSON?: unknown }} */ (Object.prototype).toJSON;
-    }
-  }
+  });
 
   assert.equal(inheritedCalls, 0);
   const body = JSON.parse(capturedBody);

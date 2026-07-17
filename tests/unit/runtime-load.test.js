@@ -29,14 +29,14 @@ const SHARED_WORKER_ID_URL = repositoryFileUrl("shared/worker-id.js");
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
-const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
 const SHARED_REDIS_URL = sharedRedisStubUrl();
 const { libUrl: CONTROL_LIB_URL } = await compileControlGraph();
 const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl(
   "runtime/load/env-build.js",
   importSpecifierReplacements({
     "shared-ns-pattern": SHARED_NS_PATTERN_URL,
-    "shared-version": SHARED_VERSION_URL,
+    "shared-worker-contract": WORKER_CONTRACT_URL,
   })
 );
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
@@ -45,7 +45,7 @@ const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-b
   "control-lib": CONTROL_LIB_URL,
   "runtime-load-env-build": RUNTIME_ENV_BUILD_URL,
   "shared-secret-envelope": SHARED_SECRET_ENVELOPE_URL,
-  "shared-version": SHARED_VERSION_URL,
+  "shared-worker-contract": WORKER_CONTRACT_URL,
   "shared-redis": SHARED_REDIS_URL,
 }));
 const RUNTIME_LOAD_INJECTION_SOURCES_URL = stubRuntimeInjectionSourcesUrl();
@@ -109,7 +109,7 @@ const LOAD_TEST_RUNTIME_DIR = path.join(LOAD_TEST_DIR, "runtime");
 const LOAD_TEST_SUBMODULE_DIR = path.join(LOAD_TEST_RUNTIME_DIR, "load");
 const ENV_BUILD_SOURCE = readRepositoryModuleSource("runtime/load/env-build.js", importSpecifierReplacements({
   "shared-ns-pattern": SHARED_NS_PATTERN_URL,
-  "shared-version": SHARED_VERSION_URL,
+  "shared-worker-contract": WORKER_CONTRACT_URL,
 }));
 mkdirSync(LOAD_TEST_SUBMODULE_DIR, { recursive: true });
 writeFileSync(path.join(LOAD_TEST_RUNTIME_DIR, "load.js"), src);

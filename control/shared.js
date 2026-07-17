@@ -22,7 +22,7 @@ import {
   formatDeleteLockToken,
   hostDeclarationsKey,
   namespaceFromHostsKey,
-} from "shared-version";
+} from "shared-worker-contract";
 import {
   S3_CLEANUP_QUEUE_NAME,
   S3_CLEANUP_TASK_ID_PREFIX,

@@ -26,7 +26,7 @@ import {
   parseDeleteLockKind,
   parseVersion,
   workerVersionsKey,
-} from "../../shared/version.js";
+} from "../../shared/worker-contract.js";
 
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 

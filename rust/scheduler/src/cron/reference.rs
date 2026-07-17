@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use wdl_rust_common::{
     identity::{is_valid_route_ns, is_valid_worker_name},
-    version::parse_version_tag,
+    worker_contract::parse_version_tag,
 };
 
 const CRON_WORKER_KEY_PREFIX: &str = "crons:";

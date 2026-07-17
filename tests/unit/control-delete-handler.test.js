@@ -15,14 +15,14 @@ import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 const { libUrl: productionControlLibUrl, lifecycleIndexesUrl } = await compileControlGraph();
-const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 
 const controlSharedExtraSource = `
 export {
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   ROUTES_FLUSH_CHANNEL,
-} from ${JSON.stringify(sharedVersionUrl)};
+} from ${JSON.stringify(workerContractUrl)};
 export async function acquireDeleteLock(_redis, _ns, _worker, kind) {
   /** @type {any} */ (globalThis).__deleteHandlerState.lockKinds.push(kind);
   return "lock-token";
@@ -129,7 +129,7 @@ export function decodePatternProjection(raw) {
 const deletePlanSrc = applyModuleReplacements(readRepositoryFile("control/handlers/delete-plan.js"), [
   [/from "control-lib";/, `from ${JSON.stringify(controlLibUrl)};`],
   [/from "control-lifecycle-indexes";/, `from ${JSON.stringify(lifecycleIndexesUrl)};`],
-  [/from "shared-version";/, `from ${JSON.stringify(sharedVersionUrl)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(workerContractUrl)};`],
   [/from "shared-secret-keys";/, `from ${JSON.stringify(sharedSecretKeysUrl)};`],
 ]);
 const deletePlanUrl = moduleDataUrl(deletePlanSrc);
@@ -140,7 +140,7 @@ const { handle } = await importControlHandler("control/handlers/delete.js", {
   replacements: {
     "control-lib": controlLibUrl,
     "control-lifecycle-indexes": lifecycleIndexesUrl,
-    "shared-version": sharedVersionUrl,
+    "shared-worker-contract": workerContractUrl,
     "shared-secret-keys": sharedSecretKeysUrl,
     "shared-redis": sharedRedisUrl,
     "shared-queue-keys": sharedQueueKeysUrl,
@@ -156,7 +156,7 @@ const { handle: handleVersions } = await importControlHandler("control/handlers/
   replacements: {
     "control-lib": controlLibUrl,
     "control-lifecycle-indexes": lifecycleIndexesUrl,
-    "shared-version": sharedVersionUrl,
+    "shared-worker-contract": workerContractUrl,
     "shared-secret-keys": sharedSecretKeysUrl,
     "shared-redis": sharedRedisUrl,
   },

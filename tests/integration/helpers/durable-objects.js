@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { fnv1a32CodeUnits } from "../../../shared/fnv1a32.js";
-import { doStorageIdKey } from "../../../shared/version.js";
+import { doStorageIdKey } from "../../../shared/worker-contract.js";
 import { doAlarmJobIdForStorage } from "../../helpers/do-alarm-job-id.js";
 import { serviceInternalPost, serviceInternalPostAsync } from "./internal-http.js";
 import {

@@ -1,5 +1,5 @@
 import { isValidRouteNs, isValidRuntimeLoadNs, WORKER_NAME_RE } from "./ns-pattern.js";
-import { parseVersion } from "./version.js";
+import { parseVersion } from "./worker-contract.js";
 
 /** @param {{ namespace: unknown, worker: unknown, version: unknown }} id */
 export function formatWorkerId({ namespace, worker, version }) {

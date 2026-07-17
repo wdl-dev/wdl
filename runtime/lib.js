@@ -2,7 +2,7 @@
 
 import { base64ToBytes, bytesToBase64 } from "shared-base64";
 import { WORKER_NAME_RE, isValidRouteNs } from "shared-ns-pattern";
-import { parseVersion } from "shared-version";
+import { parseVersion } from "shared-worker-contract";
 import {
   DEFAULT_DYNAMIC_WORKER_COMPATIBILITY_DATE,
   ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE,

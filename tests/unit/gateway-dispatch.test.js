@@ -9,7 +9,7 @@ import {
 
 const nsPatternUrl = repositoryModuleDataUrl("shared/ns-pattern.js");
 const gatewayLibUrl = repositoryModuleDataUrl("gateway/lib.js");
-const versionUrl = repositoryModuleDataUrl("shared/version.js");
+const workerContractUrl = repositoryModuleDataUrl("shared/worker-contract.js");
 const gatewayRuntimeUrl = moduleDataUrl(`
 function deps() {
   return globalThis.__gatewayDispatchTestDeps;
@@ -43,7 +43,7 @@ const dispatchSource = applyModuleReplacements(readRepositoryFile("gateway/dispa
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(nsPatternUrl)};`],
   [/from "gateway-lib";/, `from ${JSON.stringify(gatewayLibUrl)};`],
   [/from "gateway-runtime";/, `from ${JSON.stringify(gatewayRuntimeUrl)};`],
-  [/from "shared-version";/, `from ${JSON.stringify(versionUrl)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(workerContractUrl)};`],
 ]);
 
 const { resolveGatewayDispatch } = await import(moduleDataUrl(dispatchSource));

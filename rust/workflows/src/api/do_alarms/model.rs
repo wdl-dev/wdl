@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use wdl_rust_common::hash::fnv1a32;
 use wdl_rust_common::identity::{is_valid_runtime_load_ns, is_valid_worker_name};
-use wdl_rust_common::version::parse_version_tag;
+use wdl_rust_common::worker_contract::parse_version_tag;
 
 use crate::{
     DoAlarmJobKeys, WorkflowError, WorkflowResult, do_alarm_by_worker_key, do_alarm_job_id,

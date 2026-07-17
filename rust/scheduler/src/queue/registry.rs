@@ -5,7 +5,7 @@ use std::sync::Arc;
 use redis::{AsyncCommands, Value};
 use wdl_rust_common::identity::{is_valid_route_ns, is_valid_worker_name};
 use wdl_rust_common::queue_keys::is_valid_queue_name;
-use wdl_rust_common::version::parse_version_tag;
+use wdl_rust_common::worker_contract::parse_version_tag;
 
 use crate::{
     AppState, CONSUMER_GROUP, MAX_BATCH_SIZE_CAP, QueueState, SchedulerResult, indexed_data_keys,

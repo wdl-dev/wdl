@@ -10,11 +10,16 @@ import {
   PLATFORM_TIER_RESERVED_NS,
   ROUTES_ALLOWED_RESERVED_NS,
   WORKER_NAME_RE,
+  WORKFLOW_NAME_RE,
   QUEUE_NAME_RE,
   BINDING_NAME_RE,
   JS_IDENTIFIER_RE,
   WDL_RESERVED_BINDING_RE,
   KV_ID_RE,
+  isValidWorkerName,
+  isValidWorkflowName,
+  isValidQueueName,
+  isValidKvId,
   isValidJsIdentifier,
 } from "../../shared/ns-pattern.js";
 
@@ -145,6 +150,22 @@ test("KV_ID_RE blocks ':' — otherwise id='foo:v'+key='bar' aliases id='foo'+ke
   assert.ok(!KV_ID_RE.test("foo:v"));
   assert.ok(!KV_ID_RE.test("foo/bar"));
   assert.ok(!KV_ID_RE.test("Foo"));
+});
+
+test("name and id predicates apply their canonical regex grammars", () => {
+  /** @type {Array<[(value: unknown) => boolean, string, string]>} */
+  const cases = [
+    [isValidWorkerName, "My_Worker-2", "-worker"],
+    [isValidWorkflowName, "Daily_Report", "workflow/name"],
+    [isValidQueueName, "orders-dlq", "Orders"],
+    [isValidKvId, "session-store", "session:store"],
+  ];
+  for (const [predicate, valid, invalid] of cases) {
+    assert.equal(predicate(valid), true);
+    assert.equal(predicate(invalid), false);
+    assert.equal(predicate(null), false);
+  }
+  assert.equal(WORKFLOW_NAME_RE.test("Daily_Report"), true);
 });
 
 test("BINDING_NAME_RE accepts JS-identifier binding names (CF-compatible)", () => {

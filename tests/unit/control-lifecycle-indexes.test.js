@@ -9,7 +9,7 @@ import {
 const SCHEDULER_PROJECTION_CONTRACT = readRepositoryJson(
   "tests/fixtures/scheduler-projection-contract.json"
 );
-const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
 
 const {
   cronEntryJson,
@@ -36,7 +36,7 @@ const workersIndexKey = (ns) => \`workers:\${ns}\`;`],
   [/import \{ QUEUE_CONSUMER_INDEX_KEY, queueConsumerKey \} from "shared-queue-keys";/,
     `const QUEUE_CONSUMER_INDEX_KEY = "queue-consumer-index";
 const queueConsumerKey = (ns, queue) => \`queue-consumer:\${ns}:\${queue}\`;`],
-  [/from "shared-version"/, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
+  [/from "shared-worker-contract"/, `from ${JSON.stringify(WORKER_CONTRACT_URL)}`],
 ]);
 
 function recordMulti() {

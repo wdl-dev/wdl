@@ -56,7 +56,7 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelopes
 
 `worker:<ns>:<name>:v:<int>` uses a positive JavaScript-safe integer version in the
 key, not the `"v<int>"` tag. Test fixtures that seed Redis directly must use
-`shared/version.js#bundleKey`.
+`shared/worker-contract.js#bundleKey`.
 
 `namespaces` is an active worker gate. It is populated when a namespace has an active
 worker route and may be removed when the last active worker is deleted.
@@ -65,8 +65,8 @@ in this set. Auth reads this set during delegated token issue only as a best-eff
 generated-namespace collision signal, not as a permanent namespace registry.
 
 `routes:<ns>` and `worker-versions:<ns>:<name>` are constructed only through
-`shared/version.js#routesKey` / `#workerVersionsKey` (and their Rust mirror
-`rust/common/src/version.rs#routes_key` / `#worker_versions_key`). Control is the
+`shared/worker-contract.js#routesKey` / `#workerVersionsKey` (and their Rust mirror
+`rust/common/src/worker_contract.rs#routes_key` / `#worker_versions_key`). Control is the
 sole writer; sanctioned readers are gateway and workflows. Gateway reads it for
 route resolution. Workflows reads it for active export resolution during workflow
 create / verify, and for internal DO alarm retargeting when a fired alarm's

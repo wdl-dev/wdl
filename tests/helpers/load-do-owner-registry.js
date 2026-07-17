@@ -17,7 +17,7 @@ const PROTOCOL_URL = doProtocolDataUrl();
 const FAKE_REDIS_URL = repositoryFileUrl("tests/helpers/mocks/fake-redis.js");
 const SHARED_ENV_URL = repositoryFileUrl("shared/env.js");
 const SHARED_OWNER_LEASE_URL = sharedModuleDataUrl("shared/owner-lease.js");
-const SHARED_VERSION_URL = sharedModuleDataUrl("shared/version.js");
+const WORKER_CONTRACT_URL = sharedModuleDataUrl("shared/worker-contract.js");
 const SHARED_OWNER_PROTOCOL_URL = repositoryModuleDataUrl("shared/owner-protocol.js", [
   [/from "shared-owner-lease";/, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)};`],
 ]);
@@ -130,7 +130,7 @@ const src = applyModuleReplacements(readRepositoryFile("do-runtime/owner-registr
   [/from "shared-env";/, `from ${JSON.stringify(SHARED_ENV_URL)};`],
   [/from "shared-owner-lease";/, `from ${JSON.stringify(SHARED_OWNER_LEASE_URL)};`],
   [/from "shared-owner-protocol";/, `from ${JSON.stringify(SHARED_OWNER_PROTOCOL_URL)};`],
-  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],
   [/from "do-runtime-state";/, `from ${JSON.stringify(stateUrl)};`],
   [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],

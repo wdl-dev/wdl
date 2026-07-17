@@ -6,7 +6,7 @@ import {
 import { createHttpRequestScope } from "shared-request-scope";
 import { discardResponseBody, prometheusResponse, rebuildResponseWithHeaders } from "shared-respond";
 import { boundedPositiveIntEnv } from "shared-owner-lease";
-import { parseVersion } from "shared-version";
+import { parseVersion } from "shared-worker-contract";
 import { formatWorkerId } from "shared-worker-id";
 import { WdlDoHostActor } from "do-runtime-actor";
 import { handleAlarmDispatch } from "do-runtime-alarm-dispatch";

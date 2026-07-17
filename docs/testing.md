@@ -178,12 +178,13 @@ Prefer the narrow helper that matches the response or fixture source:
 | Integration workflow scenarios | Worker source and DB2 helpers from `tests/integration/helpers/workflows-scenarios.js` | Use for workflow demo source, workflow state keys, ready-shard helpers, and direct runtime replay helpers while keeping workflow assertions in the test file. |
 | Integration fetch worker source wrapper | `workerFetchCallerSource(...)` from `tests/integration/helpers/worker-source.js` | Use when several tests need the same `export default { async fetch(req, env) { try { ... } } }` caller shell while keeping the business body inline and readable. |
 | Unit control handler module graph | `createControlHandlerState(...)` / `importControlHandler(...)` from `tests/helpers/control-handler-harness.js` | Use for `control/handlers/*` tests that need `control-shared` state, logs, env, metrics, Redis, or backend service stubs. |
+| Unit Control shared module graph | `compileControlSharedGraph(...)` / `compileControlSharedDependencies(...)` from `tests/helpers/load-control-shared.js` | Use for tests of `control/shared.js` and synthetic shared stubs instead of rebuilding its production-backed dependency graph. |
 | Unit runtime R2 binding module graph | `makeR2Bucket(...)` and fetch installers from `tests/helpers/load-runtime-r2-binding.js` | Use for `runtime/bindings/r2.js` host-surface tests instead of rebuilding the R2 module replacement graph in each file. |
 | Unit D1/DO owner-client module graph | `loadD1OwnerClient(...)` / `loadDoOwnerClient(...)` from `tests/helpers/load-d1-owner-client.js` and `tests/helpers/load-do-owner-client.js` | Use for owner forwarding client tests instead of rebuilding the state, protocol, internal-auth, and owner-forwarder replacement graph in each file. |
 | Unit auth entrypoint harness state | `authMockState(...)`, `authLogs(...)`, and `lastAuthLog(...)` from `tests/helpers/load-auth-index.js` | Tests should not read or write `globalThis.__authMockState` directly; the global is private storage for the harness' inline module mocks. |
 | Unit/integration Redis command parity | `redisConformanceCases` from `tests/helpers/redis-conformance-cases.js` | Add a shared case when fake Redis and the real integration Redis wrapper must agree on command semantics. Run `tests/unit/fake-redis.test.js` and the focused Redis conformance integration file. |
 | Mocked `fetch` call recording | `makeRecordingFetch(...)` / `withRecordingFetch(...)` from `tests/helpers/mock-fetch.js` | Use `capture` when the test needs a custom call record shape. |
-| Temporary global or property replacement | `withMockedGlobal(...)` / `withMockedProperty(...)` from `tests/helpers/mock-global.js` | Use install-style helpers only when the file owns before/after cleanup. |
+| Temporary global or property replacement | `withMockedGlobal(...)`, `withMockedProperty(...)`, and `withMockedPropertyDescriptor(...)` from `tests/helpers/mock-global.js` | Use install-style helpers only when the file owns before/after cleanup. |
 | Console or stream output capture | `withCapturedConsole(...)`, `installConsoleMethodCapture(...)`, or `installStreamWriteCapture(...)` from `tests/helpers/output-capture.js` | Keep direct `console.*` and `process.stderr/stdout.write` replacement out of test files. |
 | Simple sleeps or polling | `delay(...)` / `waitUntil(...)` from `tests/helpers/timing.js` or the integration `stack.js` re-export | Do not replace sleeps inside tenant worker source strings; those are fixture code under test. |
 | Temporary directories | `withTempDir(...)` from `tests/helpers/temp-dir.js` | Prefer scoped cleanup over hand-written `mkdtemp` / `rm` `finally` blocks. |
@@ -201,7 +202,7 @@ Prefer the narrow helper that matches the response or fixture source:
   static-analysis utilities (`source-scan.js`), and `mocks/` for mocked
   Cloudflare runtime surfaces. `load-shared-module.js` owns repository module
   source loading, data-URL construction, and import-specifier rewrite helpers;
-  load import-free contract owners such as `shared/version.js` and
+  load import-free contract owners such as `shared/worker-contract.js` and
   `shared/ns-pattern.js` directly with `repositoryFileUrl(...)` instead of
   reimplementing their grammar in a stub.
   Use it instead of ad hoc `readFileSync(...).replace(...)` chains when a test
@@ -218,10 +219,10 @@ Prefer the narrow helper that matches the response or fixture source:
   `control-handler-harness.js` owns the common `control-shared` harness for
   `control/handlers/*` unit tests. Use it for state/env/log/metrics/backend
   injection instead of declaring another file-local `control-shared` data-URL
-  stub when the handler under test follows the shared control entrypoint
-  shape. The harness stub imports pure response, bounded JSON body, coded abort,
-  and optimistic retry contracts from their production owners; keep only
-  state-bound wiring and test instrumentation local to the stub.
+  stub when the handler under test follows the shared control entrypoint shape.
+  `load-control-shared.js` owns the production-backed dependency graph used by
+  both the real `control/shared.js` test and that synthetic harness stub. Keep
+  only state-bound wiring and test instrumentation local to the stub.
   `load-runtime-r2-binding.js` owns the `runtime/bindings/r2.js` host binding
   module graph, including SigV4Client/fetch recording hooks. Extend that loader
   for additional R2 host tests instead of copying the replacement graph back
@@ -250,8 +251,11 @@ Prefer the narrow helper that matches the response or fixture source:
   non-`__` `globalThis.<name> = ...` assignments and direct
   `console.log/warn/error/info = ...` assignments outside those helpers. It
   also rejects direct assignments to common built-in/global property hooks used
-  by tests (`process.stderr.*`, `AbortSignal.*`, `Object.*`,
-  `Headers.prototype.*`, and `Array.prototype.*`).
+  by tests (`process.stderr.*`, `AbortSignal.*`, `Object.*`, `JSON.*`,
+  `Headers.prototype.*`, `Array.prototype.*`, and `Function.prototype.*`).
+  Built-in prototype descriptor mocks use
+  `withMockedPropertyDescriptor(...)` instead of direct
+  `Object.defineProperty(...)` save/restore blocks.
   Unit tests do not boot Docker; they import through these loaders.
 - `tests/integration/helpers/` is the integration-test helper home. Each
   concern lives in its own sub-module — `admin-http.js`, `cli.js`,

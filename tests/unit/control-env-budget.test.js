@@ -12,13 +12,13 @@ import { encryptSecretValue } from "../../shared/secret-envelope.js";
 
 const { libUrl: controlLibUrl } = await compileControlGraph();
 const secretEnvelopeUrl = repositoryFileUrl("shared/secret-envelope.js");
-const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 const sharedRedisUrl = sharedRedisStubUrl();
 const runtimeEnvBuildUrl = repositoryModuleDataUrl(
   "runtime/load/env-build.js",
   importSpecifierReplacements({
     "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
-    "shared-version": repositoryFileUrl("shared/version.js"),
+    "shared-worker-contract": repositoryFileUrl("shared/worker-contract.js"),
   })
 );
 const {
@@ -37,7 +37,7 @@ const {
   "control-lib": controlLibUrl,
   "runtime-load-env-build": runtimeEnvBuildUrl,
   "shared-secret-envelope": secretEnvelopeUrl,
-  "shared-version": sharedVersionUrl,
+  "shared-worker-contract": workerContractUrl,
   "shared-redis": sharedRedisUrl,
 }));
 

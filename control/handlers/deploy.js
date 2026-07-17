@@ -45,7 +45,7 @@ import {
   nextVersionKey,
   parseVersion,
   routesKey,
-} from "shared-version";
+} from "shared-worker-contract";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import {
   isReservedNs,

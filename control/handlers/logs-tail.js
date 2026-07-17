@@ -6,12 +6,8 @@
 import { RedisSession, redisDbFromEnv } from "shared-redis";
 import { envValueOr } from "shared-env";
 import { PLATFORM_TIER_RESERVED_NS } from "shared-auth-roles";
-import { isReservedNs, WORKER_NAME_RE } from "shared-ns-pattern";
-import {
-  compareStreamIds,
-  isValidResumeId,
-  isValidWorkerName,
-} from "control-lib";
+import { isReservedNs, isValidWorkerName, WORKER_NAME_RE } from "shared-ns-pattern";
+import { compareStreamIds, isValidResumeId } from "control-lib";
 import { controlTailRedis, errMessage, jsonError, requireControlLog } from "control-shared";
 
 const TAIL_ACTIVATION_CHANNEL = "logs:tail:active";

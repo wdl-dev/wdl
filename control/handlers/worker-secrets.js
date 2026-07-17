@@ -28,7 +28,7 @@ import {
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
-import { deleteLockKey, routesKey, workerVersionsKey } from "shared-version";
+import { deleteLockKey, routesKey, workerVersionsKey } from "shared-worker-contract";
 
 const MAX_SECRET_ATTEMPTS = 5;
 

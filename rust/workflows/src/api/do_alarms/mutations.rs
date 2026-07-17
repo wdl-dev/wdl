@@ -1,7 +1,7 @@
 use serde_json::json;
 use wdl_rust_common::redis_eval::append_eval_cmd;
 use wdl_rust_common::time::{now_ms, random_hex_64};
-use wdl_rust_common::version::do_storage_id_key;
+use wdl_rust_common::worker_contract::do_storage_id_key;
 
 use crate::{AppState, LogLevel, WorkflowResult, do_alarm_by_worker_key, log};
 

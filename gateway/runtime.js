@@ -19,7 +19,7 @@ import {
   ROUTES_FLUSH_CHANNEL,
   patternsKey,
   routesKey,
-} from "shared-version";
+} from "shared-worker-contract";
 import { isCanonicalPatternHost, sortPatterns } from "gateway-lib";
 
 /** @type {Set<string> | null} */

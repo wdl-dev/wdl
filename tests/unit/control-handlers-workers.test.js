@@ -24,7 +24,7 @@ const workersHandlerState = installControlHandlerState(
   })
 );
 const controlSharedUrl = controlSharedHarnessUrl(WORKERS_HANDLER_STATE_GLOBAL);
-const { libUrl: controlLibUrl, sharedVersionUrl } = await compileControlGraph();
+const { libUrl: controlLibUrl, workerContractUrl } = await compileControlGraph();
 
 const sharedSecretKeysUrl = repositoryFileUrl("shared/secret-keys.js");
 
@@ -32,7 +32,7 @@ const src = applyModuleReplacements(readRepositoryFile("control/handlers/workers
   [/from "control-shared";/, `from ${JSON.stringify(controlSharedUrl)};`],
   [/from "control-lib";/, `from ${JSON.stringify(controlLibUrl)};`],
   [/from "shared-secret-keys";/, `from ${JSON.stringify(sharedSecretKeysUrl)};`],
-  [/from "shared-version";/, `from ${JSON.stringify(sharedVersionUrl)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(workerContractUrl)};`],
 ]);
 
 const { handle } = await import(moduleDataUrl(src));

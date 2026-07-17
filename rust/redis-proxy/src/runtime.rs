@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 use wdl_rust_common::identity::is_valid_runtime_worker_identity;
-use wdl_rust_common::version::worker_bundle_key;
+use wdl_rust_common::worker_contract::worker_bundle_key;
 
 use crate::{AppError, AppResult, AppState};
 
@@ -25,7 +25,7 @@ pub(crate) struct RuntimeLoadParams {
 }
 // Bundles are stored by integer ("worker:<ns>:<name>:v:42"), not the
 // `v<int>` tag. Strip the prefix and validate so the Redis key shape
-// matches how the control-plane writer (shared/version.js#bundleKey)
+// matches how the control-plane writer (shared/worker-contract.js#bundleKey)
 // spells it; otherwise a cold load misses the hash entirely.
 pub(crate) fn bundle_key(ns: &str, worker: &str, version: &str) -> AppResult<String> {
     if !is_valid_runtime_worker_identity(ns, worker, version) {

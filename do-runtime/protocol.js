@@ -21,7 +21,7 @@ import {
 } from "shared-bounded-body";
 import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 import { isValidRuntimeLoadNs, WORKER_NAME_RE } from "shared-ns-pattern";
-import { parseVersion } from "shared-version";
+import { parseVersion } from "shared-worker-contract";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";

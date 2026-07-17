@@ -17,7 +17,6 @@ export function configuredPublicUrl() { return null; }
 export function platformVersionFromPackageJson() { return "wdl.test"; }
 export function projectAccessPrincipal(principal) { return principal || null; }
 export function isAdminAcceptableNs(ns) { return typeof ns === "string" && !ns.includes("_"); }
-export function isValidWorkerName() { return true; }
 function withAction(route, action) { return action ? { ...route, action } : route; }
 export function parseControlRoute(pathname, method) {
   if (pathname === "/reload") return withAction({ kind: "reload", scopeRoute: "reload" }, method === "POST" ? "system.reload" : null);

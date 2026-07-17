@@ -7,7 +7,7 @@ import {
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
-import { parseVersion } from "shared-version";
+import { parseVersion } from "shared-worker-contract";
 import { promoteWithRoutes, RoutingError } from "control-routing";
 import { platformDomainFromEnv } from "shared-ns-pattern";
 

@@ -34,7 +34,7 @@ import {
   patternsKey,
   routesKey,
   workerVersionsKey,
-} from "shared-version";
+} from "shared-worker-contract";
 import { workerSecretsKey } from "shared-secret-keys";
 import { decodeBulk, WatchError } from "shared-redis";
 import { queueConsumerScanPrefix } from "shared-queue-keys";

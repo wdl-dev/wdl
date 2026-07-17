@@ -37,11 +37,11 @@ secrets:<ns>                    Hash, namespace-level WDL-ENC envelope
 secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 ```
 
-`worker:<ns>:<name>:v:<int>` 的 key 使用 JavaScript safe-integer 范围内的正整数 version，而不是 `"v<int>"` tag。直接 seed Redis 的测试 fixture 必须使用 `shared/version.js#bundleKey`。
+`worker:<ns>:<name>:v:<int>` 的 key 使用 JavaScript safe-integer 范围内的正整数 version，而不是 `"v<int>"` tag。直接 seed Redis 的测试 fixture 必须使用 `shared/worker-contract.js#bundleKey`。
 
 `namespaces` 是 active worker gate。有 active worker route 时会加入，最后一个 active worker 删除时可能移除。Namespace-level secrets 和 data-plane state 等资源可以比这个 set membership 活得更久。Auth 在 delegated token issue 时只把它作为 generated-namespace collision 的 best-effort 信号读取，而不是永久 namespace registry。
 
-`routes:<ns>` 和 `worker-versions:<ns>:<name>` 只能通过 `shared/version.js#routesKey` / `#workerVersionsKey`（以及它们的 Rust 镜像 `rust/common/src/version.rs#routes_key` / `#worker_versions_key`）构造。Control 是唯一 writer；sanctioned reader 是 gateway（route resolution）和 workflows。workflows 有两条读取路径：workflow create / verify 时的 active-export resolution，以及 fired alarm 的 scheduled version 已不再 retained 时的 internal DO alarm retarget。改 key 语法时必须同时更新 JS helper、Rust helper 和所有 reader。
+`routes:<ns>` 和 `worker-versions:<ns>:<name>` 只能通过 `shared/worker-contract.js#routesKey` / `#workerVersionsKey`（以及它们的 Rust 镜像 `rust/common/src/worker_contract.rs#routes_key` / `#worker_versions_key`）构造。Control 是唯一 writer；sanctioned reader 是 gateway（route resolution）和 workflows。workflows 有两条读取路径：workflow create / verify 时的 active-export resolution，以及 fired alarm 的 scheduled version 已不再 retained 时的 internal DO alarm retarget。改 key 语法时必须同时更新 JS helper、Rust helper 和所有 reader。
 
 `workers:<ns>` 表示这个 worker 有 worker-owned lifecycle state：retained bundle、active projection、worker-level secrets 或 workflow definitions。Secret-only 和 definitions-only worker 会被有意列出，并可以 whole-delete。
 

@@ -14,6 +14,9 @@ import {
   RESERVED_TENANT_NS,
   WDL_RESERVED_ENTRYPOINT_RE,
   MAX_DO_CLASS_NAME_BYTES,
+  isValidKvId,
+  isValidQueueName,
+  isValidWorkerName,
   isValidJsIdentifier,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
@@ -22,9 +25,6 @@ import { errorMessage } from "shared-errors";
 import {
   NS_RE,
   isAdminAcceptableNs,
-  isValidKvId,
-  isValidQueueName,
-  isValidWorkerName,
   MAX_QUEUE_DELAY_SECONDS,
 } from "control-lib";
 

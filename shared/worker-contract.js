@@ -1,7 +1,5 @@
-// Single point of truth for the `v<int>` version tag shape used in
-// `routes:<ns>` values and worker-bundle keys. Enforcing it here prevents
-// silent format drift between the INCR path (new deploys) and the HGET
-// path (promote / versions listing).
+// Canonical JS contract for immutable worker versions and the control-plane
+// Redis keys and channels shared across in-tree tiers.
 
 const VERSION_RE = /^v([1-9][0-9]*)$/;
 
@@ -34,20 +32,20 @@ export function parseVersion(tag) {
 // another subkey even if someone ever writes Redis directly.
 /**
  * @param {string} ns
- * @param {string} name
+ * @param {string} worker
  * @param {unknown} version
  * @returns {string}
  */
-export function bundleKey(ns, name, version) {
+export function bundleKey(ns, worker, version) {
   const n = parseVersion(version);
   if (n == null) throw new Error(`invalid version tag ${JSON.stringify(version)}`);
-  return `worker:${ns}:${name}:v:${n}`;
+  return `worker:${ns}:${worker}:v:${n}`;
 }
 
 // Monotonic immutable-version allocator for one logical worker.
-/** @param {string} ns @param {string} name */
-export function nextVersionKey(ns, name) {
-  return `worker:${ns}:${name}:next_version`;
+/** @param {string} ns @param {string} worker */
+export function nextVersionKey(ns, worker) {
+  return `worker:${ns}:${worker}:next_version`;
 }
 
 // Active-route hash for a namespace: field=workerName, value=`v<int>`. Control

@@ -3,9 +3,9 @@
 // Redis-facing writes that consume these live in control/routing.js.
 
 import { parseCron } from "shared-cron-time";
-import { QUEUE_NAME_RE } from "shared-ns-pattern";
+import { isValidQueueName, QUEUE_NAME_RE } from "shared-ns-pattern";
 import { errorMessage } from "shared-errors";
-import { isValidQueueName, MAX_QUEUE_DELAY_SECONDS } from "control-lib";
+import { MAX_QUEUE_DELAY_SECONDS } from "control-lib";
 
 /**
  * @typedef {import("shared-route-projection").PatternProjection} PatternProjection

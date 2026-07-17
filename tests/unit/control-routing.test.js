@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
 import { loadControlRouting } from "../helpers/load-control-routing.js";
 import { loadControlLib } from "../helpers/load-control-lib.js";
-import { bundleKey as productionBundleKey } from "../../shared/version.js";
+import { bundleKey as productionBundleKey } from "../../shared/worker-contract.js";
 
 const { promoteWithRoutes, bumpActiveAndPromote, reconcileHosts } =
   await loadControlRouting();

@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::time::now_ms;
-use wdl_rust_common::version::{
+use wdl_rust_common::worker_contract::{
     do_storage_id_key, parse_version_tag, routes_key, worker_versions_key,
 };
 

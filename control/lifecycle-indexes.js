@@ -5,7 +5,7 @@ import {
   workersIndexKey,
 } from "control-lib";
 import { QUEUE_CONSUMER_INDEX_KEY, queueConsumerKey } from "shared-queue-keys";
-import { workerVersionsKey } from "shared-version";
+import { workerVersionsKey } from "shared-worker-contract";
 
 export const CRON_WORKER_INDEX_KEY = "cron:index:workers";
 

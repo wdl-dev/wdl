@@ -239,6 +239,20 @@ test("shared primitive owners stay canonical", () => {
   assert.deepEqual(offenders, [], `shared primitive owners must stay canonical:\n${offenders.join("\n")}`);
 });
 
+test("name grammar predicates live with the shared regex owner", () => {
+  const owner = withoutLineComments(readRepoFile("shared/ns-pattern.js"));
+  const controlLib = withoutLineComments(readRepoFile("control/lib.js"));
+  for (const name of [
+    "isValidWorkerName",
+    "isValidWorkflowName",
+    "isValidQueueName",
+    "isValidKvId",
+  ]) {
+    assert.match(owner, new RegExp(`export function ${name}\\(`), name);
+    assert.doesNotMatch(controlLib, new RegExp(`function ${name}\\(`), name);
+  }
+});
+
 test("secret Redis key construction uses the shared JS owner", () => {
   const allowed = new Set(["shared/secret-keys.js"]);
   const offenders = [];
@@ -294,8 +308,8 @@ test("control handlers do not bypass jsonError for literal error responses", () 
   assert.deepEqual(offenders, []);
 });
 
-test("route/version registry keys go through shared/version.js helpers", () => {
-  // Only shared/version.js may hold the literal. The `${...}`-anchored regex
+test("worker control-plane registry keys go through shared/worker-contract.js helpers", () => {
+  // Only shared/worker-contract.js may hold the literal. The `${...}`-anchored regex
   // matches key construction, so channel names ("routes:invalidate"/"flush")
   // and comments are skipped.
   const files = [
@@ -304,7 +318,7 @@ test("route/version registry keys go through shared/version.js helpers", () => {
     ...GATEWAY_FILES,
     ...DO_RUNTIME_FILES,
     ...RUNTIME_FILES,
-  ].filter((file) => file !== "shared/version.js");
+  ].filter((file) => file !== "shared/worker-contract.js");
   const offenders = [];
   for (const file of files) {
     const source = withoutLineComments(readRepoFile(file));
@@ -329,11 +343,11 @@ test("route/version registry keys go through shared/version.js helpers", () => {
       offenders.push(`${file}: inline host-declarations prefix — use hostDeclarationsKey(host)`);
     }
   }
-  // Rust services are production readers too; rust/common/version.rs holds the
-  // only literals (mirror of shared/version.js), every other crate must call
+  // Rust services are production readers too; rust/common/worker_contract.rs holds the
+  // only literals (mirror of shared/worker-contract.js), every other crate must call
   // routes_key()/worker_versions_key()/do_storage_id_key().
   const rustOffenderFiles = rustFiles("rust").filter(
-    (file) => file !== "rust/common/src/version.rs"
+    (file) => file !== "rust/common/src/worker_contract.rs"
   );
   for (const file of rustOffenderFiles) {
     const source = withoutLineComments(readRepoFile(file));
@@ -345,7 +359,7 @@ test("route/version registry keys go through shared/version.js helpers", () => {
       offenders.push(`${file}: inline worker:do-storage: — use do_storage_id_key(ns, worker)`);
     }
   }
-  assert.deepEqual(offenders, [], `route/version key literals must use shared helpers:\n${offenders.join("\n")}`);
+  assert.deepEqual(offenders, [], `worker contract key literals must use shared helpers:\n${offenders.join("\n")}`);
 });
 
 test("platform domain configuration uses the shared normalized owner", () => {
@@ -374,17 +388,19 @@ test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
 });
 
 test("worker delete lock key stays aligned across control and workflows", () => {
-  const sharedVersion = withoutLineComments(readRepoFile("shared/version.js"));
-  const commonVersion = withoutLineComments(readRepoFile("rust/common/src/version.rs"));
+  const workerContract = withoutLineComments(readRepoFile("shared/worker-contract.js"));
+  const commonWorkerContract = withoutLineComments(
+    readRepoFile("rust/common/src/worker_contract.rs"),
+  );
   const controlShared = withoutLineComments(readRepoFile("control/shared.js"));
   const workflowsActiveExport = withoutLineComments(readRepoFile("rust/workflows/src/api/active_export.rs"));
 
-  assert.match(sharedVersion, /`worker-delete-lock:\$\{ns\}:\$\{worker\}`/);
-  assert.match(commonVersion, /format!\("worker-delete-lock:\{ns\}:\{worker\}"\)/);
+  assert.match(workerContract, /`worker-delete-lock:\$\{ns\}:\$\{worker\}`/);
+  assert.match(commonWorkerContract, /format!\("worker-delete-lock:\{ns\}:\{worker\}"\)/);
   assert.match(controlShared, /\bdeleteLockKey\(ns, worker\)/);
   assert.match(workflowsActiveExport, /\bworker_delete_lock_key\(ns, worker\)/);
 
-  const rustOwner = "rust/common/src/version.rs";
+  const rustOwner = "rust/common/src/worker_contract.rs";
   const offenders = rustFiles("rust").filter((file) =>
     file !== rustOwner && withoutLineComments(readRepoFile(file)).includes("worker-delete-lock:")
   );
@@ -892,14 +908,14 @@ test("Redis command metric allow-list covers shared Redis wrappers", () => {
 });
 
 test("declared-host Redis key literals stay aligned across control, gateway, and docs", () => {
-  const version = withoutLineComments(readRepoFile("shared/version.js"));
+  const workerContract = withoutLineComments(readRepoFile("shared/worker-contract.js"));
   const shared = withoutLineComments(readRepoFile("control/shared.js"));
   const routing = withoutLineComments(readRepoFile("control/routing.js"));
   const gateway = withoutLineComments(readRepoFile("gateway/runtime.js"));
   const layoutEn = readRepoFile("docs/redis-key-layout.md");
   const layoutZh = readRepoFile("docs/redis-key-layout.zh.md");
-  const declaredHostsKey = extractStringConst(version, "DECLARED_HOSTS_KEY");
-  const hostDeclarationsPrefix = extractStringConst(version, "HOST_DECLARATIONS_PREFIX");
+  const declaredHostsKey = extractStringConst(workerContract, "DECLARED_HOSTS_KEY");
+  const hostDeclarationsPrefix = extractStringConst(workerContract, "HOST_DECLARATIONS_PREFIX");
 
   assert.match(routing, new RegExp(`\\bDECLARED_HOSTS_KEY\\b`));
   assert.match(routing, /\bhostDeclarationsKey\b/);
@@ -1424,6 +1440,51 @@ test("local compose services inherit shared image anchors", () => {
     }
   }
   assert.deepEqual(offenders, []);
+});
+
+test("published compose services reset local builds on each service", () => {
+  const source = readRepoFile("docker-compose.images.yml");
+  const serviceGroups = /** @type {Array<[string, string[]]>} */ ([
+    ["rust-published", [
+      "redis-proxy-user",
+      "redis-proxy-system",
+      "redis-proxy-do",
+      "scheduler",
+      "workflows",
+    ]],
+    ["workerd-published", [
+      "user-runtime",
+      "system-runtime",
+      "gateway",
+      "d1-runtime",
+      "d1-runtime-a",
+      "d1-runtime-b",
+      "d1-runtime-c",
+      "do-runtime",
+      "do-runtime-a",
+      "do-runtime-b",
+      "do-runtime-c",
+    ]],
+  ]);
+  const servicesIndex = source.indexOf("services:");
+  assert.notEqual(servicesIndex, -1);
+  const anchorSource = source.slice(0, servicesIndex);
+  assert.doesNotMatch(anchorSource, /build:\s*!reset\b/);
+  const expectedServices = serviceGroups.flatMap(([, services]) => services).toSorted();
+  const actualServices = [...source.matchAll(/^ {2}([a-z0-9-]+):$/gm)]
+    .map((match) => match[1])
+    .toSorted();
+  assert.deepEqual(actualServices, expectedServices);
+  for (const [anchor, services] of serviceGroups) {
+    for (const service of services) {
+      const block = new RegExp(
+        String.raw`(?:^|\n) {2}${RegExp.escape(service)}:\n((?: {4}[^\n]*(?:\n|$))*)`,
+      ).exec(source)?.[1];
+      assert.ok(block, `${service} must exist in the published-image overlay`);
+      assert.match(block, new RegExp(String.raw`^ {4}<<: \*${anchor}$`, "m"), service);
+      assert.match(block, /^ {4}build: !reset null$/m, service);
+    }
+  }
 });
 
 test("local compose runtime profiles keep base services enabled by default", () => {
@@ -2375,7 +2436,7 @@ test("worker-id helper carries its relative grammar dependencies in workerd conf
     const source = readRepoFile(file);
     assert.match(source, /name = "shared-worker-id"/, file);
     assert.match(source, /name = "ns-pattern\.js"/, file);
-    assert.match(source, /name = "version\.js"/, file);
+    assert.match(source, /name = "worker-contract\.js"/, file);
   }
 });
 

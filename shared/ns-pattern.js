@@ -124,10 +124,20 @@ export function isValidRuntimeLoadNs(ns) {
 // common Wrangler-style uppercase and underscore spellings.
 export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$/;
 
+/** @param {unknown} name */
+export function isValidWorkerName(name) {
+  return typeof name === "string" && WORKER_NAME_RE.test(name);
+}
+
 // Workflow names are class-adjacent user identifiers rather than Redis queue
 // ids, so they follow the worker-name family while keeping a smaller bound for
 // UI/API surfaces.
 export const WORKFLOW_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/** @param {unknown} name */
+export function isValidWorkflowName(name) {
+  return typeof name === "string" && WORKFLOW_NAME_RE.test(name);
+}
 
 // Workflow instance ids are embedded into DB2 keys and tab-delimited scheduler
 // tokens. Keep them URL/key friendly and delimiter-free.
@@ -137,6 +147,11 @@ export const WORKFLOW_KEY_RE = /^wf_[0-9a-f]{32}$/;
 // `:` in an id would corrupt `queue:<ns>:<id>:s` parsing; camelCase
 // would split one logical queue across two log-field entries.
 export const QUEUE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** @param {unknown} name */
+export function isValidQueueName(name) {
+  return typeof name === "string" && QUEUE_NAME_RE.test(name);
+}
 
 // JS identifier — CF wrangler's "valid JavaScript variable name".
 // `__proto__` / `constructor` guard is separate in RESERVED_OBJECT_KEYS
@@ -234,6 +249,11 @@ export const WDL_RESERVED_ENTRYPOINT_RE = /^__Wdl[A-Za-z0-9_]*__$/;
 // `:` in the id would alias `kv:<ns>:foo:v:bar` between (id="foo:v",
 // key="bar") and (id="foo", key="v:bar").
 export const KV_ID_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** @param {unknown} id */
+export function isValidKvId(id) {
+  return typeof id === "string" && KV_ID_RE.test(id);
+}
 
 // D1 API ids are stable control-plane references and may retain the
 // mixed-case/underscore forms accepted by the existing D1 model.

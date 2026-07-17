@@ -50,11 +50,11 @@ export function createHttpRequestScope({ request }) {
 }
 `);
 const workerIdUrl = repositoryFileUrl("shared/worker-id.js");
-const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 const actorUrl = stub(`export class WdlDoHostActor {}`);
 const alarmDispatchUrl = stub(readRepositoryModuleSource("do-runtime/alarm-dispatch.js", importSpecifierReplacements({
   "shared-worker-id": workerIdUrl,
-  "shared-version": sharedVersionUrl,
+  "shared-worker-contract": workerContractUrl,
   "do-runtime-protocol": protocolUrl,
   "do-runtime-http": httpUrl,
 })));
@@ -130,7 +130,7 @@ const IMPORT_STUBS = {
   "shared-owner-lease": sharedOwnerLeaseUrl,
   "shared-respond": sharedRespondUrl,
   "shared-request-scope": requestScopeUrl,
-  "shared-version": sharedVersionUrl,
+  "shared-worker-contract": workerContractUrl,
   "shared-worker-id": workerIdUrl,
   "do-runtime-actor": actorUrl,
   "do-runtime-alarm-dispatch": alarmDispatchUrl,

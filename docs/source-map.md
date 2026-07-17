@@ -71,7 +71,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | Platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
-| `shared/version.js` | Worker version formatting plus worker, route-plane, lifecycle, DO owner-scope key, and route-invalidation channel helpers. |
+| `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner-scope key, and route-invalidation channel helpers. |
 | `shared/workerd-compat-flags.js` | Pinned upstream mirror of experimental enable flags plus WDL-owned dynamic-worker date and error-serialization policy. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |
@@ -101,7 +101,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `rust/scheduler/` | Cron, queue, delayed queue, orphan migration, and workflow tick scheduler. |
 | `rust/workflows/` | Workflows service, DB 2 state machine, and internal DO alarm backend jobs. |
 | `rust/supervisor/` | D1/DO supervisor binaries. |
-| `rust/common/` | Shared Rust utilities such as time, logging, internal-auth matching, Redis connection primitives, and metrics primitives. |
+| `rust/common/` | Shared Rust utilities such as worker-contract grammar and keys, time, logging, internal-auth matching, Redis connection primitives, and metrics primitives. |
 
 ## System Workers, Fixtures, And Examples
 

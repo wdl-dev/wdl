@@ -199,7 +199,7 @@ export function parseQueueConsumers() {
 }
 `);
 
-const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 
 const sharedRedisUrl = sharedRedisStubUrl();
 
@@ -319,7 +319,7 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
     "control-bundle": controlBundleUrl,
     "control-bindings": controlBindingsUrl,
     "control-topology": controlTopologyUrl,
-    "shared-version": sharedVersionUrl,
+    "shared-worker-contract": workerContractUrl,
     "shared-redis": sharedRedisUrl,
     "shared-ns-pattern": sharedNsUrl,
     "shared-auth-roles": sharedAuthRolesUrl,

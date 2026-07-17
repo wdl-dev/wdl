@@ -1,5 +1,5 @@
 use serde_json::Value as JsonValue;
-use wdl_rust_common::version::{routes_key, worker_delete_lock_key};
+use wdl_rust_common::worker_contract::{routes_key, worker_delete_lock_key};
 
 use crate::{AppState, WorkflowError, WorkflowResult};
 

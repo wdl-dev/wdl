@@ -1,7 +1,7 @@
 import { decryptSecretValue } from "shared-secret-envelope";
 import { BundleMetaError, parseBundleMeta } from "control-lib";
 import { buildWorkerEnv, doAlarmBindingProps } from "runtime-load-env-build";
-import { bundleKey } from "shared-version";
+import { bundleKey } from "shared-worker-contract";
 import { WatchError } from "shared-redis";
 
 export { BundleMetaError };

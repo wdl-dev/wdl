@@ -11,9 +11,8 @@ import {
   platformVersionFromPackageJson,
   projectAccessPrincipal,
   isAdminAcceptableNs,
-  isValidWorkerName,
 } from "control-lib";
-import { configuredHostname, WORKER_NAME_RE } from "shared-ns-pattern";
+import { configuredHostname, isValidWorkerName, WORKER_NAME_RE } from "shared-ns-pattern";
 import {
   ensureInit,
   authorizeControlRequest,

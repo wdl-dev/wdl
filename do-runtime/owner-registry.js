@@ -49,7 +49,7 @@ import {
   deleteLockKey,
   doStorageIdKey,
   parseDeleteLockKind,
-} from "shared-version";
+} from "shared-worker-contract";
 
 const DEFAULT_OWNER_TTL_SECONDS = 120;
 const DEFAULT_RENEW_CONCURRENCY = 8;

@@ -3,36 +3,22 @@
 // helpers.
 
 import {
-  freshRepositoryModuleDataUrl,
   moduleDataUrl,
-  repositoryFileUrl,
 } from "./load-shared-module.js";
+import { compileControlSharedDependencies } from "./load-control-shared.js";
 import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
 import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
 
-const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
-const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
-const SHARED_INTERNAL_AUTH_URL = repositoryFileUrl("shared/internal-auth.js");
-const SHARED_RANDOM_ID_URL = repositoryFileUrl("shared/random-id.js");
-const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
-const SHARED_OPTIMISTIC_RETRY_URL = repositoryFileUrl("shared/optimistic-retry.js");
-const CONTROL_ERRORS_URL = freshRepositoryModuleDataUrl("control/errors.js", [
-  [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
-  [/from "shared-respond"/g, `from ${JSON.stringify(SHARED_RESPOND_URL)}`],
-]);
-const CONTROL_WORKFLOWS_CLIENT_URL = freshRepositoryModuleDataUrl("control/workflows-client.js", [
-  [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
-  [/from "control-errors"/g, `from ${JSON.stringify(CONTROL_ERRORS_URL)}`],
-]);
-const CONTROL_OPTIMISTIC_REDIS_URL = sharedRedisStubUrl();
-const CONTROL_OPTIMISTIC_URL = freshRepositoryModuleDataUrl("control/optimistic.js", [
-  [/from "shared-redis"/g, `from ${JSON.stringify(CONTROL_OPTIMISTIC_REDIS_URL)}`],
-  [/from "shared-optimistic-retry"/g, `from ${JSON.stringify(SHARED_OPTIMISTIC_RETRY_URL)}`],
-]);
-const CONTROL_JSON_BODY_URL = freshRepositoryModuleDataUrl("control/json-body.js", [
-  [/from "shared-bounded-body"/g, `from ${JSON.stringify(SHARED_BOUNDED_BODY_URL)}`],
-  [/from "shared-respond"/g, `from ${JSON.stringify(SHARED_RESPOND_URL)}`],
-]);
+const {
+  sharedErrorsUrl: SHARED_ERRORS_URL,
+  sharedInternalAuthUrl: SHARED_INTERNAL_AUTH_URL,
+  sharedRandomIdUrl: SHARED_RANDOM_ID_URL,
+  sharedRespondUrl: SHARED_RESPOND_URL,
+  controlErrorsUrl: CONTROL_ERRORS_URL,
+  controlWorkflowsClientUrl: CONTROL_WORKFLOWS_CLIENT_URL,
+  controlOptimisticUrl: CONTROL_OPTIMISTIC_URL,
+  controlJsonBodyUrl: CONTROL_JSON_BODY_URL,
+} = compileControlSharedDependencies({ sharedRedisUrl: sharedRedisStubUrl() });
 
 const CONTROL_SHARED_BASE = `
 import { jsonError, jsonResponse, sanitizeJsonErrorDetails } from ${JSON.stringify(SHARED_RESPOND_URL)};

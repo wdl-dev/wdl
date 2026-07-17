@@ -1,9 +1,4 @@
-import {
-  isValidWorkerName,
-  isValidWorkflowName,
-  parseBundleMeta,
-  workflowDefsKey,
-} from "control-lib";
+import { parseBundleMeta, workflowDefsKey } from "control-lib";
 import {
   ControlAbort,
   codedErrorLogFields,
@@ -15,12 +10,14 @@ import {
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
-import { bundleKey, routesKey } from "shared-version";
+import { bundleKey, routesKey } from "shared-worker-contract";
 import {
   BINDING_NAME_RE,
   WORKER_NAME_RE,
   WORKFLOW_NAME_RE,
   WORKFLOW_KEY_RE,
+  isValidWorkerName,
+  isValidWorkflowName,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
 

@@ -42,7 +42,7 @@ import {
   createTokenLock,
   releaseTokenLock,
 } from "shared-redis-lock";
-import { NAMESPACES_KEY } from "shared-version";
+import { NAMESPACES_KEY } from "shared-worker-contract";
 
 const utf8Decoder = new TextDecoder();
 

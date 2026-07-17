@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { bundleKey } from "../../../shared/version.js";
+import { bundleKey } from "../../../shared/worker-contract.js";
 
 import { redisHGetJson } from "./redis.js";
 

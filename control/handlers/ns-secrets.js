@@ -16,7 +16,7 @@ import {
   invalidSecretMutationKeyResponse,
   readEncryptedSecretPutValue,
 } from "control-handlers-secret-put";
-import { routesKey, workerVersionsKey } from "shared-version";
+import { routesKey, workerVersionsKey } from "shared-worker-contract";
 import { nsSecretsKey, workerSecretsKey } from "shared-secret-keys";
 import { workersIndexKey } from "control-lib";
 import {

@@ -18,7 +18,7 @@ import {
   nsHostsKey,
   patternsKey,
   routesKey,
-} from "shared-version";
+} from "shared-worker-contract";
 import { workerSecretsKey } from "shared-secret-keys";
 
 /**

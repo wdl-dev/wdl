@@ -4,7 +4,7 @@
 //! environment parsing, log-level parsing and common log-line formatting, HTTP
 //! health probes, shutdown/in-flight tracking, metric storage/formatting, FNV hashing,
 //! request-id sanitization, internal-auth constants/token matching, identity grammar,
-//! version and queue-key helpers, Redis connection and EVAL command helpers, time
+//! worker contract and queue-key helpers, Redis connection and EVAL command helpers, time
 //! helpers, structured error fields, test-only process-environment overrides, and
 //! UTF-8-safe text helpers. It should not own service protocols, Redis schemas,
 //! dispatch policy, or lifecycle behavior.
@@ -26,7 +26,7 @@ pub mod shutdown;
 pub mod test_env;
 pub mod text;
 pub mod time;
-pub mod version;
+pub mod worker_contract;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures {

@@ -1,13 +1,12 @@
-//! Worker version and bundle-key helpers shared by Rust services.
+//! Worker version grammar and control-plane key helpers shared by Rust services.
 //!
 //! JavaScript control code owns the canonical version tag grammar in
-//! `shared/version.js`: `v[1-9][0-9]*`, bounded to JavaScript's safe-integer
-//! range. Rust services that read bundle hashes
-//! must use the same grammar so malformed Redis state fails closed instead of
-//! silently normalizing to another worker version.
+//! `shared/worker-contract.js`: `v[1-9][0-9]*`, bounded to JavaScript's safe-integer
+//! range. Rust services that read bundle hashes must use the same grammar so malformed
+//! Redis state fails closed instead of silently normalizing to another worker version.
 //!
 //! `routes_key` / `worker_versions_key` / `worker_delete_lock_key` /
-//! `do_storage_id_key` mirror `shared/version.js`'s lifecycle key builders.
+//! `do_storage_id_key` mirror `shared/worker-contract.js`'s lifecycle key builders.
 //! Control owns these keys; Rust readers must build them here so a future
 //! key-grammar change updates JS and Rust together.
 

@@ -1,43 +1,57 @@
 x-rust-published: &rust-published
   image: docker.io/getwdl/wdl-rust:latest
   pull_policy: always
-  build: !reset null
 
 x-workerd-published: &workerd-published
   image: docker.io/getwdl/wdl-workerd:latest
   pull_policy: always
-  build: !reset null
 
 services:
   redis-proxy-user:
     <<: *rust-published
+    build: !reset null
   redis-proxy-system:
     <<: *rust-published
+    build: !reset null
   redis-proxy-do:
     <<: *rust-published
+    build: !reset null
   scheduler:
     <<: *rust-published
+    build: !reset null
   workflows:
     <<: *rust-published
+    build: !reset null
   user-runtime:
     <<: *workerd-published
+    build: !reset null
   system-runtime:
     <<: *workerd-published
+    build: !reset null
   gateway:
     <<: *workerd-published
+    build: !reset null
   d1-runtime:
     <<: *workerd-published
+    build: !reset null
   d1-runtime-a:
     <<: *workerd-published
+    build: !reset null
   d1-runtime-b:
     <<: *workerd-published
+    build: !reset null
   d1-runtime-c:
     <<: *workerd-published
+    build: !reset null
   do-runtime:
     <<: *workerd-published
+    build: !reset null
   do-runtime-a:
     <<: *workerd-published
+    build: !reset null
   do-runtime-b:
     <<: *workerd-published
+    build: !reset null
   do-runtime-c:
     <<: *workerd-published
+    build: !reset null

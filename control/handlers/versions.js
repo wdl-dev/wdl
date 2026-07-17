@@ -30,7 +30,7 @@ import {
   parseVersion,
   routesKey,
   workerVersionsKey,
-} from "shared-version";
+} from "shared-worker-contract";
 import { workerSecretsKey } from "shared-secret-keys";
 
 const MAX_DELETE_ATTEMPTS = 5;

@@ -19,11 +19,11 @@ import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 
 const SECRET_ENVELOPE_URL = repositoryFileUrl("shared/secret-envelope.js");
-const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
 const SHARED_SECRET_KEYS_URL = repositoryFileUrl("shared/secret-keys.js");
 const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl("runtime/load/env-build.js", [
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
-  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],
 ]);
 const { libUrl: PRODUCTION_CONTROL_LIB_URL } = await compileControlGraph();
 const env = {
@@ -150,7 +150,7 @@ function envBudgetUrl() {
     [/from "control-lib";/, `from ${JSON.stringify(PRODUCTION_CONTROL_LIB_URL)};`],
     [/from "runtime-load-env-build";/, `from ${JSON.stringify(RUNTIME_ENV_BUILD_URL)};`],
     [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
-    [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+    [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],
     [/from "shared-redis";/, `from ${JSON.stringify(sharedRedisUrl)};`],
   ]);
   return moduleDataUrl(source);
@@ -172,7 +172,7 @@ const src = applyModuleReplacements(readRepositoryFile("control/handlers/ns-secr
   [/from "control-shared";/, `from ${JSON.stringify(controlSharedUrl)};`],
   [/from "control-lib";/, `from ${JSON.stringify(controlLibStubUrl)};`],
   [/from "control-handlers-secret-put";/, `from ${JSON.stringify(secretPutUrl(controlSharedUrl, controlLibStubUrl))};`],
-  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],
   [/from "control-env-budget";/, `from ${JSON.stringify(envBudgetUrl())};`],
   [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
   [/from "shared-secret-keys";/, `from ${JSON.stringify(SHARED_SECRET_KEYS_URL)};`],
@@ -737,7 +737,7 @@ const workerSrc = applyModuleReplacements(readRepositoryFile("control/handlers/w
   [/from "control-handlers-secret-put";/, `from ${JSON.stringify(workerSecretPutUrl)};`],
   [/from "control-lifecycle-indexes";/, `from ${JSON.stringify(lifecycleStubUrl)};`],
   [/from "control-routing";/, `from ${JSON.stringify(CONTROL_ROUTING_TEST_URL)};`],
-  [/from "shared-version";/, `from ${JSON.stringify(SHARED_VERSION_URL)};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],
   [/from "control-env-budget";/, `from ${JSON.stringify(envBudgetUrl())};`],
   [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
   [/from "shared-secret-keys";/, `from ${JSON.stringify(SHARED_SECRET_KEYS_URL)};`],

@@ -1,17 +1,13 @@
-// Name grammar predicates, lifecycle Redis key helpers, bundle metadata
-// parsing, referrer-index encode/decode, URL → {gate, ns} classifier,
-// and secret-key validation. Pure data-shaping only.
+// Lifecycle Redis key helpers, bundle metadata parsing, referrer-index
+// encode/decode, URL → {gate, ns} classifier, and secret-key validation.
+// Pure data-shaping only.
 
 import {
   NS_PATTERN,
   RESERVED_OBJECT_KEYS,
   isReservedNs,
   RESERVED_TENANT_NS,
-  WORKER_NAME_RE,
-  WORKFLOW_NAME_RE,
-  QUEUE_NAME_RE,
   WDL_RESERVED_BINDING_RE,
-  KV_ID_RE,
 } from "shared-ns-pattern";
 import { decodePatternProjection } from "shared-route-projection";
 import { PLATFORM_TIER_RESERVED_NS, ROLES } from "shared-auth-roles";
@@ -92,26 +88,6 @@ export function bundleAssetPrefix(meta) {
   if (!assets || typeof assets !== "object" || Array.isArray(assets)) return null;
   const prefix = /** @type {Record<string, unknown>} */ (assets).prefix;
   return typeof prefix === "string" ? prefix : null;
-}
-
-/** @param {unknown} name */
-export function isValidWorkerName(name) {
-  return typeof name === "string" && WORKER_NAME_RE.test(name);
-}
-
-/** @param {unknown} name */
-export function isValidWorkflowName(name) {
-  return typeof name === "string" && WORKFLOW_NAME_RE.test(name);
-}
-
-/** @param {unknown} name */
-export function isValidQueueName(name) {
-  return typeof name === "string" && QUEUE_NAME_RE.test(name);
-}
-
-/** @param {unknown} id */
-export function isValidKvId(id) {
-  return typeof id === "string" && KV_ID_RE.test(id);
 }
 
 // Relaxes NS_PATTERN to also accept reserved `__<x>__` ns (so JSRPC-only

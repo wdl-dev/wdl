@@ -9,7 +9,7 @@ import {
 } from "control-shared";
 import { reconcileHosts, RoutingError } from "control-routing";
 import { platformDomainFromEnv } from "shared-ns-pattern";
-import { hostsKey } from "shared-version";
+import { hostsKey } from "shared-worker-contract";
 
 /**
  * @param {{ request: Request, env: Record<string, unknown>, method: string, nsName: string, requestId: string }} args

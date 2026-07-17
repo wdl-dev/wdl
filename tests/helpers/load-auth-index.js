@@ -22,7 +22,7 @@ const SHARED_REDIS_LOCK_URL = freshRepositoryModuleDataUrl("shared/redis-lock.js
   [/from "shared-random-id"/g, `from ${JSON.stringify(SHARED_RANDOM_ID_URL)}`],
 ]);
 const SHARED_OBSERVABILITY_URL = repositoryFileUrl("shared/observability.js");
-const SHARED_VERSION_URL = repositoryFileUrl("shared/version.js");
+const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
 
 const SHARED_REDIS_MOCK = `
 function ensureState() {
@@ -379,7 +379,7 @@ export function resolveDelegatedIssueTemplate(templateId, configured = createDel
     [/from "auth-runtime"/g, `from ${JSON.stringify(authRuntimeUrl)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
     [/from "shared-redis-lock"/g, `from ${JSON.stringify(SHARED_REDIS_LOCK_URL)}`],
-    [/from "shared-version"/g, `from ${JSON.stringify(SHARED_VERSION_URL)}`],
+    [/from "shared-worker-contract"/g, `from ${JSON.stringify(WORKER_CONTRACT_URL)}`],
   ]);
   const indexMod = await import(indexUrl);
 

@@ -36,7 +36,7 @@ import {
   parseVersion,
   patternsKey,
   routesKey,
-} from "shared-version";
+} from "shared-worker-contract";
 import { errorMessage } from "shared-errors";
 import { diffCrons, nextFireMs, slotMsFor } from "control-cron-index";
 import { isReservedNs, ROUTES_ALLOWED_RESERVED_NS } from "shared-ns-pattern";

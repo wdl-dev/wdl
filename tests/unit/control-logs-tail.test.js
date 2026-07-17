@@ -59,10 +59,9 @@ function loadLogsTailHandler(options = {}) {
       `from ${JSON.stringify(SHARED_NS_PATTERN_URL)};`,
     ],
     [
-      /import \{\n {2}compareStreamIds,\n {2}isValidResumeId,\n {2}isValidWorkerName,\n\} from "control-lib";/,
+      /import \{ compareStreamIds, isValidResumeId \} from "control-lib";/,
       `const compareStreamIds = () => 0;
-       const isValidResumeId = () => true;
-       const isValidWorkerName = (name) => WORKER_NAME_RE.test(name);`,
+       const isValidResumeId = () => true;`,
     ],
     [
       /import \{ controlTailRedis, errMessage, jsonError, requireControlLog \} from "control-shared";/,

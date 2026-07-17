@@ -19,7 +19,7 @@ const ACTIVE_WORKFLOW_KEY = `wf_${"1".repeat(32)}`;
 const NEW_WORKFLOW_KEY = `wf_${"2".repeat(32)}`;
 const RETIRED_WORKFLOW_KEY = `wf_${"3".repeat(32)}`;
 const { libUrl: productionControlLibUrl } = await compileControlGraph();
-const sharedVersionUrl = repositoryFileUrl("shared/version.js");
+const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 
 const { handle } = await importControlHandler("control/handlers/workflows.js", {
@@ -28,7 +28,7 @@ const { handle } = await importControlHandler("control/handlers/workflows.js", {
     "control-lib": productionControlLibUrl,
     "shared-internal-auth": sharedInternalAuthUrl(),
     "shared-ns-pattern": sharedNsPatternUrl,
-    "shared-version": sharedVersionUrl,
+    "shared-worker-contract": workerContractUrl,
   },
 });
 

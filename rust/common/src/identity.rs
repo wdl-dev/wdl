@@ -1,11 +1,11 @@
 //! Runtime worker identity grammar shared by Rust services.
 //!
 //! JavaScript owns the canonical tenant namespace, route namespace, worker-name,
-//! and version grammars in `shared/ns-pattern.js` and `shared/version.js`. Rust
+//! and version grammars in `shared/ns-pattern.js` and `shared/worker-contract.js`. Rust
 //! services that sit on protocol boundaries mirror those rules here so internal
 //! requests cannot reach Redis key shapes that control would never write.
 
-use crate::version::parse_version_tag;
+use crate::worker_contract::parse_version_tag;
 
 pub fn is_valid_tenant_ns(ns: &str) -> bool {
     let bytes = ns.as_bytes();

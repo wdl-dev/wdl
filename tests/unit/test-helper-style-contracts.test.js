@@ -100,8 +100,11 @@ test("test global mocks go through mock-global helpers", () => {
     // Keep this allow-list in sync with the global-property mock targets named
     // in docs/testing.md. A fully generic `object.property =` matcher would
     // reject ordinary fixture setup assignments.
-    if (/\b(?:process\.stderr|AbortSignal|Object|Date|Math|Headers\.prototype|Array\.prototype)\.[A-Za-z_$][\w$]*\s*=(?!=)/.test(source)) {
+    if (/\b(?:process\.stderr|AbortSignal|Object|JSON|Date|Math|Headers\.prototype|Array\.prototype|Function\.prototype)\.[A-Za-z_$][\w$]*\s*=(?!=)/.test(source)) {
       offenders.push(`${file}: use withMockedProperty(...) for built-in global property mocks`);
+    }
+    if (/\bObject\.defineProperty\(\s*(?:Object|Function|Array|Headers|Request|Response|Promise|RegExp)\.prototype\s*,/.test(source)) {
+      offenders.push(`${file}: use withMockedPropertyDescriptor(...) for built-in prototype descriptor mocks`);
     }
   }
   assert.deepEqual(offenders, [], `test global mocks must use tests/helpers/mock-global.js:\n${offenders.join("\n")}`);
