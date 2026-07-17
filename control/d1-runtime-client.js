@@ -261,9 +261,11 @@ function d1RuntimeFailureExtra(extra) {
   return sanitized;
 }
 
+const D1_RUNTIME_CLASSIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
 /** @param {unknown} value @param {string} fallback */
-function d1RuntimeLogToken(value, fallback) {
-  return typeof value === "string" && value ? value : fallback;
+function d1RuntimeClassifierToken(value, fallback) {
+  return typeof value === "string" && D1_RUNTIME_CLASSIFIER_RE.test(value) ? value : fallback;
 }
 
 /**
@@ -274,11 +276,11 @@ function d1RuntimeLogToken(value, fallback) {
  */
 export function d1RuntimeFailureLogFields(result) {
   const body = /** @type {Record<string, unknown>} */ (Object(result?.body || {}));
-  const causeCode = d1RuntimeLogToken(body.causeCode, "");
+  const causeCode = d1RuntimeClassifierToken(body.causeCode, "");
   return {
     ...(typeof result?.status === "number" ? { upstream_status: result.status } : {}),
-    upstream_code: d1RuntimeLogToken(body.error, "d1-runtime-error"),
-    upstream_category: d1RuntimeLogToken(body.category, "internal"),
+    upstream_code: d1RuntimeClassifierToken(body.error, "d1-runtime-error"),
+    upstream_category: d1RuntimeClassifierToken(body.category, "internal"),
     upstream_retryable: body.retryable === true,
     ...(causeCode ? { upstream_cause_code: causeCode } : {}),
   };
@@ -306,8 +308,8 @@ export function d1RuntimeFailure(error, ns, databaseId, result, extra = {}, opti
     return {
       ...publicFields,
       message: "Internal error",
-      upstreamCode: d1RuntimeLogToken(body.error, "d1-runtime-error"),
-      upstreamCategory: d1RuntimeLogToken(body.category, "internal"),
+      upstreamCode: d1RuntimeClassifierToken(body.error, "d1-runtime-error"),
+      upstreamCategory: d1RuntimeClassifierToken(body.category, "internal"),
       upstreamRetryable: body.retryable === true,
       ...(typeof result?.status === "number" ? { upstreamStatus: result.status } : {}),
     };

@@ -18,6 +18,7 @@ import { echoResponseWithRequestId } from "shared-respond";
  *   route: string,
  *   probeRoutes?: string[] | undefined,
  *   extras?: Record<string, unknown> | (() => Record<string, unknown>) | null,
+ *   responseHeaderFilter?: ((headers: Headers) => void) | undefined,
  * }} options
  */
 export function createHttpRequestScope({
@@ -28,6 +29,7 @@ export function createHttpRequestScope({
   route,
   probeRoutes = undefined,
   extras = null,
+  responseHeaderFilter = undefined,
 }) {
   const startedAt = Date.now();
   const requestId = ensureRequestId(request.headers);
@@ -59,7 +61,7 @@ export function createHttpRequestScope({
      */
     respond(response) {
       status = response.status;
-      return echoResponseWithRequestId(response, requestId);
+      return echoResponseWithRequestId(response, requestId, responseHeaderFilter);
     },
 
     /**

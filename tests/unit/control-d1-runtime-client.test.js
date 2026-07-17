@@ -358,6 +358,35 @@ test("control D1 runtime failure redacts 5xx diagnostics and keeps safe extra fi
   });
 });
 
+test("control D1 runtime failure exposes only bounded machine classifiers", () => {
+  const result = {
+    status: 503,
+    body: {
+      error: "panic at /srv/d1-runtime/actor.rs:42",
+      category: `internal-${"x".repeat(128)}`,
+      causeCode: "backend\ntrace",
+      retryable: true,
+    },
+  };
+
+  assert.deepEqual(d1RuntimeFailure("d1_execute_failed", "demo", "db1", result), {
+    error: "d1_execute_failed",
+    namespace: "demo",
+    databaseId: "db1",
+    message: "Internal error",
+    upstreamCode: "d1-runtime-error",
+    upstreamCategory: "internal",
+    upstreamRetryable: true,
+    upstreamStatus: 503,
+  });
+  assert.deepEqual(d1RuntimeFailureLogFields(result), {
+    upstream_status: 503,
+    upstream_code: "d1-runtime-error",
+    upstream_category: "internal",
+    upstream_retryable: true,
+  });
+});
+
 test("control D1 runtime failure uses the outward status to redact upstream 4xx details", () => {
   assert.deepEqual(d1RuntimeFailure("d1_database_initialize_failed", "demo", "db1", {
     status: 400,

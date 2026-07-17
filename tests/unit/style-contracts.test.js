@@ -1454,6 +1454,37 @@ test("local compose runtime profiles keep base services enabled by default", () 
   }
 });
 
+test("Kubernetes stateful runtimes publish Pod-specific owner endpoints", () => {
+  const families = /** @type {Array<[string, number]>} */ ([["d1", 8787], ["do", 8788]]);
+  for (const [family, port] of families) {
+    const serviceName = `${family}-runtime`;
+    const headlessName = `${serviceName}-headless`;
+    const resources = /** @type {Array<Record<string, any>>} */ (
+      yamlDocuments(`deploy/kubernetes/base/${serviceName}.yaml`).map((document) => document.toJS())
+    );
+    const router = resources.find((resource) => resource.kind === "Service" && resource.metadata?.name === serviceName);
+    const headless = resources.find((resource) => resource.kind === "Service" && resource.metadata?.name === headlessName);
+    const statefulSet = resources.find((resource) => resource.kind === "StatefulSet" && resource.metadata?.name === serviceName);
+    assert.ok(router, `${serviceName} router Service must exist`);
+    assert.notEqual(router.spec?.clusterIP, "None", `${serviceName} router must stay load-balanced`);
+    assert.equal(headless?.spec?.clusterIP, "None", `${headlessName} must stay headless`);
+    assert.equal(statefulSet?.spec?.serviceName, headlessName, `${serviceName} StatefulSet serviceName`);
+
+    const container = statefulSet?.spec?.template?.spec?.containers
+      ?.find((/** @type {Record<string, any>} */ entry) => entry.name === serviceName);
+    assert.ok(container, `${serviceName} container must exist`);
+    const env = Object.fromEntries(container.env.map(
+      (/** @type {Record<string, any>} */ entry) => [entry.name, entry]
+    ));
+    assert.equal(env.POD_NAME?.valueFrom?.fieldRef?.fieldPath, "metadata.name");
+    assert.equal(env[`${family.toUpperCase()}_TASK_ID`]?.valueFrom?.fieldRef?.fieldPath, "metadata.name");
+    assert.equal(
+      env[`${family.toUpperCase()}_TASK_ENDPOINT`]?.value,
+      `$(POD_NAME).${headlessName}:${port}`
+    );
+  }
+});
+
 test("Kubernetes runtime families pin the redis-proxy functional contract", () => {
   const files = [
     "deploy/kubernetes/base/user-runtime.yaml",

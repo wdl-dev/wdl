@@ -20,10 +20,12 @@ export function rebuildResponseWithHeaders(response, headers) {
 /**
  * @param {Response & { webSocket?: WebSocket | null }} response
  * @param {string} requestId
+ * @param {((headers: Headers) => void) | undefined} [filterHeaders]
  * @returns {Response}
  */
-export function echoResponseWithRequestId(response, requestId) {
+export function echoResponseWithRequestId(response, requestId, filterHeaders = undefined) {
   const headers = new Headers(response.headers);
+  filterHeaders?.(headers);
   headers.set("x-request-id", requestId);
   return rebuildResponseWithHeaders(response, headers);
 }

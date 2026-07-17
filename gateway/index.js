@@ -88,6 +88,7 @@ export default {
       log,
       route: "worker_fetch",
       extras: () => ({ namespace, worker, version }),
+      responseHeaderFilter: deleteGatewayInternalHeaders,
     });
 
     try {

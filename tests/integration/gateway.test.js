@@ -194,6 +194,34 @@ test("gateway strips client-supplied internal forwarding headers", async () => {
   });
 });
 
+test("gateway strips tenant response internal headers", async () => {
+  await deployAndPromote("gwns-response-headers", "echo", {
+    code: `export default {
+      fetch() {
+        return new Response("ok", {
+          headers: {
+            "x-worker-id": "forged:worker:v1",
+            "x-worker-prefix": "/forged",
+            "x-wdl-internal-auth": "secret",
+            "x-wdl-future-private": "hidden",
+            "x-public": "visible",
+          },
+        });
+      }
+    };`,
+  });
+
+  const res = await gatewayFetch("gwns-response-headers", "/echo");
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), "ok");
+  assert.equal(res.headers["x-worker-id"], undefined);
+  assert.equal(res.headers["x-worker-prefix"], undefined);
+  assert.equal(res.headers["x-wdl-internal-auth"], undefined);
+  assert.equal(res.headers["x-wdl-future-private"], undefined);
+  assert.equal(res.headers["x-public"], "visible");
+  assert.ok(res.headers["x-request-id"]);
+});
+
 test("promoting a new version replaces routed code (pub/sub invalidates cache)", async () => {
   await deployAndPromote("gwns4", "v", {
     code: "export default {fetch(){return new Response('one')}};",

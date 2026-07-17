@@ -29,8 +29,9 @@ The resolved `{ ns, worker, version }` becomes `x-worker-id: <ns>:<worker>:<vers
 and `x-worker-prefix` on the runtime request. Literal `__system__` routes go to
 `RUNTIME_SYSTEM`; all ordinary tenant namespaces go to `RUNTIME_USER`.
 Before forwarding, gateway removes client-supplied `x-worker-id`, `x-worker-prefix`,
-and every `x-wdl-*` header. The same internal-header policy filters WebSocket upgrade
-responses before they cross back onto the public socket.
+and every `x-wdl-*` header. The same internal-header policy filters every forwarded
+response, including failed and successful WebSocket upgrades, before it crosses back
+onto the public socket.
 
 The `ADMIN_HOST` branch is infrastructure traffic, not a loaded-worker request.
 It does not set `x-worker-id` or `x-worker-prefix`. `PLATFORM_DOMAIN` and

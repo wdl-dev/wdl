@@ -95,6 +95,24 @@ test("echoResponseWithRequestId overwrites a pre-existing x-request-id", () => {
   assert.equal(out.headers.get("x-request-id"), "ours-id");
 });
 
+test("echoResponseWithRequestId filters copied headers before stamping the request id", () => {
+  const src = new Response(null, {
+    headers: {
+      "x-private": "hidden",
+      "x-public": "visible",
+      "x-request-id": "upstream-id",
+    },
+  });
+  const out = echoResponseWithRequestId(src, "ours-id", (headers) => {
+    headers.delete("x-private");
+    headers.delete("x-request-id");
+  });
+
+  assert.equal(out.headers.get("x-private"), null);
+  assert.equal(out.headers.get("x-public"), "visible");
+  assert.equal(out.headers.get("x-request-id"), "ours-id");
+});
+
 test("rebuildResponseWithHeaders preserves response fields while replacing headers", async () => {
   const src = new Response("hello", {
     status: 202,

@@ -17,8 +17,9 @@ export function recordRequestComplete(fields) {
 `);
 
 const respondUrl = moduleDataUrl(`
-export function echoResponseWithRequestId(response, requestId) {
+export function echoResponseWithRequestId(response, requestId, filterHeaders) {
   const out = new Response(response.body, response);
+  filterHeaders?.(out.headers);
   out.headers.set("x-request-id", requestId);
   return out;
 }
@@ -55,14 +56,22 @@ test("createHttpRequestScope echoes request id and records final request state",
     log,
     route: "initial",
     extras: () => ({ namespace: "tenant-a" }),
+    responseHeaderFilter(/** @type {Headers} */ headers) {
+      headers.delete("x-private");
+    },
   });
   scope.setRoute("worker_fetch");
   const err = false;
   scope.markError(err);
-  const response = scope.respond(Response.json({ ok: false }, { status: 502 }));
+  const response = scope.respond(Response.json({ ok: false }, {
+    status: 502,
+    headers: { "x-private": "hidden", "x-public": "visible" },
+  }));
   scope.complete();
 
   assert.equal(response.headers.get("x-request-id"), "rid-123");
+  assert.equal(response.headers.get("x-private"), null);
+  assert.equal(response.headers.get("x-public"), "visible");
   assert.equal(scope.requestId, "rid-123");
   assert.equal(observability.calls.complete.length, 1);
   assert.equal(observability.calls.complete[0].route, "worker_fetch");
