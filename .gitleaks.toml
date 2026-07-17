@@ -16,7 +16,7 @@ regexes = [
 description = "AWS SigV4 official example credentials used by parity fixtures."
 regexTarget = "match"
 paths = [
-  '''^tests/unit/aws-sigv4\.test\.js$'''
+  '''^tests/unit/(?:aws4fetch-sigv4|aws-sigv4)\.test\.js$'''
 ]
 regexes = [
   '''AKIDEXAMPLE''',
@@ -28,7 +28,7 @@ condition = "AND"
 description = "Fixed AWS SigV4 signature fixture generated from official example credentials."
 regexTarget = "secret"
 paths = [
-  '''^tests/unit/aws-sigv4\.test\.js$'''
+  '''^tests/unit/(?:aws4fetch-sigv4|aws-sigv4)\.test\.js$'''
 ]
 regexes = [
   '''f54699d16ac946691025f331377c59814b85e1078bc70ea66925457e2549d0a7'''
