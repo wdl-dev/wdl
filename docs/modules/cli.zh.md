@@ -51,7 +51,7 @@ CLI 可以展示：
 - `platformVersion`：control 返回的 WDL platform version。Canonical derivation 记录在 `control-auth.zh.md` 的 `/whoami` 段；CLI 应直接展示这个值，不应从 package metadata 自行重建。
 - `minCliVersion`：当前 platform build 支持的最低下游 CLI 版本。
 - `urls.control`：请求实际到达的 control origin。
-- `urls.namespace`：tenant namespace origin，只在 caller 是 namespace token 且 platform 显式配置 public `PLATFORM_DOMAIN` 时返回。
+- `urls.namespace`：tenant namespace origin，只在 caller 是 namespace token 且 platform 显式配置 `PLATFORM_DOMAIN` 时返回；Control 不校验该 hostname 是否公网可达。
 - `urls.assets`：配置的 public assets base URL，只在 control plane 有安全的绝对 `http`/`https` `ASSETS_CDN_BASE` 时返回；返回前会去掉 query 和 fragment。
 
 CLI 应把这些字段当作 diagnostics 和 user-facing guidance 的默认值，而不是替代用户显式配置。如果 `minCliVersion` 大于当前 CLI 版本，CLI 应在执行 mutating command 前 warning 或 fail。可选 URL hint 缺失时，应展示为 unavailable，不应自行猜测。

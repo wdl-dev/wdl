@@ -1,4 +1,4 @@
-import { validOwnerEndpointForService } from "./_wdl-owner-endpoint.js";
+import { prototypeGetter, validOwnerEndpointForService } from "./_wdl-owner-endpoint.js";
 import { sanitizeRequestId } from "./_wdl-request-id.js";
 
 export const DO_INVOKE_URL = "http://do-runtime/internal/do/invoke";
@@ -40,7 +40,10 @@ const OWNER_RACE_RETRY_CODES = new Set([
   "owner_claim_raced",
   "owner_fence_missing",
   "owner_lease_expired",
+  "stale_owner_storage",
   "owner_lease_too_short",
+  "owner_renew_raced",
+  "task_draining",
 ]);
 const OWNER_HINT_STALE_CODES = new Set([
   "stale_owner_generation",
@@ -82,8 +85,11 @@ const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
+const intrinsicPromiseThen = Promise.prototype.then;
 const intrinsicResponseJson = Response.json;
+const intrinsicReadableStreamCancel = ReadableStream.prototype.cancel;
 const intrinsicReadableStreamGetReader = ReadableStream.prototype.getReader;
+const intrinsicReadableStreamReaderCancel = ReadableStreamDefaultReader.prototype.cancel;
 const intrinsicReadableStreamReaderRead = ReadableStreamDefaultReader.prototype.read;
 const intrinsicReadableStreamReaderReleaseLock = ReadableStreamDefaultReader.prototype.releaseLock;
 const intrinsicSetHas = Set.prototype.has;
@@ -161,19 +167,6 @@ const RPC_RESERVED_METHODS = new Set(["fetch", "alarm"]);
  * }} DoOwnerHintDispatchOptions
  */
 
-// workerd places some WebIDL mixin getters on a parent prototype. Resolve
-// them once before tenant module evaluation rather than reading patched getters.
-/** @param {object | null} prototype @param {string} name */
-function prototypeGetter(prototype, name) {
-  let current = prototype;
-  while (current) {
-    const getter = Object.getOwnPropertyDescriptor(current, name)?.get;
-    if (getter) return getter;
-    current = Object.getPrototypeOf(current);
-  }
-  return undefined;
-}
-
 /** @param {DoBindingProps} props @param {string} objectName */
 export function doOwnerHintCacheKey(props, objectName) {
   return `${props.doStorageId}:${props.className}:${objectName}`;
@@ -216,7 +209,6 @@ function headerValue(headers, name) {
   return intrinsicReflectApply(intrinsicHeadersGet, headers, [name]);
 }
 
-/** @param {Headers} headers @param {string} name */
 /** @param {Headers} headers @param {string} name @param {string} value */
 function headerSet(headers, name, value) {
   intrinsicReflectApply(intrinsicHeadersSet, headers, [name, value]);
@@ -300,7 +292,8 @@ function releaseStreamReader(reader) {
 /** @param {ReadableStreamDefaultReader<Uint8Array>} reader */
 function cancelStreamReader(reader) {
   try {
-    reader.cancel().catch(() => {});
+    const cancellation = intrinsicReflectApply(intrinsicReadableStreamReaderCancel, reader, []);
+    intrinsicReflectApply(intrinsicPromiseThen, cancellation, [undefined, () => {}]);
   } catch {
     // Cancellation is best-effort after the bounded reader has already rejected.
   }
@@ -313,7 +306,8 @@ function cancelResponseBody(response) {
   try {
     const body = responseBody(response);
     if (!body) return;
-    body.cancel().catch(() => {});
+    const cancellation = intrinsicReflectApply(intrinsicReadableStreamCancel, body, []);
+    intrinsicReflectApply(intrinsicPromiseThen, cancellation, [undefined, () => {}]);
   } catch {
     // Best-effort cleanup only; the replacement response owns behavior.
   }
@@ -618,6 +612,11 @@ export function retryableOwnerRaceResponse(response) {
   return code !== null && setHas(OWNER_RACE_RETRY_CODES, code);
 }
 
+/** @param {Response} response */
+function retryableDirectOwnerResponse(response) {
+  return ownerHintFromResponse(response) !== null || retryableOwnerRaceResponse(response);
+}
+
 /**
  * @param {Request} request
  * @param {string | null | undefined} requestId
@@ -793,7 +792,7 @@ async function dispatchDoWithHintCache({
   /** @param {Response} response */
   const finish = async (response) => {
     let result = response;
-    if (retryOwnerRace && retryableOwnerRaceResponse(result)) {
+    if (retryOwnerRace && retryableDirectOwnerResponse(result)) {
       cancelResponseBody(result);
       clearHint();
       result = await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
@@ -810,6 +809,9 @@ async function dispatchDoWithHintCache({
     } catch {
       clearHint();
       return await finish(await replayOrUnavailable());
+    }
+    if (retryOwnerRace && retryableDirectOwnerResponse(direct)) {
+      return await finish(direct);
     }
     if (ownerHintFromResponse(direct) || staleDoOwnerHintResponse(direct)) {
       cancelResponseBody(direct);
@@ -846,13 +848,17 @@ async function dispatchDoWithHintCache({
   let direct;
   try {
     direct = await ownerFetch(ownerRequestUrl(hinted, ownerPath), init);
-    if (ownerEndpointUnavailableResponse(direct)) {
+    if (ownerEndpointUnavailableResponse(direct) &&
+        !(retryOwnerRace && retryableDirectOwnerResponse(direct))) {
       cancelResponseBody(direct);
       throw new Error(`DO owner endpoint returned ${responseStatus(direct)}`);
     }
   } catch {
     clearHint();
     return await finish(await replayOrUnavailable());
+  }
+  if (retryOwnerRace && retryableDirectOwnerResponse(direct)) {
+    return await finish(direct);
   }
   if (ownerHintFromResponse(direct)) {
     cancelResponseBody(direct);

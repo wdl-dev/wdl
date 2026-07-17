@@ -25,6 +25,9 @@ export function bundleToWorkerCode(bundle) { return bundle; }
 `);
 const runtimeLoadUrl = moduleDataUrl(`
 export function buildWorkerEnv() { return {}; }
+export function doAlarmBindingProps({ ns, worker, version, doStorageId }) {
+  return { ns, worker, version, doStorageId };
+}
 export function internalAuthBackend(ctx, env, binding) {
   return typeof ctx.exports.InternalAuthBackend === "function"
     ? ctx.exports.InternalAuthBackend({ props: { binding } })

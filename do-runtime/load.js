@@ -1,6 +1,7 @@
 import { bundleToWorkerCode } from "runtime-lib";
 import {
   buildWorkerEnv,
+  doAlarmBindingProps,
   decodeRuntimeLoadPayload,
   internalAuthBackend,
   runtimeLoadContentTypeMatches,
@@ -201,12 +202,7 @@ export function buildDoEnv(meta, nsSecrets, workerSecrets, env, ctx, invoke) {
     }
   );
   out.__WDL_DO_ALARMS__ = ctx.exports.DoAlarmBinding({
-    props: {
-      ns: invoke.ns,
-      worker: invoke.worker,
-      version: invoke.version,
-      doStorageId: invoke.doStorageId,
-    },
+    props: doAlarmBindingProps(invoke),
   });
   return out;
 }

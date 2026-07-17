@@ -13,7 +13,7 @@ import {
 } from "runtime-load-code-budget";
 import { RUNTIME_INJECTION_SOURCES } from "runtime-load-injection-sources";
 import { buildWorkerEnv } from "runtime-load-env-build";
-export { buildWorkerEnv } from "runtime-load-env-build";
+export { buildWorkerEnv, doAlarmBindingProps } from "runtime-load-env-build";
 
 const REDIS_PROXY_LOAD_TIMEOUT_MS = 8000;
 

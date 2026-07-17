@@ -132,15 +132,15 @@ function cappedReadableStream(stream, operation) {
   });
 }
 
-/** @param {Headers} headers @param {{ strictExpiry?: boolean }} [options] */
-function headersToHttpMetadata(headers, { strictExpiry = false } = {}) {
+/** @param {Headers} headers */
+function headersToHttpMetadata(headers) {
   /** @type {AnyRecord} */
   const out = {};
   for (const [field, header] of R2_HTTP_METADATA_FIELDS) {
     out[field] = headers.get(header) || undefined;
   }
-  const cacheExpiry = r2CacheExpiryFromHeaders(headers, { canonical: strictExpiry });
-  if (strictExpiry && headers.has("expires") && cacheExpiry === undefined) {
+  const cacheExpiry = r2CacheExpiryFromHeaders(headers, { canonical: true });
+  if (headers.has("expires") && cacheExpiry === undefined) {
     throw new TypeError("R2 httpMetadata Expires header must be canonical IMF-fixdate");
   }
   out.cacheExpiry = cacheExpiry;
@@ -150,7 +150,7 @@ function headersToHttpMetadata(headers, { strictExpiry = false } = {}) {
 /** @param {unknown} input */
 function normalizeHttpMetadata(input) {
   if (input == null) return undefined;
-  if (input instanceof Headers) return headersToHttpMetadata(input, { strictExpiry: true });
+  if (input instanceof Headers) return headersToHttpMetadata(input);
   if (typeof input !== "object" || Array.isArray(input)) {
     throw new TypeError("R2 httpMetadata must be an object or Headers");
   }

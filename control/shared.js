@@ -469,6 +469,16 @@ export async function renewDeleteLock(redis, ns, worker, token) {
   );
 }
 
+/** @param {string} ns @param {string} worker @param {string} [version] */
+export function deleteLockExpiredDetails(ns, worker, version) {
+  return {
+    namespace: ns,
+    name: worker,
+    ...(version === undefined ? {} : { version }),
+    message: "worker delete lock expired; retry the request",
+  };
+}
+
 // Compare-and-delete so we don't free a token a TTL-expired-then-reacquired
 // lock holder is depending on.
 /**

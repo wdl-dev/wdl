@@ -15,7 +15,6 @@ import {
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 
-export { base64ToBytes, bytesToBase64 };
 
 // Coerce a KV.put value into Uint8Array. ReadableStream is handled by the
 // caller (await body); here we stick to sync inputs.

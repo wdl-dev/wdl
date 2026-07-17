@@ -7,7 +7,7 @@ import {
   jsonResponse, jsonError,
   requireControlLog, requireControlRedis,
   errMessage,
-  acquireDeleteLock, releaseDeleteLock, renewDeleteLock,
+  acquireDeleteLock, releaseDeleteLock, renewDeleteLock, deleteLockExpiredDetails,
   assertWorkflowDeleteAllowed, cleanupDoAlarmsForWorker,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
   ControlAbort, codedErrorLogFields, controlAbortResponse,
@@ -22,6 +22,7 @@ import {
   formatReferrerBlocker,
   bundleAssetPrefix,
   parseBundleMeta,
+  parsePatternProjection,
 } from "control-lib";
 import {
   WHOLE_DELETE_LOCK_KIND,
@@ -37,7 +38,6 @@ import {
 import { workerSecretsKey } from "shared-secret-keys";
 import { decodeBulk, WatchError } from "shared-redis";
 import { queueConsumerScanPrefix } from "shared-queue-keys";
-import { decodePatternProjection } from "shared-route-projection";
 import { discardResponseBody } from "shared-respond";
 import { buildWorkerDeleteCleanup, stageWorkerDelete } from "control-handlers-delete-plan";
 
@@ -95,15 +95,14 @@ class WholeDeleteError extends ControlAbort {}
 
 /** @param {unknown} raw @param {string} host @param {string} slot */
 function requirePatternProjection(raw, host, slot) {
-  const projection = decodePatternProjection(raw);
-  if (!projection) {
-    throw new WholeDeleteError(500, "corrupt_pattern_projection", {
-      host,
-      slot,
+  return parsePatternProjection(raw, {
+    host,
+    slot,
+    makeError: (details) => new WholeDeleteError(500, "corrupt_pattern_projection", {
+      ...details,
       stage: "pattern_projection_parse",
-    });
-  }
-  return projection;
+    }),
+  });
 }
 
 /** @param {string} ns @param {string} name @returns {never} */
@@ -116,10 +115,7 @@ function throwWholeDeleteContention(ns, name) {
 
 /** @param {string} ns @param {string} name @returns {never} */
 function throwDeleteLockExpired(ns, name) {
-  throw new WholeDeleteError(409, "deleting", {
-    namespace: ns, name,
-    message: "worker delete lock expired; retry the request",
-  });
+  throw new WholeDeleteError(409, "deleting", deleteLockExpiredDetails(ns, name));
 }
 
 // Raised when collection or an under-WATCH check observes state that

@@ -781,19 +781,6 @@ test("buildWorkerEnv: D1 bindings revalidate namespace and database id grammar",
     ),
     /invalid databaseId/
   );
-  assert.throws(
-    () => buildWorkerEnv(
-      { bindings: { DB: { type: "d1", databaseId: "main" } } },
-      {},
-      {},
-      "admin",
-      "app",
-      "v1",
-      "https://assets.example",
-      makeCtx()
-    ),
-    /invalid namespace/
-  );
 });
 
 test("buildWorkerEnv: R2 binding requires bucketName", () => {

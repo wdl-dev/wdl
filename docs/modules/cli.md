@@ -83,7 +83,8 @@ CLI output may display:
 - `minCliVersion`: the minimum downstream CLI version supported by this platform build.
 - `urls.control`: the control origin that the request actually reached.
 - `urls.namespace`: the tenant namespace origin, returned only for namespace tokens when
-  the platform explicitly configures a public `PLATFORM_DOMAIN`.
+  the platform explicitly configures `PLATFORM_DOMAIN`; Control does not validate that
+  the configured hostname is publicly reachable.
 - `urls.assets`: the configured public assets base URL, returned only when the control
   plane has a safe absolute `http`/`https` `ASSETS_CDN_BASE`; query and fragment are
   stripped before returning the hint.

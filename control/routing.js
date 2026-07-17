@@ -7,6 +7,7 @@ import {
   d1DatabaseKey,
   extractD1Refs, extractOutgoingRefs,
   parseBundleMeta,
+  parsePatternProjection,
 } from "control-lib";
 import {
   cronWorkerKey,
@@ -19,7 +20,7 @@ import {
   stageWorkerVersionIndexUpsert,
 } from "control-lifecycle-indexes";
 import { parseHostList } from "control-topology";
-import { decodePatternProjection, encodePatternProjection } from "shared-route-projection";
+import { encodePatternProjection } from "shared-route-projection";
 import {
   DECLARED_HOSTS_KEY,
   NAMESPACES_KEY,
@@ -89,16 +90,16 @@ export class RoutingError extends Error {
 
 /** @param {unknown} raw @param {string} host @param {string} slot */
 function requirePatternProjection(raw, host, slot) {
-  const projection = decodePatternProjection(raw);
-  if (!projection) {
-    throw new RoutingError(
+  return parsePatternProjection(raw, {
+    host,
+    slot,
+    makeError: (details) => new RoutingError(
       500,
       "corrupt_pattern_projection",
       `Pattern projection for ${host}${slot} is corrupt`,
-      { host, slot }
-    );
-  }
-  return projection;
+      details
+    ),
+  });
 }
 
 /** @param {Array<string | null | undefined | false>} keys @returns {string[]} */

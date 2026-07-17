@@ -64,12 +64,13 @@ partial batch result; that is a result envelope, not a generic JSON error envelo
 Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime facade. The facade
 rejects an oversized `Content-Length` before reading, and streamed bodies are read
 incrementally so the cap is enforced before buffering the full body.
+
 DO RPC method names use the JavaScript identifier grammar. The do-runtime protocol
-reader caps them at 256 ASCII bytes. RPC arguments are
-structural JSON data capped at 1 MiB: finite numbers, strings, booleans, null, dense
-arrays, and plain objects are accepted. Serialization does not invoke `toJSON()` hooks;
-sparse arrays, circular structures, non-plain objects, and non-JSON values fail before
-dispatch.
+reader caps them at 256 ASCII bytes. RPC arguments are structural JSON data capped at
+1 MiB: finite numbers, strings, booleans, null, dense arrays, and plain objects are
+accepted. Serialization does not invoke `toJSON()` hooks; sparse arrays, circular
+structures, non-plain objects, and non-JSON values fail before dispatch.
+
 do-runtime invokes tenant alarm and RPC methods through private fetch dispatches
 intercepted by the generated wrapper. Those requests carry the outer request id so the
 host facade can propagate it without adding platform metadata to the tenant argument
@@ -78,11 +79,14 @@ or re-entrant calls may observe another invocation's id. Nested DO fetch/connect
 requests discard tenant-supplied `x-request-id` values and propagate the sanitized
 context id when available. Request ids remain best-effort, untrusted diagnostic
 metadata.
+
 DO invoke envelopes identify persisted bundles by canonical namespace, worker, version,
 and storage id. They do not accept inline worker source.
+
 Tenant-facing DO object names and ids must be well-formed Unicode strings. Lone UTF-16
 surrogates are rejected by `idFromName()` / `idFromString()` before hashing or dispatch;
 do-runtime alarm ingress and Workflows revalidation enforce the same boundary.
+
 DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without
 leading zeroes. DO binding class names use the ASCII JavaScript class-name grammar and
 are capped at 468 bytes at deploy, so every shard suffix fits the aggregate host-id cap.
@@ -155,13 +159,13 @@ when the logical worker is gone or now points at a different `doStorageId`.
   disconnect as the primary safety mechanism.
   Client messages queued under an older backend reconnect epoch may be discarded
   without per-frame ack/nack when the gateway resets that epoch.
-- Ordinary fetch/RPC can fall back through the router after explicit stale-owner or
-  owner-race responses carrying do-runtime's private ownership-error control header.
-  Tenant response bodies cannot opt into replay. A direct owner transport failure, or a
-  502/503/504 without a fresh owner-hint header, evicts the cached hint. Safe `GET`/`HEAD`
-  requests may replay through the router to rediscover the owner; non-idempotent methods
-  and RPC return `owner_unavailable` without replay because the owner may already have
-  applied the request.
+- Ordinary fetch/RPC can perform one router rediscovery after a trusted owner-hint or an
+  explicit pre-dispatch stale-owner/owner-race response carrying do-runtime's private
+  ownership-error control header, including for non-idempotent methods and RPC. Tenant
+  response bodies cannot opt into replay. An unmarked direct owner transport failure, or
+  a 502/503/504 without either trusted marker, evicts the cached hint. Safe `GET`/`HEAD`
+  requests may replay through the router; non-idempotent methods and RPC return
+  `owner_unavailable` because the owner may already have applied the request.
 - The shared runtime transport owns owner-hint cache wiring, invoke race retry, and
   response-header stripping for both the host binding and injected facade. Its connect
   wrapper deliberately omits the invoke-only router fallback required to preserve
@@ -340,10 +344,11 @@ recovery after the initial 101.
   that epoch.
 - Owner-hinted WebSocket direct retry failures do not fall back to the router, because
   the final 101 must come from the owner endpoint.
-- Owner-hinted ordinary fetch/RPC direct failures only fall back to the router for safe
+- Unmarked ordinary fetch/RPC direct failures only fall back to the router for safe
   `GET`/`HEAD` requests. Non-idempotent methods and RPC return `owner_unavailable` when
-  the outcome may be unknown. Explicit stale-owner and owner-race responses remain
-  retryable because they prove the owner-side fence rejected the request.
+  the outcome may be unknown. A trusted owner-hint or explicit stale-owner/owner-race
+  response remains retryable once for every method because it proves dispatch did not
+  reach tenant code.
 - Renamed/deleted migrations are deferred.
 - Long handlers still need user-level care; lease-budget watchdogs protect platform
   ownership and narrow failover races, not every storage call or the final SQLite

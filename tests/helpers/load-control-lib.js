@@ -42,6 +42,7 @@ export async function compileControlGraph(opts = {}) {
     [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
     [/from "shared-errors"/g, `from ${JSON.stringify(SHARED_ERRORS_URL)}`],
+    [/from "shared-route-projection"/g, `from ${JSON.stringify(SHARED_ROUTE_PROJECTION_URL)}`],
   ]);
 
   const bindingsUrl = freshRepositoryModuleDataUrl("control/bindings.js", [

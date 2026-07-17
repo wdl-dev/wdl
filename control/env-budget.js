@@ -1,6 +1,6 @@
 import { decryptSecretValue } from "shared-secret-envelope";
 import { BundleMetaError, parseBundleMeta } from "control-lib";
-import { buildWorkerEnv } from "runtime-load-env-build";
+import { buildWorkerEnv, doAlarmBindingProps } from "runtime-load-env-build";
 import { bundleKey } from "shared-version";
 import { WatchError } from "shared-redis";
 
@@ -160,7 +160,7 @@ export function estimatedWorkerLoaderEnv({
   if (typeof doAlarmStorageId === "string" && doAlarmStorageId) {
     estimated[DO_ALARMS_BINDING] = {
       __wdlBinding: "do-alarms",
-      props: { ns, worker, version, doStorageId: doAlarmStorageId },
+      props: doAlarmBindingProps({ ns, worker, version, doStorageId: doAlarmStorageId }),
     };
   }
   return estimated;
@@ -330,7 +330,6 @@ export async function decryptMutatedSecretHashForBudget({
  *   nsSecrets?: Record<string, unknown> | null,
  *   workerSecrets?: Record<string, unknown> | null,
  *   assetsCdnBase?: string | null,
- *   retryMissingVersions?: boolean,
  * }} args
  */
 export async function assertWorkerVersionsUserEnvBudget({
@@ -342,7 +341,6 @@ export async function assertWorkerVersionsUserEnvBudget({
   nsSecrets = null,
   workerSecrets = null,
   assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
-  retryMissingVersions = false,
 }) {
   const checks = [
     ...[...versions]
@@ -369,7 +367,7 @@ export async function assertWorkerVersionsUserEnvBudget({
   // whose command protocol is single-flight even though secret decryption is not.
   for (const { sourceVersion, estimatedVersion } of uniqueChecks) {
     const rawMeta = await redis.hGet(bundleKey(ns, worker, sourceVersion), "__meta__");
-    if (typeof rawMeta !== "string" && retryMissingVersions) throw new WatchError();
+    if (typeof rawMeta !== "string") throw new WatchError();
     const meta = parseBundleMeta(rawMeta, {
       ns,
       worker,

@@ -4,8 +4,8 @@ use redis::Value;
 use serde_json::json;
 
 use crate::{
-    AppState, CONSUMER_GROUP, LogLevel, MAX_BATCH_SIZE_CAP, RuntimeResponse, SERVICE,
-    SchedulerError, SchedulerResult, log, now_ms, post_runtime,
+    AppState, CONSUMER_GROUP, LogLevel, RuntimeResponse, SERVICE, SchedulerError, SchedulerResult,
+    log, now_ms, post_runtime,
 };
 
 use super::super::{Consumer, OutcomePlan, QueueMessage};
@@ -142,7 +142,7 @@ pub(crate) async fn dispatch_messages(
     consumer: &Consumer,
     kind: &str,
 ) -> SchedulerResult<()> {
-    let size = consumer.max_batch_size.clamp(1, MAX_BATCH_SIZE_CAP);
+    let size = consumer.max_batch_size;
     for (index, chunk) in messages.chunks(size).enumerate() {
         let mut pending = VecDeque::from([(index * size, 0_usize, chunk.to_vec())]);
         while let Some((offset, split_depth, batch)) = pending.pop_front() {

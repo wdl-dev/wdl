@@ -519,27 +519,6 @@ test("worker env budget maps strict retained metadata failures to corrupt_meta",
   );
 });
 
-test("worker env budget fails closed when retained bundle metadata is missing", async () => {
-  const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      assert.equal(key, "worker:demo:api:v:1");
-      assert.equal(field, "__meta__");
-      return null;
-    },
-  };
-
-  await assert.rejects(
-    () => assertWorkerVersionsUserEnvBudget({
-      redis,
-      ns: "demo",
-      worker: "api",
-      versions: ["v1"],
-    }),
-    (err) => assertBundleMetaError(err, "__meta__ must be a JSON string")
-  );
-});
-
 test("worker env budget surfaces missing retained bundles as watch retry", async () => {
   const redis = {
     /** @param {string} key @param {string} field */
@@ -556,7 +535,6 @@ test("worker env budget surfaces missing retained bundles as watch retry", async
       ns: "demo",
       worker: "api",
       versions: ["v1"],
-      retryMissingVersions: true,
     }),
     (err) => err instanceof Error && err.name === "WatchError"
   );

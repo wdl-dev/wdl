@@ -130,6 +130,10 @@ export class RedisClient {
       recordCommand("SET", true);
       return null;
     }
+    if (options.ifeq != null && s.strings.get(key) !== options.ifeq) {
+      recordCommand("SET", true);
+      return null;
+    }
     s.strings.set(key, value);
     if (typeof options.ttl === "number") {
       s.expirations.set(key, Date.now() + options.ttl * 1000);

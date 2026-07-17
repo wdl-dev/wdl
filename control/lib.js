@@ -13,6 +13,7 @@ import {
   WDL_RESERVED_BINDING_RE,
   KV_ID_RE,
 } from "shared-ns-pattern";
+import { decodePatternProjection } from "shared-route-projection";
 import { PLATFORM_TIER_RESERVED_NS, ROLES } from "shared-auth-roles";
 import { errorMessage } from "shared-errors";
 export const NS_RE = new RegExp(`^${NS_PATTERN}$`);
@@ -70,6 +71,16 @@ export function parseBundleMeta(raw, { ns, worker, version, makeError }) {
     fail(new TypeError("__meta__ must be a JSON object"));
   }
   return /** @type {Record<string, unknown>} */ (parsed);
+}
+
+/**
+ * @param {unknown} raw
+ * @param {{ host: string, slot: string, makeError: (details: { host: string, slot: string }) => Error }} options
+ */
+export function parsePatternProjection(raw, { host, slot, makeError }) {
+  const projection = decodePatternProjection(raw);
+  if (!projection) throw makeError({ host, slot });
+  return projection;
 }
 
 /**

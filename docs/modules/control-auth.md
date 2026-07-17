@@ -147,8 +147,9 @@ Control lifecycle operations are split so each critical transition has one autho
   single `x-forwarded-proto` value of `http` or `https`, `/whoami` uses that protocol
   for `urls.control` and `urls.namespace`; otherwise it falls back to the request URL
   protocol seen by control. `urls.namespace` is returned only for tenant namespace
-  tokens when `PLATFORM_DOMAIN` is explicitly configured as a public hostname; Control
-  does not advertise the internal `workers.local` fallback as a public URL.
+  tokens when `PLATFORM_DOMAIN` is explicitly configured. The gate is grammar-only —
+  any valid DNS hostname passes and publicness is the operator's responsibility;
+  Control never advertises the unset `workers.local` fallback as a public URL.
   `urls.assets` is returned only when `ASSETS_CDN_BASE` is a safe absolute `http`/`https`
   URL, with query and fragment stripped. The endpoint must not grow into token list,
   token lookup, or secret-bearing diagnostics.

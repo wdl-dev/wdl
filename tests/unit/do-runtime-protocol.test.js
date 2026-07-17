@@ -50,7 +50,10 @@ test("DO ownership errors stay aligned with runtime hint and retry handling", ()
     DO_OWNERSHIP_CODE.OWNER_CLAIM_RACED,
     DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING,
     DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED,
+    DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE,
     DO_OWNERSHIP_CODE.OWNER_LEASE_TOO_SHORT,
+    DO_OWNERSHIP_CODE.OWNER_RENEW_RACED,
+    DO_OWNERSHIP_CODE.TASK_DRAINING,
   ]);
   for (const code of ownershipCodes) {
     const untrusted = Response.json({ error: code }, { status: 503 });

@@ -28,6 +28,14 @@ export async function acquireDeleteLock(_redis, _ns, _worker, kind) {
   return "lock-token";
 }
 export async function renewDeleteLock() { return true; }
+export function deleteLockExpiredDetails(ns, worker, version) {
+  return {
+    namespace: ns,
+    name: worker,
+    ...(version === undefined ? {} : { version }),
+    message: "worker delete lock expired; retry the request",
+  };
+}
 export async function assertWorkflowDeleteAllowed(args) {
   /** @type {any} */ (globalThis).__deleteHandlerState.workflowChecks.push(args);
   if (/** @type {any} */ (globalThis).__deleteHandlerWorkflowBlocker) {
@@ -60,6 +68,14 @@ export async function acquireDeleteLock(_redis, _ns, _worker, kind) {
   return "lock-token";
 }
 export async function renewDeleteLock() { return true; }
+export function deleteLockExpiredDetails(ns, worker, version) {
+  return {
+    namespace: ns,
+    name: worker,
+    ...(version === undefined ? {} : { version }),
+    message: "worker delete lock expired; retry the request",
+  };
+}
 export async function assertWorkflowDeleteAllowed(args) {
   /** @type {any} */ (globalThis).__versionDeleteHandlerState.workflowChecks.push(args);
 }
@@ -80,6 +96,7 @@ export {
   doObjectRegistryKey,
   encodeReferrerMember,
   parseBundleMeta,
+  parsePatternProjection,
   referrersKey,
   workersIndexKey,
   workflowDefsKey,

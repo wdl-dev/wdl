@@ -1,6 +1,6 @@
 import {
   jsonResponse, jsonError,
-  acquireDeleteLock, releaseDeleteLock, renewDeleteLock,
+  acquireDeleteLock, releaseDeleteLock, renewDeleteLock, deleteLockExpiredDetails,
   assertWorkflowDeleteAllowed,
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
   ControlAbort, codedErrorLogFields, controlAbortResponse,
@@ -97,10 +97,7 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
         ns, worker: name, version, allowCleanup: true, requestId,
       });
       if (!await renewDeleteLock(redis, ns, name, lockToken)) {
-        throw new VersionDeleteError(409, "deleting", {
-          namespace: ns, name, version,
-          message: "worker delete lock expired; retry the request",
-        });
+        throw new VersionDeleteError(409, "deleting", deleteLockExpiredDetails(ns, name, version));
       }
       result = await executeVersionDelete({
         redis, ns, name, version, principal, requestId, lockToken,
@@ -177,10 +174,7 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
 
     if (await iso.get(deleteLockKey(ns, name)) !== lockToken) {
       await iso.unwatch();
-      throw new VersionDeleteError(409, "deleting", {
-        namespace: ns, name, version,
-        message: "worker delete lock expired; retry the request",
-      });
+      throw new VersionDeleteError(409, "deleting", deleteLockExpiredDetails(ns, name, version));
     }
 
     const currentActive = await iso.hGet(routesKey(ns), name);

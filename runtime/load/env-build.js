@@ -6,7 +6,6 @@ import {
   WDL_RESERVED_ENTRYPOINT_RE,
   isValidJsIdentifier,
   isValidJsClassDeclarationName,
-  isValidRuntimeLoadNs,
 } from "shared-ns-pattern";
 import { parseVersion } from "shared-version";
 
@@ -91,12 +90,16 @@ function materializeQueueBinding({ name, spec, ns, ctx }) {
   };
 }
 
+// The estimated control-side copy of the do-runtime alarm binding env value
+// must serialize like the real one; both build their props here.
+/** @param {{ ns: string, worker: string, version: string, doStorageId: string }} identity */
+export function doAlarmBindingProps({ ns, worker, version, doStorageId }) {
+  return { ns, worker, version, doStorageId };
+}
+
 /** @param {RuntimeBindingMaterializerArgs} args */
 function materializeD1Binding({ name, spec, ns, ctx }) {
   const databaseId = spec.databaseId;
-  if (!isValidRuntimeLoadNs(ns)) {
-    throw new Error(`Binding "${name}" is a D1 binding but has invalid namespace`);
-  }
   if (typeof databaseId !== "string" || !D1_DATABASE_ID_RE.test(databaseId)) {
     throw new Error(`Binding "${name}" is a D1 binding but has invalid databaseId`);
   }

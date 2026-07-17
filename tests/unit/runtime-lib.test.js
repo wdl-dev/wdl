@@ -4,8 +4,6 @@ import { parseBase64Json } from "../helpers/json-payload.js";
 import { readRepositoryJson, runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
 
 const {
-  base64ToBytes,
-  bytesToBase64,
   toBytes,
   bundleToWorkerCode,
   buildAssetUrl,
@@ -18,14 +16,12 @@ const {
   normalizeQueuedDispatchBody,
   normalizeScheduledDispatchBody,
 } = await import(runtimeLibModuleDataUrl());
-const sharedBase64 = await import("../../shared/base64.js");
+const { base64ToBytes, bytesToBase64 } = await import("../../shared/base64.js");
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 
 const enc = new TextEncoder();
 
-test("runtime base64 exports use the shared codec owner", () => {
-  assert.equal(bytesToBase64, sharedBase64.bytesToBase64);
-  assert.equal(base64ToBytes, sharedBase64.base64ToBytes);
+test("shared base64 codec round-trips large binary payloads", () => {
   const bytes = Uint8Array.from({ length: 70_000 }, (_, index) => index % 256);
   assert.deepEqual(base64ToBytes(bytesToBase64(bytes)), bytes);
 });

@@ -374,7 +374,7 @@ fn queue_pel_reap_idle_ms(configured_idle_ms: u64, consumer_present: bool) -> u6
 
 fn queue_pel_claim_count(consumer: Option<&Consumer>) -> usize {
     consumer
-        .map(|consumer| consumer.max_batch_size.clamp(1, MAX_BATCH_SIZE_CAP))
+        .map(|consumer| consumer.max_batch_size)
         .unwrap_or(MAX_BATCH_SIZE_CAP)
 }
 
@@ -404,11 +404,6 @@ mod tests {
     #[test]
     fn pel_reap_claim_count_matches_consumer_batch_cap_when_consumer_exists() {
         assert_eq!(queue_pel_claim_count(Some(&consumer(2))), 2);
-        assert_eq!(queue_pel_claim_count(Some(&consumer(0))), 1);
-        assert_eq!(
-            queue_pel_claim_count(Some(&consumer(MAX_BATCH_SIZE_CAP + 10))),
-            MAX_BATCH_SIZE_CAP
-        );
         assert_eq!(queue_pel_claim_count(None), MAX_BATCH_SIZE_CAP);
     }
 

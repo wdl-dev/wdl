@@ -91,7 +91,6 @@ export default {
     });
 
     try {
-      const platformDomain = platformDomainFromEnv(env);
       const subscriberStart = ensureGatewaySubscriber(env.REDIS_ADDR);
       if (subscriberStart) ctx.waitUntil(subscriberStart);
 
@@ -109,6 +108,9 @@ export default {
         prepareGatewayMetrics();
         return scope.respond(prometheusResponse(metrics));
       }
+
+      // After health/metrics so a malformed PLATFORM_DOMAIN cannot 502 probes.
+      const platformDomain = platformDomainFromEnv(env);
 
       // Admin host short-circuit runs before any ns / Redis lookup so
       // control stays reachable even mid-FLUSHALL / Redis outage.

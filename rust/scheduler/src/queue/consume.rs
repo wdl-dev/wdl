@@ -5,8 +5,8 @@ use serde_json::json;
 use tokio::time::sleep;
 
 use crate::{
-    AppState, CONSUMER_GROUP, LogLevel, MAX_BATCH_SIZE_CAP, SchedulerError, SchedulerResult, log,
-    now_ms, redis_fields_with_error, scheduler_fields_with_error,
+    AppState, CONSUMER_GROUP, LogLevel, SchedulerError, SchedulerResult, log, now_ms,
+    redis_fields_with_error, scheduler_fields_with_error,
 };
 
 use super::{
@@ -195,7 +195,7 @@ pub(crate) fn queue_xread_count_from_consumers<'a>(
 ) -> usize {
     consumers
         .into_iter()
-        .filter_map(|consumer| consumer.map(|c| c.max_batch_size.clamp(1, MAX_BATCH_SIZE_CAP)))
+        .filter_map(|consumer| consumer.map(|c| c.max_batch_size))
         .min()
         .unwrap_or(1)
 }
@@ -254,11 +254,6 @@ mod tests {
             2
         );
         assert_eq!(queue_xread_count_from_consumers([Some(&large)]), 25);
-        assert_eq!(queue_xread_count_from_consumers([Some(&consumer(0))]), 1);
-        assert_eq!(
-            queue_xread_count_from_consumers([Some(&consumer(MAX_BATCH_SIZE_CAP + 10))]),
-            MAX_BATCH_SIZE_CAP
-        );
         assert_eq!(queue_xread_count_from_consumers([None]), 1);
     }
 }

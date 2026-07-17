@@ -35,10 +35,15 @@ Storage cleanup endpoint 是 native facet storage cleanup 和 worker storage cle
 
 DO protocol error 使用 `{ error, message, details? }`。不同于 admin HTTP 的 flat additive error shape，DO protocol detail 会嵌套在 `details` 下，因为消费者是 runtime/DO client protocol，不是通用 admin JSON parser。未知 internal exception 仍会降级成安全的 `internal_error` / `Internal error` message。Storage delete-worker 在 partial batch result 时可能返回 HTTP 207 和 `{ ok:false, deleted, errors }`；这是 result envelope，不是 generic JSON error envelope。
 Tenant-originated DO fetch body 在 runtime facade 中限制为 1 MiB。Facade 会在读取前拒绝超限的 `Content-Length`，streamed body 会增量读取，因此 limit 会在完整 buffering 前生效。
+
 DO RPC method name 使用 JavaScript identifier grammar，do-runtime protocol reader 将其限制为最多 256 ASCII bytes。RPC 参数是最多 1 MiB 的 structural JSON data：接受 finite number、string、boolean、null、dense array 和 plain object。序列化不会调用 `toJSON()` hook；sparse array、circular structure、non-plain object 和 non-JSON value 会在 dispatch 前失败。
+
 do-runtime 会通过 generated wrapper 截获的私有 fetch dispatch 调用 tenant alarm 和 RPC method；这些 request 携带外层 request id，使 host facade 可以传播该 id，且不会把平台 metadata 加入 tenant argument list。持久化 class instance 使用一个小型可变诊断 context，因此 concurrent 或 re-entrant call 可能观察到另一次 invocation 的 id。嵌套 DO fetch/connect request 会丢弃 tenant 提供的 `x-request-id`，并在 context id 可用时传播其净化值；request id 仍是 best-effort、不可信的诊断 metadata。
+
 DO invoke envelope 通过 canonical namespace、worker、version 和 storage id 标识 persisted bundle，不接受 inline worker source。
+
 Tenant-facing DO object name/id 必须是 well-formed Unicode string。`idFromName()` / `idFromString()` 会在 hash 或 dispatch 前拒绝 lone UTF-16 surrogate；do-runtime alarm ingress 和 Workflows revalidation 执行相同边界。
+
 DO host id 最多 512 UTF-8 bytes，并使用不带前导零的 canonical `shardN` suffix。DO binding class name 使用 ASCII JavaScript class-name grammar，并在 deploy 时限制为最多 468 bytes，确保所有 shard suffix 都能满足 aggregate host-id 上限。
 
 ## Redis / Storage 合同
@@ -78,7 +83,7 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 - Whole-worker delete 后 redeploy 会分配新的 `doStorageId`；旧 native storage tombstone 给后续 cleanup，而不是立即物理删除。
 - WebSocket upgrade 必须在 owner endpoint 上完成。Owner-hinted WebSocket direct retry 不能 fall back 到 router-established 101。
 - WDL 会尽量让 client-facing WebSocket 由 gateway 持有并保持连接，包括 user-runtime 或 do-runtime restart 后的 backend reconnect。这个连接连续性目标强于 Cloudflare shutdown 行为；Cloudflare 可以终止 WebSocket 让新 Durable Object instance 接管。当前 backend facet 仍属于 owner scope：初始 `101` 之后，WebSocket message / close event 不会在每一帧重新校验 Redis owner generation。未来增强应在尽量保持 client 连接的同时 rebinding 或拒绝 stale backend owner facet，而不是把 client disconnect 作为主要安全机制。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
-- Ordinary fetch/RPC 只有在明确的 stale-owner 或 owner-race response 同时携带 do-runtime 私有 ownership-error control header 时才会回退到 router；tenant response body 不能触发重放。Direct owner transport failure，或 direct owner hop 返回 502/503/504 且没有 fresh owner-hint header 时，会清除 cached hint。安全的 `GET`/`HEAD` request 可以通过 router 重放以重新发现 owner；非幂等 method 和 RPC 会返回 `owner_unavailable`，不会重放，因为 owner 可能已经应用了该请求。
+- Ordinary fetch/RPC 在收到可信 owner-hint，或携带 do-runtime 私有 ownership-error control header 的明确 pre-dispatch stale-owner/owner-race response 后，可以进行一次 router rediscovery；这也适用于非幂等 method 和 RPC。Tenant response body 不能触发重放。无可信标记的 direct owner transport failure，或不带这两类可信标记的 502/503/504，会清除 cached hint。安全的 `GET`/`HEAD` request 可以通过 router 重放；非幂等 method 和 RPC 会返回 `owner_unavailable`，因为 owner 可能已经应用了该请求。
 - Shared runtime transport 统一持有 host binding 与 injected facade 的 owner-hint cache wiring、invoke race retry 和 response-header stripping。Connect wrapper 刻意不包含 invoke-only router fallback，以保留 owner-established WebSocket upgrade 语义。
 - `WEBSOCKET_RECONNECT_DELAYS_MS` 和 `WEBSOCKET_MAX_BUFFERED_MESSAGES` 可以在不改代码的情况下调整 gateway backend reconnect budget 和 client-message buffer cap。
 - Alarm delivery 是 at-least-once。Scheduler 唤醒 Workflows；Workflows 把到期 internal alarm job promote 到 ready，在 DB 2 run token 下 claim，然后调用 do-runtime `/internal/do/alarms/dispatch`。do-runtime 构造 `DoInvoke{kind:"alarm"}` 请求，并走正常 owner router/fence 路径。
@@ -152,6 +157,6 @@ do-runtime 围绕 owner resolution、dispatch、alarm execution、drain、renew 
 - DO object registry 写入是 best-effort。Registry 写失败时 dispatch 会继续，因此 tombstone set 可能不完整；未来 cleanup 必须容忍缺失 member，并把 active storage pointer、owner/alarm state 当成更强的 lifecycle signal。
 - Gateway-held WebSocket recovery 只对 client connection continuity 做 best-effort。Backend DO facet 在初始 `101` 之后不会逐消息 re-fence；owner handoff 安全依赖 reconnect/rebind 行为，以及创建 backend facet 前运行的 owner-side dispatch fence。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
 - Owner-hinted WebSocket direct retry 失败不会 fall back 到 router，因为最终 101 必须来自 owner endpoint。
-- Owner-hinted ordinary fetch/RPC direct failure 只有安全的 `GET`/`HEAD` request 会 fall back 到 router。非幂等 method 和 RPC 在 outcome 可能未知时返回 `owner_unavailable`。明确的 stale-owner 和 owner-race response 仍可重试，因为它们证明 owner-side fence 拒绝了该请求。
+- 无可信标记的 ordinary fetch/RPC direct failure 只有安全的 `GET`/`HEAD` request 会 fall back 到 router。非幂等 method 和 RPC 在 outcome 可能未知时返回 `owner_unavailable`。可信 owner-hint 或明确的 stale-owner/owner-race response 对所有 method 都可重试一次，因为它们证明 dispatch 未进入 tenant code。
 - Renamed/deleted migrations 延后。
 - 长 handler 仍需要用户自己注意；lease-budget watchdog 保护平台 ownership 并缩窄 failover race，不 fence 每一次 storage call 或最终 SQLite commit point。

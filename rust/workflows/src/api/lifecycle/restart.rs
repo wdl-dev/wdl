@@ -1,20 +1,34 @@
 use wdl_rust_common::time::now_ms;
 
 use crate::{
-    AppState, WorkflowError, WorkflowResult, by_version_key, by_worker_key, by_workflow_key,
-    ready_active_key, retention_key,
+    AppState, LogLevel, WorkflowError, WorkflowResult, by_version_key, by_worker_key,
+    by_workflow_key, log, ready_active_key, retention_key, workflow_error_fields,
 };
 
 use super::super::{
-    InstanceResponse, InstanceRouteKeys, WorkflowRequest, create_pending_restart,
-    ensure_worker_not_deleting, eval_script, identity_from_state, instance_id, payload_bytes_arg,
-    pending_restart_marker, read_public_state, remove_pending_restart, request_with_active_version,
-    validate_identity, verify_active_workflow_current, verify_workflow_def,
-    workflow_referrer_member,
+    InstanceResponse, InstanceRouteKeys, PendingRestartMarker, WorkflowRequest,
+    create_pending_restart, ensure_worker_not_deleting, eval_script, identity_from_state,
+    instance_id, payload_bytes_arg, pending_restart_marker, read_public_state,
+    remove_pending_restart, request_with_active_version, validate_identity,
+    verify_active_workflow_current, verify_workflow_def, workflow_referrer_member,
 };
+
 use super::common::{
     TransitionSignal, next_generation, stale_transition_response, successful_transition_response,
 };
+
+// Marker cleanup is best-effort: the marker TTL expires a leaked member, and
+// the caller's original rejection must stay the visible error.
+async fn discard_pending_restart(state: &AppState, marker: &PendingRestartMarker) {
+    if let Err(err) = remove_pending_restart(state, marker).await {
+        log(
+            state,
+            LogLevel::Warn,
+            "pending_restart_cleanup_failed",
+            workflow_error_fields(&err),
+        );
+    }
+}
 
 const RESTART_SCRIPT: &str = r#"
 local marker_score = redis.call("ZSCORE", KEYS[16], ARGV[12])
@@ -96,15 +110,15 @@ pub(crate) async fn restart_instance(
     let pending_restart = pending_restart_marker(state, &req, &id);
     create_pending_restart(state, &pending_restart).await?;
     if let Err(err) = verify_active_workflow_current(state, &req).await {
-        remove_pending_restart(state, &pending_restart).await?;
+        discard_pending_restart(state, &pending_restart).await;
         return Err(err);
     }
     if let Err(err) = verify_workflow_def(state, &req).await {
-        remove_pending_restart(state, &pending_restart).await?;
+        discard_pending_restart(state, &pending_restart).await;
         return Err(err);
     }
     if let Err(err) = ensure_worker_not_deleting(state, &req.ns, &req.worker).await {
-        remove_pending_restart(state, &pending_restart).await?;
+        discard_pending_restart(state, &pending_restart).await;
         return Err(err);
     }
     let shard = keys.shard();
@@ -165,7 +179,7 @@ pub(crate) async fn restart_instance(
     {
         Ok(updated) => updated,
         Err(err) => {
-            remove_pending_restart(state, &pending_restart).await?;
+            discard_pending_restart(state, &pending_restart).await;
             return Err(err);
         }
     };
@@ -175,7 +189,7 @@ pub(crate) async fn restart_instance(
         ));
     }
     if updated != 1 {
-        remove_pending_restart(state, &pending_restart).await?;
+        discard_pending_restart(state, &pending_restart).await;
         return stale_transition_response(state, &identity, &id).await;
     }
     existing.insert("status".to_string(), "queued".to_string());

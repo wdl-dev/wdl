@@ -74,8 +74,8 @@ use pending_create::{
     public_state_or_empty, wait_for_public_create_state,
 };
 use pending_restart::{
-    active_pending_restart_blockers, create_pending_restart, pending_restart_marker,
-    remove_pending_restart,
+    PendingRestartMarker, active_pending_restart_blockers, create_pending_restart,
+    pending_restart_marker, remove_pending_restart,
 };
 use progress::{
     spawn_progress_from_identity, spawn_progress_from_request, spawn_progress_from_step,

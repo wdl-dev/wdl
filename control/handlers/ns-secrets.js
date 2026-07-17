@@ -126,7 +126,6 @@ async function validateNamespaceSecretBudget({
       nsSecrets,
       workerSecrets,
       assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
-      retryMissingVersions: true,
     });
   }
 }

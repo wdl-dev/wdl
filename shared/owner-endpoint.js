@@ -24,8 +24,10 @@ const intrinsicUrlPortGet = /** @type {(this: URL) => string} */ (prototypeGette
 const intrinsicUrlSearchGet = /** @type {(this: URL) => string} */ (prototypeGetter(URL.prototype, "search"));
 const intrinsicUrlUsernameGet = /** @type {(this: URL) => string} */ (prototypeGetter(URL.prototype, "username"));
 
+// workerd places some WebIDL mixin getters on a parent prototype. Resolve
+// them once before tenant module evaluation rather than reading patched getters.
 /** @param {object | null} prototype @param {string} name */
-function prototypeGetter(prototype, name) {
+export function prototypeGetter(prototype, name) {
   let current = prototype;
   while (current) {
     const getter = Object.getOwnPropertyDescriptor(current, name)?.get;

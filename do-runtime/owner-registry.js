@@ -191,9 +191,6 @@ export function parseOwner(raw, expectedOwnerKey, expectedBundleScope = null) {
  * @returns {DoOwner}
  */
 function ownerRecordFor(env, invoke, localTask, generation, nowMs) {
-  if (!validOwnerEndpointForService(localTask.endpoint, DO_OWNER_PORT, "do-runtime")) {
-    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_UNAVAILABLE, "DO owner endpoint is invalid");
-  }
   const ttl = ownerTtlSeconds(env);
   const scope = requireInvokeScope(invoke);
   return {
@@ -218,9 +215,6 @@ function ownerRecordFor(env, invoke, localTask, generation, nowMs) {
  * @returns {DoOwner}
  */
 function renewedOwnerRecordFor(env, current, localTask, nowMs) {
-  if (!validOwnerEndpointForService(localTask.endpoint, DO_OWNER_PORT, "do-runtime")) {
-    throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_UNAVAILABLE, "DO owner endpoint is invalid");
-  }
   const ttl = ownerTtlSeconds(env);
   return {
     ...current,

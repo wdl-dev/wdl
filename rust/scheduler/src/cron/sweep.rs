@@ -207,7 +207,6 @@ pub(crate) async fn sweep(state: AppState) -> SchedulerResult<()> {
         json!({
             "workers": workers,
             "re_added": re_added,
-            "skipped": skipped,
             "entries_skipped": skipped,
             "workers_skipped": skipped_workers,
             "duration_ms": now_ms() - started,

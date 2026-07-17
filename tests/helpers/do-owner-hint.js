@@ -1,3 +1,7 @@
+import { loadDoProtocol } from "./load-do-protocol.js";
+
+const { DO_OWNERSHIP_ERROR_CONTROL_HEADER } = await loadDoProtocol();
+
 /**
  * @param {{
  *   ownerKey?: string,
@@ -34,7 +38,7 @@ export function doOwnerHintResponse(options = {}) {
 /** @param {string} code @param {HeadersInit | undefined} [headers] */
 export function doOwnershipErrorHeaders(code, headers = undefined) {
   const out = new Headers(headers);
-  out.set("x-wdl-do-ownership-error", code);
+  out.set(DO_OWNERSHIP_ERROR_CONTROL_HEADER, code);
   return out;
 }
 
