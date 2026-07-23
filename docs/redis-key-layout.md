@@ -34,7 +34,7 @@ routes:<ns>                     Hash, { workerName -> activeVersion }
 namespaces                      Set, namespaces with at least one active worker
 workers:<ns>                    Set, worker names with worker-owned lifecycle state
 worker:<ns>:<name>:next_version String, monotonic version counter, survives delete
-cron:seq:<ns>:<name>           String, permanent Cron generation high-water mark
+cron:seq:<ns>:<name>            String, permanent Cron generation high-water mark
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes plus __meta__
 worker-delete-lock:<ns>:<name>  String EX 30, per-worker delete critical-section lock;

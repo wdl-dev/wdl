@@ -231,6 +231,81 @@ test("retry and DLQ target failures retain their source messages", async () => {
   redisDel(dlqKey, { db: 1 });
 });
 
+test("one failed transition does not block a healthy sibling in the same batch", async () => {
+  const ns = uniqueNs("qtransitionmixed");
+  const queueName = `mixed-${Math.random().toString(36).slice(2, 10)}`;
+  const streamKey = queueStreamKey(ns, queueName);
+  const delayedKey = queueDelayedKey(ns, queueName);
+  const consumerVersion = await deployConsumer(ns, `
+    const batches = [];
+    const completed = [];
+    export default {
+      fetch() {
+        return Response.json({ batches, completed });
+      },
+      async queue(batch) {
+        batches.push(batch.messages.map((msg) => ({
+          kind: msg.body.kind,
+          attempts: msg.attempts,
+        })));
+        for (const msg of batch.messages) {
+          if (msg.body.kind === "blocked") {
+            msg.retry({ delaySeconds: 2 });
+          } else if (msg.attempts === 1) {
+            msg.retry({ delaySeconds: 0 });
+          } else {
+            completed.push({ kind: msg.body.kind, attempts: msg.attempts });
+            msg.ack();
+          }
+        }
+      },
+    };
+  `, [{
+    queue: queueName,
+    maxBatchSize: 2,
+    maxBatchTimeoutMs: 2000,
+    maxRetries: 3,
+  }]);
+  const producerVersion = await deployQueueProducer(ns, queueName);
+
+  await withServiceStopped("scheduler", async () => {
+    redisSet(delayedKey, "wrong-type", { db: 1 });
+    const sendRes = sendQueueMessage(ns, "producer", producerVersion, [
+      { kind: "blocked" },
+      { kind: "healthy" },
+    ]);
+    assertStatus(sendRes, 200, "mixed transition producer send");
+    assert.equal(redisXLen(streamKey, { db: 1 }), 2);
+  });
+
+  await waitUntil("mixed batch failure and healthy retry both complete", () => {
+    const failures = queueTransitionFailureLogs();
+    const consumerState = responseJson(runtimeInternalPost("/", {
+      "x-worker-id": gatewayWorkerId(ns, "consumer", consumerVersion),
+    }, ""));
+    return failures.some((entry) => (
+      entry.queue === queueName && entry.action === "delay"
+    )) && consumerState.completed.some((/** @type {any} */ entry) => (
+      entry.kind === "healthy" && entry.attempts === 2
+    ));
+  }, { timeoutMs: 20_000, intervalMs: 250 });
+
+  const consumerState = responseJson(runtimeInternalPost("/", {
+    "x-worker-id": gatewayWorkerId(ns, "consumer", consumerVersion),
+  }, ""));
+  assert.deepEqual(
+    consumerState.batches[0].map((/** @type {any} */ entry) => entry.kind).sort(),
+    ["blocked", "healthy"],
+  );
+  assert.deepEqual(consumerState.completed, [{ kind: "healthy", attempts: 2 }]);
+  await waitUntil("only the failed source message remains", () => (
+    redisXLen(streamKey, { db: 1 }) === 1
+      && redisXPendingCount(streamKey, "wdl-scheduler", { db: 1 }) === 1
+  ), { timeoutMs: 10_000, intervalMs: 250 });
+
+  redisDel(delayedKey, { db: 1 });
+});
+
 test("maxRetries=N means handler sees the message N+1 times before DLQ", async () => {
   const ns = uniqueNs("q");
 

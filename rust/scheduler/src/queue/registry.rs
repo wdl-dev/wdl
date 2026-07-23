@@ -3,14 +3,15 @@ use std::future::Future;
 use std::sync::Arc;
 
 use redis::AsyncCommands;
+use serde_json::json;
 use wdl_rust_common::identity::{is_valid_route_ns, is_valid_worker_name};
 use wdl_rust_common::queue_keys::is_valid_queue_name;
 use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::worker_contract::parse_version_tag;
 
 use crate::{
-    AppState, CONSUMER_GROUP, QueueState, SchedulerError, SchedulerResult,
-    indexed_existing_data_keys, indexed_existing_keys, repair_data_index, repair_index,
+    AppState, CONSUMER_GROUP, LogLevel, QueueState, SchedulerError, SchedulerResult,
+    indexed_existing_data_keys, indexed_existing_keys, log, repair_data_index, repair_index,
 };
 
 use super::{
@@ -103,6 +104,24 @@ pub(crate) fn hydrate_consumer(
         dead_letter_queue,
         worker_id: format!("{ns}:{worker}:{version}"),
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ConsumerResolution {
+    consumer: Option<Consumer>,
+    invalid_projection: bool,
+}
+
+fn resolve_consumer_projection(
+    ns: &str,
+    queue: &str,
+    hash: &HashMap<String, String>,
+) -> ConsumerResolution {
+    let consumer = hydrate_consumer(ns, queue, hash);
+    ConsumerResolution {
+        invalid_projection: !hash.is_empty() && consumer.is_none(),
+        consumer,
+    }
 }
 
 fn parse_reconcile_group_reply(
@@ -300,13 +319,23 @@ pub(crate) async fn resolve_consumer(
     ns: &str,
     queue: &str,
 ) -> Result<Option<Consumer>, redis::RedisError> {
-    resolve_consumer_with_hash_loader(&state.queues, stream_key, ns, queue, |key| async move {
-        state
-            .redis
-            .with_conn(async |mut conn| conn.hgetall(key).await)
-            .await
-    })
-    .await
+    let resolution =
+        resolve_consumer_with_hash_loader(&state.queues, stream_key, ns, queue, |key| async move {
+            state
+                .redis
+                .with_conn(async |mut conn| conn.hgetall(key).await)
+                .await
+        })
+        .await?;
+    if resolution.invalid_projection {
+        log(
+            state,
+            LogLevel::Warn,
+            "queue_consumer_projection_invalid",
+            json!({ "ns": ns, "queue": queue }),
+        );
+    }
+    Ok(resolution.consumer)
 }
 
 async fn resolve_consumer_with_hash_loader<F, Fut>(
@@ -315,15 +344,15 @@ async fn resolve_consumer_with_hash_loader<F, Fut>(
     ns: &str,
     queue: &str,
     load_hash: F,
-) -> Result<Option<Consumer>, redis::RedisError>
+) -> Result<ConsumerResolution, redis::RedisError>
 where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<HashMap<String, String>, redis::RedisError>>,
 {
     let hash = load_hash(queue_consumer_key(ns, queue)).await?;
-    let consumer = hydrate_consumer(ns, queue, &hash);
-    write_resolved_consumer(queues, stream_key, consumer.as_ref()).await;
-    Ok(consumer)
+    let resolution = resolve_consumer_projection(ns, queue, &hash);
+    write_resolved_consumer(queues, stream_key, resolution.consumer.as_ref()).await;
+    Ok(resolution)
 }
 
 async fn write_resolved_consumer(
@@ -592,7 +621,7 @@ mod tests {
             ("max_batch_timeout_ms", "5000"),
             ("max_retries", "3"),
         ]);
-        let consumer = resolve_consumer_with_hash_loader(&queues, &stream_key, "demo", "jobs", {
+        let resolution = resolve_consumer_with_hash_loader(&queues, &stream_key, "demo", "jobs", {
             let loaded_keys = loaded_keys.clone();
             move |key| {
                 let loaded_keys = loaded_keys.clone();
@@ -604,8 +633,9 @@ mod tests {
             }
         })
         .await
-        .unwrap()
         .unwrap();
+        assert!(!resolution.invalid_projection);
+        let consumer = resolution.consumer.unwrap();
 
         assert_eq!(
             loaded_keys.lock().unwrap().as_slice(),
@@ -630,9 +660,12 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_consumer_treats_missing_or_invalid_identity_as_absent() {
-        for authoritative in [
-            HashMap::new(),
-            str_map(&[("worker", "worker"), ("version", "invalid")]),
+        for (authoritative, invalid_projection) in [
+            (HashMap::new(), false),
+            (
+                str_map(&[("worker", "worker"), ("version", "invalid")]),
+                true,
+            ),
         ] {
             let queues = QueueState::default();
             let stream_key = queue_stream_key("demo", "jobs");
@@ -645,7 +678,7 @@ mod tests {
                 .insert(stream_key.clone(), stale);
             refresh_consumer_streams_for(&queues).await;
 
-            let consumer = resolve_consumer_with_hash_loader(
+            let resolution = resolve_consumer_with_hash_loader(
                 &queues,
                 &stream_key,
                 "demo",
@@ -655,7 +688,8 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(consumer, None);
+            assert_eq!(resolution.consumer, None);
+            assert_eq!(resolution.invalid_projection, invalid_projection);
             assert!(!queues.registry.read().await.contains_key(&stream_key));
             assert!(queues.consumer_streams.read().await.is_empty());
         }

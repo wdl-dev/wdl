@@ -19,7 +19,7 @@ routes:<ns>                     Hash, { workerName -> activeVersion }
 namespaces                      Set, 至少有一个 active worker 的 namespace
 workers:<ns>                    Set, 有 worker-owned lifecycle state 的 worker name
 worker:<ns>:<name>:next_version String, 单调 version counter，delete 后保留
-cron:seq:<ns>:<name>           String, 永久 Cron generation 高水位
+cron:seq:<ns>:<name>            String, 永久 Cron generation 高水位
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes + __meta__
 worker-delete-lock:<ns>:<name>  String EX 30, 每个 worker 的 delete critical-section lock；value 是 whole:<token> 或 version:<token>；DO first-owner claim 会 WATCH，且只有 whole 阻止 ownership

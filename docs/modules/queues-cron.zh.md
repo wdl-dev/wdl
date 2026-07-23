@@ -175,7 +175,7 @@ Scheduler 为 cron 和 queue outcome 输出结构化日志和 Prometheus metrics
 - `queue_dispatch_failures{kind=...}`
 - `queue_batch_duration_ms{outcome=...}`
 - `queue_delayed_wake_read_errors`
-- Reconcile、`XREADGROUP`、delayed sweep、PEL reap、DLQ、orphan movement 相关日志，包括 `queue_batch_dispatched`。
+- Reconcile、`XREADGROUP`、delayed sweep、PEL reap、DLQ、orphan movement 相关日志，包括 `queue_batch_dispatched` 和 `queue_consumer_projection_invalid`。
 
 Runtime tail logs 也会为 loaded worker 执行输出 `worker_scheduled` 和 `worker_queue` start/finish event。
 

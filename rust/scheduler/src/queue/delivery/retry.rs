@@ -858,6 +858,22 @@ mod tests {
     }
 
     #[test]
+    fn transition_script_keeps_immediate_retries_untrimmed() {
+        let (_, after_immediate) = QUEUE_MESSAGE_TRANSITION_SCRIPT
+            .split_once(r#"if mode == "immediate" then"#)
+            .expect("immediate retry branch");
+        let (immediate_branch, _) = after_immediate
+            .split_once(r#"elseif mode == "delay" then"#)
+            .expect("delayed retry branch");
+
+        assert!(immediate_branch.contains(r#""XADD", KEYS[2], "*""#));
+        assert!(
+            !immediate_branch.contains("MAXLEN"),
+            "the main queue stream must not trim retry messages"
+        );
+    }
+
+    #[test]
     fn transition_results_isolate_item_failures_and_keep_later_successes() {
         let consumer = Consumer {
             ns: "demo".to_string(),

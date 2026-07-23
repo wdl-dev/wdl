@@ -302,7 +302,8 @@ Important queue signals:
 - `queue_batch_duration_ms{outcome=...}`
 - `queue_delayed_wake_read_errors`
 - Logs around reconcile, `XREADGROUP`, delayed sweep, PEL reap, DLQ, and orphan
-  movement, including `queue_batch_dispatched`.
+  movement, including `queue_batch_dispatched` and
+  `queue_consumer_projection_invalid`.
 
 Runtime tail logs also emit `worker_scheduled` and `worker_queue` start/finish events
 for loaded worker execution.
