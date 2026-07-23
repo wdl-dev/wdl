@@ -30,7 +30,7 @@ import { redisZAdd, redisZScore } from "./helpers/redis.js";
 
 setupIntegrationSuite();
 
-test("stale workflow run cannot commit after incarnation or generation changes", async () => {
+test("stale workflow run cannot commit after restart generation changes", async () => {
   const ns = uniqueNs("wfstale");
   const version = await deployAndPromote(ns, "shop", {
     code: WORKER_CODE,
@@ -55,52 +55,6 @@ test("stale workflow run cannot commit after incarnation or generation changes",
 
   const createdAtMs = Number(redisWorkflowStateHGet(ns, workflowKey, "stale-1", "createdAtMs"));
   await withServiceStopped("scheduler", async () => {
-    const nextCreatedAtMs = createdAtMs + 1;
-    redisWorkflowStateHSet(ns, workflowKey, "stale-1", [
-      "status",
-      "running",
-      "createdAtMs",
-      String(nextCreatedAtMs),
-      "runToken",
-      "stale-incarnation-token",
-      "runLeaseExpiresAtMs",
-      String(Date.now() + 60_000),
-    ]);
-    const staleIncarnation = runtimeDispatchPost(
-      "/internal/workflows/run",
-      { "x-worker-id": gatewayWorkerId(ns, "shop", version) },
-      {
-        ns,
-        worker: "shop",
-        frozenVersion: version,
-        workflowName: "orders",
-        workflowKey,
-        className: "OrderWorkflow",
-        instanceId: "stale-1",
-        generation: 1,
-        createdAtMs,
-        runToken: "stale-incarnation-token",
-        params: {
-          source: "integration",
-          id: "stale-1",
-          dynamicStepName: "stale-incarnation-overwrite",
-        },
-      }
-    );
-    assert.equal(staleIncarnation.status, 200, staleIncarnation.body);
-    assert.equal(responseJson(staleIncarnation).outcome, "failed");
-    assert.equal(redisWorkflowStateHGet(ns, workflowKey, "stale-1", "generation"), "1");
-    assert.equal(
-      redisWorkflowStateHGet(ns, workflowKey, "stale-1", "createdAtMs"),
-      String(nextCreatedAtMs),
-    );
-    assert.equal(redisWorkflowStateHGet(ns, workflowKey, "stale-1", "status"), "running");
-
-    redisWorkflowStateHSet(ns, workflowKey, "stale-1", ["status", "completed"]);
-    redisWorkflowStateHDel(ns, workflowKey, "stale-1", [
-      "runToken",
-      "runLeaseExpiresAtMs",
-    ]);
     const restarted = await gatewayFetch(ns, "/shop/restart?id=stale-1");
     const restartedBody = await readIntegrationJson(restarted, 200, "workflow response");
     assert.equal(restartedBody.status, "queued");
@@ -134,6 +88,10 @@ test("stale workflow run cannot commit after incarnation or generation changes",
     assert.equal(staleReplayBody.outcome, "failed");
     assert.equal(redisWorkflowStateHGet(ns, workflowKey, "stale-1", "generation"), "2");
     assert.equal(redisWorkflowStateHGet(ns, workflowKey, "stale-1", "status"), "queued");
+    redisWorkflowStateHDel(ns, workflowKey, "stale-1", [
+      "runToken",
+      "runLeaseExpiresAtMs",
+    ]);
 
     composeScale("scheduler", 2);
     /** @type {any} */

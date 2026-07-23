@@ -23,19 +23,19 @@ return results
 static REMOVE_STALE_INDEX_MEMBERS: StaticRedisScript =
     StaticRedisScript::new(REMOVE_STALE_INDEX_MEMBERS_SCRIPT);
 
-async fn scan_keys_on(redis: &Redis, pattern: &str) -> Result<Vec<String>, redis::RedisError> {
+async fn scan_typed_keys_on(
+    redis: &Redis,
+    pattern: &str,
+    key_type: &str,
+) -> Result<Vec<String>, redis::RedisError> {
     let mut cursor = 0_u64;
     let mut keys = Vec::new();
     loop {
         let pattern = pattern.to_string();
+        let key_type = key_type.to_string();
         let (next, batch): (u64, Vec<String>) = redis
             .with_conn(async |mut conn| {
-                redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(pattern)
-                    .arg("COUNT")
-                    .arg(200)
+                scan_index_page(cursor, &pattern, &key_type)
                     .query_async(&mut conn)
                     .await
             })
@@ -192,7 +192,7 @@ pub(crate) async fn indexed_keys_after_backfill(
         return indexed_existing_keys_on(&state.redis, index_key, expected_type).await;
     }
 
-    let scanned = scan_keys_on(&state.redis, pattern).await?;
+    let scanned = scan_typed_keys_on(&state.redis, pattern, expected_type).await?;
     state
         .redis
         .with_conn(async |mut conn| {
@@ -239,7 +239,7 @@ mod tests {
     use crate::test_fixtures::parse_packed_commands;
 
     #[test]
-    fn repair_scan_filters_to_the_authoritative_key_type() {
+    fn index_scan_filters_to_the_authoritative_key_type() {
         let command = scan_index_page(7, "queue:*:*:s", "stream");
         let commands = parse_packed_commands(&command.get_packed_command());
 
