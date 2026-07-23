@@ -1,7 +1,6 @@
 import { connect } from "cloudflare:sockets";
 import {
   encodeCommand,
-  normalizeRedisDb,
   utf8Decoder,
   warnRedisCallback,
   RespReader,
@@ -26,7 +25,6 @@ export class RedisSubscriber {
   /** @param {string} address @param {string|string[]} channels @param {RedisSubscriberOptions} [opts] */
   constructor(address, channels, opts = {}) {
     this.address = address;
-    this.db = normalizeRedisDb(opts.db);
     this.channels = Array.isArray(channels) ? channels.slice() : [channels];
     this.onMessage = typeof opts.onMessage === "function" ? opts.onMessage : null;
     this.onConnect = typeof opts.onConnect === "function" ? opts.onConnect : null;
@@ -70,11 +68,6 @@ export class RedisSubscriber {
     const reader = socket.readable.getReader();
     try {
       const parser = new RespReader(reader);
-      if (this.db > 0) {
-        await writer.write(encodeCommand(["SELECT", String(this.db)]));
-        await parser.parseOne();
-        parser.compact();
-      }
       await writer.write(encodeCommand(["SUBSCRIBE", ...this.channels]));
       // Drain the SUBSCRIBE ack(s) before firing onConnect: otherwise callers
       // cannot tell when the server has registered the subscription.

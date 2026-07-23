@@ -1,4 +1,4 @@
-use wdl_rust_common::time::now_ms;
+use wdl_rust_common::{redis_eval::StaticRedisScript, time::now_ms};
 
 use crate::{AppState, InstanceIdentity, WorkflowResult, ready_active_key};
 
@@ -10,7 +10,8 @@ if status ~= ARGV[1] then
   return 0
 end
 local generation = redis.call("HGET", KEYS[1], "generation")
-if generation ~= ARGV[2] then
+local created_at_ms = redis.call("HGET", KEYS[1], "createdAtMs")
+if generation ~= ARGV[2] or created_at_ms ~= ARGV[6] then
   return 0
 end
 if redis.call("HGET", KEYS[1], "runToken") then
@@ -68,7 +69,8 @@ if lease > tonumber(ARGV[1]) then
   return 0
 end
 local generation = redis.call("HGET", KEYS[1], "generation")
-if generation ~= ARGV[2] then
+local created_at_ms = redis.call("HGET", KEYS[1], "createdAtMs")
+if generation ~= ARGV[2] or created_at_ms ~= ARGV[5] then
   return 0
 end
 redis.call("HSET", KEYS[1], "status", "queued", "updatedAtMs", ARGV[1])
@@ -77,6 +79,11 @@ redis.call("SADD", KEYS[2], ARGV[3])
 redis.call("SADD", KEYS[3], ARGV[4])
 return 1
 "#;
+
+static CLAIM_RUN: StaticRedisScript = StaticRedisScript::new(CLAIM_RUN_SCRIPT);
+static RELEASE_RUN: StaticRedisScript = StaticRedisScript::new(RELEASE_RUN_SCRIPT);
+static CLEAR_SUSPENDED_RUN: StaticRedisScript = StaticRedisScript::new(CLEAR_SUSPENDED_RUN_SCRIPT);
+static REQUEUE_EXPIRED_RUN: StaticRedisScript = StaticRedisScript::new(REQUEUE_EXPIRED_RUN_SCRIPT);
 
 pub(super) struct RunClaim {
     pub(super) token: String,
@@ -119,7 +126,7 @@ pub(super) async fn claim_run(
     let expected_generation = identity.generation.clone();
     let claimed: i64 = eval_script(
         app,
-        CLAIM_RUN_SCRIPT,
+        &CLAIM_RUN,
         &[&state_key],
         &[
             expected_status,
@@ -127,6 +134,7 @@ pub(super) async fn claim_run(
             &redis_token,
             &expires_at,
             &now_arg,
+            &identity.created_at_ms,
         ],
     )
     .await?;
@@ -147,7 +155,7 @@ pub(super) async fn release_run_claim(
     let status = status.to_string();
     let released: i64 = eval_script(
         app,
-        RELEASE_RUN_SCRIPT,
+        &RELEASE_RUN,
         &[&state_key],
         &[&generation, &token, &status, &now],
     )
@@ -170,7 +178,7 @@ pub(super) async fn clear_suspended_run_claim(
     let now = now_ms().to_string();
     let cleared: i64 = eval_script(
         app,
-        CLEAR_SUSPENDED_RUN_SCRIPT,
+        &CLEAR_SUSPENDED_RUN,
         &[&state_key, &ready, &event_index],
         &[&generation, &token, &ready_token, &now],
     )
@@ -192,9 +200,15 @@ pub(super) async fn requeue_expired_run_claim(
     let shard_arg = shard.to_string();
     let requeued: i64 = eval_script(
         app,
-        REQUEUE_EXPIRED_RUN_SCRIPT,
+        &REQUEUE_EXPIRED_RUN,
         &[&state_key, &ready, ready_active_key()],
-        &[&now, &generation, &token, &shard_arg],
+        &[
+            &now,
+            &generation,
+            &token,
+            &shard_arg,
+            &identity.created_at_ms,
+        ],
     )
     .await?;
     Ok(requeued == 1)
@@ -246,6 +260,25 @@ mod tests {
             CLAIM_RUN_SCRIPT
                 .contains(r#"redis.call("HDEL", KEYS[1], "runToken", "runLeaseExpiresAtMs")"#)
         );
+    }
+
+    #[test]
+    fn run_admission_rejects_a_recreated_instance() {
+        let claim_write = CLAIM_RUN_SCRIPT
+            .find(r#"redis.call("HSET", KEYS[1]"#)
+            .expect("claim state write");
+        let claim_fence = CLAIM_RUN_SCRIPT
+            .find(r#"created_at_ms ~= ARGV[6]"#)
+            .expect("claim incarnation fence");
+        assert!(claim_fence < claim_write);
+
+        let requeue_write = REQUEUE_EXPIRED_RUN_SCRIPT
+            .find(r#"redis.call("HSET", KEYS[1]"#)
+            .expect("requeue state write");
+        let requeue_fence = REQUEUE_EXPIRED_RUN_SCRIPT
+            .find(r#"created_at_ms ~= ARGV[5]"#)
+            .expect("requeue incarnation fence");
+        assert!(requeue_fence < requeue_write);
     }
 
     #[test]

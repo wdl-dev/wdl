@@ -1,8 +1,10 @@
 import {
   queueDelayedKey,
+  QUEUE_DELAYED_WAKE_STREAM,
   queueDlqKey,
   queueConsumerKey,
   QUEUE_CONSUMER_INDEX_KEY,
+  QUEUE_DELAYED_INDEX_KEY,
   QUEUE_STREAM_INDEX_KEY,
   queueOrphanedKey,
   queueStreamKey,
@@ -75,9 +77,11 @@ export function queueDelayedMessageMember(input) {
 
 export {
   queueDelayedKey,
+  QUEUE_DELAYED_WAKE_STREAM,
   queueDlqKey,
   queueConsumerKey,
   QUEUE_CONSUMER_INDEX_KEY,
+  QUEUE_DELAYED_INDEX_KEY,
   QUEUE_STREAM_INDEX_KEY,
   queueOrphanedKey,
   queueStreamKey,

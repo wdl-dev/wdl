@@ -32,6 +32,50 @@ import {
 
 setupIntegrationSuite();
 
+test("DO cold owner claim handles burst concurrency without surfacing owner races", async () => {
+  const ns = uniqueNs("do-claim-burst");
+  const version = await deployAndPromote(ns, "counter", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WORKER },
+    bindings: {
+      COUNTER: { type: "do", className: "Counter" },
+    },
+  });
+  const doStorageId = redisGetDoStorageId(ns, "counter");
+  const ownerKey = doHostId(ns, "counter", "Counter", "burst");
+  const services = ["do-runtime-a", "do-runtime-b", "do-runtime-c"];
+  const count = 20;
+
+  await withDoMultiRuntimes(async () => {
+    const input = {
+      ns,
+      worker: "counter",
+      version,
+      doStorageId,
+      className: "Counter",
+      objectName: "burst",
+      request: {
+        method: "POST",
+        url: "https://do.internal/increment",
+        headers: { "content-type": "text/plain" },
+      },
+    };
+    const results = await Promise.all(Array.from({ length: count }, (_value, index) => (
+      doInternalInvokeAsync(services[index % services.length], input, { body: `burst-${index}` })
+    )));
+
+    for (const result of results) assert.equal(result.status, 200, result.body);
+    assert.deepEqual(
+      results.map((result) => responseJson(result).storage).sort((a, b) => a - b),
+      Array.from({ length: count }, (_value, index) => index + 1)
+    );
+    const owner = redisGetDoOwner(ownerKey);
+    assert.ok(services.includes(owner.taskId));
+    assert.equal(owner.generation, 1);
+    assert.equal(redisGetDoOwnerGeneration(ownerKey), 1);
+  });
+});
+
 test("Durable Object takeover preserves committed SQLite state after owner loss", async () => {
   const ns = uniqueNs("do-owner-loss");
   const version = await deployAndPromote(ns, "counter", {

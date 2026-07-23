@@ -29,7 +29,7 @@ Live tail 是 activation-gated pipe，不是持久日志系统：
 
 - workerd tails 把 console、exception、fetch、scheduled 和 queue event 交给 runtime tail worker。Runtime 始终保留结构化 stdout 作为持久平台日志路径。
 - `runtime/tail-forwarder.js` append 前会检查 redis-proxy `/logs/tail/active`。Active-set 的命中和未命中都会短暂 cache，避免 inactive worker 每个 event 都付出 Redis write。
-- Control 为每个 SSE tail session 做授权，在 `logs:tail:active` 写入/刷新 worker gate，读取 `logs:<ns>:<worker>:s`，并输出 SSE frame。Reconnect 会重新走正常 auth。
+- Control 为每个 SSE tail session 做授权，在 `logs:tail:active` 写入/刷新 worker gate，读取 `logs:<ns>:<worker>:s`，并输出 SSE frame。Gate 续期与 admission 共用一个原子操作，因此并发 session 不会突破 10,000-field active-gate 上限。Reconnect 会重新走正常 auth。
 - redis-proxy 写入有界 stream entry，使用 `MAXLEN ~ 500` 并刷新 TTL。这个 stream 用来衔接 live consumer，不用于保存历史。
 - 单 worker `wdl tail` 可以用 `Last-Event-ID` 在 stream 窗口内 resume。多 worker tail 是 fan-in session；reconnect 从新会话开始，因为单个 SSE cursor 无法表达每个 worker 一个 cursor。
 - 与 session activation race 的 event、runtime rolling、redis-proxy failure 或慢 SSE reader 都可能导致丢 event。这是可接受的，因为 stdout/log aggregation 才是持久 observability 路径。

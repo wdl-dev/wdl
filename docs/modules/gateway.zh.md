@@ -67,6 +67,7 @@ Control 写 Redis 并 publish invalidation。Gateway 不反向调用 control 查
 - Route cache 是 pull-triggered，并且能自愈。
 - Gateway 在 subscriber connect 和 disconnect 时清 route/pattern cache，因为 pub/sub 消息不持久。
 - Subscriber reconnect 会清本地 cache，下一次请求重新读 Redis；漏掉 invalidation 最多导致有界 stale cache，不会永久漂移。
+- 冷 Redis 读取期间收到 invalidation 时，Gateway 会丢弃该回复并重新读取；最多尝试五个 snapshot，之后返回 `503 gateway_routing_unavailable`，避免无关 invalidation 抖动无限占住请求。
 - Namespace 之间的 pattern-host 重分配也有同样的非持久 hint window：普通 control writer 会 publish invalidation，但只有 gateway 丢弃或刷新本地 cache 后，Redis 权威状态才会生效。
 - 数据面 route lookup 遇到 Redis outage 会表现为 gateway failure；admin-host forwarding 不依赖 route Redis 状态。
 - Pattern 分支保持原始 path；subdomain 分支会去掉最前面的 worker segment。

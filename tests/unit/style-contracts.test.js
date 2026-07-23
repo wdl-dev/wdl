@@ -335,6 +335,9 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
     if (/`worker:\$\{[^`]*:next_version`/.test(source)) {
       offenders.push(`${file}: inline next_version counter — use nextVersionKey(ns, worker)`);
     }
+    if (/`cron:seq:\$\{/.test(source)) {
+      offenders.push(`${file}: inline cron sequence counter — use cronSequenceKey(ns, worker)`);
+    }
     if (/"namespaces"/.test(source)) offenders.push(`${file}: inline namespaces set — use NAMESPACES_KEY`);
     if (/"declared-hosts"/.test(source)) {
       offenders.push(`${file}: inline declared-hosts set — use DECLARED_HOSTS_KEY`);
@@ -1205,20 +1208,13 @@ test("Rust sidecar startup logs do not expose Redis URLs", () => {
 
 test("queue main stream XADD is intentionally unbounded while auxiliary streams are capped", () => {
   const source = readRepoFile("rust/redis-proxy/src/queue.rs");
-  const queueSendSig = source.match(/pub\(crate\)\s+async\s+fn\s+queue_send\b/);
-  assert.ok(queueSendSig, "queue_send must remain findable");
-  const queueSend = extractBraceBlock(source, queueSendSig.index ?? -1);
-  assert.ok(queueSend, "queue_send body must remain findable");
-  const delayedIfStart = queueSend.indexOf("if visible_at > 0.0");
-  assert.notEqual(delayedIfStart, -1, "delayed queue branch must remain findable");
-  const elseIndex = queueSend.indexOf("} else {", delayedIfStart);
-  assert.notEqual(elseIndex, -1, "immediate queue stream XADD branch must remain findable");
-  const delayedBranch = queueSend.slice(delayedIfStart, elseIndex);
-  const immediateBranch = queueSend.slice(elseIndex);
-  assert.match(delayedBranch, /pipe_delayed_wake/);
-  assert.match(immediateBranch, /pipe\.cmd\("XADD"\)/);
-  assert.match(immediateBranch, /\.arg\(entry\.first_seen_ms\);/);
-  assert.doesNotMatch(immediateBranch, /MAXLEN/,
+  const immediateSig = source.match(/fn\s+pipe_immediate_queue_entry\b/);
+  assert.ok(immediateSig, "immediate queue command owner must remain findable");
+  const immediateCommand = extractBraceBlock(source, immediateSig.index ?? -1);
+  assert.ok(immediateCommand, "immediate queue command body must remain findable");
+  assert.match(immediateCommand, /pipe\.cmd\("XADD"\)/);
+  assert.match(immediateCommand, /\.arg\(entry\.first_seen_ms\);/);
+  assert.doesNotMatch(immediateCommand, /MAXLEN/,
     "queue:<ns>:<queue>:s is the durable main stream; do not trim it with MAXLEN");
 });
 
@@ -1940,8 +1936,11 @@ test("Valkey 9 is the local and Terraform baseline when HFE commands are used", 
   const valkeyTf = withoutLineComments(readRepoFile("terraform/modules/data/valkey.tf"));
   const tail = withoutLineComments(readRepoFile("control/handlers/logs-tail.js"));
 
-  assert.match(tail, /\.hGetEx\(/, "tail activation refreshes active fields with Valkey HGETEX");
-  assert.match(tail, /\.hSetEx\(/, "tail activation creates active fields with Valkey HSETEX");
+  assert.match(
+    tail,
+    /redis\.call\("HSETEX"/,
+    "tail activation renews and admits active fields atomically with Valkey HSETEX"
+  );
   assert.match(compose, /image: valkey\/valkey:9\.1-alpine\b/);
   assert.match(valkeyTf, /engine_version = "9\.1"/);
   assert.match(valkeyTf, /parameter_group_name = "default\.valkey9"/);
@@ -2069,6 +2068,8 @@ test("queue discovery index literals stay aligned across scheduler, proxy, and c
   }
   assert.match(scheduler, /wdl_rust_common::queue_keys/);
   assert.match(proxy, /wdl_rust_common::queue_keys/);
+  assert.ok(shared.includes('QUEUE_DELAYED_WAKE_STREAM = "queue-delayed-wake"'));
+  assert.ok(common.includes('QUEUE_DELAYED_WAKE_STREAM: &str = "queue-delayed-wake"'));
 });
 
 test("cron discovery index literals stay aligned across scheduler and control", () => {
@@ -2431,9 +2432,22 @@ test("DO transport relative dependencies are registered in host and loaded-worke
 
 test("queue delay cap literals stay aligned across standalone tiers", () => {
   const expected = "86_400";
-  for (const file of ["control/lib.js", "runtime/lib.js", "rust/scheduler/src/queue/delivery/retry.rs"]) {
+  for (const file of ["control/lib.js", "runtime/lib.js", "rust/scheduler/src/queue/mod.rs"]) {
     const source = withoutLineComments(readRepoFile(file));
     assert.match(source, new RegExp(`\\bMAX_QUEUE_DELAY_SECONDS\\b[^=]*=\\s*${RegExp.escape(expected)}\\b`), file);
+  }
+});
+
+test("queue consumer projection caps stay aligned between Control and Scheduler", () => {
+  const control = withoutLineComments(readRepoFile("control/topology.js"));
+  const scheduler = withoutLineComments(readRepoFile("rust/scheduler/src/queue/mod.rs"));
+  for (const [controlName, schedulerName, expected] of [
+    ["MAX_BATCH_SIZE", "MAX_BATCH_SIZE_CAP", "100"],
+    ["MAX_BATCH_TIMEOUT_MS", "MAX_BATCH_TIMEOUT_MS", "60_000"],
+    ["MAX_RETRIES", "MAX_RETRIES", "100"],
+  ]) {
+    assert.match(control, new RegExp(`\\b${controlName}\\b[^=]*=\\s*${RegExp.escape(expected)}\\b`));
+    assert.match(scheduler, new RegExp(`\\b${schedulerName}\\b[^=]*=\\s*${RegExp.escape(expected)}\\b`));
   }
 });
 

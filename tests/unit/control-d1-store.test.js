@@ -25,6 +25,7 @@ export const state = {
   redis: {
     async get(...args) { return /** @type {any} */ (globalThis).__d1StoreTestState.redis.get(...args); },
     async hGetAll(...args) { return /** @type {any} */ (globalThis).__d1StoreTestState.redis.hGetAll(...args); },
+    async hGetAllAndGet(...args) { return /** @type {any} */ (globalThis).__d1StoreTestState.redis.hGetAllAndGet(...args); },
     async hSet(...args) { return /** @type {any} */ (globalThis).__d1StoreTestState.redis.hSet(...args); },
     async session(...args) { return /** @type {any} */ (globalThis).__d1StoreTestState.redis.session(...args); },
   },
@@ -75,19 +76,33 @@ test("D1 store: create writes provisional metadata then flips ready", async () =
   CONTROL_D1_STORE_TEST_STATE.redis = redis;
   const created = await commitDatabaseMetadata("demo", "main", "d1_main", "2026-01-01T00:00:00.000Z");
   assert.deepEqual(created, { ok: true, databaseId: "d1_main" });
+  assert.deepEqual(
+    redis.commands.filter(([command]) => command === "exists" || command === "existsMany"),
+    [["existsMany", ["d1:database-name:demo:main", "d1:database:demo:d1_main"]]]
+  );
   const provisional = redis.hashes.get("d1:database:demo:d1_main");
   assert.ok(provisional);
   assert.equal(provisional.state, "provisional");
   assert.equal(await resolveDatabaseRefFrom(redis, "demo", "main"), null);
 
+  redis.commands.length = 0;
   const ready = await markDatabaseReady("demo", { databaseId: "d1_main", databaseName: "main" }, "2026-01-01T00:00:01.000Z");
   assert.deepEqual(ready, { ok: true });
+  assert.deepEqual(
+    redis.commands.filter(([command]) => String(command).startsWith("hGetAll") || command === "get"),
+    [["hGetAllAndGet", "d1:database:demo:d1_main", "d1:database-name:demo:main"]]
+  );
   const readyRecord = redis.hashes.get("d1:database:demo:d1_main");
   assert.ok(readyRecord);
   assert.equal("provisionalUntil" in readyRecord, false);
+  redis.commands.length = 0;
   const resolved = await resolveDatabaseRefFrom(redis, "demo", "main");
   assert.equal(resolved.databaseId, "d1_main");
   assert.equal(resolved.state, "ready");
+  assert.deepEqual(redis.commands, [
+    ["hGetAllAndGet", "d1:database:demo:main", "d1:database-name:demo:main"],
+    ["hGetAll", "d1:database:demo:d1_main"],
+  ]);
 });
 
 test("D1 store: direct non-ready id does not fall through to name alias", async () => {
@@ -97,15 +112,24 @@ test("D1 store: direct non-ready id does not fall through to name alias", async 
   await commitDatabaseMetadata("demo", "d1_main", "d1_other", "2026-01-01T00:00:00.000Z");
   await markDatabaseReady("demo", { databaseId: "d1_other", databaseName: "d1_main" }, "2026-01-01T00:00:01.000Z");
 
+  redis.commands.length = 0;
   assert.equal(await resolveDatabaseRefFrom(redis, "demo", "d1_main"), null);
+  assert.deepEqual(redis.commands, [
+    ["hGetAllAndGet", "d1:database:demo:d1_main", "d1:database-name:demo:d1_main"],
+  ]);
 });
 
 test("D1 store: rollback removes only provisional metadata", async () => {
   const redis = makeRedis();
   CONTROL_D1_STORE_TEST_STATE.redis = redis;
   await commitDatabaseMetadata("demo", "main", "d1_main", "2026-01-01T00:00:00.000Z");
+  redis.commands.length = 0;
   const rolledBack = await rollbackProvisionalDatabaseMetadata("demo", { databaseId: "d1_main", databaseName: "main" });
   assert.deepEqual(rolledBack, { rolledBack: true });
+  assert.deepEqual(
+    redis.commands.filter(([command]) => String(command).startsWith("hGetAll") || command === "get"),
+    [["hGetAllAndGet", "d1:database:demo:d1_main", "d1:database-name:demo:main"]]
+  );
   assert.equal(redis.hashes.has("d1:database:demo:d1_main"), false);
   assert.equal(redis.strings.has("d1:database-name:demo:main"), false);
 });
@@ -116,6 +140,7 @@ test("D1 store: delete writes tombstone before removing active metadata", async 
   await commitDatabaseMetadata("demo", "main", "d1_main", "2026-01-01T00:00:00.000Z");
   await markDatabaseReady("demo", { databaseId: "d1_main", databaseName: "main" }, "2026-01-01T00:00:01.000Z");
 
+  redis.commands.length = 0;
   const deleted = await deleteDatabaseMetadata(
     "demo",
     { databaseId: "d1_main", databaseName: "main", state: "ready" },
@@ -124,6 +149,16 @@ test("D1 store: delete writes tombstone before removing active metadata", async 
   );
 
   assert.equal(deleted.deleted, true);
+  assert.deepEqual(
+    redis.commands.filter(([command]) =>
+      String(command).startsWith("hGetAll") || command === "get" || command === "sMembers"),
+    [[
+      "hGetAllGetSMembers",
+      "d1:database:demo:d1_main",
+      "d1:database-name:demo:main",
+      "d1:database-referrers:demo:d1_main",
+    ]]
+  );
   assert.equal(redis.hashes.has("d1:database:demo:d1_main"), false);
   assert.equal(redis.strings.has("d1:database-name:demo:main"), false);
   assert.equal(redis.sets.has("d1:databases:demo"), false);

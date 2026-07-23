@@ -11,6 +11,8 @@ import {
   assertStatus,
   delay,
   deployAndPromote,
+  gatewayUrl,
+  readIntegrationJson,
   responseJson,
   setupIntegrationSuite,
   uniqueNs,
@@ -134,6 +136,12 @@ test("pattern branch: unknown host → 404", async () => {
   const res = await fetchWithHost("nothing.workers.example", "/whatever");
   assertStatus(res, 404, "unknown host fetch");
   assert.deepEqual(res.json(), { error: "not_found", message: "Not found" });
+  const health = await readIntegrationJson(
+    await fetch(gatewayUrl("/healthz")),
+    200,
+    "gateway health after unknown host"
+  );
+  assert.equal(health.pattern_cache_size, 0);
 });
 
 test("pattern branch: CF exact-match semantics — /mcp doesn't match /mcphello", async () => {

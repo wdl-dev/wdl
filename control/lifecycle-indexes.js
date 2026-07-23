@@ -5,7 +5,7 @@ import {
   workersIndexKey,
 } from "control-lib";
 import { QUEUE_CONSUMER_INDEX_KEY, queueConsumerKey } from "shared-queue-keys";
-import { workerVersionsKey } from "shared-worker-contract";
+import { cronSequenceKey, workerVersionsKey } from "shared-worker-contract";
 
 export const CRON_WORKER_INDEX_KEY = "cron:index:workers";
 
@@ -16,7 +16,7 @@ export const CRON_WORKER_INDEX_KEY = "cron:index:workers";
  * @typedef {{ binding: string, databaseId?: string, resolvedDatabaseId?: string }} D1Ref
  * @typedef {{ id: string, gen: number, slot: number }} CronIndexEntry
  * @typedef {{ cron: string, timezone: string }} CronSpec
- * @typedef {{ cronSeq: number, addedWithPlacement: Array<CronSpec & CronIndexEntry>, removed: Array<{ id: string }> }} CronPlan
+ * @typedef {{ cronSeq: number, persistSequence: boolean, addedWithPlacement: Array<CronSpec & CronIndexEntry>, removed: Array<{ id: string }> }} CronPlan
  * @typedef {{ queue: string, maxBatchSize: number, maxBatchTimeoutMs: number, maxRetries: number, retryDelaySeconds?: number, deadLetterQueue?: string }} QueueConsumer
  */
 
@@ -76,9 +76,9 @@ export function cronRefMember(ns, worker, cronId, gen) {
   return `${ns}:${worker}:${cronId}:${gen}`;
 }
 
-/** @param {string} version @param {number} seq */
-export function cronMetaJson(version, seq) {
-  return JSON.stringify({ version, seq });
+/** @param {string} version */
+export function cronMetaJson(version) {
+  return JSON.stringify({ version });
 }
 
 /** @param {CronSpec & { gen: number }} entry */
@@ -105,10 +105,15 @@ export function stageCronWorkerRemoved(multi, ns, worker) {
   multi.sRem(CRON_WORKER_INDEX_KEY, cronWorkerKey(ns, worker));
 }
 
-/** @param {RedisMulti} multi @param {{ ns: string, worker: string, version: string, cronKey: string, seq: number }} args */
-export function stageCronProjectionMeta(multi, { ns, worker, version, cronKey, seq }) {
+/** @param {RedisMulti} multi @param {string} ns @param {string} worker @param {number} seq */
+export function stageCronSequence(multi, ns, worker, seq) {
+  multi.set(cronSequenceKey(ns, worker), String(seq));
+}
+
+/** @param {RedisMulti} multi @param {{ ns: string, worker: string, version: string, cronKey: string }} args */
+export function stageCronProjectionMeta(multi, { ns, worker, version, cronKey }) {
   stageCronWorkerIndexed(multi, ns, worker);
-  multi.hSet(cronKey, "__meta__", cronMetaJson(version, seq));
+  multi.hSet(cronKey, "__meta__", cronMetaJson(version));
 }
 
 /**
@@ -119,6 +124,7 @@ export function stageCronProjection(
   multi,
   { ns, worker, version, cronKey, existingHash, crons, plan }
 ) {
+  if (plan.persistSequence) stageCronSequence(multi, ns, worker, plan.cronSeq);
   // __meta__.version lets scheduler build x-worker-id without a second HGET;
   // delete the hash when no crons remain so stale refs decay.
   if (crons.length === 0) {
@@ -126,7 +132,7 @@ export function stageCronProjection(
     stageCronWorkerRemoved(multi, ns, worker);
     return;
   }
-  stageCronProjectionMeta(multi, { ns, worker, version, cronKey, seq: plan.cronSeq });
+  stageCronProjectionMeta(multi, { ns, worker, version, cronKey });
   for (const entry of plan.addedWithPlacement) {
     multi.hSet(cronKey, entry.id, cronEntryJson(entry));
     stageCronSlotRef(multi, ns, worker, entry);

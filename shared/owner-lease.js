@@ -7,7 +7,7 @@ const OWNER_GENERATION_COUNTER = /^(?:0|[1-9]\d*)$/;
 /**
  * @typedef {{ leaseExpiresAt?: number | null }} OwnerLeaseRecord
  * @typedef {OwnerLeaseRecord & { generation: number } & Record<string, unknown>} OwnerRecord
- * @typedef {{ get(key: string): Promise<string | number | BufferSource | null | undefined> }} RedisGetSession
+ * @typedef {{ get(key: string): Promise<string | number | Uint8Array<ArrayBufferLike> | ArrayBuffer | null | undefined> }} RedisGetSession
  * @typedef {{ time(): Promise<number> }} RedisTimeClient
  * @typedef {(status: number, code: string, message: string) => Error} ErrorFactory
  */
@@ -31,7 +31,7 @@ export function ownerGenerationScopedKey(prefix, scope) {
 }
 
 /**
- * @param {string | BufferSource | null | undefined} raw
+ * @param {string | Uint8Array<ArrayBufferLike> | ArrayBuffer | null | undefined} raw
  * @returns {OwnerRecord | null}
  */
 export function parseOwnerRecord(raw) {
@@ -97,12 +97,11 @@ export function ownerLeaseExpiresAt(nowMs, ttlSeconds) {
 }
 
 /**
- * @param {RedisGetSession} session
+ * @param {string | number | Uint8Array<ArrayBufferLike> | ArrayBuffer | null | undefined} raw
  * @param {string} generationKey
- * @returns {Promise<number>}
+ * @returns {number}
  */
-export async function currentOwnerGenerationCounter(session, generationKey) {
-  const raw = await session.get(generationKey);
+export function parseOwnerGenerationCounter(raw, generationKey) {
   if (raw === null || raw === undefined || raw === "") return 0;
   if (typeof raw === "number") {
     if (Number.isSafeInteger(raw) && raw >= 0) return raw;
@@ -123,11 +122,20 @@ export async function currentOwnerGenerationCounter(session, generationKey) {
 /**
  * @param {RedisGetSession} session
  * @param {string} generationKey
- * @param {number} [currentGeneration]
  * @returns {Promise<number>}
  */
-export async function nextOwnerGeneration(session, generationKey, currentGeneration = 0) {
-  const currentCounter = await currentOwnerGenerationCounter(session, generationKey);
+export async function currentOwnerGenerationCounter(session, generationKey) {
+  return parseOwnerGenerationCounter(await session.get(generationKey), generationKey);
+}
+
+/**
+ * @param {string | number | Uint8Array<ArrayBufferLike> | ArrayBuffer | null | undefined} raw
+ * @param {string} generationKey
+ * @param {number} [currentGeneration]
+ * @returns {number}
+ */
+export function nextOwnerGenerationFromSnapshot(raw, generationKey, currentGeneration = 0) {
+  const currentCounter = parseOwnerGenerationCounter(raw, generationKey);
   const previousGeneration = Math.max(currentCounter, currentGeneration);
   if (!Number.isSafeInteger(previousGeneration) || previousGeneration >= Number.MAX_SAFE_INTEGER) {
     throw new Error(`Owner generation counter is exhausted: ${generationKey}`);

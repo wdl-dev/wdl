@@ -1,4 +1,4 @@
-use wdl_rust_common::time::random_hex_64;
+use wdl_rust_common::{redis_eval::StaticRedisScript, time::random_hex_64};
 
 use crate::{AppState, WorkflowError, WorkflowResult, pending_version_key};
 
@@ -27,6 +27,11 @@ local count = redis.call("ZCOUNT", KEYS[1], active_min, "+inf")
 local members = redis.call("ZRANGEBYSCORE", KEYS[1], active_min, "+inf", "LIMIT", 0, ARGV[2])
 return { count, members }
 "#;
+
+static CREATE_PENDING_RESTART: StaticRedisScript =
+    StaticRedisScript::new(CREATE_PENDING_RESTART_SCRIPT);
+static READ_PENDING_RESTART: StaticRedisScript =
+    StaticRedisScript::new(READ_PENDING_RESTART_SCRIPT);
 
 pub(super) struct PendingRestartMarker {
     pub(super) key: String,
@@ -58,7 +63,7 @@ pub(super) async fn create_pending_restart(
     let key_ttl = PENDING_RESTART_KEY_TTL_MS.to_string();
     let _: i64 = eval_script(
         state,
-        CREATE_PENDING_RESTART_SCRIPT,
+        &CREATE_PENDING_RESTART,
         &[&marker.key],
         &[&marker.member, &marker_ttl, &key_ttl],
     )
@@ -96,13 +101,8 @@ pub(super) async fn active_pending_restart_blockers(
     let key = pending_version_key(ns, worker, version);
     let cleanup = if allow_cleanup { "1" } else { "0" };
     let limit = limit.to_string();
-    let (count, members): (usize, Vec<String>) = eval_script(
-        state,
-        READ_PENDING_RESTART_SCRIPT,
-        &[&key],
-        &[cleanup, &limit],
-    )
-    .await?;
+    let (count, members): (usize, Vec<String>) =
+        eval_script(state, &READ_PENDING_RESTART, &[&key], &[cleanup, &limit]).await?;
     let blockers = members
         .into_iter()
         .map(|member| parse_pending_restart_member(&member))

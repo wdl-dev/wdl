@@ -5,6 +5,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 
 use crate::{AppError, AppResult, AppState, empty};
 
@@ -20,6 +21,16 @@ pub(crate) const TAIL_STREAM_PEXPIRE_MS: u64 = 600_000;
 
 pub(crate) const TAIL_EVENT_MAX_BYTES: usize = 5 * 1024;
 pub(crate) const TAIL_ACTIVATION_KEY: &str = "logs:tail:active";
+
+const TAIL_APPEND_SCRIPT: &str = r#"
+if redis.call("HEXISTS", KEYS[1], ARGV[1]) == 0 then
+  return 0
+end
+redis.call("XADD", KEYS[2], "MAXLEN", "~", ARGV[2], "*", "json", ARGV[3])
+redis.call("PEXPIRE", KEYS[2], ARGV[4])
+return 1
+"#;
+static TAIL_APPEND: StaticRedisScript = StaticRedisScript::new(TAIL_APPEND_SCRIPT);
 
 // `<ns>:<worker>`: exactly one ':' separator, both halves non-empty,
 // neither half itself contains ':' (already implied by exactly-one).
@@ -92,18 +103,6 @@ async fn active_tail_keys(state: &AppState) -> Result<Vec<String>, redis::RedisE
         .await
 }
 
-async fn tail_key_is_active(state: &AppState, key: String) -> Result<bool, redis::RedisError> {
-    state
-        .with_redis(async |mut conn| {
-            redis::cmd("HEXISTS")
-                .arg(TAIL_ACTIVATION_KEY)
-                .arg(key)
-                .query_async(&mut conn)
-                .await
-        })
-        .await
-}
-
 // Used by tail-worker to gate `console.*` forwarding. Returning the
 // full active set (not a per-key probe) lets tail-worker cache the
 // answer for a few seconds and decide synchronously per event without
@@ -126,29 +125,20 @@ pub(crate) async fn logs_tail_append(
     validate_segment(&body.ns, "ns")?;
     validate_segment(&body.worker, "worker")?;
     validate_tail_event_json(&body.json)?;
-    let key = activation_key(&body.ns, &body.worker);
-    if !tail_key_is_active(&state, key).await? {
-        // Designed-in fast path: tail-worker only calls this endpoint after
-        // its active-set cache says someone is watching, and Valkey HFE
-        // rejects stale activation if that cache races expiry.
-        return Ok(empty(StatusCode::NO_CONTENT));
-    }
+    let activation_field = activation_key(&body.ns, &body.worker);
     let stream_key = tail_stream_key(&body.ns, &body.worker);
-    let mut pipe = redis::Pipeline::new();
-    pipe.atomic();
-    pipe.cmd("XADD")
-        .arg(&stream_key)
-        .arg("MAXLEN")
-        .arg("~")
-        .arg(TAIL_STREAM_MAXLEN)
-        .arg("*")
-        .arg("json")
-        .arg(&body.json);
-    pipe.cmd("PEXPIRE")
-        .arg(&stream_key)
-        .arg(TAIL_STREAM_PEXPIRE_MS);
-    let _: redis::Value = state
-        .with_redis(async |mut conn| pipe.query_async(&mut conn).await)
+    let max_len = TAIL_STREAM_MAXLEN.to_string();
+    let expire_ms = TAIL_STREAM_PEXPIRE_MS.to_string();
+    let _: i64 = state
+        .with_redis(async |mut conn| {
+            TAIL_APPEND
+                .prepare_invoke(
+                    &[TAIL_ACTIVATION_KEY, &stream_key],
+                    &[&activation_field, &max_len, &body.json, &expire_ms],
+                )
+                .invoke_async(&mut conn)
+                .await
+        })
         .await?;
     Ok(empty(StatusCode::NO_CONTENT))
 }
@@ -195,5 +185,15 @@ mod tests {
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.code, "invalid_request");
         assert!(err.message.contains("tail event exceeds"));
+    }
+
+    #[test]
+    fn tail_append_script_gates_before_append_and_refreshes_ttl_afterward() {
+        let gate = TAIL_APPEND_SCRIPT.find("HEXISTS").unwrap();
+        let append = TAIL_APPEND_SCRIPT.find("XADD").unwrap();
+        let expire = TAIL_APPEND_SCRIPT.find("PEXPIRE").unwrap();
+
+        assert!(gate < append);
+        assert!(append < expire);
     }
 }

@@ -118,7 +118,9 @@ KV supports the common `KVNamespace` calls: `get`, batch `get`, `getWithMetadata
 and stream result shapes; batch reads support text and JSON. Values are capped at 25 MiB
 in the runtime shim before proxying, and stream values are read with the same cap. Keys
 are capped at 512 UTF-8 bytes at the redis-proxy boundary for all KV operations,
-including list prefixes and batch reads.
+including list prefixes and batch reads. `put()` expiration and expiration-TTL values
+must be positive JavaScript safe integers; the proxy applies an expiring value-only
+write and stale-metadata removal atomically.
 `list()` is backed by Redis `HSCAN`, not a Cloudflare ordered B-tree: keys are not
 sorted, cursors are opaque WDL cursors, and concurrent writes may appear out of order or
 be re-seen. `limit` is capped at 1000. `cacheTtl` is accepted only as API shape; there

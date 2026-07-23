@@ -6,7 +6,7 @@ import { sharedModuleDataUrl } from "../helpers/load-shared-module.js";
 const {
   boundedPositiveIntEnv,
   currentOwnerGenerationCounter,
-  nextOwnerGeneration,
+  nextOwnerGenerationFromSnapshot,
   ownerGenerationScopedKey,
   ownerLeaseExpiresAt,
   ownerLeaseExpired,
@@ -98,21 +98,25 @@ test("owner lease helpers derive monotonic owner generations from Redis counters
     () => currentOwnerGenerationCounter(session, "huge"),
     /Owner generation counter is corrupt: huge/
   );
-  assert.equal(await nextOwnerGeneration(session, "normal", 3), 8);
-  assert.equal(await nextOwnerGeneration(session, "normal", 10), 11);
-  assert.equal(await nextOwnerGeneration(session, "missing", 0), 1);
-  assert.equal(await nextOwnerGeneration(session, "near-max", 0), Number.MAX_SAFE_INTEGER);
+  assert.equal(nextOwnerGenerationFromSnapshot("7", "normal", 3), 8);
+  assert.equal(nextOwnerGenerationFromSnapshot("7", "normal", 10), 11);
+  assert.equal(nextOwnerGenerationFromSnapshot(new TextEncoder().encode("12"), "bytes", 20), 21);
+  assert.equal(nextOwnerGenerationFromSnapshot(null, "missing", 0), 1);
+  assert.equal(
+    nextOwnerGenerationFromSnapshot(String(Number.MAX_SAFE_INTEGER - 1), "near-max", 0),
+    Number.MAX_SAFE_INTEGER
+  );
   assert.equal(await currentOwnerGenerationCounter(session, "max"), Number.MAX_SAFE_INTEGER);
-  await assert.rejects(
-    () => nextOwnerGeneration(session, "max", 0),
+  assert.throws(
+    () => nextOwnerGenerationFromSnapshot(String(Number.MAX_SAFE_INTEGER), "max", 0),
     /Owner generation counter is exhausted: max/
   );
-  await assert.rejects(
-    () => nextOwnerGeneration(session, "missing", Number.MAX_SAFE_INTEGER),
+  assert.throws(
+    () => nextOwnerGenerationFromSnapshot(null, "missing", Number.MAX_SAFE_INTEGER),
     /Owner generation counter is exhausted: missing/
   );
-  await assert.rejects(
-    () => nextOwnerGeneration(session, "bad", 0),
+  assert.throws(
+    () => nextOwnerGenerationFromSnapshot("bad", "bad", 0),
     /Owner generation counter is corrupt: bad/
   );
 });

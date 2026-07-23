@@ -13,6 +13,7 @@ import {
   cronWorkerKey,
   stageCronProjection,
   stageCronProjectionMeta,
+  stageCronSequence,
   stageD1ReferrerAdds,
   stageOutgoingReferrerAdds,
   stageQueueConsumerProjection,
@@ -22,11 +23,14 @@ import {
 import { parseHostList } from "control-topology";
 import { encodePatternProjection } from "shared-route-projection";
 import {
+  CRON_GENERATION_EPOCH,
   DECLARED_HOSTS_KEY,
+  DECLARED_HOSTS_REVISION_KEY,
   NAMESPACES_KEY,
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   bundleKey,
+  cronSequenceKey,
   deleteLockKey,
   formatVersion,
   hostDeclarationsKey,
@@ -52,6 +56,9 @@ import {
 } from "control-routing-route-plan";
 
 const MAX_ATTEMPTS = 5;
+const HOST_RECONCILE_READ_BATCH_SIZE = 64;
+const DEPENDENCY_READ_BATCH_SIZE = 64;
+
 /**
  * @typedef {import("shared-route-projection").PatternProjection} PatternProjection
  * @typedef {Pick<PatternProjection, "kind" | "value"> & { host: string, slot: string }} RoutePattern
@@ -60,8 +67,8 @@ const MAX_ATTEMPTS = 5;
  * @typedef {{ binding: string, databaseId: string }} D1Ref
  * @typedef {{ targetNs: string, targetWorker: string, targetVersion: string, binding: string }} OutgoingRef
  * @typedef {{ as?: string }} ExportSpec
- * @typedef {{ version?: string | null, seq?: number }} CronMeta
- * @typedef {{ cronSeq: number, addedWithPlacement: Array<CronSpec & { id: string, gen: number, slot: number }>, removed: Array<{ id: string, gen: string | number }> }} CronPlan
+ * @typedef {{ version?: string | null, seq?: unknown }} CronMeta
+ * @typedef {{ cronSeq: number, persistSequence: boolean, addedWithPlacement: Array<CronSpec & { id: string, gen: number, slot: number }>, removed: Array<{ id: string, gen: string | number }> }} CronPlan
  * @typedef {{ newQueueConsumers: QueueConsumer[], removedQueueConsumers: QueueConsumer[] }} QueuePlan
  * @typedef {{ newRoutes: RoutePattern[], newCrons: CronSpec[], newQueueConsumers: QueueConsumer[], newExports: ExportSpec[], d1Refs: D1Ref[], outgoingRefs: OutgoingRef[] }} PromoteBundleInputs
  * @typedef {{ oldRoutes: RoutePattern[], oldQueueConsumers: QueueConsumer[], affectedHosts: Set<string>, hostState: HostState }} PromoteObservedState
@@ -72,7 +79,7 @@ const MAX_ATTEMPTS = 5;
  * @typedef {{ routes?: RoutePattern[], crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
  * @typedef {Record<string, Record<string, string | null | undefined>>} HostState
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
- * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, hGetAllMany: (keys: string[]) => Promise<Array<Record<string, string | null | undefined>>>, get: (key: string) => Promise<string | null | undefined>, exists: (key: string) => Promise<number>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, zRange: (key: string, start: number, stop: number) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
+ * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, hGetAllMany: (keys: string[]) => Promise<Array<Record<string, string | null | undefined>>>, hGetAllAndGet: (hashKey: string, stringKey: string) => Promise<{ hash: Record<string, string | null | undefined>, value: string | null | undefined }>, hStrLenMany: (pairs: Array<[string, string]>) => Promise<number[]>, get: (key: string) => Promise<string | null | undefined>, exists: (...keys: string[]) => Promise<number>, existsMany: (keys: string[]) => Promise<boolean[]>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, sMembersMany: (keys: string[]) => Promise<string[][]>, zRange: (key: string, start: number, stop: number) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
  * @typedef {{ hGet: (key: string, field: string) => Promise<string | null | undefined>, incr: (key: string) => Promise<number>, session: <T>(fn: (iso: RedisIso) => Promise<T>) => Promise<T> }} RedisClient
  */
 
@@ -128,10 +135,11 @@ function warnMalformedCronProjection(options, field) {
   });
 }
 
-/** @param {CronMeta | null | undefined} meta @param {LogContext} logContext */
-function cronSeqFromMeta(meta, logContext) {
-  const value = meta?.seq ?? 0;
-  if (!Number.isInteger(value) || value < 0) {
+/** @param {CronMeta} meta @param {LogContext} logContext */
+function cronSequenceSeedFromProjection(meta, logContext) {
+  if (!Object.hasOwn(meta, "seq")) return null;
+  const value = meta.seq;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     warnMalformedCronProjection(logContext, "__meta__.seq");
     throw new RoutingError(
       500,
@@ -140,6 +148,63 @@ function cronSeqFromMeta(meta, logContext) {
     );
   }
   return value;
+}
+
+/** @param {LogContext} logContext @param {string} message @returns {never} */
+function corruptCronSequence(logContext, message) {
+  warnMalformedCronProjection(logContext, "cron_sequence");
+  throw new RoutingError(500, "corrupt_cron_sequence", message);
+}
+
+/** @param {string | null | undefined} raw @param {LogContext} logContext */
+function parseCronSequence(raw, logContext) {
+  if (raw == null) return null;
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
+    corruptCronSequence(
+      logContext,
+      `Corrupt cron sequence for ${logContext.ns || "unknown"}/${logContext.workerName || "unknown"}`
+    );
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed)) {
+    corruptCronSequence(
+      logContext,
+      `Corrupt cron sequence for ${logContext.ns || "unknown"}/${logContext.workerName || "unknown"}`
+    );
+  }
+  return parsed;
+}
+
+/**
+ * @param {CronMeta | null} cronMeta
+ * @param {string | null | undefined} rawSequence
+ * @param {LogContext} logContext
+ */
+function resolveCronSequence(cronMeta, rawSequence, logContext) {
+  const persistedSequence = parseCronSequence(rawSequence, logContext);
+  if (persistedSequence != null) {
+    if (persistedSequence < CRON_GENERATION_EPOCH - 1) {
+      corruptCronSequence(
+        logContext,
+        `Cron sequence regressed for ${logContext.ns || "unknown"}/${logContext.workerName || "unknown"}`
+      );
+    }
+    return { cronSeq: persistedSequence, persistSequence: false };
+  }
+  if (cronMeta == null) {
+    return { cronSeq: CRON_GENERATION_EPOCH - 1, persistSequence: true };
+  }
+  const projectionSeed = cronSequenceSeedFromProjection(cronMeta, logContext);
+  if (projectionSeed == null) {
+    corruptCronSequence(
+      logContext,
+      `Missing cron sequence for ${logContext.ns || "unknown"}/${logContext.workerName || "unknown"}`
+    );
+  }
+  return {
+    cronSeq: Math.max(projectionSeed, CRON_GENERATION_EPOCH - 1),
+    persistSequence: true,
+  };
 }
 
 /** @param {LogContext} logContext @returns {never} */
@@ -198,18 +263,6 @@ function routingBundleMeta(ns, workerName, version, raw) {
   }));
 }
 
-/** @param {RedisIso} iso @param {string} ns @param {string} workerName @param {string | null | undefined} version */
-async function readRoutesFromMeta(iso, ns, workerName, version) {
-  const meta = await readMeta(iso, ns, workerName, version);
-  return meta && Array.isArray(meta.routes) ? meta.routes : [];
-}
-
-/** @param {RedisIso} iso @param {string} ns @param {string} workerName @param {string | null | undefined} version */
-async function readQueueConsumersFromMeta(iso, ns, workerName, version) {
-  const meta = await readMeta(iso, ns, workerName, version);
-  return meta && Array.isArray(meta.queueConsumers) ? meta.queueConsumers : [];
-}
-
 // Callers stage their own prelude (HDEL removed slots, cron diff,
 // queue-consumer updates, ns-hosts deltas) into the same `multi`.
 // Embedding version in each slot value lets gateway build workerId
@@ -227,10 +280,10 @@ function stageVersionFlip(multi, ns, workerName, newVersion, routes, affectedHos
   multi.publish(ROUTES_CHANNEL, ns);
 }
 
-/** @param {Record<string, string>} cronHash @param {CronSpec[]} newCrons @param {number} now @param {LogContext} logContext */
-function computeCronPlan(cronHash, newCrons, now, logContext) {
-  /** @type {CronMeta} */
-  let cronMeta = { version: null, seq: 0 };
+/** @param {Record<string, string>} cronHash @param {string | null | undefined} rawSequence @param {CronSpec[]} newCrons @param {number} now @param {LogContext} logContext */
+function computeCronPlan(cronHash, rawSequence, newCrons, now, logContext) {
+  /** @type {CronMeta | null} */
+  let cronMeta = null;
   /** @type {Record<string, import("./cron-index.js").ExistingCronEntry>} */
   const oldCronById = {};
   for (const [k, v] of Object.entries(cronHash)) {
@@ -241,13 +294,45 @@ function computeCronPlan(cronHash, newCrons, now, logContext) {
     }
   }
   const cronDiff = diffCrons(oldCronById, newCrons);
-  let cronSeq = cronSeqFromMeta(cronMeta, logContext);
-  const addedWithPlacement = cronDiff.added.map((e) => ({
-    ...e,
-    gen: ++cronSeq,
-    slot: slotMsFor(nextFireMs(e.cron, e.timezone, now)),
-  }));
-  return { cronSeq, addedWithPlacement, removed: cronDiff.removed };
+  const hasExistingCronState = Object.keys(cronHash).length > 0;
+  const hasCronState = hasExistingCronState || newCrons.length > 0;
+  if (!hasCronState) {
+    if (rawSequence != null) {
+      const persistedSequence = parseCronSequence(rawSequence, logContext);
+      if (persistedSequence == null || persistedSequence < CRON_GENERATION_EPOCH - 1) {
+        corruptCronSequence(
+          logContext,
+          `Cron sequence regressed for ${logContext.ns || "unknown"}/${logContext.workerName || "unknown"}`
+        );
+      }
+    }
+    return { cronSeq: 0, persistSequence: false, addedWithPlacement: [], removed: [] };
+  }
+  if (hasExistingCronState && cronMeta == null) corruptCronMeta(logContext);
+  const sequence = resolveCronSequence(cronMeta, rawSequence, logContext);
+  let cronSeq = sequence.cronSeq;
+  const addedWithPlacement = [];
+  for (const entry of cronDiff.added) {
+    if (cronSeq >= Number.MAX_SAFE_INTEGER) {
+      throw new RoutingError(
+        500,
+        "cron_sequence_exhausted",
+        `Cron sequence exhausted for ${logContext.ns || "unknown"}/${logContext.workerName || "unknown"}`
+      );
+    }
+    cronSeq += 1;
+    addedWithPlacement.push({
+      ...entry,
+      gen: cronSeq,
+      slot: slotMsFor(nextFireMs(entry.cron, entry.timezone, now)),
+    });
+  }
+  return {
+    cronSeq,
+    persistSequence: sequence.persistSequence || addedWithPlacement.length > 0,
+    addedWithPlacement,
+    removed: cronDiff.removed,
+  };
 }
 
 /**
@@ -272,6 +357,7 @@ function stageDeclaredHostChanges(multi, ns, toAdd, removals) {
     }
   }
   for (const host of changedHosts) multi.publish(PATTERNS_CHANNEL, host);
+  if (changedHosts.size > 0) multi.incr(DECLARED_HOSTS_REVISION_KEY);
 }
 
 /** @param {QueueConsumer[]} oldQueueConsumers @param {QueueConsumer[]} newQueueConsumers */
@@ -298,30 +384,39 @@ function stageQueueConsumerPlan(multi, ns, workerName, newVersion, queuePlan) {
 
 /** @param {RedisIso} iso @param {string} ns @param {string} targetLabel @param {D1Ref[]} d1Refs */
 async function assertD1DependenciesPresent(iso, ns, targetLabel, d1Refs) {
-  await watchKeys(iso, d1Refs.map((ref) => d1DatabaseKey(ns, ref.databaseId)));
-  for (const ref of d1Refs) {
-    const exists = await iso.exists(d1DatabaseKey(ns, ref.databaseId));
-    if (exists === 0) {
-      throw new RoutingError(
-        409,
-        "d1_database_dependency_missing",
-        `Cannot ${targetLabel}: D1 binding "${ref.binding}" ` +
-          `references deleted database "${ref.databaseId}"`,
-        { broken_d1_dependency: ref }
-      );
-    }
+  const keys = d1Refs.map((ref) => d1DatabaseKey(ns, ref.databaseId));
+  await watchKeys(iso, keys);
+  if (keys.length === 0 || await iso.exists(...keys) === keys.length) return;
+  const exists = await iso.existsMany(keys);
+  const missingIndex = exists.findIndex((present) => !present);
+  if (missingIndex !== -1) {
+    const ref = d1Refs[missingIndex];
+    throw new RoutingError(
+      409,
+      "d1_database_dependency_missing",
+      `Cannot ${targetLabel}: D1 binding "${ref.binding}" ` +
+        `references deleted database "${ref.databaseId}"`,
+      { broken_d1_dependency: ref }
+    );
   }
 }
 
 /** @param {RedisIso} iso @param {string} targetLabel @param {OutgoingRef[]} outgoingRefs */
 async function assertOutgoingDependenciesPresent(iso, targetLabel, outgoingRefs) {
-  await watchKeys(iso, outgoingRefs.map((ref) => bundleKey(ref.targetNs, ref.targetWorker, ref.targetVersion)));
+  /** @type {Map<string, OutgoingRef>} */
+  const firstRefByKey = new Map();
   for (const ref of outgoingRefs) {
-    const targetMetaRaw = await iso.hGet(
-      bundleKey(ref.targetNs, ref.targetWorker, ref.targetVersion),
-      "__meta__"
-    );
-    if (typeof targetMetaRaw !== "string" || targetMetaRaw.length === 0) {
+    const key = bundleKey(ref.targetNs, ref.targetWorker, ref.targetVersion);
+    if (!firstRefByKey.has(key)) firstRefByKey.set(key, ref);
+  }
+  const keys = [...firstRefByKey.keys()];
+  await watchKeys(iso, keys);
+  for (let offset = 0; offset < keys.length; offset += DEPENDENCY_READ_BATCH_SIZE) {
+    const batch = keys.slice(offset, offset + DEPENDENCY_READ_BATCH_SIZE);
+    const lengths = await iso.hStrLenMany(batch.map((key) => [key, "__meta__"]));
+    const missingIndex = lengths.findIndex((length) => length === 0);
+    if (missingIndex !== -1) {
+      const ref = /** @type {OutgoingRef} */ (firstRefByKey.get(batch[missingIndex]));
       throw new RoutingError(
         409,
         "service_binding_dependency_missing",
@@ -351,14 +446,20 @@ async function assertQueueConsumerOwnership(
   const queueUnion = new Set(oldQueueConsumers.map((c) => c.queue))
     .union(new Set(newQueueConsumers.map((c) => c.queue)));
   await watchKeys(iso, [...queueUnion].map((q) => queueConsumerKey(ns, q)));
-  for (const c of newQueueConsumers) {
-    const held = await iso.hGetAll(queueConsumerKey(ns, c.queue));
-    if (held && held.worker && held.worker !== workerName) {
+  const workerFields = newQueueConsumers.length > 0
+    ? await iso.hGetMany(newQueueConsumers.map((consumer) => [
+      queueConsumerKey(ns, consumer.queue),
+      "worker",
+    ]))
+    : [];
+  for (const [index, consumer] of newQueueConsumers.entries()) {
+    const heldWorker = workerFields[index];
+    if (heldWorker && heldWorker !== workerName) {
       throw new RoutingError(
         409,
         "queue_consumer_conflict",
-        `Queue "${c.queue}" is already consumed by ${held.worker}`,
-        { queue: c.queue }
+        `Queue "${consumer.queue}" is already consumed by ${heldWorker}`,
+        { queue: consumer.queue }
       );
     }
   }
@@ -545,8 +646,11 @@ async function readAndAssertPromoteState(iso, ns, workerName, newVersion, inputs
   await assertOutgoingDependenciesPresent(iso, `promote ${ns}/${workerName}/${newVersion}`, inputs.outgoingRefs);
 
   const currentVersion = await iso.hGet(routesKey(ns), workerName);
-  const oldRoutes = await readRoutesFromMeta(iso, ns, workerName, currentVersion);
-  const oldQueueConsumers = await readQueueConsumersFromMeta(iso, ns, workerName, currentVersion);
+  const currentMeta = await readMeta(iso, ns, workerName, currentVersion);
+  const oldRoutes = currentMeta && Array.isArray(currentMeta.routes) ? currentMeta.routes : [];
+  const oldQueueConsumers = currentMeta && Array.isArray(currentMeta.queueConsumers)
+    ? currentMeta.queueConsumers
+    : [];
 
   // Queue-consumer ownership check — symmetric with pattern-slot 409.
   await assertQueueConsumerOwnership(
@@ -592,8 +696,15 @@ async function buildPromoteStagePlan(iso, ns, workerName, cronKey, logContext, i
     observed.hostState
   );
 
-  const cronHash = stringHash(await iso.hGetAll(cronKey));
-  const cronPlan = computeCronPlan(cronHash, inputs.newCrons, Date.now(), logContext);
+  const cronSnapshot = await iso.hGetAllAndGet(cronKey, cronSequenceKey(ns, workerName));
+  const cronHash = stringHash(cronSnapshot.hash);
+  const cronPlan = computeCronPlan(
+    cronHash,
+    cronSnapshot.value,
+    inputs.newCrons,
+    Date.now(),
+    logContext
+  );
   const queuePlan = computeQueueConsumerPlan(
     observed.oldQueueConsumers,
     inputs.newQueueConsumers
@@ -670,6 +781,7 @@ export async function promoteWithRoutes(redis, ns, workerName, newVersion, optio
       routesKey(ns),
       hostsKey(ns),
       cronKey,
+      cronSequenceKey(ns, workerName),
       deleteLockKey(ns, workerName),
       bundleKey(ns, workerName, newVersion),
     );
@@ -786,11 +898,25 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
 
     // Scheduler builds x-worker-id from cron __meta__.version.
     const cronKey = cronWorkerKey(ns, workerName);
-    await iso.watch(cronKey);
-    const cronMetaRaw = await iso.hGet(cronKey, "__meta__");
+    const cronSeqKey = cronSequenceKey(ns, workerName);
+    await iso.watch(cronKey, cronSeqKey);
+    const cronSnapshot = await iso.hGetAllAndGet(cronKey, cronSeqKey);
+    const cronMetaRaw = cronSnapshot.hash.__meta__;
     let cronMetaParsed = null;
+    let cronSequence = null;
     if (cronMetaRaw) {
       cronMetaParsed = parseCronMeta(cronMetaRaw, logContext);
+      cronSequence = resolveCronSequence(cronMetaParsed, cronSnapshot.value, logContext);
+    } else if (Object.keys(cronSnapshot.hash).length > 0) {
+      corruptCronMeta(logContext);
+    } else if (cronSnapshot.value != null) {
+      const persistedSequence = parseCronSequence(cronSnapshot.value, logContext);
+      if (persistedSequence == null || persistedSequence < CRON_GENERATION_EPOCH - 1) {
+        corruptCronSequence(
+          logContext,
+          `Cron sequence regressed for ${logContext.ns || "unknown"}/${logContext.workerName || "unknown"}`
+        );
+      }
     }
 
     await watchKeys(iso, queueConsumers.map((c) => queueConsumerKey(ns, c.queue)));
@@ -826,13 +952,15 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
       databaseIdFor: (ref) => String(ref.databaseId),
     });
 
-    if (cronMetaParsed) {
+    if (cronMetaParsed && cronSequence) {
+      if (cronSequence.persistSequence) {
+        stageCronSequence(multi, ns, workerName, cronSequence.cronSeq);
+      }
       stageCronProjectionMeta(multi, {
         ns,
         worker: workerName,
         version: newVersion,
         cronKey,
-        seq: cronSeqFromMeta(cronMetaParsed, logContext),
       });
     }
     for (const c of queueConsumers) {
@@ -886,41 +1014,44 @@ export async function reconcileHosts(redis, ns, body, platformDomain) {
     const toAdd = [...bodySet.difference(currentSet)];
     const toRemove = [...currentSet.difference(bodySet)];
     const changedHosts = [...new Set([...toAdd, ...toRemove])];
-
-    const allHosts = currentSet.union(bodySet);
-    await watchKeys(iso, [...allHosts].map((h) => patternsKey(h)));
-    await watchKeys(iso, [
-      DECLARED_HOSTS_KEY,
-      ...changedHosts.map(hostDeclarationsKey),
-    ]);
-
-    // Reverse-index fast path; HGETALL only to enrich the 409 message.
-    const reverseFlags = toRemove.length
-      ? await iso.sMIsMember(nsHostsKey(ns), ...toRemove)
-      : [];
-    for (let i = 0; i < toRemove.length; i++) {
-      const h = toRemove[i];
-      if (!reverseFlags[i]) continue;
-      const entries = await iso.hGetAll(patternsKey(h));
-      for (const [slot, raw] of Object.entries(entries)) {
-        const parsed = requirePatternProjection(raw, h, slot);
-        if (parsed.ns === ns) {
-          throw new RoutingError(
-            409,
-            "host_in_use",
-            `Cannot remove host "${h}": live pattern ${h}${slot} still references namespace "${ns}"`,
-            { host: h, slot }
-          );
-        }
-      }
+    if (changedHosts.length === 0) {
+      await iso.unwatch();
+      return [...bodySet].toSorted();
     }
 
+    await watchKeys(iso, toRemove.map((h) => patternsKey(h)));
+    await watchKeys(iso, toRemove.map(hostDeclarationsKey));
+
     const removals = [];
-    for (const host of toRemove) {
-      removals.push({
-        host,
-        declaredNs: await iso.sMembers(hostDeclarationsKey(host)),
-      });
+    for (let offset = 0; offset < toRemove.length; offset += HOST_RECONCILE_READ_BATCH_SIZE) {
+      const batch = toRemove.slice(offset, offset + HOST_RECONCILE_READ_BATCH_SIZE);
+
+      // Reverse-index fast path; HGETALL only to enrich the 409 message.
+      const reverseFlags = await iso.sMIsMember(nsHostsKey(ns), ...batch);
+      const matchedHosts = batch.filter((_host, index) => reverseFlags[index]);
+      const matchedPatterns = matchedHosts.length > 0
+        ? await iso.hGetAllMany(matchedHosts.map(patternsKey))
+        : [];
+      for (let i = 0; i < matchedHosts.length; i++) {
+        const h = matchedHosts[i];
+        const entries = matchedPatterns[i];
+        for (const [slot, raw] of Object.entries(entries)) {
+          const parsed = requirePatternProjection(raw, h, slot);
+          if (parsed.ns === ns) {
+            throw new RoutingError(
+              409,
+              "host_in_use",
+              `Cannot remove host "${h}": live pattern ${h}${slot} still references namespace "${ns}"`,
+              { host: h, slot }
+            );
+          }
+        }
+      }
+
+      const declarations = await iso.sMembersMany(batch.map(hostDeclarationsKey));
+      for (let i = 0; i < batch.length; i++) {
+        removals.push({ host: batch[i], declaredNs: declarations[i] });
+      }
     }
 
     const multi = iso.multi();

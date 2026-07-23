@@ -17,23 +17,11 @@ function deps() {
 export function recordRoutingLookup(...args) {
   return deps().recordRoutingLookup(...args);
 }
-export function ensureKnownNs(...args) {
-  return deps().ensureKnownNs(...args);
+export function resolveNamespaceRoutes(...args) {
+  return deps().resolveNamespaceRoutes(...args);
 }
-export function ensureKnownPatternHosts(...args) {
-  return deps().ensureKnownPatternHosts(...args);
-}
-export function getCachedNsRoutes(...args) {
-  return deps().getCachedNsRoutes(...args);
-}
-export function loadNsRoutes(...args) {
-  return deps().loadNsRoutes(...args);
-}
-export function getCachedPatterns(...args) {
-  return deps().getCachedPatterns(...args);
-}
-export function loadPatternsForHost(...args) {
-  return deps().loadPatternsForHost(...args);
+export function resolveHostPatterns(...args) {
+  return deps().resolveHostPatterns(...args);
 }
 export function recordPatternMatchComparisons(...args) {
   return deps().recordPatternMatchComparisons(...args);
@@ -60,19 +48,15 @@ function makeDeps({
 } = {}) {
   /** @type {Array<[string, string]>} */
   const lookups = [];
-  let ensureKnownNsCalls = 0;
-  let ensureKnownPatternHostsCalls = 0;
-  let loadPatternsForHostCalls = 0;
+  let resolveNamespaceRoutesCalls = 0;
+  let resolveHostPatternsCalls = 0;
   return {
     lookups,
-    get ensureKnownNsCalls() {
-      return ensureKnownNsCalls;
+    get resolveNamespaceRoutesCalls() {
+      return resolveNamespaceRoutesCalls;
     },
-    get ensureKnownPatternHostsCalls() {
-      return ensureKnownPatternHostsCalls;
-    },
-    get loadPatternsForHostCalls() {
-      return loadPatternsForHostCalls;
+    get resolveHostPatternsCalls() {
+      return resolveHostPatternsCalls;
     },
     deps: {
       redis: {},
@@ -81,32 +65,25 @@ function makeDeps({
       recordRoutingLookup(scope, outcome) {
         lookups.push([scope, outcome]);
       },
-      /** @param {any} _redis */
-      async ensureKnownNs(_redis) {
-        ensureKnownNsCalls += 1;
-        return knownNs;
+      /** @param {any} _redis @param {string} namespace */
+      async resolveNamespaceRoutes(_redis, namespace) {
+        resolveNamespaceRoutesCalls += 1;
+        if (!knownNs.has(namespace)) {
+          return { known: false, routes: null, cacheHit: false };
+        }
+        const cached = routeCache.get(namespace);
+        return {
+          known: true,
+          routes: cached || nsRoutes,
+          cacheHit: cached != null,
+        };
       },
-      /** @param {any} _redis */
-      async ensureKnownPatternHosts(_redis) {
-        ensureKnownPatternHostsCalls += 1;
-        return knownPatternHosts;
-      },
-      /** @param {string} namespace */
-      getCachedNsRoutes(namespace) {
-        return routeCache.get(namespace) || null;
-      },
-      /** @param {any} _redis @param {string} _namespace */
-      async loadNsRoutes(_redis, _namespace) {
-        return nsRoutes;
-      },
-      /** @param {string} _host */
-      getCachedPatterns(_host) {
-        return null;
-      },
-      /** @param {any} _redis @param {string} _host @param {string} _requestId */
-      async loadPatternsForHost(_redis, _host, _requestId) {
-        loadPatternsForHostCalls += 1;
-        return patterns;
+      /** @param {any} _redis @param {string} host @param {string} _requestId */
+      async resolveHostPatterns(_redis, host, _requestId) {
+        resolveHostPatternsCalls += 1;
+        return knownPatternHosts.has(host)
+          ? { known: true, patterns, cacheHit: false }
+          : { known: false, patterns: null, cacheHit: false };
       },
       recordPatternMatchComparisons() {},
     },
@@ -123,14 +100,11 @@ function dispatch(url, options = {}) {
   /** @type {any} */ (globalThis).__gatewayDispatchTestDeps = ctx.deps;
   return {
     lookups: ctx.lookups,
-    get ensureKnownNsCalls() {
-      return ctx.ensureKnownNsCalls;
+    get resolveNamespaceRoutesCalls() {
+      return ctx.resolveNamespaceRoutesCalls;
     },
-    get ensureKnownPatternHostsCalls() {
-      return ctx.ensureKnownPatternHostsCalls;
-    },
-    get loadPatternsForHostCalls() {
-      return ctx.loadPatternsForHostCalls;
+    get resolveHostPatternsCalls() {
+      return ctx.resolveHostPatternsCalls;
     },
     result: resolveGatewayDispatch({
       url: parsed,
@@ -144,7 +118,7 @@ function dispatch(url, options = {}) {
 }
 
 test("resolveGatewayDispatch routes admin host to control without Redis gates", async () => {
-  const { result, ensureKnownNsCalls } = dispatch("https://admin.local/reload", {
+  const { result, resolveNamespaceRoutesCalls } = dispatch("https://admin.local/reload", {
     adminHost: "admin.local",
   });
 
@@ -158,7 +132,7 @@ test("resolveGatewayDispatch routes admin host to control without Redis gates", 
     worker: null,
     version: null,
   });
-  assert.equal(ensureKnownNsCalls, 0);
+  assert.equal(resolveNamespaceRoutesCalls, 0);
 });
 
 test("resolveGatewayDispatch lets admin host bypass runtime-internal data path guards", async () => {
@@ -188,7 +162,7 @@ test("resolveGatewayDispatch rejects reserved subdomains before Redis namespace 
     worker: null,
     version: null,
   });
-  assert.equal(ctx.ensureKnownNsCalls, 0);
+  assert.equal(ctx.resolveNamespaceRoutesCalls, 0);
 });
 
 test("resolveGatewayDispatch preserves namespace context for unknown namespaces", async () => {
@@ -464,8 +438,7 @@ test("resolveGatewayDispatch rejects undeclared pattern hosts before pattern loo
     worker: null,
     version: null,
   });
-  assert.equal(ctx.ensureKnownPatternHostsCalls, 1);
-  assert.equal(ctx.loadPatternsForHostCalls, 0);
+  assert.equal(ctx.resolveHostPatternsCalls, 1);
   assert.deepEqual(ctx.lookups, [["pattern_host_gate", "miss"]]);
 });
 

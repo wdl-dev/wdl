@@ -34,6 +34,7 @@ import {
 import { workerSecretsKey } from "shared-secret-keys";
 
 const MAX_DELETE_ATTEMPTS = 5;
+const VERSION_DELETE_SIBLING_READ_BATCH_SIZE = 32;
 
 /**
  * @typedef {import("shared-redis").RedisClient} RedisClient
@@ -228,28 +229,44 @@ async function executeVersionDelete({ redis, ns, name, version, principal, reque
     // content that an unreadable sibling still references.
     let skipS3Cleanup = false;
     if (prefix) {
-      for (const otherV of currentVersions) {
-        if (otherV === version) continue;
-        const otherRaw = await iso.hGet(bundleKey(ns, name, otherV), "__meta__");
-        const otherMeta = parseBundleMeta(otherRaw, {
-          ns,
-          worker: name,
-          version: otherV,
-          makeError: ({ reason }) => new VersionDeleteError(500, "corrupt_meta", {
-            namespace: ns, name, version: otherV,
-            stage: "sibling_meta_parse",
-            detail: reason,
-          }),
-        });
-        if (bundleAssetPrefix(otherMeta) === prefix) {
-          skipS3Cleanup = true;
-          break;
+      const siblingVersions = currentVersions.filter((otherV) => otherV !== version);
+      for (
+        let offset = 0;
+        offset < siblingVersions.length && !skipS3Cleanup;
+        offset += VERSION_DELETE_SIBLING_READ_BATCH_SIZE
+      ) {
+        const batchVersions = siblingVersions.slice(
+          offset,
+          offset + VERSION_DELETE_SIBLING_READ_BATCH_SIZE
+        );
+        const siblingMetas = await iso.hGetMany(
+          batchVersions.map((otherV) => [bundleKey(ns, name, otherV), "__meta__"])
+        );
+        for (let index = 0; index < batchVersions.length; index += 1) {
+          const otherV = batchVersions[index];
+          const otherRaw = siblingMetas[index] ?? null;
+          const otherMeta = parseBundleMeta(otherRaw, {
+            ns,
+            worker: name,
+            version: otherV,
+            makeError: ({ reason }) => new VersionDeleteError(500, "corrupt_meta", {
+              namespace: ns, name, version: otherV,
+              stage: "sibling_meta_parse",
+              detail: reason,
+            }),
+          });
+          if (bundleAssetPrefix(otherMeta) === prefix) {
+            skipS3Cleanup = true;
+            break;
+          }
         }
       }
     }
 
-    const hasWorkerSecrets = (await iso.exists(workerSecretsKey(ns, name))) > 0;
-    const hasWorkflowDefs = (await iso.exists(workflowDefsKey(ns, name))) > 0;
+    const [hasWorkerSecrets = false, hasWorkflowDefs = false] = await iso.existsMany([
+      workerSecretsKey(ns, name),
+      workflowDefsKey(ns, name),
+    ]);
     const lastRetainedNoActive =
       currentVersions.length === 1 &&
       currentVersions[0] === version &&

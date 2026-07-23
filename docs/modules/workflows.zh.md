@@ -63,7 +63,7 @@ Key families：
 | `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker。 | 当前值是 `2`；greenfield deployment 从 schema 2 开始。 |
 | `wf:instance:{<ns>:<workflowKey>:<instanceId>}:state` | Hash | workflows | instance state 权威记录。 | Terminal retention 和 lifecycle cleanup 删除过期 state。 |
 | `wf:instance:{...}:payloads` | Hash | workflows | aggregate cap 下的 payload ref storage。 | 随 instance state family 删除。 |
-| `wf:instance:{...}:steps`、`step-summaries`、`step-summary-index` | Hash/ZSET | workflows | step replay/history state 权威记录。 | 随 instance 删除；summary read 可截断。 |
+| `wf:instance:{...}:steps`、`step-summaries`、`step-summary-index` | Hash/ZSET | workflows | step replay/history state 权威记录。 | 随 instance 删除；history read 有界，并拒绝 summary/index 数量不一致或请求页中 summary 缺失。 |
 | `wf:instance:{...}:events`、`events-by-type` | Hash/ZSET | workflows | buffered event record 和 type index。 | consumed/stale event 在 wait matching 或 cleanup 中删除。 |
 | `wf:ready:<shard>`、`wf:ready:active`、`wf:ready:cursor` | Set/String | workflows | ready-token hint、active shard set 和 fair-dispatch cursor。 | Token 是去重 hint；instance state 仍是权威；cursor 在 tick 之间轮转 shard 起点。 |
 | `wf:due:<shard>` | ZSET | workflows | sleep/retry/event-timeout due index。 | Tick promotion 把到期 entry 移回 ready。 |
@@ -83,12 +83,13 @@ Key families：
 - V2 workflow 只支持 same-worker。
 - Instance 冻结创建时的 worker version/class identity。
 - Control 会对当前操作实际读到的 malformed active workflow entry 和 malformed `wf:defs` record fail closed；管理路径返回 `corrupt_meta`，deploy 在复用损坏的历史 definition 时返回 `workflow_definition_corrupt`。损坏的权威 metadata 不会被暴露为正常的 missing 或 retired workflow。正常 deploy 和单个 workflow 路径不会扫描无关的历史 definition。
+- Workflows lifecycle check 会拒绝 malformed referrer member，而不是把它当成不存在。
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。
 - Scheduler 也通过同一个 `/internal/workflows/tick` endpoint 唤醒 Workflows-owned internal DO alarm jobs；scheduler 不直接读写 DO alarm state。
 - Workflows 在持久化 DO alarm job 前拒绝 non-canonical alarm identity，在 dispatch 前重新校验持久化 alarm identity，并在把 active route 用作 retarget 前校验其 version。其中 namespace、worker、version 校验复用 `wdl-rust-common`；do-runtime protocol grammar 与 identity helper 拥有 canonical alarm-specific field 和 aggregate 512-byte DO host-id 合同，Workflows 在持久化和 dispatch 前镜像并重新校验该合同。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
 - 32 个 scheduling shards 划分 ready/due work。每次 tick 会交错处理 active shard 的候选，在 claim 前取得 dispatch permit，并把已 claim activation 交给 Workflows-owned background task，而不是逐 shard drain。Tick 只等待 maintenance、claim 和 admission，不等待 tenant execution 或 DO alarm delivery 完成。`WORKFLOWS_READY_DISPATCH_CONCURRENCY` 限制同一个 Workflows replica 上跨重叠 tick 的 workflow execution，默认值为 `128`，并限制在 1–128 ready batch 范围内。独立的 DO alarm pool 由 `WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY` 控制，默认值为 `32`，有效范围为 1–100 个 job。已 admission 的 task 会持有 pool permit 和 shutdown in-flight guard，直到 runtime dispatch 与 fenced commit 结束；进程丢失后仍由现有 run lease 和 ready hint 恢复。Scheduler 通过 `WORKFLOWS_TICK_TIMEOUT_MS` 为 maintenance 和 admission 设置独立客户端 deadline，默认值为 60 秒；它不是 workflow execution deadline，也与 Workflows runtime dispatch timeout 相互独立。Tick 报告 maintenance、admission 或任一 dispatch pool 因容量不足仍有待处理工作时，Scheduler 使用 `WORKFLOWS_TICK_ACTIVE_INTERVAL_MS`（默认 100ms）；否则使用 `WORKFLOWS_TICK_INTERVAL_MS`（默认 1 秒）。
 - Ready token 是去重 hint；instance hash state 是权威状态。
-- Execution commit 同时用 `generation`、`runToken`、active instance status 和未过期 run lease fence。Step commit/register 接受同一 run 的 `running` 或 `waiting` 状态，因此一个并行 sibling 进入 retry/wait 后，另一个 sibling 仍可完成；completed runtime terminal 要求 `running`，failed runtime terminal 在 run lease 仍有效时也可以关闭由非法未 await suspending step 造成的同一 run `waiting` 状态。如果 lease 已过期，workflows 只恢复 ready hint，让下一次 claim 在新 lease 下 replay。Lifecycle commit 只用 generation fence，并在同一个 Lua commit 内 rotate `generation`。
+- Execution commit 同时用 `generation`、`runToken`、active instance status 和未过期 run lease fence。Step commit/register 接受同一 run 的 `running` 或 `waiting` 状态，因此一个并行 sibling 进入 retry/wait 后，另一个 sibling 仍可完成；completed runtime terminal 要求 `running`，failed runtime terminal 在 run lease 仍有效时也可以关闭由非法未 await suspending step 造成的同一 run `waiting` 状态。如果 lease 已过期，workflows 只恢复 ready hint，让下一次 claim 在新 lease 下 replay。首次 run admission、过期 run requeue、lifecycle commit、`sendEvent` 与 retention cleanup 还会同时比较持久化的 `createdAtMs` 和 `generation`，避免旧 snapshot 修改同 ID 下、creation timestamp 不同的后来 incarnation；会 invalidate in-flight execution 的 lifecycle path 会在同一个 Lua commit 内 rotate `generation`。
 - Runtime replay cache 只是 advisory。DB 2 step state 是权威。
 - Runtime 可以并发发起多个 `step.do`，常见形式是 `Promise.all`；每次调用按用户代码调用顺序分配 deterministic ordinal，从当前已完成 step frontier 记录 DAG dependencies，并在 run fence 下独立 commit。`step.do` callback 不能启动另一个 workflow step，即使在 callback 的 `await` 之后也不允许；并行 sibling promise 应在 run body 中、callback 代码进入 in-flight 之前创建。如果 run 在已启动 step settle 前返回，会按 invalid run 失败，所以用户代码必须 await 并发 step promise。Suspending operation（`step.sleep`、`step.sleepUntil`、`step.waitForEvent`）仍保持互斥，不能和其它 in-flight step 重叠，因为它们会 suspend 整个 workflow run。
 - Completed instance 使用 success retention；failed 和 terminated instance 使用 error retention。新建 instance 的两类 retention 默认都是 8 小时，可以通过 `create({ retention: { successRetention, errorRetention } })` 覆盖。
@@ -100,6 +101,8 @@ Workflow execution 使用两条 channel：
 
 1. Loaded worker 通过 reserved `__WDL_WORKFLOWS_BACKEND__` Fetcher binding 调 workflows。Runtime 从 bundle metadata 附加 identity；workflows 不信任 tenant body 中的 namespace、worker、version、workflow key、class 或 instance identity。
 2. workflows 把已 claim 的 run dispatch 回 runtime `:8088` 上的 `/internal/workflows/run`。Runtime 加载 frozen worker version 并调用 `className.run(event, stepFacade)`。
+
+Get、status 和 list read 会从请求中的 namespace、workflow key 与 instance id 派生 payload hash。读取 result/error payload 前，persisted `ns`、`workflowKey`、`instanceId` 和 `payloadsKey` 必须与该 canonical identity 一致；任何 divergence 都会以 invalid state fail closed。
 
 Create/restart 与 replay 的 version pinning 不同。新的 `create()` 或 `restart()` 写 DB 2 前会按当前 active route canonicalize，因此新的 durable business process 从 active version 开始。已有 instance 使用自己存的 `frozenVersion` replay；promotion 不会改变它的代码。只要 non-expired instance 仍引用某个 version，`wf:by-version` 就会阻止 worker-version delete。Restart 在重新校验 active export 前写入一个短期 target-version blocker，最终 DB 2 transition 会原子地建立持久 `wf:by-version` referrer 并删除该 blocker，因此 version delete 不能从 active-version resolution 和 restart commit 之间穿过。Runtime 会用 bundle key 共用的正 JavaScript-safe-integer version parser 校验每个 dispatch 的 `frozenVersion`；malformed persisted tag 会在加载 worker 前失败。
 
@@ -119,13 +122,13 @@ Step facade 实现 durable replay：
 - `step.sleep()` 和 `step.sleepUntil()` 记录 waiting state 和 due time，然后用 reserved internal sentinel suspend 当前 run。
 - `step.waitForEvent()` 先检查 buffered event，再记录 wait 和可选 timeout。`sendEvent` 会在 wait 出现前保存 event payload 和 type index，因此支持 event-before-wait。
 - Runtime 从头 replay 用户代码。它会 lazy fetch replay pages，也可以在进程内 advisory cache，但 DB 2 step state 始终是权威。
+- Replay step record 与它引用的 payload 共用完整的 generation、run-token、creation-time、lease 和 active-status fence。只有该 fence 仍有效时才会解析引用的 payload，因此 restart 不会把另一 execution generation 的 payload 混入当前 page。
 - V2 会为 `step.do` 持久化 DAG。runtime 按同步调用顺序分配 ordinal，把已完成 step 视作当前 dependency frontier，并把 frontier 存到后续 step 上。`Promise.all([step.do(...), step.do(...)])` 会产生拥有相同 parent 的 sibling nodes；join 后再调用的 `step.do` 会依赖这两个 sibling。依赖调度、join、cancel 仍由用户代码的 `await` / `Promise` 结构表达；workflows 持久化最终 graph，不另跑一个独立 graph planner。
 
 Fence 模型：
 
 - Execution commit（`claim-step`、step success/error、sleep/wait registration、runtime terminal）同时由 `generation`、`runToken`、active instance status 和未过期 run lease fence。Step commit/register 接受同一 run 的 `running` 或 `waiting`；completed runtime terminal 要求 `running`；failed runtime terminal 在 run lease 仍有效时也可以关闭由非法未 await suspending step 造成的同一 run `waiting` 状态。如果 lease 已过期，workflows 只恢复 ready hint，让下一次 claim 在新 lease 下 replay。
-- Lifecycle commit（`pause`、`resume`、`restart`、`terminate`、retention cleanup）使用 generation fence，并在会 invalidate in-flight execution 的路径中轮换 `generation`。
-- `sendEvent` 面向 instance 当前 generation。如果并发 restart 先赢，send-event 返回 conflict，而不是写入 stale state。
+- 首次 run claim 与过期 run requeue、lifecycle commit（`pause`、`resume`、`restart`、`terminate`）、`sendEvent` 与 retention cleanup 会同时比较 `generation` 和持久化的 `createdAtMs` incarnation 字段；会 invalidate in-flight execution 的 lifecycle path 还会轮换 `generation`。如果并发 restart 或同 ID 下 creation timestamp 不同的新 incarnation 先赢，旧 mutation 会被拒绝。
 - Payload bytes、payload refs、counters、state change 和 ready/due update 必须在 DB 2 中一起 commit；payload ref 缺失时 workflows 必须 fail closed。
 
 ## Progress Callback

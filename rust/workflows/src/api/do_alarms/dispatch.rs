@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
+use wdl_rust_common::redis_eval::append_eval_cmd;
 use wdl_rust_common::time::now_ms;
 use wdl_rust_common::worker_contract::{
     do_storage_id_key, parse_version_tag, routes_key, worker_versions_key,
@@ -19,8 +20,8 @@ use super::super::{
 };
 use super::model::{DoAlarmJob, job_from_state, map_hgetall};
 use super::scripts::{
-    CLAIM_DO_ALARM_SCRIPT, DISCARD_CORRUPT_DO_ALARM_SCRIPT, FINALIZE_DO_ALARM_SCRIPT,
-    MOVE_DUE_DO_ALARM_SCRIPT, RETRY_DO_ALARM_SCRIPT,
+    CLAIM_DO_ALARM, DISCARD_CORRUPT_DO_ALARM, FINALIZE_DO_ALARM, MOVE_DUE_DO_ALARM_SCRIPT,
+    RETRY_DO_ALARM,
 };
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
@@ -75,26 +76,64 @@ enum DoAlarmAdmission {
     Immediate,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AlarmDispatchVersionDecision {
+    Original,
+    Retarget(String),
+    Discard,
+}
+
+fn alarm_dispatch_version_decision(
+    job_storage_id: &str,
+    job_version: &str,
+    current_storage_id: Option<&str>,
+    active_version: Option<&str>,
+    retained_score: Option<f64>,
+) -> WorkflowResult<AlarmDispatchVersionDecision> {
+    if current_storage_id != Some(job_storage_id) {
+        return Ok(AlarmDispatchVersionDecision::Discard);
+    }
+    if active_version == Some(job_version) || retained_score.is_some() {
+        return Ok(AlarmDispatchVersionDecision::Original);
+    }
+    let Some(active_version) = active_version else {
+        return Ok(AlarmDispatchVersionDecision::Discard);
+    };
+    parse_version_tag(active_version)
+        .map_err(|_| WorkflowError::invalid_state("Active worker version is invalid"))?;
+    Ok(AlarmDispatchVersionDecision::Retarget(
+        active_version.to_string(),
+    ))
+}
+
 pub(crate) async fn move_due_do_alarms(app: &AppState) -> WorkflowResult<usize> {
     let queue = do_alarm_shard_queue_keys();
     let now = now_ms();
     let now_arg = now.to_string();
     let limit = DO_ALARM_MOVE_DUE_LIMIT.to_string();
-    let mut moved = 0;
-    for shard in due_shards_with_due_members(app, queue, now).await? {
-        let due = queue.due(shard);
-        let ready = queue.ready(shard);
-        let shard_arg = shard.to_string();
-        let count: i64 = eval_script(
-            app,
-            MOVE_DUE_DO_ALARM_SCRIPT,
-            &[&due, &ready, queue.ready_active()],
-            &[&now_arg, &limit, &shard_arg],
-        )
-        .await?;
-        moved += count.max(0) as usize;
+    let shards = due_shards_with_due_members(app, queue, now).await?;
+    if shards.is_empty() {
+        return Ok(0);
     }
-    Ok(moved)
+    let counts: Vec<i64> = app
+        .redis
+        .with_conn(async |mut conn| {
+            let mut pipe = redis::pipe();
+            for shard in shards {
+                let due = queue.due(shard);
+                let ready = queue.ready(shard);
+                let shard_arg = shard.to_string();
+                append_eval_cmd(
+                    &mut pipe,
+                    MOVE_DUE_DO_ALARM_SCRIPT,
+                    &[&due, &ready, queue.ready_active()],
+                    &[&now_arg, &limit, &shard_arg],
+                );
+            }
+            pipe.query_async(&mut conn).await
+        })
+        .await?;
+    Ok(counts.into_iter().map(|count| count.max(0) as usize).sum())
 }
 
 async fn claim_do_alarm(app: &AppState, job_id: &str) -> WorkflowResult<ClaimDoAlarmResult> {
@@ -113,7 +152,7 @@ async fn claim_do_alarm(app: &AppState, job_id: &str) -> WorkflowResult<ClaimDoA
     let lease_arg = lease_expires.to_string();
     let result: Vec<String> = eval_script(
         app,
-        CLAIM_DO_ALARM_SCRIPT,
+        &CLAIM_DO_ALARM,
         &[&state_key, &due_key, &ready_key],
         &[job_id, &now_arg, &run_token, &lease_arg],
     )
@@ -225,72 +264,49 @@ async fn resolve_alarm_dispatch_version(
     job: &DoAlarmJob,
 ) -> WorkflowResult<Option<String>> {
     let storage_key = do_storage_id_key(&job.ns, &job.worker);
-    let current_storage_id: Option<String> = app
+    let (current_storage_id, active_version, retained_score): (
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+    ) = app
         .control_redis
         .with_conn(async |mut conn| {
-            redis::cmd("GET")
-                .arg(storage_key)
-                .query_async(&mut conn)
-                .await
-        })
-        .await?;
-    if current_storage_id.as_deref() != Some(job.do_storage_id.as_str()) {
-        return Ok(None);
-    }
-
-    let active_version: Option<String> = app
-        .control_redis
-        .with_conn(async |mut conn| {
-            redis::cmd("HGET")
-                .arg(routes_key(&job.ns))
-                .arg(&job.worker)
-                .query_async(&mut conn)
-                .await
-        })
-        .await?;
-    if active_version.as_deref() == Some(job.version.as_str()) {
-        return Ok(Some(job.version.clone()));
-    }
-
-    let retained_versions: Vec<String> = app
-        .control_redis
-        .with_conn(async |mut conn| {
-            redis::cmd("ZRANGE")
+            let mut pipe = redis::pipe();
+            pipe.cmd("GET").arg(storage_key);
+            pipe.cmd("HGET").arg(routes_key(&job.ns)).arg(&job.worker);
+            pipe.cmd("ZSCORE")
                 .arg(worker_versions_key(&job.ns, &job.worker))
-                .arg(0)
-                .arg(-1)
-                .query_async(&mut conn)
-                .await
+                .arg(&job.version);
+            pipe.query_async(&mut conn).await
         })
         .await?;
-    if retained_versions
-        .iter()
-        .any(|version| version == &job.version)
-    {
-        return Ok(Some(job.version.clone()));
+    match alarm_dispatch_version_decision(
+        &job.do_storage_id,
+        &job.version,
+        current_storage_id.as_deref(),
+        active_version.as_deref(),
+        retained_score,
+    )? {
+        AlarmDispatchVersionDecision::Original => Ok(Some(job.version.clone())),
+        AlarmDispatchVersionDecision::Retarget(active_version) => {
+            log(
+                app,
+                LogLevel::Info,
+                "do_alarm_retargeted",
+                json!({
+                    "namespace": job.ns,
+                    "worker": job.worker,
+                    "class_name": job.class_name,
+                    "object_name": job.object_name,
+                    "job_id": job.job_id,
+                    "previous_version": job.version,
+                    "dispatch_version": active_version,
+                }),
+            );
+            Ok(Some(active_version))
+        }
+        AlarmDispatchVersionDecision::Discard => Ok(None),
     }
-
-    if let Some(active_version) = active_version {
-        parse_version_tag(&active_version)
-            .map_err(|_| WorkflowError::invalid_state("Active worker version is invalid"))?;
-        log(
-            app,
-            LogLevel::Info,
-            "do_alarm_retargeted",
-            json!({
-                "namespace": job.ns,
-                "worker": job.worker,
-                "class_name": job.class_name,
-                "object_name": job.object_name,
-                "job_id": job.job_id,
-                "previous_version": job.version,
-                "dispatch_version": active_version,
-            }),
-        );
-        return Ok(Some(active_version));
-    }
-
-    Ok(None)
 }
 
 async fn finalize_claimed_do_alarm(app: &AppState, job: &DoAlarmJob) -> WorkflowResult<bool> {
@@ -301,7 +317,7 @@ async fn finalize_claimed_do_alarm(app: &AppState, job: &DoAlarmJob) -> Workflow
     let by_worker = job.by_worker_key();
     let changed: i64 = eval_script(
         app,
-        FINALIZE_DO_ALARM_SCRIPT,
+        &FINALIZE_DO_ALARM,
         &[&state_key, &due_key, &ready_key, &by_worker],
         &[&job.run_token, &job.job_id],
     )
@@ -322,7 +338,7 @@ async fn discard_corrupt_do_alarm(
     let has_by_worker = if by_worker.is_some() { "1" } else { "0" };
     let changed: i64 = eval_script(
         app,
-        DISCARD_CORRUPT_DO_ALARM_SCRIPT,
+        &DISCARD_CORRUPT_DO_ALARM,
         &[
             &state_key,
             &due_key,
@@ -385,7 +401,7 @@ async fn retry_do_alarm(
     let max_tries = app.config.do_alarm_retry_max_tries.to_string();
     eval_script(
         app,
-        RETRY_DO_ALARM_SCRIPT,
+        &RETRY_DO_ALARM,
         &[&state_key, &due_key, &ready_key, &by_worker],
         &[
             &job.run_token,
@@ -621,9 +637,80 @@ pub(crate) async fn admit_ready_do_alarms(
 #[cfg(test)]
 mod tests {
     use super::{
-        DoAlarmAdmissionResult, ReadyAdmissionResult, do_alarm_ready_admission_config,
+        AlarmDispatchVersionDecision, DoAlarmAdmissionResult, ReadyAdmissionResult,
+        alarm_dispatch_version_decision, do_alarm_ready_admission_config,
         retry_delay_ms_from_parts, saturating_i64_ms,
     };
+
+    #[test]
+    fn alarm_dispatch_version_decision_preserves_fences_and_retargets() {
+        let cases = [
+            (
+                "storage mismatch",
+                Some("storage-b"),
+                Some("v2"),
+                Some(1.0),
+                AlarmDispatchVersionDecision::Discard,
+            ),
+            (
+                "active original",
+                Some("storage-a"),
+                Some("v1"),
+                None,
+                AlarmDispatchVersionDecision::Original,
+            ),
+            (
+                "retained original",
+                Some("storage-a"),
+                Some("v2"),
+                Some(1.0),
+                AlarmDispatchVersionDecision::Original,
+            ),
+            (
+                "retarget active",
+                Some("storage-a"),
+                Some("v2"),
+                None,
+                AlarmDispatchVersionDecision::Retarget("v2".to_string()),
+            ),
+            (
+                "no active version",
+                Some("storage-a"),
+                None,
+                None,
+                AlarmDispatchVersionDecision::Discard,
+            ),
+        ];
+
+        for (label, storage, active, retained_score, expected) in cases {
+            assert_eq!(
+                alarm_dispatch_version_decision(
+                    "storage-a",
+                    "v1",
+                    storage,
+                    active,
+                    retained_score,
+                )
+                .expect(label),
+                expected,
+                "{label}",
+            );
+        }
+    }
+
+    #[test]
+    fn alarm_dispatch_version_decision_rejects_invalid_retarget() {
+        let err = alarm_dispatch_version_decision(
+            "storage-a",
+            "v1",
+            Some("storage-a"),
+            Some("bad/version"),
+            None,
+        )
+        .expect_err("invalid active version must fail closed");
+
+        assert_eq!(err.code, "workflow_invalid_state");
+    }
 
     #[test]
     fn ready_batch_is_one_bounded_admission_wave() {

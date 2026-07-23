@@ -64,6 +64,9 @@ shared crate `wdl-rust-common`.
 - **Direct Redis/Valkey writes are repair-only.** They are not a supported consistency
   path; readers should fail closed on malformed persisted state instead of adding
   WATCH/MULTI protocols for arbitrary manual writes.
+- **Redis round trips and atomicity are explicit design work.** Batch related
+  independent operations through typed, bounded helpers; pipelining does not replace
+  Lua, WATCH/MULTI, or exact-value CAS. See `docs/project-standards.md`.
 - **Control/auth authorization is action-based.** `parseControlRoute()` assigns the
   action; auth evaluates that action against `shared/auth-roles.js`. Do not infer
   permission from URL prefix in handlers.

@@ -101,17 +101,21 @@ Cron uses wall-clock minute slots:
    slot placement; scheduler uses Rust `croner` for repair and advancement. Worker
    hashes without canonical identity or metadata are skipped instead of reseeding
    invalid refs, and emit a bounded `invalid_identity` or `invalid_meta` reason.
-3. Cron refs carry the entry generation. At fire time scheduler re-reads
+3. Cron refs carry the entry generation. At fire time scheduler reads
    `crons:<ns>:<worker>` and compares `gen`; missing metadata, corrupt JSON, or
    generation mismatch makes the ref stale and removes it from the slot.
-4. Scheduler atomically leases the ref, removes it from the current slot, and adds it to
+4. The atomic claim compares the exact metadata and entry snapshot again before taking
+   the lease or changing either slot. A concurrent configuration change causes one
+   bounded re-read and recalculation. If it changes again, scheduler leaves the source
+   ref untouched for a later tick and records `config_changed_deferred`.
+5. Scheduler atomically leases the ref, removes it from the current slot, and adds it to
    the next slot before calling runtime. This ordering gives single-fire-per-slot
    behavior and prevents a runtime/network failure from turning into an automatic cron
    retry.
-5. If a ref is stranded in a slot older than the current wall-clock slot, scheduler
+6. If a ref is stranded in a slot older than the current wall-clock slot, scheduler
    advances it to the next future slot without firing. Outage or long scheduler downtime
    therefore skips missed cron events rather than replaying them.
-6. The `scheduledTime` sent to runtime is the slot timestamp, not the POST time.
+7. The `scheduledTime` sent to runtime is the slot timestamp, not the POST time.
    `cron_queue_lag_ms` measures how late scheduler was relative to that slot.
 
 Cron therefore follows Cloudflare-style best-effort scheduled events: minute aligned, no
@@ -122,15 +126,25 @@ Queue dispatch is stream-driven rather than wall-clock driven:
 
 1. Producers write message envelopes into DB 1 streams, or into delayed ZSETs when
    `delivery_delay` / retry delay is non-zero.
-2. Scheduler reconciles `queue:index:*` discovery sets, creates the fixed
-   `wdl-scheduler` consumer group for live streams, and keeps an in-memory set of known
-   delayed queues. Empty queue indexes can be backfilled once from authoritative
-   hashes, streams, and delayed ZSETs; after that, writers own the projections and
-   reconcile owns stale-index cleanup.
+2. Scheduler repairs `queue:index:*` discovery sets from authoritative hashes, streams,
+   and delayed ZSETs at startup and every `SCHEDULER_SWEEP_MS` (five minutes by
+   default). The 1.5-second reconcile loop reads those indexes, removes stale members,
+   creates the fixed `wdl-scheduler` consumer group for live streams, and keeps an
+   in-memory set of known delayed queues. Writers remain responsible for updating the
+   indexes on normal writes; periodic repair bounds recovery from an interrupted
+   data-plus-index write without putting a keyspace scan on the reconcile hot path.
+   Missing optional consumer fields default to
+   `max_batch_size=10`, `max_batch_timeout_ms=5000`, `max_retries=3`,
+   `retry_delay_secs=0`, and no `dead_letter_queue`. Present malformed/out-of-range
+   fields or an invalid dead-letter queue make that consumer projection unusable. Group
+   creation isolates errors per stream,
+   continues later bounded chunks, refreshes healthy in-memory consumers, and reports
+   any aggregate reconcile failure after that healthy work is retained.
 3. The consume loop uses `XREADGROUP` to read main streams and dispatches batches up to
-   `max_batch_size`, clamped to the hard cap of `100`. Each read caps `COUNT` to the
-   current consumer batch-size snapshot for the active stream set so one poll does not
-   place more entries into the PEL than a current consumer can dispatch in one batch.
+   `max_batch_size`, which must be in `[1, 100]`; out-of-range projections are rejected.
+   Each read caps `COUNT` to the current consumer batch-size snapshot for the active
+   stream set so one poll does not place more entries into the PEL than a current
+   consumer can dispatch in one batch.
    PEL reap uses the same per-consumer cap when the consumer still exists; missing-
    consumer orphan movement may still page up to the hard cap. Consume and PEL reap can
    dispatch streams in parallel under the queue semaphore. Before each dispatch path
@@ -139,12 +153,14 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    version does not wait for the next reconcile tick once messages are selected.
    `max_batch_timeout_ms` is not a batching wait window in the current model.
 4. Runtime returns a queue outcome envelope. Explicit `ack`, explicit `retry`, batch
-   retry, and implicit ack are resolved in scheduler, then a Redis pipeline performs the
-   `XACK`/`XDEL`, delayed retry `ZADD`, DLQ append, or immediate retry write. Platform
-   failures that cannot become valid by retrying the same bytes, such as queue-message
-   decode failures or invalid queue dispatch bodies, go directly to DLQ without
-   consuming the retry budget. Aggregate request-body-too-large responses are split
-   and retried with smaller batches first.
+   retry, and implicit ack are resolved in scheduler. Retry and DLQ transitions execute
+   as independent atomic scripts inside one transport pipeline: all target writes
+   complete before the source entry is acknowledged and deleted. A target-side error
+   therefore retains that source entry and does not prevent healthy transitions later
+   in the same batch from completing. Platform failures that cannot become valid by
+   retrying the same bytes, such as queue-message decode failures or invalid queue
+   dispatch bodies, go directly to DLQ without consuming the retry budget. Aggregate
+   request-body-too-large responses are split and retried with smaller batches first.
 5. The delayed loop wakes from `queue-delayed-wake` and from wall-clock sleeps until the
    next due delayed member. Each due member first takes a `queue-delayed-claim:*` lease
    sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the winner moves it back to the main
@@ -165,6 +181,7 @@ Cron keys:
 
 ```text
 crons:<ns>:<worker>               Hash, authoritative live cron config
+cron:seq:<ns>:<worker>            String, permanent generation high-water mark
 cron:index:workers                Set, non-authoritative discovery index of crons hashes
 cron:index:workers:backfilled     String, one-time legacy backfill marker
 cron-slot:<slot_ms>               Set, minute-bucket consumption index, expiring around slot+10min
@@ -197,14 +214,17 @@ cleanup after proving the referenced key is absent.
 Cron:
 
 - `crons:<ns>:<worker>` is authority.
+- `cron:seq:<ns>:<worker>` is the sole permanent generation allocator. It survives empty
+  projections and whole-worker deletion, and new allocations start at `1024`.
+- Cron projection metadata stores only the active worker version used for dispatch.
 - `cron:index:workers` is only discovery. `cron:index:workers:backfilled` marks that the
   scheduler crossed pre-index legacy state; after that, an empty index means no cron
   workers.
 - `cron-slot:<slot_ms>` is a rebuildable consumption index. The current bucket plus the
   previous bucket are checked so near-rollover writes are not delayed by a full minute.
 - Cron refs are shaped as `<ns>:<worker>:<cron_id>:<gen>`.
-- `gen` fences stale bucket refs. Removing and re-adding the same cron gets a fresh
-  generation.
+- `gen` fences stale bucket refs. Removing and re-adding the same cron, including after
+  whole-worker deletion, gets a fresh generation.
 - Scheduler leases and advances a ref before firing. If the runtime call fails, that
   slot is still consumed. This preserves Cloudflare-style best-effort cron semantics
   rather than retrying scheduled events.
@@ -271,8 +291,9 @@ Important cron signals:
 - `cron_stale_refs_cleaned`
 - `cron_sweep_entries_skipped`
 - `cron_sweep_workers_skipped`
-- Logs: `cron_fired`, `cron_lease_lost`, `cron_ref_stale`, `cron_ref_stale_advanced`,
-  `cron_sweep_entry_skipped`, `cron_sweep_worker_skipped`, `cron_reconcile`
+- Logs: `cron_fired`, `cron_lease_lost`, `cron_config_changed_deferred`,
+  `cron_ref_stale`, `cron_ref_stale_advanced`, `cron_sweep_entry_skipped`,
+  `cron_sweep_worker_skipped`, `cron_reconcile`
 
 Important queue signals:
 

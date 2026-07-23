@@ -4,7 +4,7 @@ mod model;
 mod retry;
 mod sleep;
 use serde_json::{Value as JsonValue, json};
-use wdl_rust_common::time::now_ms;
+use wdl_rust_common::{redis_eval::StaticRedisScript, time::now_ms};
 
 use crate::{AppState, LogLevel, WorkflowError, WorkflowResult, log};
 
@@ -35,6 +35,12 @@ const STEP_SCRIPT_PAYLOAD_LIMIT: i64 = -1;
 const STEP_SCRIPT_EXPIRED_CLAIM: i64 = -2;
 const STEP_SCRIPT_INACTIVE_INSTANCE: i64 = -3;
 const STEP_SCRIPT_CORRUPT_CLAIM: i64 = -4;
+
+static READ_STEP_RECORD: StaticRedisScript = StaticRedisScript::new(READ_STEP_RECORD_SCRIPT);
+static COMMIT_STEP_SUCCESS: StaticRedisScript = StaticRedisScript::new(COMMIT_STEP_SUCCESS_SCRIPT);
+static COMMIT_STEP_ERROR: StaticRedisScript = StaticRedisScript::new(COMMIT_STEP_ERROR_SCRIPT);
+static COMMIT_STEP_RECORD: StaticRedisScript = StaticRedisScript::new(COMMIT_STEP_RECORD_SCRIPT);
+static RESTORE_WAITING_DUE: StaticRedisScript = StaticRedisScript::new(RESTORE_WAITING_DUE_SCRIPT);
 
 const READ_STEP_RECORD_SCRIPT: &str = r#"
 local generation = redis.call("HGET", KEYS[1], "generation")
@@ -256,21 +262,21 @@ fn ensure_step_script_ok(code: i64) -> WorkflowResult<()> {
     }
 }
 
-pub(super) async fn read_step_record_for_claim(
+async fn read_active_claim_field(
     state: &AppState,
     req: &WorkflowStepRequest,
+    data_key: &str,
+    field: &str,
 ) -> WorkflowResult<Option<String>> {
     let keys = InstanceRouteKeys::new(&req.ns, &req.workflow_key, &req.instance_id);
     let state_key = keys.state();
-    let steps_key = keys.steps();
-    let field = step_field(req.ordinal);
     let now = now_ms().to_string();
     let generation = req.generation.to_string();
     let (code, raw): (i64, String) = eval_script(
         state,
-        READ_STEP_RECORD_SCRIPT,
-        &[&state_key, &steps_key],
-        &[&generation, &req.run_token, &now, &field],
+        &READ_STEP_RECORD,
+        &[&state_key, data_key],
+        &[&generation, &req.run_token, &now, field],
     )
     .await?;
     match code {
@@ -278,6 +284,23 @@ pub(super) async fn read_step_record_for_claim(
         STEP_SCRIPT_OK => Ok(Some(raw)),
         other => Err(active_claim_error(other)),
     }
+}
+
+pub(super) async fn read_step_record_for_claim(
+    state: &AppState,
+    req: &WorkflowStepRequest,
+) -> WorkflowResult<Option<String>> {
+    let keys = InstanceRouteKeys::new(&req.ns, &req.workflow_key, &req.instance_id);
+    read_active_claim_field(state, req, &keys.steps(), &step_field(req.ordinal)).await
+}
+
+pub(super) async fn read_step_payload_for_claim(
+    state: &AppState,
+    req: &WorkflowStepRequest,
+    payload_ref: &str,
+) -> WorkflowResult<Option<String>> {
+    let keys = InstanceRouteKeys::new(&req.ns, &req.workflow_key, &req.instance_id);
+    read_active_claim_field(state, req, &keys.payloads(), payload_ref).await
 }
 async fn restore_waiting_due_index(
     state: &AppState,
@@ -294,7 +317,7 @@ async fn restore_waiting_due_index(
     let due_at_ms = due_at_ms.to_string();
     let restored: i64 = eval_script(
         state,
-        RESTORE_WAITING_DUE_SCRIPT,
+        &RESTORE_WAITING_DUE,
         &[&state_key, &due, &ready],
         &[
             &generation,
@@ -328,8 +351,6 @@ pub(crate) async fn claim_step(
         WorkflowError::invalid_state(format!("Workflow step record is corrupt: {err}"))
     })?;
     verify_step_record(&req, &config, &record)?;
-    let keys = InstanceRouteKeys::new(&req.ns, &req.workflow_key, &req.instance_id);
-    let payloads_key = keys.payloads();
     match record.status.as_str() {
         "completed" => {
             let output = if let Some(output) = record.output {
@@ -340,16 +361,7 @@ pub(crate) async fn claim_step(
                         "Workflow completed step is missing output ref",
                     ));
                 };
-                let output_raw: Option<String> = state
-                    .redis
-                    .with_conn(async |mut conn| {
-                        redis::cmd("HGET")
-                            .arg(payloads_key)
-                            .arg(&output_ref)
-                            .query_async(&mut conn)
-                            .await
-                    })
-                    .await?;
+                let output_raw = read_step_payload_for_claim(state, &req, &output_ref).await?;
                 let Some(output_raw) = output_raw else {
                     return Err(WorkflowError::payload_missing(format!(
                         "Workflow step output payload {output_ref} is missing"
@@ -383,16 +395,7 @@ pub(crate) async fn claim_step(
                         "Workflow failed step is missing error ref",
                     ));
                 };
-                let error_raw: Option<String> = state
-                    .redis
-                    .with_conn(async |mut conn| {
-                        redis::cmd("HGET")
-                            .arg(payloads_key)
-                            .arg(&error_ref)
-                            .query_async(&mut conn)
-                            .await
-                    })
-                    .await?;
+                let error_raw = read_step_payload_for_claim(state, &req, &error_ref).await?;
                 let Some(error_raw) = error_raw else {
                     return Err(WorkflowError::payload_missing(format!(
                         "Workflow step error payload {error_ref} is missing"
@@ -452,7 +455,7 @@ pub(crate) async fn commit_step_success(
     let payload_limit = instance_payload_limit_arg();
     let committed: i64 = eval_script(
         state,
-        COMMIT_STEP_SUCCESS_SCRIPT,
+        &COMMIT_STEP_SUCCESS,
         &[
             &state_key,
             &payloads_key,
@@ -540,7 +543,7 @@ pub(crate) async fn commit_step_error(
     let payload_limit = instance_payload_limit_arg();
     let committed: i64 = eval_script(
         state,
-        COMMIT_STEP_ERROR_SCRIPT,
+        &COMMIT_STEP_ERROR,
         &[
             &state_key,
             &payloads_key,
@@ -635,7 +638,7 @@ async fn commit_step_record(
     let payload_limit = instance_payload_limit_arg();
     let updated: i64 = eval_script(
         state,
-        COMMIT_STEP_RECORD_SCRIPT,
+        &COMMIT_STEP_RECORD,
         &[
             &state_key,
             &payloads_key,
@@ -717,4 +720,29 @@ async fn write_waiting_record(
         }),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_claim_field_script_checks_the_full_fence_before_reading() {
+        let generation = READ_STEP_RECORD_SCRIPT
+            .find(r#"redis.call("HGET", KEYS[1], "generation")"#)
+            .expect("claim snapshot must read generation");
+        let token = READ_STEP_RECORD_SCRIPT
+            .find(r#"redis.call("HGET", KEYS[1], "runToken")"#)
+            .expect("claim snapshot must read run token");
+        let lease = READ_STEP_RECORD_SCRIPT
+            .find(r#"redis.call("HGET", KEYS[1], "runLeaseExpiresAtMs")"#)
+            .expect("claim snapshot must read lease");
+        let status = READ_STEP_RECORD_SCRIPT
+            .find(r#"redis.call("HGET", KEYS[1], "status")"#)
+            .expect("claim snapshot must read status");
+        let field = READ_STEP_RECORD_SCRIPT
+            .find(r#"redis.call("HGET", KEYS[2], ARGV[4])"#)
+            .expect("claim snapshot must read the requested field");
+        assert!(generation < token && token < lease && lease < status && status < field);
+    }
 }

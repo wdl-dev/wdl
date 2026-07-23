@@ -14,13 +14,18 @@ import {
   responseJson,
   queueConsumerKey,
   QUEUE_CONSUMER_INDEX_KEY,
+  QUEUE_STREAM_INDEX_KEY,
   queueStreamKey,
   queueStreamMessageFields,
 } from "./helpers/index.js";
 import {
+  redisDel,
   redisHSet,
+  redisSMembers,
   redisSRem,
+  redisSet,
   redisXAdd,
+  redisXGroupCreate,
   redisXInfoGroups,
   redisXLen,
   redisXPendingCount,
@@ -113,6 +118,178 @@ test("scheduler replicas: queue consumer group delivers each message once under 
     assert.equal(redisXLen(streamKey, { db: 1 }), 0);
     assert.equal(redisXPendingCount(streamKey, "wdl-scheduler", { db: 1 }), 0);
   });
+});
+
+test("scheduler reconcile restores multiple pre-existing consumer groups", async () => {
+  const ns = uniqueNs("qreconcile");
+  const queues = ["orders", "events", "audit"];
+  const consumerVersion = await withServiceStopped("scheduler", async () => {
+    const version = await deployConsumer(
+      ns,
+      DELIVERY_SET_RECORDER,
+      queues.map((queue) => ({
+        queue,
+        maxBatchSize: 3,
+        maxBatchTimeoutMs: 2000,
+        maxRetries: 3,
+      }))
+    );
+    for (const queue of queues) {
+      redisXGroupCreate(queueStreamKey(ns, queue), "wdl-scheduler", { db: 1 });
+      redisSRem(QUEUE_CONSUMER_INDEX_KEY, queueConsumerKey(ns, queue));
+    }
+    return version;
+  });
+
+  const streamKeys = queues.map((queue) => queueStreamKey(ns, queue));
+  const consumerKeys = queues.map((queue) => queueConsumerKey(ns, queue));
+  await waitUntil("all pre-existing queue indexes repaired at startup", async () => {
+    const indexedStreams = new Set(redisSMembers(QUEUE_STREAM_INDEX_KEY, { db: 1 }));
+    const indexedConsumers = new Set(redisSMembers(QUEUE_CONSUMER_INDEX_KEY));
+    return streamKeys.every((key) => indexedStreams.has(key))
+      && consumerKeys.every((key) => indexedConsumers.has(key));
+  }, { timeoutMs: 15_000, intervalMs: 500 });
+
+  streamKeys.forEach((streamKey, index) => {
+    redisXAdd(
+      streamKey,
+      queueStreamMessageFields({
+        id: `reconcile-${index}`,
+        body: `body-${index}`,
+        contentType: "text",
+        firstSeenMs: index + 1,
+      }),
+      { db: 1 }
+    );
+  });
+
+  const consumerWorkerId = gatewayWorkerId(ns, "consumer", consumerVersion);
+  await waitUntil("messages delivered from all reconciled groups", async () => {
+    const res = runtimeInternalPost("/", { "x-worker-id": consumerWorkerId }, "");
+    if (res.status !== 200) return false;
+    return responseJson(res).bodies.length === queues.length;
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+
+  const snapshot = responseJson(runtimeInternalPost("/", {
+    "x-worker-id": consumerWorkerId,
+  }, ""));
+  assert.deepEqual(snapshot.bodies.toSorted(), ["body-0", "body-1", "body-2"]);
+});
+
+test("scheduler reconcile isolates a bad stream and continues into later consumer batches", async () => {
+  const ns = uniqueNs("qreconcileerr");
+  const queues = Array.from({ length: 130 }, (_, index) => `q${String(index).padStart(3, "0")}`);
+
+  const setup = await withServiceStopped("scheduler", async () => {
+    const consumerVersion = await deployConsumer(
+      ns,
+      DELIVERY_SET_RECORDER,
+      queues.map((queue) => ({
+        queue,
+        maxBatchSize: 3,
+        maxBatchTimeoutMs: 2000,
+        maxRetries: 3,
+      }))
+    );
+    const queueByConsumerKey = new Map(
+      queues.map((queue) => [queueConsumerKey(ns, queue), queue])
+    );
+    const orderedConsumerKeys = redisSMembers(QUEUE_CONSUMER_INDEX_KEY)
+      .filter((key) => queueByConsumerKey.has(key));
+    assert.equal(orderedConsumerKeys.length, queues.length);
+
+    const badQueue = queueByConsumerKey.get(orderedConsumerKeys[1]);
+    const firstBatchQueue = queueByConsumerKey.get(orderedConsumerKeys[0]);
+    const laterBatchQueue = queueByConsumerKey.get(orderedConsumerKeys[128]);
+    assert.ok(badQueue && firstBatchQueue && laterBatchQueue);
+    redisSet(queueStreamKey(ns, badQueue), "wrong-type", { db: 1 });
+
+    return { consumerVersion, badQueue, firstBatchQueue, laterBatchQueue };
+  });
+
+  const badStream = queueStreamKey(ns, setup.badQueue);
+  const firstBatchStream = queueStreamKey(ns, setup.firstBatchQueue);
+  const laterBatchStream = queueStreamKey(ns, setup.laterBatchQueue);
+  await waitUntil("healthy queue groups on both sides of reconcile failure", async () => {
+    const indexed = new Set(redisSMembers(QUEUE_STREAM_INDEX_KEY, { db: 1 }));
+    return indexed.has(firstBatchStream) && indexed.has(laterBatchStream);
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+  assert.equal(
+    new Set(redisSMembers(QUEUE_STREAM_INDEX_KEY, { db: 1 })).has(badStream),
+    false
+  );
+
+  redisXAdd(
+    laterBatchStream,
+    queueStreamMessageFields({
+      id: "later-batch",
+      body: "later-batch",
+      contentType: "text",
+      firstSeenMs: 1,
+    }),
+    { db: 1 }
+  );
+  const consumerWorkerId = gatewayWorkerId(ns, "consumer", setup.consumerVersion);
+  await waitUntil("later reconcile batch participates in queue consumption", async () => {
+    const res = runtimeInternalPost("/", { "x-worker-id": consumerWorkerId }, "");
+    if (res.status !== 200) return false;
+    return responseJson(res).bodies.includes("later-batch");
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+});
+
+test("scheduler reconcile removes a registered stream that later becomes invalid", async () => {
+  const ns = uniqueNs("qreconcilelateerr");
+  const badQueue = "bad";
+  const healthyQueue = "healthy";
+  const consumerVersion = await deployConsumer(ns, DELIVERY_SET_RECORDER, [
+    { queue: badQueue, maxBatchSize: 3, maxBatchTimeoutMs: 2000, maxRetries: 3 },
+    { queue: healthyQueue, maxBatchSize: 3, maxBatchTimeoutMs: 2000, maxRetries: 3 },
+  ]);
+  const badStream = queueStreamKey(ns, badQueue);
+  const healthyStream = queueStreamKey(ns, healthyQueue);
+
+  await waitUntil("both queue groups registered before stream corruption", async () => {
+    return [badStream, healthyStream].every((stream) => {
+      const groups = redisXInfoGroups(stream, { db: 1 });
+      return !groups.includes("missing") && groups.includes("wdl-scheduler");
+    });
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+
+  redisDel(badStream, { db: 1 });
+  redisSet(badStream, "wrong-type", { db: 1 });
+
+  const consumerWorkerId = gatewayWorkerId(ns, "consumer", consumerVersion);
+  redisXAdd(
+    healthyStream,
+    queueStreamMessageFields({
+      id: "release-pre-corruption-read",
+      body: "release-pre-corruption-read",
+      contentType: "text",
+      firstSeenMs: 1,
+    }),
+    { db: 1 }
+  );
+  await waitUntil("pre-corruption blocking read completes", async () => {
+    const res = runtimeInternalPost("/", { "x-worker-id": consumerWorkerId }, "");
+    return res.status === 200
+      && responseJson(res).bodies.includes("release-pre-corruption-read");
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+
+  redisXAdd(
+    healthyStream,
+    queueStreamMessageFields({
+      id: "healthy-after-registry-removal",
+      body: "healthy-after-registry-removal",
+      contentType: "text",
+      firstSeenMs: 2,
+    }),
+    { db: 1 }
+  );
+  await waitUntil("healthy queue continues after registry removal", async () => {
+    const res = runtimeInternalPost("/", { "x-worker-id": consumerWorkerId }, "");
+    return res.status === 200
+      && responseJson(res).bodies.includes("healthy-after-registry-removal");
+  }, { timeoutMs: 30_000, intervalMs: 500 });
 });
 
 test("queue dispatch rereads authoritative consumer hash before delivery", async () => {

@@ -71,11 +71,26 @@ import { SecretEnvelopeError } from "shared-secret-envelope";
 const MAX_COMMIT_ATTEMPTS = 5;
 const DEPLOY_JSON_BODY_MAX_BYTES = 32 * 1024 * 1024;
 const DEPLOY_ASSET_UPLOAD_CONCURRENCY = 8;
+const DEPLOY_PREFLIGHT_READ_BATCH_SIZE = 32;
 
 // Deploy keeps thin local wrappers even though they mirror ControlAbort-like
 // fields: commit aborts need cleanup/log handling, while request errors are
 // pre-commit shape rejections.
 class DeployAbort extends ControlAbort {}
+
+/**
+ * @param {RedisClient} redis
+ * @param {Array<[string, string]>} pairs
+ */
+async function readDeployHGetMany(redis, pairs) {
+  /** @type {(string | null)[]} */
+  const values = [];
+  for (let offset = 0; offset < pairs.length; offset += DEPLOY_PREFLIGHT_READ_BATCH_SIZE) {
+    const batch = await redis.hGetMany(pairs.slice(offset, offset + DEPLOY_PREFLIGHT_READ_BATCH_SIZE));
+    values.push(...batch.map((value) => value ?? null));
+  }
+  return values;
+}
 
 /** @param {Record<string, unknown>} details */
 function deployAbortLogContext(details) {
@@ -339,22 +354,53 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
  * @param {{ redis: RedisClient, ns: string, name: string, bindings: BindingMap }} args
  */
 async function validateServiceBindingsPreflight({ redis, ns, name, bindings }) {
-  /** @type {Map<string, Promise<string | null>>} */
+  /** @type {Map<string, { targetNs: string, worker: string }>} */
+  const targets = new Map();
+  for (const spec of Object.values(bindings)) {
+    if (!spec || spec.type !== "service" || typeof spec.service !== "string" || !spec.service) continue;
+    const targetNs = spec.ns == null ? ns : spec.ns;
+    if (typeof targetNs !== "string") continue;
+    if (targetNs === ns && spec.service === name) continue;
+    if (PLATFORM_TIER_RESERVED_NS.has(targetNs)) continue;
+    targets.set(`${targetNs}\0${spec.service}`, { targetNs, worker: spec.service });
+  }
+
+  const targetList = [...targets.values()];
+  const versions = await readDeployHGetMany(
+    redis,
+    targetList.map(({ targetNs, worker }) => [routesKey(targetNs), worker])
+  );
+  /** @type {Map<string, string | null>} */
   const versionCache = new Map();
-  /** @type {Map<string, Promise<JsonObject | null>>} */
+  /** @type {Array<{ targetNs: string, worker: string, version: string }>} */
+  const versionedTargets = [];
+  for (let index = 0; index < targetList.length; index += 1) {
+    const target = targetList[index];
+    const version = versions[index] ?? null;
+    versionCache.set(`${target.targetNs}\0${target.worker}`, version);
+    if (version) versionedTargets.push({ ...target, version });
+  }
+
+  const rawMetas = await readDeployHGetMany(
+    redis,
+    versionedTargets.map(({ targetNs, worker, version }) => [
+      bundleKey(targetNs, worker, version),
+      "__meta__",
+    ])
+  );
+  /** @type {Map<string, string | null>} */
   const metaCache = new Map();
+  for (let index = 0; index < versionedTargets.length; index += 1) {
+    const { targetNs, worker, version } = versionedTargets[index];
+    metaCache.set(`${targetNs}\0${worker}\0${version}`, rawMetas[index] ?? null);
+  }
+
   /**
    * @param {string} targetNs
    * @param {string} worker
    */
-  const lookupTargetVersion = (targetNs, worker) => {
-    const key = `${targetNs}\0${worker}`;
-    const cached = versionCache.get(key);
-    if (cached) return cached;
-    const load = redis.hGet(routesKey(targetNs), worker).then((value) => value ?? null);
-    versionCache.set(key, load);
-    return load;
-  };
+  const lookupTargetVersion = async (targetNs, worker) =>
+    versionCache.get(`${targetNs}\0${worker}`) ?? null;
   /**
    * @param {string} targetNs
    * @param {string} worker
@@ -362,16 +408,10 @@ async function validateServiceBindingsPreflight({ redis, ns, name, bindings }) {
    */
   const lookupTargetMeta = async (targetNs, worker, version) => {
     const key = `${targetNs}\0${worker}\0${version}`;
-    const cached = metaCache.get(key);
-    if (cached) return await cached;
-    const load = (async () => {
-      const rawMeta = await redis.hGet(bundleKey(targetNs, worker, version), "__meta__");
-      return rawMeta == null
-        ? null
-        : linkableBundleMeta(targetNs, worker, version, rawMeta);
-    })();
-    metaCache.set(key, load);
-    return await load;
+    const rawMeta = metaCache.get(key) ?? null;
+    return rawMeta == null
+      ? null
+      : linkableBundleMeta(targetNs, worker, version, rawMeta);
   };
   for (const [bname, spec] of Object.entries(bindings)) {
     if (!spec || spec.type !== "service") continue;
@@ -388,8 +428,12 @@ async function validateServiceBindingsPreflight({ redis, ns, name, bindings }) {
 
 /** @param {RedisClient} redis */
 async function collectPlatformExports(redis) {
-  const routeEntries = (await Promise.all([...PLATFORM_TIER_RESERVED_NS].map(async (platformNs) => {
-    const platformRoutesHash = await redis.hGetAll(routesKey(platformNs));
+  const platformNamespaces = [...PLATFORM_TIER_RESERVED_NS];
+  const routeHashes = await redis.hGetAllMany(
+    platformNamespaces.map((platformNs) => routesKey(platformNs))
+  );
+  const routeEntries = platformNamespaces.flatMap((platformNs, index) => {
+    const platformRoutesHash = routeHashes[index];
     return Object.entries(platformRoutesHash)
       .filter((entry) => typeof entry[1] === "string")
       .map(([worker, version]) => ({
@@ -397,10 +441,14 @@ async function collectPlatformExports(redis) {
         worker,
         version: /** @type {string} */ (version),
       }));
-  }))).flat();
+  });
 
-  const exportsByWorker = await Promise.all(routeEntries.map(async ({ ns, worker, version }) => {
-    const rawMeta = await redis.hGet(bundleKey(ns, worker, version), "__meta__");
+  const rawMetas = await readDeployHGetMany(
+    redis,
+    routeEntries.map(({ ns, worker, version }) => [bundleKey(ns, worker, version), "__meta__"])
+  );
+  const exportsByWorker = routeEntries.map(({ ns, worker, version }, index) => {
+    const rawMeta = rawMetas[index];
     if (rawMeta == null) return [];
     const meta = linkableBundleMeta(ns, worker, version, rawMeta);
     if (!Array.isArray(meta.exports)) return [];
@@ -416,7 +464,7 @@ async function collectPlatformExports(redis) {
         allowedCallers: entry.allowedCallers || [],
         requiredCallerSecrets: entry.requiredCallerSecrets || [],
       }));
-  }));
+  });
 
   return exportsByWorker.flat();
 }
@@ -624,8 +672,10 @@ async function runDeployPreflight({ redis, ns, name, deployRequest }) {
 async function validateCommittedEnvBudget({ redis, controlEnv, ns, name, meta, version = undefined }) {
   const nsSecretHashKey = nsSecretsKey(ns);
   const workerSecretHashKey = workerSecretsKey(ns, name);
-  const nsEncrypted = await redis.hGetAll(nsSecretHashKey);
-  const workerEncrypted = await redis.hGetAll(workerSecretHashKey);
+  const [nsEncrypted, workerEncrypted] = await redis.hGetAllMany([
+    nsSecretHashKey,
+    workerSecretHashKey,
+  ]);
   const [nsSecrets, workerSecrets] = await Promise.all([
     decryptSecretHash({ encrypted: nsEncrypted, env: controlEnv, hashKey: nsSecretHashKey }),
     decryptSecretHash({ encrypted: workerEncrypted, env: controlEnv, hashKey: workerSecretHashKey }),
@@ -938,7 +988,6 @@ export async function commitWithWatch({
     },
   }, async (iso) => {
     await watchCommitKeys(iso, { ns, name, prepared, outgoingRefs, d1Refs });
-    await iso.watch(nsSecretsKey(ns), workerSecretsKey(ns, name));
 
     const resolvedD1Refs = await resolveD1RefsForCommit(iso, { ns, d1Refs });
     await validateCallerNotDeleting(iso, { ns, name });
@@ -995,7 +1044,11 @@ export async function commitWithWatch({
  * @param {{ ns: string, name: string, prepared: PreparedBundle, outgoingRefs: OutgoingRef[], d1Refs: DeployD1Ref[] }} args
  */
 async function watchCommitKeys(iso, { ns, name, prepared, outgoingRefs, d1Refs }) {
-  const watchKeys = [deleteLockKey(ns, name)];
+  const watchKeys = [
+    deleteLockKey(ns, name),
+    nsSecretsKey(ns),
+    workerSecretsKey(ns, name),
+  ];
   if (hasDurableObjectBinding(prepared.meta.bindings)) {
     watchKeys.push(doStorageIdKey(ns, name));
   }

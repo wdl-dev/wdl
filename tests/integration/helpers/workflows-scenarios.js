@@ -12,14 +12,17 @@ import {
 } from "./internal-http.js";
 import { readMeta } from "./misc.js";
 import {
+  redisCommandCalls,
   redisDel,
   redisHDel,
   redisHGet,
   redisHSet,
   redisSAdd,
   redisSIsMember,
+  redisScriptFlush,
   redisSMembers,
   redisSetEx,
+  redisZAdd,
   redisZScore,
 } from "./redis.js";
 import { delay, setupIntegrationSuite, waitUntil } from "./stack.js";
@@ -34,10 +37,13 @@ export {
   gatewayFetch,
   gatewayWorkerId,
   redisDel,
+  redisCommandCalls,
   redisSAdd,
   redisSIsMember,
+  redisScriptFlush,
   redisSMembers,
   redisSetEx,
+  redisZAdd,
   redisZScore,
   runtimeDispatchPost,
   serviceInternalGet,
@@ -64,6 +70,15 @@ export function workerMeta(ns, worker, version) {
 /** @param {string} ns @param {string} workflowKey @param {string} instanceId */
 export function workflowInstanceStateKey(ns, workflowKey, instanceId) {
   return `wf:instance:{${ns}:${workflowKey}:${instanceId}}:state`;
+}
+
+/** @param {string} ns @param {string} workflowKey @param {string} instanceId */
+export function workflowEventTypeIndexKey(ns, workflowKey, instanceId) {
+  return `wf:instance:{${ns}:${workflowKey}:${instanceId}}:events-by-type`;
+}
+
+export function workflowRetentionKey() {
+  return "wf:retention";
 }
 
 /** @param {string} ns @param {string} workflowKey @param {string} instanceId */

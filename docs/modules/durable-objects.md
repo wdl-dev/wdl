@@ -206,8 +206,10 @@ Owner resolution is the single-writer protocol:
    active worker storage pointer. A `whole` delete lock rejects ownership; a `version`
    lock remains part of the watched snapshot but does not interrupt active storage. The
    WATCH prevents a claim from committing after whole-worker delete starts. Renewal
-   separately WATCHes the owner record and active storage pointer; its generation fence
-   is carried by the owner record rather than a second generation-key read.
+   takes a pipelined owner/storage snapshot, then uses a Lua CAS to atomically compare
+   the exact owner bytes and active storage pointer before refreshing the TTL. Its
+   generation fence is carried by the owner record rather than a second generation-key
+   read.
 3. If a live owner exists on another task, the router returns that owner or an
    owner-hint header; the runtime facade may retry directly, but the owner task still
    rechecks the fence.
@@ -215,7 +217,9 @@ Owner resolution is the single-writer protocol:
    counter and writes a new owner record with TTL in one Redis transaction.
 5. Local dispatch checks `taskId`, `generation`, lease expiry, active `doStorageId`,
    and remaining lease budget before using a native facet. A stale generation, expired
-   lease, or changed storage pointer fails closed. If less than
+   lease, or changed storage pointer fails closed. Every owner-side assertion, including
+   `/delete-storage`, reads the owner record, active storage pointer, and Redis time in
+   one snapshot. If less than
    `DO_OWNER_LEASE_GUARD_MS` remains (default `1000`), the owner first tries a
    same-task, same-generation CAS renew; if renewal fails, it fails closed. This guard
    narrows the takeover window; it is not a per-SQL-call or SQLite commit-time fence.

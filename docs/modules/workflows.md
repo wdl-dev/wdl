@@ -112,7 +112,7 @@ Key families:
 | `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker. | Current value is `2`; greenfield deployments start on schema 2. |
 | `wf:instance:{<ns>:<workflowKey>:<instanceId>}:state` | Hash | workflows | Authoritative instance state. | Terminal retention and lifecycle cleanup remove expired state. |
 | `wf:instance:{...}:payloads` | Hash | workflows | Payload ref storage under aggregate caps. | Deleted with the instance state family. |
-| `wf:instance:{...}:steps`, `step-summaries`, `step-summary-index` | Hash/ZSET | workflows | Authoritative step replay/history state. | Deleted with the instance; summaries may be truncated on read. |
+| `wf:instance:{...}:steps`, `step-summaries`, `step-summary-index` | Hash/ZSET | workflows | Authoritative step replay/history state. | Deleted with the instance; history reads are bounded and reject mismatched summary/index counts or missing summaries in the requested page. |
 | `wf:instance:{...}:events`, `events-by-type` | Hash/ZSET | workflows | Buffered event records and type index. | Consumed/stale events are removed during wait matching or cleanup. |
 | `wf:ready:<shard>`, `wf:ready:active`, `wf:ready:cursor` | Set/String | workflows | Ready-token hints, active shard set, and fair-dispatch cursor. | Tokens are deduplicated hints; instance state remains authority; the cursor rotates shard start order across ticks. |
 | `wf:due:<shard>` | ZSET | workflows | Sleep/retry/event-timeout due index. | Tick promotion moves eligible entries back to ready. |
@@ -137,6 +137,8 @@ Key families:
   definition. Damaged authoritative metadata is not exposed as a normal missing or
   retired workflow. Normal deploy and single-workflow paths do not scan unrelated
   historical definitions.
+- Workflows lifecycle checks reject malformed referrer members instead of treating
+  them as absent.
 - Scheduler only wakes workflows; workflows owns admission, fairness, shard ticks,
   ready/due movement, and runtime dispatch.
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
@@ -174,8 +176,12 @@ Key families:
   retry/wait. Completed runtime terminals require `running`; failed runtime terminals
   may also close a same-run `waiting` state created by an invalid unawaited suspending
   step while the run lease is still valid. If that lease already expired, workflows only
-  restores the ready hint so the next claim can replay under a fresh lease. Lifecycle
-  commits use a generation fence and rotate `generation` in the same Lua commit.
+  restores the ready hint so the next claim can replay under a fresh lease. Initial run
+  admission, expired-run requeue, lifecycle commits, `sendEvent`, and retention cleanup
+  also compare the persisted `createdAtMs` with `generation` so a stale snapshot cannot
+  mutate a later instance recreated under the same id with a different creation
+  timestamp. Lifecycle paths rotate `generation` in the same Lua commit when they
+  invalidate in-flight execution.
 - Runtime replay cache is advisory. DB 2 step state is authoritative.
 - Runtime may issue multiple `step.do` calls concurrently, commonly via `Promise.all`;
   each call receives a deterministic ordinal in user-code call order, records DAG
@@ -212,6 +218,11 @@ Workflow execution uses two channels:
 2. workflows dispatches claimed runs back to runtime `/internal/workflows/run` on
    `:8088`. Runtime loads the frozen worker version and invokes `className.run(event,
    stepFacade)`.
+
+Get, status, and list reads derive the payload hash from the requested namespace,
+workflow key, and instance id. Persisted `ns`, `workflowKey`, `instanceId`, and
+`payloadsKey` must match that canonical identity before any result/error payload is
+read; divergence fails closed as invalid state.
 
 Create and restart pin versions differently from replay. A new `create()` or `restart()`
 canonicalizes against the current active route before writing DB 2, so new durable
@@ -270,6 +281,10 @@ The step facade implements durable replay:
   event-before-wait is supported.
 - Runtime replays user code from the start. It fetches replay pages lazily and may cache
   them in-process, but DB 2 step state is authoritative.
+- Replay step records and their referenced payloads share the full generation,
+  run-token, creation-time, lease, and active-status fence. A referenced payload is
+  resolved only while that fence remains valid, so restart cannot mix payloads from
+  another execution generation into the page.
 - V2 records a durable DAG for `step.do`. The runtime assigns ordinals synchronously in
   call order, treats completed steps as the current dependency frontier, and stores the
   frontier on each later step. `Promise.all([step.do(...), step.do(...)])` produces
@@ -287,10 +302,11 @@ Fence model:
   a same-run `waiting` state created by an invalid unawaited suspending step while the
   run lease is still valid. If that lease already expired, workflows only restores the
   ready hint so the next claim can replay under a fresh lease.
-- Lifecycle commits (`pause`, `resume`, `restart`, `terminate`, retention cleanup) use
-  generation fencing and rotate `generation` where they invalidate in-flight execution.
-- `sendEvent` targets the current generation of the instance. If a concurrent restart
-  wins, send-event returns a conflict rather than mutating stale state.
+- Initial run claims and expired-run requeues, lifecycle commits (`pause`, `resume`,
+  `restart`, `terminate`), `sendEvent`, and retention cleanup compare both `generation`
+  and the persisted `createdAtMs` incarnation field. Lifecycle paths rotate `generation`
+  where they invalidate in-flight execution. If a concurrent restart or a same-id
+  incarnation with a different creation timestamp wins, the stale mutation is rejected.
 - Payload bytes, payload refs, counters, state changes, and ready/due updates must be
   committed in DB 2 together; workflows must fail closed on missing payload refs.
 

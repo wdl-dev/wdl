@@ -1,4 +1,4 @@
-use wdl_rust_common::time::now_ms;
+use wdl_rust_common::{redis_eval::StaticRedisScript, time::now_ms};
 
 use crate::{AppState, WorkflowError, WorkflowResult, ready_active_key};
 
@@ -16,7 +16,8 @@ if not status then
   return 0
 end
 local generation = redis.call("HGET", KEYS[1], "generation")
-if generation ~= ARGV[1] then
+local created_at_ms = redis.call("HGET", KEYS[1], "createdAtMs")
+if generation ~= ARGV[1] or created_at_ms ~= ARGV[7] then
   return 0
 end
 if ARGV[4] == "pause" then
@@ -39,6 +40,8 @@ redis.call("SADD", KEYS[4], ARGV[6])
 return 1
 "#;
 
+static PAUSE_RESUME: StaticRedisScript = StaticRedisScript::new(PAUSE_RESUME_SCRIPT);
+
 async fn transition_paused(
     state: &AppState,
     req: WorkflowRequest,
@@ -55,10 +58,10 @@ async fn transition_paused(
         .map(String::as_str)
         .ok_or_else(|| WorkflowError::invalid_state("Workflow state missing status"))?;
     if matches!(status, "completed" | "failed" | "terminated") || (paused && status == "paused") {
-        return response_from_state(state, &id, &existing).await;
+        return response_from_state(state, &req.ns, &req.workflow_key, &id, &existing).await;
     }
     if !paused && status != "paused" {
-        return response_from_state(state, &id, &existing).await;
+        return response_from_state(state, &req.ns, &req.workflow_key, &id, &existing).await;
     }
     let identity = identity_from_state(&req.ns, &req.workflow_key, &id, &existing)?;
     let next_generation = next_generation(&identity)?;
@@ -76,7 +79,7 @@ async fn transition_paused(
     let stored_now = now.clone();
     let updated: i64 = eval_script(
         state,
-        PAUSE_RESUME_SCRIPT,
+        &PAUSE_RESUME,
         &[&state_key, &ready, &due, ready_active_key()],
         &[
             &expected_generation,
@@ -85,6 +88,7 @@ async fn transition_paused(
             op,
             &token,
             &shard_arg,
+            &identity.created_at_ms,
         ],
     )
     .await?;
@@ -131,6 +135,8 @@ pub(crate) async fn resume_instance(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn pause_resume_progress_uses_post_transition_identity() {
         let source = include_str!("pause_resume.rs");
@@ -159,5 +165,16 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn pause_resume_rejects_a_recreated_instance() {
+        let first_write = PAUSE_RESUME_SCRIPT
+            .find(r#"redis.call("HSET", KEYS[1]"#)
+            .expect("pause/resume state write");
+        let incarnation_check = PAUSE_RESUME_SCRIPT
+            .find(r#"created_at_ms ~= ARGV[7]"#)
+            .expect("pause/resume incarnation fence");
+        assert!(incarnation_check < first_write);
     }
 }

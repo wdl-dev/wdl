@@ -148,6 +148,16 @@ repairable, document the authoritative record and stale cleanup path.
 WATCH/MULTI behavior belongs to one owner. Do not split preflight reads from commit-time
 revalidation without tests that prove the watched key set.
 
+Workerd I/O objects are tied to their `IoContext`. Keep the shared `RedisClient`
+socket-per-call model, and batch related commands inside one typed operation instead of
+retaining a socket or request-created promise across invocations. Use `RedisSession`
+only when one invocation or one long-lived owning task intentionally holds the
+connection for a WATCH/transaction or subscription lifecycle.
+
+Do not add a generic pipeline escape hatch to application code. Add the smallest typed,
+bounded helper that can validate reply count, reply order, and domain decoding at the
+Redis owner.
+
 ## Tests
 
 Tests should protect real contracts:

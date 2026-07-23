@@ -36,6 +36,7 @@ import {
   redisGetDoOwner,
   redisGetDoStorageId,
   redisRemoveDoAlarmDue,
+  redisSeedDoAlarmCleanupJobs,
   redisSetDoAlarmJob,
   redisSetDoOwner,
   waitForJson,
@@ -462,6 +463,46 @@ test("Workflows DO alarm cleanup is fenced to the deleted storage id", async () 
   const indexedJobs = redisDoAlarmJobIdsForWorker(ns, worker);
   assert.equal(indexedJobs.includes(oldJobId), false);
   assert.equal(indexedJobs.includes(newJobId), true);
+});
+
+test("Workflows DO alarm cleanup clears a large indexed job set", () => {
+  const ns = uniqueNs("do-cleanup-batches");
+  const worker = "alarms";
+  const doStorageId = "do_cleanup_batches_storage";
+  const jobIds = Array.from({ length: 257 }, (_, index) =>
+    doAlarmJobIdForStorage(
+      ns,
+      worker,
+      doStorageId,
+      "AlarmCounter",
+      `object-${index}`
+    )
+  );
+  redisSeedDoAlarmCleanupJobs(ns, worker, doStorageId, jobIds);
+
+  const cleanup = serviceInternalPost("workflows", 9120, "/internal/workflows/do-alarms/cleanup-worker", {
+    ns,
+    worker,
+    doStorageId,
+  });
+  assert.equal(cleanup.status, 200, cleanup.body);
+  assert.deepEqual(responseJson(cleanup), {
+    ok: true,
+    jobId: null,
+    changed: true,
+    deleted: jobIds.length,
+  });
+  assert.deepEqual(redisDoAlarmJobIdsForWorker(ns, worker), []);
+  const firstJobId = jobIds[0];
+  const lastJobId = jobIds.at(-1);
+  assert.ok(firstJobId);
+  assert.ok(lastJobId);
+  assert.deepEqual(redisGetDoAlarmJobById(firstJobId), {});
+  assert.deepEqual(redisGetDoAlarmJobById(lastJobId), {});
+  assert.deepEqual(
+    redisKeys(`wf:internal:do-alarm:by-worker:${ns}:${worker}:cleanup-snapshot:*`, { db: 2 }),
+    []
+  );
 });
 
 test("late DO alarm writes after worker delete do not recreate Workflows alarm jobs", async () => {

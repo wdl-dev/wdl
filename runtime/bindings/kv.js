@@ -61,8 +61,10 @@ function assertKvValueSize(size) {
  * @param {string} name
  */
 function requirePositiveInteger(value, name) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new TypeError(`KV put: ${name} must be a positive integer`);
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(
+      `KV put: ${name} must be a positive integer no greater than ${Number.MAX_SAFE_INTEGER}`
+    );
   }
   return value;
 }

@@ -99,6 +99,21 @@ export class RedisClient {
       return h ? { ...h } : {};
     });
   }
+  async eval(script, keys = [], args = []) {
+    const s = ensureState();
+    const indexKey = keys[0];
+    if (s.evalThrows && s.evalThrows.has(indexKey)) {
+      const err = new Error("forced eval throw on " + indexKey);
+      recordCommand("EVAL", false, err.message);
+      throw err;
+    }
+    s.evalCalls.push([script, [...keys], [...args]]);
+    recordCommand("EVAL", true);
+    const tokenId = s.strings.get(indexKey);
+    if (!tokenId) return [0];
+    const record = s.hashes.get(String(args[0] || "") + tokenId) || {};
+    return [1, tokenId, ...Object.entries(record).flat()];
+  }
   async del(key) {
     const s = ensureState();
     expireStringIfNeeded(key);
@@ -397,6 +412,8 @@ export function resetAuthMockState() {
     hashes: new Map(),
     sets: new Map(),
     getThrows: new Set(),
+    evalThrows: new Set(),
+    evalCalls: [],
     hGetAllThrows: new Set(),
     delIfEqThrows: new Set(),
     scanPages: [],

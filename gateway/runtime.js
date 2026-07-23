@@ -22,12 +22,22 @@ import {
 } from "shared-worker-contract";
 import { isCanonicalPatternHost, sortPatterns } from "gateway-lib";
 
+/**
+ * @typedef {import("shared-route-projection").PatternProjection & { slot: string }} PatternEntry
+ * @typedef {{ known: true, routes: Map<string, string>, cacheHit: boolean } | { known: false, routes: null, cacheHit: false }} NamespaceRouteResolution
+ * @typedef {{ known: true, patterns: PatternEntry[], cacheHit: boolean } | { known: false, patterns: null, cacheHit: false }} HostPatternResolution
+ */
+
 /** @type {Set<string> | null} */
 let knownNs = null;
 /** @type {Set<string> | null} */
 let knownPatternHosts = null;
+/** @type {Map<string, Map<string, string>>} */
 const routeCache = new Map();
+/** @type {Map<string, PatternEntry[]>} */
 const patternCache = new Map();
+let routeStateEpoch = 0;
+let patternStateEpoch = 0;
 /** @type {RedisSubscriber | null} */
 let subscriber = null;
 let subscriberConnected = 0;
@@ -36,17 +46,30 @@ let websocketProxyDetachedConnections = 0;
 let websocketProxyBufferedMessages = 0;
 const MAX_ROUTE_CACHE_ENTRIES = 10_000;
 const MAX_PATTERN_CACHE_ENTRIES = 10_000;
+const MAX_ROUTING_SNAPSHOT_ATTEMPTS = 5;
 const utf8Decoder = new TextDecoder();
 
 export const metrics = new MetricsRegistry();
 export const log = createLogger("gateway");
 
+export class GatewayRoutingUnavailableError extends Error {
+  constructor() {
+    super("Gateway routing state changed throughout the bounded lookup");
+    this.name = "GatewayRoutingUnavailableError";
+    this.status = 503;
+    this.code = "gateway_routing_unavailable";
+    this.publicMessage = "Gateway routing temporarily unavailable";
+  }
+}
+
 function clearRouteState() {
+  routeStateEpoch += 1;
   routeCache.clear();
   knownNs = null;
 }
 
 function clearPatternState() {
+  patternStateEpoch += 1;
   patternCache.clear();
   knownPatternHosts = null;
 }
@@ -61,34 +84,8 @@ export function createGatewayRedis(redisAddr) {
   return new RedisClient(redisAddr, { onCommand: onRedisCommand });
 }
 
-/** @param {RedisClient} redis */
-export async function ensureKnownNs(redis) {
-  if (knownNs === null) knownNs = new Set(await redis.sMembers(NAMESPACES_KEY));
-  return knownNs;
-}
-
-/** @param {RedisClient} redis */
-export async function ensureKnownPatternHosts(redis) {
-  if (knownPatternHosts === null) knownPatternHosts = new Set(await redis.sMembers(DECLARED_HOSTS_KEY));
-  return knownPatternHosts;
-}
-
-/** @param {string} ns */
-export function getCachedNsRoutes(ns) {
-  const value = routeCache.get(ns);
-  if (value) {
-    routeCache.delete(ns);
-    routeCache.set(ns, value);
-  }
-  return value;
-}
-
-/**
- * @param {RedisClient} redis
- * @param {string} ns
- */
-export async function loadNsRoutes(redis, ns) {
-  const entries = await redis.hGetAll(routesKey(ns));
+/** @param {string} ns @param {Record<string, unknown>} entries */
+function cacheNsRoutes(ns, entries) {
   const map = new Map(
     Object.entries(entries).flatMap(([k, v]) => typeof v === "string" ? [[k, v]] : [])
   );
@@ -96,23 +93,12 @@ export async function loadNsRoutes(redis, ns) {
   return map;
 }
 
-/** @param {string} host */
-export function getCachedPatterns(host) {
-  const value = patternCache.get(host);
-  if (value) {
-    patternCache.delete(host);
-    patternCache.set(host, value);
-  }
-  return value;
-}
-
 /**
- * @param {RedisClient} redis
  * @param {string} host
  * @param {string} requestId
+ * @param {Record<string, unknown>} entries
  */
-export async function loadPatternsForHost(redis, host, requestId) {
-  const entries = await redis.hGetAll(patternsKey(host));
+function cacheHostPatterns(host, requestId, entries) {
   const decodedEntries = Object.fromEntries(
     Object.entries(entries).flatMap(([k, v]) =>
       typeof v === "string" ? [[k, decodePatternProjection(v)]] : []
@@ -132,6 +118,93 @@ export async function loadPatternsForHost(redis, host, requestId) {
   }
   setBoundedCacheEntry(patternCache, host, sorted, MAX_PATTERN_CACHE_ENTRIES);
   return sorted;
+}
+
+/**
+ * @template K, V
+ * @param {Map<K, V>} cache
+ * @param {K} key
+ * @returns {V | null}
+ */
+function getCachedEntry(cache, key) {
+  const value = cache.get(key);
+  if (value === undefined) return null;
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+/**
+ * @param {RedisClient} redis
+ * @param {string} ns
+ * @returns {Promise<NamespaceRouteResolution>}
+ */
+export async function resolveNamespaceRoutes(redis, ns) {
+  for (let attempt = 0; attempt < MAX_ROUTING_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const epoch = routeStateEpoch;
+    if (knownNs === null) {
+      const snapshot = await redis.sMembersAndHGetAll(NAMESPACES_KEY, routesKey(ns));
+      if (epoch !== routeStateEpoch) continue;
+      knownNs = new Set(snapshot.members);
+      if (!knownNs.has(ns)) return { known: false, routes: null, cacheHit: false };
+      return {
+        known: true,
+        routes: cacheNsRoutes(ns, snapshot.hash),
+        cacheHit: false,
+      };
+    }
+    if (!knownNs.has(ns)) return { known: false, routes: null, cacheHit: false };
+
+    const cached = getCachedEntry(routeCache, ns);
+    if (cached) return { known: true, routes: cached, cacheHit: true };
+    const entries = await redis.hGetAll(routesKey(ns));
+    if (epoch !== routeStateEpoch) continue;
+    return {
+      known: true,
+      routes: cacheNsRoutes(ns, entries),
+      cacheHit: false,
+    };
+  }
+  throw new GatewayRoutingUnavailableError();
+}
+
+/**
+ * @param {RedisClient} redis
+ * @param {string} host
+ * @param {string} requestId
+ * @returns {Promise<HostPatternResolution>}
+ */
+export async function resolveHostPatterns(redis, host, requestId) {
+  for (let attempt = 0; attempt < MAX_ROUTING_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    const epoch = patternStateEpoch;
+    if (knownPatternHosts === null) {
+      const snapshot = await redis.sMembersAndHGetAll(DECLARED_HOSTS_KEY, patternsKey(host));
+      if (epoch !== patternStateEpoch) continue;
+      knownPatternHosts = new Set(snapshot.members);
+      if (!knownPatternHosts.has(host)) {
+        return { known: false, patterns: null, cacheHit: false };
+      }
+      return {
+        known: true,
+        patterns: cacheHostPatterns(host, requestId, snapshot.hash),
+        cacheHit: false,
+      };
+    }
+    if (!knownPatternHosts.has(host)) {
+      return { known: false, patterns: null, cacheHit: false };
+    }
+
+    const cached = getCachedEntry(patternCache, host);
+    if (cached) return { known: true, patterns: cached, cacheHit: true };
+    const entries = await redis.hGetAll(patternsKey(host));
+    if (epoch !== patternStateEpoch) continue;
+    return {
+      known: true,
+      patterns: cacheHostPatterns(host, requestId, entries),
+      cacheHit: false,
+    };
+  }
+  throw new GatewayRoutingUnavailableError();
 }
 
 /**
@@ -183,6 +256,7 @@ export function ensureGatewaySubscriber(redisAddr) {
           if (value === "*") {
             clearPatternState();
           } else if (isCanonicalPatternHost(value)) {
+            patternStateEpoch += 1;
             patternCache.delete(value);
             knownPatternHosts = null;
           } else {
@@ -215,6 +289,7 @@ export function ensureGatewaySubscriber(redisAddr) {
           });
           return;
         }
+        routeStateEpoch += 1;
         routeCache.delete(value);
         // A brand-new namespace must pass the knownNs gate before the next full
         // resync; promote publishes this ns after making it active.

@@ -21,8 +21,8 @@ export function queueConsumerKey(ns, queue) { return `queue-consumer:${ns}:${que
 
 export const QUEUE_CONSUMER_INDEX_KEY = "queue:index:consumers";
 export const QUEUE_STREAM_INDEX_KEY = "queue:index:streams";
-/** @lintignore kept as the JS mirror of Rust queue discovery indexes. */
 export const QUEUE_DELAYED_INDEX_KEY = "queue:index:delayed";
+export const QUEUE_DELAYED_WAKE_STREAM = "queue-delayed-wake";
 
 // Partial key for SCAN MATCH; sharing the grammar matters even here.
 /** @param {string} ns @returns {string} */

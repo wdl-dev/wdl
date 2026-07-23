@@ -1,15 +1,16 @@
 use redis::streams::{StreamAutoClaimReply, StreamRangeReply};
 use serde_json::json;
-use wdl_rust_common::redis_eval::{append_eval_cmd, eval_cmd};
+use wdl_rust_common::redis_eval::{StaticRedisScript, append_eval_cmd};
 
 use crate::{
-    AppState, CONSUMER_GROUP, LogLevel, MAX_BATCH_SIZE_CAP, SchedulerResult, log, now_ms,
-    redis_fields_with_error, scheduler_fields_with_error,
+    AppState, CONSUMER_GROUP, LogLevel, SchedulerResult, log, now_ms, redis_fields_with_error,
+    scheduler_fields_with_error,
 };
 
 use super::{
-    Consumer, StreamEntry, dispatch_messages, entries_to_messages, parse_stream_key,
-    queue_orphaned_key, redis_error_is_nogroup, resolve_consumer, stream_id_to_entry,
+    Consumer, MAX_BATCH_SIZE_CAP, StreamEntry, dispatch_messages, entries_to_messages,
+    parse_stream_key, queue_orphaned_key, redis_error_is_nogroup, resolve_consumer,
+    stream_id_to_entry,
 };
 
 const CLEANUP_EMPTY_ORPHANED_STREAM_SCRIPT: &str = r#"
@@ -23,6 +24,9 @@ end
 redis.call("DEL", KEYS[1])
 return 1
 "#;
+
+static CLEANUP_EMPTY_ORPHANED_STREAM: StaticRedisScript =
+    StaticRedisScript::new(CLEANUP_EMPTY_ORPHANED_STREAM_SCRIPT);
 
 const MOVE_PEL_TO_ORPHANED_SCRIPT: &str = r#"
 local entry = redis.call("XRANGE", KEYS[1], ARGV[1], ARGV[1])
@@ -173,13 +177,10 @@ async fn cleanup_empty_orphaned_stream(
         .data_redis
         .with_conn(async |mut conn| {
             let stream_key = stream_key.to_string();
-            eval_cmd(
-                CLEANUP_EMPTY_ORPHANED_STREAM_SCRIPT,
-                &[stream_key.as_str()],
-                &[CONSUMER_GROUP],
-            )
-            .query_async(&mut conn)
-            .await
+            CLEANUP_EMPTY_ORPHANED_STREAM
+                .prepare_invoke(&[stream_key.as_str()], &[CONSUMER_GROUP])
+                .invoke_async(&mut conn)
+                .await
         })
         .await?;
     Ok(cleaned == 1)

@@ -62,7 +62,7 @@ Host, secret, data, and auth operations:
 | Method | Path | Contract |
 |---|---|---|
 | `GET` / `POST` | `/ns/<ns>/hosts` | Lists or reconciles declared hosts. Reconcile normalizes hosts, rejects platform-domain hosts, and returns 409 when removing a host with live owned patterns. |
-| `POST` | `/reload` | Ops-only route resync: rebuilds the declared-host gate from `hosts:<ns>`, then publishes `routes:flush ""` and `patterns:invalidate "*"`, keeping the full-route and pattern channels orthogonal. |
+| `POST` | `/reload` | Ops-only route resync: rebuilds the declared-host gate from `hosts:<ns>` under the host-declaration revision fence, then publishes `routes:flush ""` and `patterns:invalidate "*"`. The repair incrementally bounds key scans and preflights set cardinalities, rejecting more than 10,000 combined source keys, declaration members, and stale reverse-index keys before member materialization or mutation. |
 | `GET` | `/ns/<ns>/worker/<name>/secrets` | Lists worker-level secret keys only; there is no API that reads secret values back. |
 | `PUT` / `DELETE` | `/ns/<ns>/worker/<name>/secrets/<KEY>` | Mutates one worker-level secret. PUT stores a `WDL-ENC:` envelope; active workers are bumped and promoted to force fresh cold-loads. |
 | `GET` | `/ns/<ns>/secrets` | Lists namespace-level secret keys only; there is no API that reads secret values back. |
@@ -191,9 +191,11 @@ Key families:
 | `worker-versions:<ns>:<worker>` | ZSET | Control | Retained version index. | Version delete removes members after referrer checks. |
 | `worker:<ns>:<worker>:v:<n>` | Hash | Control | Immutable bundle/version metadata and modules. | Retained until version/worker delete. |
 | `worker:<ns>:<worker>:next_version` | String counter | Control | Monotonic next version number for a logical worker name. | Survives whole-worker delete so worker ids never recycle. |
+| `cron:seq:<ns>:<worker>` | String counter | Control | Permanent Cron generation high-water mark. | Survives empty Cron projections and whole-worker delete so stale slot refs never match recreated entries. |
 | `routes:<ns>` | Hash | Control | Active worker -> version route map. | Promote/delete updates and publishes route invalidation. |
 | `hosts:<ns>` | Set | Control | Declared host allow-list for a namespace. | Promote checks membership; host reconcile updates the declared set. |
 | `declared-hosts` | Set | Control | Global gateway gate for hosts declared by at least one namespace. | Host reconcile owns ordinary writes; `/reload` repairs it from `hosts:<ns>`. |
+| `declared-hosts:revision` | String counter | Control | Optimistic fence for declared-host repair. | Host reconcile increments it in the same transaction as declaration changes; `/reload` retries if it changes during rebuild. |
 | `host-declarations:<host>` | Set | Control | Namespaces that currently declare a host. | Prevents one namespace removal from clearing the global gate for another namespace. |
 | `ns-hosts:<ns>` | Set | Control | Active host reverse index for a namespace. | Promote/reconcile maintains SADD/SREM deltas in the same EXEC. |
 | `patterns:<host>` | Hash | Control | Pattern-host route slots; values are compact `v2` tab-separated projections. | Reconcile/promote updates and publishes pattern invalidation. |

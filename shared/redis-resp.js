@@ -10,11 +10,11 @@ import { errorMessage } from "./errors.js";
  * @typedef {{ readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, close?: () => void }} RedisSocket
  * @typedef {(address: string) => RedisSocket} RedisSocketFactory
  * @typedef {{ db?: string | number, onCommand?: ((event: RedisCommandEvent) => void) | null, connect?: RedisSocketFactory }} RedisClientOptions
- * @typedef {{ ttl?: number, exat?: number, nx?: boolean, xx?: boolean, ifeq?: string }} RedisSetOptions
+ * @typedef {{ ttl?: number, exat?: number, nx?: boolean, xx?: boolean, ifeq?: RedisArg }} RedisSetOptions
  * @typedef {{ maxlen?: number }} RedisXAddOptions
  * @typedef {{ limit?: [number, number] }} RedisZRangeByScoreOptions
  * @typedef {{ REPLACE?: boolean, replace?: boolean }} RedisCopyOptions
- * @typedef {{ db?: string | number, onMessage?: ((channel: string, message: Uint8Array) => void) | null, onConnect?: (() => void) | null, onDisconnect?: (() => void) | null, onError?: ((err: unknown) => void) | null, backoff?: (attempt: number) => number, sleep?: (ms: number) => Promise<void>, connect?: RedisSocketFactory }} RedisSubscriberOptions
+ * @typedef {{ onMessage?: ((channel: string, message: Uint8Array) => void) | null, onConnect?: (() => void) | null, onDisconnect?: (() => void) | null, onError?: ((err: unknown) => void) | null, backoff?: (attempt: number) => number, sleep?: (ms: number) => Promise<void>, connect?: RedisSocketFactory }} RedisSubscriberOptions
  */
 
 export const utf8Decoder = new TextDecoder();
@@ -25,6 +25,7 @@ const RESP_LF = 0x0a;
 const ASCII_ZERO = 0x30;
 const ASCII_NINE = 0x39;
 const ASCII_MINUS = 0x2d;
+const RESP_RETAINED_BUFFER_LIMIT = 64 * 1024;
 
 /**
  * @param {string} event
@@ -138,10 +139,11 @@ export class WatchError extends Error {
   }
 }
 
-class RedisErrorReply {
+export class RedisReplyError extends Error {
   /** @param {string} message */
   constructor(message) {
-    this.message = message;
+    super(`Redis error: ${message}`);
+    this.name = "RedisReplyError";
   }
 }
 
@@ -183,17 +185,19 @@ export class RespReader {
     this.pos = 0;
   }
 
-  /** @param {boolean} [copy] */
-  _compactConsumed(copy = true) {
+  /** @param {boolean} releaseOversized */
+  _compactConsumed(releaseOversized) {
     if (this.pos === 0) return 0;
     const consumed = this.pos;
     if (this.pos >= this.buf.length) {
-      if (copy) this._storage = new Uint8Array(0);
+      if (releaseOversized && this._storage.length > RESP_RETAINED_BUFFER_LIMIT) {
+        this._storage = new Uint8Array(0);
+      }
       this.buf = this._storage.subarray(0, 0);
       this.pos = 0;
       return consumed;
     }
-    if (copy) {
+    if (releaseOversized && this._storage.length > RESP_RETAINED_BUFFER_LIMIT) {
       this._storage = this.buf.slice(this.pos);
       this.buf = this._storage;
     } else {
@@ -257,7 +261,7 @@ export class RespReader {
     }
   }
 
-  /** @param {boolean} deferErrors @returns {Promise<RedisReply | RedisErrorReply>} */
+  /** @param {boolean} deferErrors @returns {Promise<RedisReply | RedisReplyError>} */
   async _parseOne(deferErrors) {
     await this._ensureBufferedLength(this.pos + 1);
     const type = String.fromCharCode(this.buf[this.pos]);
@@ -268,8 +272,9 @@ export class RespReader {
     if (type === "+") return decodeRespLine(this.buf, lineStart, lineEnd);
     if (type === "-") {
       const message = decodeRespLine(this.buf, lineStart, lineEnd);
-      if (deferErrors) return new RedisErrorReply(message);
-      throw new Error(`Redis error: ${message}`);
+      const error = new RedisReplyError(message);
+      if (deferErrors) return error;
+      throw error;
     }
     if (type === ":") return parseRespIntegerBytes(this.buf, lineStart, lineEnd, "integer");
     if (type === "$") {
@@ -287,11 +292,11 @@ export class RespReader {
       if (count === -1) return null;
       if (count < 0) throw new Error(`Invalid RESP array length: ${decodeRespLine(this.buf, lineStart, lineEnd)}`);
       const arr = [];
-      /** @type {RedisErrorReply | null} */
+      /** @type {RedisReplyError | null} */
       let firstError = null;
       for (let i = 0; i < count; i += 1) {
         const item = await this._parseOne(true);
-        if (item instanceof RedisErrorReply) {
+        if (item instanceof RedisReplyError) {
           if (!firstError) firstError = item;
         } else {
           arr.push(item);
@@ -299,7 +304,7 @@ export class RespReader {
       }
       if (firstError) {
         if (deferErrors) return firstError;
-        throw new Error(`Redis error: ${firstError.message}`);
+        throw firstError;
       }
       return arr;
     }
@@ -309,8 +314,8 @@ export class RespReader {
   /** @returns {Promise<RedisReply>} */
   async parseOne() {
     const reply = await this._parseOne(false);
-    if (reply instanceof RedisErrorReply) {
-      throw new Error(`Redis error: ${reply.message}`);
+    if (reply instanceof RedisReplyError) {
+      throw reply;
     }
     return reply;
   }
@@ -428,6 +433,29 @@ export function buildHSetArgs(key, rest) {
   } else {
     throw new Error("hSet requires (key, field, value) or (key, object)");
   }
+  return args;
+}
+
+/** @param {string} key @param {number} ttlSeconds @param {string[]} fields @returns {RedisCommand} */
+export function buildHGetExArgs(key, ttlSeconds, fields) {
+  return [
+    "HGETEX",
+    key,
+    "EX",
+    String(ttlSeconds),
+    "FIELDS",
+    String(fields.length),
+    ...fields,
+  ];
+}
+
+/** @param {string} key @param {number} ttlSeconds @param {Record<string, RedisArg>} fields @returns {RedisCommand} */
+export function buildHSetExArgs(key, ttlSeconds, fields) {
+  /** @type {RedisCommand} */
+  const args = ["HSETEX", key, "EX", String(ttlSeconds), "FIELDS"];
+  const entries = Object.entries(fields);
+  args.push(String(entries.length));
+  for (const [field, value] of entries) args.push(field, value);
   return args;
 }
 

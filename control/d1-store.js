@@ -25,7 +25,11 @@ const PROVISIONAL_TTL_MS = 90 * 1000;
 
 /**
  * @typedef {import("control-d1-model").D1DatabaseRecord} D1DatabaseRecord
- * @typedef {{ hGetAll(key: string): Promise<Record<string, string | null | undefined>>, get(key: string): Promise<string | Uint8Array | null | undefined> }} D1RefReader
+ * @typedef {{ hash: Record<string, string | null | undefined>, value: string | Uint8Array | null | undefined }} D1RefSnapshot
+ * @typedef {{
+ *   hGetAll(key: string): Promise<Record<string, string | null | undefined>>,
+ *   hGetAllAndGet(hashKey: string, stringKey: string): Promise<D1RefSnapshot>,
+ * }} D1RefReader
  * @typedef {{ ok: true, databaseId: string } | { ok: false, reason: string } | { ok: false, error: string }} CommitDatabaseResult
  * @typedef {{ ok: true } | { ok: false, reason: string }} ReadyDatabaseResult
  * @typedef {{ rolledBack: true } | { rolledBack: false, reason?: string }} RollbackDatabaseResult
@@ -81,9 +85,13 @@ export async function getDatabaseIdByName(ns, databaseName) {
  * @param {string} databaseRef
  */
 export async function resolveDatabaseRefFrom(reader, ns, databaseRef) {
-  const byId = decodeDatabaseHash(await reader.hGetAll(d1DatabaseKey(ns, databaseRef)));
+  const snapshot = await reader.hGetAllAndGet(
+    d1DatabaseKey(ns, databaseRef),
+    d1DatabaseNameKey(ns, databaseRef)
+  );
+  const byId = decodeDatabaseHash(snapshot.hash);
   if (byId) return isReadyDatabase(byId) ? byId : null;
-  const databaseId = decodeBulk(await reader.get(d1DatabaseNameKey(ns, databaseRef)));
+  const databaseId = decodeBulk(snapshot.value);
   if (!databaseId) return null;
   const byName = decodeDatabaseHash(await reader.hGetAll(d1DatabaseKey(ns, databaseId)));
   return isReadyDatabase(byName) ? byName : null;
@@ -167,10 +175,11 @@ export async function commitDatabaseMetadata(ns, databaseName, databaseId, now) 
     const key = d1DatabaseKey(ns, databaseId);
     const nameKey = d1DatabaseNameKey(ns, databaseName);
     await session.watch(key, nameKey);
-    if (await session.exists(nameKey)) {
+    const [nameExists, idExists] = await session.existsMany([nameKey, key]);
+    if (nameExists) {
       return { ok: false, reason: "name-exists" };
     }
-    if (await session.exists(key)) {
+    if (idExists) {
       return { ok: false, reason: "id-collision" };
     }
     await session.multi()
@@ -204,8 +213,9 @@ export async function markDatabaseReady(ns, database, now) {
     const key = d1DatabaseKey(ns, database.databaseId);
     const nameKey = d1DatabaseNameKey(ns, requireDatabaseName(database));
     await session.watch(key, nameKey);
-    const current = decodeDatabaseHash(await session.hGetAll(key));
-    const currentIdForName = decodeBulk(await session.get(nameKey));
+    const snapshot = await session.hGetAllAndGet(key, nameKey);
+    const current = decodeDatabaseHash(snapshot.hash);
+    const currentIdForName = decodeBulk(snapshot.value);
     if (!current || current.databaseId !== database.databaseId || current.state !== D1_DATABASE_STATE_PROVISIONAL) {
       return { ok: false, reason: "not-provisional" };
     }
@@ -238,8 +248,9 @@ export async function rollbackProvisionalDatabaseMetadata(ns, database) {
     const nameKey = d1DatabaseNameKey(ns, requireDatabaseName(database));
     const referrersKey = d1DatabaseReferrersKey(ns, database.databaseId);
     await session.watch(key, nameKey, referrersKey);
-    const current = decodeDatabaseHash(await session.hGetAll(key));
-    const currentIdForName = decodeBulk(await session.get(nameKey));
+    const snapshot = await session.hGetAllAndGet(key, nameKey);
+    const current = decodeDatabaseHash(snapshot.hash);
+    const currentIdForName = decodeBulk(snapshot.value);
     if (!current || current.databaseId !== database.databaseId || current.state !== D1_DATABASE_STATE_PROVISIONAL) {
       return { rolledBack: false };
     }
@@ -288,12 +299,13 @@ export async function deleteDatabaseMetadata(ns, database, now, requestId) {
     const referrersKey = d1DatabaseReferrersKey(ns, database.databaseId);
     const tombstoneKey = d1DatabaseTombstoneKey(ns, database.databaseId);
     await session.watch(key, nameKey, referrersKey, tombstoneKey);
-    const current = decodeDatabaseHash(await session.hGetAll(key));
-    const currentIdForName = decodeBulk(await session.get(nameKey));
+    const snapshot = await session.hGetAllGetSMembers(key, nameKey, referrersKey);
+    const current = decodeDatabaseHash(snapshot.hash);
+    const currentIdForName = decodeBulk(snapshot.value);
     if (!current || current.databaseId !== database.databaseId || current.state !== D1_DATABASE_STATE_READY) {
       return { deleted: false };
     }
-    const rawBlockers = await session.sMembers(referrersKey);
+    const rawBlockers = snapshot.members;
     if (rawBlockers.length > 0) {
       const { blockers, malformedReferrerCount } = formatD1ReferrerBlockers(rawBlockers);
       return { deleted: false, blockers, malformedReferrerCount };

@@ -5,8 +5,8 @@ use serde_json::Value as JsonValue;
 use crate::{AppState, WorkflowError, WorkflowResult};
 
 use super::{
-    MAX_WORKFLOW_EVENT_BYTES, MAX_WORKFLOW_EVENT_TYPE_BYTES, MAX_WORKFLOW_INSTANCE_PAYLOAD_BYTES,
-    MAX_WORKFLOW_PARAMS_BYTES, MAX_WORKFLOW_RESULT_BYTES,
+    InstanceRouteKeys, MAX_WORKFLOW_EVENT_BYTES, MAX_WORKFLOW_EVENT_TYPE_BYTES,
+    MAX_WORKFLOW_INSTANCE_PAYLOAD_BYTES, MAX_WORKFLOW_PARAMS_BYTES, MAX_WORKFLOW_RESULT_BYTES,
 };
 
 pub(crate) fn params_json(params: &JsonValue) -> WorkflowResult<String> {
@@ -80,12 +80,12 @@ pub(super) fn event_payload_json(value: &JsonValue) -> WorkflowResult<String> {
 pub(super) async fn read_payload_ref(
     app: &AppState,
     state: &HashMap<String, String>,
+    payloads_key: &str,
     field: &str,
 ) -> WorkflowResult<Option<JsonValue>> {
     let Some(payload_ref) = state.get(field).cloned() else {
         return Ok(None);
     };
-    let payloads_key = payload_storage_key_for_ref(state, &payload_ref)?;
     let payload_ref_for_query = payload_ref.clone();
     let raw: Option<String> = app
         .redis
@@ -98,6 +98,32 @@ pub(super) async fn read_payload_ref(
         })
         .await?;
     parse_payload_ref(raw, &payload_ref)
+}
+
+pub(super) fn canonical_instance_payloads_key(
+    state: &HashMap<String, String>,
+    ns: &str,
+    workflow_key: &str,
+    instance_id: &str,
+) -> WorkflowResult<String> {
+    for (field, expected) in [
+        ("ns", ns),
+        ("workflowKey", workflow_key),
+        ("instanceId", instance_id),
+    ] {
+        if state.get(field).map(String::as_str) != Some(expected) {
+            return Err(WorkflowError::invalid_state(
+                "Workflow state identity does not match the requested instance",
+            ));
+        }
+    }
+    let expected = InstanceRouteKeys::new(ns, workflow_key, instance_id).payloads();
+    if state.get("payloadsKey") != Some(&expected) {
+        return Err(WorkflowError::invalid_state(
+            "Workflow payload storage key is invalid",
+        ));
+    }
+    Ok(expected)
 }
 
 pub(super) fn parse_payload_ref(
@@ -128,6 +154,8 @@ pub(super) fn payload_storage_key_for_ref(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use serde_json::json;
 
     use super::*;
@@ -147,6 +175,44 @@ mod tests {
         let err = payload_storage_key_for_ref(&state, "output")
             .expect_err("payload ref without payloadsKey should fail closed");
         assert_eq!(err.code, "workflow_payload_missing");
+    }
+
+    #[test]
+    fn canonical_payload_key_binds_all_persisted_instance_identity() {
+        let ns = "demo";
+        let workflow_key = "wf_aaaaaaaaaaaaaaaa";
+        let instance_id = "wfi_bbbbbbbbbbbbbbbb";
+        let expected = InstanceRouteKeys::new(ns, workflow_key, instance_id).payloads();
+        let mut state = HashMap::from([
+            ("ns".to_string(), ns.to_string()),
+            ("workflowKey".to_string(), workflow_key.to_string()),
+            ("instanceId".to_string(), instance_id.to_string()),
+            ("payloadsKey".to_string(), expected.clone()),
+        ]);
+
+        assert_eq!(
+            canonical_instance_payloads_key(&state, ns, workflow_key, instance_id).unwrap(),
+            expected
+        );
+
+        for (field, invalid) in [
+            ("ns", "other"),
+            ("workflowKey", "wf_cccccccccccccccc"),
+            ("instanceId", "wfi_dddddddddddddddd"),
+        ] {
+            let original = state
+                .insert(field.to_string(), invalid.to_string())
+                .unwrap();
+            let err = canonical_instance_payloads_key(&state, ns, workflow_key, instance_id)
+                .expect_err("persisted identity drift must fail closed");
+            assert_eq!(err.code, "workflow_invalid_state");
+            state.insert(field.to_string(), original);
+        }
+
+        state.insert("payloadsKey".to_string(), "wf:payloads:other".to_string());
+        let err = canonical_instance_payloads_key(&state, ns, workflow_key, instance_id)
+            .expect_err("noncanonical payload storage must fail closed");
+        assert_eq!(err.code, "workflow_invalid_state");
     }
 
     #[test]

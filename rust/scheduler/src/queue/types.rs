@@ -1,7 +1,5 @@
-use std::collections::{HashMap, HashSet};
-
-use redis::Pipeline;
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Consumer {
@@ -69,25 +67,4 @@ pub(crate) enum RetryAction {
     Immediate {
         entry: HashMap<String, String>,
     },
-}
-
-pub(crate) struct RetryBatchPlan {
-    pub(crate) pipe: Pipeline,
-    pub(crate) retry_count: usize,
-    pub(crate) dlq_count: usize,
-    pub(crate) delayed_keys: HashSet<String>,
-    pub(crate) dlq_logs: Vec<DlqLog>,
-    pub(crate) invalid_attempt_logs: Vec<InvalidAttemptLog>,
-}
-
-pub(crate) struct DlqLog {
-    pub(crate) target: String,
-    pub(crate) msg_id: String,
-    pub(crate) attempts: i64,
-}
-
-pub(crate) struct InvalidAttemptLog {
-    pub(crate) msg_id: String,
-    pub(crate) stream_id: String,
-    pub(crate) attempts: String,
 }

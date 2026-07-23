@@ -401,6 +401,48 @@ test("namespace secret PUT runs as a WATCH/MULTI mutation and retries contention
   });
 });
 
+test("namespace secret PUT batches retained state across workers", async () => {
+  await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
+    redis.sets.set("workers:demo", new Set(["api", "jobs"]));
+    redis.zsets.set("worker-versions:demo:api", new Map([["v1", 1]]));
+    redis.zsets.set("worker-versions:demo:jobs", new Map([["v2", 2]]));
+    redis.hashes.set("worker:demo:api:v:1", { __meta__: "{}" });
+    redis.hashes.set("worker:demo:jobs:v:2", { __meta__: "{}" });
+  }, async (redis) => {
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      nsName: "demo",
+      secretKey: "TOKEN",
+      requestId: "rid-secret-worker-batch",
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      redis.commands.filter(([command]) => command === "zRange" || command === "zRangeMany"),
+      [["zRangeMany", ["worker-versions:demo:api", "worker-versions:demo:jobs"], 0, -1]]
+    );
+    assert.deepEqual(
+      redis.commands.filter(([command, key]) =>
+        (command === "hGetAll" || command === "hGetAllMany") &&
+        (Array.isArray(key) || String(key).startsWith("secrets:demo:"))
+      ),
+      [["hGetAllMany", ["secrets:demo:api", "secrets:demo:jobs"]]]
+    );
+    assert.deepEqual(
+      redis.commands.filter(([command]) => command === "hGetMany"),
+      [["hGetMany", [
+        ["worker:demo:api:v:1", "__meta__"],
+        ["worker:demo:jobs:v:2", "__meta__"],
+      ]]]
+    );
+  });
+});
+
 test("namespace secret PUT checks retained worker versions before storing", async () => {
   await withNamespaceSecretRedis(namespaceSecretState, (redis) => {
     redis.sets.set("workers:demo", new Set(["api"]));
@@ -534,7 +576,12 @@ test("namespace secret PUT deduplicates retained and active version checks", asy
 
     assert.equal(response.status, 200);
     assert.equal(
-      redis.commands.filter((op) => op[0] === "hGet" && op[1] === "worker:demo:api:v:1" && op[2] === "__meta__").length,
+      redis.commands.filter((op) =>
+        op[0] === "hGetMany" &&
+        /** @type {Array<[string, string]>} */ (op[1]).filter(([key, field]) =>
+          key === "worker:demo:api:v:1" && field === "__meta__"
+        ).length === 1
+      ).length,
       1
     );
   });
@@ -805,6 +852,7 @@ test("worker secret PUT encrypts before WATCH retries and reuses the envelope", 
 
     assert.equal(response.status, 200);
     assert.deepEqual([...new Set(redis.watched)].sort(), [
+      "cron:seq:demo:api",
       "crons:demo:api",
       "hosts:demo",
       "routes:demo",
@@ -829,6 +877,33 @@ test("worker secret PUT encrypts before WATCH retries and reuses the envelope", 
         fieldName: "TOKEN",
       }),
       "plain-secret"
+    );
+  });
+});
+
+test("worker secret PUT batches active namespace and worker secret reads", async () => {
+  const state = workerSecretState;
+  await withWorkerSecretRedis(state, () => {}, async (redis) => {
+    const response = await workerHandle({
+      request: new Request("http://control.test/ns/demo/workers/api/secrets/TOKEN", {
+        method: "PUT",
+        body: JSON.stringify({ value: "plain-secret" }),
+      }),
+      env,
+      method: "PUT",
+      ns: "demo",
+      name: "api",
+      subPath: ["TOKEN"],
+      requestId: "rid-worker-secret-active-batch",
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      redis.commands.filter(([command, key]) =>
+        (command === "hGetAll" || command === "hGetAllMany") &&
+        (Array.isArray(key) || String(key).startsWith("secrets:demo"))
+      ),
+      [["hGetAllMany", ["secrets:demo", "secrets:demo:api"]]]
     );
   });
 });
@@ -955,6 +1030,13 @@ test("worker secret PUT active precheck reads the shared fake Redis state", asyn
       "worker-delete-lock:demo:api",
       "worker-versions:demo:api",
     ]);
+    assert.deepEqual(
+      redis.commands.filter(([command, key]) =>
+        (command === "hGetAll" || command === "hGetAllMany") &&
+        (Array.isArray(key) || String(key).startsWith("secrets:demo"))
+      ),
+      [["hGetAllMany", ["secrets:demo", "secrets:demo:api"]]]
+    );
   });
 });
 

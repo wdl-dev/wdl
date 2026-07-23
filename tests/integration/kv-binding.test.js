@@ -10,7 +10,7 @@ import {
   waitUntil,
   setupIntegrationSuite,
 } from "./helpers/index.js";
-import { redisHSet } from "./helpers/redis.js";
+import { redisHSet, redisScriptFlush } from "./helpers/redis.js";
 import { fnv1a32Utf8 } from "../../shared/fnv1a32.js";
 
 setupIntegrationSuite();
@@ -81,6 +81,11 @@ function keysInBucket(prefix, targetBucket, count) {
   return keys;
 }
 
+/** @param {string} prefix */
+function oneKeyPerBucket(prefix) {
+  return Array.from({ length: 32 }, (_, bucket) => keysInBucket(`${prefix}${bucket}-`, bucket, 1)[0]);
+}
+
 test("put + get round-trip", async () => {
   await setup("kvns1");
   let r = await call("kvns1", { op: "put", key: "a", val: "alpha" });
@@ -127,6 +132,21 @@ test("put without metadata clears prior metadata", async () => {
   });
   await call("kvns5", { op: "put", key: "k", val: "v2" });
   const r = await call("kvns5", { op: "getMeta", key: "k" });
+  const json = await responseJson(r);
+  assert.equal(json.value, "v2");
+  assert.equal(json.metadata, null);
+});
+
+test("expiring put without metadata clears prior metadata", async () => {
+  await setup("kvns5-ttl");
+  await call("kvns5-ttl", {
+    op: "put",
+    key: "k",
+    val: "v1",
+    meta: JSON.stringify({ tag: 1 }),
+  });
+  await call("kvns5-ttl", { op: "put", key: "k", val: "v2", ttl: "60" });
+  const r = await call("kvns5-ttl", { op: "getMeta", key: "k" });
   const json = await responseJson(r);
   assert.equal(json.value, "v2");
   assert.equal(json.metadata, null);
@@ -236,6 +256,38 @@ test("batch get and getWithMetadata return Maps", async () => {
   ]);
 });
 
+test("batch metadata reads span all KV hash buckets and recover after SCRIPT FLUSH", async () => {
+  const ns = "kvns-batch-buckets";
+  const keys = oneKeyPerBucket("bucket-");
+  await setup(ns);
+  for (const [index, key] of keys.entries()) {
+    await call(ns, {
+      op: "put",
+      key,
+      val: JSON.stringify({ index }),
+      meta: JSON.stringify({ bucket: kvBucket(key) }),
+    });
+  }
+  redisScriptFlush();
+
+  const response = await call(ns, {
+    op: "getMetaBatch",
+    keys: JSON.stringify([...keys, "missing"]),
+    type: "json",
+  });
+
+  assert.equal(response.status, 200);
+  const entries = await responseJson(response);
+  assert.equal(entries.length, 33);
+  for (const [index, key] of keys.entries()) {
+    assert.deepEqual(entries[index], [
+      key,
+      { value: { index }, metadata: { bucket: kvBucket(key) } },
+    ]);
+  }
+  assert.deepEqual(entries.at(-1), ["missing", { value: null, metadata: null }]);
+});
+
 test("list honors limit and keeps pagination self-terminating", async () => {
   // The shim uses Redis SCAN with a fixed internal COUNT, so whether
   // pagination kicks in depends on total keys vs COUNT, not on `limit`
@@ -276,13 +328,19 @@ test("list clamps oversized user limits to Cloudflare's 1000-key page cap", asyn
   const entries = keysInBucket("cap-", 0, 1005).map((/** @type {string} */ key) => /** @type {[string, string]} */ ([key, "x"]));
   seedKvFields(ns, "test", entries);
 
-  const r = await call(ns, { op: "list", prefix: "cap-", limit: "5000" });
+  const r = await call(ns, {
+    op: "list",
+    prefix: "cap-",
+    limit: "5000",
+    metadata: "true",
+  });
   assert.equal(r.status, 200);
   const page = await responseJson(r);
   assert.ok(
     page.keys.length <= 1000,
     `expected at most 1000 keys after runtime/proxy clamping, got ${page.keys.length}`
   );
+  assert.ok(page.keys.every((/** @type {{ metadata: unknown }} */ key) => key.metadata === null));
 });
 
 test("list ignores forged cursor overflow outside the current binding page", async () => {

@@ -39,7 +39,8 @@ Live tail is an activation-gated pipe, not a durable logging system:
   pay a Redis write per event.
 - Control authorizes each SSE tail session, writes/refreshes the worker gate in
   `logs:tail:active`, reads `logs:<ns>:<worker>:s`, and emits SSE frames. Reconnects
-  re-enter normal auth.
+  re-enter normal auth. Gate renewal and admission share one atomic operation, so
+  concurrent sessions cannot exceed the 10,000-field active-gate cap.
 - redis-proxy appends bounded stream entries with `MAXLEN ~ 500` and refreshes TTL. The
   stream exists to bridge live consumers, not to preserve history.
 - Single-worker `wdl tail` can use `Last-Event-ID` to resume from the stream window.

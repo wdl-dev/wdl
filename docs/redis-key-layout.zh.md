@@ -19,6 +19,7 @@ routes:<ns>                     Hash, { workerName -> activeVersion }
 namespaces                      Set, 至少有一个 active worker 的 namespace
 workers:<ns>                    Set, 有 worker-owned lifecycle state 的 worker name
 worker:<ns>:<name>:next_version String, 单调 version counter，delete 后保留
+cron:seq:<ns>:<name>           String, 永久 Cron generation 高水位
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes + __meta__
 worker-delete-lock:<ns>:<name>  String EX 30, 每个 worker 的 delete critical-section lock；value 是 whole:<token> 或 version:<token>；DO first-owner claim 会 WATCH，且只有 whole 阻止 ownership
@@ -26,6 +27,7 @@ worker-version-referrers:<ns>:<name>:<version>
                                 Set, canonical JSON 的 version-pinned caller ref
 hosts:<ns>                      Set, operator 声明的 host intent
 declared-hosts                  Set, 至少被一个 namespace 声明过的 host
+declared-hosts:revision         String, host declaration mutation 的单调 revision
 host-declarations:<host>        Set, 声明这个 host 的 namespace
 ns-hosts:<ns>                   Set, promote 维护的 active host reverse index
 patterns:<host>                 Hash, slot -> v2 tab-separated projection
@@ -39,6 +41,8 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 
 `worker:<ns>:<name>:v:<int>` 的 key 使用 JavaScript safe-integer 范围内的正整数 version，而不是 `"v<int>"` tag。直接 seed Redis 的测试 fixture 必须使用 `shared/worker-contract.js#bundleKey`。
 
+`cron:seq:<ns>:<name>` 是 Control 持有的永久 Cron generation allocator。它在 Cron projection 清空和 whole-worker delete 后仍保留，确保旧 `cron-slot:*` ref 不会匹配重建的 entry。Allocator 从 generation `1024` 开始分配，更低的值属于保留范围，永久 allocator 不会发放。
+
 `namespaces` 是 active worker gate。有 active worker route 时会加入，最后一个 active worker 删除时可能移除。Namespace-level secrets 和 data-plane state 等资源可以比这个 set membership 活得更久。Auth 在 delegated token issue 时只把它作为 generated-namespace collision 的 best-effort 信号读取，而不是永久 namespace registry。
 
 `routes:<ns>` 和 `worker-versions:<ns>:<name>` 只能通过 `shared/worker-contract.js#routesKey` / `#workerVersionsKey`（以及它们的 Rust 镜像 `rust/common/src/worker_contract.rs#routes_key` / `#worker_versions_key`）构造。Control 是唯一 writer；sanctioned reader 是 gateway（route resolution）和 workflows。workflows 有两条读取路径：workflow create / verify 时的 active-export resolution，以及 fired alarm 的 scheduled version 已不再 retained 时的 internal DO alarm retarget。改 key 语法时必须同时更新 JS helper、Rust helper 和所有 reader。
@@ -49,7 +53,7 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 
 Subdomain routing 读取 `routes:<ns>`。Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>`，并直接使用 slot value 中嵌入的 `version` 构造 `x-worker-id`。Pattern slot value 是由 `shared/route-projection.js` 编码的紧凑 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` record。Promote 在同一个 Redis transaction 中更新两套 projection。Control mutation 和 delete 路径遇到无法 decode 的非空 slot 时会 fail closed，不会把未知 owner 当成空槽。
 
-`hosts:<ns>` 是 operator intent：这个 namespace 被允许使用这些 host。`declared-hosts` 是 gateway 对“至少被一个 namespace 声明过的 host”的 gate。`host-declarations:<host>` 记录声明该 host 的 namespace，因此一个 namespace 移除声明时，不会在另一个 namespace 仍声明该 host 的情况下清掉全局 gate。`POST /reload` 会先从 `hosts:<ns>` 重建这两个声明索引，再发布 gateway cache invalidation；这给 operator-managed host declaration 提供显式 repair/backfill 路径。`ns-hosts:<ns>` 是 active reverse index：这个 namespace 当前在这些 host 上拥有至少一个 slot。`hosts:<ns>` 应是 superset。Host reconcile 会先用 `ns-hosts:<ns>` 做 fast path，再扫描 `patterns:<host>`。
+`hosts:<ns>` 是 operator intent：这个 namespace 被允许使用这些 host。`declared-hosts` 是 gateway 对“至少被一个 namespace 声明过的 host”的 gate。`host-declarations:<host>` 记录声明该 host 的 namespace，因此一个 namespace 移除声明时，不会在另一个 namespace 仍声明该 host 的情况下清掉全局 gate。Host reconcile 会在同一个 transaction 中修改源 declaration、派生索引并递增 `declared-hosts:revision`。`POST /reload` 从 `hosts:<ns>` 重建两个声明索引时会 WATCH 该 revision，因此并发 host reconcile 会让 repair 重试，成功后才发布 gateway cache invalidation。`ns-hosts:<ns>` 是 active reverse index：这个 namespace 当前在这些 host 上拥有至少一个 slot。`hosts:<ns>` 应是 superset。Host reconcile 会先用 `ns-hosts:<ns>` 做 fast path，再扫描 `patterns:<host>`。
 
 Pattern `slot` 是原始 wrangler pattern，例如 `/mcp` 或 `/mcp/*`；它也是 Redis hash field。`kind` 是 `exact` 或 `prefix`，决定 gateway matching 语义。
 

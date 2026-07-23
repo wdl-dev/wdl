@@ -86,6 +86,79 @@ pub(crate) fn pipe_queue_discovery_indexes(
     }
 }
 
+fn pipe_immediate_queue_entry(pipe: &mut Pipeline, stream_key: &str, entry: QueueEntry) {
+    pipe.cmd("XADD")
+        .arg(stream_key)
+        .arg("*")
+        .arg("id")
+        .arg(entry.id)
+        .arg("body_b64")
+        .arg(entry.body_b64)
+        .arg("content_type")
+        .arg(entry.content_type)
+        .arg("attempts")
+        .arg(entry.attempts)
+        .arg("first_seen_ms")
+        .arg(entry.first_seen_ms);
+}
+
+fn build_queue_send_pipeline(
+    actions: Vec<QueueAction>,
+    stream_key: &str,
+    delayed_key: &str,
+) -> AppResult<Pipeline> {
+    let has_delayed = actions
+        .iter()
+        .any(|action| action.visible_at.unwrap_or(0.0) > 0.0);
+    let has_immediate = actions
+        .iter()
+        .any(|action| action.visible_at.unwrap_or(0.0) <= 0.0);
+    let mut pipe = Pipeline::new();
+    // Single immediate sends stay non-transactional. Consumer registration
+    // and empty-index backfill repair an index write that loses a race with XADD.
+    if actions.len() > 1 || has_delayed {
+        pipe.atomic();
+    }
+
+    let mut delayed_entries = Vec::new();
+    let mut earliest_delayed = None;
+    for action in actions {
+        let entry = action
+            .entry
+            .ok_or_else(|| AppError::bad_request("queue action missing entry"))?;
+        let visible_at = action.visible_at.unwrap_or(0.0);
+        if visible_at > 0.0 {
+            delayed_entries.push((
+                visible_at.to_string(),
+                serde_json::to_string(&entry).map_err(AppError::internal_json)?,
+            ));
+            earliest_delayed =
+                Some(earliest_delayed.map_or(visible_at, |earliest: f64| earliest.min(visible_at)));
+        } else {
+            pipe_immediate_queue_entry(&mut pipe, stream_key, entry);
+        }
+    }
+
+    if let Some(earliest_delayed) = earliest_delayed {
+        let mut zadd = redis::cmd("ZADD");
+        zadd.arg(delayed_key);
+        for (score, member) in delayed_entries {
+            zadd.arg(score).arg(member);
+        }
+        pipe.add_command(zadd);
+        pipe_delayed_wake(&mut pipe, delayed_key, earliest_delayed);
+    }
+
+    pipe_queue_discovery_indexes(
+        &mut pipe,
+        stream_key,
+        delayed_key,
+        has_immediate,
+        has_delayed,
+    );
+    Ok(pipe)
+}
+
 // Validate the standard btoa alphabet and compute the exact decoded byte count
 // without allocating the decoded payload just to enforce producer size caps.
 pub(crate) fn base64_decoded_len(encoded: &str) -> AppResult<usize> {
@@ -178,54 +251,7 @@ pub(crate) async fn queue_send(
     validate_queue_actions(&actions)?;
     let stream_key = queue_stream_key(&q.ns, &q.id);
     let delayed_key = queue_delayed_key(&q.ns, &q.id);
-    let mut pipe = Pipeline::new();
-    let has_delayed = actions
-        .iter()
-        .any(|action| action.visible_at.unwrap_or(0.0) > 0.0);
-    let has_immediate = actions
-        .iter()
-        .any(|action| action.visible_at.unwrap_or(0.0) <= 0.0);
-    if actions.len() > 1 || has_delayed {
-        pipe.atomic();
-    }
-    for action in actions {
-        let entry = action
-            .entry
-            .ok_or_else(|| AppError::bad_request("queue action missing entry"))?;
-        let visible_at = action.visible_at.unwrap_or(0.0);
-        if visible_at > 0.0 {
-            pipe.cmd("ZADD")
-                .arg(&delayed_key)
-                .arg(visible_at.to_string())
-                .arg(serde_json::to_string(&entry).map_err(AppError::internal_json)?);
-            pipe_delayed_wake(&mut pipe, &delayed_key, visible_at);
-        } else {
-            pipe.cmd("XADD")
-                .arg(&stream_key)
-                .arg("*")
-                .arg("id")
-                .arg(entry.id)
-                .arg("body_b64")
-                .arg(entry.body_b64)
-                .arg("content_type")
-                .arg(entry.content_type)
-                .arg("attempts")
-                .arg(entry.attempts)
-                .arg("first_seen_ms")
-                .arg(entry.first_seen_ms);
-        }
-    }
-    // Single immediate sends intentionally stay non-transactional for the
-    // hot path. If XADD succeeds and index SADD fails, consumer registration
-    // also indexes registered streams; empty-index backfill remains the
-    // bootstrap safety net.
-    pipe_queue_discovery_indexes(
-        &mut pipe,
-        &stream_key,
-        &delayed_key,
-        has_immediate,
-        has_delayed,
-    );
+    let pipe = build_queue_send_pipeline(actions, &stream_key, &delayed_key)?;
     let _: redis::Value = state
         .with_redis(async |mut conn| pipe.query_async(&mut conn).await)
         .await?;
@@ -254,6 +280,13 @@ mod tests {
             "visibleAt": 0
         }))
         .unwrap()
+    }
+
+    fn named_queue_action(id: &str, visible_at: f64) -> QueueAction {
+        let mut action = queue_action(1);
+        action.entry.as_mut().unwrap().id = id.to_string();
+        action.visible_at = Some(visible_at);
+        action
     }
 
     #[test]
@@ -402,6 +435,81 @@ mod tests {
         assert!(packed.contains(QUEUE_DELAYED_WAKE_KEY_FIELD));
         assert!(packed.contains("queue-delayed:demo:jobs"));
         assert!(packed.contains(QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD));
+    }
+
+    #[test]
+    fn queue_send_pipeline_batches_delayed_entries_and_preserves_immediate_stream() {
+        let delayed_key = "queue-delayed:demo:jobs";
+        let stream_key = "queue:demo:jobs:s";
+        let later = named_queue_action("later", 200.0);
+        let later_json = serde_json::to_string(later.entry.as_ref().unwrap()).unwrap();
+        let sooner = named_queue_action("sooner", 100.0);
+        let sooner_json = serde_json::to_string(sooner.entry.as_ref().unwrap()).unwrap();
+        let actions = vec![named_queue_action("now", 0.0), later, sooner];
+
+        let pipe = build_queue_send_pipeline(actions, stream_key, delayed_key).unwrap();
+        let commands = parse_packed_commands(&pipe.get_packed_pipeline());
+
+        assert_eq!(commands.first().unwrap(), &["MULTI"]);
+        assert_eq!(commands.last().unwrap(), &["EXEC"]);
+
+        let main_xadds = commands
+            .iter()
+            .filter(|command| {
+                command.first().map(String::as_str) == Some("XADD") && command[1] == stream_key
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(main_xadds.len(), 1);
+        assert!(!main_xadds[0].iter().any(|arg| arg == "MAXLEN"));
+
+        let zadds = commands
+            .iter()
+            .filter(|command| command.first().map(String::as_str) == Some("ZADD"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            zadds,
+            vec![&vec![
+                "ZADD".to_string(),
+                delayed_key.to_string(),
+                "200".to_string(),
+                later_json,
+                "100".to_string(),
+                sooner_json,
+            ]]
+        );
+
+        let wakes = commands
+            .iter()
+            .filter(|command| {
+                command.first().map(String::as_str) == Some("XADD")
+                    && command[1] == QUEUE_DELAYED_WAKE_STREAM
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(
+            wakes[0]
+                .windows(2)
+                .find(|pair| pair[0] == QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD)
+                .unwrap()[1],
+            "100"
+        );
+    }
+
+    #[test]
+    fn queue_send_pipeline_keeps_single_immediate_send_non_transactional() {
+        let pipe = build_queue_send_pipeline(
+            vec![named_queue_action("now", 0.0)],
+            "queue:demo:jobs:s",
+            "queue-delayed:demo:jobs",
+        )
+        .unwrap();
+        let commands = parse_packed_commands(&pipe.get_packed_pipeline());
+        assert!(
+            !commands
+                .iter()
+                .flatten()
+                .any(|arg| arg == "MULTI" || arg == "EXEC")
+        );
     }
 
     #[test]

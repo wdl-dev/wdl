@@ -36,6 +36,9 @@ const redisState = createFakeRedisState();
  * @property {number} redisTimeMs
  * @property {number[]} redisTimeSequence
  * @property {(() => void) | null} onExecFailure
+ * @property {((entries: Array<[string, string | Uint8Array]>) => void) | null} beforeDelIfEqMany
+ * @property {((call: { script: string, keys: string[], args: unknown[], attempt: number }) => void) | null} beforeRenewEval
+ * @property {Array<{ script: string, keys: string[], args: unknown[] }>} renewEvalCalls
  * @property {boolean} draining
  * @property {number} inFlightDispatches
  */
@@ -51,6 +54,9 @@ export const DO_OWNER_REGISTRY_TEST_STATE = {
   redisTimeMs: Date.now(),
   redisTimeSequence: [],
   onExecFailure: null,
+  beforeDelIfEqMany: null,
+  beforeRenewEval: null,
+  renewEvalCalls: [],
   draining: false,
   inFlightDispatches: 0,
 };
@@ -69,6 +75,9 @@ export function resetDoOwnerRegistryTestState() {
   testState.redisTimeMs = Date.now();
   testState.redisTimeSequence = [];
   testState.onExecFailure = null;
+  testState.beforeDelIfEqMany = null;
+  testState.beforeRenewEval = null;
+  testState.renewEvalCalls = [];
   testState.draining = false;
   testState.inFlightDispatches = 0;
 }
@@ -108,9 +117,16 @@ const sharedRedisUrl = sharedRedisStubUrl();
 
 const redisUrl = moduleDataUrl(`
 import { createFakeRedisClient } from ${JSON.stringify(FAKE_REDIS_URL)};
+const utf8Decoder = new TextDecoder();
 function testState() { return /** @type {any} */ (globalThis).__doOwnerRegistryTestState; }
+function redisText(value) {
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return utf8Decoder.decode(value);
+  if (value instanceof ArrayBuffer) return utf8Decoder.decode(new Uint8Array(value));
+  return value == null ? null : String(value);
+}
 export function createRedisClient() {
-  return createFakeRedisClient(testState().redisState, {
+  const client = createFakeRedisClient(testState().redisState, {
     encodeGet: true,
     nowMs: () => {
       const sequence = testState().redisTimeSequence;
@@ -119,6 +135,26 @@ export function createRedisClient() {
     },
     onExecFailure: () => testState().onExecFailure?.(),
   });
+  return {
+    ...client,
+    async delIfEqMany(entries) {
+      testState().beforeDelIfEqMany?.(entries);
+      return client.delIfEqMany(entries);
+    },
+    async eval(script, keys = [], args = []) {
+      const state = testState();
+      const call = { script, keys: [...keys], args: [...args] };
+      state.renewEvalCalls.push(call);
+      state.beforeRenewEval?.({ ...call, attempt: state.renewEvalCalls.length });
+      const [ownerKey, storagePointerKey] = keys;
+      const [expectedOwner, expectedStorageId, renewedOwner, ttlSeconds] = args;
+      if (state.store.get(ownerKey) !== redisText(expectedOwner)) return 0;
+      if (state.store.get(storagePointerKey) !== redisText(expectedStorageId)) return -1;
+      state.store.set(ownerKey, redisText(renewedOwner));
+      state.redisState.expirations.set(ownerKey, state.redisTimeMs + Number(ttlSeconds) * 1000);
+      return 1;
+    },
+  };
 }
 `);
 
@@ -140,7 +176,6 @@ const src = applyModuleReplacements(readRepositoryFile("do-runtime/owner-registr
 const registry = await import(moduleDataUrl(src));
 
 export const {
-  assertCurrentOwner,
   assertCurrentOwnerWithLeaseBudget,
   drainOwnedScopes,
   ownerGenerationKeyOf,
@@ -148,7 +183,6 @@ export const {
   ownerKeyOf,
   parseOwner,
   renewOwnedScopes,
-  releaseOwner,
   resolveDoOwner,
   shouldRenewOwnerLease,
 } = registry;

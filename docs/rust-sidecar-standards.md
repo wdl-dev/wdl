@@ -198,6 +198,12 @@ explicit.
 - Classify Redis server errors through stable error codes (`err.code()`) rather than
   string-substring matching on formatted errors. Tests may search Lua source strings
   when they are protecting script contents, but runtime logic should not.
+- Use `wdl_rust_common::redis_eval::StaticRedisScript` for direct Lua execution so
+  steady-state calls use EVALSHA and script-cache loss is recovered through SCRIPT
+  LOAD/NOSCRIPT handling. Keep script bodies and replay policy in the owning service.
+- Keep Lua source-based EVAL in pipelines unless the owner has a proven protocol for
+  recovering a partially executed pipeline. Never retry an entire mixed pipeline on
+  NOSCRIPT: commands before the failure may already have committed.
 - Service error types own their machine code, human message, and HTTP status. Do not
   reconstruct HTTP status from string codes in a separate server layer.
 - Redis schema markers should fail closed when the persisted shape does not match the

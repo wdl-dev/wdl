@@ -5,13 +5,20 @@ import assert from "node:assert/strict";
  *   key: (suffix: string) => string,
  *   del: (...keys: string[]) => Promise<unknown>,
  *   exists: (key: string) => Promise<boolean>,
+ *   existsCount: (...keys: string[]) => Promise<number>,
  *   hSet: (key: string, fields: Record<string, string>) => Promise<unknown>,
  *   hGet: (key: string, field: string) => Promise<string | null>,
  *   hMGet: (key: string, fields: string[]) => Promise<Array<string | null>>,
  *   hGetAll: (key: string) => Promise<Record<string, string>>,
+ *   hStrLenMany: (pairs: Array<[string, string]>) => Promise<number[]>,
  *   hDel: (key: string, ...fields: string[]) => Promise<number>,
  *   set: (key: string, value: string) => Promise<unknown>,
+ *   setIfEq: (key: string, value: string, expected: string) => Promise<boolean>,
+ *   delIfEq: (key: string, expected: string) => Promise<number>,
  *   sAdd: (key: string, member: string) => Promise<unknown>,
+ *   sMembers: (key: string) => Promise<string[]>,
+ *   sCard: (key: string) => Promise<number>,
+ *   sCardMany: (keys: string[]) => Promise<number[]>,
  *   zAdd: (key: string, score: number, member: string) => Promise<unknown>,
  *   zRange: (key: string, start: number, stop: number) => Promise<string[]>,
  *   copy: (src: string, dst: string, opts?: { REPLACE?: boolean }) => Promise<number>,
@@ -21,6 +28,39 @@ import assert from "node:assert/strict";
  */
 
 export const redisConformanceCases = [
+  {
+    id: "multi-exists",
+    name: "multi-key existence counts present keys including duplicates",
+    /** @param {RedisConformanceAdapter} redis */
+    async run(redis) {
+      const first = redis.key("exists-first");
+      const second = redis.key("exists-second");
+      const missing = redis.key("exists-missing");
+      await redis.del(first, second, missing);
+      await redis.set(first, "1");
+      await redis.set(second, "2");
+
+      assert.equal(await redis.existsCount(first, missing, second, first), 3);
+    },
+  },
+  {
+    id: "value-cas",
+    name: "value CAS updates and deletes only the expected string",
+    /** @param {RedisConformanceAdapter} redis */
+    async run(redis) {
+      const key = redis.key("value-cas");
+      await redis.del(key);
+      await redis.set(key, "owner-a");
+
+      assert.equal(await redis.setIfEq(key, "owner-b", "stale-owner"), false);
+      assert.equal(await redis.setIfEq(key, "owner-b", "owner-a"), true);
+      assert.equal(await redis.delIfEq(key, "owner-a"), 0);
+      assert.equal(await redis.delIfEq(key, "owner-b"), 1);
+      assert.equal(await redis.exists(key), false);
+      assert.equal(await redis.setIfEq(key, "owner-c", "owner-b"), false);
+      assert.equal(await redis.delIfEq(key, "owner-b"), 0);
+    },
+  },
   {
     id: "hash-read",
     name: "hash reads return own fields, missing fields, and empty HMGET batches",
@@ -57,6 +97,31 @@ export const redisConformanceCases = [
       assert.equal(await redis.hDel(hash, "value"), 1);
       assert.equal(await redis.exists(hash), false);
       assert.deepEqual(await redis.hGetAll(hash), {});
+    },
+  },
+  {
+    id: "hash-length-set-cardinality",
+    name: "hash byte lengths and set cardinalities preserve missing-key semantics",
+    /** @param {RedisConformanceAdapter} redis */
+    async run(redis) {
+      const hash = redis.key("length-hash");
+      const members = redis.key("cardinality-set");
+      const missing = redis.key("cardinality-missing");
+      await redis.del(hash, members, missing);
+      await redis.hSet(hash, { ascii: "a", unicode: "\u00e9", empty: "" });
+      await redis.sAdd(members, "one");
+      await redis.sAdd(members, "two");
+
+      assert.deepEqual(await redis.hStrLenMany([
+        [hash, "ascii"],
+        [hash, "unicode"],
+        [hash, "empty"],
+        [hash, "missing"],
+        [missing, "missing"],
+      ]), [1, 2, 0, 0, 0]);
+      assert.equal(await redis.sCard(members), 2);
+      assert.equal(await redis.sCard(missing), 0);
+      assert.deepEqual(await redis.sCardMany([members, missing]), [2, 0]);
     },
   },
   {
@@ -118,6 +183,25 @@ export const redisConformanceCases = [
         assert.deepEqual(await redis.hGetAll(dst), { value: "new" });
         assert.equal(await redis.expireTime(dst), futureUnixSeconds);
       }
+    },
+  },
+  {
+    id: "copy-set-source",
+    name: "COPY preserves Set values and source expiration",
+    /** @param {RedisConformanceAdapter} redis */
+    async run(redis) {
+      const src = redis.key("copy-set-src");
+      const dst = redis.key("copy-set-dst");
+      const futureUnixSeconds = 4_102_444_800;
+      await redis.del(src, dst);
+      await redis.sAdd(src, "two");
+      await redis.sAdd(src, "one");
+      await redis.expireAt(src, futureUnixSeconds);
+      await redis.hSet(dst, { old: "value" });
+
+      assert.equal(await redis.copy(src, dst, { REPLACE: true }), 1);
+      assert.deepEqual((await redis.sMembers(dst)).toSorted(), ["one", "two"]);
+      assert.equal(await redis.expireTime(dst), futureUnixSeconds);
     },
   },
 ];

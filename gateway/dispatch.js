@@ -10,14 +10,10 @@ import {
   matchPatternWithStats,
 } from "gateway-lib";
 import {
-  ensureKnownNs,
-  ensureKnownPatternHosts,
-  getCachedNsRoutes,
-  loadNsRoutes,
-  getCachedPatterns,
-  loadPatternsForHost,
   recordPatternMatchComparisons,
   recordRoutingLookup,
+  resolveHostPatterns,
+  resolveNamespaceRoutes,
 } from "gateway-runtime";
 import { parseVersion } from "shared-worker-contract";
 
@@ -125,8 +121,8 @@ export async function resolveGatewayDispatch({
       return notFoundDispatch(route, { namespace });
     }
 
-    const nsSet = await ensureKnownNs(redis);
-    if (!nsSet.has(namespace)) {
+    const resolvedRoutes = await resolveNamespaceRoutes(redis, namespace);
+    if (!resolvedRoutes.known) {
       recordRoutingLookup("namespace_gate", "miss");
       return notFoundDispatch(route, { namespace });
     }
@@ -138,13 +134,8 @@ export async function resolveGatewayDispatch({
     ({ worker, forwardPath, prefix } = pathParts);
     if (!WORKER_NAME_RE.test(worker)) return notFoundDispatch(route, { namespace, worker });
 
-    let nsRoutes = getCachedNsRoutes(namespace);
-    if (nsRoutes) {
-      recordRoutingLookup("route_cache", "hit");
-    } else {
-      recordRoutingLookup("route_cache", "miss");
-      nsRoutes = await loadNsRoutes(redis, namespace);
-    }
+    recordRoutingLookup("route_cache", resolvedRoutes.cacheHit ? "hit" : "miss");
+    const nsRoutes = resolvedRoutes.routes;
     version = nsRoutes.get(worker);
     if (!version) return notFoundDispatch(route, { namespace, worker });
     if (parseVersion(version) == null) {
@@ -153,20 +144,15 @@ export async function resolveGatewayDispatch({
   } else {
     route = "worker_fetch_pattern";
     const patternHost = /** @type {string} */ (classified.host);
-    const knownPatternHosts = await ensureKnownPatternHosts(redis);
-    if (!knownPatternHosts.has(patternHost)) {
+    const resolvedPatterns = await resolveHostPatterns(redis, patternHost, requestId);
+    if (!resolvedPatterns.known) {
       recordRoutingLookup("pattern_host_gate", "miss");
       return notFoundDispatch(route);
     }
     recordRoutingLookup("pattern_host_gate", "hit");
 
-    let sorted = getCachedPatterns(patternHost);
-    if (sorted) {
-      recordRoutingLookup("pattern_cache", "hit");
-    } else {
-      recordRoutingLookup("pattern_cache", "miss");
-      sorted = await loadPatternsForHost(redis, patternHost, requestId);
-    }
+    recordRoutingLookup("pattern_cache", resolvedPatterns.cacheHit ? "hit" : "miss");
+    const sorted = resolvedPatterns.patterns;
     const match = matchPatternWithStats(sorted, url.pathname, url.search);
     recordPatternMatchComparisons(match.entry ? "hit" : "miss", match.comparisons);
     const hit = match.entry;

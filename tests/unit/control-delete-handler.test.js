@@ -172,6 +172,8 @@ const { handle: handleVersions } = await importControlHandler("control/handlers/
  *   doStorageIdDuringExec?: string | null,
  *   doOwnerKeys?: string[],
  *   doOwnerKeysDuringExec?: string[],
+ *   doObjectCount?: number,
+ *   doObjectCountDuringExec?: number,
  *   queueConsumerKeys?: string[],
  *   queueConsumerKeysDuringExec?: string[],
  *   queueConsumerWorker?: string | null,
@@ -196,6 +198,8 @@ function resetDeleteHandlerState({
   doStorageIdDuringExec = doStorageId,
   doOwnerKeys = [],
   doOwnerKeysDuringExec = doOwnerKeys,
+  doObjectCount = 0,
+  doObjectCountDuringExec = doObjectCount,
   queueConsumerKeys = ["queue-consumer:demo:jobs"],
   queueConsumerKeysDuringExec = queueConsumerKeys,
   queueConsumerWorker = "api",
@@ -297,15 +301,40 @@ function resetDeleteHandlerState({
       if (key === "wf:defs:demo:api") return hasWorkflowDefs ? 1 : 0;
       return 0;
     },
+    /** @param {string[]} keys */
+    async existsMany(keys) {
+      commands.push(["SESSION_EXISTSMANY", keys]);
+      return keys.map((key) => {
+        if (key === "secrets:demo:api") return hasWorkerSecrets;
+        if (key === "wf:defs:demo:api") return hasWorkflowDefs;
+        return false;
+      });
+    },
     /** @param {string} key */
     async sMembers(key) { return versionReferrers(key); },
+    /** @param {string} key */
+    async sCard(key) {
+      commands.push(["SESSION_SCARD", key]);
+      return key === "do:objects:do_old" ? doObjectCountDuringExec : 0;
+    },
+    /** @param {string[]} keys */
+    async sMembersMany(keys) {
+      commands.push(["SESSION_SMEMBERSMANY", keys]);
+      return keys.map((key) => versionReferrers(key));
+    },
     /** @param {string[]} keys */
     async hGetAllMany(keys) {
       commands.push(["SESSION_HGETALLMANY", keys]);
-      return keys.map((key) => patternRecordsDuringExec[key] || {});
+      return keys.map((key) => {
+        if (queueConsumerKeys.includes(key)) {
+          return queueConsumerWorkerDuringExec ? { worker: queueConsumerWorkerDuringExec } : {};
+        }
+        return patternRecordsDuringExec[key] || {};
+      });
     },
     /** @param {string} _cursor @param {string} pattern */
     async scan(_cursor, pattern) {
+      commands.push(["SESSION_SCAN", pattern]);
       if (pattern === "do:owner:scope:do_old%3A*") return ["0", doOwnerKeysDuringExec];
       if (pattern === "queue-consumer:demo:*" && queueConsumerWorkerDuringExec) {
         return ["0", queueConsumerKeysDuringExec];
@@ -379,6 +408,11 @@ function resetDeleteHandlerState({
     /** @param {string} key */
     async sMembers(key) { return versionReferrers(key); },
     /** @param {string} key */
+    async sCard(key) {
+      commands.push(["CLIENT_SCARD", key]);
+      return key === "do:objects:do_old" ? doObjectCount : 0;
+    },
+    /** @param {string} key */
     async hGetAll(key) {
       if (key === "routes:demo") return { ...routeVersions };
       return {};
@@ -396,6 +430,15 @@ function resetDeleteHandlerState({
       if (key === "secrets:demo:api") return hasWorkerSecrets ? 1 : 0;
       if (key === "wf:defs:demo:api") return hasWorkflowDefs ? 1 : 0;
       return 0;
+    },
+    /** @param {string[]} keys */
+    async existsMany(keys) {
+      commands.push(["CLIENT_EXISTSMANY", keys]);
+      return keys.map((key) => {
+        if (key === "secrets:demo:api") return hasWorkerSecrets;
+        if (key === "wf:defs:demo:api") return hasWorkflowDefs;
+        return false;
+      });
     },
     /** @param {unknown[]} args */
     async del(...args) { multiCalls.push(["DEL", ...args]); },
@@ -419,12 +462,13 @@ function resetDeleteHandlerState({
   });
 }
 
-/** @param {{ assetPrefix?: string | null, bundleMetaRaw?: string | null, retainedVersions?: string[], siblingMetaRaw?: string | null, lockTokenDuringExec?: string | null, hasWorkflowDefs?: boolean }} [opts] */
+/** @param {{ assetPrefix?: string | null, bundleMetaRaw?: string | null, retainedVersions?: string[], siblingMetaRaw?: string | null, siblingMetaByVersion?: Record<string, string | null>, lockTokenDuringExec?: string | null, hasWorkflowDefs?: boolean }} [opts] */
 function resetVersionDeleteHandlerState({
   assetPrefix = "assets/demo/api/v1/",
   bundleMetaRaw,
   retainedVersions = ["v1"],
   siblingMetaRaw = null,
+  siblingMetaByVersion = {},
   lockTokenDuringExec = "lock-token",
   hasWorkflowDefs = false,
 } = {}) {
@@ -436,8 +480,26 @@ function resetVersionDeleteHandlerState({
     : bundleMetaRaw;
   /** @type {unknown[][]} */
   const multiCalls = [];
+  /** @type {unknown[][]} */
+  const readCommands = [];
   /** @type {string[][]} */
   const watchBatches = [];
+  /** @param {string} key @param {string} field */
+  const readHashField = (key, field) => {
+    if (key === "routes:demo" && field === "api") return null;
+    if (key === "worker:demo:api:v:1" && field === "__meta__") return meta;
+    if (field === "__meta__") {
+      const versionNumber = key.match(/^worker:demo:api:v:(\d+)$/)?.[1];
+      const version = versionNumber ? `v${versionNumber}` : null;
+      if (version && Object.hasOwn(siblingMetaByVersion, version)) {
+        return siblingMetaByVersion[version];
+      }
+      if (version === "v2") return siblingMetaRaw;
+    }
+    return null;
+  };
+  /** @param {string} key */
+  const keyExists = (key) => key === "wf:defs:demo:api" && hasWorkflowDefs ? 1 : 0;
   const session = {
     /** @param {string[]} keys */
     async watch(...keys) { watchBatches.push(keys); },
@@ -449,10 +511,13 @@ function resetVersionDeleteHandlerState({
     },
     /** @param {string} key @param {string} field */
     async hGet(key, field) {
-      if (key === "routes:demo" && field === "api") return null;
-      if (key === "worker:demo:api:v:1" && field === "__meta__") return meta;
-      if (key === "worker:demo:api:v:2" && field === "__meta__") return siblingMetaRaw;
-      return null;
+      readCommands.push(["HGET", key, field]);
+      return readHashField(key, field);
+    },
+    /** @param {Array<[string, string]>} pairs */
+    async hGetMany(pairs) {
+      readCommands.push(["HGETMANY", pairs]);
+      return pairs.map(([key, field]) => readHashField(key, field));
     },
     /** @param {string} key */
     async zRange(key) {
@@ -462,7 +527,13 @@ function resetVersionDeleteHandlerState({
     async sMembers() { return []; },
     /** @param {string} key */
     async exists(key) {
-      return key === "wf:defs:demo:api" && hasWorkflowDefs ? 1 : 0;
+      readCommands.push(["EXISTS", key]);
+      return keyExists(key);
+    },
+    /** @param {string[]} keys */
+    async existsMany(keys) {
+      readCommands.push(["EXISTSMANY", keys]);
+      return keys.map((key) => keyExists(key) > 0);
     },
     multi() {
       return {
@@ -485,6 +556,7 @@ function resetVersionDeleteHandlerState({
     logs: [],
     lockKinds: [],
     multiCalls,
+    readCommands,
     releaseCalls: 0,
     redis,
     metrics: { increment() {}, observe() {} },
@@ -567,6 +639,10 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
 
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, true);
+  assert.deepEqual(
+    testState.commands.find((/** @type {unknown[]} */ call) => call[0] === "CLIENT_EXISTSMANY"),
+    ["CLIENT_EXISTSMANY", ["secrets:demo:api", "wf:defs:demo:api"]]
+  );
   assert.deepEqual(testState.lockKinds, ["whole"]);
   assert.deepEqual(testState.workflowChecks, [{
     ns: "demo", worker: "api", allowCleanup: true, requestId: "rid-delete",
@@ -801,6 +877,8 @@ test("worker delete retries instead of committing when DO owner keys drift after
     assetPrefix: null,
     doOwnerKeys: [],
     doOwnerKeysDuringExec: ["do:owner:scope:do_old%3ARoom%3Ashard0"],
+    doObjectCount: 0,
+    doObjectCountDuringExec: 0,
   });
 
   const response = await handle({
@@ -814,6 +892,34 @@ test("worker delete retries instead of committing when DO owner keys drift after
 
   const body = await readJsonResponse(response, 503);
   assert.equal(body.error, "whole_delete_contention");
+  assert.ok(testState.commands.some((/** @type {unknown[]} */ call) =>
+    call[0] === "SESSION_SCAN" && call[1] === "do:owner:scope:do_old%3A*"
+  ));
+  assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
+  assert.deepEqual(testState.doAlarmCleanups, []);
+});
+
+test("worker delete retries instead of committing when DO object count drifts after collection", async () => {
+  const testState = resetDeleteHandlerState({
+    assetPrefix: null,
+    doObjectCount: 0,
+    doObjectCountDuringExec: 1,
+  });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-object-count-drift",
+  });
+
+  const body = await readJsonResponse(response, 503);
+  assert.equal(body.error, "whole_delete_contention");
+  assert.equal(testState.commands.some((/** @type {unknown[]} */ call) =>
+    call[0] === "SESSION_SCAN" && call[1] === "do:owner:scope:do_old%3A*"
+  ), false);
   assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
   assert.deepEqual(testState.doAlarmCleanups, []);
 });
@@ -878,6 +984,51 @@ test("worker delete deduplicates Redis SCAN results before drift checks and coun
   assert.equal(
     (testState.watchBatches.at(-1) || []).filter((key) => key === ownerKey).length,
     1,
+  );
+});
+
+test("worker delete bounds and batches under-WATCH projection snapshots", async () => {
+  const retainedVersions = Array.from({ length: 65 }, (_, index) => `v${index + 1}`);
+  const queueConsumerKeys = ["queue-consumer:demo:jobs", "queue-consumer:demo:email"];
+  const testState = resetDeleteHandlerState({
+    assetPrefix: null,
+    hasWorkerSecrets: true,
+    hasWorkflowDefs: true,
+    queueConsumerKeys,
+    retainedVersions,
+  });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-batched-snapshot",
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.deleted, true);
+  assert.deepEqual(
+    testState.commands.find((/** @type {unknown[]} */ call) => call[0] === "SESSION_EXISTSMANY"),
+    ["SESSION_EXISTSMANY", ["secrets:demo:api", "wf:defs:demo:api"]]
+  );
+  const setBatches = testState.commands
+    .filter((/** @type {unknown[]} */ call) => call[0] === "SESSION_SMEMBERSMANY")
+    .map((call) => /** @type {string[]} */ (call[1]));
+  assert.equal(setBatches.length, 5);
+  assert.ok(setBatches.every((keys) => keys.length <= 16));
+  assert.deepEqual(
+    setBatches.flat(),
+    retainedVersions.map((version) => `worker-version-referrers:demo:api:${version}`)
+  );
+  assert.ok(testState.commands.some((/** @type {unknown[]} */ call) =>
+    call[0] === "SESSION_SCARD" && call[1] === "do:objects:do_old"
+  ));
+  assert.deepEqual(
+    testState.commands.find((/** @type {unknown[]} */ call) =>
+      call[0] === "SESSION_HGETALLMANY" && Array.isArray(call[1]) && call[1][0]?.startsWith("queue-consumer:")),
+    ["SESSION_HGETALLMANY", queueConsumerKeys]
   );
 });
 
@@ -1592,6 +1743,44 @@ test("version delete keeps a definitions-only worker discoverable", async () => 
   assert.equal(testState.multiCalls.some((call) =>
     call[0] === "SREM" && call[1] === "workers:demo" && call[2] === "api"
   ), false);
+});
+
+test("version delete batches sibling metadata and lifecycle existence reads", async () => {
+  const siblingVersions = Array.from({ length: 33 }, (_, index) => `v${index + 2}`);
+  const testState = resetVersionDeleteHandlerState({
+    retainedVersions: ["v1", ...siblingVersions],
+    siblingMetaByVersion: Object.fromEntries(siblingVersions.map((version) => [
+      version,
+      JSON.stringify({ assets: { prefix: `assets/demo/api/${version}/` }, bindings: {} }),
+    ])),
+  });
+
+  const response = await handleVersions({
+    method: "DELETE",
+    ns: "demo",
+    name: "api",
+    subPath: ["v1"],
+    principal: { kind: "ops" },
+    requestId: "rid-version-delete-batched-reads",
+  });
+
+  await readJsonResponse(response, 200);
+  const siblingReadBatches = testState.readCommands.filter((command) => command[0] === "HGETMANY");
+  const siblingReadPairs = siblingReadBatches.flatMap((command) => /** @type {string[][]} */ (command[1]));
+  assert.ok(siblingReadBatches.length > 1);
+  assert.ok(siblingReadBatches.every((command) => /** @type {unknown[]} */ (command[1]).length <= 32));
+  assert.deepEqual(siblingReadPairs, siblingVersions.map((version) => [
+    `worker:demo:api:v:${version.slice(1)}`,
+    "__meta__",
+  ]));
+  assert.deepEqual(testState.readCommands.filter((command) => command[0] === "EXISTSMANY"), [[
+    "EXISTSMANY",
+    ["secrets:demo:api", "wf:defs:demo:api"],
+  ]]);
+  assert.equal(testState.readCommands.some((command) =>
+    command[0] === "HGET" && /^worker:demo:api:v:(?:[2-9]|[1-9]\d+)$/.test(String(command[1]))
+  ), false);
+  assert.equal(testState.readCommands.some((command) => command[0] === "EXISTS"), false);
 });
 
 test("version delete classifies non-object bundle metadata as corrupt", async () => {

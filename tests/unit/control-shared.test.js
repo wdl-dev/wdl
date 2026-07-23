@@ -7,7 +7,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { moduleDataUrl } from "../helpers/load-shared-module.js";
 import { compileControlSharedGraph } from "../helpers/load-control-shared.js";
-import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
+import {
+  createFakeRedis,
+  createFakeRedisState,
+  sharedRedisStubUrl,
+} from "../helpers/mocks/fake-redis.js";
 import { installMockProperty } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
@@ -422,59 +426,11 @@ test("runOptimistic rethrows non-WatchError failures", async () => {
 });
 
 test("rebuildDeclaredHostIndexes rebuilds global host declaration gate from namespace sets", async () => {
-  const sets = new Map([
-    ["hosts:alpha", new Set(["app.workers.example", "shared.workers.example"])],
-    ["hosts:beta", new Set(["shared.workers.example"])],
-    ["declared-hosts", new Set(["stale.workers.example"])],
-    ["host-declarations:stale.workers.example", new Set(["old"])],
-  ]);
-  const redis = {
-    /** @param {string} _cursor @param {string} match */
-    async scan(_cursor, match) {
-      const keys = [...sets.keys()].filter((key) => {
-        if (match.endsWith("*")) return key.startsWith(match.slice(0, -1));
-        return key === match;
-      });
-      return ["0", keys];
-    },
-    /** @param {string} key */
-    async sMembers(key) {
-      return [...(sets.get(key) || new Set())];
-    },
-    /** @param {(session: { multi(): { del(...keys: string[]): unknown, sAdd(key: string, members: string | string[]): unknown, exec(): Promise<unknown> } }) => Promise<unknown>} fn */
-    async session(fn) {
-      /** @type {Array<() => void>} */
-      const operations = [];
-      let execCalled = false;
-      const multi = {
-        /** @param {string[]} keys */
-        del(...keys) {
-          operations.push(() => {
-            for (const key of keys) sets.delete(key);
-          });
-          return multi;
-        },
-        /** @param {string} key @param {string | string[]} members */
-        sAdd(key, members) {
-          operations.push(() => {
-            const set = sets.get(key) || new Set();
-            for (const member of Array.isArray(members) ? members : [members]) set.add(member);
-            sets.set(key, set);
-          });
-          return multi;
-        },
-        async exec() {
-          execCalled = true;
-          for (const apply of operations) apply();
-        },
-      };
-      const result = await fn({ multi: () => multi });
-      if (!execCalled) {
-        throw new Error("Mock Redis transaction was not executed: expected multi().exec() to be called");
-      }
-      return result;
-    },
-  };
+  const redis = createFakeRedis();
+  redis.state.sets.set("hosts:alpha", new Set(["app.workers.example", "shared.workers.example"]));
+  redis.state.sets.set("hosts:beta", new Set(["shared.workers.example"]));
+  redis.state.sets.set("declared-hosts", new Set(["stale.workers.example"]));
+  redis.state.sets.set("host-declarations:stale.workers.example", new Set(["old"]));
 
   const result = await rebuildDeclaredHostIndexes(redis);
 
@@ -482,10 +438,172 @@ test("rebuildDeclaredHostIndexes rebuilds global host declaration gate from name
     declaredHosts: 2,
     declarationKeysRemoved: 1,
   });
-  assert.deepEqual(sets.get("declared-hosts"), new Set(["app.workers.example", "shared.workers.example"]));
-  assert.deepEqual(sets.get("host-declarations:app.workers.example"), new Set(["alpha"]));
-  assert.deepEqual(sets.get("host-declarations:shared.workers.example"), new Set(["alpha", "beta"]));
-  assert.equal(sets.has("host-declarations:stale.workers.example"), false);
+  assert.deepEqual(
+    redis.state.commands.filter(([command]) => command === "sCardMany"),
+    [["sCardMany", ["hosts:alpha", "hosts:beta"]]]
+  );
+  assert.deepEqual(
+    redis.state.commands.filter(([command]) => command === "sMembersMany"),
+    [["sMembersMany", ["hosts:alpha", "hosts:beta"]]]
+  );
+  assert.ok(redis.state.watchBatches.some((keys) => keys.includes("declared-hosts:revision")));
+  assert.deepEqual(redis.state.sets.get("declared-hosts"), new Set(["app.workers.example", "shared.workers.example"]));
+  assert.deepEqual(redis.state.sets.get("host-declarations:app.workers.example"), new Set(["alpha"]));
+  assert.deepEqual(redis.state.sets.get("host-declarations:shared.workers.example"), new Set(["alpha", "beta"]));
+  assert.equal(redis.state.sets.has("host-declarations:stale.workers.example"), false);
+});
+
+test("rebuildDeclaredHostIndexes bounds cardinality and member-read pipelines", async () => {
+  const redis = createFakeRedis();
+  for (let index = 0; index < 65; index += 1) {
+    redis.state.sets.set(
+      `hosts:tenant-${index}`,
+      new Set([`host-${index}.workers.example`])
+    );
+  }
+
+  const result = await rebuildDeclaredHostIndexes(redis);
+
+  assert.equal(result.declaredHosts, 65);
+  assert.deepEqual(
+    redis.state.commands
+      .filter(([command]) => command === "sCardMany")
+      .map(([, keys]) => /** @type {string[]} */ (keys).length),
+    [64, 1]
+  );
+  assert.deepEqual(
+    redis.state.commands
+      .filter(([command]) => command === "sMembersMany")
+      .map(([, keys]) => /** @type {string[]} */ (keys).length),
+    [64, 1]
+  );
+});
+
+test("rebuildDeclaredHostIndexes retries from the current source after revision drift", async () => {
+  const state = createFakeRedisState();
+  state.sets.set("hosts:alpha", new Set(["alpha.workers.example"]));
+  const redis = createFakeRedis(state);
+  const session = redis.session.bind(redis);
+  let injectedDrift = false;
+  redis.session = async (fn) => await session(async (iso) => {
+    const sMembersMany = iso.sMembersMany.bind(iso);
+    iso.sMembersMany = async (keys) => {
+      const members = await sMembersMany(keys);
+      if (!injectedDrift) {
+        injectedDrift = true;
+        // Model the ordinary writer committing a source update and its revision
+        // after reload captured the old source snapshot.
+        state.sets.set("hosts:beta", new Set(["beta.workers.example"]));
+        await redis.incr("declared-hosts:revision");
+      }
+      return members;
+    };
+    return await fn(iso);
+  });
+
+  const result = await rebuildDeclaredHostIndexes(redis);
+
+  assert.deepEqual(result, { declaredHosts: 2, declarationKeysRemoved: 0 });
+  assert.deepEqual(
+    state.sets.get("declared-hosts"),
+    new Set(["alpha.workers.example", "beta.workers.example"])
+  );
+  assert.equal(
+    state.watchBatches.filter((keys) => keys.includes("declared-hosts:revision")).length,
+    2
+  );
+});
+
+test("rebuildDeclaredHostIndexes deduplicates SCAN results before counting and reading", async () => {
+  const state = createFakeRedisState();
+  state.sets.set("hosts:alpha", new Set(["app.workers.example"]));
+  state.sets.set("host-declarations:app.workers.example", new Set(["alpha"]));
+  const redis = createFakeRedis(state);
+  const session = redis.session.bind(redis);
+  redis.session = async (fn) => await session(async (iso) => {
+    const scan = iso.scan.bind(iso);
+    iso.scan = async (cursor, pattern, count) => {
+      const [next, keys] = await scan(cursor, pattern, count);
+      return [next, [...keys, ...keys]];
+    };
+    return await fn(iso);
+  });
+
+  const result = await rebuildDeclaredHostIndexes(redis);
+
+  assert.deepEqual(result, { declaredHosts: 1, declarationKeysRemoved: 1 });
+  assert.deepEqual(
+    state.commands.filter(([command]) => command === "sMembersMany"),
+    [["sMembersMany", ["hosts:alpha"]]]
+  );
+});
+
+test("rebuildDeclaredHostIndexes rejects oversized scans before reading members or mutating", async () => {
+  const hostKeys = Array.from(
+    { length: 5_001 },
+    (_, index) => `hosts:tenant-${index}`
+  );
+  const oldDeclarationKeys = Array.from(
+    { length: 5_000 },
+    (_, index) => `host-declarations:host-${index}.workers.example`
+  );
+  let scanCalls = 0;
+  let cardinalityReadCalls = 0;
+  let memberReadCalls = 0;
+  let multiCalls = 0;
+  const session = {
+    async watch() {},
+    /** @param {string} cursor @param {string} pattern */
+    async scan(cursor, pattern) {
+      scanCalls += 1;
+      if (cursor !== "0") throw new Error("scan continued after exceeding the entry budget");
+      return [
+        pattern === "host-declarations:*" ? "next" : "0",
+        pattern === "host-declarations:*" ? oldDeclarationKeys : hostKeys,
+      ];
+    },
+    async sCardMany() { cardinalityReadCalls += 1; return []; },
+    async sMembersMany() { memberReadCalls += 1; return []; },
+    multi() {
+      multiCalls += 1;
+      throw new Error("must fail before building a transaction");
+    },
+  };
+  const redis = {
+    /** @param {(value: typeof session) => Promise<unknown>} fn */
+    async session(fn) { return await fn(session); },
+  };
+
+  await assert.rejects(
+    rebuildDeclaredHostIndexes(redis),
+    /declared host rebuild exceeds 10000 entries/
+  );
+  assert.equal(scanCalls, 2);
+  assert.equal(cardinalityReadCalls, 0);
+  assert.equal(memberReadCalls, 0);
+  assert.equal(multiCalls, 0);
+});
+
+test("rebuildDeclaredHostIndexes rejects oversized declarations before reading members or mutating", async () => {
+  const redis = createFakeRedis();
+  redis.state.sets.set(
+    "hosts:tenant",
+    new Set(Array.from({ length: 10_000 }, (_, index) => `host-${index}.workers.example`))
+  );
+
+  await assert.rejects(
+    rebuildDeclaredHostIndexes(redis),
+    /declared host rebuild exceeds 10000 entries/
+  );
+  assert.deepEqual(
+    redis.state.commands.filter(([command]) => command === "sCardMany"),
+    [["sCardMany", ["hosts:tenant"]]]
+  );
+  assert.deepEqual(
+    redis.state.commands.filter(([command]) => command === "sMembersMany"),
+    []
+  );
+  assert.deepEqual(redis.state.ops, []);
 });
 
 test("controlAbortResponse keeps abort errors on the shared response path", async () => {

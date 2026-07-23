@@ -228,6 +228,26 @@ test("KV put rejects non-number expiration options before proxy work", withFetch
   );
 }));
 
+test("KV put rejects expiration values above the safe integer boundary", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV } = await loadKvBinding();
+  setFetch(async () => {
+    throw new Error("fetch should not be called for unsafe expiration options");
+  });
+
+  await assert.rejects(
+    () => makeKv(KV).put("unsafe-ttl", "value", {
+      expirationTtl: Number.MAX_SAFE_INTEGER + 1,
+    }),
+    /KV put: expirationTtl must be a positive integer/
+  );
+  await assert.rejects(
+    () => makeKv(KV).put("unsafe-expiration", "value", {
+      expiration: Number.MAX_SAFE_INTEGER + 1,
+    }),
+    /KV put: expiration must be a positive integer/
+  );
+}));
+
 test("KV put cancels oversized streams while reading", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV } = await loadKvBinding([
     [/export const KV_VALUE_MAX_BYTES = 25 \* 1024 \* 1024;/, "export const KV_VALUE_MAX_BYTES = 4;"],

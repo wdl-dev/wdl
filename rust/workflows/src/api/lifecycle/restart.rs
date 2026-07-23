@@ -1,4 +1,4 @@
-use wdl_rust_common::time::now_ms;
+use wdl_rust_common::{redis_eval::StaticRedisScript, time::now_ms};
 
 use crate::{
     AppState, LogLevel, WorkflowError, WorkflowResult, by_version_key, by_worker_key,
@@ -42,7 +42,8 @@ if not status then
   return 0
 end
 local generation = redis.call("HGET", KEYS[1], "generation")
-if generation ~= ARGV[1] then
+local created_at_ms = redis.call("HGET", KEYS[1], "createdAtMs")
+if generation ~= ARGV[1] or created_at_ms ~= ARGV[13] then
   return 0
 end
 redis.call("DEL", KEYS[2])
@@ -66,6 +67,8 @@ redis.call("ZREM", KEYS[12], ARGV[6])
 redis.call("ZADD", KEYS[14], ARGV[3], ARGV[11])
 return 1
 "#;
+
+static RESTART: StaticRedisScript = StaticRedisScript::new(RESTART_SCRIPT);
 
 const RESTART_LEASE_EXPIRED: i64 = -1;
 
@@ -141,7 +144,7 @@ pub(crate) async fn restart_instance(
     let params_bytes = payload_bytes_arg(&params_json);
     let updated: i64 = match eval_script(
         state,
-        RESTART_SCRIPT,
+        &RESTART,
         &[
             &state_key,
             &steps_key,
@@ -173,6 +176,7 @@ pub(crate) async fn restart_instance(
             &shard_arg,
             &identity.instance_id,
             &pending_restart.member,
+            &identity.created_at_ms,
         ],
     )
     .await
@@ -252,10 +256,14 @@ mod tests {
         assert!(RESTART_SCRIPT.contains(r#"redis.call("ZREM", KEYS[16], ARGV[12])"#));
         assert!(RESTART_SCRIPT.contains(r#"redis.call("ZADD", KEYS[14], ARGV[3], ARGV[11])"#));
         let lease_check = RESTART_SCRIPT.find("if not marker_score").unwrap();
+        let incarnation_check = RESTART_SCRIPT
+            .find(r#"created_at_ms ~= ARGV[13]"#)
+            .expect("restart must reject a recreated instance");
         let first_write = RESTART_SCRIPT
             .find(r#"redis.call("DEL", KEYS[2])"#)
             .unwrap();
         assert!(lease_check < first_write);
+        assert!(incarnation_check < first_write);
     }
 
     #[test]

@@ -34,6 +34,7 @@ routes:<ns>                     Hash, { workerName -> activeVersion }
 namespaces                      Set, namespaces with at least one active worker
 workers:<ns>                    Set, worker names with worker-owned lifecycle state
 worker:<ns>:<name>:next_version String, monotonic version counter, survives delete
+cron:seq:<ns>:<name>           String, permanent Cron generation high-water mark
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes plus __meta__
 worker-delete-lock:<ns>:<name>  String EX 30, per-worker delete critical-section lock;
@@ -43,6 +44,7 @@ worker-version-referrers:<ns>:<name>:<version>
                                 Set, canonical JSON version-pinned caller refs
 hosts:<ns>                      Set, declared operator host intent
 declared-hosts                  Set, hosts declared by at least one namespace
+declared-hosts:revision         String, monotonic host-declaration mutation revision
 host-declarations:<host>        Set, namespaces declaring this host
 ns-hosts:<ns>                   Set, active host reverse index maintained by promote
 patterns:<host>                 Hash, slot -> v2 tab-separated projection
@@ -57,6 +59,11 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelopes
 `worker:<ns>:<name>:v:<int>` uses a positive JavaScript-safe integer version in the
 key, not the `"v<int>"` tag. Test fixtures that seed Redis directly must use
 `shared/worker-contract.js#bundleKey`.
+
+`cron:seq:<ns>:<name>` is Control's permanent Cron generation allocator. It survives
+an empty Cron projection and whole-worker deletion so stale `cron-slot:*` refs cannot
+match a recreated entry. Allocations start at generation `1024`; lower values are
+reserved and never issued by the permanent allocator.
 
 `namespaces` is an active worker gate. It is populated when a namespace has an active
 worker route and may be removed when the last active worker is deleted.
@@ -90,10 +97,11 @@ cannot be decoded; they do not treat an unknown owner as an empty slot.
 `hosts:<ns>` is operator intent: the namespace is allowed to use those hosts.
 `declared-hosts` is a gateway gate for hosts declared by at least one namespace.
 `host-declarations:<host>` records the declaring namespaces so one namespace removing a
-host does not clear the global gate while another namespace still declares it.
-`POST /reload` rebuilds the two declaration indexes from `hosts:<ns>` before publishing
-gateway cache invalidations, which provides an explicit repair/backfill path for
-operator-managed host declarations.
+host does not clear the global gate while another namespace still declares it. Host
+reconcile changes the source and derived declaration indexes together and increments
+`declared-hosts:revision` in the same transaction. `POST /reload` watches that revision
+while rebuilding the two declaration indexes from `hosts:<ns>`, so a concurrent host
+reconcile retries the repair before gateway cache invalidation is published.
 `ns-hosts:<ns>` is the active reverse index: the namespace currently owns at least one
 slot on those hosts. `hosts:<ns>` is expected to be a superset. Host reconcile uses
 `ns-hosts:<ns>` as a fast path before scanning `patterns:<host>`.

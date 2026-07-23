@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use redis::AsyncCommands;
 use redis::streams::StreamReadReply;
 use serde_json::json;
 use tokio::time::sleep;
@@ -173,68 +172,90 @@ async fn claim_delayed_members(
     Ok(claimed)
 }
 
-async fn move_claimed_delayed_member(
+fn delayed_mutation_pipeline(
+    instance_id: &str,
+    delayed_key: &str,
+    target_key: &str,
+    trim: Option<usize>,
+    moved: &[(String, String, HashMap<String, String>)],
+    corrupt: &[(String, String)],
+) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    let trim_arg = trim.map(|value| value.to_string()).unwrap_or_default();
+    for (member, claim_key, entry) in moved {
+        append_eval_cmd(
+            &mut pipe,
+            MOVE_CLAIMED_DELAYED_MEMBER_SCRIPT,
+            &[claim_key.as_str(), delayed_key, target_key],
+            &[instance_id, member.as_str(), trim_arg.as_str()],
+        );
+        for (field, value) in entry {
+            pipe.arg(field).arg(value);
+        }
+    }
+    for (member, claim_key) in corrupt {
+        append_eval_cmd(
+            &mut pipe,
+            DROP_CLAIMED_DELAYED_MEMBER_SCRIPT,
+            &[claim_key.as_str(), delayed_key],
+            &[instance_id, member.as_str()],
+        );
+    }
+    pipe.cmd("ZCARD").arg(delayed_key);
+    pipe
+}
+
+struct DelayedMutationResult {
+    moved: usize,
+    dropped: usize,
+    remaining: i64,
+}
+
+async fn apply_claimed_delayed_members(
     state: &AppState,
     delayed_key: &str,
     target_key: &str,
     trim: Option<usize>,
-    claimed: &[(String, String, HashMap<String, String>)],
-) -> SchedulerResult<usize> {
-    if claimed.is_empty() {
-        return Ok(0);
-    }
-    let moved: Vec<i64> = state
+    moved: &[(String, String, HashMap<String, String>)],
+    corrupt: &[(String, String)],
+) -> SchedulerResult<DelayedMutationResult> {
+    let mut replies: Vec<i64> = state
         .data_redis
         .with_conn(async |mut conn| {
-            let mut pipe = redis::pipe();
-            let trim_arg = trim.map(|value| value.to_string()).unwrap_or_default();
-            for (member, claim_key, entry) in claimed {
-                append_eval_cmd(
-                    &mut pipe,
-                    MOVE_CLAIMED_DELAYED_MEMBER_SCRIPT,
-                    &[claim_key.as_str(), delayed_key, target_key],
-                    &[
-                        state.instance_id.as_str(),
-                        member.as_str(),
-                        trim_arg.as_str(),
-                    ],
-                );
-                for (field, value) in entry {
-                    pipe.arg(field).arg(value);
-                }
-            }
+            let pipe = delayed_mutation_pipeline(
+                &state.instance_id,
+                delayed_key,
+                target_key,
+                trim,
+                moved,
+                corrupt,
+            );
             pipe.query_async(&mut conn).await
         })
         .await?;
-    let moved_count = moved.iter().filter(|count| **count == 1).count();
+    let expected_replies = moved.len() + corrupt.len() + 1;
+    if replies.len() != expected_replies {
+        return Err(SchedulerError::internal_error(
+            "invalid delayed mutation pipeline response",
+        ));
+    }
+    let remaining = replies
+        .pop()
+        .ok_or_else(|| SchedulerError::internal_error("missing delayed queue remaining count"))?;
+    let moved_count = replies[..moved.len()]
+        .iter()
+        .filter(|count| **count == 1)
+        .count();
+    let dropped = replies[moved.len()..]
+        .iter()
+        .filter(|count| **count == 1)
+        .count();
     record_queue_delayed_move_skips(&state.metrics, moved.len().saturating_sub(moved_count));
-    Ok(moved_count)
-}
-
-async fn drop_claimed_corrupt_delayed_members(
-    state: &AppState,
-    delayed_key: &str,
-    claimed: &[(String, String)],
-) -> SchedulerResult<usize> {
-    if claimed.is_empty() {
-        return Ok(0);
-    }
-    let dropped: Vec<i64> = state
-        .data_redis
-        .with_conn(async |mut conn| {
-            let mut pipe = redis::pipe();
-            for (member, claim_key) in claimed {
-                append_eval_cmd(
-                    &mut pipe,
-                    DROP_CLAIMED_DELAYED_MEMBER_SCRIPT,
-                    &[claim_key.as_str(), delayed_key],
-                    &[state.instance_id.as_str(), member.as_str()],
-                );
-            }
-            pipe.query_async(&mut conn).await
-        })
-        .await?;
-    Ok(dropped.into_iter().filter(|count| *count == 1).count())
+    Ok(DelayedMutationResult {
+        moved: moved_count,
+        dropped,
+        remaining,
+    })
 }
 
 pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
@@ -282,72 +303,56 @@ pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
             continue;
         }
 
-        let mut moved = 0_usize;
-        let mut orphaned_moved = 0_usize;
+        let mut move_batch = Vec::with_capacity(claimed.len());
         let mut corrupt = Vec::new();
-        if orphaned {
-            let orphaned_key = queue_orphaned_key(&ns, &queue);
-            let mut move_batch = Vec::with_capacity(claimed.len());
-            for (member, claim_key) in &claimed {
-                let Some(mut entry) = parse_json_entry(member) else {
-                    corrupt.push((member.clone(), claim_key.clone()));
-                    continue;
-                };
+        for (member, claim_key) in &claimed {
+            let Some(mut entry) = parse_json_entry(member) else {
+                corrupt.push((member.clone(), claim_key.clone()));
+                continue;
+            };
+            if orphaned {
                 entry.insert("reason".to_string(), "consumer-removed".to_string());
                 entry.insert("source".to_string(), "delayed".to_string());
-                move_batch.push((member.clone(), claim_key.clone(), entry));
             }
-            orphaned_moved = move_claimed_delayed_member(
-                &state,
-                &delayed_key,
-                &orphaned_key,
-                Some(state.config.max_orphaned_len),
-                &move_batch,
-            )
-            .await?;
-            moved += orphaned_moved;
-        } else {
-            let mut move_batch = Vec::with_capacity(claimed.len());
-            for (member, claim_key) in &claimed {
-                let Some(entry) = parse_json_entry(member) else {
-                    corrupt.push((member.clone(), claim_key.clone()));
-                    continue;
-                };
-                move_batch.push((member.clone(), claim_key.clone(), entry));
-            }
-            moved +=
-                move_claimed_delayed_member(&state, &delayed_key, &stream_key, None, &move_batch)
-                    .await?;
+            move_batch.push((member.clone(), claim_key.clone(), entry));
         }
-        let dropped_corrupt =
-            drop_claimed_corrupt_delayed_members(&state, &delayed_key, &corrupt).await?;
-        record_queue_delayed_corrupt_members(&state.metrics, dropped_corrupt);
-        if dropped_corrupt > 0 {
+        let (target_key, trim) = if orphaned {
+            (
+                queue_orphaned_key(&ns, &queue),
+                Some(state.config.max_orphaned_len),
+            )
+        } else {
+            (stream_key, None)
+        };
+        let result = apply_claimed_delayed_members(
+            &state,
+            &delayed_key,
+            &target_key,
+            trim,
+            &move_batch,
+            &corrupt,
+        )
+        .await?;
+        record_queue_delayed_corrupt_members(&state.metrics, result.dropped);
+        if result.dropped > 0 {
             log(
                 &state,
                 LogLevel::Warn,
                 "queue_delayed_corrupt_members_dropped",
-                json!({ "ns": ns, "queue": queue, "count": dropped_corrupt }),
+                json!({ "ns": ns, "queue": queue, "count": result.dropped }),
             );
         }
-        moved += dropped_corrupt;
+        let moved = result.moved + result.dropped;
         made_progress = made_progress || moved > 0;
         if orphaned {
             log(
                 &state,
                 LogLevel::Info,
                 "queue_delayed_orphaned",
-                json!({ "ns": ns, "queue": queue, "count": orphaned_moved }),
+                json!({ "ns": ns, "queue": queue, "count": result.moved }),
             );
         }
-        let remaining: i64 = state
-            .data_redis
-            .with_conn(async |mut conn| {
-                let delayed_key = delayed_key.clone();
-                conn.zcard(delayed_key).await
-            })
-            .await?;
-        if remaining == 0 {
+        if result.remaining == 0 {
             state
                 .queues
                 .known_delayed
@@ -531,6 +536,7 @@ pub(crate) async fn queue_delayed_wake_loop(state: AppState) -> SchedulerResult<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::parse_packed_commands;
 
     #[test]
     fn delayed_queue_wall_clock_wait_is_zero_once_due() {
@@ -669,6 +675,30 @@ mod tests {
             + drop_zrem_pos;
         assert!(drop_zrem_pos < drop_del_pos);
         assert!(drop_del_pos < drop_return_pos);
+    }
+
+    #[test]
+    fn delayed_mutations_read_remaining_count_in_the_same_pipeline() {
+        let moved = vec![(
+            "valid".to_string(),
+            "claim-valid".to_string(),
+            HashMap::from([("id".to_string(), "a".to_string())]),
+        )];
+        let corrupt = vec![("corrupt".to_string(), "claim-corrupt".to_string())];
+        let pipeline = delayed_mutation_pipeline(
+            "scheduler-a",
+            "queue-delayed:demo:jobs",
+            "queue:demo:jobs:s",
+            None,
+            &moved,
+            &corrupt,
+        );
+        let commands = parse_packed_commands(&pipeline.get_packed_pipeline());
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0][0], "EVAL");
+        assert_eq!(commands[1][0], "EVAL");
+        assert_eq!(commands[2], ["ZCARD", "queue-delayed:demo:jobs"]);
     }
 
     #[test]

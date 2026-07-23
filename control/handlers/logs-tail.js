@@ -13,6 +13,27 @@ import { controlTailRedis, errMessage, jsonError, requireControlLog } from "cont
 const TAIL_ACTIVATION_CHANNEL = "logs:tail:active";
 const TAIL_ACTIVATION_TTL_SECONDS = 30;
 const TAIL_ACTIVATION_MAX_ENTRIES = 10_000;
+const ACTIVATE_TAIL_WORKERS_SCRIPT = `
+local count = redis.call("HLEN", KEYS[1])
+local fields = {}
+local seen = {}
+for i = 3, #ARGV do
+  local field = ARGV[i]
+  if not seen[field] then
+    seen[field] = true
+    local exists = redis.call("HEXISTS", KEYS[1], field) == 1
+    if exists or count < tonumber(ARGV[2]) then
+      if not exists then count = count + 1 end
+      fields[#fields + 1] = field
+      fields[#fields + 1] = "1"
+    end
+  end
+end
+if #fields > 0 then
+  redis.call("HSETEX", KEYS[1], "EX", ARGV[1], "FIELDS", #fields / 2, unpack(fields))
+end
+return #fields / 2
+`;
 const XREAD_BLOCK_MS = 10_000;
 const SSE_KEEPALIVE_MS = 5_000;
 const LOG_TAIL_IDLE_PULL_GRACE_FACTOR = 3;
@@ -38,12 +59,11 @@ const SSE_HEADERS = {
 
 /**
  * @typedef {{
- *   exists(key: string): Promise<number>,
- *   xRange(key: string, start: string, end: string, countKeyword: string, count: string): Promise<Array<[Uint8Array, Uint8Array[]]>>,
- *   hLen(key: string): Promise<number>,
- *   hGetEx(key: string, ttlSeconds: number, fields: string[]): Promise<Array<Uint8Array | string | null | undefined>>,
- *   hSetEx(key: string, ttlSeconds: number, fields: Record<string, string>): Promise<unknown>,
- * }} TailRedis
+ *   existsAndXRange(key: string, start: string, end: string, count: number): Promise<{ exists: boolean, entries: Array<[Uint8Array, Uint8Array[]]> }>,
+ * }} TailResumeRedis
+ * @typedef {{
+ *   eval(script: string, keys: string[], args: string[]): Promise<unknown>,
+ * }} TailActivationRedis
  * @typedef {{ xRead(...args: string[]): Promise<unknown> }} TailSession
  * @typedef {[Uint8Array, Uint8Array[]]} TailStreamItem
  * @typedef {[Uint8Array, TailStreamItem[]]} TailStreamBatch
@@ -124,16 +144,15 @@ export function tailMaxSessionMs(env) {
 // Pre-check that the resume id can still be honored. If the stream key
 // expired since last XADD, no first id exists for comparison so we
 // distinguish "expired" from "trimmed" with separate codes (see doc).
-/** @param {{ redis: TailRedis, streamKey: string, resumeId: string }} args */
+/** @param {{ redis: TailResumeRedis, streamKey: string, resumeId: string }} args */
 async function checkResumePoint({ redis, streamKey, resumeId }) {
-  const exists = await redis.exists(streamKey);
-  if (exists === 0) {
+  const { exists, entries } = await redis.existsAndXRange(streamKey, "-", "+", 1);
+  if (!exists) {
     return { warning: { code: "resume_stream_expired",
       message: "Resume stream has expired (no recent activity)." } };
   }
   // XRANGE … COUNT 1 returns [[idBuf, [k1Buf,v1Buf,...]]] or [].
-  const reply = await redis.xRange(streamKey, "-", "+", "COUNT", "1");
-  const firstIdRaw = reply && reply[0] && reply[0][0];
+  const firstIdRaw = entries[0]?.[0];
   if (!firstIdRaw) return { warning: null };
   const firstId = utf8Decoder.decode(firstIdRaw);
   if (compareStreamIds(resumeId, firstId) < 0) {
@@ -165,27 +184,20 @@ function findJsonField(fields) {
 }
 
 /**
- * @param {TailRedis} redis
+ * @param {TailActivationRedis} redis
  * @param {string[]} keys
  */
 export async function activateTailWorkers(redis, keys) {
   if (keys.length === 0) return;
-  const active = await redis.hGetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, keys);
-  const missing = [];
-  for (let i = 0; i < keys.length; i++) {
-    if (active[i] == null) missing.push(keys[i]);
-  }
-  let allowedMissing = missing;
-  if (missing.length > 0) {
-    const count = await redis.hLen(TAIL_ACTIVATION_CHANNEL);
-    allowedMissing = missing.slice(0, Math.max(0, TAIL_ACTIVATION_MAX_ENTRIES - count));
-  }
-  /** @type {Record<string, string>} */
-  const fields = {};
-  for (const key of allowedMissing) fields[key] = "1";
-  if (Object.keys(fields).length > 0) {
-    await redis.hSetEx(TAIL_ACTIVATION_CHANNEL, TAIL_ACTIVATION_TTL_SECONDS, fields);
-  }
+  await redis.eval(
+    ACTIVATE_TAIL_WORKERS_SCRIPT,
+    [TAIL_ACTIVATION_CHANNEL],
+    [
+      String(TAIL_ACTIVATION_TTL_SECONDS),
+      String(TAIL_ACTIVATION_MAX_ENTRIES),
+      ...keys,
+    ],
+  );
 }
 
 /**
@@ -468,9 +480,8 @@ export async function handle({ request, env, ctx, ns, requestId }) {
       }
       try {
         if (!bootstrapped) {
-          // Open BEFORE flipping bootstrapped so a session.open() throw
-          // lets the next pull retry the whole bootstrap, not skip past
-          // it and fail on the first Redis stream read.
+          // Open before flipping bootstrapped so a failed SELECT/open cannot
+          // leave the stream marked ready without a usable read session.
           await session.open();
           sessionOpen = true;
           if (cancelled) {

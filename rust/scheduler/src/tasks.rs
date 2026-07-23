@@ -3,25 +3,32 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 use serde_json::json;
-use tokio::time::{MissedTickBehavior, interval, sleep};
+use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
 
 use crate::cron::{sweep, tick, wait_ms_until_next_slot};
 use crate::queue::{
-    queue_consume_loop, queue_delayed_dispatch_loop, queue_delayed_wake_loop, queue_pel_reap,
-    queue_reconcile,
+    queue_consume_loop, queue_delayed_dispatch_loop, queue_delayed_wake_loop, queue_index_repair,
+    queue_pel_reap, queue_reconcile,
 };
 use crate::{
     AppState, LogLevel, SchedulerResult, error_fields, fields_with_error, log, now_ms,
     panic_payload_message, scheduler_error_fields, workflows_tick,
 };
 
-fn spawn_periodic<F, Fut>(state: AppState, failure_event: &'static str, ms: u64, mut f: F)
-where
+fn spawn_periodic<F, Fut>(
+    state: AppState,
+    failure_event: &'static str,
+    ms: u64,
+    delay_first: bool,
+    mut f: F,
+) where
     F: FnMut(AppState) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = SchedulerResult<()>> + Send + 'static,
 {
     tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_millis(ms));
+        let period = Duration::from_millis(ms);
+        let start = periodic_start(Instant::now(), period, delay_first);
+        let mut ticker = interval_at(start, period);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -56,6 +63,10 @@ where
             }
         }
     });
+}
+
+fn periodic_start(now: Instant, period: Duration, delay_first: bool) -> Instant {
+    if delay_first { now + period } else { now }
 }
 
 fn spawn_workflows_tick_loop(state: AppState) {
@@ -241,6 +252,14 @@ pub(crate) async fn run_startup_reconciliation(state: AppState) {
             scheduler_error_fields(&err),
         );
     }
+    if let Err(err) = queue_index_repair(state.clone()).await {
+        log(
+            &state,
+            LogLevel::Error,
+            "startup_queue_index_repair_failed",
+            scheduler_error_fields(&err),
+        );
+    }
     if let Err(err) = queue_reconcile(state.clone()).await {
         log(
             &state,
@@ -253,11 +272,25 @@ pub(crate) async fn run_startup_reconciliation(state: AppState) {
 
 pub(crate) fn spawn_background_tasks(state: AppState) {
     spawn_cron_dispatch_loop(state.clone());
-    spawn_periodic(state.clone(), "sweep_failed", state.config.sweep_ms, sweep);
+    spawn_periodic(
+        state.clone(),
+        "sweep_failed",
+        state.config.sweep_ms,
+        false,
+        sweep,
+    );
+    spawn_periodic(
+        state.clone(),
+        "queue_index_repair_failed",
+        state.config.sweep_ms,
+        true,
+        queue_index_repair,
+    );
     spawn_periodic(
         state.clone(),
         "queue_reconcile_failed",
         state.config.queue_reconcile_ms,
+        false,
         queue_reconcile,
     );
     spawn_queue_delayed_wake_listener(state.clone());
@@ -269,6 +302,7 @@ pub(crate) fn spawn_background_tasks(state: AppState) {
         state.clone(),
         "periodic_queue_pel_reap_failed",
         state.config.queue_pel_reap_ms,
+        false,
         queue_pel_reap,
     );
     spawn_queue_consumer(state);
@@ -277,6 +311,15 @@ pub(crate) fn spawn_background_tasks(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_periodic_work_waits_one_full_period() {
+        let now = Instant::now();
+        let period = Duration::from_secs(300);
+
+        assert_eq!(periodic_start(now, period, false), now);
+        assert_eq!(periodic_start(now, period, true), now + period);
+    }
 
     #[test]
     fn restart_error_fields_mark_business_errors_as_restartable() {

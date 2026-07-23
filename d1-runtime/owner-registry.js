@@ -14,7 +14,7 @@ import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import {
   boundedPositiveIntEnv,
   currentOwnerGenerationCounter,
-  nextOwnerGeneration,
+  nextOwnerGenerationFromSnapshot,
   ownerLeaseExpiresAt,
   ownerLeaseExpired,
   parseOwnerRecord,
@@ -24,11 +24,12 @@ import {
 import {
   ownerFenceMatches,
   ownerProtocolKeys,
+  releaseOwnerRecords,
   readOwnerRecord,
   readOwnerRecordWithRedisTime,
+  readOwnerSnapshotWithRedisTime,
   stageOwnerClaim,
   stageOwnerRelease,
-  stageOwnerRenew,
 } from "shared-owner-protocol";
 import {
   isDraining,
@@ -65,8 +66,8 @@ const D1_OWNER_PORT = 8787;
  * @typedef {{ namespace?: string, databaseId?: string, dbKey: string, slot?: string | number, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} D1Owner
  * @typedef {{ taskId: string, endpoint: string }} D1Target
  * @typedef {import("shared-redis").RedisSetOptions} RedisSetOptions
- * @typedef {{ get(key: string): Promise<string | Uint8Array | null>, getWithTime(key: string): Promise<{ value: string | Uint8Array | null, nowMs: number }>, time(): Promise<number>, set(key: string, value: string, options?: RedisSetOptions): Promise<unknown>, session<T>(callback: (session: import("shared-redis").RedisSession) => Promise<T>): Promise<T> }} RedisClient
- * @typedef {{ pendingObservedMax: number, waitedMs: number, released?: number, alreadyLost?: number, errors?: Array<unknown> }} DrainResult
+ * @typedef {{ get(key: string): Promise<string | Uint8Array | null>, getMany(keys: string[]): Promise<Array<string | Uint8Array | null>>, getWithTime(key: string): Promise<{ value: string | Uint8Array | null, nowMs: number }>, time(): Promise<number>, set(key: string, value: string, options?: RedisSetOptions): Promise<unknown>, delIfEqMany(entries: Array<[string, string | Uint8Array]>): Promise<number[]>, session<T>(callback: (session: import("shared-redis").RedisSession) => Promise<T>): Promise<T> }} RedisClient
+ * @typedef {{ pendingObservedMax: number, waitedMs: number, readyOwners?: D1Owner[], errors?: Array<unknown> }} DrainResult
  */
 
 /** @param {D1Env} env */
@@ -426,8 +427,8 @@ async function waitForOwnedActorsToDrain(env, entries) {
   const started = Date.now();
   const deadline = started + drainWaitTimeoutMs(env);
   let nextIndex = 0;
-  let released = 0;
-  let alreadyLost = 0;
+  /** @type {D1Owner[]} */
+  const readyOwners = [];
   let pendingObservedMax = pendingQueryCount();
   /** @type {Array<{ dbKey: string, error: string }>} */
   const errors = [];
@@ -442,11 +443,7 @@ async function waitForOwnedActorsToDrain(env, entries) {
         pendingObservedMax = Math.max(pendingObservedMax, pendingQueryCount());
         await waitForOwnedActorToDrain(env, owner, deadline);
         pendingObservedMax = Math.max(pendingObservedMax, pendingQueryCount());
-        const result = await releaseOwner(env, owner);
-        // These counters are only mutated in synchronous sections between
-        // awaits; keep it that way if this loop grows.
-        if (result.released) released += 1;
-        else alreadyLost += 1;
+        readyOwners.push(owner);
       } catch (err) {
         errors.push({
           dbKey: owner.dbKey,
@@ -458,8 +455,7 @@ async function waitForOwnedActorsToDrain(env, entries) {
   return {
     pendingObservedMax,
     waitedMs: Date.now() - started,
-    released,
-    alreadyLost,
+    readyOwners,
     errors,
   };
 }
@@ -469,51 +465,83 @@ export async function renewOwner(env, owner) {
   const client = redisClient(env);
   const key = ownerKeyOf(owner.dbKey);
   const localTask = await resolveTaskIdentity(env);
-  return await withWatchRetries(async () => client.session(async (session) => {
-    await session.watch(key);
-    const { owner: current, nowMs } = await readOwnerWithTimeFromClient(session, owner.dbKey);
+  for (let attempt = 0; attempt < OWNER_CLAIM_RETRIES; attempt += 1) {
+    const { owner: current, rawOwner, nowMs } = await readOwnerWithTimeFromClient(client, owner.dbKey);
     if (!ownerFenceMatches(current, owner)) {
-      await session.unwatch();
       forgetOwnedDb(owner.dbKey);
       if (current) rememberObservedOwner(env, current);
       else forgetObservedOwner(owner.dbKey);
       return { renewed: false, owner: current, nowMs };
     }
     if (ownerLeaseExpired(current, nowMs)) {
-      await session.unwatch();
       forgetOwnedDb(owner.dbKey);
       forgetObservedOwner(owner.dbKey);
       return { renewed: false, owner: current, nowMs };
     }
 
     const renewed = ownerRecordFor(env, owner, owner.generation, localTask, nowMs);
-    await stageOwnerRenew(session.multi(), key, renewed, ownerTtlSeconds(env)).exec();
-    ownedDbs.set(owner.dbKey, renewed);
-    rememberObservedOwner(env, renewed, nowMs);
-    return { renewed: true, owner: renewed, nowMs };
-  }), "owner-renew-raced", `failed to renew D1 database ${owner.dbKey}`);
+    const expected = rawOwner instanceof ArrayBuffer ? new Uint8Array(rawOwner) : rawOwner;
+    if (expected == null) break;
+    const result = await client.set(key, JSON.stringify(renewed), {
+      ttl: ownerTtlSeconds(env),
+      ifeq: expected,
+    });
+    if (result === "OK") {
+      ownedDbs.set(owner.dbKey, renewed);
+      rememberObservedOwner(env, renewed, nowMs);
+      return { renewed: true, owner: renewed, nowMs };
+    }
+  }
+  throw new D1ProtocolError(
+    409,
+    "owner-renew-raced",
+    `failed to renew D1 database ${owner.dbKey}`
+  );
 }
 
-/** @param {D1Env} env @param {D1Owner} owner */
-export async function releaseOwner(env, owner) {
-  const client = redisClient(env);
-  const key = ownerKeyOf(owner.dbKey);
-  return await withWatchRetries(async () => client.session(async (session) => {
-    await session.watch(key);
-    const current = parseOwner(await session.get(key), owner.dbKey);
-    if (!ownerFenceMatches(current, owner)) {
-      await session.unwatch();
-      forgetOwnedDb(owner.dbKey);
-      if (current) rememberObservedOwner(env, current);
-      else forgetObservedOwner(owner.dbKey);
-      return { released: false, owner: current };
-    }
+/** @param {D1Env} env @param {D1Owner[]} owners */
+async function releaseOwners(env, owners) {
+  const results = await releaseOwnerRecords(
+    redisClient(env),
+    owners.map((owner) => ({ ownerKey: ownerKeyOf(owner.dbKey), expected: owner })),
+    (raw, expected) => parseOwner(decodeBulk(raw), expected.dbKey)
+  );
+  return results.map((result, index) => {
+    const expected = owners[index];
+    if (result.error) return { expected, result: null, error: result.error };
+    forgetOwnedDb(expected.dbKey);
+    if (result.owner) rememberObservedOwner(env, result.owner);
+    else forgetObservedOwner(expected.dbKey);
+    return { expected, result, error: null };
+  });
+}
 
-    await stageOwnerRelease(session.multi(), key).exec();
-    forgetOwnedDb(owner.dbKey);
-    forgetObservedOwner(owner.dbKey);
-    return { released: true, owner: null };
-  }), "owner-release-raced", `failed to release D1 database ${owner.dbKey}`);
+/** @param {D1Env} env @param {D1Owner[]} owners */
+async function releaseOwnersForDrain(env, owners) {
+  let outcomes;
+  try {
+    outcomes = await releaseOwners(env, owners);
+  } catch (err) {
+    return {
+      released: 0,
+      alreadyLost: 0,
+      errors: owners.map((owner) => ({ dbKey: owner.dbKey, error: errorMessage(err) })),
+    };
+  }
+  let released = 0;
+  let alreadyLost = 0;
+  /** @type {Array<{ dbKey: string, error: string }>} */
+  const errors = [];
+  for (const outcome of outcomes) {
+    if (outcome.result == null) {
+      errors.push({ dbKey: outcome.expected.dbKey, error: errorMessage(outcome.error) });
+    } else if (outcome.result.released) {
+      released += 1;
+    } else {
+      alreadyLost += 1;
+    }
+  }
+  return { released, alreadyLost, errors };
 }
 
 /** @param {D1Env} env @param {D1Owner} staleOwner @returns {Promise<D1Owner>} */
@@ -527,7 +555,12 @@ export async function takeoverExpiredOwner(env, staleOwner) {
   const generationKey = ownerGenerationKeyOf(staleOwner.dbKey);
   return await withWatchRetries(async () => client.session(async (session) => {
     await session.watch(key, generationKey);
-    const { owner: current, nowMs } = await readOwnerWithTimeFromClient(session, staleOwner.dbKey);
+    const { owner: current, relatedValues, nowMs } = await readOwnerSnapshotWithRedisTime(
+      session,
+      key,
+      [generationKey],
+      (raw) => parseOwner(decodeBulk(raw), staleOwner.dbKey)
+    );
     if (!current) {
       await session.unwatch();
       forgetObservedOwner(staleOwner.dbKey);
@@ -545,7 +578,11 @@ export async function takeoverExpiredOwner(env, staleOwner) {
       return current;
     }
 
-    const generation = await nextOwnerGeneration(session, generationKey, current.generation);
+    const generation = nextOwnerGenerationFromSnapshot(
+      relatedValues[0],
+      generationKey,
+      current.generation
+    );
     const owner = ownerRecordFor(env, current, generation, localTask, nowMs);
     await stageOwnerClaim(session.multi(), { ownerKey: key, generationKey }, owner, ownerTtlSeconds(env)).exec();
     rememberOwner(owner);
@@ -613,15 +650,13 @@ export async function drainOwnedDbs(env) {
   const entries = Array.from(ownedDbs.values());
   /** @type {DrainResult} */
   let drainWait = { pendingObservedMax: pendingQueryCount(), waitedMs: 0 };
-  let released = 0;
-  let alreadyLost = 0;
   /** @type {Array<unknown>} */
   const errors = [];
+  let readyOwners = entries;
 
   if (env.D1_DATABASES && entries.length > 0) {
     drainWait = await waitForOwnedActorsToDrain(env, entries);
-    released = drainWait.released ?? 0;
-    alreadyLost = drainWait.alreadyLost ?? 0;
+    readyOwners = drainWait.readyOwners ?? [];
     errors.push(...(drainWait.errors ?? []));
   } else {
     try {
@@ -645,16 +680,10 @@ export async function drainOwnedDbs(env) {
         errors: [{ dbKey: null, error: errorMessage(err) }],
       };
     }
-    for (const owner of entries) {
-      try {
-        const result = await releaseOwner(env, owner);
-        if (result.released) released += 1;
-        else alreadyLost += 1;
-      } catch (err) {
-        errors.push({ dbKey: owner.dbKey, error: errorMessage(err) });
-      }
-    }
   }
+
+  const releaseResult = await releaseOwnersForDrain(env, readyOwners);
+  errors.push(...releaseResult.errors);
 
   return {
     draining: isDraining(),
@@ -662,8 +691,8 @@ export async function drainOwnedDbs(env) {
     pending: pendingQueryCount(),
     pendingObservedMax: drainWait.pendingObservedMax,
     waitedMs: drainWait.waitedMs,
-    released,
-    alreadyLost,
+    released: releaseResult.released,
+    alreadyLost: releaseResult.alreadyLost,
     errors,
   };
 }
@@ -719,7 +748,12 @@ export async function rebalanceDatabase(env, database, target) {
   const localTask = await resolveTaskIdentity(env);
   return await withWatchRetries(async () => client.session(async (session) => {
     await session.watch(key, generationKey);
-    const current = parseOwner(await session.get(key), database.dbKey);
+    const { owner: current, relatedValues, nowMs } = await readOwnerSnapshotWithRedisTime(
+      session,
+      key,
+      [generationKey],
+      (raw) => parseOwner(decodeBulk(raw), database.dbKey)
+    );
     if (!current || current.taskId !== localTask.taskId) {
       await session.unwatch();
       forgetOwnedDb(database.dbKey);
@@ -742,8 +776,11 @@ export async function rebalanceDatabase(env, database, target) {
       return { database, outcome: "unchanged", owner: current };
     }
 
-    const generation = await nextOwnerGeneration(session, generationKey, current.generation);
-    const nowMs = await redisServerTimeMs(session);
+    const generation = nextOwnerGenerationFromSnapshot(
+      relatedValues[0],
+      generationKey,
+      current.generation
+    );
     const nextOwner = ownerRecordFor(env, database, generation, target, nowMs);
     await stageOwnerClaim(session.multi(), { ownerKey: key, generationKey }, nextOwner, ownerTtlSeconds(env)).exec();
     forgetOwnedDb(database.dbKey);
@@ -824,7 +861,12 @@ export async function resolveDbOwner(env, identity, options = {}) {
   try {
     return await withWatchRetries(async () => client.session(async (session) => {
       await session.watch(key, generationKey);
-      const { owner: racedOwner, nowMs } = await readOwnerWithTimeFromClient(session, identity.dbKey);
+      const { owner: racedOwner, relatedValues, nowMs } = await readOwnerSnapshotWithRedisTime(
+        session,
+        key,
+        [generationKey],
+        (raw) => parseOwner(decodeBulk(raw), identity.dbKey)
+      );
       if (racedOwner) {
         await session.unwatch();
         if (ownerLeaseExpired(racedOwner, nowMs)) {
@@ -838,7 +880,7 @@ export async function resolveDbOwner(env, identity, options = {}) {
         return racedOwner;
       }
 
-      const generation = await nextOwnerGeneration(session, generationKey);
+      const generation = nextOwnerGenerationFromSnapshot(relatedValues[0], generationKey);
       const owner = ownerRecordFor(env, identity, generation, localTask, nowMs);
       await stageOwnerClaim(session.multi(), { ownerKey: key, generationKey }, owner, ownerTtlSeconds(env)).exec();
       rememberOwner(owner);

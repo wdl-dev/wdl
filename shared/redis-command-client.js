@@ -2,6 +2,8 @@ import { connect } from "cloudflare:sockets";
 import { RedisSession } from "shared-redis-session";
 import { errorMessage } from "./errors.js";
 import {
+  buildHGetExArgs,
+  buildHSetExArgs,
   buildHSetArgs,
   buildSetArgs,
   concatBuffers,
@@ -140,14 +142,32 @@ export class RedisClient {
 
   /** @param {string} key */
   async getWithTime(key) {
-    const [value, time] = await this._execPipeline("GET_TIME_PIPELINE", [
-      ["GET", key],
+    const { values, nowMs } = await this.getManyWithTime([key]);
+    return {
+      value: values[0],
+      nowMs,
+    };
+  }
+
+  /** @param {string[]} keys */
+  async getManyWithTime(keys) {
+    if (keys.length === 0) throw new Error("getManyWithTime requires at least one key");
+    const replies = await this._execPipeline("GET_TIME_PIPELINE", [
+      ...keys.map((key) => /** @type {RedisCommand} */ (["GET", key])),
       ["TIME"],
     ]);
     return {
-      value: /** @type {Uint8Array | null} */ (value),
-      nowMs: decodeRedisTimeMs(time),
+      values: /** @type {Array<Uint8Array | null>} */ (replies.slice(0, keys.length)),
+      nowMs: decodeRedisTimeMs(replies[keys.length]),
     };
+  }
+
+  /** @param {string[]} keys */
+  async getMany(keys) {
+    return /** @type {Array<Uint8Array | null>} */ (await this._execPipeline(
+      "GET_PIPELINE",
+      keys.map((key) => ["GET", key])
+    ));
   }
 
   /** @param {string} key @param {RedisArg} value @param {RedisSetOptions} [opts] */
@@ -161,9 +181,17 @@ export class RedisClient {
     return /** @type {number} */ (await this._exec("DEL", ...keys));
   }
 
-  /** @param {string} key @param {string} value */
+  /** @param {string} key @param {RedisArg} value */
   async delIfEq(key, value) {
     return /** @type {number} */ (await this._exec("DELIFEQ", key, value));
+  }
+
+  /** @param {Array<[string, RedisArg]>} entries */
+  async delIfEqMany(entries) {
+    return /** @type {number[]} */ (await this._execPipeline(
+      "DELIFEQ_PIPELINE",
+      entries.map(([key, value]) => ["DELIFEQ", key, value])
+    ));
   }
 
   /** @param {string} script @param {string[]} [keys] @param {RedisArg[]} [args] */
@@ -260,7 +288,7 @@ export class RedisClient {
   async hGetEx(key, ttlSeconds, fields) {
     if (fields.length === 0) return [];
     const arr = /** @type {unknown[] | null} */ (
-      await this._exec("HGETEX", key, "EX", String(ttlSeconds), "FIELDS", String(fields.length), ...fields)
+      await this._exec(...buildHGetExArgs(key, ttlSeconds, fields))
     );
     return arr ? arr.map(decodeBulk) : [];
   }
@@ -279,6 +307,33 @@ export class RedisClient {
     return replies.map(decodeHashObject);
   }
 
+  /** @param {string} hashKey @param {string} stringKey */
+  async hGetAllAndGet(hashKey, stringKey) {
+    const [hashReply, valueReply] = await this._execPipeline("HGETALL_GET_PIPELINE", [
+      ["HGETALL", hashKey],
+      ["GET", stringKey],
+    ]);
+    return {
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      value: decodeBulk(valueReply),
+    };
+  }
+
+  /** @param {string} setKey @param {string} hashKey */
+  async sMembersAndHGetAll(setKey, hashKey) {
+    const [membersReply, hashReply] = await this._execPipeline(
+      "SMEMBERS_HGETALL_PIPELINE",
+      [
+        ["SMEMBERS", setKey],
+        ["HGETALL", hashKey],
+      ]
+    );
+    return {
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+    };
+  }
+
   /** @param {string} key @param {...RedisHSetArg} rest */
   async hSet(key, ...rest) {
     return /** @type {number} */ (await this._exec(...buildHSetArgs(key, rest)));
@@ -286,12 +341,7 @@ export class RedisClient {
 
   /** @param {string} key @param {number} ttlSeconds @param {Record<string, RedisArg>} fields */
   async hSetEx(key, ttlSeconds, fields) {
-    /** @type {RedisCommand} */
-    const args = ["HSETEX", key, "EX", String(ttlSeconds), "FIELDS"];
-    const entries = Object.entries(fields);
-    args.push(String(entries.length));
-    for (const [field, value] of entries) args.push(field, value);
-    return /** @type {number} */ (await this._exec(...args));
+    return /** @type {number} */ (await this._exec(...buildHSetExArgs(key, ttlSeconds, fields)));
   }
 
   /** @param {string} key @param {...string} fields */
@@ -324,6 +374,14 @@ export class RedisClient {
     return replies.map((value) => value === 1);
   }
 
+  /** @param {Array<[string, string]>} pairs */
+  async hStrLenMany(pairs) {
+    return /** @type {number[]} */ (await this._execPipeline(
+      "HSTRLEN_PIPELINE",
+      pairs.map(([key, field]) => ["HSTRLEN", key, field])
+    ));
+  }
+
   /** @param {string} key @param {string|string[]} members */
   async sAdd(key, members) {
     const arr = Array.isArray(members) ? members : [members];
@@ -338,6 +396,23 @@ export class RedisClient {
 
   /** @param {string} key */
   async sMembers(key) { return this.smembers(key); }
+  /** @param {string[]} keys */
+  async sMembersMany(keys) {
+    const replies = /** @type {(unknown[] | null)[]} */ (await this._execPipeline(
+      "SMEMBERS_PIPELINE",
+      keys.map((key) => ["SMEMBERS", key])
+    ));
+    return replies.map(decodeStringArray);
+  }
+  /** @param {string} key */
+  async sCard(key) { return /** @type {number} */ (await this._exec("SCARD", key)); }
+  /** @param {string[]} keys */
+  async sCardMany(keys) {
+    return /** @type {number[]} */ (await this._execPipeline(
+      "SCARD_PIPELINE",
+      keys.map((key) => ["SCARD", key])
+    ));
+  }
   /** @param {string} key @param {string} member */
   async sIsMember(key, member) { return this.sismember(key, member); }
 
@@ -358,6 +433,15 @@ export class RedisClient {
   /** @param {...string} keys */
   async exists(...keys) { return /** @type {number} */ (await this._exec("EXISTS", ...keys)); }
 
+  /** @param {string[]} keys */
+  async existsMany(keys) {
+    const replies = /** @type {number[]} */ (await this._execPipeline(
+      "EXISTS_PIPELINE",
+      keys.map((key) => ["EXISTS", key])
+    ));
+    return replies.map((value) => value > 0);
+  }
+
   /** @param {string} src @param {string} dst @param {RedisCopyOptions} [opts] */
   async copy(src, dst, opts = {}) {
     const args = ["COPY", src, dst];
@@ -373,6 +457,18 @@ export class RedisClient {
     return /** @type {[Uint8Array, Uint8Array[]][]} */ (await this._exec("XRANGE", ...args));
   }
 
+  /** @param {string} key @param {string} start @param {string} end @param {number} count */
+  async existsAndXRange(key, start, end, count) {
+    const [exists, entries] = await this._execPipeline("EXISTS_XRANGE_PIPELINE", [
+      ["EXISTS", key],
+      ["XRANGE", key, start, end, "COUNT", String(count)],
+    ]);
+    return {
+      exists: /** @type {number} */ (exists) > 0,
+      entries: /** @type {[Uint8Array, Uint8Array[]][]} */ (entries),
+    };
+  }
+
   /** @template T @param {(session: RedisSession) => Promise<T>} fn @returns {Promise<T>} */
   async session(fn) {
     const session = new RedisSession(this.address, {
@@ -380,8 +476,8 @@ export class RedisClient {
       onCommand: this.onCommand,
       connect: this._connect,
     });
-    await session.open();
     try {
+      await session.open();
       return await fn(session);
     } finally {
       await session.close();

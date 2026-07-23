@@ -543,30 +543,13 @@ fn workflow_runtime_dispatch_checks_status_before_json_parse() {
 #[test]
 fn workflow_admission_isolates_per_instance_dispatch_errors() {
     let tick_source = include_str!("api/tick.rs");
-    let dispatch_source = RUNTIME_DISPATCH_SOURCE;
-    let prepare_ready_token = tick_source
-        .split("async fn prepare_ready_token")
-        .nth(1)
-        .expect("tick.rs should define prepare_ready_token");
     assert!(
         tick_source.contains("ReadyTokenResult::DispatchError"),
         "runtime dispatch errors must become a per-token result instead of aborting the whole tick"
     );
     assert!(
-        prepare_ready_token.contains("read_state_by_id(app, &ns, &workflow_key, &instance_id)"),
-        "ready-token dispatch should read state directly from parsed identity"
-    );
-    assert!(
-        !prepare_ready_token.contains("WorkflowRequest {"),
-        "ready-token dispatch should not build a placeholder WorkflowRequest just to read state"
-    );
-    assert!(
         tick_source.contains("workflow_dispatch_error"),
         "isolated dispatch errors should still be visible in structured logs"
-    );
-    assert!(
-        dispatch_source.contains("commit_runtime_failed_payload"),
-        "deterministic terminal payload cap errors must commit a failed terminal state instead of retrying"
     );
 }
 
@@ -642,42 +625,14 @@ fn workflow_ready_writes_update_active_shard_index() {
 }
 
 #[test]
-fn workflow_do_alarm_worker_cleanup_scans_by_worker_once() {
-    let source = include_str!("api/do_alarms/mutations.rs");
-    let cleanup = source
-        .split("pub(crate) async fn cleanup_do_alarms_for_worker")
-        .nth(1)
-        .expect("cleanup_do_alarms_for_worker should exist");
-    assert!(
-        cleanup.contains("let mut cursor = 0_u64;") && cleanup.contains("loop {"),
-        "worker cleanup should use a single SSCAN cursor loop"
-    );
-    assert!(
-        cleanup.contains("if !job_ids.is_empty() {")
-            && cleanup.contains("snapshot_key")
-            && cleanup.contains(r#".cmd("SADD")"#)
-            && cleanup.contains(r#""SPOP""#)
-            && !cleanup.contains("job_ids_to_cleanup"),
-        "worker cleanup should snapshot by-worker scan batches without accumulating the whole worker index locally"
-    );
-    let scan_done = cleanup
-        .find("if cursor == 0")
-        .expect("worker cleanup should finish the source SSCAN loop");
-    let snapshot_pop = cleanup
-        .find(r#""SPOP""#)
-        .expect("worker cleanup should pop from the snapshot after scanning");
-    assert!(
-        scan_done < snapshot_pop,
-        "worker cleanup must not delete from the by-worker source set while scanning it"
-    );
-    assert!(
-        cleanup.matches(r#""EXPIRE""#).count() >= 2,
-        "worker cleanup snapshot TTL should be refreshed during snapshot build and drain"
-    );
-    assert!(
-        !cleanup.contains("touched"),
-        "worker cleanup should not rescan the whole by-worker set until a zero-touched pass"
-    );
+fn workflow_do_alarm_mutations_avoid_whole_set_redis_commands() {
+    let source = include_str!("api/do_alarms/mutations.rs").to_ascii_uppercase();
+    for command in ["COPY", "SMEMBERS"] {
+        assert!(
+            !source.contains(&format!(r#"CMD("{command}")"#)),
+            "DO alarm mutations must not use whole-set {command}"
+        );
+    }
 }
 
 #[test]

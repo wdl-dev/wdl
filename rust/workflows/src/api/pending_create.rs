@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use wdl_rust_common::time::{now_ms, random_hex_64};
+use wdl_rust_common::{
+    redis_eval::StaticRedisScript,
+    time::{now_ms, random_hex_64},
+};
 
 use crate::{
     AppState, InstanceIdentity, WorkflowError, WorkflowResult, by_version_key, by_worker_key,
@@ -44,6 +47,11 @@ redis.call("SREM", KEYS[8], ARGV[1])
 redis.call("SREM", KEYS[9], ARGV[1])
 return 1
 "#;
+
+static FINALIZE_CREATE_INSTANCE: StaticRedisScript =
+    StaticRedisScript::new(FINALIZE_CREATE_INSTANCE_SCRIPT);
+static CLEANUP_PENDING_CREATE: StaticRedisScript =
+    StaticRedisScript::new(CLEANUP_PENDING_CREATE_SCRIPT);
 
 pub(super) fn pending_create_token(state: &AppState, req: &WorkflowRequest, id: &str) -> String {
     format!(
@@ -126,7 +134,7 @@ pub(super) async fn finalize_created_instance(
     let shard_arg = shard.to_string();
     let finalized: i64 = eval_script(
         state,
-        FINALIZE_CREATE_INSTANCE_SCRIPT,
+        &FINALIZE_CREATE_INSTANCE,
         &[&state_key, &ready, ready_active_key(), &by_workflow],
         &[&token, &now, pending_create_token, &shard_arg, id],
     )
@@ -178,7 +186,7 @@ pub(super) async fn cleanup_pending_create_identity(
     let referrer_member = workflow_referrer_member(&identity.workflow_key, &identity.instance_id);
     let removed: i64 = eval_script(
         state,
-        CLEANUP_PENDING_CREATE_SCRIPT,
+        &CLEANUP_PENDING_CREATE,
         &[
             &state_key,
             &payloads_key,

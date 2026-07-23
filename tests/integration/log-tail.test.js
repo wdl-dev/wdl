@@ -25,7 +25,13 @@ import {
   responseJson,
   parseJsonText,
 } from "./helpers/index.js";
-import { redisCommand, redisDel, redisXLen, redisXRangeRaw } from "./helpers/redis.js";
+import {
+  redisCommand,
+  redisDel,
+  redisScriptFlush,
+  redisXLen,
+  redisXRangeRaw,
+} from "./helpers/redis.js";
 
 setupIntegrationSuite();
 
@@ -222,6 +228,7 @@ test("wdl tail: console.* + uncaught exception flow end-to-end", async () => {
     ns, query: "worker=tail-target", durationMs: 5000,
   });
   await waitForActivation(ns, "tail-target");
+  redisScriptFlush();
 
   for (const tag of ["one", "two"]) {
     const res = await gatewayFetch(ns, `/tail-target/?tag=${tag}`);

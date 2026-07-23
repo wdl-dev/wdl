@@ -2,28 +2,63 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 
-use redis::{AsyncCommands, Value};
+use redis::AsyncCommands;
 use wdl_rust_common::identity::{is_valid_route_ns, is_valid_worker_name};
 use wdl_rust_common::queue_keys::is_valid_queue_name;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::worker_contract::parse_version_tag;
 
 use crate::{
-    AppState, CONSUMER_GROUP, MAX_BATCH_SIZE_CAP, QueueState, SchedulerResult, indexed_data_keys,
-    indexed_keys,
+    AppState, CONSUMER_GROUP, QueueState, SchedulerError, SchedulerResult,
+    indexed_existing_data_keys, indexed_existing_keys, repair_data_index, repair_index,
 };
 
 use super::{
-    Consumer, QUEUE_CONSUMER_INDEX_KEY, QUEUE_CONSUMER_SCAN_PATTERN, QUEUE_DELAYED_INDEX_KEY,
+    Consumer, MAX_BATCH_SIZE_CAP, MAX_BATCH_TIMEOUT_MS, MAX_QUEUE_DELAY_SECONDS, MAX_RETRIES,
+    QUEUE_CONSUMER_INDEX_KEY, QUEUE_CONSUMER_SCAN_PATTERN, QUEUE_DELAYED_INDEX_KEY,
     QUEUE_DELAYED_SCAN_PATTERN, QUEUE_STREAM_INDEX_KEY, QUEUE_STREAM_SCAN_PATTERN,
-    parse_consumer_key, queue_consumer_key, queue_stream_key, redis_error_is_busygroup,
+    parse_consumer_key, queue_consumer_key, queue_stream_key,
 };
 
 const QUEUE_RECONCILE_CONSUMER_HASH_BATCH_SIZE: usize = 128;
+const RECONCILE_QUEUE_GROUPS_SCRIPT: &str = r#"
+local results = {}
+for index = 2, #KEYS do
+  local result = redis.pcall('XGROUP', 'CREATE', KEYS[index], ARGV[1], '0', 'MKSTREAM')
+  if type(result) == 'table' and result.err then
+    if string.sub(result.err, 1, 9) ~= 'BUSYGROUP' then
+      results[#results + 1] = {0, result.err}
+    else
+      local indexed = redis.pcall('SADD', KEYS[1], KEYS[index])
+      if type(indexed) == 'table' and indexed.err then
+        results[#results + 1] = {0, indexed.err}
+      else
+        results[#results + 1] = {1, ''}
+      end
+    end
+  else
+    local indexed = redis.pcall('SADD', KEYS[1], KEYS[index])
+    if type(indexed) == 'table' and indexed.err then
+      results[#results + 1] = {0, indexed.err}
+    else
+      results[#results + 1] = {1, ''}
+    end
+  end
+end
+return results
+"#;
 
-fn finite_or(value: Option<&String>, fallback: i64) -> i64 {
-    value
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(fallback)
+static RECONCILE_QUEUE_GROUPS: StaticRedisScript =
+    StaticRedisScript::new(RECONCILE_QUEUE_GROUPS_SCRIPT);
+
+fn bounded_i64(value: Option<&String>, fallback: i64, min: i64, max: i64) -> Option<i64> {
+    match value {
+        None => Some(fallback),
+        Some(value) => value
+            .parse::<i64>()
+            .ok()
+            .filter(|parsed| (min..=max).contains(parsed)),
+    }
 }
 
 pub(crate) fn hydrate_consumer(
@@ -43,14 +78,21 @@ pub(crate) fn hydrate_consumer(
         .filter(|value| parse_version_tag(value).is_ok())
         .cloned()?;
     let max_batch_size =
-        finite_or(hash.get("max_batch_size"), 10).clamp(1, MAX_BATCH_SIZE_CAP as i64) as usize;
-    let max_batch_timeout_ms = finite_or(hash.get("max_batch_timeout_ms"), 5000);
-    let max_retries = finite_or(hash.get("max_retries"), 3);
-    let retry_delay_secs = finite_or(hash.get("retry_delay_secs"), 0).max(0);
-    let dead_letter_queue = hash
-        .get("dead_letter_queue")
-        .filter(|value| !value.is_empty())
-        .cloned();
+        bounded_i64(hash.get("max_batch_size"), 10, 1, MAX_BATCH_SIZE_CAP as i64)? as usize;
+    let max_batch_timeout_ms = bounded_i64(
+        hash.get("max_batch_timeout_ms"),
+        5000,
+        0,
+        MAX_BATCH_TIMEOUT_MS,
+    )?;
+    let max_retries = bounded_i64(hash.get("max_retries"), 3, 0, MAX_RETRIES)?;
+    let retry_delay_secs =
+        bounded_i64(hash.get("retry_delay_secs"), 0, 0, MAX_QUEUE_DELAY_SECONDS)?;
+    let dead_letter_queue = match hash.get("dead_letter_queue") {
+        None => None,
+        Some(value) if is_valid_queue_name(value) && value != queue => Some(value.clone()),
+        Some(_) => return None,
+    };
     Some(Consumer {
         ns: ns.to_string(),
         queue: queue.to_string(),
@@ -63,37 +105,55 @@ pub(crate) fn hydrate_consumer(
     })
 }
 
-async fn flush_indexed_streams(
-    state: &AppState,
-    indexed_streams: &mut Vec<String>,
-) -> SchedulerResult<()> {
-    if indexed_streams.is_empty() {
-        return Ok(());
+fn parse_reconcile_group_reply(
+    reply: Vec<(i64, String)>,
+    expected: usize,
+) -> SchedulerResult<Vec<Result<(), String>>> {
+    if reply.len() != expected {
+        return Err(SchedulerError::internal_error(
+            "queue consumer group reconcile count mismatch",
+        ));
     }
-    let streams = std::mem::take(indexed_streams);
-    let _: i64 = state
+    reply
+        .into_iter()
+        .map(|(status, message)| match status {
+            1 if message.is_empty() => Ok(Ok(())),
+            0 if !message.is_empty() => Ok(Err(message)),
+            _ => Err(SchedulerError::internal_error(
+                "invalid queue consumer group reconcile response",
+            )),
+        })
+        .collect()
+}
+
+async fn reconcile_queue_groups(
+    state: &AppState,
+    stream_keys: &[String],
+) -> SchedulerResult<Vec<Result<(), String>>> {
+    if stream_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut keys = Vec::with_capacity(stream_keys.len() + 1);
+    keys.push(QUEUE_STREAM_INDEX_KEY);
+    keys.extend(stream_keys.iter().map(String::as_str));
+    let reply: Vec<(i64, String)> = state
         .data_redis
         .with_conn(async |mut conn| {
-            redis::cmd("SADD")
-                .arg(QUEUE_STREAM_INDEX_KEY)
-                .arg(streams)
-                .query_async(&mut conn)
+            RECONCILE_QUEUE_GROUPS
+                .prepare_invoke(&keys, &[CONSUMER_GROUP])
+                .invoke_async(&mut conn)
                 .await
         })
         .await?;
-    Ok(())
+    parse_reconcile_group_reply(reply, stream_keys.len())
 }
 
 pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
     let mut seen = HashSet::new();
     let mut registry_changed = false;
-    let consumer_keys = indexed_keys(
-        &state,
-        QUEUE_CONSUMER_INDEX_KEY,
-        QUEUE_CONSUMER_SCAN_PATTERN,
-    )
-    .await?;
-    let mut indexed_streams = Vec::new();
+    let mut reconcile_error_count = 0usize;
+    let mut first_reconcile_error = None;
+    let consumer_keys = indexed_existing_keys(&state, QUEUE_CONSUMER_INDEX_KEY, "hash").await?;
     for consumer_key_chunk in consumer_keys.chunks(QUEUE_RECONCILE_CONSUMER_HASH_BATCH_SIZE) {
         let consumer_hashes: Vec<HashMap<String, String>> = state
             .redis
@@ -105,6 +165,7 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
                 pipe.query_async(&mut conn).await
             })
             .await?;
+        let mut resolved = Vec::with_capacity(consumer_key_chunk.len());
         for (key, hash) in consumer_key_chunk.iter().zip(consumer_hashes) {
             let Some((ns, queue)) = parse_consumer_key(key) else {
                 continue;
@@ -113,47 +174,38 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
                 continue;
             };
             let stream_key = queue_stream_key(&ns, &queue);
+            resolved.push((stream_key, consumer));
+        }
+        let stream_keys = resolved
+            .iter()
+            .map(|(stream_key, _)| stream_key.clone())
+            .collect::<Vec<_>>();
+        let group_results = match reconcile_queue_groups(&state, &stream_keys).await {
+            Ok(results) => results,
+            Err(err) => {
+                reconcile_error_count += resolved.len();
+                first_reconcile_error.get_or_insert_with(|| err.message.clone());
+                // The whole batch has an unknown outcome. Preserve any prior
+                // in-memory consumers for these streams while later chunks
+                // continue; per-stream script errors below remain removable.
+                seen.extend(stream_keys);
+                continue;
+            }
+        };
+        let mut registry = state.queues.registry.write().await;
+        for ((stream_key, consumer), group_result) in resolved.into_iter().zip(group_results) {
+            if let Err(message) = group_result {
+                reconcile_error_count += 1;
+                first_reconcile_error.get_or_insert(message);
+                continue;
+            }
             seen.insert(stream_key.clone());
-            // Register the consumer before MKSTREAM: consume_loop may pick up
-            // the stream before its group exists. The NOGROUP branch there
-            // triggers an immediate reconcile, and XGROUP CREATE is idempotent
-            // via BUSYGROUP so a retry does no harm.
-            let previous = state
-                .queues
-                .registry
-                .write()
-                .await
-                .insert(stream_key.clone(), consumer.clone());
+            let previous = registry.insert(stream_key, consumer.clone());
             if previous.as_ref() != Some(&consumer) {
                 registry_changed = true;
             }
-            let group_result: Result<Value, redis::RedisError> = state
-                .data_redis
-                .with_conn(async |mut conn| {
-                    let stream_key = stream_key.clone();
-                    redis::cmd("XGROUP")
-                        .arg("CREATE")
-                        .arg(stream_key)
-                        .arg(CONSUMER_GROUP)
-                        .arg("0")
-                        .arg("MKSTREAM")
-                        .query_async(&mut conn)
-                        .await
-                })
-                .await;
-            if let Err(err) = group_result
-                && !redis_error_is_busygroup(&err)
-            {
-                flush_indexed_streams(&state, &mut indexed_streams).await?;
-                return Err(err.into());
-            }
-            indexed_streams.push(stream_key);
-            if indexed_streams.len() >= QUEUE_RECONCILE_CONSUMER_HASH_BATCH_SIZE {
-                flush_indexed_streams(&state, &mut indexed_streams).await?;
-            }
         }
     }
-    flush_indexed_streams(&state, &mut indexed_streams).await?;
     {
         let mut registry = state.queues.registry.write().await;
         let before_len = registry.len();
@@ -162,20 +214,17 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
             registry_changed = true;
         }
     }
-    // consumer_streams is a derived snapshot. Refresh after every successful
-    // reconcile so a prior XGROUP error after registry insertion cannot
-    // strand a stream outside the consumer loop.
+    // consumer_streams is a derived snapshot. Refresh after additions and the
+    // final retain so blocking reads see the registry state produced by this pass.
     refresh_consumer_streams(&state).await;
 
-    let streams =
-        indexed_data_keys(&state, QUEUE_STREAM_INDEX_KEY, QUEUE_STREAM_SCAN_PATTERN).await?;
+    let streams = indexed_existing_data_keys(&state, QUEUE_STREAM_INDEX_KEY, "stream").await?;
     {
         let mut known = state.queues.known_streams.write().await;
         known.clear();
         known.extend(streams);
     }
-    let delayed =
-        indexed_data_keys(&state, QUEUE_DELAYED_INDEX_KEY, QUEUE_DELAYED_SCAN_PATTERN).await?;
+    let delayed = indexed_existing_data_keys(&state, QUEUE_DELAYED_INDEX_KEY, "zset").await?;
     let delayed_changed = {
         let delayed = delayed.into_iter().collect::<HashSet<_>>();
         let mut known = state.queues.known_delayed.write().await;
@@ -189,6 +238,40 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
     if registry_changed || delayed_changed {
         state.queues.delayed_changed.notify_one();
     }
+    if reconcile_error_count > 0 {
+        return Err(SchedulerError::internal_error(format!(
+            "queue consumer group reconcile failed for {reconcile_error_count} streams; first error: {}",
+            first_reconcile_error.as_deref().unwrap_or("unknown error")
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) async fn queue_index_repair(state: AppState) -> SchedulerResult<()> {
+    let consumer_result = repair_index(
+        &state,
+        QUEUE_CONSUMER_INDEX_KEY,
+        QUEUE_CONSUMER_SCAN_PATTERN,
+        "hash",
+    )
+    .await;
+    let stream_result = repair_data_index(
+        &state,
+        QUEUE_STREAM_INDEX_KEY,
+        QUEUE_STREAM_SCAN_PATTERN,
+        "stream",
+    )
+    .await;
+    let delayed_result = repair_data_index(
+        &state,
+        QUEUE_DELAYED_INDEX_KEY,
+        QUEUE_DELAYED_SCAN_PATTERN,
+        "zset",
+    )
+    .await;
+    consumer_result?;
+    stream_result?;
+    delayed_result?;
     Ok(())
 }
 
@@ -288,13 +371,12 @@ mod tests {
     }
 
     #[test]
-    fn queue_index_lookup_plan_covers_backfill_and_stale_branches() {
+    fn queue_index_lookup_plan_keeps_existing_members_and_removes_stale_members() {
         assert_eq!(
             crate::classify_index_members(Vec::new(), Vec::new()),
             crate::IndexedMemberPlan {
                 existing: Vec::new(),
                 stale: Vec::new(),
-                needs_scan: true,
             }
         );
 
@@ -303,7 +385,6 @@ mod tests {
             crate::IndexedMemberPlan {
                 existing: Vec::new(),
                 stale: vec!["queue:demo:old:s".to_string()],
-                needs_scan: true,
             }
         );
 
@@ -318,19 +399,12 @@ mod tests {
             crate::IndexedMemberPlan {
                 existing: vec!["queue:demo:jobs:s".to_string()],
                 stale: vec!["queue:demo:old:s".to_string()],
-                needs_scan: false,
             }
-        );
-
-        assert_eq!(crate::backfill_index_members(&[]), None);
-        assert_eq!(
-            crate::backfill_index_members(&["queue:demo:jobs:s".to_string()]),
-            Some(vec!["queue:demo:jobs:s".to_string()])
         );
     }
 
     #[test]
-    fn hydrate_consumer_preserves_defaults_and_runtime_batch_cap() {
+    fn hydrate_consumer_preserves_defaults_and_valid_explicit_bounds() {
         let defaults = hydrate_consumer(
             "demo",
             "jobs",
@@ -370,7 +444,7 @@ mod tests {
             &str_map(&[
                 ("worker", "w"),
                 ("version", "v3"),
-                ("max_batch_size", "1000"),
+                ("max_batch_size", "100"),
                 ("max_retries", "0"),
                 ("max_batch_timeout_ms", "0"),
                 ("retry_delay_secs", "0"),
@@ -381,6 +455,74 @@ mod tests {
         assert_eq!(zeroes.max_retries, 0);
         assert_eq!(zeroes.max_batch_timeout_ms, 0);
         assert_eq!(zeroes.retry_delay_secs, 0);
+    }
+
+    #[test]
+    fn hydrate_consumer_rejects_present_invalid_projection_fields() {
+        for (field, value) in [
+            ("max_batch_size", "0"),
+            ("max_batch_size", "101"),
+            ("max_batch_size", "not-a-number"),
+            ("max_batch_timeout_ms", "-1"),
+            ("max_batch_timeout_ms", "60001"),
+            ("max_retries", "-1"),
+            ("max_retries", "101"),
+            ("retry_delay_secs", "-1"),
+            ("retry_delay_secs", "86401"),
+            ("dead_letter_queue", "bad:queue"),
+            ("dead_letter_queue", "jobs"),
+        ] {
+            let mut hash = valid_consumer_hash("w", "v1");
+            hash.insert(field.to_string(), value.to_string());
+            assert!(
+                hydrate_consumer("demo", "jobs", &hash).is_none(),
+                "{field}={value} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn reconcile_group_reply_preserves_per_stream_results() {
+        assert_eq!(
+            parse_reconcile_group_reply(
+                vec![
+                    (1, String::new()),
+                    (0, "WRONGTYPE bad stream".to_string()),
+                    (1, String::new()),
+                ],
+                3,
+            )
+            .unwrap(),
+            vec![Ok(()), Err("WRONGTYPE bad stream".to_string()), Ok(())]
+        );
+
+        let err = parse_reconcile_group_reply(vec![(1, String::new())], 2)
+            .expect_err("reply count mismatches must fail closed");
+        assert_eq!(err.code, "internal_error");
+
+        let err = parse_reconcile_group_reply(vec![(7, String::new())], 1)
+            .expect_err("unknown script statuses must fail closed");
+        assert_eq!(err.code, "internal_error");
+    }
+
+    #[test]
+    fn reconcile_group_script_isolates_errors_and_indexes_only_healthy_streams() {
+        let pcall = RECONCILE_QUEUE_GROUPS_SCRIPT
+            .find("redis.pcall")
+            .expect("script uses pcall for per-stream XGROUP errors");
+        let busygroup = RECONCILE_QUEUE_GROUPS_SCRIPT
+            .find("BUSYGROUP")
+            .expect("script distinguishes an existing consumer group");
+        let index = RECONCILE_QUEUE_GROUPS_SCRIPT
+            .find("redis.pcall('SADD'")
+            .expect("script indexes reconciled streams");
+        let final_return = RECONCILE_QUEUE_GROUPS_SCRIPT
+            .rfind("return results")
+            .expect("script returns every per-stream result");
+
+        assert!(pcall < busygroup);
+        assert!(busygroup < index);
+        assert!(index < final_return);
     }
 
     #[test]

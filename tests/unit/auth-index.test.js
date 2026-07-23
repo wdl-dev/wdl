@@ -288,12 +288,12 @@ test("verify: verify_threw when Redis throws mid-flight", async () => {
     created_by: "bootstrap",
   });
   state.strings.set(`auth:hash:${hash}`, tokenId);
-  // Force the GET on auth:hash:<sha> to throw — verify catches and re-raises.
-  state.getThrows.add(`auth:hash:${hash}`);
+  // Force the atomic index+record read to throw — verify catches and re-raises.
+  state.evalThrows.add(`auth:hash:${hash}`);
 
   await assert.rejects(
     () => auth.verify({ token: plaintext, action: "worker.list", ns: "tenant-a" }),
-    /forced get throw/,
+    /forced eval throw/,
   );
 
   const logged = lastAuthLog("auth_verify");
@@ -337,11 +337,16 @@ test("verify: valid token emits outcome=ok and info log", async () => {
   assert.equal(logged.level, "info");
   assert.equal(logged.outcome, "ok");
   assert.equal(logged.reason, "allow");
-  assert.equal(authMockState().sessions, 1);
+  assert.equal(authMockState().sessions, 0);
   assert.deepEqual(
     authMockState().commands.map((/** @type {any} */ entry) => entry.command),
-    ["HGET", "GET", "HGETALL"],
+    ["HGET", "EVAL"],
   );
+  assert.equal(state.evalCalls.length, 1);
+  assert.deepEqual(state.evalCalls[0].slice(1), [
+    [`auth:hash:${hash}`],
+    ["auth:token:"],
+  ]);
 
   assert.equal(logged.category, "worker");
 });
@@ -372,7 +377,7 @@ test("verify: skips bootstrap HGET after first ensure and re-ensures bootstrap t
   assert.equal(second.ok, true);
   assert.deepEqual(
     state.commands.map((/** @type {any} */ entry) => entry.command),
-    ["GET", "HGETALL"],
+    ["EVAL"],
   );
 
   state.commands = [];
@@ -385,7 +390,7 @@ test("verify: skips bootstrap HGET after first ensure and re-ensures bootstrap t
   assert.equal(recovered.tokenId, "bootstrap");
   assert.deepEqual(
     state.commands.map((/** @type {any} */ entry) => entry.command),
-    ["GET", "HGET", "HGET", "HSET", "SET", "GET", "HGETALL"],
+    ["EVAL", "HGET", "HGET", "HSET", "SET", "EVAL"],
   );
 });
 
@@ -416,7 +421,7 @@ test("verify: bootstrap token rotates a stale bootstrap record on first ensure",
   assert.equal(state.strings.get(`auth:hash:${desiredHash}`), "bootstrap");
   assert.deepEqual(
     state.commands.map((/** @type {any} */ entry) => entry.command),
-    ["HGET", "HGET", "DEL", "HSET", "SET", "GET", "HGETALL"],
+    ["HGET", "HGET", "DEL", "HSET", "SET", "EVAL"],
   );
 });
 

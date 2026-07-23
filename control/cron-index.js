@@ -22,7 +22,7 @@ export function cronId(cron, timezone) {
 
 // Diff an existing cron hash (parsed, __meta__ removed) against a new
 // __meta__.crons list. Returns the minimum set of ops needed at promote:
-//   added:   fresh entries — caller allocates `gen` from __meta__.seq
+//   added:   fresh entries — caller allocates `gen` from cron:seq high-water
 //            and computes the initial bucket slot
 //   removed: stale entries — HDEL from hash; bucket refs decay lazily
 //   kept:    unchanged — preserve `gen`; no hash or bucket writes

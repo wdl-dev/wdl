@@ -46,7 +46,7 @@ Host、secret、data 和 auth 操作：
 | Method | Path | 合同 |
 |---|---|---|
 | `GET` / `POST` | `/ns/<ns>/hosts` | 列出或 reconcile declared hosts。Reconcile 会 normalize host、拒绝 platform-domain host，并在移除仍有 live owned patterns 的 host 时返回 409。 |
-| `POST` | `/reload` | Ops-only route resync：先从 `hosts:<ns>` 重建 declared-host gate，再发布 `routes:flush ""` 和 `patterns:invalidate "*"`，full-route channel 和 pattern channel 保持正交。 |
+| `POST` | `/reload` | Ops-only route resync：在 host-declaration revision fence 下从 `hosts:<ns>` 重建 declared-host gate，再发布 `routes:flush ""` 和 `patterns:invalidate "*"`。Repair 会增量限制 key scan 并预检 set cardinality，在物化 member 或 mutation 前拒绝 source key、declaration member 与 stale reverse-index key 合计超过 10,000 项的状态。 |
 | `GET` | `/ns/<ns>/worker/<name>/secrets` | 只列出 worker-level secret keys；不存在读取 secret value 的 API。 |
 | `PUT` / `DELETE` | `/ns/<ns>/worker/<name>/secrets/<KEY>` | 修改单个 worker-level secret。PUT 存储 `WDL-ENC:` envelope；active worker 会 bump 并 promote 来强制后续 cold-load 新 secrets。 |
 | `GET` | `/ns/<ns>/secrets` | 只列出 namespace-level secret keys；不存在读取 secret value 的 API。 |
@@ -103,9 +103,11 @@ Key families：
 | `worker-versions:<ns>:<worker>` | ZSET | Control | retained version index。 | referrer check 通过后，version delete 移除 member。 |
 | `worker:<ns>:<worker>:v:<n>` | Hash | Control | immutable bundle/version metadata 和 modules。 | 保留到 version/worker delete。 |
 | `worker:<ns>:<worker>:next_version` | String counter | Control | logical worker name 的 monotonic next version number。 | whole-worker delete 后保留，保证 worker id 不复用。 |
+| `cron:seq:<ns>:<worker>` | String counter | Control | 永久 Cron generation 高水位。 | Cron projection 清空和 whole-worker delete 后仍保留，防止旧 slot ref 匹配重建 entry。 |
 | `routes:<ns>` | Hash | Control | active worker -> version route map。 | promote/delete 更新并 publish route invalidation。 |
 | `hosts:<ns>` | Set | Control | namespace 声明的 host allow-list。 | Promote 检查 membership；host reconcile 更新声明集合。 |
 | `declared-hosts` | Set | Control | gateway 对“至少被一个 namespace 声明过的 host”的全局 gate。 | Host reconcile 负责日常写入；`/reload` 从 `hosts:<ns>` 修复它。 |
+| `declared-hosts:revision` | String counter | Control | declared-host repair 的 optimistic fence。 | Host reconcile 在 declaration change 的同一 transaction 中递增；`/reload` 在 rebuild 期间发生变化时重试。 |
 | `host-declarations:<host>` | Set | Control | 当前声明这个 host 的 namespace。 | 防止一个 namespace 移除声明时清掉另一个 namespace 仍需要的全局 gate。 |
 | `ns-hosts:<ns>` | Set | Control | namespace 的 active host 反向索引。 | promote/reconcile 在同一个 EXEC 内维护 SADD/SREM delta。 |
 | `patterns:<host>` | Hash | Control | pattern-host route slots；value 是紧凑 `v2` tab-separated projection。 | reconcile/promote 更新并 publish pattern invalidation。 |

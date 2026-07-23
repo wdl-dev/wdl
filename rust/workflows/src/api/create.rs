@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use serde_json::Value as JsonValue;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::time::now_ms;
 
 use crate::{AppState, WorkflowError, WorkflowResult, by_version_key, by_worker_key};
@@ -47,6 +48,8 @@ redis.call("SADD", KEYS[3], ARGV[14])
 redis.call("SADD", KEYS[4], ARGV[14])
 return 1
 "#;
+
+static CREATE_INSTANCE: StaticRedisScript = StaticRedisScript::new(CREATE_INSTANCE_SCRIPT);
 
 fn callback_json(value: &JsonValue) -> WorkflowResult<String> {
     if value.is_null() {
@@ -144,7 +147,7 @@ async fn create_instance_prevalidated(
     let create = async || {
         eval_script(
             state,
-            CREATE_INSTANCE_SCRIPT,
+            &CREATE_INSTANCE,
             &[&state_key, &payloads_key, &by_worker, &by_version],
             &[
                 &req.ns,
@@ -187,7 +190,7 @@ async fn create_instance_prevalidated(
             state
                 .metrics
                 .increment("workflow_instances", &[("outcome", "existing")], 1.0);
-            return response_from_state(state, &id, &existing).await;
+            return response_from_state(state, &req.ns, &req.workflow_key, &id, &existing).await;
         }
     }
 

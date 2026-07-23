@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use wdl_rust_common::hash::fnv1a32;
 use wdl_rust_common::identity::is_valid_runtime_load_ns;
-use wdl_rust_common::redis_eval::eval_cmd;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 
 use crate::observability::Metrics;
 use crate::{AppError, AppResult, AppState, SERVICE, empty};
@@ -24,24 +24,50 @@ const VALUE_FIELD_PREFIX: &str = "v:";
 const META_FIELD_PREFIX: &str = "m:";
 const KV_KEY_MAX_BYTES: usize = 512;
 const KV_BATCH_KEYS_MAX: usize = 100;
+const KV_EXPIRATION_MAX: u64 = 9_007_199_254_740_991;
 pub(crate) const KV_BATCH_RAW_BYTES_MAX: usize = 25 * 1024 * 1024;
+const KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT: &str = r#"
+if ARGV[3] == "EX" then
+  redis.call("HSETEX", KEYS[1], "EX", ARGV[4], "FIELDS", 1, ARGV[1], ARGV[5])
+else
+  redis.call("HSETEX", KEYS[1], "EXAT", ARGV[4], "FIELDS", 1, ARGV[1], ARGV[5])
+end
+redis.call("HDEL", KEYS[1], ARGV[2])
+return 1
+"#;
+static KV_PUT_EXPIRING_VALUE_ONLY: StaticRedisScript =
+    StaticRedisScript::new(KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT);
 const HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT: &str = r#"
 local budget = tonumber(ARGV[1])
 local total = 0
-for i = 2, #ARGV do
-  local len = redis.call("HSTRLEN", KEYS[1], ARGV[i])
-  total = total + len
-  if total > budget then
-    return {0, total}
+local arg_index = 2
+local groups = {}
+for key_index = 1, #KEYS do
+  local field_count = tonumber(ARGV[arg_index])
+  arg_index = arg_index + 1
+  local fields = {}
+  for field_index = 1, field_count do
+    local field = ARGV[arg_index]
+    arg_index = arg_index + 1
+    fields[field_index] = field
+    total = total + redis.call("HSTRLEN", KEYS[key_index], field)
+    if total > budget then
+      return {0, total}
+    end
   end
+  groups[key_index] = fields
 end
 local out = {1, total}
-local values = redis.call("HMGET", KEYS[1], unpack(ARGV, 2))
-for i = 1, #values do
-  table.insert(out, values[i])
+for key_index = 1, #KEYS do
+  local values = redis.call("HMGET", KEYS[key_index], unpack(groups[key_index]))
+  for value_index = 1, #values do
+    table.insert(out, values[value_index])
+  end
 end
 return out
 "#;
+static HMGET_WITH_RAW_BYTE_BUDGET: StaticRedisScript =
+    StaticRedisScript::new(HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT);
 use cursor::{cursor_overflow_field_allowed, encode_list_cursor, existing_cursor_overflow_fields};
 pub(crate) use cursor::{decode_list_cursor, normalize_list_limit};
 
@@ -98,7 +124,7 @@ impl KvParams {
 
 fn require_positive_integer(value: &str, message: &'static str) -> AppResult<()> {
     match value.parse::<u64>() {
-        Ok(n) if n > 0 => Ok(()),
+        Ok(n) if n > 0 && n <= KV_EXPIRATION_MAX => Ok(()),
         _ => Err(AppError::bad_request(message)),
     }
 }
@@ -199,6 +225,24 @@ fn grouped_hmget_commands_for_indices(
         .collect()
 }
 
+fn grouped_value_metadata_commands(
+    ns: &str,
+    id: &str,
+    keys: &[String],
+) -> Vec<GroupedHmgetCommand> {
+    let mut by_hash: HashMap<String, (Vec<usize>, Vec<String>)> = HashMap::new();
+    for (index, key) in keys.iter().enumerate() {
+        let redis_key = hash_key_for_user_key(ns, id, key);
+        let entry = by_hash.entry(redis_key).or_default();
+        entry.0.extend([index * 2, index * 2 + 1]);
+        entry.1.extend([value_field(key), meta_field(key)]);
+    }
+    by_hash
+        .into_iter()
+        .map(|(redis_key, (indices, fields))| (redis_key, indices, fields))
+        .collect()
+}
+
 fn raw_bytes_too_large() -> AppError {
     AppError::payload_too_large(format!(
         "KV batch raw value/metadata bytes exceed {KV_BATCH_RAW_BYTES_MAX} byte limit"
@@ -258,31 +302,57 @@ fn parse_hmget_budget_reply(
     Ok((bytes, out))
 }
 
-fn hmget_with_raw_byte_budget_command(
-    redis_key: &str,
-    remaining: usize,
-    fields: &[String],
-) -> redis::Cmd {
-    let remaining_arg = remaining.to_string();
-    let mut args = Vec::with_capacity(fields.len() + 1);
-    args.push(remaining_arg.as_str());
-    args.extend(fields.iter().map(String::as_str));
-    eval_cmd(HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT, &[redis_key], &args)
+fn validate_grouped_hmget_plan(
+    commands: &[GroupedHmgetCommand],
+    output_len: usize,
+) -> AppResult<usize> {
+    let mut expected_values = 0_usize;
+    for (_, indices, fields) in commands {
+        if indices.len() != fields.len() || indices.iter().any(|index| *index >= output_len) {
+            return Err(AppError::internal_error("invalid grouped KV HMGET plan"));
+        }
+        expected_values = expected_values
+            .checked_add(fields.len())
+            .ok_or_else(|| AppError::internal_error("invalid grouped KV HMGET plan"))?;
+    }
+    Ok(expected_values)
 }
 
-async fn query_hmget_with_raw_byte_budget(
+async fn query_grouped_hmget_with_raw_byte_budget(
     conn: &mut ConnectionManager,
-    redis_key: &str,
     remaining: usize,
-    fields: &[String],
+    commands: &[GroupedHmgetCommand],
 ) -> AppResult<(usize, Vec<Option<Vec<u8>>>)> {
-    if fields.is_empty() {
+    if commands.is_empty() {
         return Ok((0, Vec::new()));
     }
-    // HSTRLEN and HMGET run in one Redis-side script, so an over-budget group
-    // is rejected before its payload bytes leave Redis.
-    let cmd = hmget_with_raw_byte_budget_command(redis_key, remaining, fields);
-    parse_hmget_budget_reply(cmd.query_async(conn).await?, fields.len())
+    let remaining_arg = remaining.to_string();
+    let field_counts = commands
+        .iter()
+        .map(|(_, _, fields)| fields.len().to_string())
+        .collect::<Vec<_>>();
+    let keys = commands
+        .iter()
+        .map(|(redis_key, _, _)| redis_key.as_str())
+        .collect::<Vec<_>>();
+    let mut args = Vec::with_capacity(
+        1 + field_counts.len()
+            + commands
+                .iter()
+                .map(|(_, _, fields)| fields.len())
+                .sum::<usize>(),
+    );
+    args.push(remaining_arg.as_str());
+    for ((_, _, fields), field_count) in commands.iter().zip(&field_counts) {
+        args.push(field_count.as_str());
+        args.extend(fields.iter().map(String::as_str));
+    }
+    let expected_values = commands.iter().map(|(_, _, fields)| fields.len()).sum();
+    let reply = HMGET_WITH_RAW_BYTE_BUDGET
+        .prepare_invoke(&keys, &args)
+        .invoke_async(conn)
+        .await?;
+    parse_hmget_budget_reply(reply, expected_values)
 }
 
 #[derive(Default)]
@@ -313,17 +383,24 @@ impl RawByteBudget {
 fn apply_grouped_hmget_response(
     output: &mut [Option<Vec<u8>>],
     budget: &mut RawByteBudget,
-    indices: Vec<usize>,
+    commands: &[GroupedHmgetCommand],
     preflight_bytes: usize,
     values: Vec<Option<Vec<u8>>>,
 ) -> AppResult<()> {
-    if values.len() != indices.len() {
+    let expected_values = validate_grouped_hmget_plan(commands, output.len())?;
+    if values.len() != expected_values {
         return Err(AppError::internal_error("invalid grouped KV HMGET reply"));
     }
     budget.record_preflight(preflight_bytes)?;
-    for (index, value) in indices.into_iter().zip(values) {
-        budget.record_actual(value.as_deref())?;
-        output[index] = value;
+    let mut values = values.into_iter();
+    for (_, indices, _) in commands {
+        for index in indices {
+            let value = values
+                .next()
+                .ok_or_else(|| AppError::internal_error("invalid grouped KV HMGET reply"))?;
+            budget.record_actual(value.as_deref())?;
+            output[*index] = value;
+        }
     }
     Ok(())
 }
@@ -334,18 +411,14 @@ async fn load_grouped_fields_with_raw_byte_budget(
     output_len: usize,
     budget: &mut RawByteBudget,
 ) -> AppResult<Vec<Option<Vec<u8>>>> {
-    // The preflight total limits transfer between groups; the separate actual
-    // total rechecks returned payloads before callers encode a response.
     let mut output = vec![None; output_len];
-    for (redis_key, indices, fields) in commands {
-        if indices.len() != fields.len() || indices.iter().any(|index| *index >= output.len()) {
-            return Err(AppError::internal_error("invalid grouped KV HMGET plan"));
-        }
-        let (preflight_bytes, values) =
-            query_hmget_with_raw_byte_budget(conn, &redis_key, budget.remaining()?, &fields)
-                .await?;
-        apply_grouped_hmget_response(&mut output, budget, indices, preflight_bytes, values)?;
-    }
+    validate_grouped_hmget_plan(&commands, output_len)?;
+    // All HSTRLEN calls across every hash precede the first HMGET, so an
+    // over-budget payload never leaves Valkey. Actual bytes are rechecked before
+    // response encoding as a defense against malformed script replies.
+    let (preflight_bytes, values) =
+        query_grouped_hmget_with_raw_byte_budget(conn, budget.remaining()?, &commands).await?;
+    apply_grouped_hmget_response(&mut output, budget, &commands, preflight_bytes, values)?;
     Ok(output)
 }
 
@@ -359,36 +432,26 @@ pub(crate) fn kv_put_pipeline(
     exat: &str,
 ) -> redis::Pipeline {
     let mut pipe = redis::pipe();
-    pipe.atomic();
     if ttl.is_empty() && exat.is_empty() {
-        pipe.cmd("HSET")
-            .arg(redis_key)
-            .arg(value_field)
-            .arg(body)
-            .ignore();
         if let Some(metadata) = metadata {
             pipe.cmd("HSET")
                 .arg(redis_key)
+                .arg(value_field)
+                .arg(body)
                 .arg(meta_field)
                 .arg(metadata)
                 .ignore();
-            pipe.cmd("HPERSIST")
-                .arg(redis_key)
-                .arg("FIELDS")
-                .arg(2)
-                .arg(value_field)
-                .arg(meta_field)
-                .ignore();
         } else {
-            pipe.cmd("HDEL").arg(redis_key).arg(meta_field).ignore();
-            pipe.cmd("HPERSIST")
+            pipe.atomic();
+            pipe.cmd("HSET")
                 .arg(redis_key)
-                .arg("FIELDS")
-                .arg(1)
                 .arg(value_field)
+                .arg(body)
                 .ignore();
+            pipe.cmd("HDEL").arg(redis_key).arg(meta_field).ignore();
         }
     } else {
+        let metadata = metadata.expect("expiring value-only puts must use the atomic script path");
         let mut hsetex = redis::cmd("HSETEX");
         hsetex.arg(redis_key);
         if !ttl.is_empty() {
@@ -396,21 +459,37 @@ pub(crate) fn kv_put_pipeline(
         } else {
             hsetex.arg("EXAT").arg(exat);
         }
-        if let Some(metadata) = metadata {
-            hsetex
-                .arg("FIELDS")
-                .arg(2)
-                .arg(value_field)
-                .arg(body)
-                .arg(meta_field)
-                .arg(metadata);
-        } else {
-            hsetex.arg("FIELDS").arg(1).arg(value_field).arg(body);
-            pipe.cmd("HDEL").arg(redis_key).arg(meta_field).ignore();
-        }
+        hsetex
+            .arg("FIELDS")
+            .arg(2)
+            .arg(value_field)
+            .arg(body)
+            .arg(meta_field)
+            .arg(metadata);
         pipe.add_command(hsetex).ignore();
     }
     pipe
+}
+
+async fn kv_put_expiring_value_only(
+    conn: &mut ConnectionManager,
+    redis_key: &str,
+    value_field: &str,
+    meta_field: &str,
+    body: &[u8],
+    ttl: &str,
+    exat: &str,
+) -> Result<(), redis::RedisError> {
+    let (mode, expiration) = if !ttl.is_empty() {
+        ("EX", ttl)
+    } else {
+        ("EXAT", exat)
+    };
+    let mut invocation = KV_PUT_EXPIRING_VALUE_ONLY
+        .prepare_invoke(&[redis_key], &[value_field, meta_field, mode, expiration]);
+    invocation.arg(body);
+    let _: i64 = invocation.invoke_async(conn).await?;
+    Ok(())
 }
 
 fn field_to_user_key(field: &str) -> AppResult<&str> {
@@ -423,6 +502,37 @@ fn decode_metadata(bytes: Option<Vec<u8>>) -> AppResult<Option<Value>> {
     bytes
         .map(|raw| serde_json::from_slice::<Value>(&raw).map_err(AppError::internal_json))
         .transpose()
+}
+
+fn decode_batch_entries(
+    keys: Vec<String>,
+    include_metadata: bool,
+    mut raw: Vec<Option<Vec<u8>>>,
+) -> AppResult<Vec<Value>> {
+    let width = if include_metadata { 2 } else { 1 };
+    let expected = keys
+        .len()
+        .checked_mul(width)
+        .ok_or_else(|| AppError::internal_error("invalid KV batch response size"))?;
+    if raw.len() != expected {
+        return Err(AppError::internal_error("invalid KV batch response size"));
+    }
+    let mut entries = Vec::with_capacity(keys.len());
+    for (index, key) in keys.into_iter().enumerate() {
+        let value_index = index * width;
+        let value = raw[value_index].take();
+        let metadata = if include_metadata && value.is_some() {
+            decode_metadata(raw[value_index + 1].take())?
+        } else {
+            None
+        };
+        entries.push(json!({
+            "key": key,
+            "value_b64": value.map(|bytes| STANDARD.encode(bytes)),
+            "metadata": metadata,
+        }));
+    }
+    Ok(entries)
 }
 
 fn normalize_list_prefix(prefix: Option<String>) -> AppResult<String> {
@@ -525,56 +635,26 @@ pub(crate) async fn kv_get_batch(
     let keys = body.keys;
     let mut conn = state.redis();
     let mut budget = RawByteBudget::default();
-    let value_commands = grouped_hmget_commands(&q.ns, &q.id, &keys, VALUE_FIELD_PREFIX);
-    let mut values = load_grouped_fields_with_raw_byte_budget(
-        &mut conn,
-        value_commands,
-        keys.len(),
-        &mut budget,
-    )
-    .await?;
-    let mut metadata: Vec<Option<Value>> = vec![None; keys.len()];
-    if include_metadata {
-        let present_value_indices = values
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| value.as_ref().map(|_| index))
-            .collect::<Vec<_>>();
-        let metadata_commands = grouped_hmget_commands_for_indices(
-            &q.ns,
-            &q.id,
-            &keys,
-            present_value_indices,
-            META_FIELD_PREFIX,
-        );
-        let raw_metadata = load_grouped_fields_with_raw_byte_budget(
-            &mut conn,
-            metadata_commands,
-            keys.len(),
-            &mut budget,
-        )
-        .await?;
-        for (index, raw) in raw_metadata.into_iter().enumerate() {
-            if values[index].is_some() {
-                metadata[index] = decode_metadata(raw)?;
-            }
-        }
-    }
+    let commands = if include_metadata {
+        grouped_value_metadata_commands(&q.ns, &q.id, &keys)
+    } else {
+        grouped_hmget_commands(&q.ns, &q.id, &keys, VALUE_FIELD_PREFIX)
+    };
+    let output_len = if include_metadata {
+        keys.len() * 2
+    } else {
+        keys.len()
+    };
+    let raw =
+        load_grouped_fields_with_raw_byte_budget(&mut conn, commands, output_len, &mut budget)
+            .await?;
     record_kv_value_bytes(
         state.metrics(),
         "get_batch",
         "raw_batch",
         budget.actual_bytes,
     );
-    let mut entries = Vec::with_capacity(keys.len());
-    for (index, key) in keys.into_iter().enumerate() {
-        let value = values[index].take();
-        entries.push(json!({
-            "key": key,
-            "value_b64": value.map(|bytes| STANDARD.encode(bytes)),
-            "metadata": metadata[index].take(),
-        }));
-    }
+    let entries = decode_batch_entries(keys, include_metadata, raw)?;
     Ok(Json(json!({ "entries": entries })))
 }
 
@@ -608,17 +688,30 @@ pub(crate) async fn kv_put(
     let exat = q.exat.unwrap_or_default();
     state
         .with_redis(async |mut conn| {
-            kv_put_pipeline(
-                &redis_key,
-                &value,
-                &meta,
-                body.as_ref(),
-                metadata.as_deref(),
-                &ttl,
-                &exat,
-            )
-            .query_async::<()>(&mut conn)
-            .await
+            if metadata.is_none() && (!ttl.is_empty() || !exat.is_empty()) {
+                kv_put_expiring_value_only(
+                    &mut conn,
+                    &redis_key,
+                    &value,
+                    &meta,
+                    body.as_ref(),
+                    &ttl,
+                    &exat,
+                )
+                .await
+            } else {
+                kv_put_pipeline(
+                    &redis_key,
+                    &value,
+                    &meta,
+                    body.as_ref(),
+                    metadata.as_deref(),
+                    &ttl,
+                    &exat,
+                )
+                .query_async::<()>(&mut conn)
+                .await
+            }
         })
         .await?;
     record_kv_value_bytes(state.metrics(), "put", "value", body.len());
@@ -840,6 +933,15 @@ mod tests {
     }
 
     #[test]
+    fn hmget_budget_script_preflights_all_hashes_before_reading_values() {
+        assert!(HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT.contains("for key_index = 1, #KEYS do"));
+        assert!(
+            HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT.rfind("HSTRLEN").unwrap()
+                < HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT.find("HMGET").unwrap()
+        );
+    }
+
+    #[test]
     fn kv_binding_id_grammar_matches_cross_language_fixture() {
         let fixture: Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/cross-language-identity.json"
@@ -857,24 +959,6 @@ mod tests {
                 .expect("kvIds fixture valid flag must be a boolean");
             assert_eq!(is_valid_kv_binding_id(value), valid, "kvIds:{value:?}");
         }
-    }
-
-    #[test]
-    fn hmget_budget_command_packs_script_key_budget_and_fields() {
-        let fields = vec!["v:first".to_string(), "v:second".to_string()];
-        let commands = parse_packed_commands(
-            &hmget_with_raw_byte_budget_command("kvh:tenant:store:b:1", 1024, &fields)
-                .get_packed_command(),
-        );
-
-        assert_eq!(commands.len(), 1);
-        let command = &commands[0];
-        assert_eq!(command[0], "EVAL");
-        assert_eq!(command[1], HMGET_WITH_RAW_BYTE_BUDGET_SCRIPT);
-        assert_eq!(
-            &command[2..],
-            ["1", "kvh:tenant:store:b:1", "1024", "v:first", "v:second"]
-        );
     }
 
     #[test]
@@ -908,23 +992,89 @@ mod tests {
     }
 
     #[test]
+    fn grouped_value_metadata_plan_reads_each_pair_in_one_hash_snapshot() {
+        let keys = vec!["alpha".to_string(), "bravo".to_string()];
+        let commands = grouped_value_metadata_commands("tenant", "store", &keys);
+
+        assert_eq!(
+            commands
+                .iter()
+                .map(|(_, _, fields)| fields.len())
+                .sum::<usize>(),
+            keys.len() * 2
+        );
+        for (redis_key, indices, fields) in commands {
+            assert_eq!(indices.len(), fields.len());
+            for (index, pair) in indices.chunks_exact(2).enumerate() {
+                let key_index = pair[0] / 2;
+                assert_eq!(pair, [key_index * 2, key_index * 2 + 1]);
+                assert_eq!(
+                    redis_key,
+                    hash_key_for_user_key("tenant", "store", &keys[key_index])
+                );
+                assert_eq!(fields[index * 2], value_field(&keys[key_index]));
+                assert_eq!(fields[index * 2 + 1], meta_field(&keys[key_index]));
+            }
+        }
+    }
+
+    #[test]
+    fn batch_decode_preserves_empty_values_and_ignores_orphan_metadata() {
+        let entries = decode_batch_entries(
+            vec!["empty".to_string(), "missing".to_string()],
+            true,
+            vec![
+                Some(Vec::new()),
+                Some(br#"{"kind":"empty"}"#.to_vec()),
+                None,
+                Some(br#"{"orphan":true}"#.to_vec()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                json!({
+                    "key": "empty",
+                    "value_b64": "",
+                    "metadata": { "kind": "empty" },
+                }),
+                json!({
+                    "key": "missing",
+                    "value_b64": null,
+                    "metadata": null,
+                }),
+            ]
+        );
+
+        let err = decode_batch_entries(vec!["key".to_string()], true, vec![None])
+            .expect_err("misaligned value/metadata replies must fail closed");
+        assert_eq!(err.code, "internal_error");
+    }
+
+    #[test]
     fn grouped_budgeted_response_restores_input_order() {
         let mut output = vec![None; 3];
         let mut budget = RawByteBudget::default();
+        let commands = vec![
+            (
+                "hash-a".to_string(),
+                vec![2, 0],
+                vec!["v:c".to_string(), "v:a".to_string()],
+            ),
+            ("hash-b".to_string(), vec![1], vec!["v:b".to_string()]),
+        ];
         apply_grouped_hmget_response(
             &mut output,
             &mut budget,
-            vec![2, 0],
-            1,
-            vec![Some(b"ccc".to_vec()), Some(b"aa".to_vec())],
-        )
-        .unwrap();
-        apply_grouped_hmget_response(
-            &mut output,
-            &mut budget,
-            vec![1],
-            2,
-            vec![Some(b"bbbb".to_vec())],
+            &commands,
+            3,
+            vec![
+                Some(b"ccc".to_vec()),
+                Some(b"aa".to_vec()),
+                Some(b"bbbb".to_vec()),
+            ],
         )
         .unwrap();
         assert_eq!(
@@ -1066,30 +1216,20 @@ mod tests {
         let commands = parse_packed_commands(
             &kv_put_pipeline("hash", "v:k", "m:k", b"value", None, "", "").get_packed_pipeline(),
         );
+        assert_eq!(commands.len(), 4);
         assert_eq!(commands[0][0], "MULTI");
         assert_eq!(commands[1], ["HSET", "hash", "v:k", "value"]);
         assert_eq!(commands[2], ["HDEL", "hash", "m:k"]);
-        assert_eq!(commands[3], ["HPERSIST", "hash", "FIELDS", "1", "v:k"]);
-        assert_eq!(commands[4][0], "EXEC");
+        assert_eq!(commands[3][0], "EXEC");
 
         let commands = parse_packed_commands(
             &kv_put_pipeline("hash", "v:k", "m:k", b"value", Some(b"{\"a\":1}"), "", "")
                 .get_packed_pipeline(),
         );
-        assert_eq!(commands[1], ["HSET", "hash", "v:k", "value"]);
-        assert_eq!(commands[2], ["HSET", "hash", "m:k", "{\"a\":1}"]);
+        assert_eq!(commands.len(), 1);
         assert_eq!(
-            commands[3],
-            ["HPERSIST", "hash", "FIELDS", "2", "v:k", "m:k"]
-        );
-
-        let commands = parse_packed_commands(
-            &kv_put_pipeline("hash", "v:k", "m:k", b"value", None, "60", "").get_packed_pipeline(),
-        );
-        assert_eq!(commands[1], ["HDEL", "hash", "m:k"]);
-        assert_eq!(
-            commands[2],
-            ["HSETEX", "hash", "EX", "60", "FIELDS", "1", "v:k", "value"]
+            commands[0],
+            ["HSET", "hash", "v:k", "value", "m:k", "{\"a\":1}"]
         );
 
         let commands = parse_packed_commands(
@@ -1104,8 +1244,9 @@ mod tests {
             )
             .get_packed_pipeline(),
         );
+        assert_eq!(commands.len(), 1);
         assert_eq!(
-            commands[1],
+            commands[0],
             [
                 "HSETEX",
                 "hash",
@@ -1119,6 +1260,19 @@ mod tests {
                 "{\"a\":1}"
             ]
         );
+    }
+
+    #[test]
+    fn expiring_value_only_put_writes_value_before_deleting_metadata() {
+        let value_write = KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT
+            .find(r#"redis.call("HSETEX""#)
+            .expect("expiring value write");
+        let metadata_delete = KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT
+            .find(r#"redis.call("HDEL", KEYS[1], ARGV[2])"#)
+            .expect("metadata delete");
+        assert!(value_write < metadata_delete);
+        assert!(KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT.contains(r#"ARGV[3] == "EX""#));
+        assert!(KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT.contains(r#""EXAT", ARGV[4]"#));
     }
 
     #[test]
@@ -1145,6 +1299,24 @@ mod tests {
             (None, Some("-1")),
             (None, Some("1.5")),
             (None, Some("abc")),
+        ] {
+            let params = KvParams {
+                ns: "tenant".to_string(),
+                id: "store".to_string(),
+                key: Some("key".to_string()),
+                ttl: ttl.map(str::to_string),
+                exat: exat.map(str::to_string),
+                prefix: None,
+                limit: None,
+                metadata: None,
+                cursor: None,
+            };
+            assert!(params.validate_expiration().is_err());
+        }
+
+        for (ttl, exat) in [
+            (Some("9007199254740992"), None),
+            (None, Some("9007199254740992")),
         ] {
             let params = KvParams {
                 ns: "tenant".to_string(),

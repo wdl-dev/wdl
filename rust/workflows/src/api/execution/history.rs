@@ -2,6 +2,7 @@ use axum::body::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::time::now_ms;
 
 use crate::{
@@ -16,6 +17,24 @@ const DEFAULT_STATUS_STEP_LIMIT: usize = 100;
 const MAX_STATUS_STEP_LIMIT: usize = 1000;
 const DEFAULT_REPLAY_STEP_PAGE_LIMIT: usize = 64;
 const MAX_REPLAY_STEP_PAGE_LIMIT: usize = 128;
+
+const READ_STEP_HISTORY_SCRIPT: &str = r#"
+local summary_count = redis.call("HLEN", KEYS[1])
+local index_count = redis.call("ZCARD", KEYS[2])
+if summary_count ~= index_count then
+  return {0, index_count, {}}
+end
+local fields = redis.call("ZREVRANGE", KEYS[2], 0, ARGV[1])
+local raw = {}
+for _, field in ipairs(fields) do
+  local value = redis.call("HGET", KEYS[1], field)
+  if not value then
+    return {0, index_count, {}}
+  end
+  table.insert(raw, value)
+end
+return {1, index_count, raw}
+"#;
 
 const READ_REPLAY_STEP_PAGE_SCRIPT: &str = r#"
 local generation = redis.call("HGET", KEYS[1], "generation")
@@ -46,6 +65,38 @@ for i = 5, #ARGV do
 end
 return {1, out}
 "#;
+
+const READ_REPLAY_PAYLOADS_SCRIPT: &str = r#"
+local generation = redis.call("HGET", KEYS[1], "generation")
+local token = redis.call("HGET", KEYS[1], "runToken")
+local created_at_ms = redis.call("HGET", KEYS[1], "createdAtMs")
+if generation ~= ARGV[1] or token ~= ARGV[2] or created_at_ms ~= ARGV[3] then
+  return {0, {}}
+end
+local lease = tonumber(redis.call("HGET", KEYS[1], "runLeaseExpiresAtMs") or "")
+if not lease then
+  return {-4, {}}
+end
+if lease <= tonumber(ARGV[4]) then
+  return {-2, {}}
+end
+local status = redis.call("HGET", KEYS[1], "status")
+if status ~= "running" and status ~= "waiting" then
+  return {-3, {}}
+end
+local out = {}
+for i = 5, #ARGV do
+  local raw = redis.call("HGET", KEYS[2], ARGV[i])
+  table.insert(out, raw or false)
+end
+return {1, out}
+"#;
+
+static READ_STEP_HISTORY: StaticRedisScript = StaticRedisScript::new(READ_STEP_HISTORY_SCRIPT);
+static READ_REPLAY_STEP_PAGE: StaticRedisScript =
+    StaticRedisScript::new(READ_REPLAY_STEP_PAGE_SCRIPT);
+static READ_REPLAY_PAYLOADS: StaticRedisScript =
+    StaticRedisScript::new(READ_REPLAY_PAYLOADS_SCRIPT);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +154,31 @@ pub(crate) fn workflow_step_options(options: &JsonValue) -> WorkflowResult<Optio
     Ok(Some(limit))
 }
 
+fn step_history_from_snapshot(
+    code: i64,
+    index_count: usize,
+    raw: Vec<String>,
+) -> WorkflowResult<StepHistory> {
+    if code != 1 {
+        return Err(WorkflowError::invalid_state(
+            "Workflow step summary index is inconsistent",
+        ));
+    }
+
+    let mut records = Vec::with_capacity(raw.len());
+    for value in raw {
+        let record: StepSummary = serde_json::from_str(&value).map_err(|err| {
+            WorkflowError::invalid_state(format!("Workflow step summary is corrupt: {err}"))
+        })?;
+        records.push(normalize_summary(record));
+    }
+    records.sort_by_key(|record| record.ordinal);
+    Ok(StepHistory {
+        truncated: index_count > records.len(),
+        entries: records,
+    })
+}
+
 pub(crate) async fn read_step_history(
     app: &AppState,
     ns: &str,
@@ -112,81 +188,15 @@ pub(crate) async fn read_step_history(
 ) -> WorkflowResult<StepHistory> {
     let summaries_key = instance_step_summaries_key(ns, workflow_key, instance_id);
     let summary_index_key = instance_step_summary_index_key(ns, workflow_key, instance_id);
-    let index_count: usize = app
-        .redis
-        .with_conn(async |mut conn| {
-            redis::cmd("ZCARD")
-                .arg(&summary_index_key)
-                .query_async::<usize>(&mut conn)
-                .await
-        })
-        .await?;
-    if index_count > 0 {
-        let fields: Vec<String> = app
-            .redis
-            .with_conn(async |mut conn| {
-                redis::cmd("ZREVRANGE")
-                    .arg(&summary_index_key)
-                    .arg(0)
-                    .arg(limit.saturating_sub(1))
-                    .query_async(&mut conn)
-                    .await
-            })
-            .await?;
-        let raw: Vec<Option<String>> = app
-            .redis
-            .with_conn(async |mut conn| {
-                let mut cmd = redis::cmd("HMGET");
-                cmd.arg(&summaries_key);
-                for field in &fields {
-                    cmd.arg(field);
-                }
-                cmd.query_async(&mut conn).await
-            })
-            .await?;
-        let mut records = Vec::with_capacity(raw.len());
-        for (field, value) in fields.into_iter().zip(raw) {
-            let value = value.ok_or_else(|| {
-                WorkflowError::invalid_state(format!(
-                    "Workflow step summary index points to missing field {field}"
-                ))
-            })?;
-            let record: StepSummary = serde_json::from_str(&value).map_err(|err| {
-                WorkflowError::invalid_state(format!("Workflow step summary is corrupt: {err}"))
-            })?;
-            records.push(normalize_summary(record));
-        }
-        records.sort_by_key(|record| record.ordinal);
-        return Ok(StepHistory {
-            entries: records,
-            truncated: index_count > limit,
-        });
-    }
-
-    let raw: HashMap<String, String> = app
-        .redis
-        .with_conn(async |mut conn| {
-            redis::cmd("HGETALL")
-                .arg(summaries_key)
-                .query_async(&mut conn)
-                .await
-        })
-        .await?;
-    let mut records = Vec::with_capacity(raw.len());
-    for value in raw.into_values() {
-        let record: StepSummary = serde_json::from_str(&value).map_err(|err| {
-            WorkflowError::invalid_state(format!("Workflow step summary is corrupt: {err}"))
-        })?;
-        records.push(normalize_summary(record));
-    }
-    records.sort_by_key(|record| record.ordinal);
-    let truncated = records.len() > limit;
-    if truncated {
-        let drop_count = records.len() - limit;
-        records.drain(0..drop_count);
-    }
-    let entries = records;
-    Ok(StepHistory { entries, truncated })
+    let stop = limit.saturating_sub(1).to_string();
+    let (code, index_count, raw): (i64, usize, Vec<String>) = eval_script(
+        app,
+        &READ_STEP_HISTORY,
+        &[&summaries_key, &summary_index_key],
+        &[&stop],
+    )
+    .await?;
+    step_history_from_snapshot(code, index_count, raw)
 }
 
 fn normalize_summary(mut record: StepSummary) -> StepSummary {
@@ -223,7 +233,7 @@ pub(crate) async fn read_replay_step_page(
     args.extend(fields.iter().map(String::as_str));
     let (code, raw): (i64, Vec<String>) = eval_script(
         app,
-        READ_REPLAY_STEP_PAGE_SCRIPT,
+        &READ_REPLAY_STEP_PAGE,
         &[&state_key, &steps_key],
         &args,
     )
@@ -242,7 +252,7 @@ pub(crate) async fn read_replay_step_page(
         })?;
         records.push(record);
     }
-    let payloads = read_replay_payloads(app, &payloads_key, &records).await?;
+    let payloads = read_replay_payloads(app, &state_key, &payloads_key, &req, &records).await?;
     let entries = records
         .into_iter()
         .map(|record| replay_entry(record, &payloads))
@@ -296,7 +306,9 @@ fn replay_entry(
 
 async fn read_replay_payloads(
     app: &AppState,
+    state_key: &str,
     payloads_key: &str,
+    req: &WorkflowReplayStepsRequest,
     records: &[StepRecord],
 ) -> WorkflowResult<HashMap<String, JsonValue>> {
     let mut refs = Vec::new();
@@ -315,17 +327,31 @@ async fn read_replay_payloads(
     if refs.is_empty() {
         return Ok(HashMap::new());
     }
-    let raw: Vec<Option<String>> = app
-        .redis
-        .with_conn(async |mut conn| {
-            let mut cmd = redis::cmd("HMGET");
-            cmd.arg(payloads_key);
-            for payload_ref in &refs {
-                cmd.arg(payload_ref);
-            }
-            cmd.query_async(&mut conn).await
-        })
-        .await?;
+    let generation = req.generation.to_string();
+    let created_at_ms = req.created_at_ms.to_string();
+    let now = now_ms().to_string();
+    let mut args = vec![
+        generation.as_str(),
+        req.run_token.as_str(),
+        created_at_ms.as_str(),
+        now.as_str(),
+    ];
+    args.extend(refs.iter().map(String::as_str));
+    let (code, raw): (i64, Vec<Option<String>>) = eval_script(
+        app,
+        &READ_REPLAY_PAYLOADS,
+        &[state_key, payloads_key],
+        &args,
+    )
+    .await?;
+    if code != STEP_SCRIPT_OK {
+        return Err(active_claim_error(code));
+    }
+    if raw.len() != refs.len() {
+        return Err(WorkflowError::invalid_state(
+            "Workflow replay payload response is inconsistent",
+        ));
+    }
     let mut payloads = HashMap::with_capacity(refs.len());
     for (payload_ref, raw) in refs.into_iter().zip(raw) {
         let Some(raw) = raw else {
@@ -345,14 +371,99 @@ async fn read_replay_payloads(
 mod tests {
     use super::*;
 
+    fn step_summary_json(ordinal: u32, attempt: u32) -> String {
+        json!({
+            "ordinal": ordinal,
+            "name": format!("step-{ordinal}"),
+            "nameCount": 1,
+            "dependencies": [],
+            "status": "complete",
+            "attempt": attempt,
+            "outputRef": null,
+            "errorRef": null,
+            "hasOutput": false,
+            "hasError": false,
+            "completedAtMs": ordinal,
+            "failedAtMs": null,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn step_history_snapshot_is_atomic_bounded_and_fail_closed() {
+        let summary_count = READ_STEP_HISTORY_SCRIPT
+            .find(r#"redis.call("HLEN", KEYS[1])"#)
+            .expect("history snapshot must count summaries");
+        let index_count = READ_STEP_HISTORY_SCRIPT
+            .find(r#"redis.call("ZCARD", KEYS[2])"#)
+            .expect("history snapshot must count index entries");
+        let mismatch = READ_STEP_HISTORY_SCRIPT
+            .find("summary_count ~= index_count")
+            .expect("history snapshot must reject mismatched state");
+        let bounded_page = READ_STEP_HISTORY_SCRIPT
+            .find(r#"redis.call("ZREVRANGE", KEYS[2], 0, ARGV[1])"#)
+            .expect("history snapshot must read only the requested page");
+        let summary_read = READ_STEP_HISTORY_SCRIPT
+            .find(r#"redis.call("HGET", KEYS[1], field)"#)
+            .expect("history snapshot must read indexed summaries");
+
+        assert!(summary_count < mismatch);
+        assert!(index_count < mismatch);
+        assert!(mismatch < bounded_page);
+        assert!(bounded_page < summary_read);
+        assert!(!READ_STEP_HISTORY_SCRIPT.contains("HGETALL"));
+    }
+
+    #[test]
+    fn step_history_snapshot_rejects_mismatched_summary_state() {
+        let Err(error) = step_history_from_snapshot(0, 1, Vec::new()) else {
+            panic!("mismatched step summary state must fail closed");
+        };
+
+        assert_eq!(error.code, "workflow_invalid_state");
+        assert_eq!(error.message, "Workflow step summary index is inconsistent");
+    }
+
+    #[test]
+    fn step_history_snapshot_sorts_and_normalizes_the_bounded_page() {
+        let history = step_history_from_snapshot(
+            1,
+            3,
+            vec![step_summary_json(2, 0), step_summary_json(1, 1)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            history
+                .entries
+                .iter()
+                .map(|entry| entry.ordinal)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(history.entries[1].attempt, 1);
+        assert!(history.truncated);
+    }
+
     #[test]
     fn replay_page_reads_are_active_claim_fenced() {
-        assert!(READ_REPLAY_STEP_PAGE_SCRIPT.contains(r#""runLeaseExpiresAtMs""#));
-        assert!(READ_REPLAY_STEP_PAGE_SCRIPT.contains(r#"lease <= tonumber(ARGV[4])"#));
-        assert!(
-            READ_REPLAY_STEP_PAGE_SCRIPT.contains(r#"status ~= "running" and status ~= "waiting""#)
-        );
-        assert!(READ_REPLAY_STEP_PAGE_SCRIPT.contains(r#"created_at_ms ~= ARGV[3]"#));
-        assert!(READ_REPLAY_STEP_PAGE_SCRIPT.contains(r#"redis.call("HGET", KEYS[2], ARGV[i])"#));
+        for script in [READ_REPLAY_STEP_PAGE_SCRIPT, READ_REPLAY_PAYLOADS_SCRIPT] {
+            let payload_read = script
+                .find(r#"redis.call("HGET", KEYS[2], ARGV[i])"#)
+                .expect("script must read replay data");
+            for fence in [
+                r#"generation ~= ARGV[1]"#,
+                r#"token ~= ARGV[2]"#,
+                r#"created_at_ms ~= ARGV[3]"#,
+                r#""runLeaseExpiresAtMs""#,
+                r#"lease <= tonumber(ARGV[4])"#,
+                r#"status ~= "running" and status ~= "waiting""#,
+            ] {
+                assert!(
+                    script.find(fence).is_some_and(|index| index < payload_read),
+                    "{fence} must be checked before replay data is read"
+                );
+            }
+        }
     }
 }

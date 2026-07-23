@@ -393,8 +393,8 @@ async function decryptBudgetSecrets({
  * @param {{
  *   iso: {
  *     watch: (...keys: string[]) => Promise<unknown>,
- *     hGet: (key: string, field: string) => Promise<string | null | undefined>,
- *     hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>,
+ *     hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>,
+ *     hGetAllMany: (keys: string[]) => Promise<Array<Record<string, string | null | undefined>>>,
  *     zRange: (key: string, start: number, stop: number) => Promise<string[]>,
  *   },
  *   multi: import("shared-redis").RedisMulti,
@@ -427,10 +427,8 @@ async function stageWorkerSecretForBump({
   const versionsKey = workerVersionsKey(ns, name);
   await iso.watch(nsSecretHashKey, secretsKey, versionsKey);
 
-  // Keep reads sequential: RedisSession is a single RESP stream.
   const retainedVersions = await iso.zRange(versionsKey, 0, -1);
-  const nsEncrypted = await iso.hGetAll(nsSecretHashKey);
-  const workerEncrypted = await iso.hGetAll(secretsKey);
+  const [nsEncrypted, workerEncrypted] = await iso.hGetAllMany([nsSecretHashKey, secretsKey]);
   if (method === "DELETE" && !Object.hasOwn(workerEncrypted, key)) {
     throw new SecretNoop();
   }
@@ -530,8 +528,7 @@ async function mutateSecretWithoutActive({ redis, ns, name, key, method, value, 
       }
     }
 
-    const nsEncrypted = await iso.hGetAll(nsSecretHashKey);
-    const workerEncrypted = await iso.hGetAll(secretsKey);
+    const [nsEncrypted, workerEncrypted] = await iso.hGetAllMany([nsSecretHashKey, secretsKey]);
     const { nsSecrets, workerSecrets } = await decryptBudgetSecrets({
       nsEncrypted,
       workerEncrypted,

@@ -62,19 +62,20 @@ Cron 使用 wall-clock 分钟 slot：
 
 1. `wait_ms_until_next_slot()` 睡到下一个 UTC 分钟边界。tick loop 随后扫描当前 `cron-slot:<slot_ms>` bucket 和前一个 bucket。扫描前一个 bucket 是为了覆盖分钟 rollover 附近刚写入的 ref。
 2. 另一条 sweep/reconcile 路径从 `cron:index:workers` 读取 active cron hash，用 croner 和配置的 timezone 计算每个 entry 的下一次触发时间，再 round 到分钟 slot，并把 ref 写入 slot bucket。这个流程是 repair 逻辑，不是权威状态。Control 只在 promote-time 初始 slot placement 使用 JavaScript `croner`；scheduler repair 和 advance 使用 Rust `croner`。缺少 canonical identity 或 metadata 的 worker hash 会被跳过，不会重新播种非法 ref，并输出 bounded `invalid_identity` 或 `invalid_meta` reason。
-3. Cron ref 带 entry generation。真正 fire 前，scheduler 会重新读取 `crons:<ns>:<worker>` 并比较 `gen`；metadata 缺失、JSON 损坏或 generation 不匹配都会让 ref 变成 stale，并从 slot 中移除。
-4. Scheduler 会先原子地 lease ref、从当前 slot 移除、加入下一个 slot，然后才调用 runtime。这个顺序保证每个 slot 只 fire 一次，并且 runtime/network 失败不会变成自动 cron retry。
-5. 如果某个 ref 滞留在早于当前 wall-clock slot 的旧 slot 中，scheduler 只把它 advance 到下一个 future slot，不会 fire。也就是说 outage 或 scheduler 长时间停顿期间错过的 cron event 会被跳过，而不是补发。
-6. 发给 runtime 的 `scheduledTime` 是 slot timestamp，不是 POST 时间。`cron_queue_lag_ms` 衡量 scheduler 相对该 slot 晚了多久。
+3. Cron ref 带 entry generation。真正 fire 前，scheduler 读取 `crons:<ns>:<worker>` 并比较 `gen`；metadata 缺失、JSON 损坏或 generation 不匹配都会让 ref 变成 stale，并从 slot 中移除。
+4. 原子 claim 会在取得 lease 或修改 slot 前再次精确比较 metadata 和 entry snapshot。并发配置变化会触发一次有界重读和重新计算；如果配置再次变化，scheduler 会保留 source ref 给后续 tick，并记录 `config_changed_deferred`。
+5. Scheduler 会先原子地 lease ref、从当前 slot 移除、加入下一个 slot，然后才调用 runtime。这个顺序保证每个 slot 只 fire 一次，并且 runtime/network 失败不会变成自动 cron retry。
+6. 如果某个 ref 滞留在早于当前 wall-clock slot 的旧 slot 中，scheduler 只把它 advance 到下一个 future slot，不会 fire。也就是说 outage 或 scheduler 长时间停顿期间错过的 cron event 会被跳过，而不是补发。
+7. 发给 runtime 的 `scheduledTime` 是 slot timestamp，不是 POST 时间。`cron_queue_lag_ms` 衡量 scheduler 相对该 slot 晚了多久。
 
 因此 cron 语义是 Cloudflare 风格的 best-effort scheduled event：分钟对齐、不 catch-up replay、允许 overlap，用户 handler 失败只作为 outcome 上报，不由 scheduler 重试。
 
 Queue dispatch 是 stream-driven，不是 wall-clock driven：
 
 1. Producer 把 message envelope 写入 DB 1 stream；当 `delivery_delay` 或 retry delay 非零时，先写入 delayed ZSET。
-2. Scheduler reconcile `queue:index:*` discovery set，为 live stream 创建固定的 `wdl-scheduler` consumer group，并维护一个内存中的 known delayed queue 集合。空 queue index 可以从权威 hash、stream 和 delayed ZSET 一次性 backfill；之后 projection 由 writer 维护，stale-index cleanup 由 reconcile 负责。
-3. Consume loop 使用 `XREADGROUP` 读取 main stream，并按 `max_batch_size` 组 batch 投递，且 hard cap 为 `100`。每次 read 会用当前 active stream set 的 consumer batch-size snapshot 限制 `COUNT`，避免一次 poll 把超过当前 consumer 单批 dispatch 能力的 entries 放进 PEL。PEL reap 在 consumer 仍存在时使用同一 per-consumer cap；consumer 已消失的 orphan movement 仍可按 hard cap 分页。Consume 和 PEL reap 可以在 queue semaphore 下按 stream 并行 dispatch。每条 dispatch path 在向 runtime 发送 message 前都会重读该 stream 的权威 `queue-consumer` hash 并刷新内存 registry，因此 consumer promote 后，一旦 message 被选中，就不需要等下一次 reconcile tick 才使用新版本。当前模型里 `max_batch_timeout_ms` 不是 batching wait window。
-4. Runtime 返回 queue outcome envelope。Scheduler 解析 explicit `ack`、explicit `retry`、batch retry 和 implicit ack，然后用 Redis pipeline 执行 `XACK`/`XDEL`、delayed retry `ZADD`、DLQ append 或 immediate retry write。不会因为重试同一批 bytes 变好的平台失败，例如 queue message decode failure 或非法 queue dispatch body，会直接进 DLQ，不消耗 retry budget。聚合 request-body-too-large 会先拆成更小 batch 重试。
+2. Scheduler 会在启动时及每个 `SCHEDULER_SWEEP_MS`（默认五分钟）从权威 hash、stream 和 delayed ZSET 修复 `queue:index:*` discovery set。1.5 秒一次的 reconcile loop 只读取这些 index、删除 stale member、为 live stream 创建固定的 `wdl-scheduler` consumer group，并维护内存中的 known delayed queue 集合。正常写入仍由 writer 维护 index；周期 repair 为中断的 data-plus-index 写入提供有界恢复，同时避免在 reconcile 热路径扫描 keyspace。缺失的 optional consumer field 默认使用 `max_batch_size=10`、`max_batch_timeout_ms=5000`、`max_retries=3`、`retry_delay_secs=0` 且不配置 `dead_letter_queue`；已存在但 malformed/out-of-range 的字段或非法 dead-letter queue 会让该 consumer projection 不可用。Group creation 按 stream 隔离错误并继续后续有界 chunk；健康 consumer 会先写入内存 registry 并刷新派生 snapshot，最后才汇报聚合 reconcile failure。
+3. Consume loop 使用 `XREADGROUP` 读取 main stream，并按 `max_batch_size` 组 batch 投递；该值必须在 `[1, 100]` 内，越界 projection 会被拒绝。每次 read 会用当前 active stream set 的 consumer batch-size snapshot 限制 `COUNT`，避免一次 poll 把超过当前 consumer 单批 dispatch 能力的 entries 放进 PEL。PEL reap 在 consumer 仍存在时使用同一 per-consumer cap；consumer 已消失的 orphan movement 仍可按 hard cap 分页。Consume 和 PEL reap 可以在 queue semaphore 下按 stream 并行 dispatch。每条 dispatch path 在向 runtime 发送 message 前都会重读该 stream 的权威 `queue-consumer` hash 并刷新内存 registry，因此 consumer promote 后，一旦 message 被选中，就不需要等下一次 reconcile tick 才使用新版本。当前模型里 `max_batch_timeout_ms` 不是 batching wait window。
+4. Runtime 返回 queue outcome envelope。Scheduler 解析 explicit `ack`、explicit `retry`、batch retry 和 implicit ack。Retry 与 DLQ transition 会作为彼此独立的原子脚本放在同一 transport pipeline 中执行：所有 target 写入成功后才会 acknowledge 并删除 source entry。因此 target 侧错误会保留 source entry，也不会阻止同 batch 后续健康 transition 完成。不会因为重试同一批 bytes 变好的平台失败，例如 queue message decode failure 或非法 queue dispatch body，会直接进 DLQ，不消耗 retry budget。聚合 request-body-too-large 会先拆成更小 batch 重试。
 5. Delayed loop 由 `queue-delayed-wake` 和下一条 due member 的 wall-clock sleep 唤醒。每个到期 member 会先取得 `queue-delayed-claim:*` lease，TTL 为 `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`；抢到的副本把它移回 main stream，或在 consumer 已消失时移入 orphan stream。
 6. Orphan / Pending-Entry cleanup 是诊断和保护机制。它防止 consumer 删除或 scheduler crash 路径静默丢消息，但 main queue stream 仍是 durable backlog，并且故意不 trim。Delayed ZSET 和 orphan stream-tail migration 受 `QUEUE_SWEEP_BATCH_SIZE` 分页控制，默认 `100`。
 
@@ -89,6 +90,7 @@ Cron keys：
 
 ```text
 crons:<ns>:<worker>               Hash, active cron config 的权威状态
+cron:seq:<ns>:<worker>            String, 永久 generation 高水位
 cron:index:workers                Set, crons hash 的非权威 discovery index
 cron:index:workers:backfilled     String, 一次性 legacy backfill marker
 cron-slot:<slot_ms>               Set, 分钟 bucket consumption index，约在 slot+10min 过期
@@ -119,10 +121,12 @@ Index 不是权威状态。Writer 只负责添加 index member；scheduler recon
 Cron：
 
 - `crons:<ns>:<worker>` 是权威状态。
+- `cron:seq:<ns>:<worker>` 是唯一的永久 generation allocator，在 projection 清空和 whole-worker delete 后仍保留；新分配从 `1024` 开始。
+- Cron projection metadata 只保存 dispatch 使用的 active worker version。
 - `cron:index:workers` 只用于 discovery。`cron:index:workers:backfilled` 表示 scheduler 已跨过 pre-index legacy state；之后空 index 表示没有已发现的 cron worker。
 - `cron-slot:<slot_ms>` 是可重建的 consumption index。scheduler 会检查当前 bucket 和前一个 bucket，避免临近分钟边界的写入被延迟一整分钟。
 - Cron ref 形状是 `<ns>:<worker>:<cron_id>:<gen>`。
-- `gen` 是 stale bucket ref 的 fence。删除后重新添加同一个 cron 会得到新的 generation。
+- `gen` 是 stale bucket ref 的 fence。删除后重新添加同一个 cron，包括 whole-worker delete 后重建，都会得到新的 generation。
 - Scheduler 先 lease 并 advance ref，再触发 runtime。如果 runtime call 失败，该 slot 也已经被消费。这保持 Cloudflare 风格的 best-effort cron 语义，而不是重试 scheduled event。
 - 滞留在旧 slot 的 ref 会 advance 但不会 fire。Outage 期间错过的 cron event 会被跳过。
 - Handler failure 会由 runtime 以 HTTP 200 + `outcome:"error"` 返回，scheduler 不把用户代码失败当成可重试 transport failure。
@@ -163,7 +167,7 @@ Scheduler 为 cron 和 queue outcome 输出结构化日志和 Prometheus metrics
 - `cron_stale_refs_cleaned`
 - `cron_sweep_entries_skipped`
 - `cron_sweep_workers_skipped`
-- Logs：`cron_fired`、`cron_lease_lost`、`cron_ref_stale`、`cron_ref_stale_advanced`、`cron_sweep_entry_skipped`、`cron_sweep_worker_skipped`、`cron_reconcile`
+- Logs：`cron_fired`、`cron_lease_lost`、`cron_config_changed_deferred`、`cron_ref_stale`、`cron_ref_stale_advanced`、`cron_sweep_entry_skipped`、`cron_sweep_worker_skipped`、`cron_reconcile`
 
 重要 queue 信号：
 

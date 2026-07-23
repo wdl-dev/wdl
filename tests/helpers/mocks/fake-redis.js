@@ -10,6 +10,7 @@ const SHARED_REDIS_RESP_URL = repositoryModuleDataUrl("shared/redis-resp.js", [
   [/from "shared-observability";/, `from ${JSON.stringify(SHARED_OBSERVABILITY_URL)};`],
   [/from "\.\/errors\.js";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
 ]);
+const utf8Encoder = new TextEncoder();
 
 /** @typedef {Map<string, string>} FakeRedisStrings */
 /** @typedef {Map<string, Record<string, string>>} FakeRedisHashes */
@@ -27,6 +28,7 @@ const SHARED_REDIS_RESP_URL = repositoryModuleDataUrl("shared/redis-resp.js", [
  *   watchBatches: string[][],
  *   commands: unknown[][],
  *   expirations: Map<string, number>,
+ *   revisions: Map<string, number>,
  *   execFailures: number,
  *   nowMs: number,
  * }} FakeRedisState
@@ -65,6 +67,7 @@ export function createFakeRedisState() {
     watchBatches: [],
     commands: [],
     expirations: new Map(),
+    revisions: new Map(),
     execFailures: 0,
     nowMs: Date.now(),
   };
@@ -81,6 +84,7 @@ export function resetFakeRedisState(state) {
   state.watchBatches.length = 0;
   state.commands.length = 0;
   state.expirations.clear();
+  state.revisions.clear();
   state.execFailures = 0;
   state.nowMs = Date.now();
 }
@@ -104,6 +108,7 @@ export function createFakeRedis(state = createFakeRedisState(), options = {}) {
     sets: state.sets,
     zsets: state.zsets,
     expirations: state.expirations,
+    revisions: state.revisions,
     get execFailures() { return state.execFailures; },
     set execFailures(value) { state.execFailures = value; },
     ops: state.ops,
@@ -121,7 +126,6 @@ export function createFakeRedis(state = createFakeRedisState(), options = {}) {
  * @param {{ encodeGet?: boolean, nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
  */
 export function createFakeRedisClient(state, options = {}) {
-  const session = createFakeRedisSession(state, options);
   return {
     /** @param {string} key */
     async get(key) {
@@ -133,6 +137,26 @@ export function createFakeRedisClient(state, options = {}) {
     async getWithTime(key) {
       return { value: await this.get(key), nowMs: await this.time() };
     },
+    /** @param {string[]} keys */
+    async getManyWithTime(keys) {
+      if (keys.length === 0) throw new Error("getManyWithTime requires at least one key");
+      state.commands.push(["getManyWithTime", [...keys]]);
+      return {
+        values: keys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return encodeMaybe(state.strings.get(key) ?? null, options);
+        }),
+        nowMs: await this.time(),
+      };
+    },
+    /** @param {string[]} keys */
+    async getMany(keys) {
+      state.commands.push(["getMany", [...keys]]);
+      return keys.map((key) => {
+        expireIfNeeded(state, key, options);
+        return encodeMaybe(state.strings.get(key) ?? null, options);
+      });
+    },
     async time() {
       return currentFakeRedisTimeMs(state, options);
     },
@@ -141,20 +165,22 @@ export function createFakeRedisClient(state, options = {}) {
       state.commands.push(["incr", key]);
       const next = Number(state.strings.get(key) || 0) + 1;
       state.strings.set(key, String(next));
+      markKeyModified(state, key);
       return next;
     },
-    /** @param {string} key @param {string} value @param {{ nx?: boolean, ttl?: number, ifeq?: string }} [setOptions] */
+    /** @param {string} key @param {string} value @param {{ nx?: boolean, ttl?: number, ifeq?: string | Uint8Array }} [setOptions] */
     async set(key, value, setOptions = {}) {
       expireIfNeeded(state, key, options);
       state.commands.push(["set", key, value, { ...setOptions }]);
       if (setOptions.nx && keyExists(state, key, options)) return null;
-      if (setOptions.ifeq != null && state.strings.get(key) !== setOptions.ifeq) return null;
+      if (setOptions.ifeq != null && !storedStringEquals(state.strings.get(key), setOptions.ifeq)) return null;
       state.strings.set(key, value);
       if (typeof setOptions.ttl === "number") {
         state.expirations.set(key, currentFakeRedisTimeMs(state, options) + setOptions.ttl * 1000);
       } else {
         state.expirations.delete(key);
       }
+      markKeyModified(state, key);
       return "OK";
     },
     /** @param {...string} keys */
@@ -164,12 +190,21 @@ export function createFakeRedisClient(state, options = {}) {
       for (const key of keys) removed += deleteKey(state, key, options);
       return removed;
     },
-    /** @param {string} key @param {string} value */
+    /** @param {string} key @param {string | Uint8Array} value */
     async delIfEq(key, value) {
       expireIfNeeded(state, key, options);
       state.commands.push(["delIfEq", key, value]);
-      if (state.strings.get(key) !== value) return 0;
+      if (!storedStringEquals(state.strings.get(key), value)) return 0;
       return deleteKey(state, key, options);
+    },
+    /** @param {Array<[string, string | Uint8Array]>} entries */
+    async delIfEqMany(entries) {
+      state.commands.push(["delIfEqMany", entries.map(([key, value]) => [key, value])]);
+      return entries.map(([key, value]) => {
+        expireIfNeeded(state, key, options);
+        if (!storedStringEquals(state.strings.get(key), value)) return 0;
+        return deleteKey(state, key, options);
+      });
     },
     /** @param {string} cursor @param {string} match @param {number} [count] */
     async scan(cursor, match, count = 100) {
@@ -212,6 +247,34 @@ export function createFakeRedisClient(state, options = {}) {
         return { ...(state.hashes.get(key) || {}) };
       });
     },
+    /** @param {Array<[string, string]>} pairs */
+    async hStrLenMany(pairs) {
+      state.commands.push(["hStrLenMany", pairs.map(([key, field]) => [key, field])]);
+      return pairs.map(([key, field]) => {
+        expireIfNeeded(state, key, options);
+        return redisByteLength(hashField(state, key, field));
+      });
+    },
+    /** @param {string} hashKey @param {string} stringKey */
+    async hGetAllAndGet(hashKey, stringKey) {
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, stringKey, options);
+      state.commands.push(["hGetAllAndGet", hashKey, stringKey]);
+      return {
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+        value: state.strings.get(stringKey) ?? null,
+      };
+    },
+    /** @param {string} setKey @param {string} hashKey */
+    async sMembersAndHGetAll(setKey, hashKey) {
+      expireIfNeeded(state, setKey, options);
+      expireIfNeeded(state, hashKey, options);
+      state.commands.push(["sMembersAndHGetAll", setKey, hashKey]);
+      return {
+        members: [...(state.sets.get(setKey) || new Set())],
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+      };
+    },
     /** @param {string} key @param {Record<string, string>} fields */
     async hSet(key, fields) {
       expireIfNeeded(state, key, options);
@@ -232,6 +295,7 @@ export function createFakeRedisClient(state, options = {}) {
         }
       }
       if (Object.keys(hash).length === 0) state.hashes.delete(key);
+      if (removed > 0) markKeyModified(state, key);
       return removed;
     },
     /** @param {string} key */
@@ -252,11 +316,36 @@ export function createFakeRedisClient(state, options = {}) {
       state.commands.push(["sMembers", key]);
       return [...(state.sets.get(key) || new Set())];
     },
+    /** @param {string[]} keys */
+    async sMembersMany(keys) {
+      state.commands.push(["sMembersMany", [...keys]]);
+      return keys.map((key) => {
+        expireIfNeeded(state, key, options);
+        return [...(state.sets.get(key) || new Set())];
+      });
+    },
+    /** @param {string} key */
+    async sCard(key) {
+      expireIfNeeded(state, key, options);
+      state.commands.push(["sCard", key]);
+      return state.sets.get(key)?.size || 0;
+    },
+    /** @param {string[]} keys */
+    async sCardMany(keys) {
+      state.commands.push(["sCardMany", [...keys]]);
+      return keys.map((key) => {
+        expireIfNeeded(state, key, options);
+        return state.sets.get(key)?.size || 0;
+      });
+    },
     /** @param {string} key @param {string} member */
     async sAdd(key, member) {
       expireIfNeeded(state, key, options);
       state.commands.push(["sAdd", key, member]);
-      ensureSet(state, key).add(member);
+      const set = ensureSet(state, key);
+      const before = set.size;
+      set.add(member);
+      if (set.size !== before) markKeyModified(state, key);
     },
     /** @param {string} key */
     async zCard(key) {
@@ -271,15 +360,17 @@ export function createFakeRedisClient(state, options = {}) {
       state.commands.push(["zRange", key, start, stop, result]);
       return result;
     },
-    /** @param {string} key */
-    async exists(key) {
-      expireIfNeeded(state, key, options);
-      state.commands.push(["exists", key]);
-      return keyExists(state, key, options) ? 1 : 0;
+    /** @param {...string} keys */
+    async exists(...keys) {
+      state.commands.push(["exists", ...keys]);
+      return keys.reduce((count, key) => {
+        expireIfNeeded(state, key, options);
+        return count + (keyExists(state, key, options) ? 1 : 0);
+      }, 0);
     },
     /** @param {(session: ReturnType<typeof createFakeRedisSession>) => Promise<unknown>} fn */
     async session(fn) {
-      return await fn(session);
+      return await fn(createFakeRedisSession(state, options));
     },
   };
 }
@@ -289,13 +380,41 @@ export function createFakeRedisClient(state, options = {}) {
  * @param {{ nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
  */
 export function createFakeRedisSession(state, options = {}) {
+  /** @type {Map<string, { fingerprint: string, revision: number }>} */
+  const watchedSnapshots = new Map();
+  const watchContext = {
+    assertUnchanged() {
+      for (const [key, snapshot] of watchedSnapshots) {
+        if (
+          keyRevision(state, key) !== snapshot.revision ||
+          fakeKeyFingerprint(state, key, options) !== snapshot.fingerprint
+        ) {
+          throw new FakeRedisWatchError();
+        }
+      }
+    },
+    clear() {
+      watchedSnapshots.clear();
+    },
+  };
   return {
     /** @param {string[]} keys */
     async watch(...keys) {
       state.watched.push(...keys);
       state.watchBatches.push(keys);
+      for (const key of keys) {
+        if (!watchedSnapshots.has(key)) {
+          const fingerprint = fakeKeyFingerprint(state, key, options);
+          watchedSnapshots.set(key, {
+            fingerprint,
+            revision: keyRevision(state, key),
+          });
+        }
+      }
     },
-    async unwatch() {},
+    async unwatch() {
+      watchContext.clear();
+    },
     /** @param {string} key */
     async get(key) {
       expireIfNeeded(state, key, options);
@@ -364,6 +483,36 @@ export function createFakeRedisSession(state, options = {}) {
         return { ...(state.hashes.get(key) || {}) };
       });
     },
+    /** @param {Array<[string, string]>} pairs */
+    async hStrLenMany(pairs) {
+      state.commands.push(["hStrLenMany", pairs.map(([key, field]) => [key, field])]);
+      return pairs.map(([key, field]) => {
+        expireIfNeeded(state, key, options);
+        return redisByteLength(hashField(state, key, field));
+      });
+    },
+    /** @param {string} hashKey @param {string} stringKey */
+    async hGetAllAndGet(hashKey, stringKey) {
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, stringKey, options);
+      state.commands.push(["hGetAllAndGet", hashKey, stringKey]);
+      return {
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+        value: state.strings.get(stringKey) ?? null,
+      };
+    },
+    /** @param {string} hashKey @param {string} stringKey @param {string} setKey */
+    async hGetAllGetSMembers(hashKey, stringKey, setKey) {
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, stringKey, options);
+      expireIfNeeded(state, setKey, options);
+      state.commands.push(["hGetAllGetSMembers", hashKey, stringKey, setKey]);
+      return {
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+        value: state.strings.get(stringKey) ?? null,
+        members: [...(state.sets.get(setKey) || new Set())],
+      };
+    },
     /** @param {string} key */
     async hKeys(key) {
       expireIfNeeded(state, key, options);
@@ -376,11 +525,13 @@ export function createFakeRedisSession(state, options = {}) {
       state.commands.push(["hExists", key, field]);
       return Object.hasOwn(state.hashes.get(key) || {}, field);
     },
-    /** @param {string} key */
-    async exists(key) {
-      expireIfNeeded(state, key, options);
-      state.commands.push(["exists", key]);
-      return keyExists(state, key, options) ? 1 : 0;
+    /** @param {...string} keys */
+    async exists(...keys) {
+      state.commands.push(["exists", ...keys]);
+      return keys.reduce((count, key) => {
+        expireIfNeeded(state, key, options);
+        return count + (keyExists(state, key, options) ? 1 : 0);
+      }, 0);
     },
     /** @param {string[]} keys */
     async existsMany(keys) {
@@ -399,6 +550,28 @@ export function createFakeRedisSession(state, options = {}) {
       expireIfNeeded(state, key, options);
       state.commands.push(["sMembers", key]);
       return [...(state.sets.get(key) || new Set())];
+    },
+    /** @param {string[]} keys */
+    async sMembersMany(keys) {
+      state.commands.push(["sMembersMany", [...keys]]);
+      return keys.map((key) => {
+        expireIfNeeded(state, key, options);
+        return [...(state.sets.get(key) || new Set())];
+      });
+    },
+    /** @param {string} key */
+    async sCard(key) {
+      expireIfNeeded(state, key, options);
+      state.commands.push(["sCard", key]);
+      return state.sets.get(key)?.size || 0;
+    },
+    /** @param {string[]} keys */
+    async sCardMany(keys) {
+      state.commands.push(["sCardMany", [...keys]]);
+      return keys.map((key) => {
+        expireIfNeeded(state, key, options);
+        return state.sets.get(key)?.size || 0;
+      });
     },
     /** @param {string} key */
     async zCard(key) {
@@ -428,11 +601,11 @@ export function createFakeRedisSession(state, options = {}) {
       for (const key of keys) removed += deleteKey(state, key, options);
       return removed;
     },
-    /** @param {string} key @param {string} value */
+    /** @param {string} key @param {string | Uint8Array} value */
     async delIfEq(key, value) {
       expireIfNeeded(state, key, options);
       state.commands.push(["delIfEq", key, value]);
-      if (state.strings.get(key) !== value) return 0;
+      if (!storedStringEquals(state.strings.get(key), value)) return 0;
       return deleteKey(state, key, options);
     },
     /** @param {string} cursor @param {string} match @param {number} [count] */
@@ -443,20 +616,11 @@ export function createFakeRedisSession(state, options = {}) {
     },
     /** @param {string} src @param {string} dst @param {{ REPLACE?: boolean }} [opts] */
     async copy(src, dst, opts = {}) {
-      expireIfNeeded(state, src, options);
       state.commands.push(["copy", src, dst, { ...opts }]);
-      const hash = state.hashes.get(src);
-      if (!hash) return 0;
-      if (!opts.REPLACE && keyExists(state, dst, options)) return 0;
-      if (opts.REPLACE) deleteKey(state, dst, options);
-      state.hashes.set(dst, { ...hash });
-      const expiresAt = state.expirations.get(src);
-      if (expiresAt == null) state.expirations.delete(dst);
-      else state.expirations.set(dst, expiresAt);
-      return 1;
+      return copyKey(state, src, dst, opts, options);
     },
     multi() {
-      return createFakeRedisMulti(state, options);
+      return createFakeRedisMulti(state, options, watchContext);
     },
   };
 }
@@ -464,8 +628,9 @@ export function createFakeRedisSession(state, options = {}) {
 /**
  * @param {FakeRedisState} state
  * @param {{ nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
+ * @param {{ assertUnchanged: () => void, clear: () => void }} [watchContext]
  */
-export function createFakeRedisMulti(state, options = {}) {
+export function createFakeRedisMulti(state, options = {}, watchContext = undefined) {
   /** @type {unknown[][]} */
   const ops = [];
   const chain = {
@@ -485,6 +650,11 @@ export function createFakeRedisMulti(state, options = {}) {
     /** @param {string} key @param {string} value @param {Record<string, unknown>} [options] */
     set(key, value, options = undefined) {
       ops.push(["set", key, value, options]);
+      return chain;
+    },
+    /** @param {string} key */
+    incr(key) {
+      ops.push(["incr", key]);
       return chain;
     },
     /** @param {string[]} keys */
@@ -528,14 +698,19 @@ export function createFakeRedisMulti(state, options = {}) {
       return chain;
     },
     async exec() {
-      if (state.execFailures > 0) {
-        state.execFailures -= 1;
-        options.onExecFailure?.(ops, state.execFailures);
-        throw new FakeRedisWatchError();
+      try {
+        watchContext?.assertUnchanged();
+        if (state.execFailures > 0) {
+          state.execFailures -= 1;
+          options.onExecFailure?.(ops, state.execFailures);
+          throw new FakeRedisWatchError();
+        }
+        state.ops.push(...ops);
+        state.commands.push(...ops);
+        return ops.map((op) => applyFakeRedisOp(state, op, options));
+      } finally {
+        watchContext?.clear();
       }
-      state.ops.push(...ops);
-      state.commands.push(...ops);
-      return ops.map((op) => applyFakeRedisOp(state, op, options));
     },
   };
   return chain;
@@ -558,17 +733,24 @@ export function applyFakeRedisOp(state, op, options = {}) {
 
   const key = /** @type {string} */ (op[1]);
   if (kind === "set") {
-    const setOptions = /** @type {{ nx?: boolean, ttl?: number, ifeq?: string } | undefined} */ (op[3]) ?? {};
+    const setOptions = /** @type {{ nx?: boolean, ttl?: number, ifeq?: string | Uint8Array } | undefined} */ (op[3]) ?? {};
     expireIfNeeded(state, key, options);
     if (setOptions.nx && keyExists(state, key, options)) return null;
-    if (setOptions.ifeq != null && state.strings.get(key) !== setOptions.ifeq) return null;
+    if (setOptions.ifeq != null && !storedStringEquals(state.strings.get(key), setOptions.ifeq)) return null;
     state.strings.set(key, /** @type {string} */ (op[2]));
     if (typeof setOptions.ttl === "number") {
       state.expirations.set(key, currentFakeRedisTimeMs(state, options) + setOptions.ttl * 1000);
     } else {
       state.expirations.delete(key);
     }
+    markKeyModified(state, key);
     return "OK";
+  }
+  if (kind === "incr") {
+    const next = Number(state.strings.get(key) || 0) + 1;
+    state.strings.set(key, String(next));
+    markKeyModified(state, key);
+    return next;
   }
   if (kind === "hSet") {
     return setHashFields(state, key, /** @type {Record<string, string>} */ (op[2]));
@@ -584,6 +766,7 @@ export function applyFakeRedisOp(state, op, options = {}) {
       }
     }
     if (Object.keys(hash).length === 0) state.hashes.delete(key);
+    if (removed > 0) markKeyModified(state, key);
     return removed;
   }
   if (kind === "copy") {
@@ -591,45 +774,47 @@ export function applyFakeRedisOp(state, op, options = {}) {
     const copyOptions = /** @type {{ REPLACE?: boolean }} */ (
       op[3] && typeof op[3] === "object" ? op[3] : {}
     );
-    expireIfNeeded(state, key, options);
-    const hash = state.hashes.get(key);
-    if (!hash) return 0;
-    if (!copyOptions.REPLACE && keyExists(state, dst, options)) return 0;
-    if (copyOptions.REPLACE) deleteKey(state, dst, options);
-    state.hashes.set(dst, { ...hash });
-    const expiresAt = state.expirations.get(key);
-    if (expiresAt == null) state.expirations.delete(dst);
-    else state.expirations.set(dst, expiresAt);
-    return 1;
+    return copyKey(state, key, dst, copyOptions, options);
   }
   if (kind === "sAdd") {
     const set = ensureSet(state, key);
     const before = set.size;
     set.add(/** @type {string} */ (op[2]));
-    return set.size > before ? 1 : 0;
+    const added = set.size > before ? 1 : 0;
+    if (added === 1) markKeyModified(state, key);
+    return added;
   }
   if (kind === "sRem") {
     const set = state.sets.get(key);
     const removed = set?.delete(/** @type {string} */ (op[2])) ? 1 : 0;
     if (set?.size === 0) state.sets.delete(key);
+    if (removed === 1) markKeyModified(state, key);
     return removed;
   }
   if (kind === "zAdd") {
     const zset = state.zsets.get(key) || new Map();
-    const added = zset.has(/** @type {string} */ (op[3])) ? 0 : 1;
-    zset.set(/** @type {string} */ (op[3]), /** @type {number} */ (op[2]));
+    const member = /** @type {string} */ (op[3]);
+    const score = /** @type {number} */ (op[2]);
+    const previous = zset.get(member);
+    const added = zset.has(member) ? 0 : 1;
+    zset.set(member, score);
     state.zsets.set(key, zset);
+    if (previous !== score) markKeyModified(state, key);
     return added;
   }
   if (kind === "zRem") {
     const zset = state.zsets.get(key);
     const removed = zset?.delete(/** @type {string} */ (op[2])) ? 1 : 0;
     if (zset?.size === 0) state.zsets.delete(key);
+    if (removed === 1) markKeyModified(state, key);
     return removed;
   }
   if (kind === "publish") return 0;
   if (kind === "expireAt") {
+    expireIfNeeded(state, key, options);
+    if (!keyExists(state, key, options)) return 0;
     state.expirations.set(key, Number(op[2]) * 1000);
+    markKeyModified(state, key);
     return 1;
   }
   return undefined;
@@ -649,6 +834,7 @@ function setHashFields(state, key, fields) {
     if (!Object.hasOwn(hash, field)) added += 1;
   }
   state.hashes.set(key, { ...hash, ...fields });
+  markKeyModified(state, key);
   return added;
 }
 
@@ -680,6 +866,89 @@ function keyExists(state, key, options = {}) {
 }
 
 /**
+ * Snapshot one logical key so direct test-state mutations obey WATCH semantics.
+ * @param {FakeRedisState} state
+ * @param {string} key
+ * @param {{ nowMs?: () => number }} [options]
+ */
+function fakeKeyFingerprint(state, key, options = {}) {
+  expireIfNeeded(state, key, options);
+  if (!keyExists(state, key, options)) return "absent";
+  const expiresAt = state.expirations.get(key) ?? null;
+  if (state.strings.has(key)) {
+    return JSON.stringify(["string", state.strings.get(key), expiresAt]);
+  }
+  if (state.hashes.has(key)) {
+    const entries = Object.entries(state.hashes.get(key) || {}).toSorted(([a], [b]) =>
+      a.localeCompare(b)
+    );
+    return JSON.stringify(["hash", entries, expiresAt]);
+  }
+  if (state.sets.has(key)) {
+    return JSON.stringify(["set", [...(state.sets.get(key) || [])].toSorted(), expiresAt]);
+  }
+  const entries = [...(state.zsets.get(key) || new Map())].toSorted(([a], [b]) =>
+    a.localeCompare(b)
+  );
+  return JSON.stringify(["zset", entries, expiresAt]);
+}
+
+/** @param {FakeRedisState} state @param {string} key */
+function keyRevision(state, key) {
+  return state.revisions.get(key) ?? 0;
+}
+
+/** @param {unknown} value */
+function redisByteLength(value) {
+  if (value == null) return 0;
+  if (value instanceof Uint8Array) return value.byteLength;
+  return new TextEncoder().encode(String(value)).byteLength;
+}
+
+/** @param {FakeRedisState} state @param {string} key */
+function markKeyModified(state, key) {
+  state.revisions.set(key, keyRevision(state, key) + 1);
+}
+
+/** @param {FakeRedisState} state @param {string} key */
+function clearKeyData(state, key) {
+  state.strings.delete(key);
+  state.hashes.delete(key);
+  state.sets.delete(key);
+  state.zsets.delete(key);
+  state.expirations.delete(key);
+}
+
+/**
+ * @param {FakeRedisState} state
+ * @param {string} src
+ * @param {string} dst
+ * @param {{ REPLACE?: boolean }} copyOptions
+ * @param {{ nowMs?: () => number }} [options]
+ */
+function copyKey(state, src, dst, copyOptions, options = {}) {
+  if (src === dst) throw new Error("source and destination objects are the same");
+  expireIfNeeded(state, src, options);
+  if (!keyExists(state, src, options)) return 0;
+  if (!copyOptions.REPLACE && keyExists(state, dst, options)) return 0;
+
+  clearKeyData(state, dst);
+  if (state.strings.has(src)) {
+    state.strings.set(dst, /** @type {string} */ (state.strings.get(src)));
+  } else if (state.hashes.has(src)) {
+    state.hashes.set(dst, { ...(state.hashes.get(src) || {}) });
+  } else if (state.sets.has(src)) {
+    state.sets.set(dst, new Set(state.sets.get(src)));
+  } else {
+    state.zsets.set(dst, new Map(state.zsets.get(src)));
+  }
+  const expiresAt = state.expirations.get(src);
+  if (expiresAt != null) state.expirations.set(dst, expiresAt);
+  markKeyModified(state, dst);
+  return 1;
+}
+
+/**
  * @param {FakeRedisState} state
  * @param {string} key
  * @param {{ nowMs?: () => number }} [options]
@@ -687,11 +956,8 @@ function keyExists(state, key, options = {}) {
 function deleteKey(state, key, options = {}) {
   expireIfNeeded(state, key, options);
   const existed = keyExists(state, key, options);
-  state.strings.delete(key);
-  state.hashes.delete(key);
-  state.sets.delete(key);
-  state.zsets.delete(key);
-  state.expirations.delete(key);
+  clearKeyData(state, key);
+  if (existed) markKeyModified(state, key);
   return existed ? 1 : 0;
 }
 
@@ -703,11 +969,8 @@ function deleteKey(state, key, options = {}) {
 function expireIfNeeded(state, key, options = {}) {
   const expiresAt = state.expirations.get(key);
   if (expiresAt == null || currentFakeRedisTimeMs(state, options) < expiresAt) return;
-  state.expirations.delete(key);
-  state.strings.delete(key);
-  state.hashes.delete(key);
-  state.sets.delete(key);
-  state.zsets.delete(key);
+  clearKeyData(state, key);
+  markKeyModified(state, key);
 }
 
 /**
@@ -751,6 +1014,15 @@ function globToRegExp(glob) {
 function encodeMaybe(value, options) {
   if (!options.encodeGet || value == null) return value;
   return new TextEncoder().encode(value);
+}
+
+/** @param {string | undefined} stored @param {string | Uint8Array} expected */
+function storedStringEquals(stored, expected) {
+  if (stored == null) return false;
+  if (typeof expected === "string") return stored === expected;
+  const storedBytes = utf8Encoder.encode(stored);
+  if (storedBytes.length !== expected.length) return false;
+  return storedBytes.every((value, index) => value === expected[index]);
 }
 
 /** @param {FakeRedisState} state @param {{ nowMs?: () => number }} options */

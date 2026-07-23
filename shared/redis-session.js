@@ -1,6 +1,8 @@
 import { connect } from "cloudflare:sockets";
 import {
   WatchError,
+  buildHGetExArgs,
+  buildHSetExArgs,
   buildHSetArgs,
   buildSetArgs,
   concatBuffers,
@@ -13,6 +15,7 @@ import {
   utf8Decoder,
   warnRedisCallback,
   RespReader,
+  RedisReplyError,
 } from "shared-redis-resp";
 import { errorMessage } from "./errors.js";
 
@@ -60,20 +63,25 @@ export class RedisSession {
   async open() {
     if (this._closed) throw new Error("Redis session closed");
     if (this.socket) return this;
-    const socket = this._connect(this.address);
-    const writer = socket.writable.getWriter();
-    const reader = socket.readable.getReader();
-    const parser = new RespReader(reader);
-    this.socket = socket;
-    this.writer = writer;
-    this.reader = reader;
-    this.parser = parser;
-    if (this.db > 0) {
-      await writer.write(encodeCommand(["SELECT", String(this.db)]));
-      await parser.parseOne();
-      parser.compact();
+    try {
+      const socket = this._connect(this.address);
+      this.socket = socket;
+      const writer = socket.writable.getWriter();
+      this.writer = writer;
+      const reader = socket.readable.getReader();
+      this.reader = reader;
+      const parser = new RespReader(reader);
+      this.parser = parser;
+      if (this.db > 0) {
+        await writer.write(encodeCommand(["SELECT", String(this.db)]));
+        await parser.parseOne();
+        parser.compact();
+      }
+      return this;
+    } catch (err) {
+      await this.close();
+      throw err;
     }
-    return this;
   }
 
   hasOpenResources() {
@@ -122,6 +130,11 @@ export class RedisSession {
       this._emitCommand({ command, duration_ms: Date.now() - startedAt, ok: true });
       return reply;
     } catch (err) {
+      if (err instanceof RedisReplyError) {
+        parser.compact();
+      } else {
+        await this.close();
+      }
       this._emitCommand({
         command,
         duration_ms: Date.now() - startedAt,
@@ -141,8 +154,18 @@ export class RedisSession {
     try {
       await writer.write(concatBuffers(commands.map((args) => encodeCommand(args))));
       const replies = [];
-      for (let i = 0; i < commands.length; i += 1) replies.push(await parser.parseOne());
+      /** @type {RedisReplyError | null} */
+      let firstReplyError = null;
+      for (let i = 0; i < commands.length; i += 1) {
+        try {
+          replies.push(await parser.parseOne());
+        } catch (err) {
+          if (!(err instanceof RedisReplyError)) throw err;
+          if (!firstReplyError) firstReplyError = err;
+        }
+      }
       parser.compact();
+      if (firstReplyError) throw firstReplyError;
       this._emitCommand({
         command,
         duration_ms: Date.now() - startedAt,
@@ -151,6 +174,7 @@ export class RedisSession {
       });
       return replies;
     } catch (err) {
+      if (!(err instanceof RedisReplyError)) await this.close();
       this._emitCommand({
         command,
         duration_ms: Date.now() - startedAt,
@@ -182,6 +206,14 @@ export class RedisSession {
     const arr = /** @type {unknown[] | null} */ (await this._exec("HMGET", key, ...fields));
     return arr ? arr.map(decodeBulk) : [];
   }
+  /** @param {string} key @param {number} ttlSeconds @param {string[]} fields */
+  async hGetEx(key, ttlSeconds, fields) {
+    if (fields.length === 0) return [];
+    const arr = /** @type {unknown[] | null} */ (
+      await this._exec(...buildHGetExArgs(key, ttlSeconds, fields))
+    );
+    return arr ? arr.map(decodeBulk) : [];
+  }
   /** @param {string} key */
   async hGetAll(key) {
     return decodeHashObject(/** @type {unknown[] | null} */ (await this._exec("HGETALL", key)));
@@ -196,9 +228,42 @@ export class RedisSession {
     return replies.map(decodeHashObject);
   }
 
+  /** @param {string} hashKey @param {string} stringKey */
+  async hGetAllAndGet(hashKey, stringKey) {
+    const [hashReply, valueReply] = await this._execPipeline("HGETALL_GET_PIPELINE", [
+      ["HGETALL", hashKey],
+      ["GET", stringKey],
+    ]);
+    return {
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      value: decodeBulk(valueReply),
+    };
+  }
+
+  /** @param {string} hashKey @param {string} stringKey @param {string} setKey */
+  async hGetAllGetSMembers(hashKey, stringKey, setKey) {
+    const [hashReply, valueReply, membersReply] = await this._execPipeline(
+      "HGETALL_GET_SMEMBERS_PIPELINE",
+      [
+        ["HGETALL", hashKey],
+        ["GET", stringKey],
+        ["SMEMBERS", setKey],
+      ]
+    );
+    return {
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      value: decodeBulk(valueReply),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
+  }
+
   /** @param {string} key @param {...RedisHSetArg} rest */
   async hSet(key, ...rest) {
     return /** @type {number} */ (await this._exec(...buildHSetArgs(key, rest)));
+  }
+  /** @param {string} key @param {number} ttlSeconds @param {Record<string, RedisArg>} fields */
+  async hSetEx(key, ttlSeconds, fields) {
+    return /** @type {number} */ (await this._exec(...buildHSetExArgs(key, ttlSeconds, fields)));
   }
   /** @param {string} key @param {...string} fields */
   async hDel(key, ...fields) {
@@ -209,6 +274,8 @@ export class RedisSession {
     const arr = /** @type {unknown[] | null} */ (await this._exec("HKEYS", key));
     return decodeStringArray(arr);
   }
+  /** @param {string} key */
+  async hLen(key) { return /** @type {number} */ (await this._exec("HLEN", key)); }
   /** @param {string} key @param {string} field */
   async hExists(key, field) { return (await this._exec("HEXISTS", key, field)) === 1; }
 
@@ -219,6 +286,14 @@ export class RedisSession {
       keys.map((key) => ["HEXISTS", key, field])
     ));
     return replies.map((value) => value === 1);
+  }
+
+  /** @param {Array<[string, string]>} pairs */
+  async hStrLenMany(pairs) {
+    return /** @type {number[]} */ (await this._execPipeline(
+      "HSTRLEN_PIPELINE",
+      pairs.map(([key, field]) => ["HSTRLEN", key, field])
+    ));
   }
 
   /** @param {string} key @param {string|string[]} members */
@@ -235,6 +310,23 @@ export class RedisSession {
   async sMembers(key) {
     const arr = /** @type {unknown[] | null} */ (await this._exec("SMEMBERS", key));
     return decodeStringArray(arr);
+  }
+  /** @param {string[]} keys */
+  async sMembersMany(keys) {
+    const replies = /** @type {(unknown[] | null)[]} */ (await this._execPipeline(
+      "SMEMBERS_PIPELINE",
+      keys.map((key) => ["SMEMBERS", key])
+    ));
+    return replies.map(decodeStringArray);
+  }
+  /** @param {string} key */
+  async sCard(key) { return /** @type {number} */ (await this._exec("SCARD", key)); }
+  /** @param {string[]} keys */
+  async sCardMany(keys) {
+    return /** @type {number[]} */ (await this._execPipeline(
+      "SCARD_PIPELINE",
+      keys.map((key) => ["SCARD", key])
+    ));
   }
   /** @param {string} key @param {string} member */
   async sIsMember(key, member) { return (await this._exec("SISMEMBER", key, member)) === 1; }
@@ -285,7 +377,7 @@ export class RedisSession {
   async time() { return decodeRedisTimeMs(await this._exec("TIME")); }
   /** @param {...string} keys */
   async del(...keys) { return /** @type {number} */ (await this._exec("DEL", ...keys)); }
-  /** @param {string} key @param {string} value */
+  /** @param {string} key @param {RedisArg} value */
   async delIfEq(key, value) { return /** @type {number} */ (await this._exec("DELIFEQ", key, value)); }
   /** @param {string} channel @param {RedisArg} message */
   async publish(channel, message) { return this._exec("PUBLISH", channel, message); }
@@ -378,6 +470,8 @@ export class RedisMulti {
     this._commands.push(buildSetArgs(key, value, opts));
     return this;
   }
+  /** @param {string} key */
+  incr(key) { this._commands.push(["INCR", key]); return this; }
   /** @param {string} channel @param {RedisArg} message */
   publish(channel, message) { this._commands.push(["PUBLISH", channel, message]); return this; }
   /** @param {string} key @param {number|string} score @param {string} member */
@@ -424,12 +518,22 @@ export class RedisMulti {
     const startedAt = Date.now();
     try {
       await writer.write(buf);
-      await parser.parseOne(); parser.compact();
-      for (let i = 0; i < this._commands.length; i += 1) {
-        await parser.parseOne(); parser.compact();
+      const replyCount = this._commands.length + 2;
+      /** @type {RedisReplyError | null} */
+      let firstReplyError = null;
+      /** @type {unknown} */
+      let result;
+      for (let i = 0; i < replyCount; i += 1) {
+        try {
+          const reply = await parser.parseOne();
+          if (i === replyCount - 1) result = reply;
+        } catch (err) {
+          if (!(err instanceof RedisReplyError)) throw err;
+          if (!firstReplyError) firstReplyError = err;
+        }
+        parser.compact();
       }
-      const result = await parser.parseOne();
-      parser.compact();
+      if (firstReplyError) throw firstReplyError;
       if (result === null) {
         session._emitCommand({
           command: "MULTI_EXEC",
@@ -442,6 +546,9 @@ export class RedisMulti {
       session._emitCommand({ command: "MULTI_EXEC", duration_ms: Date.now() - startedAt, ok: true });
       return result;
     } catch (err) {
+      if (!(err instanceof RedisReplyError) && !(err instanceof WatchError)) {
+        await session.close();
+      }
       if (!(err instanceof WatchError)) {
         session._emitCommand({
           command: "MULTI_EXEC",

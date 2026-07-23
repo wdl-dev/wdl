@@ -22,8 +22,10 @@ import {
   uniqueNs,
   waitUntil,
   withServiceStopped,
+  workflowRetentionKey,
   workerMeta,
 } from "./helpers/workflows-scenarios.js";
+import { redisZAdd, redisZScore } from "./helpers/redis.js";
 
 setupIntegrationSuite();
 
@@ -277,7 +279,7 @@ test("workflow instances block worker deletion and worker-delete lock blocks new
   }
 });
 
-test("terminal workflow retention releases delete blockers after cleanup", async () => {
+test("terminal workflow retention batches cleanup and releases delete blockers", async () => {
   const ns = uniqueNs("wfret");
   const version = await deployAndPromote(ns, "shop", {
     code: WORKER_CODE,
@@ -288,14 +290,24 @@ test("terminal workflow retention releases delete blockers after cleanup", async
   });
   assert.ok(version);
 
-  const created = await gatewayFetch(ns, "/shop/create?id=short-retention&retentionMs=1000");
-  await readIntegrationJson(created, 200, "workflow response");
+  for (const instanceId of ["short-retention-1", "short-retention-2"]) {
+    const created = await gatewayFetch(
+      ns,
+      `/shop/create?id=${instanceId}&retentionMs=1000`,
+    );
+    await readIntegrationJson(created, 200, "workflow response");
+  }
 
-  await waitUntil("short-retention workflow completes", async () => {
-    const status = await gatewayFetch(ns, "/shop/get?id=short-retention");
-    const body = await readIntegrationJson(status, 200, "workflow response");
-    return body.status === "completed";
-  }, { timeoutMs: 60000, intervalMs: 250 });
+  for (const instanceId of ["short-retention-1", "short-retention-2"]) {
+    await waitUntil(`${instanceId} workflow completes`, async () => {
+      const status = await gatewayFetch(ns, `/shop/get?id=${instanceId}`);
+      const body = await readIntegrationJson(status, 200, "workflow response");
+      return body.status === "completed";
+    }, { timeoutMs: 60000, intervalMs: 250 });
+  }
+
+  const malformedToken = `malformed-retention-${ns}`;
+  redisZAdd(workflowRetentionKey(), Date.now() - 1, malformedToken, { db: 2 });
 
   const blocked = await adminFetch(`/ns/${ns}/worker/shop/delete`, { method: "POST" });
   const blockedBody = await readIntegrationJson(blocked, 409, "workflow delete response");
@@ -307,6 +319,7 @@ test("terminal workflow retention releases delete blockers after cleanup", async
     assert.equal(deleted.status, 409, await deleted.text());
     return false;
   }, { timeoutMs: 60000, intervalMs: 500 });
+  assert.equal(redisZScore(workflowRetentionKey(), malformedToken, { db: 2 }), null);
 
   const metrics = serviceInternalGet("workflows", 9120, "/_metrics").body;
   assert.match(metrics, /wdl_workflow_retention_cleaned_total\{outcome="cleaned"\} [1-9][0-9]*/);

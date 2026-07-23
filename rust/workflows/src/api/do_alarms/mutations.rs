@@ -10,11 +10,9 @@ use super::model::{
     DoAlarmCleanupRequest, DoAlarmDeleteRequest, DoAlarmMutationResponse, DoAlarmSetRequest,
     job_keys_for_identity, validate_cleanup_request, validate_delete_request, validate_set_request,
 };
-use super::scripts::{
-    CLEANUP_DO_ALARM_FOR_STORAGE_SCRIPT, DELETE_DO_ALARM_SCRIPT, SET_DO_ALARM_SCRIPT,
-};
+use super::scripts::{CLEANUP_DO_ALARM_FOR_STORAGE_SCRIPT, DELETE_DO_ALARM, SET_DO_ALARM};
 
-const DO_ALARM_CLEANUP_SCAN_COUNT: usize = 256;
+const DO_ALARM_CLEANUP_BATCH_SIZE: usize = 256;
 const DO_ALARM_CLEANUP_SNAPSHOT_TTL_SECONDS: usize = 60;
 
 pub(crate) async fn set_do_alarm(
@@ -47,7 +45,7 @@ pub(crate) async fn set_do_alarm(
     let retry_count = req.retry_count.to_string();
     let generation: i64 = eval_script(
         app,
-        SET_DO_ALARM_SCRIPT,
+        &SET_DO_ALARM,
         &[&state_key, &due_key, &ready_key, &by_worker],
         &[
             &req.ns,
@@ -166,7 +164,7 @@ async fn delete_do_alarm_job(
     let ready_key = keys.ready();
     eval_script(
         app,
-        DELETE_DO_ALARM_SCRIPT,
+        &DELETE_DO_ALARM,
         &[&state_key, &due_key, &ready_key, by_worker],
         &[token, keys.job_id()],
     )
@@ -190,7 +188,7 @@ pub(crate) async fn cleanup_do_alarms_for_worker(
                     .arg(&by_worker)
                     .arg(cursor)
                     .arg("COUNT")
-                    .arg(DO_ALARM_CLEANUP_SCAN_COUNT)
+                    .arg(DO_ALARM_CLEANUP_BATCH_SIZE)
                     .query_async(&mut conn)
                     .await
             })
@@ -200,6 +198,7 @@ pub(crate) async fn cleanup_do_alarms_for_worker(
             app.redis
                 .with_conn(async |mut conn| {
                     let mut pipe = redis::pipe();
+                    pipe.atomic();
                     pipe.cmd("SADD").arg(&snapshot_key).arg(job_ids);
                     pipe.ignore();
                     pipe.cmd("EXPIRE")
@@ -230,7 +229,7 @@ pub(crate) async fn cleanup_do_alarms_for_worker(
             .with_conn(async |mut conn| {
                 redis::cmd("SPOP")
                     .arg(&snapshot_key)
-                    .arg(DO_ALARM_CLEANUP_SCAN_COUNT)
+                    .arg(DO_ALARM_CLEANUP_BATCH_SIZE)
                     .query_async(&mut conn)
                     .await
             })

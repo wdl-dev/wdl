@@ -10,6 +10,8 @@ import {
   redisSMembers,
   redisWorkflowStateHDel,
   redisWorkflowStateHSet,
+  redisZAdd,
+  redisZScore,
   readIntegrationJson,
   responseJson,
   serviceInternalGet,
@@ -19,6 +21,7 @@ import {
   setupIntegrationSuite,
   uniqueNs,
   waitUntil,
+  workflowEventTypeIndexKey,
   workerMeta,
 } from "./helpers/workflows-scenarios.js";
 
@@ -525,6 +528,63 @@ test("workflow binding creates and reads an instance through workflows", async (
   assert.ok(bufferedBody);
   assert.deepEqual(bufferedBody.output, { message: "buffered", fromEnv: "runtime-ok" });
 
+  const cleanupId = "event-cleanup-fence";
+  const cleanupCreatedAtMs = Date.now();
+  const cleanupRunToken = "run-event-cleanup";
+  redisWorkflowStateHSet(ns, workflowKey, cleanupId, [
+    "status",
+    "running",
+    "generation",
+    "1",
+    "createdAtMs",
+    String(cleanupCreatedAtMs),
+    "runToken",
+    cleanupRunToken,
+    "runLeaseExpiresAtMs",
+    String(Date.now() + 60_000),
+    "payloadBytes",
+    "0",
+  ]);
+  const cleanupIndexKey = workflowEventTypeIndexKey(ns, workflowKey, cleanupId);
+  const staleEventMember = `${Buffer.from("approval").toString("hex")}:00000000000000000001`;
+  redisZAdd(cleanupIndexKey, 0, staleEventMember, { db: 2 });
+  const cleanupRequest = {
+    ns,
+    worker: "shop",
+    frozenVersion: version,
+    workflowName: "orders",
+    workflowKey,
+    className: "OrderWorkflow",
+    instanceId: cleanupId,
+    generation: 1,
+    createdAtMs: cleanupCreatedAtMs,
+    runToken: cleanupRunToken,
+    ordinal: 0,
+    stepName: "approval",
+    nameCount: 1,
+    dependencies: [],
+    config: { type: "waitForEvent", eventType: "approval", timeoutMs: null },
+  };
+  const staleCleanup = serviceInternalPost(
+    "workflows",
+    9120,
+    "/internal/workflows/register-wait",
+    { ...cleanupRequest, createdAtMs: cleanupCreatedAtMs + 1 },
+  );
+  assert.equal(staleCleanup.status, 500, staleCleanup.body);
+  assert.equal(responseJson(staleCleanup).error, "workflow_invalid_state");
+  assert.equal(redisZScore(cleanupIndexKey, staleEventMember, { db: 2 }), "0");
+
+  const activeCleanup = serviceInternalPost(
+    "workflows",
+    9120,
+    "/internal/workflows/register-wait",
+    cleanupRequest,
+  );
+  assert.equal(activeCleanup.status, 200, activeCleanup.body);
+  assert.deepEqual(responseJson(activeCleanup), { state: "waiting" });
+  assert.equal(redisZScore(cleanupIndexKey, staleEventMember, { db: 2 }), null);
+
   const terminable = await gatewayFetch(ns, "/shop/create?id=terminate-1&wait=1");
   await readIntegrationJson(terminable, 200, "workflow response");
   await waitUntil("workflow reaches wait state before termination", async () => {
@@ -572,6 +632,48 @@ test("workflow binding creates and reads an instance through workflows", async (
   }, { timeoutMs: 60000, intervalMs: 250 });
   assert.ok(resumedBody);
   assert.deepEqual(resumedBody.output, { message: "paused-buffer", fromEnv: "runtime-ok" });
+
+  const completedList = serviceInternalPost(
+    "workflows",
+    9120,
+    "/internal/workflows/instances",
+    {
+      ns,
+      worker: "shop",
+      frozenVersion: version,
+      workflowName: "orders",
+      workflowKey,
+      className: "OrderWorkflow",
+      options: { limit: 100 },
+    },
+  );
+  assert.equal(completedList.status, 200, completedList.body);
+  const listedOrder = responseJson(completedList).instances.find(
+    (/** @type {any} */ instance) => instance.id === "order-123",
+  );
+  assert.ok(listedOrder);
+  assert.deepEqual(listedOrder.output, restartedCompletedBody.output);
+
+  redisWorkflowStateHSet(ns, workflowKey, "order-123", [
+    "outputRef",
+    "missing-list-payload",
+  ]);
+  const corruptList = serviceInternalPost(
+    "workflows",
+    9120,
+    "/internal/workflows/instances",
+    {
+      ns,
+      worker: "shop",
+      frozenVersion: version,
+      workflowName: "orders",
+      workflowKey,
+      className: "OrderWorkflow",
+      options: { limit: 100 },
+    },
+  );
+  assert.equal(corruptList.status, 500, corruptList.body);
+  assert.equal(responseJson(corruptList).error, "workflow_payload_missing");
 
   const metrics = serviceInternalGet("workflows", 9120, "/_metrics").body;
   for (const outcome of ["paused", "resumed", "restarted", "terminated"]) {

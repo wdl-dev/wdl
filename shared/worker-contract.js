@@ -48,6 +48,19 @@ export function nextVersionKey(ns, worker) {
   return `worker:${ns}:${worker}:next_version`;
 }
 
+// Cron generations below this epoch are reserved and never allocated by the
+// permanent counter, so slot refs without allocator state cannot overlap
+// permanent allocations.
+export const CRON_GENERATION_EPOCH = 1024;
+
+// Permanent high-water mark for Cron configuration generations. Like
+// next_version, this survives whole-worker deletion so stale scheduled refs
+// can never match a recreated Cron entry.
+/** @param {string} ns @param {string} worker */
+export function cronSequenceKey(ns, worker) {
+  return `cron:seq:${ns}:${worker}`;
+}
+
 // Active-route hash for a namespace: field=workerName, value=`v<int>`. Control
 // is the sole writer; centralized here so cross-tier readers cannot drift from
 // the key grammar (reader set in docs/redis-key-layout.md).
@@ -65,6 +78,7 @@ export function patternsKey(host) {
 
 export const NAMESPACES_KEY = "namespaces";
 export const DECLARED_HOSTS_KEY = "declared-hosts";
+export const DECLARED_HOSTS_REVISION_KEY = "declared-hosts:revision";
 export const ROUTES_CHANNEL = "routes:invalidate";
 export const ROUTES_FLUSH_CHANNEL = "routes:flush";
 export const PATTERNS_CHANNEL = "patterns:invalidate";

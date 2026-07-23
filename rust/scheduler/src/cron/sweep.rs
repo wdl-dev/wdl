@@ -22,6 +22,7 @@ async fn cron_worker_keys(state: &AppState) -> Result<Vec<String>, redis::RedisE
         CRON_WORKER_INDEX_KEY,
         CRON_WORKER_INDEX_BACKFILLED_KEY,
         CRON_WORKER_KEY_SCAN_PATTERN,
+        "hash",
     )
     .await
 }

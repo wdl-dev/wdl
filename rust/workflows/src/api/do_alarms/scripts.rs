@@ -1,3 +1,15 @@
+use wdl_rust_common::redis_eval::StaticRedisScript;
+
+pub(super) static SET_DO_ALARM: StaticRedisScript = StaticRedisScript::new(SET_DO_ALARM_SCRIPT);
+pub(super) static DELETE_DO_ALARM: StaticRedisScript =
+    StaticRedisScript::new(DELETE_DO_ALARM_SCRIPT);
+pub(super) static CLAIM_DO_ALARM: StaticRedisScript = StaticRedisScript::new(CLAIM_DO_ALARM_SCRIPT);
+pub(super) static FINALIZE_DO_ALARM: StaticRedisScript =
+    StaticRedisScript::new(FINALIZE_DO_ALARM_SCRIPT);
+pub(super) static DISCARD_CORRUPT_DO_ALARM: StaticRedisScript =
+    StaticRedisScript::new(DISCARD_CORRUPT_DO_ALARM_SCRIPT);
+pub(super) static RETRY_DO_ALARM: StaticRedisScript = StaticRedisScript::new(RETRY_DO_ALARM_SCRIPT);
+
 pub(super) const SET_DO_ALARM_SCRIPT: &str = r#"
 local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")
 generation = generation + 1

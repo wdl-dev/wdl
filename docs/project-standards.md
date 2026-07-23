@@ -168,6 +168,34 @@ Do not create a shared helper only to remove a few local lines. Create it when i
 removes duplicated policy, duplicated key grammar, duplicated error mapping, or a drift
 pattern that reviewers would otherwise need to remember.
 
+## Redis And Valkey Access
+
+Redis round trips, atomicity, and data bounds are separate design decisions:
+
+- Batch independent operations when they share one owner, connection lifetime, failure
+  boundary, and budget. Prefer a typed, operation-specific snapshot or batch helper over
+  a generic public pipeline API. Preserve positional result alignment and existing item,
+  byte, and page limits; saving a round trip is not a reason to introduce an unbounded
+  read.
+- Pipelining is a transport optimization, not an atomicity boundary. When a read decides
+  a concurrent write, use an owner-controlled Lua script, WATCH/MULTI/EXEC window, or
+  exact-value CAS. Keep protected reads and commit-time revalidation inside that owner's
+  concurrency boundary.
+- Exact-value CAS compares stored bytes, not parsed values. Retain the original bulk
+  response bytes for IFEQ/DELIFEQ-style operations and parse a separate view. Do not
+  reserialize JSON or text to reconstruct the expected value.
+- Keep retries at the layer that knows whether replay is safe. Do not retry a mixed
+  pipeline after a partial result merely because one command reported a cache miss or
+  transient failure.
+- New command or batch surfaces need focused wire/order tests. When unit tests use the
+  fake Redis implementation and integration uses real Valkey, add shared conformance
+  cases for the command semantics. Add targeted fault-path integration when recovery
+  behavior such as WATCH conflict or script-cache loss is part of the contract.
+
+Tests should protect these semantics, not mandate that a particular helper or pipeline
+spelling remains in the source. Language-specific connection and Lua rules live in
+`docs/workerd-js-standards.md` and `docs/rust-sidecar-standards.md`.
+
 ## Fail-Closed Validation
 
 Server-side validation is canonical. CLI and tests may keep cheap fail-fast checks, but

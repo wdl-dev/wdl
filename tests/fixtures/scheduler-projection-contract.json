@@ -8,18 +8,19 @@
     "slotKey": "cron-slot:1778856600000",
     "slotExpireAt": 1778857200,
     "cronId": "1cb037f29d",
-    "gen": 7,
-    "reference": "tenant:worker:1cb037f29d:7",
+    "gen": 1024,
+    "reference": "tenant:worker:1cb037f29d:1024",
+    "sequenceKey": "cron:seq:tenant:worker",
+    "sequenceValue": "1024",
     "meta": {
       "version": "v3",
-      "seq": 7,
-      "json": "{\"version\":\"v3\",\"seq\":7}"
+      "json": "{\"version\":\"v3\"}"
     },
     "entry": {
       "cron": "*/5 * * * *",
       "timezone": "UTC",
-      "gen": 7,
-      "json": "{\"cron\":\"*/5 * * * *\",\"timezone\":\"UTC\",\"gen\":7}"
+      "gen": 1024,
+      "json": "{\"cron\":\"*/5 * * * *\",\"timezone\":\"UTC\",\"gen\":1024}"
     }
   },
   "queueConsumer": {

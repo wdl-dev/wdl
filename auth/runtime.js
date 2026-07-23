@@ -2,7 +2,7 @@
 // bootstrap reflection, and observability; auth/index.js owns the JSRPC method
 // flow and auth policy decisions.
 
-import { RedisClient, WatchError } from "shared-redis";
+import { RedisClient, WatchError, decodeBulk } from "shared-redis";
 import {
   createLogLevelBinder,
   createLogger,
@@ -39,6 +39,9 @@ import { withOptimisticRetries } from "shared-optimistic-retry";
  *   hGetAllMany(keys: string[]): Promise<Array<Record<string, string | null | undefined>>>,
  * }} RedisAuthBatchReader
  * @typedef {RedisAuthReader & {
+ *   eval(script: string, keys?: string[], args?: Array<string | number | boolean | Uint8Array>): Promise<unknown>,
+ * }} RedisAuthVerifier
+ * @typedef {RedisAuthReader & {
  *   watch(key: string): Promise<unknown>,
  *   unwatch(): Promise<unknown>,
  *   multi(): import("shared-redis").RedisMulti,
@@ -49,6 +52,7 @@ import { withOptimisticRetries } from "shared-optimistic-retry";
  *   ensureBootstrap(redis: RedisAuthReader, requestId: string | null): Promise<BootstrapState>,
  *   ensureBootstrapForVerify(redis: RedisAuthReader, requestId: string | null): Promise<BootstrapState>,
  *   readRecord(redis: RedisAuthReader, tokenId: string): Promise<AuthTokenRecord | null>,
+ *   readRecordByHash(redis: RedisAuthVerifier, hash: string): Promise<{ tokenId: string, record: AuthTokenRecord | null } | null>,
  *   readRecords(redis: RedisAuthBatchReader, tokenIds: string[]): Promise<Array<{ tokenId: string, record: AuthTokenRecord | null }>>,
  *   rethrowPolicy(requestId: string | null, command: string, err: unknown): never,
  *   beginVerify(requestId: string | null, startedAt: number, action: unknown, ns: string | undefined): VerifyFinalizer,
@@ -59,6 +63,18 @@ import { withOptimisticRetries } from "shared-optimistic-retry";
 
 export const TOKEN_KEY_PREFIX = "auth:token:";
 export const HASH_KEY_PREFIX = "auth:hash:";
+const READ_TOKEN_BY_HASH_SCRIPT = `
+local token_id = redis.call("GET", KEYS[1])
+if not token_id then
+  return {0}
+end
+local record = redis.call("HGETALL", ARGV[1] .. token_id)
+local out = {1, token_id}
+for i = 1, #record do
+  table.insert(out, record[i])
+end
+return out
+`;
 export { formatError };
 
 /** @param {string} tokenId */
@@ -141,6 +157,16 @@ export function bindAuthRuntime(env) {
       return parseTokenRecord(hash);
     },
 
+    /** @param {RedisAuthVerifier} redis @param {string} hash */
+    async readRecordByHash(redis, hash) {
+      const reply = await redis.eval(
+        READ_TOKEN_BY_HASH_SCRIPT,
+        [hashKey(hash)],
+        [TOKEN_KEY_PREFIX],
+      );
+      return parseIndexedTokenReply(reply);
+    },
+
     /** @param {RedisAuthBatchReader} redis @param {string[]} tokenIds */
     async readRecords(redis, tokenIds) {
       if (tokenIds.length === 0) return [];
@@ -182,6 +208,30 @@ export function bindAuthRuntime(env) {
       });
     },
   };
+}
+
+/** @param {unknown} reply @returns {{ tokenId: string, record: AuthTokenRecord | null } | null} */
+function parseIndexedTokenReply(reply) {
+  if (!Array.isArray(reply) || reply.length === 0) {
+    throw new Error("invalid auth token lookup reply");
+  }
+  if (reply[0] === 0) {
+    if (reply.length !== 1) throw new Error("invalid auth token lookup miss reply");
+    return null;
+  }
+  if (reply[0] !== 1 || reply.length < 2 || reply.length % 2 !== 0) {
+    throw new Error("invalid auth token lookup record reply");
+  }
+  const tokenId = decodeBulk(reply[1]);
+  if (!tokenId) throw new Error("invalid auth token lookup id");
+  /** @type {Record<string, string | null | undefined>} */
+  const fields = {};
+  for (let i = 2; i < reply.length; i += 2) {
+    const field = decodeBulk(reply[i]);
+    if (!field) throw new Error("invalid auth token lookup field");
+    fields[field] = decodeBulk(reply[i + 1]);
+  }
+  return { tokenId, record: parseTokenRecord(fields) };
 }
 
 /** @param {Record<string, unknown>} env @param {string | null} requestId @param {AuthLogger} logAuth */

@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 
 use crate::{
     AppState, DispatchTaskUnavailable, InstanceIdentity, LogLevel, Metrics,
@@ -8,10 +9,11 @@ use crate::{
     workflow_shard_queue_keys,
 };
 
+use super::payload::{parse_payload_ref, payload_storage_key_for_ref};
 use super::{
-    ReadyAdmissionConfig, ReadyAdmissionOutcome, RunClaim, admit_ready_do_alarms,
-    admit_ready_members, claim_run, identity_from_state, log_instance_event, parse_ready_token,
-    read_payload_ref, read_state_by_id, release_run_claim, requeue_expired_run_claim,
+    InstanceRouteKeys, ReadyAdmissionConfig, ReadyAdmissionOutcome, RunClaim,
+    admit_ready_do_alarms, admit_ready_members, claim_run, eval_script, identity_from_state,
+    log_instance_event, parse_ready_token, release_run_claim, requeue_expired_run_claim,
     spawn_progress_from_identity,
 };
 
@@ -81,10 +83,67 @@ enum ReadyTokenResult {
     RemoveIfTerminal(ReadyTokenGuard),
     Keep,
 }
-async fn load_params(app: &AppState, state: &HashMap<String, String>) -> WorkflowResult<JsonValue> {
-    Ok(read_payload_ref(app, state, "paramsRef")
-        .await?
-        .unwrap_or(JsonValue::Null))
+
+const READ_READY_STATE_AND_PARAMS_SCRIPT: &str = r#"
+local state = redis.call("HGETALL", KEYS[1])
+local status = redis.call("HGET", KEYS[1], "status")
+if status ~= "queued" and status ~= "waiting" then
+  return {state, false}
+end
+local params_ref = redis.call("HGET", KEYS[1], "paramsRef")
+if not params_ref then
+  return {state, false}
+end
+local payloads_key = redis.call("HGET", KEYS[1], "payloadsKey")
+if payloads_key ~= KEYS[2] then
+  return {state, false}
+end
+return {state, redis.call("HGET", KEYS[2], params_ref)}
+"#;
+
+static READ_READY_STATE_AND_PARAMS: StaticRedisScript =
+    StaticRedisScript::new(READ_READY_STATE_AND_PARAMS_SCRIPT);
+
+fn params_from_ready_snapshot(
+    state: &HashMap<String, String>,
+    expected_payloads_key: &str,
+    raw_params: Option<String>,
+) -> WorkflowResult<JsonValue> {
+    let Some(params_ref) = state.get("paramsRef") else {
+        return Ok(JsonValue::Null);
+    };
+    let payloads_key = payload_storage_key_for_ref(state, params_ref)?;
+    if payloads_key != expected_payloads_key {
+        return Err(WorkflowError::invalid_state(
+            "Workflow payload storage key is invalid",
+        ));
+    }
+    Ok(parse_payload_ref(raw_params, params_ref)?.unwrap_or(JsonValue::Null))
+}
+
+async fn read_ready_state_and_params(
+    app: &AppState,
+    ns: &str,
+    workflow_key: &str,
+    instance_id: &str,
+) -> WorkflowResult<(HashMap<String, String>, JsonValue)> {
+    let keys = InstanceRouteKeys::new(ns, workflow_key, instance_id);
+    let state_key = keys.state();
+    let payloads_key = keys.payloads();
+    let (state, raw_params): (HashMap<String, String>, Option<String>) = eval_script(
+        app,
+        &READ_READY_STATE_AND_PARAMS,
+        &[&state_key, &payloads_key],
+        &[],
+    )
+    .await?;
+    let params = match state.get("status").map(String::as_str) {
+        Some("queued" | "waiting") => {
+            params_from_ready_snapshot(&state, &payloads_key, raw_params)?
+        }
+        _ => JsonValue::Null,
+    };
+    Ok((state, params))
 }
 
 async fn prepare_ready_token(
@@ -97,7 +156,8 @@ async fn prepare_ready_token(
             ReadyTokenResult::RemoveMalformed,
         ));
     };
-    let state = read_state_by_id(app, &ns, &workflow_key, &instance_id).await?;
+    let (state, params) =
+        read_ready_state_and_params(app, &ns, &workflow_key, &instance_id).await?;
     let Some(status) = state.get("status").map(String::as_str) else {
         return Ok(ReadyTokenAdmission::Immediate(
             ReadyTokenResult::RemoveIfStateMissing(ReadyTokenIdentity {
@@ -127,7 +187,6 @@ async fn prepare_ready_token(
         }));
     }
     let identity = identity_from_state(&ns, &workflow_key, &instance_id, &state)?;
-    let params = load_params(app, &state).await?;
     let previous_status = status.to_string();
     let Some(claim) = claim_run(app, &identity, &previous_status).await? else {
         return Ok(ReadyTokenAdmission::Immediate(ReadyTokenResult::Keep));
@@ -376,6 +435,54 @@ async fn apply_ready_token_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::InstanceKeys;
+
+    #[test]
+    fn ready_snapshot_validates_params_before_claim() {
+        let payloads_key = InstanceKeys::new("ns", "key", "inst").payloads();
+        let state = HashMap::from([
+            ("paramsRef".to_string(), "params-1".to_string()),
+            ("payloadsKey".to_string(), payloads_key.clone()),
+        ]);
+
+        assert_eq!(
+            params_from_ready_snapshot(&state, &payloads_key, Some(r#"{"ok":true}"#.to_string()))
+                .expect("valid params"),
+            json!({ "ok": true })
+        );
+        let err = params_from_ready_snapshot(&state, &payloads_key, None)
+            .expect_err("missing params must fail before claim");
+        assert_eq!(err.code, "workflow_payload_missing");
+    }
+
+    #[test]
+    fn ready_snapshot_preserves_null_params_and_rejects_wrong_payload_key() {
+        assert_eq!(
+            params_from_ready_snapshot(&HashMap::new(), "payloads", None)
+                .expect("params are optional"),
+            JsonValue::Null
+        );
+
+        let state = HashMap::from([
+            ("paramsRef".to_string(), "params-1".to_string()),
+            ("payloadsKey".to_string(), "other-payloads".to_string()),
+        ]);
+        let err = params_from_ready_snapshot(&state, "expected-payloads", Some("null".to_string()))
+            .expect_err("noncanonical payload storage must fail closed");
+        assert_eq!(err.code, "workflow_invalid_state");
+    }
+
+    #[test]
+    fn ready_snapshot_script_is_read_only() {
+        assert!(READ_READY_STATE_AND_PARAMS_SCRIPT.contains(r#"redis.call("HGETALL", KEYS[1])"#));
+        assert!(READ_READY_STATE_AND_PARAMS_SCRIPT.contains(r#"redis.call("HGET", KEYS[2]"#));
+        for write in ["HSET", "HDEL", "SADD", "SREM", "ZADD", "ZREM", "DEL"] {
+            assert!(
+                !READ_READY_STATE_AND_PARAMS_SCRIPT.contains(&format!(r#"redis.call("{write}""#)),
+                "ready snapshot must not execute {write}"
+            );
+        }
+    }
 
     #[test]
     fn workflow_dispatch_gauge_releases_when_dispatch_unwinds() {

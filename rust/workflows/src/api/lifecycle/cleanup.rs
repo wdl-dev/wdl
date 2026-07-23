@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+
 use wdl_rust_common::time::now_ms;
 
-use crate::{AppState, WorkflowResult, by_version_key, by_worker_key};
+use crate::{
+    AppState, WorkflowError, WorkflowResult, by_version_key, by_worker_key, instance_state_key,
+};
 
 use super::super::{
     LIFECYCLE_BLOCKER_LIMIT, LifecycleBlocker, LifecycleCheckRequest, LifecycleCheckResponse,
@@ -15,10 +19,106 @@ enum LifecycleMemberState {
     Ignore,
 }
 
+struct LifecycleMember {
+    workflow_key: String,
+    instance_id: String,
+}
+
+struct ClassifiedLifecycleMember {
+    member: LifecycleMember,
+    state: LifecycleMemberState,
+}
+
 impl LifecycleMemberState {
     fn is_blocker(&self) -> bool {
         matches!(self, Self::Blocker)
     }
+}
+
+fn lifecycle_members_from_scan(
+    members: impl IntoIterator<Item = String>,
+) -> WorkflowResult<Vec<LifecycleMember>> {
+    members
+        .into_iter()
+        .map(|member| {
+            let (workflow_key, instance_id) =
+                parse_workflow_referrer_member(&member).ok_or_else(|| {
+                    WorkflowError::invalid_state("Workflow lifecycle referrer is corrupt")
+                })?;
+            Ok(LifecycleMember {
+                workflow_key,
+                instance_id,
+            })
+        })
+        .collect()
+}
+
+fn lifecycle_state_pipeline(ns: &str, members: &[LifecycleMember]) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    for member in members {
+        pipe.cmd("HGETALL").arg(instance_state_key(
+            ns,
+            &member.workflow_key,
+            &member.instance_id,
+        ));
+    }
+    pipe
+}
+
+fn classify_lifecycle_member(
+    existing: &HashMap<String, String>,
+    now: i64,
+) -> WorkflowResult<LifecycleMemberState> {
+    if existing.is_empty() {
+        return Ok(LifecycleMemberState::Ignore);
+    }
+    if is_pending_create(existing) {
+        if pending_create_expired(existing, now) {
+            return Ok(LifecycleMemberState::ExpiredPending(Box::new(
+                pending_create_cleanup_from_state(existing)?,
+            )));
+        }
+        return Ok(LifecycleMemberState::Blocker);
+    }
+    Ok(LifecycleMemberState::Blocker)
+}
+
+fn classify_lifecycle_page(
+    members: Vec<LifecycleMember>,
+    states: Vec<HashMap<String, String>>,
+    now: i64,
+) -> WorkflowResult<Vec<ClassifiedLifecycleMember>> {
+    if states.len() != members.len() {
+        return Err(WorkflowError::internal_error(
+            "Workflow lifecycle state reply count mismatch",
+        ));
+    }
+    members
+        .into_iter()
+        .zip(states)
+        .map(|(member, existing)| {
+            Ok(ClassifiedLifecycleMember {
+                member,
+                state: classify_lifecycle_member(&existing, now)?,
+            })
+        })
+        .collect()
+}
+
+async fn read_lifecycle_page(
+    state: &AppState,
+    ns: &str,
+    members: Vec<LifecycleMember>,
+) -> WorkflowResult<Vec<ClassifiedLifecycleMember>> {
+    let states: Vec<HashMap<String, String>> = state
+        .redis
+        .with_conn(async |mut conn| {
+            lifecycle_state_pipeline(ns, &members)
+                .query_async(&mut conn)
+                .await
+        })
+        .await?;
+    classify_lifecycle_page(members, states, now_ms())
 }
 
 async fn lifecycle_blocker_state(
@@ -28,18 +128,7 @@ async fn lifecycle_blocker_state(
     instance_id: &str,
 ) -> WorkflowResult<LifecycleMemberState> {
     let existing = read_state_by_id(state, ns, workflow_key, instance_id).await?;
-    if existing.is_empty() {
-        return Ok(LifecycleMemberState::Ignore);
-    }
-    if is_pending_create(&existing) {
-        if pending_create_expired(&existing, now_ms()) {
-            return Ok(LifecycleMemberState::ExpiredPending(Box::new(
-                pending_create_cleanup_from_state(&existing)?,
-            )));
-        }
-        return Ok(LifecycleMemberState::Blocker);
-    }
-    Ok(LifecycleMemberState::Blocker)
+    classify_lifecycle_member(&existing, now_ms())
 }
 
 pub(crate) async fn check_delete_lifecycle(
@@ -110,27 +199,28 @@ pub(crate) async fn check_delete_lifecycle(
                     .await
             })
             .await?;
-        for member in members {
-            let (workflow_key, instance_id) =
-                parse_workflow_referrer_member(&member).unwrap_or_else(|| ("".to_string(), member));
-            match lifecycle_blocker_state(state, &req.ns, &workflow_key, &instance_id).await? {
-                LifecycleMemberState::Blocker => {}
-                LifecycleMemberState::ExpiredPending(pending) => {
-                    expired_pending.push(pending);
-                    continue;
+        for chunk in members.chunks(LIFECYCLE_BLOCKER_LIMIT) {
+            let page = lifecycle_members_from_scan(chunk.iter().cloned())?;
+            for classified in read_lifecycle_page(state, &req.ns, page).await? {
+                match classified.state {
+                    LifecycleMemberState::Blocker => {}
+                    LifecycleMemberState::ExpiredPending(pending) => {
+                        expired_pending.push(pending);
+                        continue;
+                    }
+                    LifecycleMemberState::Ignore => continue,
                 }
-                LifecycleMemberState::Ignore => continue,
-            }
-            blockers.push(LifecycleBlocker {
-                workflow_key,
-                instance_id,
-            });
-            if blockers.len() >= LIFECYCLE_BLOCKER_LIMIT {
-                return Ok(LifecycleCheckResponse {
-                    allowed: false,
-                    count,
-                    blockers,
+                blockers.push(LifecycleBlocker {
+                    workflow_key: classified.member.workflow_key,
+                    instance_id: classified.member.instance_id,
                 });
+                if blockers.len() >= LIFECYCLE_BLOCKER_LIMIT {
+                    return Ok(LifecycleCheckResponse {
+                        allowed: false,
+                        count,
+                        blockers,
+                    });
+                }
             }
         }
         cursor = next;
@@ -172,6 +262,63 @@ pub(crate) async fn check_delete_lifecycle(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use crate::instance_state_key;
+
+    use super::*;
+
+    #[test]
+    fn lifecycle_page_pipeline_preserves_valid_member_slots() {
+        let members = lifecycle_members_from_scan(vec![
+            "workflow-a\tinstance-a".to_string(),
+            "workflow-b\tinstance-b".to_string(),
+        ])
+        .unwrap();
+        let actual = lifecycle_state_pipeline("demo", &members).get_packed_pipeline();
+        let mut expected = redis::pipe();
+        expected
+            .cmd("HGETALL")
+            .arg(instance_state_key("demo", "workflow-a", "instance-a"));
+        expected
+            .cmd("HGETALL")
+            .arg(instance_state_key("demo", "workflow-b", "instance-b"));
+
+        assert_eq!(actual, expected.get_packed_pipeline());
+    }
+
+    #[test]
+    fn malformed_lifecycle_members_fail_closed_before_state_reads() {
+        let Err(error) = lifecycle_members_from_scan(vec!["malformed-member".to_string()]) else {
+            panic!("malformed lifecycle member must fail closed");
+        };
+
+        assert_eq!(error.code, "workflow_invalid_state");
+        assert_eq!(error.message, "Workflow lifecycle referrer is corrupt");
+    }
+
+    #[test]
+    fn lifecycle_page_reply_alignment_preserves_valid_members() {
+        let members = lifecycle_members_from_scan(vec![
+            "workflow-a\tinstance-a".to_string(),
+            "workflow-b\tinstance-b".to_string(),
+        ])
+        .unwrap();
+        let states = vec![
+            HashMap::from([("status".to_string(), "running".to_string())]),
+            HashMap::new(),
+        ];
+        let classified = classify_lifecycle_page(members, states, now_ms()).unwrap();
+
+        assert_eq!(classified.len(), 2);
+        assert_eq!(classified[0].member.workflow_key, "workflow-a");
+        assert_eq!(classified[0].member.instance_id, "instance-a");
+        assert!(classified[0].state.is_blocker());
+        assert_eq!(classified[1].member.workflow_key, "workflow-b");
+        assert_eq!(classified[1].member.instance_id, "instance-b");
+        assert!(!classified[1].state.is_blocker());
+    }
+
     #[test]
     fn lifecycle_cleanup_failure_rechecks_blocker_state() {
         let source = include_str!("cleanup.rs");

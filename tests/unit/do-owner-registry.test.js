@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 
 import {
-  assertCurrentOwner,
   assertCurrentOwnerWithLeaseBudget,
   DO_OWNER_REGISTRY_TEST_STATE,
   doOwnerRegistryWriteCommands,
@@ -12,7 +11,6 @@ import {
   ownerKeyOf,
   parseOwner,
   renewOwnedScopes,
-  releaseOwner,
   resetDoOwnerRegistryTestState,
   resolveDoOwner,
   shouldRenewOwnerLease,
@@ -36,6 +34,15 @@ const OWNER_KEY = `${DO_STORAGE_ID}:Room:shard0`;
 const STORAGE_POINTER_KEY = "worker:do-storage:tenant:chat";
 const DELETE_LOCK_KEY = "worker-delete-lock:tenant:chat";
 
+function ownerSnapshotKeys() {
+  return [
+    ownerKeyOf(OWNER_KEY),
+    ownerGenerationKeyOf(OWNER_KEY),
+    DELETE_LOCK_KEY,
+    STORAGE_POINTER_KEY,
+  ];
+}
+
 beforeEach(resetDoOwnerRegistryTestState);
 
 function invoke() {
@@ -47,6 +54,17 @@ function invoke() {
     hostId: OWNER_KEY,
     className: "Room",
   };
+}
+
+/**
+ * @param {Record<string, string>} env
+ * @param {{ ownerKey: string, taskId: string, generation: number }} owner
+ */
+async function assertCurrentOwnerForTest(env, owner) {
+  const result = await assertCurrentOwnerWithLeaseBudget(env, owner, {
+    storageScope: invoke(),
+  });
+  return result.owner;
 }
 
 function setStoragePointer(value = DO_STORAGE_ID) {
@@ -162,6 +180,17 @@ test("DO owner registry: claim writes owner generation counter", async () => {
     ).generation,
     1
   );
+  assert.deepEqual(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.filter((command) => command[0] === "getManyWithTime"),
+    [
+      ["getManyWithTime", ownerSnapshotKeys()],
+      ["getManyWithTime", ownerSnapshotKeys()],
+    ]
+  );
+  assert.equal(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.some((command) => command[0] === "get"),
+    false
+  );
 });
 
 test("DO owner registry: corrupt generation counter fails closed", async () => {
@@ -216,10 +245,10 @@ test("DO owner registry: first claim refuses a worker under whole-delete lock", 
       return true;
     }
   );
-  assert.ok(DO_OWNER_REGISTRY_TEST_STATE.watchedKeys.includes(DELETE_LOCK_KEY));
+  assert.deepEqual(DO_OWNER_REGISTRY_TEST_STATE.watchedKeys, []);
   assert.deepEqual(
     DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.filter((command) => command[0] === "getManyWithTime"),
-    [["getManyWithTime", [ownerKeyOf(OWNER_KEY), DELETE_LOCK_KEY]]]
+    [["getManyWithTime", ownerSnapshotKeys()]]
   );
   assert.equal(
     DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.some((command) => (
@@ -268,7 +297,7 @@ test("DO owner registry: lost owner state cannot validate an old owner from anot
   assert.equal(owner.taskId, "task-b");
   assert.equal(owner.generation, 1);
   await assert.rejects(
-    assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, {
+    assertCurrentOwnerForTest({ REDIS_ADDR: "redis:6379" }, {
       ownerKey: OWNER_KEY,
       taskId: "task-a",
       generation: 1,
@@ -286,7 +315,7 @@ test("DO owner registry: same task reclaims generation one after owner state los
   assert.equal(owner.taskId, "task-b");
   assert.equal(owner.generation, 1);
   assert.equal(owner.endpoint, "do-runtime-b:8788");
-  assert.deepEqual(await assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, owner), owner);
+  assert.deepEqual(await assertCurrentOwnerForTest({ REDIS_ADDR: "redis:6379" }, owner), owner);
 });
 
 test("DO owner registry: same-task hot path does not refresh every request", async () => {
@@ -301,6 +330,11 @@ test("DO owner registry: same-task hot path does not refresh every request", asy
 
   assert.deepEqual(resolved, owner);
   assert.deepEqual(doOwnerRegistryWriteCommands(), []);
+  assert.deepEqual(DO_OWNER_REGISTRY_TEST_STATE.redisState.watchBatches, []);
+  assert.deepEqual(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.filter((command) => command[0] === "getManyWithTime"),
+    [["getManyWithTime", ownerSnapshotKeys()]]
+  );
   assert.equal(
     shouldRenewOwnerLease(
       { DO_OWNER_TTL_SECONDS: "120" },
@@ -345,6 +379,11 @@ test("DO owner registry: draining task returns a healthy remote owner", async ()
 
   assert.deepEqual(resolved, owner);
   assert.equal(DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.has(ownerKey), false);
+  assert.deepEqual(DO_OWNER_REGISTRY_TEST_STATE.redisState.watchBatches, []);
+  assert.deepEqual(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.filter((command) => command[0] === "getManyWithTime"),
+    [["getManyWithTime", ownerSnapshotKeys()]]
+  );
 });
 
 test("DO owner registry: draining task refuses local ownership or takeover", async () => {
@@ -396,7 +435,7 @@ test("DO owner registry: actor fence rejects stale generations", async () => {
   })));
 
   await assert.rejects(
-    assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 7 }),
+    assertCurrentOwnerForTest({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 7 }),
     /owner generation is stale/
   );
 });
@@ -413,7 +452,7 @@ test("DO owner registry: actor fence rejects expired local leases", async () => 
   })));
 
   await assert.rejects(
-    assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 8 }),
+    assertCurrentOwnerForTest({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 8 }),
     /owner lease has expired/
   );
   assert.equal(DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.has(ownerKey), false);
@@ -431,7 +470,7 @@ test("DO owner registry: actor fence uses Redis server time as lease authority",
   })));
 
   await assert.rejects(
-    assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 8 }),
+    assertCurrentOwnerForTest({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 8 }),
     /owner lease has expired/
   );
 });
@@ -450,7 +489,8 @@ test("DO owner registry: actor fence renews leases inside the guard window", asy
 
   const { owner, leaseRemainingMs } = await assertCurrentOwnerWithLeaseBudget(
     { REDIS_ADDR: "redis:6379", DO_OWNER_LEASE_GUARD_MS: String(LEASE_GUARD_MS) },
-    { ownerKey, taskId: "task-a", generation: 8 }
+    { ownerKey, taskId: "task-a", generation: 8 },
+    { storageScope: invoke() }
   );
 
   assert.equal(owner.taskId, "task-a");
@@ -479,7 +519,8 @@ test("DO owner registry: actor fence rejects renewals that still miss the guard 
         DO_OWNER_TTL_SECONDS: "1",
         DO_OWNER_LEASE_GUARD_MS: "2000",
       },
-      { ownerKey, taskId: "task-a", generation: 8 }
+      { ownerKey, taskId: "task-a", generation: 8 },
+      { storageScope: invoke() }
     ),
     /insufficient remaining budget/
   );
@@ -507,7 +548,8 @@ test("DO owner registry: post-renew guard budget uses the renew Redis time", asy
         DO_OWNER_TTL_SECONDS: "1",
         DO_OWNER_LEASE_GUARD_MS: "1100",
       },
-      { ownerKey, taskId: "task-a", generation: 8 }
+      { ownerKey, taskId: "task-a", generation: 8 },
+      { storageScope: invoke() }
     ),
     /insufficient remaining budget/
   );
@@ -528,7 +570,8 @@ test("DO owner registry: actor fence reports stale storage before lease-guard re
   await assert.rejects(
     assertCurrentOwnerWithLeaseBudget(
       { REDIS_ADDR: "redis:6379", DO_OWNER_LEASE_GUARD_MS: String(LEASE_GUARD_MS) },
-      { ownerKey, taskId: "task-a", generation: 8 }
+      { ownerKey, taskId: "task-a", generation: 8 },
+      { storageScope: invoke() }
     ),
     /no longer matches active worker storage/
   );
@@ -552,7 +595,7 @@ test("DO owner registry: lease-budget watchdog rejects near-expiry leases withou
     assertCurrentOwnerWithLeaseBudget(
       { REDIS_ADDR: "redis:6379", DO_OWNER_LEASE_GUARD_MS: String(LEASE_GUARD_MS) },
       { ownerKey, taskId: "task-a", generation: 8 },
-      { renewNearExpiry: false }
+      { renewNearExpiry: false, storageScope: invoke() }
     ),
     /insufficient remaining budget/
   );
@@ -573,8 +616,20 @@ test("DO owner registry: actor fence returns Redis-time lease budget", async () 
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(ownerKey), JSON.stringify(owner));
 
   assert.deepEqual(
-    await assertCurrentOwnerWithLeaseBudget({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 8 }),
+    await assertCurrentOwnerWithLeaseBudget(
+      { REDIS_ADDR: "redis:6379" },
+      { ownerKey, taskId: "task-a", generation: 8 },
+      { storageScope: invoke() }
+    ),
     { owner, leaseRemainingMs: EXPECTED_LEASE_REMAINING_MS }
+  );
+  assert.deepEqual(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.filter((command) => command[0] === "getManyWithTime"),
+    [["getManyWithTime", [ownerKeyOf(ownerKey), STORAGE_POINTER_KEY]]]
+  );
+  assert.equal(
+    DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.some((command) => command[0] === "get"),
+    false
   );
 });
 
@@ -604,6 +659,75 @@ test("DO owner registry: renewOwnedScopes extends matching owned leases", async 
   assert.equal(renewed.taskId, "task-a");
   assert.ok(renewed.leaseExpiresAt > owner.leaseExpiresAt);
   assert.deepEqual(DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.get(ownerKey), renewed);
+});
+
+test("DO owner registry: renewal retries an exact-byte same-fence owner race", async () => {
+  const owner = ownerRecord({
+    generation: 8,
+    leaseExpiresAt: Date.now() + SHORT_LEASE_MS,
+  });
+  const initialRaw = `${JSON.stringify(owner)}\n`;
+  const concurrentOwner = {
+    ...owner,
+    leaseExpiresAt: owner.leaseExpiresAt + SHORT_LEASE_MS,
+  };
+  setStoragePointer();
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), initialRaw);
+  DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.set(OWNER_KEY, owner);
+  DO_OWNER_REGISTRY_TEST_STATE.beforeRenewEval = ({ attempt }) => {
+    if (attempt === 1) {
+      DO_OWNER_REGISTRY_TEST_STATE.store.set(
+        ownerKeyOf(OWNER_KEY),
+        JSON.stringify(concurrentOwner)
+      );
+    }
+  };
+
+  const result = await renewOwnedScopes({
+    REDIS_ADDR: "redis:6379",
+    DO_OWNER_TTL_SECONDS: "120",
+  });
+
+  assert.equal(result.renewed, 1);
+  assert.equal(result.lost, 0);
+  assert.equal(result.errors.length, 0);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.renewEvalCalls.length, 2);
+  assert.equal(
+    new TextDecoder().decode(
+      /** @type {Uint8Array} */ (DO_OWNER_REGISTRY_TEST_STATE.renewEvalCalls[0].args[0])
+    ),
+    initialRaw
+  );
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.watchedKeys.includes(ownerKeyOf(OWNER_KEY)), false);
+  assert.ok(
+    parseStoredJson(DO_OWNER_REGISTRY_TEST_STATE.store.get(ownerKeyOf(OWNER_KEY)))
+      .leaseExpiresAt > concurrentOwner.leaseExpiresAt
+  );
+});
+
+test("DO owner registry: renewal preserves a concurrently replaced storage pointer", async () => {
+  const owner = ownerRecord({
+    generation: 8,
+    leaseExpiresAt: Date.now() + SHORT_LEASE_MS,
+  });
+  const initialRaw = JSON.stringify(owner);
+  const replacementStorageId = "do_replaced0123456789abcdef01234567";
+  setStoragePointer();
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), initialRaw);
+  DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.set(OWNER_KEY, owner);
+  DO_OWNER_REGISTRY_TEST_STATE.beforeRenewEval = () => {
+    setStoragePointer(replacementStorageId);
+  };
+
+  const result = await renewOwnedScopes({ REDIS_ADDR: "redis:6379" });
+
+  assert.equal(result.renewed, 0);
+  assert.equal(result.lost, 1);
+  assert.equal(result.errors.length, 0);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.renewEvalCalls.length, 1);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.get(ownerKeyOf(OWNER_KEY)), initialRaw);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.get(STORAGE_POINTER_KEY), replacementStorageId);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.has(OWNER_KEY), false);
 });
 
 test("DO owner registry: renewOwnedScopes forgets owners lost to another task", async () => {
@@ -700,7 +824,7 @@ test("DO owner registry: actor fence rejects owners after worker storage pointer
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerGenerationKeyOf(ownerKey), "8");
 
   await assert.rejects(
-    assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 8 }),
+    assertCurrentOwnerForTest({ REDIS_ADDR: "redis:6379" }, { ownerKey, taskId: "task-a", generation: 8 }),
     /no longer matches active worker storage/
   );
 });
@@ -717,9 +841,10 @@ test("DO owner registry: drain releases only matching owned generations", async 
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerGenerationKeyOf(ownerKey), "8");
   DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.set(ownerKey, owner);
 
-  const released = await releaseOwner({ REDIS_ADDR: "redis:6379" }, owner);
+  DO_OWNER_REGISTRY_TEST_STATE.draining = true;
+  const result = await drainOwnedScopes({ REDIS_ADDR: "redis:6379" });
 
-  assert.deepEqual(released, { released: true, owner: null });
+  assert.equal(result.released, 1);
   assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.has(ownerKeyOf(ownerKey)), false);
   assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.get(ownerGenerationKeyOf(ownerKey)), "8");
 });
@@ -746,4 +871,102 @@ test("DO owner registry: drainOwnedScopes reports release counts", async () => {
     alreadyLost: 0,
     errors: [],
   });
+});
+
+test("DO owner registry: batched drain preserves a scope reclaimed before DELIFEQ", async () => {
+  const first = ownerRecord({ generation: 8 });
+  const secondOwnerKey = `${DO_STORAGE_ID}:Room:shard1`;
+  const second = ownerRecord({
+    ownerKey: secondOwnerKey,
+    hostId: secondOwnerKey,
+    generation: 9,
+  });
+  const replacement = {
+    ...second,
+    taskId: "task-b",
+    endpoint: "do-runtime-b:8788",
+    generation: 10,
+  };
+  for (const owner of [first, second]) {
+    DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(owner.ownerKey), JSON.stringify(owner));
+    DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.set(owner.ownerKey, owner);
+  }
+  DO_OWNER_REGISTRY_TEST_STATE.draining = true;
+  DO_OWNER_REGISTRY_TEST_STATE.beforeDelIfEqMany = () => {
+    DO_OWNER_REGISTRY_TEST_STATE.store.set(
+      ownerKeyOf(secondOwnerKey),
+      JSON.stringify(replacement)
+    );
+  };
+
+  const result = await drainOwnedScopes({ REDIS_ADDR: "redis:6379" });
+
+  assert.deepEqual(result, {
+    draining: true,
+    owned: 0,
+    released: 1,
+    alreadyLost: 1,
+    errors: [],
+  });
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.has(ownerKeyOf(first.ownerKey)), false);
+  assert.deepEqual(
+    parseStoredJson(DO_OWNER_REGISTRY_TEST_STATE.store.get(ownerKeyOf(secondOwnerKey))),
+    replacement
+  );
+});
+
+test("DO owner registry: drain retries a concurrent same-fence lease renewal", async () => {
+  const owner = ownerRecord({
+    generation: 8,
+    leaseExpiresAt: Date.now() + HEALTHY_LEASE_MS,
+  });
+  const key = ownerKeyOf(owner.ownerKey);
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(key, JSON.stringify(owner));
+  DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.set(owner.ownerKey, owner);
+  DO_OWNER_REGISTRY_TEST_STATE.draining = true;
+  let renewed = false;
+  DO_OWNER_REGISTRY_TEST_STATE.beforeDelIfEqMany = () => {
+    if (renewed) return;
+    renewed = true;
+    DO_OWNER_REGISTRY_TEST_STATE.store.set(key, JSON.stringify({
+      ...owner,
+      leaseExpiresAt: owner.leaseExpiresAt + HEALTHY_LEASE_MS,
+    }));
+  };
+
+  const result = await drainOwnedScopes({ REDIS_ADDR: "redis:6379" });
+
+  assert.deepEqual(result, {
+    draining: true,
+    owned: 0,
+    released: 1,
+    alreadyLost: 0,
+    errors: [],
+  });
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.has(key), false);
+});
+
+test("DO owner registry: drain retains ownership after persistent same-fence release races", async () => {
+  const owner = ownerRecord({
+    generation: 8,
+    leaseExpiresAt: Date.now() + HEALTHY_LEASE_MS,
+  });
+  const key = ownerKeyOf(owner.ownerKey);
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(key, JSON.stringify(owner));
+  DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.set(owner.ownerKey, owner);
+  DO_OWNER_REGISTRY_TEST_STATE.draining = true;
+  let leaseExpiresAt = owner.leaseExpiresAt;
+  DO_OWNER_REGISTRY_TEST_STATE.beforeDelIfEqMany = () => {
+    leaseExpiresAt += HEALTHY_LEASE_MS;
+    DO_OWNER_REGISTRY_TEST_STATE.store.set(key, JSON.stringify({ ...owner, leaseExpiresAt }));
+  };
+
+  const result = await drainOwnedScopes({ REDIS_ADDR: "redis:6379" });
+
+  assert.equal(result.released, 0);
+  assert.equal(result.alreadyLost, 0);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0].error, /owner release raced/i);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.store.has(key), true);
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.has(owner.ownerKey), true);
 });

@@ -1,17 +1,120 @@
 use std::collections::{HashMap, HashSet};
 
-use redis::{Pipeline, Value};
+use redis::Pipeline;
 use serde_json::json;
+use wdl_rust_common::redis_eval::append_eval_cmd;
 
-use crate::{AppState, CONSUMER_GROUP, LogLevel, Metrics, SERVICE, SchedulerResult, log, now_ms};
-
-use super::super::{
-    Consumer, DlqLog, InvalidAttemptLog, QUEUE_DELAYED_INDEX_KEY, QueueMessage, RetryAction,
-    RetryBatchPlan, queue_delayed_key, queue_dlq_key,
+use crate::{
+    AppState, CONSUMER_GROUP, LogLevel, Metrics, SERVICE, SchedulerError, SchedulerResult, log,
+    now_ms,
 };
 
-const MAX_QUEUE_DELAY_SECONDS: i64 = 86_400;
+use super::super::{
+    Consumer, MAX_QUEUE_DELAY_SECONDS, QUEUE_DELAYED_INDEX_KEY, QueueMessage, RetryAction,
+    queue_delayed_key, queue_dlq_key,
+};
+
 const MILLIS_PER_SECOND: i64 = 1_000;
+const TRANSITION_IMMEDIATE: &str = "immediate";
+const TRANSITION_DELAY: &str = "delay";
+const TRANSITION_DLQ: &str = "dlq";
+
+const QUEUE_MESSAGE_TRANSITION_SCRIPT: &str = r#"
+local function failure(result)
+  if type(result) == "table" and result.err then
+    return {0, tostring(result.err)}
+  end
+  return nil
+end
+
+local mode = ARGV[1]
+local target_result
+if mode == "immediate" then
+  target_result = redis.pcall(
+    "XADD", KEYS[2], "*",
+    "id", ARGV[6],
+    "body_b64", ARGV[7],
+    "content_type", ARGV[8],
+    "attempts", ARGV[9],
+    "first_seen_ms", ARGV[10])
+elseif mode == "delay" then
+  local indexed = redis.pcall("SADD", KEYS[3], KEYS[2])
+  local indexed_failure = failure(indexed)
+  if indexed_failure then
+    return indexed_failure
+  end
+  target_result = redis.pcall("ZADD", KEYS[2], ARGV[4], ARGV[5])
+elseif mode == "dlq" then
+  target_result = redis.pcall(
+    "XADD", KEYS[2], "MAXLEN", "~", ARGV[3], "*",
+    "id", ARGV[6],
+    "body_b64", ARGV[7],
+    "content_type", ARGV[8],
+    "attempts", ARGV[9],
+    "first_seen_ms", ARGV[10],
+    "reason", ARGV[11])
+else
+  return {0, "invalid queue transition mode"}
+end
+
+local target_failure = failure(target_result)
+if target_failure then
+  return target_failure
+end
+local acked = redis.pcall("XACK", KEYS[1], ARGV[12], ARGV[2])
+local ack_failure = failure(acked)
+if ack_failure then
+  return ack_failure
+end
+local deleted = redis.pcall("XDEL", KEYS[1], ARGV[2])
+local delete_failure = failure(deleted)
+if delete_failure then
+  return delete_failure
+end
+return {1, ""}
+"#;
+
+struct DlqLog {
+    target: String,
+    msg_id: String,
+    attempts: i64,
+}
+
+struct InvalidAttemptLog {
+    msg_id: String,
+    stream_id: String,
+    attempts: String,
+}
+
+struct QueueTransition {
+    action: &'static str,
+    msg_id: String,
+    stream_id: String,
+    delayed_key: Option<String>,
+    dlq_log: Option<DlqLog>,
+    invalid_attempt_log: Option<InvalidAttemptLog>,
+}
+
+pub(crate) struct RetryBatchPlan {
+    pub(crate) pipe: Pipeline,
+    transitions: Vec<QueueTransition>,
+}
+
+struct TransitionBatchOutcome {
+    retry_count: usize,
+    dlq_count: usize,
+    delayed_keys: HashSet<String>,
+    dlq_logs: Vec<DlqLog>,
+    invalid_attempt_logs: Vec<InvalidAttemptLog>,
+    failures: Vec<QueueTransitionFailure>,
+}
+
+struct QueueTransitionFailure {
+    action: &'static str,
+    msg_id: String,
+    stream_id: String,
+    message: String,
+}
 
 pub(crate) fn decide_retry_action(
     msg: &QueueMessage,
@@ -66,27 +169,6 @@ fn valid_attempts(raw: &str) -> bool {
     matches!(raw.parse::<i64>(), Ok(attempts) if attempts >= 0 && attempts.checked_add(1).is_some())
 }
 
-pub(crate) fn pipe_xadd_entry(
-    pipe: &mut Pipeline,
-    key: &str,
-    trim: Option<usize>,
-    entry: &HashMap<String, String>,
-) {
-    pipe.cmd("XADD").arg(key);
-    if let Some(max_len) = trim {
-        pipe.arg("MAXLEN").arg("~").arg(max_len);
-    }
-    pipe.arg("*");
-    for (field, value) in entry {
-        pipe.arg(field).arg(value);
-    }
-}
-
-pub(crate) fn pipe_xack_xdel(pipe: &mut Pipeline, stream_key: &str, id: &str) {
-    pipe.cmd("XACK").arg(stream_key).arg(CONSUMER_GROUP).arg(id);
-    pipe.cmd("XDEL").arg(stream_key).arg(id);
-}
-
 pub(crate) async fn retry_messages_batch(
     state: &AppState,
     retries: Vec<(QueueMessage, i64)>,
@@ -103,59 +185,7 @@ pub(crate) async fn retry_messages_batch(
         state.config.max_dlq_len,
         now_ms(),
     )?;
-    let RetryBatchPlan {
-        pipe,
-        retry_count,
-        dlq_count,
-        delayed_keys,
-        dlq_logs,
-        invalid_attempt_logs,
-    } = plan;
-
-    state
-        .data_redis
-        .with_conn(async |mut conn| pipe.query_async::<Value>(&mut conn).await)
-        .await?;
-
-    if !delayed_keys.is_empty() {
-        state
-            .queues
-            .known_delayed
-            .write()
-            .await
-            .extend(delayed_keys);
-        state.queues.delayed_changed.notify_one();
-    }
-    for log_entry in dlq_logs {
-        log(
-            state,
-            LogLevel::Warn,
-            "queue_message_to_dlq",
-            json!({
-                "queue": consumer.queue,
-                "dlq": log_entry.target,
-                "msg_id": log_entry.msg_id,
-                "attempts": log_entry.attempts,
-                "max_retries": consumer.max_retries,
-            }),
-        );
-    }
-    for log_entry in invalid_attempt_logs {
-        log(
-            state,
-            LogLevel::Warn,
-            "queue_message_invalid_attempts",
-            json!({
-                "queue": consumer.queue,
-                "msg_id": log_entry.msg_id,
-                "stream_id": log_entry.stream_id,
-                "attempts": log_entry.attempts,
-            }),
-        );
-    }
-    record_queue_messages(&state.metrics, "retry", retry_count);
-    record_queue_messages(&state.metrics, "dlq", dlq_count);
-    Ok(())
+    execute_transition_plan(state, plan, consumer, None).await
 }
 
 pub(crate) async fn terminal_messages_batch(
@@ -175,36 +205,151 @@ pub(crate) async fn terminal_messages_batch(
         state.config.max_dlq_len,
         reason,
     )?;
-    let RetryBatchPlan {
+    execute_transition_plan(state, plan, consumer, Some(reason)).await
+}
+
+fn entry_field<'a>(entry: &'a HashMap<String, String>, field: &str) -> SchedulerResult<&'a str> {
+    entry
+        .get(field)
+        .map(String::as_str)
+        .ok_or_else(|| SchedulerError::internal_error(format!("queue retry entry missing {field}")))
+}
+
+fn append_transition(
+    pipe: &mut Pipeline,
+    keys: &[&str],
+    mode: &'static str,
+    msg: &QueueMessage,
+    entry: &HashMap<String, String>,
+    max_dlq_len: usize,
+    delayed: Option<(i64, &str)>,
+) -> SchedulerResult<()> {
+    let max_dlq_len = max_dlq_len.to_string();
+    let visible_at_ms = delayed
+        .map(|(value, _)| value.to_string())
+        .unwrap_or_default();
+    let delayed_member = delayed.map(|(_, member)| member).unwrap_or("");
+    append_eval_cmd(
         pipe,
-        retry_count: _,
-        dlq_count,
-        delayed_keys: _,
-        dlq_logs,
-        invalid_attempt_logs,
-    } = plan;
+        QUEUE_MESSAGE_TRANSITION_SCRIPT,
+        keys,
+        &[
+            mode,
+            &msg.stream_id,
+            &max_dlq_len,
+            &visible_at_ms,
+            delayed_member,
+            entry_field(entry, "id")?,
+            entry_field(entry, "body_b64")?,
+            entry_field(entry, "content_type")?,
+            entry_field(entry, "attempts")?,
+            entry_field(entry, "first_seen_ms")?,
+            entry.get("reason").map(String::as_str).unwrap_or(""),
+            CONSUMER_GROUP,
+        ],
+    );
+    Ok(())
+}
 
-    state
-        .data_redis
-        .with_conn(async |mut conn| pipe.query_async::<Value>(&mut conn).await)
-        .await?;
+fn invalid_attempt_log(msg: &QueueMessage) -> Option<InvalidAttemptLog> {
+    (!valid_attempts(&msg.attempts)).then(|| InvalidAttemptLog {
+        msg_id: msg.id.clone(),
+        stream_id: msg.stream_id.clone(),
+        attempts: msg.attempts.clone(),
+    })
+}
 
-    for log_entry in dlq_logs {
-        log(
-            state,
-            LogLevel::Warn,
-            "queue_message_to_dlq",
-            json!({
-                "queue": consumer.queue,
-                "dlq": log_entry.target,
-                "msg_id": log_entry.msg_id,
-                "attempts": log_entry.attempts,
-                "max_retries": consumer.max_retries,
-                "reason": reason,
-            }),
-        );
+fn parse_transition_results(
+    transitions: Vec<QueueTransition>,
+    replies: Vec<(i64, String)>,
+) -> SchedulerResult<TransitionBatchOutcome> {
+    if replies.len() != transitions.len() {
+        return Err(SchedulerError::internal_error(
+            "queue transition pipeline reply count mismatch",
+        ));
     }
-    for log_entry in invalid_attempt_logs {
+    let mut outcome = TransitionBatchOutcome {
+        retry_count: 0,
+        dlq_count: 0,
+        delayed_keys: HashSet::new(),
+        dlq_logs: Vec::new(),
+        invalid_attempt_logs: Vec::new(),
+        failures: Vec::new(),
+    };
+    for (transition, (code, message)) in transitions.into_iter().zip(replies) {
+        match (code, message.is_empty()) {
+            (1, true) => {
+                match transition.action {
+                    TRANSITION_IMMEDIATE | TRANSITION_DELAY => outcome.retry_count += 1,
+                    TRANSITION_DLQ => outcome.dlq_count += 1,
+                    _ => {
+                        return Err(SchedulerError::internal_error(
+                            "invalid queue transition action",
+                        ));
+                    }
+                }
+                if let Some(key) = transition.delayed_key {
+                    outcome.delayed_keys.insert(key);
+                }
+                if let Some(log_entry) = transition.dlq_log {
+                    outcome.dlq_logs.push(log_entry);
+                }
+                if let Some(log_entry) = transition.invalid_attempt_log {
+                    outcome.invalid_attempt_logs.push(log_entry);
+                }
+            }
+            (0, false) => outcome.failures.push(QueueTransitionFailure {
+                action: transition.action,
+                msg_id: transition.msg_id,
+                stream_id: transition.stream_id,
+                message,
+            }),
+            _ => {
+                return Err(SchedulerError::internal_error(
+                    "invalid queue transition response",
+                ));
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+async fn execute_transition_plan(
+    state: &AppState,
+    plan: RetryBatchPlan,
+    consumer: &Consumer,
+    terminal_reason: Option<&str>,
+) -> SchedulerResult<()> {
+    let RetryBatchPlan { pipe, transitions } = plan;
+    let replies: Vec<(i64, String)> = state
+        .data_redis
+        .with_conn(async |mut conn| pipe.query_async(&mut conn).await)
+        .await?;
+    let outcome = parse_transition_results(transitions, replies)?;
+
+    if !outcome.delayed_keys.is_empty() {
+        state
+            .queues
+            .known_delayed
+            .write()
+            .await
+            .extend(outcome.delayed_keys);
+        state.queues.delayed_changed.notify_one();
+    }
+    for log_entry in outcome.dlq_logs {
+        let mut fields = json!({
+            "queue": consumer.queue,
+            "dlq": log_entry.target,
+            "msg_id": log_entry.msg_id,
+            "attempts": log_entry.attempts,
+            "max_retries": consumer.max_retries,
+        });
+        if let Some(reason) = terminal_reason {
+            fields["reason"] = json!(reason);
+        }
+        log(state, LogLevel::Warn, "queue_message_to_dlq", fields);
+    }
+    for log_entry in outcome.invalid_attempt_logs {
         log(
             state,
             LogLevel::Warn,
@@ -217,7 +362,22 @@ pub(crate) async fn terminal_messages_batch(
             }),
         );
     }
-    record_queue_messages(&state.metrics, "dlq", dlq_count);
+    for failure in outcome.failures {
+        log(
+            state,
+            LogLevel::Error,
+            "queue_message_transition_failed",
+            json!({
+                "queue": consumer.queue,
+                "msg_id": failure.msg_id,
+                "stream_id": failure.stream_id,
+                "action": failure.action,
+                "error_message": failure.message,
+            }),
+        );
+    }
+    record_queue_messages(&state.metrics, "retry", outcome.retry_count);
+    record_queue_messages(&state.metrics, "dlq", outcome.dlq_count);
     Ok(())
 }
 
@@ -230,21 +390,10 @@ pub(crate) fn build_retry_batch_plan(
 ) -> SchedulerResult<RetryBatchPlan> {
     let stream_key_owned = stream_key.to_string();
     let mut pipe = redis::pipe();
-    pipe.atomic();
-    let mut retry_count = 0_usize;
-    let mut dlq_count = 0_usize;
-    let mut delayed_keys = HashSet::new();
-    let mut dlq_logs = Vec::new();
-    let mut invalid_attempt_logs = Vec::new();
+    let mut transitions = Vec::with_capacity(retries.len());
 
     for (msg, delay_secs) in retries {
-        if !valid_attempts(&msg.attempts) {
-            invalid_attempt_logs.push(InvalidAttemptLog {
-                msg_id: msg.id.clone(),
-                stream_id: msg.stream_id.clone(),
-                attempts: msg.attempts.clone(),
-            });
-        }
+        let invalid_attempt_log = invalid_attempt_log(&msg);
         match decide_retry_action(
             &msg,
             delay_secs,
@@ -259,13 +408,26 @@ pub(crate) fn build_retry_batch_plan(
                 entry,
             } => {
                 let dlq_key = queue_dlq_key(&consumer.ns, &target);
-                pipe_xadd_entry(&mut pipe, &dlq_key, Some(max_dlq_len), &entry);
-                pipe_xack_xdel(&mut pipe, &stream_key_owned, &msg.stream_id);
-                dlq_count += 1;
-                dlq_logs.push(DlqLog {
-                    target,
-                    msg_id: msg.id,
-                    attempts,
+                append_transition(
+                    &mut pipe,
+                    &[&stream_key_owned, &dlq_key],
+                    TRANSITION_DLQ,
+                    &msg,
+                    &entry,
+                    max_dlq_len,
+                    None,
+                )?;
+                transitions.push(QueueTransition {
+                    action: TRANSITION_DLQ,
+                    msg_id: msg.id.clone(),
+                    stream_id: msg.stream_id.clone(),
+                    delayed_key: None,
+                    dlq_log: Some(DlqLog {
+                        target,
+                        msg_id: msg.id,
+                        attempts,
+                    }),
+                    invalid_attempt_log,
                 });
             }
             RetryAction::Delay {
@@ -274,33 +436,47 @@ pub(crate) fn build_retry_batch_plan(
             } => {
                 let delayed_key = queue_delayed_key(&consumer.ns, &consumer.queue);
                 let member = serde_json::to_string(&entry)?;
-                pipe.cmd("ZADD")
-                    .arg(&delayed_key)
-                    .arg(visible_at_ms)
-                    .arg(member);
-                pipe.cmd("SADD")
-                    .arg(QUEUE_DELAYED_INDEX_KEY)
-                    .arg(&delayed_key);
-                pipe_xack_xdel(&mut pipe, &stream_key_owned, &msg.stream_id);
-                delayed_keys.insert(delayed_key);
-                retry_count += 1;
+                append_transition(
+                    &mut pipe,
+                    &[&stream_key_owned, &delayed_key, QUEUE_DELAYED_INDEX_KEY],
+                    TRANSITION_DELAY,
+                    &msg,
+                    &entry,
+                    max_dlq_len,
+                    Some((visible_at_ms, &member)),
+                )?;
+                transitions.push(QueueTransition {
+                    action: TRANSITION_DELAY,
+                    msg_id: msg.id,
+                    stream_id: msg.stream_id,
+                    delayed_key: Some(delayed_key),
+                    dlq_log: None,
+                    invalid_attempt_log,
+                });
             }
             RetryAction::Immediate { entry } => {
-                pipe_xadd_entry(&mut pipe, &stream_key_owned, None, &entry);
-                pipe_xack_xdel(&mut pipe, &stream_key_owned, &msg.stream_id);
-                retry_count += 1;
+                append_transition(
+                    &mut pipe,
+                    &[&stream_key_owned, &stream_key_owned],
+                    TRANSITION_IMMEDIATE,
+                    &msg,
+                    &entry,
+                    max_dlq_len,
+                    None,
+                )?;
+                transitions.push(QueueTransition {
+                    action: TRANSITION_IMMEDIATE,
+                    msg_id: msg.id,
+                    stream_id: msg.stream_id,
+                    delayed_key: None,
+                    dlq_log: None,
+                    invalid_attempt_log,
+                });
             }
         }
     }
 
-    Ok(RetryBatchPlan {
-        pipe,
-        retry_count,
-        dlq_count,
-        delayed_keys,
-        dlq_logs,
-        invalid_attempt_logs,
-    })
+    Ok(RetryBatchPlan { pipe, transitions })
 }
 
 pub(crate) fn build_terminal_batch_plan(
@@ -312,19 +488,10 @@ pub(crate) fn build_terminal_batch_plan(
 ) -> SchedulerResult<RetryBatchPlan> {
     let stream_key_owned = stream_key.to_string();
     let mut pipe = redis::pipe();
-    pipe.atomic();
-    let mut dlq_count = 0_usize;
-    let mut dlq_logs = Vec::new();
-    let mut invalid_attempt_logs = Vec::new();
+    let mut transitions = Vec::with_capacity(messages.len());
 
     for msg in messages {
-        if !valid_attempts(&msg.attempts) {
-            invalid_attempt_logs.push(InvalidAttemptLog {
-                msg_id: msg.id.clone(),
-                stream_id: msg.stream_id.clone(),
-                attempts: msg.attempts.clone(),
-            });
-        }
+        let invalid_attempt_log = invalid_attempt_log(&msg);
         let attempts = parse_next_attempts(&msg.attempts);
         let entry = HashMap::from([
             ("id".to_string(), msg.id.clone()),
@@ -340,24 +507,30 @@ pub(crate) fn build_terminal_batch_plan(
             .unwrap_or(&consumer.queue)
             .to_string();
         let dlq_key = queue_dlq_key(&consumer.ns, &target);
-        pipe_xadd_entry(&mut pipe, &dlq_key, Some(max_dlq_len), &entry);
-        pipe_xack_xdel(&mut pipe, &stream_key_owned, &msg.stream_id);
-        dlq_count += 1;
-        dlq_logs.push(DlqLog {
-            target,
-            msg_id: msg.id,
-            attempts,
+        append_transition(
+            &mut pipe,
+            &[&stream_key_owned, &dlq_key],
+            TRANSITION_DLQ,
+            &msg,
+            &entry,
+            max_dlq_len,
+            None,
+        )?;
+        transitions.push(QueueTransition {
+            action: TRANSITION_DLQ,
+            msg_id: msg.id.clone(),
+            stream_id: msg.stream_id.clone(),
+            delayed_key: None,
+            dlq_log: Some(DlqLog {
+                target,
+                msg_id: msg.id,
+                attempts,
+            }),
+            invalid_attempt_log,
         });
     }
 
-    Ok(RetryBatchPlan {
-        pipe,
-        retry_count: 0,
-        dlq_count,
-        delayed_keys: HashSet::new(),
-        dlq_logs,
-        invalid_attempt_logs,
-    })
+    Ok(RetryBatchPlan { pipe, transitions })
 }
 
 pub(crate) fn record_queue_messages(metrics: &Metrics, outcome: &str, count: usize) {
@@ -385,6 +558,7 @@ pub(crate) fn record_queue_dispatch_failures(metrics: &Metrics, kind: &str, coun
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::parse_packed_commands;
 
     fn msg(id: &str, stream_id: &str, attempts: &str) -> QueueMessage {
         QueueMessage {
@@ -397,40 +571,10 @@ mod tests {
         }
     }
 
-    fn parse_packed_commands(packed: &[u8]) -> Vec<Vec<String>> {
-        let mut offset = 0_usize;
-        let mut commands = Vec::new();
-        while offset < packed.len() {
-            assert_eq!(packed[offset], b'*');
-            offset += 1;
-            let count = read_resp_usize(packed, &mut offset);
-            let mut command = Vec::new();
-            for _ in 0..count {
-                assert_eq!(packed[offset], b'$');
-                offset += 1;
-                let len = read_resp_usize(packed, &mut offset);
-                let end = offset + len;
-                command.push(String::from_utf8(packed[offset..end].to_vec()).unwrap());
-                offset = end;
-                assert_eq!(&packed[offset..offset + 2], b"\r\n");
-                offset += 2;
-            }
-            commands.push(command);
-        }
-        commands
-    }
-
-    fn read_resp_usize(packed: &[u8], offset: &mut usize) -> usize {
-        let start = *offset;
-        while &packed[*offset..*offset + 2] != b"\r\n" {
-            *offset += 1;
-        }
-        let value = std::str::from_utf8(&packed[start..*offset])
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        *offset += 2;
-        value
+    fn eval_parts(command: &[String]) -> (&[String], &[String]) {
+        assert_eq!(command[0], "EVAL");
+        let key_count = command[2].parse::<usize>().expect("valid EVAL key count");
+        (&command[3..3 + key_count], &command[3 + key_count..])
     }
 
     #[test]
@@ -609,15 +753,17 @@ mod tests {
         .unwrap();
 
         let commands = parse_packed_commands(&plan.pipe.get_packed_pipeline());
-        assert_eq!(commands[1][0], "ZADD");
+        assert_eq!(commands.len(), 1);
+        let (_, args) = eval_parts(&commands[0]);
+        assert_eq!(args[0], TRANSITION_DELAY);
         assert_eq!(
-            commands[1][2],
+            args[3],
             (1_000_000 + MAX_QUEUE_DELAY_SECONDS * MILLIS_PER_SECOND).to_string()
         );
     }
 
     #[test]
-    fn retry_batch_plan_builds_one_atomic_pipeline_for_mixed_actions() {
+    fn retry_batch_plan_builds_one_isolated_script_per_message() {
         let consumer = Consumer {
             ns: "demo".to_string(),
             queue: "jobs".to_string(),
@@ -632,6 +778,7 @@ mod tests {
             vec![
                 (msg("immediate", "1-0", "0"), 0),
                 (msg("delayed", "2-0", "0"), 7),
+                (msg("delayed-2", "2-1", "0"), 9),
                 (msg("dead", "3-0", "1"), 0),
             ],
             "queue:demo:jobs:s",
@@ -641,53 +788,117 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.retry_count, 2);
-        assert_eq!(plan.dlq_count, 1);
-        assert!(plan.delayed_keys.contains("queue-delayed:demo:jobs"));
-        assert_eq!(plan.dlq_logs.len(), 1);
-        assert_eq!(plan.dlq_logs[0].target, "failures");
-        assert_eq!(plan.dlq_logs[0].msg_id, "dead");
-        assert_eq!(plan.dlq_logs[0].attempts, 2);
-        assert!(plan.invalid_attempt_logs.is_empty());
-
         let commands = parse_packed_commands(&plan.pipe.get_packed_pipeline());
-        let names = commands
-            .iter()
-            .map(|cmd| cmd[0].as_str())
-            .collect::<Vec<_>>();
+        assert_eq!(commands.len(), 4);
+        let (immediate_keys, immediate_args) = eval_parts(&commands[0]);
+        assert_eq!(immediate_keys, ["queue:demo:jobs:s", "queue:demo:jobs:s"]);
+        assert_eq!(immediate_args[0], TRANSITION_IMMEDIATE);
+        assert_eq!(immediate_args[1], "1-0");
+
+        let (delayed_keys, delayed_args) = eval_parts(&commands[1]);
         assert_eq!(
-            names,
+            delayed_keys,
             [
-                "MULTI", "XADD", "XACK", "XDEL", "ZADD", "SADD", "XACK", "XDEL", "XADD", "XACK",
-                "XDEL", "EXEC"
+                "queue:demo:jobs:s",
+                "queue-delayed:demo:jobs",
+                QUEUE_DELAYED_INDEX_KEY
             ]
         );
-        assert_eq!(commands[1][1], "queue:demo:jobs:s");
-        assert_eq!(
-            commands[2],
-            ["XACK", "queue:demo:jobs:s", CONSUMER_GROUP, "1-0"]
-        );
-        assert_eq!(commands[3], ["XDEL", "queue:demo:jobs:s", "1-0"]);
-        assert_eq!(commands[4][1], "queue-delayed:demo:jobs");
-        assert_eq!(commands[4][2], "1007000");
-        assert_eq!(
-            commands[5],
-            ["SADD", QUEUE_DELAYED_INDEX_KEY, "queue-delayed:demo:jobs"]
-        );
-        assert_eq!(
-            commands[6],
-            ["XACK", "queue:demo:jobs:s", CONSUMER_GROUP, "2-0"]
-        );
-        assert_eq!(commands[7], ["XDEL", "queue:demo:jobs:s", "2-0"]);
-        assert_eq!(
-            &commands[8][0..5],
-            ["XADD", "queue:demo:failures:dlq", "MAXLEN", "~", "99"]
-        );
-        assert_eq!(
-            commands[9],
-            ["XACK", "queue:demo:jobs:s", CONSUMER_GROUP, "3-0"]
-        );
-        assert_eq!(commands[10], ["XDEL", "queue:demo:jobs:s", "3-0"]);
+        assert_eq!(delayed_args[0], TRANSITION_DELAY);
+        assert_eq!(delayed_args[3], "1007000");
+
+        let (_, second_delayed_args) = eval_parts(&commands[2]);
+        assert_eq!(second_delayed_args[3], "1009000");
+
+        let (dlq_keys, dlq_args) = eval_parts(&commands[3]);
+        assert_eq!(dlq_keys, ["queue:demo:jobs:s", "queue:demo:failures:dlq"]);
+        assert_eq!(dlq_args[0], TRANSITION_DLQ);
+        assert_eq!(dlq_args[2], "99");
+        assert_eq!(dlq_args[10], "max_retries_exceeded");
+
+        let outcome = parse_transition_results(
+            plan.transitions,
+            vec![
+                (1, String::new()),
+                (1, String::new()),
+                (1, String::new()),
+                (1, String::new()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(outcome.retry_count, 3);
+        assert_eq!(outcome.dlq_count, 1);
+        assert!(outcome.delayed_keys.contains("queue-delayed:demo:jobs"));
+        assert_eq!(outcome.dlq_logs.len(), 1);
+        assert_eq!(outcome.dlq_logs[0].target, "failures");
+        assert_eq!(outcome.dlq_logs[0].msg_id, "dead");
+        assert_eq!(outcome.dlq_logs[0].attempts, 2);
+        assert!(outcome.invalid_attempt_logs.is_empty());
+        assert!(outcome.failures.is_empty());
+    }
+
+    #[test]
+    fn transition_script_finishes_target_writes_before_source_removal() {
+        let delayed_index = QUEUE_MESSAGE_TRANSITION_SCRIPT
+            .find(r#"redis.pcall("SADD", KEYS[3], KEYS[2])"#)
+            .expect("delayed index write");
+        let delayed_payload = QUEUE_MESSAGE_TRANSITION_SCRIPT
+            .find(r#"redis.pcall("ZADD", KEYS[2], ARGV[4], ARGV[5])"#)
+            .expect("delayed payload write");
+        let ack = QUEUE_MESSAGE_TRANSITION_SCRIPT
+            .find(r#"redis.pcall("XACK", KEYS[1], ARGV[12], ARGV[2])"#)
+            .expect("source ack");
+        let delete = QUEUE_MESSAGE_TRANSITION_SCRIPT
+            .find(r#"redis.pcall("XDEL", KEYS[1], ARGV[2])"#)
+            .expect("source delete");
+        assert!(delayed_index < delayed_payload);
+        assert!(delayed_payload < ack);
+        assert!(ack < delete);
+        assert!(QUEUE_MESSAGE_TRANSITION_SCRIPT.contains("return {0, tostring(result.err)}"));
+    }
+
+    #[test]
+    fn transition_results_isolate_item_failures_and_keep_later_successes() {
+        let consumer = Consumer {
+            ns: "demo".to_string(),
+            queue: "jobs".to_string(),
+            max_batch_size: 10,
+            max_batch_timeout_ms: 5000,
+            max_retries: 3,
+            retry_delay_secs: 0,
+            dead_letter_queue: None,
+            worker_id: "demo:worker:v1".to_string(),
+        };
+        let plan = build_retry_batch_plan(
+            vec![
+                (msg("first", "1-0", "0"), 0),
+                (msg("bad", "2-0", "0"), 7),
+                (msg("last", "3-0", "0"), 0),
+            ],
+            "queue:demo:jobs:s",
+            &consumer,
+            99,
+            1_000_000,
+        )
+        .unwrap();
+
+        let outcome = parse_transition_results(
+            plan.transitions,
+            vec![
+                (1, String::new()),
+                (0, "WRONGTYPE target".to_string()),
+                (1, String::new()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.retry_count, 2);
+        assert_eq!(outcome.dlq_count, 0);
+        assert!(outcome.delayed_keys.is_empty());
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].action, TRANSITION_DELAY);
+        assert_eq!(outcome.failures[0].msg_id, "bad");
+        assert_eq!(outcome.failures[0].stream_id, "2-0");
     }
 
     #[test]
@@ -711,20 +922,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.retry_count, 1);
-        assert_eq!(plan.dlq_count, 0);
-        assert_eq!(plan.invalid_attempt_logs.len(), 1);
-        assert_eq!(plan.invalid_attempt_logs[0].msg_id, "bad");
-        assert_eq!(plan.invalid_attempt_logs[0].stream_id, "9-0");
-        assert_eq!(plan.invalid_attempt_logs[0].attempts, "not-a-number");
-
         let commands = parse_packed_commands(&plan.pipe.get_packed_pipeline());
-        assert_eq!(commands[1][1], "queue:demo:jobs:s");
-        assert!(
-            commands[1]
-                .array_windows::<2>()
-                .any(|pair| pair[0] == "attempts" && pair[1] == "1")
-        );
+        let (_, args) = eval_parts(&commands[0]);
+        assert_eq!(args[8], "1");
+        let outcome = parse_transition_results(plan.transitions, vec![(1, String::new())]).unwrap();
+        assert_eq!(outcome.retry_count, 1);
+        assert_eq!(outcome.dlq_count, 0);
+        assert_eq!(outcome.invalid_attempt_logs.len(), 1);
+        assert_eq!(outcome.invalid_attempt_logs[0].msg_id, "bad");
+        assert_eq!(outcome.invalid_attempt_logs[0].stream_id, "9-0");
+        assert_eq!(outcome.invalid_attempt_logs[0].attempts, "not-a-number");
 
         let negative_plan = build_retry_batch_plan(
             vec![(msg("negative", "10-0", "-1"), 0)],
@@ -734,8 +941,10 @@ mod tests {
             1_000_000,
         )
         .unwrap();
-        assert_eq!(negative_plan.invalid_attempt_logs.len(), 1);
-        assert_eq!(negative_plan.invalid_attempt_logs[0].attempts, "-1");
+        let negative_outcome =
+            parse_transition_results(negative_plan.transitions, vec![(1, String::new())]).unwrap();
+        assert_eq!(negative_outcome.invalid_attempt_logs.len(), 1);
+        assert_eq!(negative_outcome.invalid_attempt_logs[0].attempts, "-1");
 
         let overflow_plan = build_retry_batch_plan(
             vec![(msg("overflow", "11-0", &i64::MAX.to_string()), 0)],
@@ -745,9 +954,11 @@ mod tests {
             1_000_000,
         )
         .unwrap();
-        assert_eq!(overflow_plan.invalid_attempt_logs.len(), 1);
+        let overflow_outcome =
+            parse_transition_results(overflow_plan.transitions, vec![(1, String::new())]).unwrap();
+        assert_eq!(overflow_outcome.invalid_attempt_logs.len(), 1);
         assert_eq!(
-            overflow_plan.invalid_attempt_logs[0].attempts,
+            overflow_outcome.invalid_attempt_logs[0].attempts,
             i64::MAX.to_string()
         );
     }
@@ -773,26 +984,17 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.retry_count, 0);
-        assert_eq!(plan.dlq_count, 1);
-        assert_eq!(plan.dlq_logs[0].target, "failures");
-        assert_eq!(plan.dlq_logs[0].msg_id, "bad");
-        assert_eq!(plan.dlq_logs[0].attempts, 1);
-
         let commands = parse_packed_commands(&plan.pipe.get_packed_pipeline());
-        assert_eq!(
-            &commands[1][0..5],
-            ["XADD", "queue:demo:failures:dlq", "MAXLEN", "~", "99"]
-        );
-        assert!(
-            commands[1]
-                .array_windows::<2>()
-                .any(|pair| pair[0] == "reason" && pair[1] == "queue_message_decode_failed")
-        );
-        assert_eq!(
-            commands[2],
-            ["XACK", "queue:demo:jobs:s", CONSUMER_GROUP, "9-0"]
-        );
-        assert_eq!(commands[3], ["XDEL", "queue:demo:jobs:s", "9-0"]);
+        let (keys, args) = eval_parts(&commands[0]);
+        assert_eq!(keys, ["queue:demo:jobs:s", "queue:demo:failures:dlq"]);
+        assert_eq!(args[0], TRANSITION_DLQ);
+        assert_eq!(args[2], "99");
+        assert_eq!(args[10], "queue_message_decode_failed");
+        let outcome = parse_transition_results(plan.transitions, vec![(1, String::new())]).unwrap();
+        assert_eq!(outcome.retry_count, 0);
+        assert_eq!(outcome.dlq_count, 1);
+        assert_eq!(outcome.dlq_logs[0].target, "failures");
+        assert_eq!(outcome.dlq_logs[0].msg_id, "bad");
+        assert_eq!(outcome.dlq_logs[0].attempts, 1);
     }
 }

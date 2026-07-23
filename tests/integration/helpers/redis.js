@@ -16,6 +16,18 @@ export function redisCommand(args, options = {}) {
   return composeExec("redis", `redis-cli ${dbArgs}${args}`).trim();
 }
 
+/**
+ * @param {string} script
+ * @param {string[]} keys
+ * @param {string[]} args
+ * @param {{ db?: number }} [options]
+ * @returns {string}
+ */
+export function redisEval(script, keys, args, options = {}) {
+  const encoded = [script, String(keys.length), ...keys, ...args].map(shellQuote).join(" ");
+  return redisCommand(`EVAL ${encoded}`, options);
+}
+
 /** @param {string} key @param {{ db?: number }} [options] @returns {string | null} */
 export function redisGet(key, options = {}) {
   const val = redisCommand(`GET ${shellQuote(key)}`, options);
@@ -25,6 +37,11 @@ export function redisGet(key, options = {}) {
 /** @param {string} key @param {{ db?: number }} [options] @returns {boolean} */
 export function redisExists(key, options = {}) {
   return redisCommand(`EXISTS ${shellQuote(key)}`, options) === "1";
+}
+
+/** @param {string[]} keys @param {{ db?: number }} [options] @returns {number} */
+export function redisExistsCount(keys, options = {}) {
+  return Number(redisCommand(`EXISTS ${keys.map(shellQuote).join(" ")}`, options));
 }
 
 /** @param {string} key @param {{ db?: number }} [options] @returns {string | null} */
@@ -58,6 +75,19 @@ export function redisJsonMembers(members, label = "Redis member JSON") {
 /** @param {string} key @param {string} value @param {{ db?: number }} [options] */
 export function redisSet(key, value, options = {}) {
   redisCommand(`SET ${shellQuote(key)} ${shellQuote(value)}`, options);
+}
+
+/** @param {string} key @param {string} value @param {string} expected @param {{ db?: number }} [options] */
+export function redisSetIfEq(key, value, expected, options = {}) {
+  return redisCommand(
+    `SET ${shellQuote(key)} ${shellQuote(value)} IFEQ ${shellQuote(expected)}`,
+    options
+  ) === "OK";
+}
+
+/** @param {string} key @param {string} expected @param {{ db?: number }} [options] */
+export function redisDelIfEq(key, expected, options = {}) {
+  return Number(redisCommand(`DELIFEQ ${shellQuote(key)} ${shellQuote(expected)}`, options));
 }
 
 /** @param {string} key @param {unknown} value @param {{ db?: number }} [options] */
@@ -113,6 +143,11 @@ export function redisHDel(key, fields, options = {}) {
   return Number(redisCommand(`HDEL ${shellQuote(key)} ${fields.map(shellQuote).join(" ")}`, options));
 }
 
+/** @param {string} key @param {string} field @param {{ db?: number }} [options] @returns {number} */
+export function redisHStrLen(key, field, options = {}) {
+  return Number(redisCommand(`HSTRLEN ${shellQuote(key)} ${shellQuote(field)}`, options));
+}
+
 /** @param {string} key @param {{ db?: number }} [options] @returns {string[]} */
 export function redisSMembers(key, options = {}) {
   const out = redisCommand(`SMEMBERS ${shellQuote(key)}`, options);
@@ -127,6 +162,11 @@ export function redisSAdd(key, member, options = {}) {
 /** @param {string} key @param {string} member @param {{ db?: number }} [options] */
 export function redisSRem(key, member, options = {}) {
   redisCommand(`SREM ${shellQuote(key)} ${shellQuote(member)}`, options);
+}
+
+/** @param {string} key @param {{ db?: number }} [options] @returns {number} */
+export function redisSCard(key, options = {}) {
+  return Number(redisCommand(`SCARD ${shellQuote(key)}`, options));
 }
 
 /** @param {string} key @param {number} [start] @param {number} [stop] @param {{ db?: number }} [options] @returns {string[]} */
@@ -198,6 +238,14 @@ export function redisXAdd(key, fields, options = {}) {
   return redisCommand(`XADD ${shellQuote(key)} ${shellQuote(id)} ${args}`, options);
 }
 
+/** @param {string} key @param {string} group @param {{ db?: number }} [options] */
+export function redisXGroupCreate(key, group, options = {}) {
+  redisCommand(
+    `XGROUP CREATE ${shellQuote(key)} ${shellQuote(group)} 0 MKSTREAM`,
+    options
+  );
+}
+
 /** @param {string} key @param {string} group @param {string} consumer @param {{ db?: number, count?: number, id?: string }} [options] */
 export function redisXReadGroup(key, group, consumer, options = {}) {
   const count = options.count ?? 1;
@@ -260,6 +308,23 @@ export function redisCopy(src, dst, options = {}) {
 
 export function redisFlushAll() {
   redisCommand("FLUSHALL");
+}
+
+export function redisScriptFlush() {
+  redisCommand("SCRIPT FLUSH");
+}
+
+/** @param {string} command @returns {number} */
+export function redisCommandCalls(command) {
+  const commandLabel = command.toLowerCase().replaceAll(" ", "|");
+  const prefix = `cmdstat_${commandLabel}:`;
+  const line = redisCommand("INFO commandstats")
+    .split(/\r?\n/)
+    .find((entry) => entry.startsWith(prefix));
+  if (line == null) return 0;
+  const calls = /(?:^|,)calls=(\d+)(?:,|$)/.exec(line.slice(prefix.length));
+  if (calls == null) throw new Error(`missing calls field for Redis command ${command}`);
+  return Number(calls[1]);
 }
 
 /** @param {string} channel @param {string} message @returns {number} */

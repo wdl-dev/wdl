@@ -23,13 +23,14 @@ import {
   BundleMetaError,
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
-  assertWorkerVersionsUserEnvBudget,
+  assertWorkersVersionsUserEnvBudget,
   decryptMutatedSecretHashForBudget,
   decryptSecretHash,
 } from "control-env-budget";
 import { SecretEnvelopeError } from "shared-secret-envelope";
 
 const MAX_NS_SECRET_ATTEMPTS = 5;
+const NS_SECRET_WORKER_READ_BATCH_SIZE = 16;
 
 class NamespaceSecretAbort extends ControlAbort {}
 
@@ -104,27 +105,48 @@ async function validateNamespaceSecretBudget({
     return;
   }
 
-  for (const worker of workerNames) {
-    const secretHashKey = workerSecretsKey(nsName, worker);
-    await redis.watch(workerVersionsKey(nsName, worker), secretHashKey);
-    const activeVersion = activeRoutes[worker];
-    const retainedVersions = await redis.zRange(workerVersionsKey(nsName, worker), 0, -1);
-    const workerEncrypted = await redis.hGetAll(secretHashKey);
-    const workerSecrets = await decryptSecretHash({
-      encrypted: workerEncrypted,
-      env: controlEnv,
-      hashKey: secretHashKey,
-    });
-    await assertWorkerVersionsUserEnvBudget({
+  const workers = [...workerNames];
+  for (let offset = 0; offset < workers.length; offset += NS_SECRET_WORKER_READ_BATCH_SIZE) {
+    const batch = workers.slice(offset, offset + NS_SECRET_WORKER_READ_BATCH_SIZE);
+    await redis.watch(...batch.flatMap((worker) => [
+      workerVersionsKey(nsName, worker),
+      workerSecretsKey(nsName, worker),
+    ]));
+  }
+
+  for (let offset = 0; offset < workers.length; offset += NS_SECRET_WORKER_READ_BATCH_SIZE) {
+    const batch = workers.slice(offset, offset + NS_SECRET_WORKER_READ_BATCH_SIZE);
+    const versionKeys = batch.map((worker) => workerVersionsKey(nsName, worker));
+    const secretKeys = batch.map((worker) => workerSecretsKey(nsName, worker));
+    const retainedByWorker = await redis.zRangeMany(versionKeys, 0, -1);
+    const encryptedByWorker = await redis.hGetAllMany(secretKeys);
+    const secretsByWorker = await Promise.all(encryptedByWorker.map((encrypted, index) =>
+      decryptSecretHash({
+        encrypted,
+        env: controlEnv,
+        hashKey: secretKeys[index],
+      })
+    ));
+    /** @type {Array<{ worker: string, versions: string[], workerSecrets: Record<string, string> }>} */
+    const budgetWorkers = [];
+    for (let index = 0; index < batch.length; index += 1) {
+      const worker = batch[index];
+      const activeVersion = activeRoutes[worker];
+      budgetWorkers.push({
+        worker,
+        versions: [
+          ...retainedByWorker[index],
+          ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
+        ],
+        workerSecrets: secretsByWorker[index],
+      });
+    }
+
+    await assertWorkersVersionsUserEnvBudget({
       redis,
       ns: nsName,
-      worker,
-      versions: [
-        ...retainedVersions,
-        ...(typeof activeVersion === "string" && activeVersion ? [activeVersion] : []),
-      ],
+      workers: budgetWorkers,
       nsSecrets,
-      workerSecrets,
       assetsCdnBase: controlEnv.ASSETS_CDN_BASE,
     });
   }

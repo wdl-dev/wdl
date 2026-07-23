@@ -13,4 +13,4 @@ export { parseBase64Json, parseJsonText, parseStdoutJson } from "./json-payload.
 export { cronId, readMeta } from "./misc.js";
 export { shellQuote } from "./shell-quote.js";
 export { workerFetchCallerSource } from "./worker-source.js";
-export { encodeQueueMessageBody, queueConsumerKey, QUEUE_CONSUMER_INDEX_KEY, queueDelayedKey, queueDelayedMessageMember, queueDlqKey, QUEUE_STREAM_INDEX_KEY, queueOrphanedKey, queueStreamKey, queueStreamMessage, queueStreamMessageFields } from "./queue.js";
+export { encodeQueueMessageBody, queueConsumerKey, QUEUE_CONSUMER_INDEX_KEY, queueDelayedKey, queueDelayedMessageMember, QUEUE_DELAYED_INDEX_KEY, QUEUE_DELAYED_WAKE_STREAM, queueDlqKey, QUEUE_STREAM_INDEX_KEY, queueOrphanedKey, queueStreamKey, queueStreamMessage, queueStreamMessageFields } from "./queue.js";

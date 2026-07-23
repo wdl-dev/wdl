@@ -4,6 +4,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::{AppState, WorkflowError, WorkflowResult, by_workflow_key, instance_state_key};
 
+use super::payload::{canonical_instance_payloads_key, parse_payload_ref};
 use super::{
     InstanceResponse, ListInstancesResponse, WorkflowRequest, instance_id, public_state_or_empty,
     read_payload_ref, read_step_history, validate_identity, verify_workflow_def,
@@ -12,6 +13,20 @@ use super::{
 
 const DEFAULT_INSTANCES_LIMIT: usize = 100;
 const MAX_INSTANCES_LIMIT: usize = 1000;
+const LIST_PAYLOAD_READ_BATCH_SIZE: usize = 32;
+
+#[derive(Clone, Copy)]
+enum InstancePayloadField {
+    Output,
+    Error,
+}
+
+struct InstancePayloadRead {
+    instance_index: usize,
+    field: InstancePayloadField,
+    payloads_key: String,
+    payload_ref: String,
+}
 
 fn workflow_instances_options(options: &JsonValue) -> WorkflowResult<(usize, u64)> {
     let limit = match options.get("limit") {
@@ -87,14 +102,17 @@ pub(super) async fn read_state_by_id(
 
 pub(super) async fn response_from_state(
     app: &AppState,
+    ns: &str,
+    workflow_key: &str,
     id: &str,
     state: &HashMap<String, String>,
 ) -> WorkflowResult<InstanceResponse> {
     let status = state
         .get("status")
         .ok_or_else(|| WorkflowError::not_found("Workflow instance not found"))?;
-    let output = read_payload_ref(app, state, "outputRef").await?;
-    let error = match read_payload_ref(app, state, "errorRef").await? {
+    let payloads_key = canonical_instance_payloads_key(state, ns, workflow_key, id)?;
+    let output = read_payload_ref(app, state, &payloads_key, "outputRef").await?;
+    let error = match read_payload_ref(app, state, &payloads_key, "errorRef").await? {
         Some(error) => Some(error),
         None => inline_error_from_state(state),
     };
@@ -109,19 +127,98 @@ pub(super) async fn response_from_state(
 
 async fn response_with_steps(
     app: &AppState,
+    ns: &str,
+    workflow_key: &str,
     id: &str,
     state: &HashMap<String, String>,
     limit: usize,
 ) -> WorkflowResult<InstanceResponse> {
-    let mut response = response_from_state(app, id, state).await?;
-    let ns = state
-        .get("ns")
-        .ok_or_else(|| WorkflowError::invalid_state("Workflow state missing ns"))?;
-    let workflow_key = state
-        .get("workflowKey")
-        .ok_or_else(|| WorkflowError::invalid_state("Workflow state missing workflowKey"))?;
+    let mut response = response_from_state(app, ns, workflow_key, id, state).await?;
     response.steps = Some(read_step_history(app, ns, workflow_key, id, limit).await?);
     Ok(response)
+}
+
+fn prepare_list_instance(
+    ns: &str,
+    workflow_key: &str,
+    id: &str,
+    state: &HashMap<String, String>,
+    instance_index: usize,
+    payload_reads: &mut Vec<InstancePayloadRead>,
+) -> WorkflowResult<InstanceResponse> {
+    let status = state
+        .get("status")
+        .ok_or_else(|| WorkflowError::not_found("Workflow instance not found"))?;
+    let payloads_key = canonical_instance_payloads_key(state, ns, workflow_key, id)?;
+    for (field_name, field) in [
+        ("outputRef", InstancePayloadField::Output),
+        ("errorRef", InstancePayloadField::Error),
+    ] {
+        let Some(payload_ref) = state.get(field_name) else {
+            continue;
+        };
+        payload_reads.push(InstancePayloadRead {
+            instance_index,
+            field,
+            payloads_key: payloads_key.clone(),
+            payload_ref: payload_ref.clone(),
+        });
+    }
+    Ok(InstanceResponse {
+        id: id.to_string(),
+        status: status.clone(),
+        output: None,
+        error: (!state.contains_key("errorRef"))
+            .then(|| inline_error_from_state(state))
+            .flatten(),
+        steps: None,
+    })
+}
+
+fn apply_list_payload_reply(
+    instances: &mut [InstanceResponse],
+    read: &InstancePayloadRead,
+    raw: Option<String>,
+) -> WorkflowResult<()> {
+    let value = parse_payload_ref(raw, &read.payload_ref)?;
+    let instance = instances.get_mut(read.instance_index).ok_or_else(|| {
+        WorkflowError::internal_error("workflow list payload response index mismatch")
+    })?;
+    match read.field {
+        InstancePayloadField::Output => instance.output = value,
+        InstancePayloadField::Error => instance.error = value,
+    }
+    Ok(())
+}
+
+async fn read_list_payloads(
+    state: &AppState,
+    instances: &mut [InstanceResponse],
+    reads: &[InstancePayloadRead],
+) -> WorkflowResult<()> {
+    for batch in reads.chunks(LIST_PAYLOAD_READ_BATCH_SIZE) {
+        let raw_values: Vec<Option<String>> = state
+            .redis
+            .with_conn(async |mut conn| {
+                let mut pipe = redis::pipe();
+                for read in batch {
+                    pipe.cmd("HGET")
+                        .arg(&read.payloads_key)
+                        .arg(&read.payload_ref);
+                }
+                pipe.query_async(&mut conn).await
+            })
+            .await?;
+        if raw_values.len() != batch.len() {
+            return Err(WorkflowError::internal_error(
+                "workflow list payload reply count mismatch",
+            ));
+        }
+        for (read, raw) in batch.iter().zip(raw_values) {
+            apply_list_payload_reply(instances, read, raw)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) async fn read_public_state(
@@ -154,7 +251,7 @@ pub(crate) async fn get_instance(
     if existing.is_empty() {
         return Err(WorkflowError::not_found("Workflow instance not found"));
     }
-    response_from_state(state, &id, &existing).await
+    response_from_state(state, &req.ns, &req.workflow_key, &id, &existing).await
 }
 
 pub(crate) async fn status_instance(
@@ -169,8 +266,10 @@ pub(crate) async fn status_instance(
         return Err(WorkflowError::not_found("Workflow instance not found"));
     }
     match step_limit {
-        Some(limit) => response_with_steps(state, &id, &existing, limit).await,
-        None => response_from_state(state, &id, &existing).await,
+        Some(limit) => {
+            response_with_steps(state, &req.ns, &req.workflow_key, &id, &existing, limit).await
+        }
+        None => response_from_state(state, &req.ns, &req.workflow_key, &id, &existing).await,
     }
 }
 
@@ -221,13 +320,23 @@ pub(crate) async fn list_instances(
             .await?
     };
     let mut instances = Vec::new();
+    let mut payload_reads = Vec::new();
     for (instance_id, raw_state) in members.iter().zip(raw_states) {
         let existing = public_state_or_empty(state, raw_state).await?;
         if existing.is_empty() {
             continue;
         }
-        instances.push(response_from_state(state, instance_id, &existing).await?);
+        let instance_index = instances.len();
+        instances.push(prepare_list_instance(
+            &req.ns,
+            &req.workflow_key,
+            instance_id,
+            &existing,
+            instance_index,
+            &mut payload_reads,
+        )?);
     }
+    read_list_payloads(state, &mut instances, &payload_reads).await?;
     let next = cursor.saturating_add(u64::try_from(members.len()).unwrap_or(u64::MAX));
 
     Ok(ListInstancesResponse {
@@ -239,6 +348,7 @@ pub(crate) async fn list_instances(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::InstanceRouteKeys;
 
     #[test]
     fn list_instances_uses_bounded_workflow_index_page() {
@@ -268,5 +378,69 @@ mod tests {
                 "message": "payload budget exceeded",
             }))
         );
+    }
+
+    #[test]
+    fn list_payload_reads_preserve_duplicate_refs_and_response_slots() {
+        let state = HashMap::from([
+            ("ns".to_string(), "demo".to_string()),
+            ("workflowKey".to_string(), "wf_test".to_string()),
+            ("instanceId".to_string(), "inst-1".to_string()),
+            ("status".to_string(), "failed".to_string()),
+            (
+                "payloadsKey".to_string(),
+                InstanceRouteKeys::new("demo", "wf_test", "inst-1").payloads(),
+            ),
+            ("outputRef".to_string(), "shared-ref".to_string()),
+            ("errorRef".to_string(), "shared-ref".to_string()),
+        ]);
+        let mut reads = Vec::new();
+        let response = prepare_list_instance("demo", "wf_test", "inst-1", &state, 0, &mut reads)
+            .expect("valid list instance");
+        let mut instances = vec![response];
+
+        assert_eq!(reads.len(), 2);
+        assert!(matches!(reads[0].field, InstancePayloadField::Output));
+        assert!(matches!(reads[1].field, InstancePayloadField::Error));
+        assert_eq!(reads[0].payload_ref, "shared-ref");
+        assert_eq!(reads[1].payload_ref, "shared-ref");
+
+        apply_list_payload_reply(
+            &mut instances,
+            &reads[0],
+            Some(r#"{"kind":"output"}"#.to_string()),
+        )
+        .expect("output payload");
+        apply_list_payload_reply(
+            &mut instances,
+            &reads[1],
+            Some(r#"{"kind":"error"}"#.to_string()),
+        )
+        .expect("error payload");
+        assert_eq!(instances[0].output, Some(json!({ "kind": "output" })));
+        assert_eq!(instances[0].error, Some(json!({ "kind": "error" })));
+    }
+
+    #[test]
+    fn list_payload_read_fails_closed_on_missing_ref() {
+        let state = HashMap::from([
+            ("ns".to_string(), "demo".to_string()),
+            ("workflowKey".to_string(), "wf_test".to_string()),
+            ("instanceId".to_string(), "inst-1".to_string()),
+            ("status".to_string(), "completed".to_string()),
+            (
+                "payloadsKey".to_string(),
+                InstanceRouteKeys::new("demo", "wf_test", "inst-1").payloads(),
+            ),
+            ("outputRef".to_string(), "missing-ref".to_string()),
+        ]);
+        let mut reads = Vec::new();
+        let response = prepare_list_instance("demo", "wf_test", "inst-1", &state, 0, &mut reads)
+            .expect("valid list instance");
+        let mut instances = vec![response];
+
+        let err = apply_list_payload_reply(&mut instances, &reads[0], None)
+            .expect_err("missing list payload must fail closed");
+        assert_eq!(err.code, "workflow_payload_missing");
     }
 }

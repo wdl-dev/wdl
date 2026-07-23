@@ -13,6 +13,7 @@ import { errorMessage } from "shared-errors";
 import { randomHex } from "shared-random-id";
 import {
   DECLARED_HOSTS_KEY,
+  DECLARED_HOSTS_REVISION_KEY,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
   PATTERNS_CHANNEL,
@@ -321,20 +322,34 @@ export async function publishOne(channel, payload, scope, requestId) {
   }
 }
 
+const DECLARED_HOST_REBUILD_READ_BATCH_SIZE = 64;
+const DECLARED_HOST_REBUILD_MAX_ENTRIES = 10_000;
+const DECLARED_HOST_REBUILD_MAX_ATTEMPTS = 5;
+
+function declaredHostRebuildLimitError() {
+  return new Error(
+    `declared host rebuild exceeds ${DECLARED_HOST_REBUILD_MAX_ENTRIES} entries`
+  );
+}
+
 /**
- * @param {RedisClient} redis
+ * @param {{ scan(cursor: string, pattern: string, count?: number): Promise<[string, string[]]> }} redis
  * @param {string} pattern
+ * @param {number} maxEntries
  */
-async function scanKeys(redis, pattern) {
-  /** @type {string[]} */
-  const keys = [];
+async function scanKeys(redis, pattern, maxEntries) {
+  const keys = new Set();
   let cursor = "0";
   do {
     const [next, found] = await redis.scan(cursor, pattern, 100);
-    keys.push(...found);
+    for (const key of found) {
+      if (keys.has(key)) continue;
+      if (keys.size >= maxEntries) throw declaredHostRebuildLimitError();
+      keys.add(key);
+    }
     cursor = next;
   } while (cursor !== "0");
-  return keys;
+  return [...keys];
 }
 
 /**
@@ -345,22 +360,68 @@ async function scanKeys(redis, pattern) {
  * @param {RedisClient} [redis]
  */
 export async function rebuildDeclaredHostIndexes(redis = requireControlRedis()) {
-  const hostKeys = await scanKeys(redis, HOSTS_SCAN_PATTERN);
-  const oldDeclarationKeys = await scanKeys(redis, HOST_DECLARATIONS_SCAN_PATTERN);
-  /** @type {Map<string, Set<string>>} */
-  const declarationsByHost = new Map();
-  for (const key of hostKeys) {
-    const ns = namespaceFromHostsKey(key);
-    if (!ns) continue;
-    for (const host of await redis.sMembers(key)) {
-      if (!host) continue;
-      const declarations = declarationsByHost.get(host) || new Set();
-      declarations.add(ns);
-      declarationsByHost.set(host, declarations);
+  return runOptimistic(redis, {
+    attempts: DECLARED_HOST_REBUILD_MAX_ATTEMPTS,
+    onExhausted: () => {
+      throw new Error("declared host indexes changed throughout rebuild");
+    },
+  }, async (iso) => {
+    await iso.watch(DECLARED_HOSTS_REVISION_KEY);
+    // SCAN calls share this held session, so keep them sequential.
+    const hostKeys = await scanKeys(
+      iso,
+      HOSTS_SCAN_PATTERN,
+      DECLARED_HOST_REBUILD_MAX_ENTRIES
+    );
+    const oldDeclarationKeys = await scanKeys(
+      iso,
+      HOST_DECLARATIONS_SCAN_PATTERN,
+      DECLARED_HOST_REBUILD_MAX_ENTRIES - hostKeys.length
+    );
+    const hostScopes = hostKeys.flatMap((key) => {
+      const ns = namespaceFromHostsKey(key);
+      return ns ? [{ key, ns }] : [];
+    });
+    const scannedEntryCount = hostKeys.length + oldDeclarationKeys.length;
+    let declarationCount = 0;
+    for (
+      let offset = 0;
+      offset < hostScopes.length;
+      offset += DECLARED_HOST_REBUILD_READ_BATCH_SIZE
+    ) {
+      const batch = hostScopes.slice(offset, offset + DECLARED_HOST_REBUILD_READ_BATCH_SIZE);
+      const cardinalities = await iso.sCardMany(batch.map(({ key }) => key));
+      for (const cardinality of cardinalities) {
+        declarationCount += cardinality;
+        if (
+          scannedEntryCount + declarationCount >
+          DECLARED_HOST_REBUILD_MAX_ENTRIES
+        ) {
+          throw declaredHostRebuildLimitError();
+        }
+      }
     }
-  }
 
-  await redis.session(async (iso) => {
+    /** @type {Map<string, Set<string>>} */
+    const declarationsByHost = new Map();
+    for (
+      let offset = 0;
+      offset < hostScopes.length;
+      offset += DECLARED_HOST_REBUILD_READ_BATCH_SIZE
+    ) {
+      const batch = hostScopes.slice(offset, offset + DECLARED_HOST_REBUILD_READ_BATCH_SIZE);
+      const membersByScope = await iso.sMembersMany(batch.map(({ key }) => key));
+      for (let index = 0; index < batch.length; index += 1) {
+        const { ns } = batch[index];
+        for (const host of membersByScope[index] ?? []) {
+          if (!host) continue;
+          const declarations = declarationsByHost.get(host) || new Set();
+          declarations.add(ns);
+          declarationsByHost.set(host, declarations);
+        }
+      }
+    }
+
     const multi = iso.multi();
     multi.del(DECLARED_HOSTS_KEY, ...oldDeclarationKeys);
     for (const [host, namespaces] of declarationsByHost) {
@@ -368,11 +429,11 @@ export async function rebuildDeclaredHostIndexes(redis = requireControlRedis()) 
       multi.sAdd(hostDeclarationsKey(host), [...namespaces]);
     }
     await multi.exec();
+    return {
+      declaredHosts: declarationsByHost.size,
+      declarationKeysRemoved: oldDeclarationKeys.length,
+    };
   });
-  return {
-    declaredHosts: declarationsByHost.size,
-    declarationKeysRemoved: oldDeclarationKeys.length,
-  };
 }
 
 /** @param {string} requestId */

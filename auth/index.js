@@ -44,8 +44,6 @@ import {
 } from "shared-redis-lock";
 import { NAMESPACES_KEY } from "shared-worker-contract";
 
-const utf8Decoder = new TextDecoder();
-
 /**
  * @typedef {import("auth-lib").TokenRecord} TokenRecord
  * @typedef {{ requestId?: string }} AuthRequestInput
@@ -259,20 +257,14 @@ export default class Auth extends WorkerEntrypoint {
       }
       const hash = await hashToken(token);
       const redis = runtime.newRedis();
-      const loaded = await redis.session(async (session) => {
-        const bootstrap = await runtime.ensureBootstrapForVerify(session, requestId);
-        let id = await session.get(hashKey(hash));
-        if (!id && bootstrap.cached && hash === bootstrap.desiredHash) {
-          // Cached bootstrap hash only gates self-heal; normal GET above still
-          // accepts a newer bootstrap token if another isolate rotated Redis.
-          await runtime.ensureBootstrap(session, requestId);
-          id = await session.get(hashKey(hash));
-        }
-        if (!id) return null;
-        const tokenId = typeof id === "string" ? id : utf8Decoder.decode(id);
-        const record = await runtime.readRecord(session, tokenId);
-        return { tokenId, record };
-      });
+      const bootstrap = await runtime.ensureBootstrapForVerify(redis, requestId);
+      let loaded = await runtime.readRecordByHash(redis, hash);
+      if (!loaded && bootstrap.cached && hash === bootstrap.desiredHash) {
+        // Cached bootstrap hash only gates self-heal; the ordinary lookup above
+        // still accepts a newer bootstrap token if another isolate rotated Redis.
+        await runtime.ensureBootstrap(redis, requestId);
+        loaded = await runtime.readRecordByHash(redis, hash);
+      }
       if (!loaded) {
         return verifyLog.finalize({
           ret: { ok: false, status: 401, reason: "unknown_token" },

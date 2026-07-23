@@ -181,6 +181,8 @@ test("D1 owner registry: lost owner state cannot validate an old owner from anot
 
 test("D1 owner registry: same task reclaims generation one after owner state loss", async () => {
   const identity = { namespace: "tenant-a", databaseId: "db1", dbKey: "tenant-a:db1", slot: 7 };
+  const ownerKey = ownerKeyOf(identity.dbKey);
+  const generationKey = ownerGenerationKeyOf(identity.dbKey);
   D1_TEST_STATE.taskIdentity = { taskId: "task-b", endpoint: "d1-runtime-b:8787" };
 
   const owner = await resolveDbOwner({ REDIS_ADDR: "redis:6379" }, identity);
@@ -189,6 +191,10 @@ test("D1 owner registry: same task reclaims generation one after owner state los
   assert.equal(owner.generation, 1);
   assert.equal(owner.endpoint, "d1-runtime-b:8787");
   assert.deepEqual(await assertCurrentOwner({ REDIS_ADDR: "redis:6379" }, owner), owner);
+  assert.deepEqual(
+    D1_TEST_STATE.redisState.commands.filter((/** @type {any[]} */ command) => command[0] === "getManyWithTime"),
+    [["getManyWithTime", [ownerKey, generationKey]]]
+  );
 });
 
 test("D1 owner registry: current-owner check rejects expired matching leases", async () => {
@@ -532,6 +538,10 @@ test("D1 owner registry: takeover bumps generation monotonically even when the s
   assert.equal(D1_TEST_STATE.registryStore.get(generationKey), "12");
   assert.ok(D1_TEST_STATE.watchedKeys.includes(ownerKey));
   assert.ok(D1_TEST_STATE.watchedKeys.includes(generationKey));
+  assert.deepEqual(
+    D1_TEST_STATE.redisState.commands.filter((/** @type {any[]} */ command) => command[0] === "getManyWithTime"),
+    [["getManyWithTime", [ownerKey, generationKey]]]
+  );
 });
 
 test("D1 owner registry: drain waits for in-flight queries before releasing owners", async () => {
@@ -564,6 +574,106 @@ test("D1 owner registry: drain waits for in-flight queries before releasing owne
   assert.ok(Date.now() - started >= 25);
   assert.equal(D1_TEST_STATE.registryStore.has(ownerKey), false);
   assert.deepEqual(D1_TEST_STATE.forgottenStorageSizes, [owner.dbKey]);
+});
+
+test("D1 owner registry: batched drain releases peers without deleting a reclaimed owner", async () => {
+  const owners = ["db1", "db2"].map((databaseId, index) => ({
+    namespace: "tenant-a",
+    databaseId,
+    dbKey: `tenant-a:${databaseId}`,
+    slot: index,
+    taskId: "task-a",
+    endpoint: "d1-runtime-a:8787",
+    generation: index + 3,
+    leaseExpiresAt: Date.now() + 60_000,
+  }));
+  for (const owner of owners) {
+    D1_TEST_STATE.registryStore.set(ownerKeyOf(owner.dbKey), JSON.stringify(owner));
+    D1_TEST_STATE.ownedDbs.set(owner.dbKey, owner);
+  }
+  const replacement = {
+    ...owners[1],
+    taskId: "task-b",
+    endpoint: "d1-runtime-b:8787",
+    generation: 9,
+  };
+  D1_TEST_STATE.beforeDelIfEqMany = () => {
+    D1_TEST_STATE.registryStore.set(ownerKeyOf(owners[1].dbKey), JSON.stringify(replacement));
+  };
+
+  const result = await drainOwnedDbs({ REDIS_ADDR: "redis:6379" });
+
+  assert.equal(result.released, 1);
+  assert.equal(result.alreadyLost, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(D1_TEST_STATE.registryStore.has(ownerKeyOf(owners[0].dbKey)), false);
+  assert.deepEqual(
+    parseStoredJson(D1_TEST_STATE.registryStore.get(ownerKeyOf(owners[1].dbKey))),
+    replacement
+  );
+});
+
+test("D1 owner registry: drain retries a concurrent same-fence lease renewal", async () => {
+  const owner = {
+    namespace: "tenant-a",
+    databaseId: "db1",
+    dbKey: "tenant-a:db1",
+    slot: 7,
+    taskId: "task-a",
+    endpoint: "d1-runtime-a:8787",
+    generation: 3,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  const ownerKey = ownerKeyOf(owner.dbKey);
+  D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify(owner));
+  D1_TEST_STATE.ownedDbs.set(owner.dbKey, owner);
+  let renewed = false;
+  D1_TEST_STATE.beforeDelIfEqMany = () => {
+    if (renewed) return;
+    renewed = true;
+    D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify({
+      ...owner,
+      leaseExpiresAt: owner.leaseExpiresAt + 60_000,
+    }));
+  };
+
+  const result = await drainOwnedDbs({ REDIS_ADDR: "redis:6379" });
+
+  assert.equal(result.released, 1);
+  assert.equal(result.alreadyLost, 0);
+  assert.deepEqual(result.errors, []);
+  assert.equal(D1_TEST_STATE.registryStore.has(ownerKey), false);
+  assert.equal(D1_TEST_STATE.ownedDbs.has(owner.dbKey), false);
+});
+
+test("D1 owner registry: drain retains ownership after persistent same-fence release races", async () => {
+  const owner = {
+    namespace: "tenant-a",
+    databaseId: "db1",
+    dbKey: "tenant-a:db1",
+    slot: 7,
+    taskId: "task-a",
+    endpoint: "d1-runtime-a:8787",
+    generation: 3,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  const ownerKey = ownerKeyOf(owner.dbKey);
+  D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify(owner));
+  D1_TEST_STATE.ownedDbs.set(owner.dbKey, owner);
+  let leaseExpiresAt = owner.leaseExpiresAt;
+  D1_TEST_STATE.beforeDelIfEqMany = () => {
+    leaseExpiresAt += 60_000;
+    D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify({ ...owner, leaseExpiresAt }));
+  };
+
+  const result = await drainOwnedDbs({ REDIS_ADDR: "redis:6379" });
+
+  assert.equal(result.released, 0);
+  assert.equal(result.alreadyLost, 0);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0].error, /owner release raced/i);
+  assert.equal(D1_TEST_STATE.registryStore.has(ownerKey), true);
+  assert.equal(D1_TEST_STATE.ownedDbs.has(owner.dbKey), true);
 });
 
 test("D1 owner registry: drain concurrency is configurable and bounded", () => {
@@ -683,6 +793,13 @@ test("D1 owner registry: rebalance retries WatchError before moving ownership", 
   assert.equal(result.owner.taskId, "task-b");
   assert.equal(result.owner.generation, 7);
   assert.deepEqual(D1_TEST_STATE.forgottenStorageSizes, [database.dbKey]);
+  assert.deepEqual(
+    D1_TEST_STATE.redisState.commands.filter((/** @type {any[]} */ command) => command[0] === "getManyWithTime"),
+    [
+      ["getManyWithTime", [ownerKey, generationKey]],
+      ["getManyWithTime", [ownerKey, generationKey]],
+    ]
+  );
 });
 
 test("D1 owner registry: rebalance to the current owner is a no-op", async () => {
@@ -752,8 +869,84 @@ test("D1 owner registry: rebalance to same task with a different endpoint refres
   assert.deepEqual(D1_TEST_STATE.forgottenStorageSizes, [database.dbKey]);
 });
 
+test("D1 owner registry: renew retries raw IFEQ after a same-fence race", async () => {
+  const owner = {
+    namespace: "tenant-a",
+    databaseId: "db1",
+    dbKey: "tenant-a:db1",
+    slot: 7,
+    taskId: "task-a",
+    endpoint: "d1-runtime-a:8787",
+    generation: 3,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  const ownerKey = ownerKeyOf(owner.dbKey);
+  const stored = `${JSON.stringify(owner)}\n`;
+  const concurrentRenewal = { ...owner, leaseExpiresAt: owner.leaseExpiresAt + 1_000 };
+  D1_TEST_STATE.registryStore.set(ownerKey, stored);
+  D1_TEST_STATE.ownedDbs.set(owner.dbKey, owner);
+  D1_TEST_STATE.beforeSetIfEq = (
+    /** @type {string} */ _key,
+    /** @type {string} */ _value,
+    /** @type {{ ifeq?: string | Uint8Array }} */ options,
+    /** @type {number} */ attempt
+  ) => {
+    if (attempt !== 1) return;
+    assert.ok(options.ifeq instanceof Uint8Array);
+    assert.equal(new TextDecoder().decode(options.ifeq), stored);
+    D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify(concurrentRenewal));
+  };
+
+  const result = await renewOwnedDbs({
+    REDIS_ADDR: "redis:6379",
+    D1_OWNER_TTL_SECONDS: "120",
+  });
+
+  assert.equal(result.renewed, 1);
+  assert.equal(result.lost, 0);
+  assert.deepEqual(result.errors, []);
+  assert.equal(D1_TEST_STATE.ifEqAttempts, 2);
+  assert.equal(D1_TEST_STATE.watchedKeys.includes(ownerKey), false);
+  assert.ok(parseStoredJson(D1_TEST_STATE.registryStore.get(ownerKey)).leaseExpiresAt > owner.leaseExpiresAt);
+});
+
+test("D1 owner registry: renew does not overwrite a peer that wins the IFEQ race", async () => {
+  const owner = {
+    namespace: "tenant-a",
+    databaseId: "db1",
+    dbKey: "tenant-a:db1",
+    slot: 7,
+    taskId: "task-a",
+    endpoint: "d1-runtime-a:8787",
+    generation: 3,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  const replacement = {
+    ...owner,
+    taskId: "task-b",
+    endpoint: "d1-runtime-b:8787",
+    generation: 4,
+  };
+  const ownerKey = ownerKeyOf(owner.dbKey);
+  D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify(owner));
+  D1_TEST_STATE.ownedDbs.set(owner.dbKey, owner);
+  D1_TEST_STATE.beforeSetIfEq = () => {
+    D1_TEST_STATE.registryStore.set(ownerKey, JSON.stringify(replacement));
+    D1_TEST_STATE.beforeSetIfEq = null;
+  };
+
+  const result = await renewOwnedDbs({ REDIS_ADDR: "redis:6379" });
+
+  assert.equal(result.renewed, 0);
+  assert.equal(result.lost, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(D1_TEST_STATE.ifEqAttempts, 1);
+  assert.equal(D1_TEST_STATE.ownedDbs.has(owner.dbKey), false);
+  assert.deepEqual(parseStoredJson(D1_TEST_STATE.registryStore.get(ownerKey)), replacement);
+});
+
 test("D1 owner registry: renew uses bounded concurrency instead of strict serial execution", async () => {
-  D1_TEST_STATE.sessionDelayMs = 25;
+  D1_TEST_STATE.ifEqDelayMs = 25;
   for (let idx = 0; idx < 4; idx += 1) {
     const owner = {
       namespace: "tenant-a",
@@ -778,5 +971,5 @@ test("D1 owner registry: renew uses bounded concurrency instead of strict serial
   assert.equal(result.renewed, 4);
   assert.equal(result.lost, 0);
   assert.equal(result.errors.length, 0);
-  assert.equal(D1_TEST_STATE.sessionConcurrencyMax, 2);
+  assert.equal(D1_TEST_STATE.ifEqConcurrencyMax, 2);
 });

@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use serde_json::{Value as JsonValue, json};
-use wdl_rust_common::time::now_ms;
+use wdl_rust_common::{redis_eval::StaticRedisScript, time::now_ms};
 
 use crate::{
     AppState, EventRecord, WorkflowError, WorkflowRequest, WorkflowResult, ready_active_key,
@@ -7,14 +9,15 @@ use crate::{
 
 use super::super::{
     InstanceRouteKeys, aggregate_payload_error, eval_script, event_payload_json,
-    event_type_from_value, instance_id, instance_payload_limit_arg, read_public_state, result_json,
-    spawn_progress_from_step, validate_identity,
+    event_type_from_value, instance_id, instance_payload_limit_arg, is_pending_create,
+    pending_create_expired, read_public_state, result_json, spawn_progress_from_step,
+    validate_identity,
 };
 use super::{
-    StepRecord, StepRecordCommit, WorkflowStepRequest, commit_step_record, inline_step_payload,
-    log_step_event, observe_step_duration, read_step_record_for_claim, step_event_ref,
-    step_record_json, step_summary_json, validate_step_request, verify_step_record,
-    write_waiting_record,
+    StepRecord, StepRecordCommit, WorkflowStepRequest, commit_step_record, ensure_step_script_ok,
+    inline_step_payload, log_step_event, observe_step_duration, read_step_payload_for_claim,
+    read_step_record_for_claim, step_event_ref, step_record_json, step_summary_json,
+    validate_step_request, verify_step_record, write_waiting_record,
 };
 
 pub(crate) const SEND_EVENT_SCRIPT: &str = r#"
@@ -26,7 +29,8 @@ if status == "completed" or status == "failed" or status == "terminated" then
   return -2
 end
 local generation = redis.call("HGET", KEYS[1], "generation")
-if generation ~= ARGV[6] then
+local created_at_ms = redis.call("HGET", KEYS[1], "createdAtMs")
+if generation ~= ARGV[6] or created_at_ms ~= ARGV[9] then
   return -3
 end
 local payload_bytes = tonumber(redis.call("HGET", KEYS[1], "payloadBytes") or "0")
@@ -54,8 +58,86 @@ end
 return 1
 "#;
 
+static SEND_EVENT: StaticRedisScript = StaticRedisScript::new(SEND_EVENT_SCRIPT);
+
+const READ_SEND_EVENT_STATE_SCRIPT: &str = r#"
+if redis.call("EXISTS", KEYS[1]) == 0 then
+  return {0, {false, false, false, false}}
+end
+return {1, redis.call("HMGET", KEYS[1], "status", "generation", "createdAtMs", "pendingExpiresAtMs")}
+"#;
+
+static READ_SEND_EVENT_STATE: StaticRedisScript =
+    StaticRedisScript::new(READ_SEND_EVENT_STATE_SCRIPT);
+
+const CLEANUP_STALE_EVENT_INDEX_SCRIPT: &str = r#"
+local generation = redis.call("HGET", KEYS[1], "generation")
+local created_at_ms = redis.call("HGET", KEYS[1], "createdAtMs")
+local run_token = redis.call("HGET", KEYS[1], "runToken")
+if generation ~= ARGV[1] or created_at_ms ~= ARGV[2] or run_token ~= ARGV[3] then
+  return {0, 0}
+end
+local lease = tonumber(redis.call("HGET", KEYS[1], "runLeaseExpiresAtMs") or "")
+if not lease then
+  return {-4, 0}
+end
+if lease <= tonumber(ARGV[4]) then
+  return {-2, 0}
+end
+local status = redis.call("HGET", KEYS[1], "status")
+if status ~= "running" and status ~= "waiting" then
+  return {-3, 0}
+end
+local removed = 0
+for i = 5, #ARGV, 4 do
+  local mode = ARGV[i]
+  local member = ARGV[i + 1]
+  local field = ARGV[i + 2]
+  local expected = ARGV[i + 3]
+  local current = false
+  local should_remove = mode == "malformed"
+  if mode == "missing" then
+    current = redis.call("HGET", KEYS[2], field)
+    should_remove = not current
+  elseif mode == "observed" then
+    current = redis.call("HGET", KEYS[2], field)
+    should_remove = current == expected
+  end
+  if should_remove then
+    removed = removed + redis.call("ZREM", KEYS[3], member)
+  end
+end
+return {1, removed}
+"#;
+
+static CLEANUP_STALE_EVENT_INDEX: StaticRedisScript =
+    StaticRedisScript::new(CLEANUP_STALE_EVENT_INDEX_SCRIPT);
+
 const EVENT_INDEX_SCAN_BATCH_SIZE: i64 = 64;
 const EVENT_INDEX_STALE_SCAN_LIMIT: usize = 256;
+
+enum StaleEventRecordObservation {
+    MalformedMember,
+    Missing { field: String },
+    Observed { field: String, raw: String },
+}
+
+struct StaleEventIndexObservation {
+    member: String,
+    record: StaleEventRecordObservation,
+}
+
+impl StaleEventIndexObservation {
+    fn script_args(&self) -> (&'static str, &str, &str, &str) {
+        match &self.record {
+            StaleEventRecordObservation::MalformedMember => ("malformed", &self.member, "", ""),
+            StaleEventRecordObservation::Missing { field } => ("missing", &self.member, field, ""),
+            StaleEventRecordObservation::Observed { field, raw } => {
+                ("observed", &self.member, field, raw)
+            }
+        }
+    }
+}
 
 fn wait_event_type(req: &WorkflowStepRequest) -> WorkflowResult<&str> {
     let event_type = req
@@ -84,6 +166,47 @@ fn event_type_index_prefix(event_type: &str) -> String {
 fn event_type_index_member(event_type: &str, event_id: &str) -> String {
     let seq = event_id.parse::<u64>().unwrap_or(0);
     format!("{}{seq:020}", event_type_index_prefix(event_type))
+}
+
+fn send_event_state_from_fields(
+    fields: Vec<Option<String>>,
+) -> WorkflowResult<HashMap<String, String>> {
+    let [status, generation, created_at_ms, pending_expires_at_ms] = fields
+        .try_into()
+        .map_err(|_| WorkflowError::internal_error("Workflow event state reply count mismatch"))?;
+    let mut state = HashMap::with_capacity(4);
+    for (field, value) in [
+        ("status", status),
+        ("generation", generation),
+        ("createdAtMs", created_at_ms),
+        ("pendingExpiresAtMs", pending_expires_at_ms),
+    ] {
+        if let Some(value) = value {
+            state.insert(field.to_string(), value);
+        }
+    }
+    Ok(state)
+}
+
+async fn read_send_event_state(
+    state: &AppState,
+    req: &WorkflowRequest,
+    state_key: &str,
+) -> WorkflowResult<(bool, HashMap<String, String>)> {
+    let (exists, fields): (i64, Vec<Option<String>>) =
+        eval_script(state, &READ_SEND_EVENT_STATE, &[state_key], &[]).await?;
+    if exists == 0 {
+        return Ok((false, HashMap::new()));
+    }
+    let existing = send_event_state_from_fields(fields)?;
+    if !is_pending_create(&existing) {
+        return Ok((true, existing));
+    }
+    if !pending_create_expired(&existing, now_ms()) {
+        return Ok((false, HashMap::new()));
+    }
+    let existing = read_public_state(state, req).await?;
+    Ok((!existing.is_empty(), existing))
 }
 
 fn event_id_from_index_member(member: &str) -> Option<String> {
@@ -146,12 +269,15 @@ async fn find_buffered_event(
             if let Some(event_id) = event_id_from_index_member(&member) {
                 candidates.push((member, event_id));
             } else {
-                stale_members.push(member);
+                stale_members.push(StaleEventIndexObservation {
+                    member,
+                    record: StaleEventRecordObservation::MalformedMember,
+                });
             }
         }
         if candidates.is_empty() {
             stale_seen += stale_members.len();
-            remove_event_index_members(state, &event_index_key, &stale_members).await?;
+            cleanup_stale_event_index_members(state, req, &keys, &stale_members).await?;
             if stale_seen >= EVENT_INDEX_STALE_SCAN_LIMIT {
                 return Err(WorkflowError::invalid_state(
                     "Workflow event type index has too many stale members",
@@ -172,14 +298,20 @@ async fn find_buffered_event(
             .await?;
         for ((member, field), value) in candidates.into_iter().zip(raw) {
             let Some(value) = value else {
-                stale_members.push(member);
+                stale_members.push(StaleEventIndexObservation {
+                    member,
+                    record: StaleEventRecordObservation::Missing { field },
+                });
                 continue;
             };
             let record: EventRecord = serde_json::from_str(&value).map_err(|err| {
                 WorkflowError::invalid_state(format!("Workflow event record is corrupt: {err}"))
             })?;
             if record.event_type != event_type || record.consumed_by_ordinal.is_some() {
-                stale_members.push(member);
+                stale_members.push(StaleEventIndexObservation {
+                    member,
+                    record: StaleEventRecordObservation::Observed { field, raw: value },
+                });
                 continue;
             }
             let payload_ref = record.payload_ref.clone();
@@ -201,11 +333,11 @@ async fn find_buffered_event(
             let payload: JsonValue = serde_json::from_str(&payload_raw).map_err(|err| {
                 WorkflowError::invalid_state(format!("Workflow event payload is corrupt: {err}"))
             })?;
-            remove_event_index_members(state, &event_index_key, &stale_members).await?;
+            cleanup_stale_event_index_members(state, req, &keys, &stale_members).await?;
             return Ok(Some((field, record, payload)));
         }
         stale_seen += stale_members.len();
-        remove_event_index_members(state, &event_index_key, &stale_members).await?;
+        cleanup_stale_event_index_members(state, req, &keys, &stale_members).await?;
         if stale_seen >= EVENT_INDEX_STALE_SCAN_LIMIT {
             return Err(WorkflowError::invalid_state(
                 "Workflow event type index has too many stale members",
@@ -214,26 +346,40 @@ async fn find_buffered_event(
     }
 }
 
-async fn remove_event_index_members(
+async fn cleanup_stale_event_index_members(
     state: &AppState,
-    event_index_key: &str,
-    members: &[String],
+    req: &WorkflowStepRequest,
+    keys: &InstanceRouteKeys<'_>,
+    observations: &[StaleEventIndexObservation],
 ) -> WorkflowResult<()> {
-    if members.is_empty() {
+    if observations.is_empty() {
         return Ok(());
     }
-    let _: i64 = state
-        .redis
-        .with_conn(async |mut conn| {
-            let mut cmd = redis::cmd("ZREM");
-            cmd.arg(event_index_key);
-            for member in members {
-                cmd.arg(member);
-            }
-            cmd.query_async(&mut conn).await
-        })
-        .await?;
-    Ok(())
+    let generation = req.generation.to_string();
+    let created_at_ms = req.created_at_ms.to_string();
+    let now = now_ms().to_string();
+    let mut args = Vec::with_capacity(4 + observations.len() * 4);
+    args.extend([
+        generation.as_str(),
+        created_at_ms.as_str(),
+        req.run_token.as_str(),
+        now.as_str(),
+    ]);
+    for observation in observations {
+        let (mode, member, field, expected) = observation.script_args();
+        args.extend([mode, member, field, expected]);
+    }
+    let state_key = keys.state();
+    let events_key = keys.events();
+    let event_index_key = keys.event_type_index();
+    let (code, _removed): (i64, i64) = eval_script(
+        state,
+        &CLEANUP_STALE_EVENT_INDEX,
+        &[&state_key, &events_key, &event_index_key],
+        &args,
+    )
+    .await?;
+    ensure_step_script_ok(code)
 }
 
 async fn complete_wait_with_payload(
@@ -366,19 +512,7 @@ pub(crate) async fn register_wait(
                             "Workflow completed wait step is missing output ref",
                         ));
                     };
-                    let payloads_key =
-                        InstanceRouteKeys::new(&req.ns, &req.workflow_key, &req.instance_id)
-                            .payloads();
-                    let output_raw: Option<String> = state
-                        .redis
-                        .with_conn(async |mut conn| {
-                            redis::cmd("HGET")
-                                .arg(payloads_key)
-                                .arg(&output_ref)
-                                .query_async(&mut conn)
-                                .await
-                        })
-                        .await?;
+                    let output_raw = read_step_payload_for_claim(state, &req, &output_ref).await?;
                     let Some(output_raw) = output_raw else {
                         return Err(WorkflowError::payload_missing(format!(
                             "Workflow wait output payload {output_ref} is missing"
@@ -494,8 +628,10 @@ pub(crate) async fn send_event(
     let id = instance_id(&req)?.to_string();
     let event_type = event_type_from_value(&req.event)?.to_string();
     let payload = event_payload_json(&req.event)?;
-    let existing = read_public_state(state, &req).await?;
-    if existing.is_empty() {
+    let keys = InstanceRouteKeys::new(&req.ns, &req.workflow_key, &id);
+    let state_key = keys.state();
+    let (exists, existing) = read_send_event_state(state, &req, &state_key).await?;
+    if !exists {
         return Err(WorkflowError::not_found("Workflow instance not found"));
     }
     let status = existing.get("status").map(String::as_str).unwrap_or("");
@@ -508,8 +644,10 @@ pub(crate) async fn send_event(
         .get("generation")
         .cloned()
         .ok_or_else(|| WorkflowError::invalid_state("Workflow state missing generation"))?;
-    let keys = InstanceRouteKeys::new(&req.ns, &req.workflow_key, &id);
-    let state_key = keys.state();
+    let created_at_ms = existing
+        .get("createdAtMs")
+        .cloned()
+        .ok_or_else(|| WorkflowError::invalid_state("Workflow state missing createdAtMs"))?;
     let payloads_key = keys.payloads();
     let events_key = keys.events();
     let event_index_key = keys.event_type_index();
@@ -522,7 +660,7 @@ pub(crate) async fn send_event(
     let payload_limit = instance_payload_limit_arg();
     let committed: i64 = eval_script(
         state,
-        SEND_EVENT_SCRIPT,
+        &SEND_EVENT,
         &[
             &state_key,
             &payloads_key,
@@ -540,6 +678,7 @@ pub(crate) async fn send_event(
             &generation,
             &shard_arg,
             &event_index_prefix,
+            &created_at_ms,
         ],
     )
     .await?;
@@ -554,7 +693,7 @@ pub(crate) async fn send_event(
         }
         -3 => {
             return Err(WorkflowError::conflict(
-                "Workflow generation changed before event delivery",
+                "Workflow instance changed before event delivery",
             ));
         }
         _ => {
@@ -571,6 +710,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn send_event_state_read_is_atomic_and_bounded() {
+        assert!(READ_SEND_EVENT_STATE_SCRIPT.contains(r#"redis.call("EXISTS", KEYS[1])"#));
+        assert!(READ_SEND_EVENT_STATE_SCRIPT.contains(r#"redis.call("HMGET", KEYS[1]"#));
+        for field in ["status", "generation", "createdAtMs", "pendingExpiresAtMs"] {
+            assert!(READ_SEND_EVENT_STATE_SCRIPT.contains(field));
+        }
+        assert!(!READ_SEND_EVENT_STATE_SCRIPT.contains("HGETALL"));
+    }
+
+    #[test]
+    fn send_event_rejects_a_recreated_instance() {
+        let first_write = SEND_EVENT_SCRIPT
+            .find(r#"redis.call("HSET", KEYS[2]"#)
+            .expect("event payload write");
+        let incarnation_check = SEND_EVENT_SCRIPT
+            .find(r#"created_at_ms ~= ARGV[9]"#)
+            .expect("sendEvent incarnation fence");
+        assert!(incarnation_check < first_write);
+    }
+
+    #[test]
     fn event_type_index_members_sort_by_type_then_sequence() {
         assert_eq!(
             event_type_index_prefix("room.ready"),
@@ -584,6 +744,60 @@ mod tests {
             event_id_from_index_member("726f6f6d2e7265616479:00000000000000000012").as_deref(),
             Some("12")
         );
+    }
+
+    #[test]
+    fn stale_event_index_observations_preserve_cleanup_preconditions() {
+        let malformed = StaleEventIndexObservation {
+            member: "malformed".to_string(),
+            record: StaleEventRecordObservation::MalformedMember,
+        };
+        assert_eq!(malformed.script_args(), ("malformed", "malformed", "", ""));
+
+        let missing = StaleEventIndexObservation {
+            member: "type:0001".to_string(),
+            record: StaleEventRecordObservation::Missing {
+                field: "1".to_string(),
+            },
+        };
+        assert_eq!(missing.script_args(), ("missing", "type:0001", "1", ""));
+
+        let observed = StaleEventIndexObservation {
+            member: "type:0002".to_string(),
+            record: StaleEventRecordObservation::Observed {
+                field: "2".to_string(),
+                raw: r#"{"id":"2"}"#.to_string(),
+            },
+        };
+        assert_eq!(
+            observed.script_args(),
+            ("observed", "type:0002", "2", r#"{"id":"2"}"#)
+        );
+    }
+
+    #[test]
+    fn stale_event_index_cleanup_is_active_claim_and_exact_record_fenced() {
+        let zrem = CLEANUP_STALE_EVENT_INDEX_SCRIPT
+            .find(r#"redis.call("ZREM", KEYS[3], member)"#)
+            .expect("cleanup script must remove stale index members");
+        for guard in [
+            r#"redis.call("HGET", KEYS[1], "generation")"#,
+            r#"redis.call("HGET", KEYS[1], "createdAtMs")"#,
+            r#"redis.call("HGET", KEYS[1], "runToken")"#,
+            r#"redis.call("HGET", KEYS[1], "runLeaseExpiresAtMs")"#,
+            r#"redis.call("HGET", KEYS[1], "status")"#,
+            r#"should_remove = not current"#,
+            r#"should_remove = current == expected"#,
+        ] {
+            let position = CLEANUP_STALE_EVENT_INDEX_SCRIPT
+                .find(guard)
+                .unwrap_or_else(|| panic!("cleanup script must contain {guard}"));
+            assert!(
+                position < zrem,
+                "cleanup guard must run before ZREM: {guard}"
+            );
+        }
+        assert!(CLEANUP_STALE_EVENT_INDEX_SCRIPT.contains("for i = 5, #ARGV, 4 do"));
     }
 
     #[test]

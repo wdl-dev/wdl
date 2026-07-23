@@ -27,13 +27,22 @@ function fakeRedisConformanceAdapter(redis, prefix) {
     key: (suffix) => `${prefix}:${suffix}`,
     del: (...keys) => redis.del(...keys),
     exists: async (key) => await redis.exists(key) === 1,
+    existsCount: (...keys) => redis.exists(...keys),
     hSet: (key, fields) => redis.hSet(key, fields),
     hGet: (key, field) => redis.hGet(key, field),
     hMGet: (key, fields) => redis.hMGet(key, fields),
     hGetAll: (key) => redis.hGetAll(key),
+    hStrLenMany: (pairs) => redis.hStrLenMany(pairs),
     hDel: (key, ...fields) => redis.hDel(key, ...fields),
     set: (key, value) => redis.set(key, value),
+    setIfEq: async (key, value, expected) => (
+      await redis.set(key, value, { ifeq: expected }) === "OK"
+    ),
+    delIfEq: (key, expected) => redis.delIfEq(key, expected),
     sAdd: (key, member) => redis.sAdd(key, member),
+    sMembers: (key) => redis.sMembers(key),
+    sCard: (key) => redis.sCard(key),
+    sCardMany: (keys) => redis.sCardMany(keys),
     zAdd: (key, score, member) => redis.session((session) => session.multi().zAdd(key, score, member).exec()),
     zRange: (key, start, stop) => redis.zRange(key, start, stop),
     copy: async (src, dst, opts = {}) => Number(await redis.session((session) => session.copy(src, dst, opts))),
@@ -106,6 +115,48 @@ test("fake redis session records single and batched hash reads", async () => {
     ["hGet", "hash:b", "two"],
     ["hMGet", "hash:b", ["two", "missing"]],
   ]);
+});
+
+test("fake redis mirrors combined hash and string snapshots", async () => {
+  const redis = createFakeRedis();
+  redis.hashes.set("hash:a", { one: "1" });
+  redis.strings.set("alias:a", "target-a");
+
+  assert.deepEqual(await redis.hGetAllAndGet("hash:a", "alias:a"), {
+    hash: { one: "1" },
+    value: "target-a",
+  });
+  redis.sets.set("members:a", new Set(["one", "two"]));
+  assert.deepEqual(await redis.sMembersAndHGetAll("members:a", "hash:a"), {
+    members: ["one", "two"],
+    hash: { one: "1" },
+  });
+  await redis.session(async (session) => {
+    assert.deepEqual(await session.hGetAllAndGet("hash:missing", "alias:missing"), {
+      hash: {},
+      value: null,
+    });
+    redis.sets.set("refs:a", new Set(["worker", "version"]));
+    assert.deepEqual(await session.hGetAllGetSMembers("hash:a", "alias:a", "refs:a"), {
+      hash: { one: "1" },
+      value: "target-a",
+      members: ["worker", "version"],
+    });
+  });
+  assert.deepEqual(redis.commands, [
+    ["hGetAllAndGet", "hash:a", "alias:a"],
+    ["sMembersAndHGetAll", "members:a", "hash:a"],
+    ["hGetAllAndGet", "hash:missing", "alias:missing"],
+    ["hGetAllGetSMembers", "hash:a", "alias:a", "refs:a"],
+  ]);
+
+  const rawRedis = createFakeRedis(undefined, { encodeGet: true });
+  rawRedis.hashes.set("hash:raw", { one: "1" });
+  rawRedis.strings.set("alias:raw", "target-raw");
+  assert.deepEqual(await rawRedis.hGetAllAndGet("hash:raw", "alias:raw"), {
+    hash: { one: "1" },
+    value: "target-raw",
+  });
 });
 
 test("fake redis getManyWithTime matches the production empty-input contract", async () => {
@@ -226,6 +277,61 @@ test("fake redis treats empty collection keys as absent", async () => {
   });
 });
 
+test("fake redis WATCH rejects an EXEC after a watched value changes", async () => {
+  const redis = createFakeRedis();
+  redis.hashes.set("watched", { value: "before" });
+
+  await assert.rejects(
+    redis.session(async (session) => {
+      await session.watch("watched");
+      redis.hashes.set("watched", { value: "after" });
+      await session.multi().hSet("result", { value: "committed" }).exec();
+    }),
+    (err) => err instanceof FakeRedisWatchError
+  );
+
+  assert.equal(redis.hashes.has("result"), false);
+});
+
+test("fake redis WATCH rejects ABA mutations that restore the original value", async () => {
+  const redis = createFakeRedis();
+  await redis.set("watched", "before");
+
+  await assert.rejects(
+    redis.session(async (session) => {
+      await session.watch("watched");
+      await redis.set("watched", "during");
+      await redis.set("watched", "before");
+      await session.multi().set("result", "blocked").exec();
+    }),
+    (err) => err instanceof FakeRedisWatchError
+  );
+
+  assert.equal(redis.strings.has("result"), false);
+});
+
+test("fake redis WATCH accumulates keys and resets after EXEC", async () => {
+  const redis = createFakeRedis();
+  redis.strings.set("first", "a");
+  redis.strings.set("second", "b");
+
+  await assert.rejects(
+    redis.session(async (session) => {
+      await session.watch("first");
+      await session.watch("second");
+      redis.strings.set("first", "changed");
+      await session.multi().set("result", "blocked").exec();
+    }),
+    (err) => err instanceof FakeRedisWatchError
+  );
+
+  await redis.session(async (session) => {
+    await session.watch("first");
+    await session.multi().set("result", "committed").exec();
+  });
+  assert.equal(redis.strings.get("result"), "committed");
+});
+
 test("fake redis multi copy records and honors replace option", async () => {
   const redis = createFakeRedis();
   redis.hashes.set("src", { value: "new" });
@@ -316,6 +422,23 @@ test("fake redis supports lock-style set and delIfEq with TTL expiry", async () 
   assert.equal(await redis.exists("lock"), 0);
 });
 
+test("fake redis client compares raw bytes for batched owner CAS", async () => {
+  const redis = createFakeRedis(undefined, { encodeGet: true });
+  redis.strings.set("owner:a", "owner-a");
+  redis.strings.set("owner:b", "owner-b");
+
+  const values = await redis.getMany(["owner:a", "owner:b"]);
+  assert.ok(values.every((value) => value instanceof Uint8Array));
+  const rawValues = /** @type {Uint8Array[]} */ (values);
+  assert.deepEqual(rawValues.map((value) => new TextDecoder().decode(value)), ["owner-a", "owner-b"]);
+  assert.deepEqual(await redis.delIfEqMany([
+    ["owner:a", rawValues[0]],
+    ["owner:b", new TextEncoder().encode("stale-owner")],
+  ]), [1, 0]);
+  assert.equal(redis.strings.has("owner:a"), false);
+  assert.equal(redis.strings.get("owner:b"), "owner-b");
+});
+
 test("fake redis set without ttl clears an existing expiration", async () => {
   let nowMs = 1_000;
   const redis = createFakeRedis(undefined, { nowMs: () => nowMs });
@@ -392,4 +515,46 @@ test("fake redis multi expireAt uses Redis unix seconds", async () => {
 
   nowMs += 60_001;
   assert.deepEqual(await redis.sMembers("cron-slot"), []);
+});
+
+test("fake redis mirrors batched set snapshots on client and session surfaces", async () => {
+  const redis = createFakeRedis();
+  redis.sets.set("set:a", new Set(["one", "two"]));
+  redis.sets.set("set:b", new Set(["three"]));
+
+  assert.deepEqual(await redis.sMembersMany(["set:a", "set:b"]), [
+    ["one", "two"],
+    ["three"],
+  ]);
+  await redis.session(async (session) => {
+    assert.deepEqual(await session.sMembersMany(["set:b", "set:missing"]), [
+      ["three"],
+      [],
+    ]);
+  });
+});
+
+test("fake redis mirrors batched hash lengths, set cardinality, and transactional increments", async () => {
+  const redis = createFakeRedis();
+  redis.hashes.set("hash:a", { multibyte: "\u00e9", empty: "" });
+  redis.sets.set("set:a", new Set(["one", "two"]));
+
+  assert.deepEqual(await redis.hStrLenMany([
+    ["hash:a", "multibyte"],
+    ["hash:a", "empty"],
+    ["hash:missing", "field"],
+  ]), [2, 0, 0]);
+  assert.equal(await redis.sCard("set:a"), 2);
+  assert.equal(await redis.sCard("set:missing"), 0);
+  assert.deepEqual(await redis.sCardMany(["set:a", "set:missing"]), [2, 0]);
+  await redis.session(async (session) => {
+    assert.deepEqual(await session.sCardMany(["set:missing", "set:a"]), [0, 2]);
+  });
+
+  await redis.session(async (session) => {
+    assert.deepEqual(await session.hStrLenMany([["hash:a", "multibyte"]]), [2]);
+    assert.equal(await session.sCard("set:a"), 2);
+    assert.deepEqual(await session.multi().incr("revision").incr("revision").exec(), [1, 2]);
+  });
+  assert.equal(redis.strings.get("revision"), "2");
 });

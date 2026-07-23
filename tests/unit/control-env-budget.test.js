@@ -6,7 +6,7 @@ import {
   repositoryFileUrl,
   repositoryModuleDataUrl,
 } from "../helpers/load-shared-module.js";
-import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
+import { createFakeRedis, sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { encryptSecretValue } from "../../shared/secret-envelope.js";
 
@@ -29,6 +29,7 @@ const {
   WorkerEnvBudgetError,
   assertWorkerLoaderUserEnvBudget,
   assertWorkerVersionsUserEnvBudget,
+  assertWorkersVersionsUserEnvBudget,
   decryptSecretHash,
   estimatedWorkerLoaderEnv,
   estimatedWorkerLoaderEnvBytes,
@@ -57,6 +58,18 @@ function assertBundleMetaError(err, reason) {
   assert.ok(bundleError.cause instanceof Error);
   assert.equal(bundleError.cause.message, reason);
   return true;
+}
+
+/** @param {Record<string, unknown>} records */
+function createBundleMetaRedis(records) {
+  const redis = createFakeRedis();
+  for (const [key, meta] of Object.entries(records)) {
+    if (meta == null) continue;
+    redis.hashes.set(key, {
+      __meta__: typeof meta === "string" ? meta : JSON.stringify(meta),
+    });
+  }
+  return redis;
 }
 
 test("worker env budget counts merged vars and secrets with worker-secret precedence", () => {
@@ -342,17 +355,10 @@ test("decryptSecretHash fails closed on unknown envelope kids", async () => {
 });
 
 test("worker env budget checks every retained worker version", async () => {
-  const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      assert.equal(field, "__meta__");
-      if (key === "worker:demo:api:v:1") return JSON.stringify({ vars: { SMALL: "ok" } });
-      if (key === "worker:demo:api:v:2") {
-        return JSON.stringify({ vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES) } });
-      }
-      return null;
-    },
-  };
+  const redis = createBundleMetaRedis({
+    "worker:demo:api:v:1": { vars: { SMALL: "ok" } },
+    "worker:demo:api:v:2": { vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES) } },
+  });
 
   await assert.rejects(
     () => assertWorkerVersionsUserEnvBudget({
@@ -370,26 +376,76 @@ test("worker env budget checks every retained worker version", async () => {
   );
 });
 
+test("worker env budget batches and deduplicates retained bundle metadata reads", async () => {
+  const redis = createBundleMetaRedis({
+    "worker:demo:api:v:1": { vars: { FIRST: "one" } },
+    "worker:demo:api:v:2": { vars: { SECOND: "two" } },
+  });
+
+  await assertWorkerVersionsUserEnvBudget({
+    redis,
+    ns: "demo",
+    worker: "api",
+    versions: ["v1", "v2", "v1"],
+    versionEstimates: [{ sourceVersion: "v1", estimatedVersion: "v3" }],
+  });
+
+  assert.deepEqual(
+    redis.commands.filter(([command]) => command === "hGet" || command === "hGetMany"),
+    [["hGetMany", [
+      ["worker:demo:api:v:1", "__meta__"],
+      ["worker:demo:api:v:2", "__meta__"],
+    ]]]
+  );
+});
+
+test("worker env budget preserves worker identity across a shared metadata pipeline", async () => {
+  const redis = createBundleMetaRedis({
+    "worker:demo:api:v:1": { vars: { SMALL: "ok" } },
+    "worker:demo:jobs:v:4": { vars: { BIG: "x".repeat(WORKER_LOADER_ENV_MAX_BYTES) } },
+  });
+
+  await assert.rejects(
+    () => assertWorkersVersionsUserEnvBudget({
+      redis,
+      ns: "demo",
+      workers: [
+        { worker: "api", versions: ["v1"] },
+        { worker: "jobs", versions: ["v4"] },
+      ],
+    }),
+    (err) => {
+      if (!(err instanceof WorkerEnvBudgetError)) return false;
+      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      assert.equal(budgetErr.details.worker, "jobs");
+      assert.equal(budgetErr.details.source_version, "v4");
+      return true;
+    }
+  );
+  assert.deepEqual(
+    redis.commands.filter(([command]) => command === "hGetMany"),
+    [["hGetMany", [
+      ["worker:demo:api:v:1", "__meta__"],
+      ["worker:demo:jobs:v:4", "__meta__"],
+    ]]]
+  );
+});
+
 test("worker env budget checks retained-version binding env injections", async () => {
   const secret = "x".repeat(Math.floor(WORKER_LOADER_ENV_MAX_BYTES * 0.6));
-  const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      assert.equal(key, "worker:demo:caller:v:1");
-      assert.equal(field, "__meta__");
-      return JSON.stringify({
-        bindings: {
-          PLATFORM: {
-            type: "service",
-            ns: "__platform__",
-            service: "platformApi",
-            version: "v1",
-            requiredCallerSecrets: ["API_TOKEN"],
-          },
+  const redis = createBundleMetaRedis({
+    "worker:demo:caller:v:1": {
+      bindings: {
+        PLATFORM: {
+          type: "service",
+          ns: "__platform__",
+          service: "platformApi",
+          version: "v1",
+          requiredCallerSecrets: ["API_TOKEN"],
         },
-      });
+      },
     },
-  };
+  });
 
   await assert.rejects(
     () => assertWorkerVersionsUserEnvBudget({
@@ -429,17 +485,12 @@ test("worker env budget estimates a source bundle under a future version string"
   assert.ok(bytesWithPad(padLength, "v1") <= WORKER_LOADER_ENV_MAX_BYTES);
   assert.ok(bytesWithPad(padLength, WORKER_LOADER_ENV_VERSION_PLACEHOLDER) > WORKER_LOADER_ENV_MAX_BYTES);
 
-  const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      assert.equal(key, "worker:demo:api:v:1");
-      assert.equal(field, "__meta__");
-      return JSON.stringify({
-        ...baseMeta,
-        vars: { PAD: "x".repeat(padLength) },
-      });
+  const redis = createBundleMetaRedis({
+    "worker:demo:api:v:1": {
+      ...baseMeta,
+      vars: { PAD: "x".repeat(padLength) },
     },
-  };
+  });
 
   await assert.doesNotReject(() => assertWorkerVersionsUserEnvBudget({
     redis,
@@ -471,14 +522,9 @@ test("worker env budget estimates a source bundle under a future version string"
 });
 
 test("worker env budget reports bundle metadata parse context", async () => {
-  const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      assert.equal(key, "worker:demo:api:v:1");
-      assert.equal(field, "__meta__");
-      return "{not-json";
-    },
-  };
+  const redis = createBundleMetaRedis({
+    "worker:demo:api:v:1": "{not-json",
+  });
 
   await assert.rejects(
     () => assertWorkerVersionsUserEnvBudget({
@@ -497,13 +543,11 @@ test("worker env budget reports bundle metadata parse context", async () => {
 });
 
 test("worker env budget maps strict retained metadata failures to corrupt_meta", async () => {
-  const redis = {
-    async hGet() {
-      return JSON.stringify({
-        workflows: [{ binding: "FLOW", name: "flow", className: "Flow" }],
-      });
+  const redis = createBundleMetaRedis({
+    "worker:demo:api:v:1": {
+      workflows: [{ binding: "FLOW", name: "flow", className: "Flow" }],
     },
-  };
+  });
 
   await assert.rejects(
     () => assertWorkerVersionsUserEnvBudget({
@@ -520,14 +564,7 @@ test("worker env budget maps strict retained metadata failures to corrupt_meta",
 });
 
 test("worker env budget surfaces missing retained bundles as watch retry", async () => {
-  const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      assert.equal(key, "worker:demo:api:v:1");
-      assert.equal(field, "__meta__");
-      return null;
-    },
-  };
+  const redis = createBundleMetaRedis({});
 
   await assert.rejects(
     () => assertWorkerVersionsUserEnvBudget({
@@ -541,14 +578,9 @@ test("worker env budget surfaces missing retained bundles as watch retry", async
 });
 
 test("worker env budget fails closed when retained bundle metadata is not an object", async () => {
-  const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      assert.equal(key, "worker:demo:api:v:1");
-      assert.equal(field, "__meta__");
-      return "[]";
-    },
-  };
+  const redis = createBundleMetaRedis({
+    "worker:demo:api:v:1": "[]",
+  });
 
   await assert.rejects(
     () => assertWorkerVersionsUserEnvBudget({

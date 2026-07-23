@@ -31,6 +31,7 @@ function loadLogsTailHandler(options = {}) {
           /** @type {any} */ (globalThis).__tailSessions.push(this);
           this.xReadCalls = [];
           this.publishCalls = [];
+          this.evalCalls = [];
           this.closed = false;
         }
         async open() {
@@ -44,6 +45,7 @@ function loadLogsTailHandler(options = {}) {
           await this.openPromise;
         }
         async publish(channel, payload) { this.publishCalls.push([channel, payload]); }
+        async eval(script, keys, args) { this.evalCalls.push([script, keys, args]); }
         async xRead(...args) { this.xReadCalls.push(args); return null; }
         hasOpenResources() { return Boolean(this.socket); }
         async close() { this.closed = true; }
@@ -81,28 +83,33 @@ function resetTailState() {
   /** @type {any} */ (globalThis).__tailState = {
     redis: {},
     dataRedis: {
-      /** @type {Array<[string, number, Record<string, string>]>} */
-      hSetExCalls: [],
-      /** @type {Array<[string, number, string[]]>} */
-      hGetExCalls: [],
-      /** @type {string[]} */
-      hLenCalls: [],
+      /** @type {Array<[string, string[], string[]]>} */
+      evalCalls: [],
       /** @type {Map<string, string>} */
       activeFields: new Map(),
-      hLenValue: 0,
-      /** @param {string} key @param {number} ttlSeconds @param {string[]} fields */
-      async hGetEx(key, ttlSeconds, fields) {
-        this.hGetExCalls.push([key, ttlSeconds, fields]);
-        return fields.map((field) => this.activeFields.get(field) ?? null);
+      activeCount: 0,
+      evalError: null,
+      sessionCalls: 0,
+      /** @template T @param {(session: any) => Promise<T>} fn */
+      async session(fn) {
+        this.sessionCalls += 1;
+        return await fn(this);
       },
-      /** @param {string} key */
-      async hLen(key) {
-        this.hLenCalls.push(key);
-        return this.hLenValue;
-      },
-      /** @param {string} key @param {number} ttlSeconds @param {Record<string, string>} fields */
-      async hSetEx(key, ttlSeconds, fields) {
-        this.hSetExCalls.push([key, ttlSeconds, fields]);
+      /** @param {string} script @param {string[]} keys @param {string[]} args */
+      async eval(script, keys, args) {
+        this.evalCalls.push([script, keys, args]);
+        if (this.evalError) throw this.evalError;
+        const maxEntries = Number(args[1]);
+        let count = this.activeCount;
+        for (const field of args.slice(2)) {
+          if (!this.activeFields.has(field)) {
+            if (count >= maxEntries) continue;
+            count += 1;
+          }
+          this.activeFields.set(field, "1");
+        }
+        this.activeCount = count;
+        return this.activeFields.size;
       },
     },
     logs: [],
@@ -420,7 +427,7 @@ test("logs tail opens its stream session on the data Redis DB", async () => {
   assert.deepEqual(/** @type {any} */ (globalThis).__tailSessions[0].opts, { db: 1 });
 });
 
-test("logs tail writes activation through the data Redis client", async () => {
+test("logs tail keeps activation writes off its held blocking-read session", async () => {
   resetTailState();
   const { handle } = await loadLogsTailHandler();
   /** @type {Promise<unknown>[]} */
@@ -442,13 +449,17 @@ test("logs tail writes activation through the data Redis client", async () => {
   await reader.cancel();
   await Promise.all(waitUntilPromises);
 
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hGetExCalls, [
-    ["logs:tail:active", 30, ["demo:foo"]],
+  const session = /** @type {any} */ (globalThis).__tailSessions[0];
+  const dataRedis = /** @type {any} */ (globalThis).__tailState.dataRedis;
+  assert.equal(dataRedis.evalCalls.length, 1);
+  assert.deepEqual(dataRedis.evalCalls[0].slice(1), [
+    ["logs:tail:active"],
+    ["30", "10000", "demo:foo"],
   ]);
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
-    ["logs:tail:active", 30, { "demo:foo": "1" }],
-  ]);
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailSessions[0].publishCalls, []);
+  assert.equal(dataRedis.activeFields.get("demo:foo"), "1");
+  assert.equal(dataRedis.sessionCalls, 0);
+  assert.deepEqual(session.evalCalls, []);
+  assert.ok(session.xReadCalls.length > 0);
 });
 
 test("logs tail batches multi-worker activation while preserving the active cap", async () => {
@@ -457,7 +468,7 @@ test("logs tail batches multi-worker activation while preserving the active cap"
   /** @type {Promise<unknown>[]} */
   const waitUntilPromises = [];
   /** @type {any} */ (globalThis).__tailState.dataRedis.activeFields.set("demo:bar", "1");
-  /** @type {any} */ (globalThis).__tailState.dataRedis.hLenValue = 9_999;
+  /** @type {any} */ (globalThis).__tailState.dataRedis.activeCount = 9_999;
   const response = await handle({
     request: new Request("http://control.test/ns/demo/logs/tail?worker=foo&worker=bar&worker=baz"),
     env: {
@@ -475,13 +486,50 @@ test("logs tail batches multi-worker activation while preserving the active cap"
   await reader.cancel();
   await Promise.all(waitUntilPromises);
 
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hGetExCalls, [
-    ["logs:tail:active", 30, ["demo:bar", "demo:baz", "demo:foo"]],
+  const session = /** @type {any} */ (globalThis).__tailSessions[0];
+  const dataRedis = /** @type {any} */ (globalThis).__tailState.dataRedis;
+  assert.equal(dataRedis.evalCalls.length, 1);
+  assert.deepEqual(dataRedis.evalCalls[0].slice(1), [
+    ["logs:tail:active"],
+    ["30", "10000", "demo:bar", "demo:baz", "demo:foo"],
   ]);
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hLenCalls, ["logs:tail:active"]);
-  assert.deepEqual(/** @type {any} */ (globalThis).__tailState.dataRedis.hSetExCalls, [
-    ["logs:tail:active", 30, { "demo:baz": "1" }],
-  ]);
+  assert.equal(dataRedis.activeFields.get("demo:bar"), "1");
+  assert.equal(dataRedis.activeFields.get("demo:baz"), "1");
+  assert.equal(dataRedis.activeFields.has("demo:foo"), false);
+  assert.equal(dataRedis.activeCount, 10_000);
+  assert.equal(dataRedis.sessionCalls, 0);
+  assert.deepEqual(session.evalCalls, []);
+});
+
+test("logs tail continues blocking reads after an independent activation failure", async () => {
+  resetTailState();
+  const state = /** @type {any} */ (globalThis).__tailState;
+  state.dataRedis.evalError = new Error("activation connection lost");
+  const { handle } = await loadLogsTailHandler();
+  /** @type {Promise<unknown>[]} */
+  const waitUntilPromises = [];
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    env: {
+      REDIS_ADDR: "redis-control:6379",
+      DATA_REDIS_ADDR: "redis-data:6379",
+      DATA_REDIS_DB: "1",
+    },
+    ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+    ns: "demo",
+    requestId: "rid-tail",
+  });
+
+  const reader = response.body.getReader();
+  await readText(reader);
+  await reader.cancel();
+  await Promise.all(waitUntilPromises);
+
+  const session = /** @type {any} */ (globalThis).__tailSessions[0];
+  assert.ok(session.xReadCalls.length > 0);
+  assert.deepEqual(session.evalCalls, []);
+  assert.ok(state.logs.some((/** @type {{ event: string }} */ entry) =>
+    entry.event === "tail_heartbeat_activate_failed"));
 });
 
 test("tailMaxSessionMs defaults to fifteen minutes and ignores invalid overrides", async () => {

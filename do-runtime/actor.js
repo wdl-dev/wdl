@@ -14,7 +14,6 @@ import {
   readLocalActorInvokeRequest,
 } from "do-runtime-protocol";
 import {
-  assertCurrentOwner,
   assertCurrentOwnerWithLeaseBudget,
   forgetOwnedScope,
   ownerLeaseGuardMs,
@@ -140,7 +139,7 @@ export class WdlDoHostActor extends DurableObject {
       }
       if (url.pathname === "/delete-storage") {
         const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request));
-        await assertCurrentOwner(this.env, invoke.owner);
+        await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
         const facetName = buildFacetName(invoke);
         this.ctx.facets.delete(facetName);
         this.facetNames.delete(facetName);
@@ -181,9 +180,9 @@ export class WdlDoHostActor extends DurableObject {
       throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
     }
     try {
-      let fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
+      let fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
       if (await this.rememberObject(invoke)) {
-        fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner);
+        fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
       }
       const { owner, leaseRemainingMs } = fenced;
       return withoutOwnershipErrorControlHeader(
@@ -237,7 +236,10 @@ export class WdlDoHostActor extends DurableObject {
         timer = null;
         if (isDone()) return;
         try {
-          const renewed = await assertCurrentOwnerWithLeaseBudget(this.env, owner, { renewNearExpiry: false });
+          const renewed = await assertCurrentOwnerWithLeaseBudget(this.env, owner, {
+            renewNearExpiry: false,
+            storageScope: invoke,
+          });
           if (isDone()) return;
           schedule(renewed.leaseRemainingMs);
         } catch (err) {

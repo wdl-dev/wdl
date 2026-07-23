@@ -86,14 +86,32 @@ test("RespReader handles CRLF split across chunks", async () => {
   assert.equal(await parser.parseOne(), "OK");
 });
 
-test("RespReader.compact drops consumed bytes between replies", async () => {
-  const reader = mockReader([bytes("+OK\r\n+OK\r\n")]);
+test("RespReader.compact reuses small buffers between replies", async () => {
+  const reader = mockReader([bytes("+OK\r\n+OK\r\n"), bytes(":2\r\n")]);
   const parser = new RespReader(reader);
   await parser.parseOne();
+  const storage = parser._storage;
   parser.compact();
   assert.equal(parser.pos, 0);
   assert.equal(parser.buf.length, 5); // "+OK\r\n" remaining
+  assert.equal(parser._storage, storage);
+  assert.deepEqual(Array.from(parser.buf), Array.from(bytes("+OK\r\n")));
   await parser.parseOne();
+  parser.compact();
+  assert.equal(parser.buf.length, 0);
+  assert.equal(parser._storage, storage);
+  assert.equal(parser._storage.length, 1024);
+  assert.equal(await parser.parseOne(), 2);
+  assert.equal(parser._storage, storage);
+});
+
+test("RespReader.compact releases an oversized consumed buffer", async () => {
+  const payload = "x".repeat(65 * 1024);
+  const reader = mockReader([bytes(`$${payload.length}\r\n${payload}\r\n`)]);
+  const parser = new RespReader(reader);
+
+  assert.equal((await parser.parseOne()).length, payload.length);
+  assert.ok(parser._storage.length > 64 * 1024);
   parser.compact();
   assert.equal(parser.buf.length, 0);
   assert.equal(parser._storage.length, 0);
@@ -206,6 +224,27 @@ function fakeSocket(scriptedChunks) {
   };
   return socket;
 }
+
+test("RedisSubscriber does not select a logical DB before subscribing", async () => {
+  const socket = fakeSocket([
+    bytes("*3\r\n$9\r\nsubscribe\r\n$5\r\nroute\r\n:1\r\n"),
+  ]);
+  const sub = new RedisSubscriber("x", ["route"], /** @type {any} */ ({
+    db: 1,
+    connect: () => socket,
+    onConnect: () => sub.stop(),
+    onError: () => {},
+    sleep: async () => sub.stop(),
+  }));
+
+  await sub.start();
+
+  assert.equal(socket._writer.writes.length, 1);
+  assert.equal(
+    new TextDecoder().decode(socket._writer.writes[0]),
+    "*2\r\n$9\r\nSUBSCRIBE\r\n$5\r\nroute\r\n"
+  );
+});
 
 test("RedisSubscriber: SUBSCRIBE, ack, message, disconnect fire in order", async () => {
   /** @type {Array<string | [string, string, string]>} */

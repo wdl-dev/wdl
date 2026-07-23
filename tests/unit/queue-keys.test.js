@@ -4,6 +4,7 @@ import {
   parseConsumerKey,
   parseDelayedKey,
   parseStreamKey,
+  QUEUE_DELAYED_WAKE_STREAM,
   queueConsumerKey,
   queueDelayedKey,
   queueStreamKey,
@@ -16,6 +17,7 @@ test("queue key builders compose canonical Redis shapes", () => {
   assert.equal(queueStreamKey("demo", "jobs"), "queue:demo:jobs:s");
   assert.equal(queueDelayedKey("demo", "jobs"), "queue-delayed:demo:jobs");
   assert.equal(queueConsumerKey("demo", "jobs"), "queue-consumer:demo:jobs");
+  assert.equal(QUEUE_DELAYED_WAKE_STREAM, "queue-delayed-wake");
 });
 
 test("queue key parsers match the cross-language fixture", () => {

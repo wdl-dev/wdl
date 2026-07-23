@@ -21,6 +21,7 @@ const {
   queueConsumerFields,
   stageCronSlotRef,
   stageCronProjection,
+  stageCronSequence,
   stageCronWorkerIndexed,
   stageCronWorkerRemoved,
   stageD1ReferrerAdds,
@@ -57,6 +58,11 @@ function recordMulti() {
     /** @param {unknown[]} args */
     hDel(...args) {
       calls.push(["hDel", ...args]);
+      return this;
+    },
+    /** @param {unknown[]} args */
+    set(...args) {
+      calls.push(["set", ...args]);
       return this;
     },
     /** @param {unknown[]} args */
@@ -112,6 +118,13 @@ test("stageCronSlotRef writes ref and expiry together", () => {
   ]);
 });
 
+test("stageCronSequence writes the permanent generation high-water mark", () => {
+  const cron = SCHEDULER_PROJECTION_CONTRACT.cron;
+  const multi = recordMulti();
+  stageCronSequence(multi, cron.ns, cron.worker, cron.gen);
+  assert.deepEqual(multi.calls, [["set", cron.sequenceKey, cron.sequenceValue]]);
+});
+
 test("stageCronProjection writes the shared scheduler projection contract", () => {
   const cron = SCHEDULER_PROJECTION_CONTRACT.cron;
   const multi = recordMulti();
@@ -129,12 +142,18 @@ test("stageCronProjection writes the shared scheduler projection contract", () =
     cronKey: cron.workerKey,
     existingHash: {},
     crons: [{ cron: entry.cron, timezone: entry.timezone }],
-    plan: { cronSeq: cron.meta.seq, addedWithPlacement: [entry], removed: [] },
+    plan: {
+      cronSeq: entry.gen,
+      persistSequence: true,
+      addedWithPlacement: [entry],
+      removed: [],
+    },
   });
 
-  assert.equal(cronMetaJson(cron.meta.version, cron.meta.seq), cron.meta.json);
+  assert.equal(cronMetaJson(cron.meta.version), cron.meta.json);
   assert.equal(cronEntryJson(entry), cron.entry.json);
   assert.deepEqual(multi.calls, [
+    ["set", cron.sequenceKey, cron.sequenceValue],
     ["sAdd", cron.workerIndexKey, cron.workerKey],
     ["hSet", cron.workerKey, "__meta__", cron.meta.json],
     ["hSet", cron.workerKey, cron.cronId, cron.entry.json],

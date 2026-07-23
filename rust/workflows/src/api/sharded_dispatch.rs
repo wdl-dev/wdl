@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use wdl_rust_common::redis_eval::append_eval_cmd;
+use wdl_rust_common::redis_eval::{StaticRedisScript, append_eval_cmd};
 use wdl_rust_common::time::now_ms;
 
 use crate::{AppState, ShardQueueKeys, WorkflowError, WorkflowResult};
@@ -92,6 +92,9 @@ end
 return 0
 "#;
 
+static REMOVE_READY_MEMBER_IF_STATE_MISSING: StaticRedisScript =
+    StaticRedisScript::new(REMOVE_READY_MEMBER_IF_STATE_MISSING_SCRIPT);
+
 pub(crate) fn rotate_active_shards(mut shards: Vec<usize>, seed: usize) -> Vec<usize> {
     shards.sort_unstable();
     shards.dedup();
@@ -169,21 +172,48 @@ fn interleave_ready_members(sampled: Vec<(usize, Vec<String>)>) -> VecDeque<(usi
     candidates
 }
 
-pub(crate) async fn prune_ready_shard_if_empty(
+async fn prune_ready_shards_if_empty(
     app: &AppState,
     keys: ShardQueueKeys,
-    shard: usize,
+    shards: &[usize],
 ) -> WorkflowResult<()> {
-    let ready = keys.ready(shard);
-    let shard_arg = shard.to_string();
-    eval_script::<i64>(
-        app,
-        PRUNE_READY_SHARD_SCRIPT,
-        &[&ready, keys.ready_active()],
-        &[&shard_arg],
-    )
-    .await?;
+    if shards.is_empty() {
+        return Ok(());
+    }
+    app.redis
+        .with_conn(async |mut conn| {
+            let mut pipe = redis::pipe();
+            for shard in shards {
+                let ready = keys.ready(*shard);
+                let shard_arg = shard.to_string();
+                append_eval_cmd(
+                    &mut pipe,
+                    PRUNE_READY_SHARD_SCRIPT,
+                    &[&ready, keys.ready_active()],
+                    &[&shard_arg],
+                );
+            }
+            pipe.query_async::<Vec<i64>>(&mut conn).await
+        })
+        .await?;
     Ok(())
+}
+
+fn shards_to_prune(
+    empty_sampled: &[usize],
+    touched: &[usize],
+    error_shards: &[usize],
+    prune_on_error: bool,
+) -> Vec<usize> {
+    let mut shards = empty_sampled
+        .iter()
+        .chain(touched)
+        .copied()
+        .filter(|shard| prune_on_error || !error_shards.contains(shard))
+        .collect::<Vec<_>>();
+    shards.sort_unstable();
+    shards.dedup();
+    shards
 }
 
 pub(crate) async fn remove_ready_member_if_state_missing(
@@ -194,7 +224,7 @@ pub(crate) async fn remove_ready_member_if_state_missing(
 ) -> WorkflowResult<bool> {
     let removed: i64 = eval_script(
         app,
-        REMOVE_READY_MEMBER_IF_STATE_MISSING_SCRIPT,
+        &REMOVE_READY_MEMBER_IF_STATE_MISSING,
         &[state_key, ready_key],
         &[member],
     )
@@ -352,7 +382,7 @@ where
 {
     let active_shards = active_ready_shards(app, keys).await?;
     let sampled = sample_ready_members(app, keys, &active_shards, config.batch_size).await?;
-    let mut prune_shards = sampled
+    let empty_sampled_shards = sampled
         .iter()
         .filter_map(|(shard, members)| members.is_empty().then_some(*shard))
         .collect::<Vec<_>>();
@@ -365,16 +395,13 @@ where
         merge_counters,
     )
     .await;
-    for shard in run.touched_shards {
-        if !prune_shards.contains(&shard) {
-            prune_shards.push(shard);
-        }
-    }
-    for shard in prune_shards {
-        if config.prune_on_error || !run.error_shards.contains(&shard) {
-            prune_ready_shard_if_empty(app, keys, shard).await?;
-        }
-    }
+    let prune_shards = shards_to_prune(
+        &empty_sampled_shards,
+        &run.touched_shards,
+        &run.error_shards,
+        config.prune_on_error,
+    );
+    prune_ready_shards_if_empty(app, keys, &prune_shards).await?;
     Ok(ReadyAdmissionResult {
         counters: run.counters,
         error: run.error,
@@ -545,6 +572,18 @@ mod tests {
     fn ready_shard_prune_removes_only_empty_shards_from_active_index() {
         assert!(PRUNE_READY_SHARD_SCRIPT.contains(r#"redis.call("SCARD", KEYS[1]) == 0"#));
         assert!(PRUNE_READY_SHARD_SCRIPT.contains(r#"redis.call("SREM", KEYS[2], ARGV[1])"#));
+    }
+
+    #[test]
+    fn ready_shard_prune_excludes_error_shards_unless_configured() {
+        assert_eq!(
+            shards_to_prune(&[0, 2], &[1, 2, 3], &[2, 3], false),
+            vec![0, 1],
+        );
+        assert_eq!(
+            shards_to_prune(&[0, 2], &[1, 2, 3], &[2, 3], true),
+            vec![0, 1, 2, 3],
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::{
     AppState, WORKFLOW_READY_BATCH_SIZE, WorkflowResult, instance_state_key,
     workflow_shard_queue_keys,
 };
+use wdl_rust_common::redis_eval::StaticRedisScript;
 
 use super::super::{
     DuePromotionConfig, DuePromotionMember, eval_script, parse_ready_token, promote_due_members,
@@ -19,6 +20,9 @@ end
 redis.call("SREM", KEYS[2], ARGV[2])
 return 1
 "#;
+
+static REMOVE_READY_TOKEN_IF_TERMINAL: StaticRedisScript =
+    StaticRedisScript::new(REMOVE_READY_TOKEN_IF_TERMINAL_SCRIPT);
 
 const DUE_SCAN_OVERFETCH_FACTOR: usize = 4;
 
@@ -110,7 +114,7 @@ pub(super) async fn remove_ready_token_if_terminal(
     let ready = workflow_shard_queue_keys().ready(shard);
     eval_script::<i64>(
         app,
-        REMOVE_READY_TOKEN_IF_TERMINAL_SCRIPT,
+        &REMOVE_READY_TOKEN_IF_TERMINAL,
         &[&state_key, &ready],
         &[&guard.generation, &token],
     )

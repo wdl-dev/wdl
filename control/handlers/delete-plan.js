@@ -129,9 +129,9 @@ export function stageWorkerDelete(multi, { collected, channels }) {
     });
   }
 
-  // `worker:<ns>:<name>:next_version` is deliberately NOT DEL'd —
-  // workerLoader has no eviction, so a reused <ns:name:version> id
-  // could hit a cached isolate from the pre-delete generation.
+  // Permanent allocators are deliberately NOT DEL'd. next_version prevents
+  // workerLoader id reuse; cron:seq prevents stale slot refs from matching a
+  // recreated Cron entry.
   stageWorkerHidden(multi, ns, name);
 
   if (collected.namespaceStillActive) {

@@ -6,6 +6,7 @@ import { doAlarmJobIdForStorage } from "../../helpers/do-alarm-job-id.js";
 import { serviceInternalPost, serviceInternalPostAsync } from "./internal-http.js";
 import {
   redisDel,
+  redisEval,
   redisGet,
   redisGetJson,
   redisGetRaw,
@@ -34,6 +35,15 @@ const {
 const DO_ALARM_READY_SHARDS = 32;
 const WORKFLOWS_REDIS_DB = 2;
 const WORKFLOWS_REDIS = { db: WORKFLOWS_REDIS_DB };
+const SEED_DO_ALARM_CLEANUP_JOBS_SCRIPT = `
+local storage_id = ARGV[1]
+for index = 2, #KEYS do
+  local job_id = ARGV[index]
+  redis.call("HSET", KEYS[index], "doStorageId", storage_id)
+  redis.call("SADD", KEYS[1], job_id)
+end
+return #KEYS - 1
+`;
 
 /** @param {string} ownerKey */
 export function doOwnerRedisKey(ownerKey) {
@@ -144,6 +154,25 @@ export function redisRemoveDoAlarmDue(jobId) {
 /** @param {string} ns @param {string} worker @param {string} jobId */
 export function redisAddDoAlarmByWorker(ns, worker, jobId) {
   redisSAdd(doAlarmByWorkerKey(ns, worker), jobId, WORKFLOWS_REDIS);
+}
+
+/**
+ * Seed enough minimal jobs for cleanup batching without one Docker exec per job.
+ * @param {string} ns
+ * @param {string} worker
+ * @param {string} doStorageId
+ * @param {string[]} jobIds
+ */
+export function redisSeedDoAlarmCleanupJobs(ns, worker, doStorageId, jobIds) {
+  const seeded = Number(
+    redisEval(
+      SEED_DO_ALARM_CLEANUP_JOBS_SCRIPT,
+      [doAlarmByWorkerKey(ns, worker), ...jobIds.map(doAlarmStateKey)],
+      [doStorageId, ...jobIds],
+      WORKFLOWS_REDIS
+    )
+  );
+  assert.equal(seeded, jobIds.length);
 }
 
 /** @param {string} ns @param {string} worker */

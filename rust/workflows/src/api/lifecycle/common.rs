@@ -27,7 +27,7 @@ pub(super) async fn stale_transition_response(
     if current.is_empty() {
         return Err(WorkflowError::not_found("Workflow instance not found"));
     }
-    response_from_state(state, id, &current).await
+    response_from_state(state, &identity.ns, &identity.workflow_key, id, &current).await
 }
 
 pub(super) async fn successful_transition_response(
@@ -54,5 +54,12 @@ pub(super) async fn successful_transition_response(
         signal.progress_status,
         None,
     );
-    response_from_state(state, id, existing).await
+    response_from_state(
+        state,
+        &updated_identity.ns,
+        &updated_identity.workflow_key,
+        id,
+        existing,
+    )
+    .await
 }

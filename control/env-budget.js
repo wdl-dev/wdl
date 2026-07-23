@@ -8,6 +8,7 @@ export { BundleMetaError };
 
 const DO_ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const ESTIMATED_ASSETS_CDN_BASE = "https://assets.invalid";
+const WORKER_ENV_META_READ_BATCH_SIZE = 32;
 // Pessimistic placeholder for version strings that will be allocated after a
 // secret mutation. Redis INCR results are parsed as JS numbers today, so this
 // uses the longest safe integer-shaped `v<int>` tag.
@@ -321,27 +322,10 @@ export async function decryptMutatedSecretHashForBudget({
 }
 
 /**
- * @param {{
- *   redis: { hGet(key: string, field: string): Promise<string | null | undefined> },
- *   ns: string,
- *   worker: string,
- *   versions: Iterable<string>,
- *   versionEstimates?: Iterable<{ sourceVersion: string, estimatedVersion: string }>,
- *   nsSecrets?: Record<string, unknown> | null,
- *   workerSecrets?: Record<string, unknown> | null,
- *   assetsCdnBase?: string | null,
- * }} args
+ * @param {Iterable<string>} versions
+ * @param {Iterable<{ sourceVersion: string, estimatedVersion: string }>} versionEstimates
  */
-export async function assertWorkerVersionsUserEnvBudget({
-  redis,
-  ns,
-  worker,
-  versions,
-  versionEstimates = [],
-  nsSecrets = null,
-  workerSecrets = null,
-  assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
-}) {
+function versionBudgetChecks(versions, versionEstimates) {
   const checks = [
     ...[...versions]
       .filter((version) => typeof version === "string" && version)
@@ -355,24 +339,93 @@ export async function assertWorkerVersionsUserEnvBudget({
         entry.estimatedVersion
       ),
   ];
-  const uniqueChecks = [...new Map(
+  return [...new Map(
     checks.map((entry) => [`${entry.sourceVersion}\0${entry.estimatedVersion}`, entry])
   ).values()];
-  if (uniqueChecks.length === 0) {
-    assertWorkerLoaderUserEnvBudget({ ns, worker, nsSecrets, workerSecrets, assetsCdnBase });
-    return;
+}
+
+/**
+ * @typedef {{
+ *   worker: string,
+ *   versions: Iterable<string>,
+ *   versionEstimates?: Iterable<{ sourceVersion: string, estimatedVersion: string }>,
+ *   workerSecrets?: Record<string, unknown> | null,
+ * }} WorkerVersionBudgetInput
+ */
+
+/**
+ * @param {{
+ *   redis: { hGetMany(pairs: Array<[string, string]>): Promise<Array<string | null | undefined>> },
+ *   ns: string,
+ *   workers: Iterable<WorkerVersionBudgetInput>,
+ *   nsSecrets?: Record<string, unknown> | null,
+ *   assetsCdnBase?: string | null,
+ * }} args
+ */
+export async function assertWorkersVersionsUserEnvBudget({
+  redis,
+  ns,
+  workers,
+  nsSecrets = null,
+  assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
+}) {
+  /** @type {Array<WorkerVersionBudgetInput & { sourceVersion: string, estimatedVersion: string }>} */
+  const checks = [];
+  /** @type {Map<string, [string, string]>} */
+  const metadataReads = new Map();
+
+  for (const input of workers) {
+    const workerChecks = versionBudgetChecks(input.versions, input.versionEstimates || []);
+    if (workerChecks.length === 0) {
+      assertWorkerLoaderUserEnvBudget({
+        ns,
+        worker: input.worker,
+        nsSecrets,
+        workerSecrets: input.workerSecrets,
+        assetsCdnBase,
+      });
+      continue;
+    }
+    for (const check of workerChecks) {
+      checks.push({ ...input, ...check });
+      const identity = `${input.worker}\0${check.sourceVersion}`;
+      if (!metadataReads.has(identity)) {
+        metadataReads.set(identity, [bundleKey(ns, input.worker, check.sourceVersion), "__meta__"]);
+      }
+    }
   }
 
-  // Keep bundle metadata reads sequential: callers may pass a RedisSession,
-  // whose command protocol is single-flight even though secret decryption is not.
-  for (const { sourceVersion, estimatedVersion } of uniqueChecks) {
-    const rawMeta = await redis.hGet(bundleKey(ns, worker, sourceVersion), "__meta__");
+  /** @type {Map<string, string | null | undefined>} */
+  const rawMetadata = new Map();
+  const reads = [...metadataReads];
+  for (let offset = 0; offset < reads.length; offset += WORKER_ENV_META_READ_BATCH_SIZE) {
+    const batch = reads.slice(offset, offset + WORKER_ENV_META_READ_BATCH_SIZE);
+    const replies = await redis.hGetMany(batch.map(([, pair]) => pair));
+    for (let index = 0; index < batch.length; index += 1) {
+      rawMetadata.set(batch[index][0], replies[index]);
+    }
+  }
+
+  /** @type {Map<string, ReturnType<typeof parseBundleMeta>>} */
+  const parsedMetadata = new Map();
+  for (const {
+    worker,
+    workerSecrets = null,
+    sourceVersion,
+    estimatedVersion,
+  } of checks) {
+    const identity = `${worker}\0${sourceVersion}`;
+    const rawMeta = rawMetadata.get(identity);
     if (typeof rawMeta !== "string") throw new WatchError();
-    const meta = parseBundleMeta(rawMeta, {
-      ns,
-      worker,
-      version: sourceVersion,
-    });
+    let meta = parsedMetadata.get(identity);
+    if (!meta) {
+      meta = parseBundleMeta(rawMeta, {
+        ns,
+        worker,
+        version: sourceVersion,
+      });
+      parsedMetadata.set(identity, meta);
+    }
     try {
       assertWorkerLoaderUserEnvBudget({
         ns,
@@ -392,4 +445,35 @@ export async function assertWorkerVersionsUserEnvBudget({
       throw bundleMaterializationError(ns, worker, sourceVersion, err);
     }
   }
+}
+
+/**
+ * @param {{
+ *   redis: { hGetMany(pairs: Array<[string, string]>): Promise<Array<string | null | undefined>> },
+ *   ns: string,
+ *   worker: string,
+ *   versions: Iterable<string>,
+ *   versionEstimates?: Iterable<{ sourceVersion: string, estimatedVersion: string }>,
+ *   nsSecrets?: Record<string, unknown> | null,
+ *   workerSecrets?: Record<string, unknown> | null,
+ *   assetsCdnBase?: string | null,
+ * }} args
+ */
+export async function assertWorkerVersionsUserEnvBudget({
+  redis,
+  ns,
+  worker,
+  versions,
+  versionEstimates = [],
+  nsSecrets = null,
+  workerSecrets = null,
+  assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
+}) {
+  await assertWorkersVersionsUserEnvBudget({
+    redis,
+    ns,
+    workers: [{ worker, versions, versionEstimates, workerSecrets }],
+    nsSecrets,
+    assetsCdnBase,
+  });
 }

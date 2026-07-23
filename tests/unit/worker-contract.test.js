@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   DECLARED_HOSTS_KEY,
+  DECLARED_HOSTS_REVISION_KEY,
   DO_OWNER_SCOPE_PREFIX,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
@@ -13,6 +14,8 @@ import {
   VERSION_DELETE_LOCK_KIND,
   WHOLE_DELETE_LOCK_KIND,
   bundleKey,
+  CRON_GENERATION_EPOCH,
+  cronSequenceKey,
   deleteLockKey,
   doOwnerScopeScanPatternForStorage,
   doStorageIdKey,
@@ -81,6 +84,7 @@ test("bundleKey: rejects malformed version tags", () => {
 test("route-plane registry key helpers compose and parse canonical keys", () => {
   assert.equal(NAMESPACES_KEY, "namespaces");
   assert.equal(DECLARED_HOSTS_KEY, "declared-hosts");
+  assert.equal(DECLARED_HOSTS_REVISION_KEY, "declared-hosts:revision");
   assert.equal(HOSTS_SCAN_PATTERN, "hosts:*");
   assert.equal(HOST_DECLARATIONS_SCAN_PATTERN, "host-declarations:*");
   assert.equal(hostsKey("demo"), "hosts:demo");
@@ -95,6 +99,11 @@ test("route-plane registry key helpers compose and parse canonical keys", () => 
 
 test("nextVersionKey composes the worker version counter key", () => {
   assert.equal(nextVersionKey("demo", "hello"), "worker:demo:hello:next_version");
+});
+
+test("cronSequenceKey composes the permanent cron generation counter", () => {
+  assert.equal(CRON_GENERATION_EPOCH, 1024);
+  assert.equal(cronSequenceKey("demo", "hello"), "cron:seq:demo:hello");
 });
 
 test("worker lifecycle key helpers compose canonical keys", () => {

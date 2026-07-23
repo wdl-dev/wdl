@@ -27,6 +27,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   hashes: new Map(),
   sets: new Map(),
   zsets: new Map(),
+  revisions: new Map(),
   stagedMeta: null,
   execFailures: 0,
   hSetCalls: [],
@@ -40,6 +41,8 @@ const CONTROL_DEPLOY_TEST_STATE = {
   parsedQueueConsumers: null,
   parsedPlatformBindings: null,
   watchedKeys: null,
+  watchBatches: [],
+  redisCommands: [],
   envBudgetError: false,
   envBudgetCalls: [],
   secretEnvelopeError: null,
@@ -55,6 +58,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.hashes = new Map();
   CONTROL_DEPLOY_TEST_STATE.sets = new Map();
   CONTROL_DEPLOY_TEST_STATE.zsets = new Map();
+  CONTROL_DEPLOY_TEST_STATE.revisions = new Map();
   CONTROL_DEPLOY_TEST_STATE.stagedMeta = null;
   CONTROL_DEPLOY_TEST_STATE.execFailures = 0;
   CONTROL_DEPLOY_TEST_STATE.hSetCalls = [];
@@ -69,6 +73,8 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.parsedQueueConsumers = null;
   CONTROL_DEPLOY_TEST_STATE.parsedPlatformBindings = null;
   CONTROL_DEPLOY_TEST_STATE.watchedKeys = null;
+  CONTROL_DEPLOY_TEST_STATE.watchBatches = [];
+  CONTROL_DEPLOY_TEST_STATE.redisCommands = [];
   CONTROL_DEPLOY_TEST_STATE.envBudgetError = false;
   CONTROL_DEPLOY_TEST_STATE.envBudgetCalls = [];
   CONTROL_DEPLOY_TEST_STATE.secretEnvelopeError = null;
@@ -394,9 +400,10 @@ function makeSession() {
     zsets: state.zsets,
     ops: [],
     watched: state.watchedKeys,
-    watchBatches: [],
-    commands: [],
+    watchBatches: state.watchBatches,
+    commands: state.redisCommands,
     expirations: new Map(),
+    revisions: state.revisions,
     execFailures: state.execFailures,
     nowMs: Date.now(),
   };
@@ -456,14 +463,31 @@ function installPlatformAuthWarningFixture(options = {}) {
     },
     /** @param {string} key */
     async hGetAll(key) {
+      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGETALL", key]);
       return key === "routes:__platform__" ? { auth: "v1" } : {};
+    },
+    /** @param {string[]} keys */
+    async hGetAllMany(keys) {
+      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGETALLMANY", keys]);
+      return keys.map((key) => key === "routes:__platform__" ? { auth: "v1" } : {});
     },
     /** @param {string} key @param {string} field */
     async hGet(key, field) {
+      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGET", key, field]);
       if (key === "worker:__platform__:auth:v:1" && field === "__meta__") {
         return JSON.stringify(PLATFORM_AUTH_META);
       }
       return null;
+    },
+    /** @param {Array<[string, string]>} pairs */
+    async hGetMany(pairs) {
+      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGETMANY", pairs]);
+      return pairs.map(([key, field]) => {
+        if (key === "worker:__platform__:auth:v:1" && field === "__meta__") {
+          return JSON.stringify(PLATFORM_AUTH_META);
+        }
+        return null;
+      });
     },
     async incr() {
       return await (options.incr ? options.incr() : 1);
@@ -552,6 +576,17 @@ test("commitWithWatch validates deploy env budget under watched secret hashes", 
 
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("secrets:tenant-a"));
   assert.ok(/** @type {any} */ (globalThis).__controlDeployTestState.watchedKeys.includes("secrets:tenant-a:demo"));
+  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.watchBatches.length, 1);
+  assert.deepEqual(
+    /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.filter(
+      (/** @type {[string, unknown]} */ [command, key]) => {
+        if (command === "hGetAll") return String(key).startsWith("secrets:tenant-a");
+        return command === "hGetAllMany" &&
+          Array.isArray(key) && key.some((item) => String(item).startsWith("secrets:tenant-a"));
+      }
+    ),
+    [["hGetAllMany", ["secrets:tenant-a", "secrets:tenant-a:demo"]]]
+  );
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.length, 1);
   assert.deepEqual(/** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls[0].vars, { TOKEN: "from-vars" });
   assert.equal(
@@ -607,11 +642,11 @@ test("commitWithWatch validates env budget against materialized D1 metadata", as
 });
 
 test("deploy handler resolves cross-namespace service-binding meta from the target namespace", async () => {
-  /** @type {string[]} */
-  const metaReads = [];
+  /** @type {unknown[][]} */
+  const bindingReads = [];
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
-    ["routes:other", { api: "v1" }],
+    ["routes:other", { api: "v1", jobs: "v2" }],
     ["worker:other:api:v:1", {
       "__meta__": JSON.stringify({
         exports: [{ entrypoint: "default", allowedCallers: ["tenant-a"] }],
@@ -620,6 +655,11 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
     ["worker:tenant-a:api:v:1", {
       "__meta__": JSON.stringify({
         exports: [{ entrypoint: "default", allowedCallers: [] }],
+      }),
+    }],
+    ["worker:other:jobs:v:2", {
+      "__meta__": JSON.stringify({
+        exports: [{ entrypoint: "default", allowedCallers: ["tenant-a"] }],
       }),
     }],
   ]);
@@ -635,8 +675,13 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
     },
     /** @param {string} key @param {string} field */
     async hGet(key, field) {
-      if (field === "__meta__") metaReads.push(key);
+      bindingReads.push(["HGET", key, field]);
       return await session.hGet(key, field);
+    },
+    /** @param {Array<[string, string]>} pairs */
+    async hGetMany(pairs) {
+      bindingReads.push(["HGETMANY", pairs]);
+      return await session.hGetMany(pairs);
     },
     /** @param {string} key */
     async hGetAll(key) {
@@ -661,6 +706,7 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
           modules: { "worker.js": "export default {}" },
           bindings: {
             API: { type: "service", ns: "other", service: "api" },
+            JOBS: { type: "service", ns: "other", service: "jobs" },
           },
         }),
       }),
@@ -671,9 +717,18 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
     });
 
     assert.equal(response.status, 201);
-    assert.ok(metaReads.includes("worker:other:api:v:1"));
-    assert.ok(!metaReads.includes("worker:tenant-a:api:v:1"));
+    assert.deepEqual(bindingReads, [
+      ["HGETMANY", [
+        ["routes:other", "api"],
+        ["routes:other", "jobs"],
+      ]],
+      ["HGETMANY", [
+        ["worker:other:api:v:1", "__meta__"],
+        ["worker:other:jobs:v:2", "__meta__"],
+      ]],
+    ]);
     assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.bindings.API.version, "v1");
+    assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.bindings.JOBS.version, "v2");
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
   }
@@ -681,11 +736,13 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
 
 test("deploy handler classifies empty service target metadata before commit", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      if (key === "routes:other" && field === "api") return "v1";
-      if (key === "worker:other:api:v:1" && field === "__meta__") return "";
-      return null;
+    /** @param {Array<[string, string]>} pairs */
+    async hGetMany(pairs) {
+      return pairs.map(([key, field]) => {
+        if (key === "routes:other" && field === "api") return "v1";
+        if (key === "worker:other:api:v:1" && field === "__meta__") return "";
+        return null;
+      });
     },
     async incr() {
       throw new Error("corrupt target metadata must fail before version allocation");
@@ -720,12 +777,13 @@ test("deploy handler classifies empty service target metadata before commit", as
 
 test("deploy handler fails closed instead of hiding empty platform export metadata", async () => {
   installPlatformAuthWarningFixture();
-  /** @param {string} key @param {string} field */
-  const corruptPlatformMetaHGet = async (key, field) => {
-    if (key === "worker:__platform__:auth:v:1" && field === "__meta__") return "";
-    return null;
+  /** @param {Array<[string, string]>} pairs */
+  const corruptPlatformMetaHGetMany = async (pairs) => {
+    return pairs.map(([key, field]) =>
+      key === "worker:__platform__:auth:v:1" && field === "__meta__" ? "" : null
+    );
   };
-  /** @type {any} */ (globalThis).__controlDeployTestState.redis.hGet = corruptPlatformMetaHGet;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis.hGetMany = corruptPlatformMetaHGetMany;
 
   const response = await handle({
     request: new Request("http://control/ns/tenant-a/workers/caller/deploy", {
@@ -916,6 +974,11 @@ test("deploy handler counts runtime-generated wrapper code before allocating a v
     assert.equal(typeof body.code_bytes, "number");
     assert.equal(body.max_code_bytes, WORKER_LOADER_CODE_MAX_BYTES);
     assert.equal(incrCalled, false);
+    assert.deepEqual(CONTROL_DEPLOY_TEST_STATE.redisCommands.filter((/** @type {unknown[]} */ command) =>
+      String(command[0]).startsWith("PLATFORM_")), [
+      ["PLATFORM_HGETALLMANY", ["routes:__platform__"]],
+      ["PLATFORM_HGETMANY", [["worker:__platform__:auth:v:1", "__meta__"]]],
+    ]);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;

@@ -1,5 +1,4 @@
 pub(crate) const CONSUMER_GROUP: &str = "wdl-scheduler";
-pub(crate) const MAX_BATCH_SIZE_CAP: usize = 100;
 pub(crate) const SERVICE: &str = "scheduler";
 
 mod config;

@@ -1,14 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createFakeRedis } from "../helpers/mocks/fake-redis.js";
+import {
+  applyFakeRedisOp,
+  createFakeRedis,
+  createFakeRedisState,
+} from "../helpers/mocks/fake-redis.js";
 import { loadControlRouting } from "../helpers/load-control-routing.js";
 import { loadControlLib } from "../helpers/load-control-lib.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { bundleKey as productionBundleKey } from "../../shared/worker-contract.js";
 
 const { promoteWithRoutes, bumpActiveAndPromote, reconcileHosts } =
   await loadControlRouting();
 const { controlLib } = await loadControlLib();
 const { encodeReferrerMember } = controlLib;
+const CRON_ID = /** @type {{ cron: { cronId: string } }} */ (
+  readRepositoryJson("tests/fixtures/scheduler-projection-contract.json")
+).cron.cronId;
 
 function makeRedis() {
   return createFakeRedis();
@@ -30,6 +38,20 @@ function seedBundle(redis, version, meta) {
  */
 function patternProjection(ns, worker, version, kind, value) {
   return ["v2", ns, worker, version, kind, value].join("\t");
+}
+
+/** @param {Record<string, string>} cronHash */
+function onlyCronEntry(cronHash) {
+  const found = Object.entries(cronHash).find(([field]) => field !== "__meta__");
+  assert.ok(found);
+  return JSON.parse(found[1]);
+}
+
+/** @param {Record<string, string>} cronHash */
+function readMeta(cronHash) {
+  const raw = cronHash["__meta__"];
+  assert.equal(typeof raw, "string");
+  return JSON.parse(raw);
 }
 
 /**
@@ -359,6 +381,136 @@ test("promoteWithRoutes rejects non-object cron metadata", async () => {
   );
 });
 
+test("promoteWithRoutes allocates cron generations from the permanent epoch", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    crons: [{ cron: "*/5 * * * *", timezone: "UTC" }],
+  });
+
+  await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  const cronHash = redis.state.hashes.get("crons:demo:worker");
+  assert.ok(cronHash);
+  const meta = readMeta(cronHash);
+  const entry = onlyCronEntry(cronHash);
+  assert.deepEqual(meta, { version: "v1" });
+  assert.equal(entry.gen, 1024);
+  assert.equal(redis.state.strings.get("cron:seq:demo:worker"), "1024");
+  assert.ok(redis.state.watched.includes("cron:seq:demo:worker"));
+});
+
+test("promoteWithRoutes never reuses a cron generation after clearing the projection", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    crons: [{ cron: "*/5 * * * *", timezone: "UTC" }],
+  });
+  seedBundle(redis, "v2", { crons: [] });
+  seedBundle(redis, "v3", {
+    crons: [{ cron: "*/5 * * * *", timezone: "UTC" }],
+  });
+
+  await promoteWithRoutes(redis, "demo", "worker", "v1");
+  const firstHash = redis.state.hashes.get("crons:demo:worker");
+  assert.ok(firstHash);
+  const firstEntry = onlyCronEntry(firstHash);
+
+  await promoteWithRoutes(redis, "demo", "worker", "v2");
+  assert.equal(redis.state.hashes.has("crons:demo:worker"), false);
+  assert.equal(redis.state.strings.get("cron:seq:demo:worker"), "1024");
+
+  await promoteWithRoutes(redis, "demo", "worker", "v3");
+  const recreatedHash = redis.state.hashes.get("crons:demo:worker");
+  assert.ok(recreatedHash);
+  const recreatedEntry = onlyCronEntry(recreatedHash);
+  assert.equal(recreatedEntry.gen, firstEntry.gen + 1);
+  assert.equal(redis.state.strings.get("cron:seq:demo:worker"), "1025");
+});
+
+test("concurrent cron promotion retries from the committed generation counter", async () => {
+  const state = createFakeRedisState();
+  const redis = createFakeRedis(state, {
+    onExecFailure(ops) {
+      for (const op of ops) applyFakeRedisOp(state, op);
+    },
+  });
+  redis.execFailures = 1;
+  seedBundle(redis, "v1", {
+    crons: [{ cron: "*/5 * * * *", timezone: "UTC" }],
+  });
+
+  await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  const cronHash = redis.state.hashes.get("crons:demo:worker");
+  assert.ok(cronHash);
+  assert.equal(onlyCronEntry(cronHash).gen, 1024);
+  assert.equal(redis.state.strings.get("cron:seq:demo:worker"), "1024");
+  assert.equal(redis.state.execFailures, 0);
+});
+
+const invalidCronSequences = /** @type {Array<[string, string]>} */ ([
+  ["malformed", "not-a-number"],
+  ["below the reserved epoch", "100"],
+]);
+for (const [label, sequence] of invalidCronSequences) {
+  test(`promoteWithRoutes rejects permanent cron sequence: ${label}`, async () => {
+    const redis = makeRedis();
+    seedBundle(redis, "v2", {
+      crons: [{ cron: "*/5 * * * *", timezone: "UTC" }],
+    });
+    redis.state.hashes.set("crons:demo:worker", {
+      __meta__: JSON.stringify({ version: "v1" }),
+      existing: JSON.stringify({ cron: "*/5 * * * *", timezone: "UTC", gen: 1 }),
+    });
+    redis.state.strings.set("cron:seq:demo:worker", sequence);
+
+    await assert.rejects(
+      promoteWithRoutes(redis, "demo", "worker", "v2"),
+      (err) => {
+        assertRoutingErrorShape(err, 500, "corrupt_cron_sequence");
+        return true;
+      }
+    );
+  });
+}
+
+test("promoteWithRoutes treats the permanent cron sequence as authoritative", async () => {
+  const redis = makeRedis();
+  const cron = { cron: "*/5 * * * *", timezone: "UTC" };
+  const id = CRON_ID;
+  seedBundle(redis, "v2", { crons: [cron] });
+  redis.state.hashes.set("crons:demo:worker", {
+    __meta__: JSON.stringify({ version: "v1", seq: "obsolete" }),
+    [id]: JSON.stringify({ ...cron, gen: 1024 }),
+  });
+  redis.state.strings.set("cron:seq:demo:worker", "1024");
+
+  await promoteWithRoutes(redis, "demo", "worker", "v2");
+
+  const cronHash = redis.state.hashes.get("crons:demo:worker");
+  assert.ok(cronHash);
+  assert.deepEqual(readMeta(cronHash), { version: "v2" });
+  assert.equal(redis.state.strings.get("cron:seq:demo:worker"), "1024");
+});
+
+test("promoteWithRoutes rejects projection metadata without a permanent sequence", async () => {
+  const redis = makeRedis();
+  const cron = { cron: "*/5 * * * *", timezone: "UTC" };
+  const id = CRON_ID;
+  seedBundle(redis, "v2", { crons: [cron] });
+  redis.state.hashes.set("crons:demo:worker", {
+    __meta__: JSON.stringify({ version: "v1" }),
+    [id]: JSON.stringify({ ...cron, gen: 1024 }),
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v2"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_cron_sequence");
+      return true;
+    }
+  );
+});
+
 test("promoteWithRoutes watches and rejects missing service-binding target bundles", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {
@@ -439,6 +591,96 @@ test("promoteWithRoutes batches service-binding dependency watches", async () =>
   ));
 });
 
+test("promoteWithRoutes reads active bundle metadata once", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", { routes: [], queueConsumers: [] });
+  seedBundle(redis, "v2", { routes: [], queueConsumers: [] });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+
+  await promoteWithRoutes(redis, "demo", "worker", "v2");
+
+  assert.equal(redis.state.commands.filter(([command, key, field]) =>
+    command === "hGet" &&
+    key === productionBundleKey("demo", "worker", "v1") &&
+    field === "__meta__"
+  ).length, 1);
+});
+
+test("promoteWithRoutes batches D1, service, and queue dependency reads", async () => {
+  const redis = makeRedis();
+  const d1Keys = ["d1_a", "d1_b"].map((databaseId) => `d1:database:demo:${databaseId}`);
+  const servicePairs = [
+    [productionBundleKey("other", "api", "v3"), "__meta__"],
+    [productionBundleKey("other", "jobs", "v4"), "__meta__"],
+  ];
+  const queuePairs = [
+    ["queue-consumer:demo:queue-a", "worker"],
+    ["queue-consumer:demo:queue-b", "worker"],
+  ];
+  seedBundle(redis, "v1", {
+    bindings: {
+      DB_A: { type: "d1", databaseId: "d1_a" },
+      DB_B: { type: "d1", databaseId: "d1_b" },
+      SERVICE_A: { type: "service", ns: "other", service: "api", version: "v3" },
+      SERVICE_B: { type: "service", ns: "other", service: "jobs", version: "v4" },
+    },
+    queueConsumers: [
+      { ...consumerWithoutOptions, queue: "queue-a" },
+      { ...consumerWithoutOptions, queue: "queue-b" },
+    ],
+  });
+  for (const key of d1Keys) redis.state.hashes.set(key, { state: "ready" });
+  for (const [key] of servicePairs) redis.state.hashes.set(key, { __meta__: "{}" });
+  for (const [key] of queuePairs) redis.state.hashes.set(key, { worker: "worker" });
+
+  await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  assert.ok(redis.state.commands.some((command) =>
+    command[0] === "exists" && command.slice(1).toSorted().join("\n") === d1Keys.toSorted().join("\n")
+  ));
+  const batchedHashReads = redis.state.commands
+    .filter(([command]) => command === "hGetMany")
+    .map(([, pairs]) => /** @type {Array<[string, string]>} */ (pairs));
+  assert.deepEqual(
+    redis.state.commands.find(([command]) => command === "hStrLenMany")?.[1],
+    servicePairs
+  );
+  assert.deepEqual(
+    batchedHashReads.find((pairs) => pairs[0]?.[0] === queuePairs[0][0]),
+    queuePairs
+  );
+  assert.equal(redis.state.commands.filter(([command, key]) =>
+    command === "hGetAll" && queuePairs.some(([queueKey]) => queueKey === key)
+  ).length, 0);
+});
+
+test("promoteWithRoutes deduplicates and bounds service dependency metadata probes", async () => {
+  const redis = makeRedis();
+  const bindings = Object.fromEntries(Array.from({ length: 66 }, (_, index) => [
+    `SERVICE_${index}`,
+    {
+      type: "service",
+      ns: "other",
+      service: `target-${index % 65}`,
+      version: "v1",
+    },
+  ]));
+  seedBundle(redis, "v1", { bindings });
+  for (let index = 0; index < 65; index += 1) {
+    redis.state.hashes.set(productionBundleKey("other", `target-${index}`, "v1"), {
+      __meta__: "{}",
+    });
+  }
+
+  await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  const reads = redis.state.commands
+    .filter(([command]) => command === "hStrLenMany")
+    .map(([, pairs]) => /** @type {Array<[string, string]>} */ (pairs));
+  assert.deepEqual(reads.map((pairs) => pairs.length), [64, 1]);
+  assert.equal(new Set(reads.flat().map(([key]) => key)).size, 65);
+});
+
 test("bumpActiveAndPromote also rewrites full queue consumer projection", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", { queueConsumers: [consumerWithoutOptions] });
@@ -464,6 +706,9 @@ test("bumpActiveAndPromote also rewrites full queue consumer projection", async 
     max_batch_timeout_ms: "2000",
     max_retries: "3",
   });
+  assert.equal(redis.state.hashes.has("crons:demo:worker"), false);
+  assert.equal(redis.state.strings.has("cron:seq:demo:worker"), false);
+  assert.equal(redis.state.sets.get("cron:index:workers")?.size ?? 0, 0);
 });
 
 test("bumpActiveAndPromote batches pattern projection reads across hosts", async () => {
@@ -733,6 +978,27 @@ test("bumpActiveAndPromote rejects malformed cron metadata", async () => {
   ]);
 });
 
+test("bumpActiveAndPromote initializes a missing permanent sequence from projection metadata", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    crons: [{ cron: "*/5 * * * *", timezone: "UTC" }],
+  });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+  redis.state.hashes.set("crons:demo:worker", {
+    __meta__: JSON.stringify({ version: "v1", seq: 1 }),
+    existing: JSON.stringify({ cron: "*/5 * * * *", timezone: "UTC", gen: 1 }),
+  });
+
+  const result = await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.equal(result.version, "v2");
+  assert.equal(redis.state.strings.get("cron:seq:demo:worker"), "1023");
+  const cronHash = redis.state.hashes.get("crons:demo:worker");
+  assert.ok(cronHash);
+  assert.deepEqual(readMeta(cronHash), { version: "v2" });
+});
+
 test("bumpActiveAndPromote rejects malformed cron sequence metadata", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {});
@@ -853,11 +1119,22 @@ test("reconcileHosts stages declared host indexes and pattern invalidation", asy
   assert.equal(redis.state.sets.get("hosts:demo")?.has("app.workers.example"), true);
   assert.equal(redis.state.sets.get("declared-hosts")?.has("app.workers.example"), true);
   assert.equal(redis.state.sets.get("host-declarations:app.workers.example")?.has("demo"), true);
+  assert.equal(redis.state.strings.get("declared-hosts:revision"), "1");
   assert.ok(redis.state.ops.some((op) =>
     op[0] === "publish" &&
     op[1] === "patterns:invalidate" &&
     op[2] === "app.workers.example"
   ));
+});
+
+test("reconcileHosts no-op watches only the namespace host source", async () => {
+  const redis = makeRedis();
+  redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
+
+  await reconcileHosts(redis, "demo", { hosts: ["app.workers.example"] }, "workers.local");
+
+  assert.deepEqual(redis.state.watchBatches, [["hosts:demo"]]);
+  assert.equal(redis.state.ops.length, 0);
 });
 
 test("reconcileHosts preserves global host gate while another namespace still declares host", async () => {
@@ -875,13 +1152,125 @@ test("reconcileHosts preserves global host gate while another namespace still de
 
 test("reconcileHosts removes global host gate after the final declaration is removed", async () => {
   const redis = makeRedis();
-  redis.state.sets.set("hosts:demo", new Set(["app.workers.example"]));
-  redis.state.sets.set("declared-hosts", new Set(["app.workers.example"]));
-  redis.state.sets.set("host-declarations:app.workers.example", new Set(["demo"]));
+  const hosts = ["api.workers.example", "app.workers.example"];
+  redis.state.sets.set("hosts:demo", new Set(hosts));
+  redis.state.sets.set("declared-hosts", new Set(hosts));
+  for (const host of hosts) {
+    redis.state.sets.set(`host-declarations:${host}`, new Set(["demo"]));
+  }
 
   await reconcileHosts(redis, "demo", { hosts: [] }, "workers.local");
 
-  assert.equal(redis.state.sets.get("hosts:demo")?.has("app.workers.example") ?? false, false);
+  assert.deepEqual(
+    redis.state.commands.filter((command) => command[0] === "sMembersMany"),
+    [["sMembersMany", hosts.map((host) => `host-declarations:${host}`)]]
+  );
+  assert.equal(redis.state.sets.has("hosts:demo"), false);
   assert.equal(redis.state.sets.has("declared-hosts"), false);
-  assert.equal(redis.state.sets.has("host-declarations:app.workers.example"), false);
+  for (const host of hosts) {
+    assert.equal(redis.state.sets.has(`host-declarations:${host}`), false);
+  }
+});
+
+test("reconcileHosts retries when declarations change during host removal", async () => {
+  const state = createFakeRedisState();
+  const redis = createFakeRedis(state);
+  const host = "app.workers.example";
+  state.sets.set("hosts:demo", new Set([host]));
+  state.sets.set("declared-hosts", new Set([host]));
+  state.sets.set(`host-declarations:${host}`, new Set(["demo", "other"]));
+
+  const originalSession = redis.session.bind(redis);
+  let attempts = 0;
+  let injectedDrift = false;
+  redis.session = async (fn) => {
+    attempts += 1;
+    return await originalSession(async (iso) => {
+      const sMembersMany = iso.sMembersMany.bind(iso);
+      return await fn({
+        ...iso,
+        async sMembersMany(keys) {
+          const declarations = await sMembersMany(keys);
+          if (!injectedDrift && keys.includes(`host-declarations:${host}`)) {
+            injectedDrift = true;
+            // Another namespace removes its declaration after this attempt read
+            // the old set. The watched declaration must force a fresh decision.
+            state.sets.set(`host-declarations:${host}`, new Set(["demo"]));
+          }
+          return declarations;
+        },
+      });
+    });
+  };
+
+  await reconcileHosts(redis, "demo", { hosts: [] }, "workers.local");
+
+  assert.equal(attempts, 2);
+  assert.equal(state.sets.has("declared-hosts"), false);
+  assert.equal(state.sets.has(`host-declarations:${host}`), false);
+  assert.equal(
+    state.watchBatches.filter((keys) => keys.includes(`patterns:${host}`)).length,
+    2
+  );
+  assert.equal(
+    state.watchBatches.filter((keys) => keys.includes(`host-declarations:${host}`)).length,
+    2
+  );
+});
+
+test("reconcileHosts bounds host removal reads", async () => {
+  const redis = makeRedis();
+  const hosts = Array.from({ length: 65 }, (_, index) => `host-${index}.workers.example`);
+  redis.state.sets.set("hosts:demo", new Set(hosts));
+  redis.state.sets.set("declared-hosts", new Set(hosts));
+  for (const host of hosts) {
+    redis.state.sets.set(`host-declarations:${host}`, new Set(["demo"]));
+  }
+
+  await reconcileHosts(redis, "demo", { hosts: [] }, "workers.local");
+
+  const membershipReads = redis.state.commands
+    .filter((command) => command[0] === "sMIsMember")
+    .map((command) => command[2]);
+  const declarationReads = redis.state.commands
+    .filter((command) => command[0] === "sMembersMany")
+    .map((command) => command[1]);
+  assert.deepEqual(membershipReads, [hosts.slice(0, 64), hosts.slice(64)]);
+  assert.deepEqual(declarationReads, [
+    hosts.slice(0, 64).map((host) => `host-declarations:${host}`),
+    hosts.slice(64).map((host) => `host-declarations:${host}`),
+  ]);
+});
+
+test("reconcileHosts rejects a live pattern found in a later removal batch", async () => {
+  const redis = makeRedis();
+  const hosts = Array.from({ length: 65 }, (_, index) => `host-${index}.workers.example`);
+  const liveHost = hosts.at(-1);
+  assert.ok(liveHost);
+  redis.state.sets.set("hosts:demo", new Set(hosts));
+  redis.state.sets.set("declared-hosts", new Set(hosts));
+  redis.state.sets.set("ns-hosts:demo", new Set([liveHost]));
+  redis.state.hashes.set(`patterns:${liveHost}`, {
+    "/*": patternProjection("demo", "worker", "v1", "prefix", "/"),
+  });
+  for (const host of hosts) {
+    redis.state.sets.set(`host-declarations:${host}`, new Set(["demo"]));
+  }
+
+  await assert.rejects(
+    reconcileHosts(redis, "demo", { hosts: [] }, "workers.local"),
+    (err) => {
+      const shaped = assertRoutingErrorShape(err, 409, "host_in_use");
+      assert.equal(shaped.details.host, liveHost);
+      assert.equal(shaped.details.slot, "/*");
+      return true;
+    }
+  );
+  assert.deepEqual(redis.state.sets.get("hosts:demo"), new Set(hosts));
+  assert.deepEqual(
+    redis.state.commands.filter(([command, keys]) =>
+      command === "hGetAllMany" && Array.isArray(keys) && keys.length > 0
+    ),
+    [["hGetAllMany", [`patterns:${liveHost}`]]]
+  );
 });

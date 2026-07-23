@@ -50,11 +50,17 @@ export function resetD1OwnerRegistryTestState() {
   D1_OWNER_REGISTRY_TEST_STATE.draining = false;
   D1_OWNER_REGISTRY_TEST_STATE.taskIdentity = { taskId: "task-a", endpoint: "d1-runtime-a:8787" };
   D1_OWNER_REGISTRY_TEST_STATE.onWatchExecFailure = null;
+  D1_OWNER_REGISTRY_TEST_STATE.beforeDelIfEqMany = null;
   D1_OWNER_REGISTRY_TEST_STATE.logEntries = [];
   D1_OWNER_REGISTRY_TEST_STATE.metricIncrements = [];
   D1_OWNER_REGISTRY_TEST_STATE.sessionDelayMs = 0;
   D1_OWNER_REGISTRY_TEST_STATE.sessionConcurrency = 0;
   D1_OWNER_REGISTRY_TEST_STATE.sessionConcurrencyMax = 0;
+  D1_OWNER_REGISTRY_TEST_STATE.ifEqDelayMs = 0;
+  D1_OWNER_REGISTRY_TEST_STATE.ifEqConcurrency = 0;
+  D1_OWNER_REGISTRY_TEST_STATE.ifEqConcurrencyMax = 0;
+  D1_OWNER_REGISTRY_TEST_STATE.ifEqAttempts = 0;
+  D1_OWNER_REGISTRY_TEST_STATE.beforeSetIfEq = null;
   D1_OWNER_REGISTRY_TEST_STATE.redisGets = 0;
   D1_OWNER_REGISTRY_TEST_STATE.redisTimes = 0;
   D1_OWNER_REGISTRY_TEST_STATE.redisTimeMs = Date.now();
@@ -106,6 +112,7 @@ function redisNow() {
 
 function fakeRedisOptions() {
   return {
+    encodeGet: true,
     nowMs: redisNow,
     onExecFailure(commands, remainingFailures) {
       const state = testState();
@@ -142,6 +149,23 @@ function d1RedisClient() {
   const client = wrapRedis(createFakeRedisClient(redisState, fakeRedisOptions()));
   return {
     ...client,
+    async set(key, value, options = {}) {
+      if (options.ifeq == null) return await client.set(key, value, options);
+      state.ifEqAttempts += 1;
+      state.ifEqConcurrency += 1;
+      state.ifEqConcurrencyMax = Math.max(state.ifEqConcurrencyMax, state.ifEqConcurrency);
+      try {
+        if (state.ifEqDelayMs > 0) await state.delay(state.ifEqDelayMs);
+        state.beforeSetIfEq?.(key, value, options, state.ifEqAttempts);
+        return await client.set(key, value, options);
+      } finally {
+        state.ifEqConcurrency -= 1;
+      }
+    },
+    async delIfEqMany(entries) {
+      state.beforeDelIfEqMany?.(entries);
+      return client.delIfEqMany(entries);
+    },
     async session(fn) {
       state.sessionConcurrency += 1;
       state.sessionConcurrencyMax = Math.max(

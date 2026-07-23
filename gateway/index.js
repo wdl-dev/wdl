@@ -27,6 +27,7 @@ import {
   resolveGatewayDispatch,
 } from "gateway-dispatch";
 import {
+  GatewayRoutingUnavailableError,
   createGatewayRedis,
   ensureGatewaySubscriber,
   gatewayHealthSnapshot,
@@ -171,6 +172,14 @@ export default {
       }
     } catch (err) {
       scope.markError(err);
+      if (err instanceof GatewayRoutingUnavailableError) {
+        return scope.respond(internalErrorResponse(
+          err.status,
+          err.code,
+          err.publicMessage,
+          scope.requestId
+        ));
+      }
       return scope.respond(internalErrorResponse(502, "gateway_error", "Gateway error", scope.requestId));
     } finally {
       scope.complete();

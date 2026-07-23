@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  adminFetch,
   adminPost,
   assertStatus,
   composeRestart,
@@ -25,6 +26,7 @@ import {
   responseJson,
 } from "./helpers/index.js";
 import {
+  redisCommandCalls,
   redisDel,
   redisExpireTime,
   redisGet,
@@ -33,6 +35,7 @@ import {
   redisHSet,
   redisKeys,
   redisSAdd,
+  redisScriptFlush,
   redisSMembers,
 } from "./helpers/redis.js";
 
@@ -134,13 +137,14 @@ test("promote materializes crons hash + cron-slot bucket refs", async () => {
     "expected cron worker discovery index to include promoted worker"
   );
   const meta = redisHashJsonField(hash, "__meta__", `crons:${ns}:w __meta__`);
-  assert.equal(meta.version, v);
-  assert.ok(meta.seq >= 1);
+  assert.deepEqual(meta, { version: v });
   assert.ok(hash[id], `expected entry for cron_id ${id}`);
   const entry = redisHashJsonField(hash, id, `crons:${ns}:w ${id}`);
   assert.equal(entry.cron, "*/5 * * * *");
   assert.equal(entry.timezone, "UTC");
   assert.equal(typeof entry.gen, "number");
+  assert.equal(entry.gen, 1024);
+  assert.equal(redisGet(`cron:seq:${ns}:w`), "1024");
 
   const ref = `${ns}:w:${id}:${entry.gen}`;
   const slotKeys = redisKeys("cron-slot:*");
@@ -169,6 +173,56 @@ test("promote with no crons clears prior hash entries", async () => {
     false,
     "cron worker discovery index must drop workers with no crons"
   );
+  assert.equal(redisGet(`cron:seq:${ns}:w`), "1024");
+});
+
+test("cron generation survives clear and whole-worker delete", async () => {
+  const ns = uniqueNs("cronseq");
+  const cron = { cron: "*/5 * * * *", timezone: "UTC" };
+  const id = cronId(cron.cron, cron.timezone);
+
+  await deployAndPromoteWithCrons(ns, "w", [cron]);
+  const first = redisHashJsonField(
+    redisHGetAll(`crons:${ns}:w`), id, `crons:${ns}:w ${id}`
+  );
+  await deployAndPromoteWithCrons(ns, "w", []);
+  await deployAndPromoteWithCrons(ns, "w", [cron]);
+  const afterClear = redisHashJsonField(
+    redisHGetAll(`crons:${ns}:w`), id, `crons:${ns}:w ${id}`
+  );
+  assert.equal(afterClear.gen, first.gen + 1);
+
+  const deleted = await adminFetch(`/ns/${ns}/worker/w/delete`, { method: "POST" });
+  assertStatus(deleted, 200, "whole-worker delete");
+  assert.equal(redisGet(`cron:seq:${ns}:w`), String(afterClear.gen));
+
+  await deployAndPromoteWithCrons(ns, "w", [cron]);
+  const afterDelete = redisHashJsonField(
+    redisHGetAll(`crons:${ns}:w`), id, `crons:${ns}:w ${id}`
+  );
+  assert.equal(afterDelete.gen, afterClear.gen + 1);
+});
+
+test("whole-worker delete without an allocator recreates Cron at the generation epoch", async () => {
+  const ns = uniqueNs("cronreserveddelete");
+  const cron = { cron: "*/5 * * * *", timezone: "UTC" };
+  const id = cronId(cron.cron, cron.timezone);
+  const version = await deployAndPromoteWithCrons(ns, "w", []);
+
+  redisHSet(`crons:${ns}:w`, {
+    __meta__: JSON.stringify({ version, seq: 7 }),
+    [id]: JSON.stringify({ ...cron, gen: 7 }),
+  });
+
+  const deleted = await adminFetch(`/ns/${ns}/worker/w/delete`, { method: "POST" });
+  assertStatus(deleted, 200, "whole-worker delete without allocator");
+  assert.equal(redisGet(`cron:seq:${ns}:w`), null);
+
+  await deployAndPromoteWithCrons(ns, "w", [cron]);
+  const recreated = redisHashJsonField(
+    redisHGetAll(`crons:${ns}:w`), id, `crons:${ns}:w ${id}`
+  );
+  assert.equal(recreated.gen, 1024);
 });
 
 test("promote preserves gen for unchanged cron across versions (no reschedule churn)", async () => {
@@ -333,6 +387,9 @@ test("scheduler: ref in current bucket is fired, pre-advanced, and reaches worke
   await waitForCurrentSlotFixtureWindow();
   const currentSlot = Math.floor(Date.now() / 60_000) * 60_000;
   redisSAdd(`cron-slot:${currentSlot}`, ref);
+  redisScriptFlush();
+  const evalshaBefore = redisCommandCalls("evalsha");
+  const scriptLoadsBefore = redisCommandCalls("script load");
   composeRestart("scheduler");
 
   await waitUntil("scheduler to fire the seeded ref", async () => {
@@ -354,6 +411,8 @@ test("scheduler: ref in current bucket is fired, pre-advanced, and reaches worke
   const nextSlotMs = Number(nextSlotKey.split(":")[1]);
   assert.equal(redisExpireTime(nextSlotKey), Math.floor(nextSlotMs / 1000) + 600,
     "advance_ref must EXPIREAT the new slot");
+  assert.ok(redisCommandCalls("evalsha") > evalshaBefore);
+  assert.ok(redisCommandCalls("script load") > scriptLoadsBefore);
 });
 
 test("scheduler: stranded ref (slotMs < currentSlot) is advanced without firing — CF 'skip missed' semantics", async () => {

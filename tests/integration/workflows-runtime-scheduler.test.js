@@ -8,8 +8,11 @@ import {
   deployAndPromote,
   gatewayFetch,
   redisSAdd,
+  redisCommandCalls,
   redisSIsMember,
+  redisScriptFlush,
   redisWorkflowStateHGet,
+  redisWorkflowStateHSet,
   redisZScore,
   readIntegrationJson,
   responseJson,
@@ -24,6 +27,29 @@ import {
 } from "./helpers/workflows-scenarios.js";
 
 setupIntegrationSuite();
+
+test("workflow scripts use EVALSHA and recover after SCRIPT FLUSH", async () => {
+  const ns = uniqueNs("wfscript");
+  await deployAndPromote(ns, "shop", {
+    code: WORKER_CODE,
+    workflows: [
+      { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+    ],
+  });
+
+  await withServiceStopped("scheduler", async () => {
+    const evalshaBefore = redisCommandCalls("evalsha");
+    const warmed = await gatewayFetch(ns, "/shop/create?id=script-warm");
+    await readIntegrationJson(warmed, 200, "workflow response");
+    assert.ok(redisCommandCalls("evalsha") > evalshaBefore);
+
+    redisScriptFlush();
+    const loadsBefore = redisCommandCalls("script load");
+    const afterFlush = await gatewayFetch(ns, "/shop/create?id=script-after-flush");
+    await readIntegrationJson(afterFlush, 200, "workflow response");
+    assert.ok(redisCommandCalls("script load") > loadsBefore);
+  });
+});
 
 test("scheduler replicas: workflow tick claims and completes one queued instance", async () => {
   const ns = uniqueNs("wfreplica");
@@ -64,6 +90,33 @@ test("scheduler replicas: workflow tick claims and completes one queued instance
     const finalBody = await readIntegrationJson(final, 200, "workflow response");
     assert.equal(finalBody.status, "completed");
     assert.equal(finalBody.steps.entries.length, 1);
+  });
+});
+
+test("missing workflow params fail before the run is claimed", async () => {
+  const ns = uniqueNs("wfparams");
+  const version = await deployAndPromote(ns, "shop", {
+    code: WORKER_CODE,
+    workflows: [
+      { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+    ],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  const instanceId = "missing-params";
+
+  await withServiceStopped("scheduler", async () => {
+    const created = await gatewayFetch(ns, `/shop/create?id=${instanceId}`);
+    await readIntegrationJson(created, 200, "workflow response");
+    redisWorkflowStateHSet(ns, workflowKey, instanceId, [
+      "paramsRef",
+      "missing-params-payload",
+    ]);
+
+    const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
+    assert.equal(tick.status, 500, tick.body);
+    assert.equal(responseJson(tick).error, "workflow_payload_missing");
+    assert.equal(redisWorkflowStateHGet(ns, workflowKey, instanceId, "status"), "queued");
+    assert.equal(redisWorkflowStateHGet(ns, workflowKey, instanceId, "runToken"), "");
   });
 });
 

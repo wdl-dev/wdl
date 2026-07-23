@@ -22,6 +22,9 @@ function actor(env = {}) {
         harness.aborts.push({ name, reason });
         harness.abortReject?.(reason);
       },
+      delete(/** @type {string} */ name) {
+        harness.deletedFacets.push(name);
+      },
     },
   };
   return new WdlDoHostActor(ctx, { ENV: "test", ...env });
@@ -173,16 +176,55 @@ test("DO host actor: stale initial owner fence does not write the object registr
     registryStarted = true;
   };
 
+  const request = invoke({
+    ns: "tenant",
+    worker: "chat",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+  });
   await assert.rejects(
-    host.dispatchWithFence(invoke({
-      doStorageId: "do_0123456789abcdef0123456789abcdef",
-    }), () => new Response("should not run")),
+    host.dispatchWithFence(request, () => new Response("should not run")),
     /owner generation is stale/
   );
 
   assert.equal(harness.assertCalls, 1);
+  assert.equal(
+    /** @type {{ storageScope?: unknown }} */ (harness.assertArguments[0].options).storageScope,
+    request
+  );
   assert.equal(registryStarted, false);
   assert.deepEqual(harness.remembered, []);
+});
+
+test("DO host actor: delete-storage validates owner and active storage in one scoped assertion", async () => {
+  const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  const request = invoke({
+    ns: "tenant",
+    worker: "chat",
+    workerId: "tenant:chat:v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+  });
+  const owner = {
+    ...request.owner,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  harness.actorInvokes = [request];
+  harness.assertResponses = [owner];
+  host.facetNames.add("Room:alice");
+  host.registeredObjectMembers.add("Room:alice");
+
+  const response = await host.fetch(new Request("http://actor.test/delete-storage", {
+    method: "POST",
+  }));
+
+  await assertJsonResponse(response, 200, { ok: true });
+  assert.equal(harness.assertCalls, 1);
+  assert.equal(
+    /** @type {{ storageScope?: unknown }} */ (harness.assertArguments[0].options).storageScope,
+    request
+  );
+  assert.deepEqual(harness.deletedFacets, ["Room:alice"]);
+  assert.equal(host.facetNames.has("Room:alice"), false);
+  assert.equal(host.registeredObjectMembers.has("Room:alice"), false);
 });
 
 test("DO host actor: registry delay is re-fenced before tenant dispatch", async () => {

@@ -10,7 +10,10 @@ import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
 /**
  * @typedef {{
  *   assertResponses: any[],
+ *   assertArguments: Array<{ owner: unknown, options: unknown }>,
+ *   actorInvokes: any[],
  *   remembered: any[],
+ *   deletedFacets: string[],
  *   aborts: any[],
  *   draining: boolean,
  *   inFlight: number,
@@ -29,7 +32,10 @@ const doActorGlobal = globalThis;
 /** @type {DoHostActorHarnessState} */
 const DO_ACTOR_TEST_STATE = {
   assertResponses: [],
+  assertArguments: [],
+  actorInvokes: [],
   remembered: [],
+  deletedFacets: [],
   aborts: [],
   draining: false,
   inFlight: 0,
@@ -77,7 +83,11 @@ export function buildFacetName(invoke) {
 export function buildAlarmRequest() { throw new Error("unexpected alarm request"); }
 export function buildForwardRequest() { throw new Error("unexpected forward request"); }
 export function normalizeDoConnectRequest() { throw new Error("unexpected connect normalize"); }
-export async function readLocalActorInvokeRequest() { throw new Error("unexpected actor request read"); }
+export async function readLocalActorInvokeRequest() {
+  const next = globalThis.__doActorTestState.actorInvokes.shift();
+  if (!next) throw new Error("missing actor invoke request");
+  return next;
+}
 `);
 
 const ownerRegistryUrl = moduleDataUrl(`
@@ -88,7 +98,8 @@ export async function assertCurrentOwner() {
   if (!next) throw new Error("missing assertCurrentOwner response");
   return await next;
 }
-export async function assertCurrentOwnerWithLeaseBudget() {
+export async function assertCurrentOwnerWithLeaseBudget(_env, ownerFence, options) {
+  globalThis.__doActorTestState.assertArguments.push({ owner: ownerFence, options });
   const owner = await assertCurrentOwner();
   return {
     owner,
@@ -147,7 +158,10 @@ export function doHostActorHarnessState() {
 export function resetDoHostActorHarness() {
   const state = DO_ACTOR_TEST_STATE;
   state.assertResponses = [];
+  state.assertArguments = [];
+  state.actorInvokes = [];
   state.remembered = [];
+  state.deletedFacets = [];
   state.aborts = [];
   state.draining = false;
   state.inFlight = 0;

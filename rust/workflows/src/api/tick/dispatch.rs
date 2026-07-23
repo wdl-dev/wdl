@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::time::now_ms;
 
 use crate::{
@@ -81,6 +82,9 @@ redis.call("SREM", KEYS[4], ARGV[7])
 redis.call("ZREM", KEYS[5], ARGV[7])
 return 1
 "#;
+
+static COMMIT_RUNTIME_TERMINAL: StaticRedisScript =
+    StaticRedisScript::new(COMMIT_RUNTIME_TERMINAL_SCRIPT);
 
 pub(super) enum RuntimeCommitOutcome {
     Completed,
@@ -281,7 +285,7 @@ async fn run_terminal_commit(
 ) -> WorkflowResult<i64> {
     eval_script(
         app,
-        COMMIT_RUNTIME_TERMINAL_SCRIPT,
+        &COMMIT_RUNTIME_TERMINAL,
         &commit.keys(),
         &commit.args(),
     )
