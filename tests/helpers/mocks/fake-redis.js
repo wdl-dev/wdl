@@ -275,6 +275,28 @@ export function createFakeRedisClient(state, options = {}) {
         hash: { ...(state.hashes.get(hashKey) || {}) },
       };
     },
+    /** @param {string} namespacesKey @param {string} hashKey @param {string} setKey */
+    async sMembersHGetAllAndSMembers(namespacesKey, hashKey, setKey) {
+      expireIfNeeded(state, namespacesKey, options);
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, setKey, options);
+      state.commands.push(["sMembersHGetAllAndSMembers", namespacesKey, hashKey, setKey]);
+      return {
+        namespaces: [...(state.sets.get(namespacesKey) || new Set())],
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+        members: [...(state.sets.get(setKey) || new Set())],
+      };
+    },
+    /** @param {string} hashKey @param {string} setKey */
+    async hGetAllAndSMembers(hashKey, setKey) {
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, setKey, options);
+      state.commands.push(["hGetAllAndSMembers", hashKey, setKey]);
+      return {
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+        members: [...(state.sets.get(setKey) || new Set())],
+      };
+    },
     /** @param {string} key @param {Record<string, string>} fields */
     async hSet(key, fields) {
       expireIfNeeded(state, key, options);
@@ -428,6 +450,24 @@ export function createFakeRedisSession(state, options = {}) {
         expireIfNeeded(state, key, options);
         return state.strings.get(key) ?? null;
       });
+    },
+    /** @param {string[]} getKeys @param {Array<[string, string]>} hgetPairs */
+    async getManyAndHGetMany(getKeys, hgetPairs) {
+      state.commands.push([
+        "getManyAndHGetMany",
+        [...getKeys],
+        hgetPairs.map(([key, field]) => [key, field]),
+      ]);
+      return {
+        values: getKeys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return state.strings.get(key) ?? null;
+        }),
+        fields: hgetPairs.map(([key, field]) => {
+          expireIfNeeded(state, key, options);
+          return hashField(state, key, field);
+        }),
+      };
     },
     /** @param {string} key */
     async getWithTime(key) {

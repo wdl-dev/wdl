@@ -21,7 +21,8 @@ Gateway has three dispatch branches:
   route lookup outage, or DB 0 `FLUSHALL` recovery work. Auth and most control
   operations still depend on Redis and fail closed when their own Redis state is
   unavailable.
-- `<ns>.<PLATFORM_DOMAIN>/<worker>/<path>`: subdomain route lookup from `routes:<ns>`.
+- `<ns>.<PLATFORM_DOMAIN>/<worker>/<path>`: subdomain route lookup from
+  `routes:<ns>`, excluding workers in `platform-domain-disabled:<ns>`.
 - Pattern hosts: declared-host gate from `declared-hosts`, then lookup from
   `patterns:<host>` with longest-prefix slot matching.
 
@@ -60,9 +61,11 @@ routing cache:
 - Every request starts by normalizing and lowercasing the URL host. The `ADMIN_HOST`
   branch bypasses route Redis state and forwards to control/auth through
   `env.CONTROL.fetch()`.
-- Subdomain routing first rejects reserved namespaces, then checks `namespaces` and
-  `routes:<ns>`. The leading worker segment is stripped before forwarding to runtime, so
-  tenant code sees the path after the worker name.
+- Subdomain routing first rejects reserved namespaces, then checks `namespaces`,
+  `routes:<ns>`, and the explicit `platform-domain-disabled:<ns>` opt-out set. The
+  leading worker segment is stripped before forwarding to runtime, so tenant code sees
+  the path after the worker name. Pattern routing remains active for an opted-out
+  worker.
 - Pattern routing first checks `declared-hosts`, then reads `patterns:<host>` and
   chooses the longest matching path slot. The gate answers only "is this host declared
   by any namespace"; it does not assign host ownership. Ownership and conflict checks
@@ -93,6 +96,8 @@ Gateway reads:
 namespaces               Set, active namespace gate
 declared-hosts           Set, custom/pattern hosts declared by any namespace
 routes:<ns>              Hash, worker name -> active version
+platform-domain-disabled:<ns>
+                         Set, workers hidden from the platform-domain branch
 patterns:<host>          Hash, path slot -> v2 tab-separated projection
 ```
 

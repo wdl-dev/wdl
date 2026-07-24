@@ -17,6 +17,7 @@ import {
   doStorageIdKey,
   nsHostsKey,
   patternsKey,
+  platformDomainDisabledKey,
   routesKey,
 } from "shared-worker-contract";
 import { workerSecretsKey } from "shared-secret-keys";
@@ -94,6 +95,7 @@ export function stageWorkerDelete(multi, { collected, channels }) {
   if (collected.activeVersion) {
     multi.hDel(routesKey(ns), name);
   }
+  multi.sRem(platformDomainDisabledKey(ns), name);
   if (collected.hostsLosingNsOwnership.length) {
     multi.sRem(nsHostsKey(ns), collected.hostsLosingNsOwnership);
   }

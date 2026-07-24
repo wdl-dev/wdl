@@ -31,6 +31,7 @@ set explicitly.
 
 ```text
 routes:<ns>                     Hash, { workerName -> activeVersion }
+platform-domain-disabled:<ns>   Set, active workers hidden from platform-domain routing
 namespaces                      Set, namespaces with at least one active worker
 workers:<ns>                    Set, worker names with worker-owned lifecycle state
 worker:<ns>:<name>:next_version String, monotonic version counter, survives delete
@@ -86,13 +87,17 @@ definitions-only workers are intentionally listed and whole-deletable.
 
 ## Route And Host Projection
 
-Subdomain routing reads `routes:<ns>`. Pattern routing first checks `declared-hosts`,
-then reads `patterns:<host>` and uses the slot value's embedded `version` to construct
-`x-worker-id` without consulting `routes:<ns>`. Pattern slot values are compact
+Subdomain routing reads `routes:<ns>` and filters the explicit
+`platform-domain-disabled:<ns>` opt-out set. The active version remains in
+`routes:<ns>` so lifecycle, binding, and Workflows readers keep one active-version
+owner. Pattern routing first checks `declared-hosts`, then reads `patterns:<host>` and
+uses the slot value's embedded `version` to construct `x-worker-id` without consulting
+`routes:<ns>`. Pattern slot values are compact
 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` records encoded by
 `shared/route-projection.js`, not JSON. Promote updates both projections in the same
-Redis transaction. Control mutation and delete paths fail closed on a nonempty slot that
-cannot be decoded; they do not treat an unknown owner as an empty slot.
+Redis transaction; the same transaction adds or removes the platform-domain opt-out.
+Control mutation and delete paths fail closed on a nonempty slot that cannot be decoded;
+they do not treat an unknown owner as an empty slot.
 
 `hosts:<ns>` is operator intent: the namespace is allowed to use those hosts.
 `declared-hosts` is a gateway gate for hosts declared by at least one namespace.
@@ -139,8 +144,10 @@ authoritative route or index still names the bundle. Deploy discovery/link prefl
 does not classify absence as `corrupt_meta`; the watched commit remains authoritative
 and rejects a missing pinned service target as `target_drift`.
 
-Routes, crons, queue consumers, bindings, vars, exports, workflow definitions, and asset
-prefixes are version metadata. Rollback is a promote of an older immutable version.
+Routes, platform-domain exposure, crons, queue consumers, bindings, vars, exports,
+workflow definitions, and asset prefixes are version metadata. `workersDev: false`
+records an explicit platform-domain opt-out; absence means enabled. Rollback is a
+promote of an older immutable version.
 
 ## Feature Key Families
 

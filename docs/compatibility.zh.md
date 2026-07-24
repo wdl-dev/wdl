@@ -55,7 +55,7 @@ Bundled workerd 允许 `Fetcher` 和 Durable Object class stub 在不启用 expe
 
 | Surface | 状态 | workerd 提供什么 | WDL 增强 / 新增什么 | 与 Cloudflare 的模型差异 | 未实现 / 缺口 |
 |---|---|---|---|---|---|
-| Wrangler project parsing | Partial | 无。 | WDL CLI 解析支持的 `wrangler.toml` / JSONC 子集：KV、D1、R2、services、DO、workflows、queues、vars、assets、routes。 | 不支持的字段会拒绝，而不是静默模拟。 | 上面的各 binding 行列出了主要拒绝形态。 |
+| Wrangler project parsing | Partial | 无。 | WDL CLI 解析支持的 `wrangler.toml` / JSONC 子集：KV、D1、R2、services、DO、workflows、queues、vars、assets、routes，以及显式 `workers_dev` platform-domain opt-out。 | 不支持的字段会拒绝，而不是静默模拟。 | 上面的各 binding 行列出了主要拒绝形态。 |
 | Worker deploy/promote/delete | Supported | workerd 加载平台提供的 worker。 | Control/auth 负责 bundle commit、route promotion、WATCH/MULTI fence、lifecycle indexes、retained versions、secrets 和 async S3 cleanup intent。 | WDL API/CLI 是管理面。 | 不以 Cloudflare API parity 为目标。 |
 | Log tail | Supported | runtime 中有 worker console output。 | Runtime tail worker 输出 structured logs；control 授权 tail session；redis-proxy 存 bounded streams。 | Tail activation 有时间边界。 | 与 activation 竞争的消息可能丢失。 |
 | Metrics/health | Supported | 服务代码可以暴露 HTTP endpoint。 | Gateway、runtime、d1-runtime、do-runtime、scheduler、workflows、redis-proxy 暴露各自 probes/metrics。 | Metrics socket 按服务拆分。 | Control/auth 没有独立公开 metrics socket。 |

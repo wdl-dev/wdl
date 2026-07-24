@@ -28,6 +28,7 @@ import {
   nsHostsKey,
   parseDeleteLockKind,
   parseVersion,
+  platformDomainDisabledKey,
   workerVersionsKey,
 } from "../../shared/worker-contract.js";
 
@@ -91,6 +92,7 @@ test("route-plane registry key helpers compose and parse canonical keys", () => 
   assert.equal(namespaceFromHostsKey("hosts:demo"), "demo");
   assert.equal(namespaceFromHostsKey("routes:demo"), "");
   assert.equal(nsHostsKey("demo"), "ns-hosts:demo");
+  assert.equal(platformDomainDisabledKey("demo"), "platform-domain-disabled:demo");
   assert.equal(hostDeclarationsKey("app.example"), "host-declarations:app.example");
   assert.equal(ROUTES_CHANNEL, "routes:invalidate");
   assert.equal(ROUTES_FLUSH_CHANNEL, "routes:flush");

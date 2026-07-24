@@ -36,8 +36,8 @@ Worker lifecycle：
 |---|---|---|
 | `GET` | `/ns/<ns>/workers` | 列出有 namespace-owned state 的 worker，包括 deploy-only、active、secret-only 和 workflow-definitions-only worker；每一项都会返回 `hasSecrets` 和 `hasWorkflowDefs`。 |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | 列出 retained versions 和 active status。 |
-| `POST` | `/ns/<ns>/worker/<name>/deploy` | 从 shorthand code 或完整 module manifest 创建新的 immutable version；routes、crons、queue consumers、service refs、platform refs、assets、vars、bindings 和 `exports` 都是 version metadata。Python modules 和上游 experimental compatibility flags 会在 commit 前被拒绝。 |
-| `POST` | `/ns/<ns>/worker/<name>/promote` | 通过 WATCH/MULTI routing path promote `{"version":"vN"}`。Host declaration 失败是 403；live pattern conflict 是 409；transaction contention 耗尽是 503。 |
+| `POST` | `/ns/<ns>/worker/<name>/deploy` | 从 shorthand code 或完整 module manifest 创建新的 immutable version；routes、`workersDev`、crons、queue consumers、service refs、platform refs、assets、vars、bindings 和 `exports` 都是 version metadata，201 响应也会回显解析后的 `workersDev`。Python modules 和上游 experimental compatibility flags 会在 commit 前被拒绝。 |
+| `POST` | `/ns/<ns>/worker/<name>/promote` | 通过 WATCH/MULTI routing path promote `{"version":"vN"}`。成功响应会保留 `platformDomain` 和 `workersDev`，同时以启用时的 `urls.platform` 和 `urls.routes[]` 中每条 active pattern 对应的 URL hint 返回 canonical URL hint；每条 hint 按 operator 原始 pattern 拼出，因此 prefix route 会保留尾部 `*`。Host declaration 失败是 403；live pattern conflict 是 409；transaction contention 耗尽是 503。 |
 | `DELETE` | `/ns/<ns>/worker/<name>/versions/<version>` | 在 active-route、service-ref、lifecycle 和 delete-lock blocker 全部通过后删除一个 retained non-active version。Referrer redaction 按 principal 决定。 |
 | `POST` | `/ns/<ns>/worker/<name>/delete` | Whole-worker delete。`?dry_run=1` 只返回 computed impact 和 blockers，不写入。Redaction 与 single-version delete 一致。 |
 

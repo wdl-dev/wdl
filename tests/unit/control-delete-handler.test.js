@@ -683,6 +683,11 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
   ));
   assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
     call[0] === "SREM" &&
+    call[1] === "platform-domain-disabled:demo" &&
+    call[2] === "api"
+  ));
+  assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
+    call[0] === "SREM" &&
     call[1] === "workers:demo" &&
     call[2] === "api"
   ));

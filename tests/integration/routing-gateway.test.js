@@ -91,6 +91,70 @@ test("pattern branch: custom host + path reach the worker, path not stripped", a
   assert.equal(body.path, "/some/path");
 });
 
+test("workersDev=false keeps pattern routing active while disabling the platform URL", async () => {
+  const ns = uniqueNs("gw-workers-dev");
+  const host = "workers-dev.workers.example";
+  await adminPost(`/ns/${ns}/hosts`, { hosts: [host] });
+
+  const deployV1 = await adminPost(`/ns/${ns}/worker/app/deploy`, {
+    ...echoWorker("v1"),
+    routes: [`${host}/*`],
+  });
+  assertStatus(deployV1, 201, "default workersDev deploy");
+  const promoteV1 = await adminPost(`/ns/${ns}/worker/app/promote`, {
+    version: deployV1.json.version,
+  });
+  assertStatus(promoteV1, 200, "default workersDev promote");
+  assert.equal(promoteV1.json.workersDev, true);
+  assert.deepEqual(promoteV1.json.urls, {
+    platform: `https://${ns}.workers.local/app/`,
+    routes: [`https://${host}/*`],
+  });
+  assert.equal(responseJson(await fetchWithHost(host, "/path")).tag, "v1");
+  assert.equal(responseJson(await fetchWithHost(`${ns}.workers.local`, "/app/path")).tag, "v1");
+
+  const deployV2 = await adminPost(`/ns/${ns}/worker/app/deploy`, {
+    ...echoWorker("v2"),
+    routes: [`${host}/*`],
+    workersDev: false,
+  });
+  assertStatus(deployV2, 201, "workersDev=false deploy");
+  const promoteV2 = await adminPost(`/ns/${ns}/worker/app/promote`, {
+    version: deployV2.json.version,
+  });
+  assertStatus(promoteV2, 200, "workersDev=false promote");
+  assert.equal(promoteV2.json.workersDev, false);
+  assert.deepEqual(promoteV2.json.urls, {
+    routes: [`https://${host}/*`],
+  });
+
+  await delay(100);
+  assert.equal(responseJson(await fetchWithHost(host, "/path")).tag, "v2");
+  assertStatus(
+    await fetchWithHost(`${ns}.workers.local`, "/app/path"),
+    404,
+    "disabled platform-domain fetch"
+  );
+
+  const deployV3 = await adminPost(`/ns/${ns}/worker/app/deploy`, {
+    ...echoWorker("v3"),
+  });
+  assertStatus(deployV3, 201, "restored workersDev deploy");
+  const promoteV3 = await adminPost(`/ns/${ns}/worker/app/promote`, {
+    version: deployV3.json.version,
+  });
+  assertStatus(promoteV3, 200, "restored workersDev promote");
+  assert.equal(promoteV3.json.workersDev, true);
+  assert.deepEqual(promoteV3.json.urls, {
+    platform: `https://${ns}.workers.local/app/`,
+    routes: [],
+  });
+
+  await delay(100);
+  assert.equal(responseJson(await fetchWithHost(`${ns}.workers.local`, "/app/path")).tag, "v3");
+  assertStatus(await fetchWithHost(host, "/path"), 404, "removed pattern route");
+});
+
 test("pattern branch: runtime-looking paths remain tenant fetch paths", async () => {
   const ns = uniqueNs("gw-internal");
   const host = "internal.workers.example";

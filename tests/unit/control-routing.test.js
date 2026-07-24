@@ -138,6 +138,66 @@ test("promoteWithRoutes removes queue consumer discovery index entries for remov
   ));
 });
 
+test("promoteWithRoutes toggles platform-domain routing without hiding the active version", async () => {
+  const redis = makeRedis();
+  const routes = [
+    {
+      host: "app.example",
+      slot: "/api/*",
+      kind: "prefix",
+      value: "/api/",
+    },
+    {
+      host: "app.example",
+      slot: "/mcp",
+      kind: "exact",
+      value: "/mcp",
+    },
+  ];
+  seedBundle(redis, "v1", { routes, workersDev: false });
+  seedBundle(redis, "v2", { routes: [] });
+  redis.state.sets.set("hosts:demo", new Set(["app.example"]));
+
+  const disabled = await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  assert.equal(disabled.workersDev, false);
+  // Prefix routes keep the operator's trailing wildcard; exact routes do not
+  // gain one.
+  assert.deepEqual(disabled.routeUrls, [
+    "https://app.example/api/*",
+    "https://app.example/mcp",
+  ]);
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+  assert.equal(redis.state.sets.get("platform-domain-disabled:demo")?.has("worker"), true);
+
+  const enabled = await promoteWithRoutes(redis, "demo", "worker", "v2");
+
+  assert.equal(enabled.workersDev, true);
+  assert.deepEqual(enabled.routeUrls, []);
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v2");
+  assert.equal(redis.state.sets.get("platform-domain-disabled:demo")?.has("worker") ?? false, false);
+});
+
+test("promoteWithRoutes rejects invalid persisted workersDev metadata", async () => {
+  /** @type {Array<[unknown, string]>} */
+  const cases = [
+    ["false", "corrupt_meta"],
+    [false, "workers_dev_requires_routes"],
+  ];
+  for (const [workersDev, code] of cases) {
+    const redis = makeRedis();
+    seedBundle(redis, "v1", { workersDev });
+    await assert.rejects(
+      promoteWithRoutes(redis, "demo", "worker", "v1"),
+      (err) => {
+        assertRoutingErrorShape(err, code === "corrupt_meta" ? 500 : 400, code);
+        return true;
+      }
+    );
+    assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+  }
+});
+
 for (const [label, rawMeta] of [
   ["missing", null],
   ["empty", ""],
@@ -741,6 +801,29 @@ test("bumpActiveAndPromote batches pattern projection reads across hosts", async
     ),
     false
   );
+});
+
+test("bumpActiveAndPromote preserves the platform-domain opt-out", async () => {
+  const redis = makeRedis();
+  const routes = [{
+    host: "app.example",
+    slot: "/*",
+    kind: "prefix",
+    value: "/",
+  }];
+  seedBundle(redis, "v1", { routes, workersDev: false });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.hashes.set("patterns:app.example", {
+    "/*": patternProjection("demo", "worker", "v1", "prefix", "/"),
+  });
+  redis.state.sets.set("hosts:demo", new Set(["app.example"]));
+  redis.state.sets.set("platform-domain-disabled:demo", new Set(["worker"]));
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v2");
+  assert.equal(redis.state.sets.get("platform-domain-disabled:demo")?.has("worker"), true);
 });
 
 test("bumpActiveAndPromote retries when active changes before source metadata read", async () => {

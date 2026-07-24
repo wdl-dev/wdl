@@ -65,17 +65,18 @@ test("resolveNamespaceRoutes fills the gate and route cache in one cold read", a
   /** @type {unknown[][]} */
   const calls = [];
   const redis = {
-    /** @param {string} setKey @param {string} hashKey */
-    async sMembersAndHGetAll(setKey, hashKey) {
-      calls.push(["sMembersAndHGetAll", setKey, hashKey]);
+    /** @param {string} namespacesKey @param {string} hashKey @param {string} setKey */
+    async sMembersHGetAllAndSMembers(namespacesKey, hashKey, setKey) {
+      calls.push(["sMembersHGetAllAndSMembers", namespacesKey, hashKey, setKey]);
       return {
-        members: ["demo"],
+        namespaces: ["demo"],
         hash: { app: "v3" },
+        members: [],
       };
     },
-    /** @param {string} key */
-    async hGetAll(key) {
-      calls.push(["hGetAll", key]);
+    /** @param {string} hashKey @param {string} setKey */
+    async hGetAllAndSMembers(hashKey, setKey) {
+      calls.push(["hGetAllAndSMembers", hashKey, setKey]);
       throw new Error("unexpected route reload");
     },
   };
@@ -89,7 +90,80 @@ test("resolveNamespaceRoutes fills the gate and route cache in one cold read", a
   assert.equal(hot.known, true);
   assert.equal(hot.cacheHit, true);
   assert.equal(hot.routes, cold.routes);
-  assert.deepEqual(calls, [["sMembersAndHGetAll", "namespaces", "routes:demo"]]);
+  assert.deepEqual(calls, [
+    ["sMembersHGetAllAndSMembers", "namespaces", "routes:demo", "platform-domain-disabled:demo"],
+  ]);
+});
+
+test("resolveNamespaceRoutes excludes platform-domain opt-outs from the same cold snapshot", async () => {
+  const { resolveNamespaceRoutes } = await loadGatewayRuntime();
+  /** @type {unknown[][]} */
+  const calls = [];
+  const redis = {
+    /** @param {string} namespacesKey @param {string} hashKey @param {string} setKey */
+    async sMembersHGetAllAndSMembers(namespacesKey, hashKey, setKey) {
+      calls.push(["sMembersHGetAllAndSMembers", namespacesKey, hashKey, setKey]);
+      return {
+        namespaces: ["demo"],
+        hash: { public: "v2", routed: "v4" },
+        members: ["routed"],
+      };
+    },
+    /** @param {string} hashKey @param {string} setKey */
+    async hGetAllAndSMembers(hashKey, setKey) {
+      calls.push(["hGetAllAndSMembers", hashKey, setKey]);
+      throw new Error("unexpected warm-miss reload");
+    },
+  };
+
+  const cold = await resolveNamespaceRoutes(redis, "demo");
+
+  assert.equal(cold.known, true);
+  assert.deepEqual([...cold.routes], [["public", "v2"]]);
+  assert.deepEqual(calls, [
+    ["sMembersHGetAllAndSMembers", "namespaces", "routes:demo", "platform-domain-disabled:demo"],
+  ]);
+});
+
+test("resolveNamespaceRoutes subtracts opt-outs on a warm-cache miss in one round trip", async () => {
+  const { ensureGatewaySubscriber, resolveNamespaceRoutes } = await loadGatewayRuntime();
+  /** @type {unknown[][]} */
+  const calls = [];
+  const redis = {
+    /** @param {string} namespacesKey @param {string} hashKey @param {string} setKey */
+    async sMembersHGetAllAndSMembers(namespacesKey, hashKey, setKey) {
+      calls.push(["sMembersHGetAllAndSMembers", namespacesKey, hashKey, setKey]);
+      return { namespaces: ["demo"], hash: { public: "v2", routed: "v4" }, members: [] };
+    },
+    /** @param {string} hashKey @param {string} setKey */
+    async hGetAllAndSMembers(hashKey, setKey) {
+      calls.push(["hGetAllAndSMembers", hashKey, setKey]);
+      return { hash: { public: "v2", routed: "v4" }, members: ["routed"] };
+    },
+  };
+
+  try {
+    await ensureGatewaySubscriber("redis:6379");
+    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
+    handlers.onConnect();
+
+    // Cold read fills knownNs + routeCache; a per-ns route invalidation drops
+    // only that route cache entry (knownNs stays), so the next read is a
+    // warm-cache miss that must still fold the disabled set into one snapshot.
+    await resolveNamespaceRoutes(redis, "demo");
+    handlers.onMessage("routes:invalidate", new TextEncoder().encode("demo"));
+    const warm = await resolveNamespaceRoutes(redis, "demo");
+
+    assert.equal(warm.known, true);
+    assert.equal(warm.cacheHit, false);
+    assert.deepEqual([...warm.routes], [["public", "v2"]]);
+    assert.deepEqual(calls, [
+      ["sMembersHGetAllAndSMembers", "namespaces", "routes:demo", "platform-domain-disabled:demo"],
+      ["hGetAllAndSMembers", "routes:demo", "platform-domain-disabled:demo"],
+    ]);
+  } finally {
+    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
+  }
 });
 
 test("resolveNamespaceRoutes keeps concurrent cold replies associated with their namespace", async () => {
@@ -97,8 +171,8 @@ test("resolveNamespaceRoutes keeps concurrent cold replies associated with their
   const alpha = Promise.withResolvers();
   const beta = Promise.withResolvers();
   const redis = {
-    /** @param {string} _setKey @param {string} hashKey */
-    async sMembersAndHGetAll(_setKey, hashKey) {
+    /** @param {string} _namespacesKey @param {string} hashKey @param {string} _setKey */
+    async sMembersHGetAllAndSMembers(_namespacesKey, hashKey, _setKey) {
       if (hashKey === "routes:alpha") return await alpha.promise;
       if (hashKey === "routes:beta") return await beta.promise;
       throw new Error(`unexpected route key ${hashKey}`);
@@ -107,9 +181,9 @@ test("resolveNamespaceRoutes keeps concurrent cold replies associated with their
 
   const alphaPending = resolveNamespaceRoutes(redis, "alpha");
   const betaPending = resolveNamespaceRoutes(redis, "beta");
-  beta.resolve({ members: ["alpha", "beta"], hash: { api: "v2" } });
+  beta.resolve({ namespaces: ["alpha", "beta"], hash: { api: "v2" }, members: [] });
   const betaResult = await betaPending;
-  alpha.resolve({ members: ["alpha", "beta"], hash: { app: "v1" } });
+  alpha.resolve({ namespaces: ["alpha", "beta"], hash: { app: "v1" }, members: [] });
   const alphaResult = await alphaPending;
 
   assert.deepEqual([...alphaResult.routes], [["app", "v1"]]);
@@ -121,10 +195,11 @@ test("resolveNamespaceRoutes keeps concurrent cold replies associated with their
 test("resolveNamespaceRoutes ignores a fetched hash for an unknown namespace", async () => {
   const { resolveNamespaceRoutes } = await loadGatewayRuntime();
   const redis = {
-    async sMembersAndHGetAll() {
+    async sMembersHGetAllAndSMembers() {
       return {
-        members: ["other"],
+        namespaces: ["other"],
         hash: { app: "v3" },
+        members: [],
       };
     },
   };
@@ -202,10 +277,10 @@ test("route invalidation prevents an older cold snapshot from restoring stale st
   const firstRead = Promise.withResolvers();
   let reads = 0;
   const redis = {
-    async sMembersAndHGetAll() {
+    async sMembersHGetAllAndSMembers() {
       reads += 1;
       if (reads === 1) return await firstRead.promise;
-      return { members: ["demo"], hash: { app: "v2" } };
+      return { namespaces: ["demo"], hash: { app: "v2" }, members: [] };
     },
   };
 
@@ -215,7 +290,7 @@ test("route invalidation prevents an older cold snapshot from restoring stale st
     handlers.onConnect();
     const pending = resolveNamespaceRoutes(redis, "demo");
     handlers.onMessage("routes:invalidate", new TextEncoder().encode("demo"));
-    firstRead.resolve({ members: ["demo"], hash: { app: "v1" } });
+    firstRead.resolve({ namespaces: ["demo"], hash: { app: "v1" }, members: [] });
 
     const result = await pending;
     assert.equal(result.known, true);
@@ -263,7 +338,7 @@ test("route resolution fails closed after bounded invalidation churn", async () 
   } = await loadGatewayRuntime();
   let reads = 0;
   const redis = {
-    async sMembersAndHGetAll() {
+    async sMembersHGetAllAndSMembers() {
       reads += 1;
       if (reads <= 5) {
         gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers.onMessage(
@@ -271,7 +346,7 @@ test("route resolution fails closed after bounded invalidation churn", async () 
           new TextEncoder().encode("other")
         );
       }
-      return { members: ["demo"], hash: { app: "v1" } };
+      return { namespaces: ["demo"], hash: { app: "v1" }, members: [] };
     },
   };
 

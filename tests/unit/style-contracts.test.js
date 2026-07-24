@@ -323,6 +323,9 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
   for (const file of files) {
     const source = withoutLineComments(readRepoFile(file));
     if (/`routes:\$\{/.test(source)) offenders.push(`${file}: inline routes:<ns> — use routesKey(ns)`);
+    if (/`platform-domain-disabled:\$\{/.test(source)) {
+      offenders.push(`${file}: inline platform-domain-disabled:<ns> — use platformDomainDisabledKey(ns)`);
+    }
     if (/`patterns:\$\{/.test(source)) offenders.push(`${file}: inline patterns:<host> — use patternsKey(host)`);
     if (/`worker-versions:\$\{/.test(source)) {
       offenders.push(`${file}: inline worker-versions: — use workerVersionsKey(ns, worker)`);

@@ -36,6 +36,7 @@ export async function handle({ request, env, ns, name, requestId }) {
       worker: name,
       version: body.version,
       affected_hosts: result.affectedHosts.length,
+      workers_dev: result.workersDev,
     });
     return jsonResponse(200, {
       namespace: ns,
@@ -44,6 +45,13 @@ export async function handle({ request, env, ns, name, requestId }) {
       active: true,
       affectedHosts: result.affectedHosts,
       platformDomain,
+      workersDev: result.workersDev,
+      urls: {
+        ...(result.workersDev
+          ? { platform: `https://${ns}.${platformDomain}/${name}/` }
+          : {}),
+        routes: result.routeUrls,
+      },
     });
   } catch (err) {
     if (err instanceof RoutingError) {

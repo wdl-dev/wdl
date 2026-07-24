@@ -334,6 +334,38 @@ export class RedisClient {
     };
   }
 
+  /** @param {string} namespacesKey @param {string} hashKey @param {string} setKey */
+  async sMembersHGetAllAndSMembers(namespacesKey, hashKey, setKey) {
+    const [namespacesReply, hashReply, membersReply] = await this._execPipeline(
+      "SMEMBERS_HGETALL_SMEMBERS_PIPELINE",
+      [
+        ["SMEMBERS", namespacesKey],
+        ["HGETALL", hashKey],
+        ["SMEMBERS", setKey],
+      ]
+    );
+    return {
+      namespaces: decodeStringArray(/** @type {unknown[] | null} */ (namespacesReply)),
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
+  }
+
+  /** @param {string} hashKey @param {string} setKey */
+  async hGetAllAndSMembers(hashKey, setKey) {
+    const [hashReply, membersReply] = await this._execPipeline(
+      "HGETALL_SMEMBERS_PIPELINE",
+      [
+        ["HGETALL", hashKey],
+        ["SMEMBERS", setKey],
+      ]
+    );
+    return {
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
+  }
+
   /** @param {string} key @param {...RedisHSetArg} rest */
   async hSet(key, ...rest) {
     return /** @type {number} */ (await this._exec(...buildHSetArgs(key, rest)));

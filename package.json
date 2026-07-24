@@ -35,17 +35,17 @@
     "build:third-party-licenses": "node scripts/generate-third-party-license-bundles.mjs"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260723.1",
+    "@cloudflare/workers-types": "5.20260724.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.13.3",
     "esbuild": "^0.28.1",
-    "eslint": "^10.7.0",
+    "eslint": "^10.8.0",
     "globals": "^17.7.0",
     "knip": "^6.27.0",
     "typescript": "^6.0.3",
     "yaml": "^2.9.0"
   },
   "dependencies": {
-    "workerd": "1.20260723.1"
+    "workerd": "1.20260724.1"
   }
 }

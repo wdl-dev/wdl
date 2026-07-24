@@ -391,6 +391,58 @@ test("RedisClient.sMembersAndHGetAll reads a gateway snapshot on one socket", as
   );
 });
 
+test("RedisClient.sMembersHGetAllAndSMembers reads the disabled-set snapshot on one socket", async () => {
+  const socket = makeFakeSocket([
+    bytes(
+      "*1\r\n$4\r\ndemo\r\n" +
+        "*2\r\n$3\r\napp\r\n$2\r\nv3\r\n" +
+        "*1\r\n$3\r\napp\r\n"
+    ),
+  ]);
+  const { connect, state } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+
+  const snapshot = await client.sMembersHGetAllAndSMembers(
+    "namespaces",
+    "routes:demo",
+    "platform-domain-disabled:demo"
+  );
+
+  assert.deepEqual(snapshot, {
+    namespaces: ["demo"],
+    hash: { app: "v3" },
+    members: ["app"],
+  });
+  assert.equal(state.count, 1);
+  assert.equal(
+    decode(socket._writes[0]),
+    "*2\r\n$8\r\nSMEMBERS\r\n$10\r\nnamespaces\r\n" +
+      "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n" +
+      "*2\r\n$8\r\nSMEMBERS\r\n$29\r\nplatform-domain-disabled:demo\r\n"
+  );
+});
+
+test("RedisClient.hGetAllAndSMembers reads the warm-miss route snapshot on one socket", async () => {
+  const socket = makeFakeSocket([
+    bytes("*2\r\n$3\r\napp\r\n$2\r\nv3\r\n" + "*1\r\n$3\r\napp\r\n"),
+  ]);
+  const { connect, state } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+
+  const snapshot = await client.hGetAllAndSMembers(
+    "routes:demo",
+    "platform-domain-disabled:demo"
+  );
+
+  assert.deepEqual(snapshot, { hash: { app: "v3" }, members: ["app"] });
+  assert.equal(state.count, 1);
+  assert.equal(
+    decode(socket._writes[0]),
+    "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n" +
+      "*2\r\n$8\r\nSMEMBERS\r\n$29\r\nplatform-domain-disabled:demo\r\n"
+  );
+});
+
 test("RedisSession.hGetAllAndGet preserves empty hash and missing string replies", async () => {
   const socket = makeFakeSocket([bytes("*0\r\n$-1\r\n")]);
   const { connect, state } = scriptedConnect(socket);
@@ -405,6 +457,30 @@ test("RedisSession.hGetAllAndGet preserves empty hash and missing string replies
     decode(socket._writes[0]),
     "*2\r\n$7\r\nHGETALL\r\n$24\r\nd1:database:demo:missing\r\n" +
       "*2\r\n$3\r\nGET\r\n$29\r\nd1:database-name:demo:missing\r\n"
+  );
+});
+
+test("RedisSession.getManyAndHGetMany reads locks and hash fields in one write", async () => {
+  const socket = makeFakeSocket([
+    bytes("$-1\r\n$3\r\ntok\r\n$2\r\nv3\r\n$2\r\n{}\r\n"),
+  ]);
+  const { connect, state } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+
+  const snapshot = await client.session((/** @type {any} */ session) =>
+    session.getManyAndHGetMany(
+      ["lock:a", "lock:b"],
+      [["routes:demo", "a"], ["bundle:demo", "__meta__"]]
+    ));
+
+  assert.deepEqual(snapshot, { values: [null, "tok"], fields: ["v3", "{}"] });
+  assert.equal(state.count, 1);
+  assert.equal(
+    decode(socket._writes[0]),
+    "*2\r\n$3\r\nGET\r\n$6\r\nlock:a\r\n" +
+      "*2\r\n$3\r\nGET\r\n$6\r\nlock:b\r\n" +
+      "*3\r\n$4\r\nHGET\r\n$11\r\nroutes:demo\r\n$1\r\na\r\n" +
+      "*3\r\n$4\r\nHGET\r\n$11\r\nbundle:demo\r\n$8\r\n__meta__\r\n"
   );
 });
 

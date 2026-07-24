@@ -69,6 +69,14 @@ export function routesKey(ns) {
   return `routes:${ns}`;
 }
 
+// Workers explicitly hidden from the namespace platform-domain route. The
+// active version remains in routes:<ns> for lifecycle, binding, and Workflows
+// readers; Gateway subtracts this set when it builds its subdomain cache.
+/** @param {string} ns @returns {string} */
+export function platformDomainDisabledKey(ns) {
+  return `platform-domain-disabled:${ns}`;
+}
+
 // Pattern-route hash for a declared custom host: field=path slot, value=compact
 // route projection. Control writes it; gateway reads it for pattern routing.
 /** @param {string} host @returns {string} */

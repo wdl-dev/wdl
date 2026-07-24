@@ -11,7 +11,7 @@ workerd 入口是 `gateway/index.js`。纯 route 解析在 `gateway/dispatch.js`
 Gateway 有三条 dispatch 分支：
 
 - 归一化并转小写后的 host 等于 `env.ADMIN_HOST`：短路到 `env.CONTROL.fetch()`。这个分支不查 namespace 或 route Redis state，因此 admin-host 请求在 route cache 漂移、route lookup outage 或 DB 0 `FLUSHALL` 恢复工作中仍可到达 control。Auth 和大多数 control 操作仍依赖 Redis；相关 Redis state 不可用时会 fail closed。
-- `<ns>.<PLATFORM_DOMAIN>/<worker>/<path>`：从 `routes:<ns>` 做 subdomain route lookup。
+- `<ns>.<PLATFORM_DOMAIN>/<worker>/<path>`：从 `routes:<ns>` 做 subdomain route lookup，并排除 `platform-domain-disabled:<ns>` 中的 worker。
 - Pattern host：先从 `declared-hosts` 做 declared-host gate，再从 `patterns:<host>` 做 longest-prefix slot matching。
 
 解析出的 `{ ns, worker, version }` 会转成 runtime 请求头 `x-worker-id: <ns>:<worker>:<version>` 和 `x-worker-prefix`。字面量 `__system__` route 进入 `RUNTIME_SYSTEM`；普通 tenant namespace 进入 `RUNTIME_USER`。
@@ -33,7 +33,7 @@ Gateway 有三条 dispatch 分支：
 Gateway 没有控制面权威。它只是把 Redis route state 投影成一个小的本地 routing cache：
 
 - 每个请求先归一化并转小写 URL host。`ADMIN_HOST` 分支绕过 route Redis state，通过 `env.CONTROL.fetch()` 转发到 control/auth。
-- Subdomain routing 先拒绝 reserved namespace，再检查 `namespaces` 和 `routes:<ns>`。转发到 runtime 前会去掉最前面的 worker segment，因此 tenant code 看到的是 worker name 后面的 path。
+- Subdomain routing 先拒绝 reserved namespace，再检查 `namespaces`、`routes:<ns>` 和显式 opt-out 的 `platform-domain-disabled:<ns>` set。转发到 runtime 前会去掉最前面的 worker segment，因此 tenant code 看到的是 worker name 后面的 path。Worker opt out 后，pattern routing 仍保持 active。
 - Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>` 并选择最长匹配的 path slot。这个 gate 只回答“这个 host 是否被任意 namespace 声明过”，不分配 host owner。Ownership 和 conflict check 仍由 active `patterns:<host>` projection 编码。
 - Runtime pool selection 是精确匹配：只有字面量 `__system__` route 使用 `RUNTIME_SYSTEM`。未来如果有新的 reserved namespace 要进入 system-runtime，必须显式 opt in；不要改成泛化的 reserved-prefix 匹配。
 - Route 和 pattern cache 是每个 gateway isolate 内的有界性能 cache。它们不是事实来源；Redis 才是当前 route source of truth。
@@ -49,6 +49,8 @@ Gateway 读取：
 namespaces               Set, active namespace gate
 declared-hosts           Set, 任意 namespace 声明过的 custom/pattern host
 routes:<ns>              Hash, worker name -> active version
+platform-domain-disabled:<ns>
+                         Set, 不经 platform-domain 分支公开的 worker
 patterns:<host>          Hash, path slot -> v2 tab-separated projection
 ```
 

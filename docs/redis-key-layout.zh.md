@@ -16,6 +16,7 @@ Local compose、Kubernetes 和 Terraform 都启用这个切分。Rust service �
 
 ```text
 routes:<ns>                     Hash, { workerName -> activeVersion }
+platform-domain-disabled:<ns>   Set, 不经 platform-domain route 公开的 active worker
 namespaces                      Set, 至少有一个 active worker 的 namespace
 workers:<ns>                    Set, 有 worker-owned lifecycle state 的 worker name
 worker:<ns>:<name>:next_version String, 单调 version counter，delete 后保留
@@ -51,7 +52,7 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 
 ## Route 和 Host Projection
 
-Subdomain routing 读取 `routes:<ns>`。Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>`，并直接使用 slot value 中嵌入的 `version` 构造 `x-worker-id`。Pattern slot value 是由 `shared/route-projection.js` 编码的紧凑 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` record。Promote 在同一个 Redis transaction 中更新两套 projection。Control mutation 和 delete 路径遇到无法 decode 的非空 slot 时会 fail closed，不会把未知 owner 当成空槽。
+Subdomain routing 读取 `routes:<ns>`，并过滤显式 opt-out 的 `platform-domain-disabled:<ns>` set。Active version 仍保留在 `routes:<ns>`，因此 lifecycle、binding 和 Workflows reader 继续共用同一个 active-version owner。Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>`，并直接使用 slot value 中嵌入的 `version` 构造 `x-worker-id`。Pattern slot value 是由 `shared/route-projection.js` 编码的紧凑 `v2\t<ns>\t<worker>\t<version>\t<kind>\t<value>` record。Promote 在同一个 Redis transaction 中更新两套 projection，并同时加入或移除 platform-domain opt-out。Control mutation 和 delete 路径遇到无法 decode 的非空 slot 时会 fail closed，不会把未知 owner 当成空槽。
 
 `hosts:<ns>` 是 operator intent：这个 namespace 被允许使用这些 host。`declared-hosts` 是 gateway 对“至少被一个 namespace 声明过的 host”的 gate。`host-declarations:<host>` 记录声明该 host 的 namespace，因此一个 namespace 移除声明时，不会在另一个 namespace 仍声明该 host 的情况下清掉全局 gate。Host reconcile 会在同一个 transaction 中修改源 declaration、派生索引并递增 `declared-hosts:revision`。`POST /reload` 从 `hosts:<ns>` 重建两个声明索引时会 WATCH 该 revision，因此并发 host reconcile 会让 repair 重试，成功后才发布 gateway cache invalidation。`ns-hosts:<ns>` 是 active reverse index：这个 namespace 当前在这些 host 上拥有至少一个 slot。`hosts:<ns>` 应是 superset。Host reconcile 会先用 `ns-hosts:<ns>` 做 fast path，再扫描 `patterns:<host>`。
 
@@ -79,7 +80,7 @@ Pattern `slot` 是原始 wrangler pattern，例如 `/mcp` 或 `/mcp/*`；它也�
 
 Control 把 `__meta__` 写为 JSON object。Control-plane consumer 通过 `control/lib.js::parseBundleMeta()` 解析必需的 bundle metadata；malformed JSON、array 和 scalar 值都会以 `corrupt_meta` fail closed。Bundle 缺失的语义仍由具体 use site 持有：当 projection 变更、唯一性证明、lifecycle cleanup、workflow view 或 environment budget 必须消费 metadata 才能产生正确结果时，只要权威 route 或 index 仍指向该 bundle，缺失就 fail closed。Deploy discovery/link preflight 不把缺失归类为 `corrupt_meta`；watched commit 仍是权威检查，并以 `target_drift` 拒绝缺失的 pinned service target。
 
-Routes、crons、queue consumers、bindings、vars、exports、workflow definitions 和 asset prefixes 都是 version metadata。Rollback 本质上是 promote 一个旧的 immutable version。
+Routes、platform-domain exposure、crons、queue consumers、bindings、vars、exports、workflow definitions 和 asset prefixes 都是 version metadata。`workersDev: false` 表示显式关闭 platform-domain exposure；字段缺失表示启用。Rollback 本质上是 promote 一个旧的 immutable version。
 
 ## Feature Key Families
 

@@ -354,6 +354,27 @@ export class RedisSession {
     ));
     return replies.map(decodeBulk);
   }
+  /**
+   * Read string keys and hash fields in one pipeline flush. `values` aligns to
+   * `getKeys`, `fields` aligns to `hgetPairs`; callers that batch several
+   * independent hash lookups pass them concatenated and slice `fields` back.
+   *
+   * @param {string[]} getKeys
+   * @param {Array<[string, string]>} hgetPairs
+   */
+  async getManyAndHGetMany(getKeys, hgetPairs) {
+    const replies = /** @type {unknown[]} */ (await this._execPipeline(
+      "GET_HGET_PIPELINE",
+      [
+        ...getKeys.map((key) => ["GET", key]),
+        ...hgetPairs.map(([key, field]) => ["HGET", key, field]),
+      ]
+    ));
+    return {
+      values: replies.slice(0, getKeys.length).map(decodeBulk),
+      fields: replies.slice(getKeys.length).map(decodeBulk),
+    };
+  }
   /** @param {string} key */
   async getWithTime(key) {
     const { values, nowMs } = await this.getManyWithTime([key]);

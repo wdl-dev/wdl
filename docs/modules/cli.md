@@ -160,6 +160,7 @@ Supported config surfaces:
 | `[[services]]` | Freezes target namespace, worker, version, and entrypoint at caller deploy time. Cross-namespace `ns` is a WDL extension and requires target opt-in. |
 | `[[platform_bindings]]` | Resolves a `SCREAMING_SNAKE_CASE` symbolic platform export from platform-tier namespaces and freezes it into the caller. |
 | `route` / `routes` | Sent raw to control; control owns pattern grammar and platform-domain rejection. |
+| `workers_dev` | `false` opts the worker out of the `<ns>.<platform-domain>/<worker>/` subdomain route while keeping pattern routes active; requires at least one `route`/`routes` entry. Defaults to enabled. |
 | `[triggers] crons` and `[[triggers.schedules]]` | UTC Cloudflare-compatible crons plus WDL timezone extension. |
 | `[[queues.producers]]` and `[[queues.consumers]]` | Producer and consumer metadata. `max_concurrency` is rejected. |
 | `[[workflows]]` | Same-worker Workflows V2 bindings. |

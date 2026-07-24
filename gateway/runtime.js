@@ -18,6 +18,7 @@ import {
   ROUTES_CHANNEL,
   ROUTES_FLUSH_CHANNEL,
   patternsKey,
+  platformDomainDisabledKey,
   routesKey,
 } from "shared-worker-contract";
 import { isCanonicalPatternHost, sortPatterns } from "gateway-lib";
@@ -84,10 +85,21 @@ export function createGatewayRedis(redisAddr) {
   return new RedisClient(redisAddr, { onCommand: onRedisCommand });
 }
 
-/** @param {string} ns @param {Record<string, unknown>} entries */
-function cacheNsRoutes(ns, entries) {
+/**
+ * Build the namespace subdomain route map, subtracting workers that opted out
+ * of platform-domain routing. Reading both keys in one pipeline is transport
+ * batching, not atomicity: an interleaved promote bumps the route epoch, and
+ * the caller's post-read epoch recheck discards that view.
+ *
+ * @param {string} ns
+ * @param {Record<string, unknown>} entries
+ * @param {Set<string>} disabled
+ */
+function cacheNsRoutes(ns, entries, disabled) {
   const map = new Map(
-    Object.entries(entries).flatMap(([k, v]) => typeof v === "string" ? [[k, v]] : [])
+    Object.entries(entries).flatMap(([k, v]) =>
+      typeof v === "string" && !disabled.has(k) ? [[k, v]] : []
+    )
   );
   setBoundedCacheEntry(routeCache, ns, map, MAX_ROUTE_CACHE_ENTRIES);
   return map;
@@ -143,13 +155,17 @@ export async function resolveNamespaceRoutes(redis, ns) {
   for (let attempt = 0; attempt < MAX_ROUTING_SNAPSHOT_ATTEMPTS; attempt += 1) {
     const epoch = routeStateEpoch;
     if (knownNs === null) {
-      const snapshot = await redis.sMembersAndHGetAll(NAMESPACES_KEY, routesKey(ns));
+      const snapshot = await redis.sMembersHGetAllAndSMembers(
+        NAMESPACES_KEY,
+        routesKey(ns),
+        platformDomainDisabledKey(ns)
+      );
       if (epoch !== routeStateEpoch) continue;
-      knownNs = new Set(snapshot.members);
+      knownNs = new Set(snapshot.namespaces);
       if (!knownNs.has(ns)) return { known: false, routes: null, cacheHit: false };
       return {
         known: true,
-        routes: cacheNsRoutes(ns, snapshot.hash),
+        routes: cacheNsRoutes(ns, snapshot.hash, new Set(snapshot.members)),
         cacheHit: false,
       };
     }
@@ -157,11 +173,11 @@ export async function resolveNamespaceRoutes(redis, ns) {
 
     const cached = getCachedEntry(routeCache, ns);
     if (cached) return { known: true, routes: cached, cacheHit: true };
-    const entries = await redis.hGetAll(routesKey(ns));
+    const snapshot = await redis.hGetAllAndSMembers(routesKey(ns), platformDomainDisabledKey(ns));
     if (epoch !== routeStateEpoch) continue;
     return {
       known: true,
-      routes: cacheNsRoutes(ns, entries),
+      routes: cacheNsRoutes(ns, snapshot.hash, new Set(snapshot.members)),
       cacheHit: false,
     };
   }

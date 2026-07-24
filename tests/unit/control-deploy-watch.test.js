@@ -37,6 +37,7 @@ const CONTROL_DEPLOY_TEST_STATE = {
   assetsToUpload: null,
   putAssetCalls: null,
   putAssetError: null,
+  parsedRoutes: null,
   parsedCrons: null,
   parsedQueueConsumers: null,
   parsedPlatformBindings: null,
@@ -69,6 +70,7 @@ function resetControlDeployTestState() {
   CONTROL_DEPLOY_TEST_STATE.assetsToUpload = null;
   CONTROL_DEPLOY_TEST_STATE.putAssetCalls = null;
   CONTROL_DEPLOY_TEST_STATE.putAssetError = null;
+  CONTROL_DEPLOY_TEST_STATE.parsedRoutes = null;
   CONTROL_DEPLOY_TEST_STATE.parsedCrons = null;
   CONTROL_DEPLOY_TEST_STATE.parsedQueueConsumers = null;
   CONTROL_DEPLOY_TEST_STATE.parsedPlatformBindings = null;
@@ -196,7 +198,9 @@ export class LinkError extends Error {
 `);
 
 const controlTopologyUrl = moduleDataUrl(`
-export function parseRoutes() { return []; }
+export function parseRoutes() {
+  return /** @type {any} */ (globalThis).__controlDeployTestState.parsedRoutes || [];
+}
 export function parseCronList() {
   return /** @type {any} */ (globalThis).__controlDeployTestState.parsedCrons || [];
 }
@@ -732,6 +736,105 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
   }
+});
+
+test("deploy handler persists workersDev=false for a routed worker", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.parsedRoutes = [{
+    host: "app.example",
+    slot: "/*",
+    kind: "prefix",
+    value: "/",
+  }];
+  const session = makeSession();
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      return 1;
+    },
+    async hKeys() {
+      return [];
+    },
+    async hGetAll(/** @type {string} */ key) {
+      return await session.hGetAll(key);
+    },
+    async hGet(/** @type {string} */ key, /** @type {string} */ field) {
+      return await session.hGet(key, field);
+    },
+    async session(/** @type {(iso: any) => Promise<any>} */ fn) {
+      return await fn(session);
+    },
+  };
+
+  const response = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/routed/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+        routes: ["app.example/*"],
+        workersDev: false,
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "routed",
+    requestId: "rid-workers-dev-disabled",
+  });
+
+  assert.equal((await readJsonResponse(response, 201)).workersDev, false);
+  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.workersDev, false);
+});
+
+test("deploy handler validates workersDev before allocating a version", async () => {
+  let incrCalls = 0;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      incrCalls += 1;
+      return 1;
+    },
+  };
+
+  const withoutRoute = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/private/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+        workersDev: false,
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "private",
+    requestId: "rid-workers-dev-no-route",
+  });
+  assert.match(
+    (await readJsonResponse(withoutRoute, 400)).message,
+    /requires at least one route pattern/
+  );
+
+  /** @type {any} */ (globalThis).__controlDeployTestState.parsedRoutes = [{
+    host: "app.example",
+    slot: "/*",
+    kind: "prefix",
+    value: "/",
+  }];
+  const nonBoolean = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/routed/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+        routes: ["app.example/*"],
+        workersDev: "false",
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "routed",
+    requestId: "rid-workers-dev-type",
+  });
+  assert.match((await readJsonResponse(nonBoolean, 400)).message, /must be a boolean/);
+  assert.equal(incrCalls, 0);
 });
 
 test("deploy handler classifies empty service target metadata before commit", async () => {

@@ -101,6 +101,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 | `[[services]]` | 在 caller deploy 时冻结 target namespace、worker、version 和 entrypoint。Cross-namespace `ns` 是 WDL extension，需要 target opt in。 |
 | `[[platform_bindings]]` | 从 platform-tier namespace 解析一个 `SCREAMING_SNAKE_CASE` symbolic platform export，并冻结到 caller。 |
 | `route` / `routes` | 原样发给 control；control 负责 pattern grammar 和 platform-domain rejection。 |
+| `workers_dev` | `false` 让该 worker 退出 `<ns>.<platform-domain>/<worker>/` subdomain route，同时保留 pattern route；要求至少有一条 `route`/`routes`。默认启用。 |
 | `[triggers] crons` 和 `[[triggers.schedules]]` | Cloudflare-compatible UTC cron 加 WDL timezone extension。 |
 | `[[queues.producers]]` 和 `[[queues.consumers]]` | Producer 和 consumer metadata。`max_concurrency` 被拒绝。 |
 | `[[workflows]]` | Same-worker Workflows V2 binding。 |

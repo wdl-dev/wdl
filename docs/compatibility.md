@@ -78,7 +78,7 @@ supported WDL surface.
 
 | Surface | Status | What workerd provides | Stronger / added in WDL | Different from Cloudflare | Not implemented / gaps |
 |---|---|---|---|---|---|
-| Wrangler project parsing | Partial | None. | WDL CLI parses the supported subset of `wrangler.toml` / JSONC: KV, D1, R2, services, DO, workflows, queues, vars, assets, and routes. | Unsupported fields are rejected rather than silently emulated. | Per-binding rows above call out the major rejected shapes. |
+| Wrangler project parsing | Partial | None. | WDL CLI parses the supported subset of `wrangler.toml` / JSONC: KV, D1, R2, services, DO, workflows, queues, vars, assets, routes, and explicit `workers_dev` platform-domain opt-out. | Unsupported fields are rejected rather than silently emulated. | Per-binding rows above call out the major rejected shapes. |
 | Worker deploy/promote/delete | Supported | workerd loads what the platform supplies. | Control/auth own bundle commit, route promotion, WATCH/MULTI fences, lifecycle indexes, retained versions, secrets, and async S3 cleanup intents. | WDL API/CLI is the management surface. | Cloudflare API parity is not the goal. |
 | Log tail | Supported | Worker console output exists in runtime. | Runtime tail worker emits structured logs; control authorizes tail sessions; redis-proxy stores bounded streams. | Tail activation is time-bounded. | Messages racing activation can be dropped. |
 | Metrics/health | Supported | Service code can expose HTTP endpoints. | Gateway, runtime, d1-runtime, do-runtime, scheduler, workflows, and redis-proxy expose their service-specific probes/metrics as documented in module docs. | Metrics sockets are per-service. | Control/auth have no standalone public metrics socket. |

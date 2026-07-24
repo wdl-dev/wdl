@@ -39,6 +39,7 @@ import {
   nsHostsKey,
   parseVersion,
   patternsKey,
+  platformDomainDisabledKey,
   routesKey,
 } from "shared-worker-contract";
 import { errorMessage } from "shared-errors";
@@ -70,13 +71,13 @@ const DEPENDENCY_READ_BATCH_SIZE = 64;
  * @typedef {{ version?: string | null, seq?: unknown }} CronMeta
  * @typedef {{ cronSeq: number, persistSequence: boolean, addedWithPlacement: Array<CronSpec & { id: string, gen: number, slot: number }>, removed: Array<{ id: string, gen: string | number }> }} CronPlan
  * @typedef {{ newQueueConsumers: QueueConsumer[], removedQueueConsumers: QueueConsumer[] }} QueuePlan
- * @typedef {{ newRoutes: RoutePattern[], newCrons: CronSpec[], newQueueConsumers: QueueConsumer[], newExports: ExportSpec[], d1Refs: D1Ref[], outgoingRefs: OutgoingRef[] }} PromoteBundleInputs
+ * @typedef {{ newRoutes: RoutePattern[], workersDev: boolean, newCrons: CronSpec[], newQueueConsumers: QueueConsumer[], newExports: ExportSpec[], d1Refs: D1Ref[], outgoingRefs: OutgoingRef[] }} PromoteBundleInputs
  * @typedef {{ oldRoutes: RoutePattern[], oldQueueConsumers: QueueConsumer[], affectedHosts: Set<string>, hostState: HostState }} PromoteObservedState
  * @typedef {{ newRouteKeys: Set<string>, nsHostsAdd: string[], nsHostsRem: string[], cronKey: string, cronHash: Record<string, string>, cronPlan: CronPlan, queuePlan: QueuePlan }} PromoteStagePlan
  * @typedef {{ log?: (level: string, event: string, fields: Record<string, unknown>) => void, requestId?: string, ns?: string, workerName?: string }} LogContext
  * @typedef {{ iso: RedisIso, multi: RedisMulti, currentVersion: string, newVersion: string, sourceMeta: BundleMeta }} BumpStageContext
  * @typedef {LogContext & { stageBeforeCopy?: (context: BumpStageContext) => void | Promise<void> }} BumpOptions
- * @typedef {{ routes?: RoutePattern[], crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
+ * @typedef {{ routes?: RoutePattern[], workersDev?: boolean, crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
  * @typedef {Record<string, Record<string, string | null | undefined>>} HostState
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
  * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, hGetAllMany: (keys: string[]) => Promise<Array<Record<string, string | null | undefined>>>, hGetAllAndGet: (hashKey: string, stringKey: string) => Promise<{ hash: Record<string, string | null | undefined>, value: string | null | undefined }>, hStrLenMany: (pairs: Array<[string, string]>) => Promise<number[]>, get: (key: string) => Promise<string | null | undefined>, exists: (...keys: string[]) => Promise<number>, existsMany: (keys: string[]) => Promise<boolean[]>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, sMembersMany: (keys: string[]) => Promise<string[][]>, zRange: (key: string, start: number, stop: number) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
@@ -255,20 +256,29 @@ async function retryIfRouteChanged(iso, ns, workerName, version) {
  */
 function routingBundleMeta(ns, workerName, version, raw) {
   // Swallowing would hide old routes/consumers from the diff and leak them.
-  return /** @type {BundleMeta} */ (parseBundleMeta(raw, {
+  const meta = parseBundleMeta(raw, {
     ns,
     worker: workerName,
     version,
     makeError: ({ message }) => new RoutingError(500, "corrupt_meta", message),
-  }));
+  });
+  if (meta.workersDev !== undefined && typeof meta.workersDev !== "boolean") {
+    throw new RoutingError(
+      500,
+      "corrupt_meta",
+      `Corrupt __meta__ for ${ns}/${workerName}/${version}`,
+      { field: "workersDev" }
+    );
+  }
+  return /** @type {BundleMeta} */ (meta);
 }
 
 // Callers stage their own prelude (HDEL removed slots, cron diff,
 // queue-consumer updates, ns-hosts deltas) into the same `multi`.
 // Embedding version in each slot value lets gateway build workerId
 // straight from a pattern hit.
-/** @param {RedisMulti} multi @param {string} ns @param {string} workerName @param {string} newVersion @param {RoutePattern[]} routes @param {Set<string>} affectedHosts */
-function stageVersionFlip(multi, ns, workerName, newVersion, routes, affectedHosts) {
+/** @param {RedisMulti} multi @param {string} ns @param {string} workerName @param {string} newVersion @param {RoutePattern[]} routes @param {boolean} workersDev @param {Set<string>} affectedHosts */
+function stageVersionFlip(multi, ns, workerName, newVersion, routes, workersDev, affectedHosts) {
   for (const r of routes) {
     const value = encodePatternProjection({
       ns, worker: workerName, version: newVersion, kind: r.kind, value: r.value,
@@ -276,6 +286,11 @@ function stageVersionFlip(multi, ns, workerName, newVersion, routes, affectedHos
     multi.hSet(patternsKey(r.host), r.slot, value);
   }
   multi.hSet(routesKey(ns), workerName, newVersion);
+  if (workersDev) {
+    multi.sRem(platformDomainDisabledKey(ns), workerName);
+  } else {
+    multi.sAdd(platformDomainDisabledKey(ns), workerName);
+  }
   for (const h of affectedHosts) multi.publish(PATTERNS_CHANNEL, h);
   multi.publish(ROUTES_CHANNEL, ns);
 }
@@ -609,9 +624,18 @@ async function readPromoteBundleInputs(iso, ns, workerName, newVersion) {
   const meta = routingBundleMeta(ns, workerName, newVersion, metaRaw);
 
   const newRoutes = Array.isArray(meta.routes) ? meta.routes : [];
+  const workersDev = meta.workersDev !== false;
   const newCrons = Array.isArray(meta.crons) ? meta.crons : [];
   const newQueueConsumers = Array.isArray(meta.queueConsumers) ? meta.queueConsumers : [];
   const newExports = Array.isArray(meta.exports) ? meta.exports : [];
+
+  if (!workersDev && newRoutes.length === 0) {
+    throw new RoutingError(
+      400,
+      "workers_dev_requires_routes",
+      "workersDev=false requires at least one route pattern"
+    );
+  }
 
   // Reserved-ns allow-list: deploy-side gate is not the last line of
   // defense — bundles written out-of-band could skip it.
@@ -626,6 +650,7 @@ async function readPromoteBundleInputs(iso, ns, workerName, newVersion) {
 
   return {
     newRoutes,
+    workersDev,
     newCrons,
     newQueueConsumers,
     newExports,
@@ -736,7 +761,15 @@ function stagePromoteWithRoutes(multi, ns, workerName, newVersion, inputs, obser
       multi.hDel(patternsKey(r.host), r.slot);
     }
   }
-  stageVersionFlip(multi, ns, workerName, newVersion, inputs.newRoutes, observed.affectedHosts);
+  stageVersionFlip(
+    multi,
+    ns,
+    workerName,
+    newVersion,
+    inputs.newRoutes,
+    inputs.workersDev,
+    observed.affectedHosts
+  );
   // In the same MULTI as the route flip — closes the half-state where
   // routes:<ns> is set but the gateway's knownNs gate still 404s.
   multi.sAdd(NAMESPACES_KEY, ns);
@@ -760,7 +793,8 @@ function stagePromoteWithRoutes(multi, ns, workerName, newVersion, inputs, obser
 
 // Meta is re-read inside the session under WATCH so a racing hard-delete
 // can't flip `routes:<ns>` onto a bundle about to vanish.
-// Throws RoutingError(400|403|404|409|503). Returns {version, affectedHosts}.
+// Throws RoutingError(400|403|404|409|503). Returns
+// {version, affectedHosts, workersDev, routeUrls}.
 /** @param {RedisClient} redis @param {string} ns @param {string} workerName @param {string} newVersion @param {LogContext} [options] */
 export async function promoteWithRoutes(redis, ns, workerName, newVersion, options = {}) {
   const logContext = { ...options, ns, workerName };
@@ -801,7 +835,14 @@ export async function promoteWithRoutes(redis, ns, workerName, newVersion, optio
     const multi = iso.multi();
     stagePromoteWithRoutes(multi, ns, workerName, newVersion, inputs, observed, plan);
     await multi.exec();
-    return { version: newVersion, affectedHosts: [...observed.affectedHosts] };
+    return {
+      version: newVersion,
+      affectedHosts: [...observed.affectedHosts],
+      workersDev: inputs.workersDev,
+      // `slot` is the operator's original wrangler pattern; `value` drops the
+      // trailing wildcard, so a prefix route would report an exact-looking URL.
+      routeUrls: inputs.newRoutes.map((route) => `https://${route.host}${route.slot}`),
+    };
   });
 }
 
@@ -876,6 +917,7 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     const srcMeta = routingBundleMeta(ns, workerName, currentVersion, srcMetaRaw);
 
     const routes = srcMeta && Array.isArray(srcMeta.routes) ? srcMeta.routes : [];
+    const workersDev = srcMeta.workersDev !== false;
     const queueConsumers = srcMeta && Array.isArray(srcMeta.queueConsumers) ? srcMeta.queueConsumers : [];
     const outgoingRefs = extractOutgoingRefs(srcMeta && srcMeta.bindings, ns);
     const d1Refs = extractD1Refs(srcMeta && srcMeta.bindings);
@@ -937,7 +979,7 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
       });
     }
     multi.copy(srcKey, dstKey, { REPLACE: true });
-    stageVersionFlip(multi, ns, workerName, newVersion, routes, affectedHosts);
+    stageVersionFlip(multi, ns, workerName, newVersion, routes, workersDev, affectedHosts);
     // Idempotent — also heals namespaces drift (manual SREM, recovery scripts).
     multi.sAdd(NAMESPACES_KEY, ns);
 

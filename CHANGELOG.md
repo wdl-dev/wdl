@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added Wrangler `workers_dev = false` support for workers with custom route patterns, allowing pattern routes to remain active while that Worker's platform-domain path returns 404; promote responses now report the active platform and pattern-route URL hints.
+- Updated the bundled workerd and Workers types pins to `1.20260724.1` and `5.20260724.1`.
+
 ## wdl.20260723.1 - 2026-07-23
 
 - Reduced Valkey round trips and request bytes across Durable Object ownership, KV, queues, Workflows, Auth, Gateway routing, and log-tail paths with bounded typed pipelines, cached direct Rust scripts, atomic snapshots, and reusable RESP buffers.

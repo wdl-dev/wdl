@@ -126,6 +126,7 @@ function deployAbortLogContext(details) {
  *   modules: Record<string, unknown>,
  *   assetsToUpload: Array<[string, Uint8Array]> | null,
  *   routes: RoutePattern[],
+ *   workersDev: boolean,
  *   exportsList: ExportEntry[],
  *   platformBindingsList: PlatformBindingRequest[],
  *   crons: CronSpec[],
@@ -266,6 +267,14 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
     throw invalidDeployRequest(errMessage(err));
   }
 
+  if (body.workersDev !== undefined && typeof body.workersDev !== "boolean") {
+    throw invalidDeployRequest("'workersDev' must be a boolean");
+  }
+  const workersDev = body.workersDev !== false;
+  if (!workersDev && routes.length === 0) {
+    throw invalidDeployRequest("'workersDev' set to false requires at least one route pattern");
+  }
+
   // Reserved ns are JSRPC-only unless explicitly whitelisted for routes.
   // promoteWithRoutes re-checks in case a bundle was committed before this gate.
   if (
@@ -338,6 +347,7 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
     modules,
     assetsToUpload: /** @type {Array<[string, Uint8Array]> | null} */ (assetsToUpload),
     routes,
+    workersDev,
     exportsList,
     platformBindingsList,
     crons,
@@ -529,6 +539,7 @@ function prepareCommittedBundle({ deployRequest, ns, name, bindings }) {
       assets: assetsMeta,
     })));
     if (deployRequest.routes.length) prepared.meta.routes = deployRequest.routes;
+    if (!deployRequest.workersDev) prepared.meta.workersDev = false;
     if (deployRequest.crons.length) prepared.meta.crons = deployRequest.crons;
     if (deployRequest.queueConsumers.length) {
       prepared.meta.queueConsumers = deployRequest.queueConsumers;
@@ -926,6 +937,7 @@ export async function handle({ request, env, ns, name, requestId }) {
     name,
     version,
     active: false,
+    workersDev: parsed.deployRequest.workersDev,
     ...(warnings.length ? { warnings } : {}),
   });
 }
@@ -1126,18 +1138,25 @@ async function validateOutgoingRefsForCommit(iso, { outgoingRefs }) {
   // present, no delete in flight. Otherwise we're about to commit a
   // caller version referencing a soon-to-vanish target.
   if (outgoingRefs.length === 0) return;
-  const targetLocks = await iso.getMany(
-    outgoingRefs.map((ref) => deleteLockKey(ref.targetNs, ref.targetWorker))
+  // Lock, active-version, and bundle-meta reads are independent per ref, so
+  // fold them into one pipeline: GET locks + HGET actives + HGET metas in a
+  // single round trip inside the commit WATCH window.
+  /** @type {Array<[string, string]>} */
+  const hashReadPairs = [
+    ...outgoingRefs.map((ref) =>
+      /** @type {[string, string]} */ ([routesKey(ref.targetNs), ref.targetWorker])),
+    ...outgoingRefs.map((ref) =>
+      /** @type {[string, string]} */ ([
+        bundleKey(ref.targetNs, ref.targetWorker, ref.targetVersion),
+        "__meta__",
+      ])),
+  ];
+  const { values: targetLocks, fields: hashReads } = await iso.getManyAndHGetMany(
+    outgoingRefs.map((ref) => deleteLockKey(ref.targetNs, ref.targetWorker)),
+    hashReadPairs
   );
-  const currentActives = await iso.hGetMany(
-    outgoingRefs.map((ref) => [routesKey(ref.targetNs), ref.targetWorker])
-  );
-  const targetMetas = await iso.hGetMany(
-    outgoingRefs.map((ref) => [
-      bundleKey(ref.targetNs, ref.targetWorker, ref.targetVersion),
-      "__meta__",
-    ])
-  );
+  const currentActives = hashReads.slice(0, outgoingRefs.length);
+  const targetMetas = hashReads.slice(outgoingRefs.length);
   for (const [index, ref] of outgoingRefs.entries()) {
     const targetLock = targetLocks[index];
     if (targetLock) {
