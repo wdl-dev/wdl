@@ -273,6 +273,21 @@ function routingBundleMeta(ns, workerName, version, raw) {
   return /** @type {BundleMeta} */ (meta);
 }
 
+// Both activation paths enforce this, so metadata written out-of-band cannot
+// activate a version that no route can reach.
+/** @param {BundleMeta} meta @param {RoutePattern[]} routes @returns {boolean} */
+function assertRoutableWorkersDev(meta, routes) {
+  const workersDev = meta.workersDev !== false;
+  if (!workersDev && routes.length === 0) {
+    throw new RoutingError(
+      400,
+      "workers_dev_requires_routes",
+      "workersDev=false requires at least one route pattern"
+    );
+  }
+  return workersDev;
+}
+
 // Callers stage their own prelude (HDEL removed slots, cron diff,
 // queue-consumer updates, ns-hosts deltas) into the same `multi`.
 // Embedding version in each slot value lets gateway build workerId
@@ -624,18 +639,10 @@ async function readPromoteBundleInputs(iso, ns, workerName, newVersion) {
   const meta = routingBundleMeta(ns, workerName, newVersion, metaRaw);
 
   const newRoutes = Array.isArray(meta.routes) ? meta.routes : [];
-  const workersDev = meta.workersDev !== false;
+  const workersDev = assertRoutableWorkersDev(meta, newRoutes);
   const newCrons = Array.isArray(meta.crons) ? meta.crons : [];
   const newQueueConsumers = Array.isArray(meta.queueConsumers) ? meta.queueConsumers : [];
   const newExports = Array.isArray(meta.exports) ? meta.exports : [];
-
-  if (!workersDev && newRoutes.length === 0) {
-    throw new RoutingError(
-      400,
-      "workers_dev_requires_routes",
-      "workersDev=false requires at least one route pattern"
-    );
-  }
 
   // Reserved-ns allow-list: deploy-side gate is not the last line of
   // defense — bundles written out-of-band could skip it.
@@ -917,7 +924,7 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     const srcMeta = routingBundleMeta(ns, workerName, currentVersion, srcMetaRaw);
 
     const routes = srcMeta && Array.isArray(srcMeta.routes) ? srcMeta.routes : [];
-    const workersDev = srcMeta.workersDev !== false;
+    const workersDev = assertRoutableWorkersDev(srcMeta, routes);
     const queueConsumers = srcMeta && Array.isArray(srcMeta.queueConsumers) ? srcMeta.queueConsumers : [];
     const outgoingRefs = extractOutgoingRefs(srcMeta && srcMeta.bindings, ns);
     const d1Refs = extractD1Refs(srcMeta && srcMeta.bindings);

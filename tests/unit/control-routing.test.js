@@ -741,6 +741,23 @@ test("promoteWithRoutes deduplicates and bounds service dependency metadata prob
   assert.equal(new Set(reads.flat().map(([key]) => key)).size, 65);
 });
 
+test("bumpActiveAndPromote rejects persisted workersDev=false without routes", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", { workersDev: false });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  await assert.rejects(
+    bumpActiveAndPromote(redis, "demo", "worker"),
+    (err) => {
+      assertRoutingErrorShape(err, 400, "workers_dev_requires_routes");
+      return true;
+    }
+  );
+
+  assert.equal(redis.state.hashes.has("worker:demo:worker:v:2"), false);
+});
+
 test("bumpActiveAndPromote also rewrites full queue consumer projection", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", { queueConsumers: [consumerWithoutOptions] });
