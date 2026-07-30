@@ -13,7 +13,7 @@ import {
   normalizeR2ObjectKey,
   r2PhysicalKey,
   r2PhysicalPrefix,
-  stripR2PhysicalPrefix,
+  stripR2PhysicalPrefixWith,
 } from "runtime-r2-utils";
 import {
   applyCustomMetadata,
@@ -230,7 +230,7 @@ async function deleteBatch(bucket, s3, keys, requestMeta = {}) {
       const rawKey = xmlUnescape((/<Key>([^<]*)<\/Key>/.exec(blk) || [])[1] || "?");
       let k = "?";
       try {
-        k = stripR2PhysicalPrefix(bucket.ctx.props, rawKey);
+        k = stripR2PhysicalPrefixWith(prefix, rawKey);
       } catch {}
       return k;
     }).join("; ");
@@ -376,7 +376,7 @@ export class R2Bucket extends WorkerEntrypoint {
         throw new Error(`R2 LIST failed with ${res.status}`);
       }
       const xml = await res.text();
-      const listed = parseListObjects(xml, bucket.ctx.props);
+      const listed = parseListObjects(xml, prefix);
       const include = new Set(Array.isArray(options.include) ? options.include : []);
       if (include.has("httpMetadata") || include.has("customMetadata")) {
         listed.objects = await mapWithConcurrency(

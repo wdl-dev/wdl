@@ -36,142 +36,177 @@ function bytesOf(value) {
   return utf8Encoder.encode(value);
 }
 
-/** @param {ByteArray[]} chunks */
-function concat(chunks) {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
-}
-
 /** @param {number | bigint} value */
-function varint(value) {
-  let n = Number(value);
+function checkedVarint(value) {
+  const n = Number(value);
   if (!Number.isSafeInteger(n) || n < 0) throw new Error("invalid varint");
-  const out = [];
+  return n;
+}
+
+/** @param {number} value */
+function varintByteLength(value) {
+  let n = value;
+  let length = 1;
   while (n >= 0x80) {
-    out.push((n & 0x7f) | 0x80);
     n = Math.floor(n / 0x80);
+    length += 1;
   }
-  out.push(n);
-  return Uint8Array.from(out);
+  return length;
 }
 
 /**
- * @param {number} field
- * @param {number} wireType
- */
-function tag(field, wireType) {
-  return varint(field * 8 + wireType);
-}
-
-/**
- * @param {number} field
- * @param {unknown} value
- */
-function nonEmptyStringField(field, value) {
-  if (value == null || value === "") return [];
-  const bytes = bytesOf(String(value));
-  return [tag(field, WIRE_LEN), varint(bytes.length), bytes];
-}
-
-/**
- * @param {number} field
- * @param {unknown} value
- */
-function stringField(field, value) {
-  if (value == null) return [];
-  const bytes = bytesOf(String(value));
-  return [tag(field, WIRE_LEN), varint(bytes.length), bytes];
-}
-
-/**
- * @param {number} field
- * @param {ArrayBuffer | ArrayBufferView<ArrayBufferLike> | null | undefined} value
- */
-function bytesField(field, value) {
-  if (value == null) return [];
-  const bytes = value instanceof Uint8Array
-    ? value
-    : value instanceof ArrayBuffer
-      ? new Uint8Array(value)
-      : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  return [tag(field, WIRE_LEN), varint(bytes.length), bytes];
-}
-
-/**
- * @param {number} field
- * @param {ByteArray} bytes
- */
-function messageField(field, bytes) {
-  return [tag(field, WIRE_LEN), varint(bytes.length), bytes];
-}
-
-/**
- * @param {number} field
+ * @param {Uint8Array} destination
+ * @param {number} offset
  * @param {number} value
  */
-function doubleField(field, value) {
-  const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setFloat64(0, value, true);
-  return [tag(field, WIRE_FIXED64), bytes];
-}
-
-/**
- * @param {number} field
- * @param {boolean} value
- */
-function boolField(field, value) {
-  return [tag(field, WIRE_VARINT), varint(value ? 1 : 0)];
-}
-
-/**
- * @param {number} field
- * @param {unknown} value
- */
-function valueField(field, value) {
-  return messageField(field, encodeValue(value));
-}
-
-/** @param {unknown} value */
-function encodeParam(value) {
-  const normalized = normalizeD1Param(value);
-  if (normalized == null) return concat(boolField(1, true));
-  if (typeof normalized === "number") return concat(doubleField(2, normalized));
-  if (typeof normalized === "string") return concat(stringField(3, normalized));
-  if (Array.isArray(normalized)) return concat(bytesField(4, Uint8Array.from(normalized)));
-  throw new Error(`D1_TYPE_ERROR: Type '${typeof normalized}' not supported for query wire`);
-}
-
-/** @param {D1QueryStatementInput | null | undefined} statement */
-function encodeStatement(statement) {
-  /** @type {ByteArray[]} */
-  const chunks = [
-    ...nonEmptyStringField(1, statement?.sql),
-  ];
-  for (const param of statement?.params || []) {
-    chunks.push(...messageField(2, encodeParam(param)));
+function writeVarint(destination, offset, value) {
+  let n = value;
+  while (n >= 0x80) {
+    destination[offset++] = (n & 0x7f) | 0x80;
+    n = Math.floor(n / 0x80);
   }
-  return concat(chunks);
+  destination[offset++] = n;
+  return offset;
+}
+
+/**
+ * @typedef {{ kind: "length", value: number, bodyStart: number } | { kind: "double", value: number }} WireMarker
+ * @typedef {number | ByteArray | WireMarker} WirePart
+ */
+
+class WirePlan {
+  constructor() {
+    /** @type {WirePart[]} */
+    this.parts = [];
+    this.byteLength = 0;
+  }
+
+  /** @param {number | bigint} value */
+  appendVarint(value) {
+    const normalized = checkedVarint(value);
+    this.parts.push(normalized);
+    this.byteLength += varintByteLength(normalized);
+  }
+
+  /** @param {ByteArray} bytes */
+  appendBytes(bytes) {
+    this.parts.push(bytes);
+    this.byteLength += bytes.length;
+  }
+
+  /** @param {number} field @param {number | bigint} value */
+  varintField(field, value) {
+    this.appendVarint(field * 8 + WIRE_VARINT);
+    this.appendVarint(value);
+  }
+
+  /** @param {number} field @param {number} value */
+  doubleField(field, value) {
+    this.appendVarint(field * 8 + WIRE_FIXED64);
+    this.parts.push({ kind: "double", value });
+    this.byteLength += 8;
+  }
+
+  /** @param {number} field @param {ByteArray} bytes */
+  bytesField(field, bytes) {
+    this.appendVarint(field * 8 + WIRE_LEN);
+    this.appendVarint(bytes.length);
+    this.appendBytes(bytes);
+  }
+
+  /** @param {number} field @param {unknown} value */
+  stringField(field, value) {
+    if (value == null) return;
+    this.bytesField(field, bytesOf(String(value)));
+  }
+
+  /** @param {number} field @param {unknown} value */
+  nonEmptyStringField(field, value) {
+    if (value == null || value === "") return;
+    this.stringField(field, value);
+  }
+
+  /** @param {number} field */
+  beginMessage(field) {
+    this.appendVarint(field * 8 + WIRE_LEN);
+    /** @type {Extract<WireMarker, { kind: "length" }>} */
+    const marker = {
+      kind: "length",
+      value: 0,
+      bodyStart: this.byteLength,
+    };
+    this.parts.push(marker);
+    return marker;
+  }
+
+  /** @param {Extract<WireMarker, { kind: "length" }>} marker */
+  endMessage(marker) {
+    marker.value = this.byteLength - marker.bodyStart;
+    this.byteLength += varintByteLength(marker.value);
+  }
+
+  /** @returns {Uint8Array<ArrayBuffer>} */
+  finish() {
+    const output = new Uint8Array(this.byteLength);
+    const view = new DataView(output.buffer, output.byteOffset, output.byteLength);
+    let offset = 0;
+    for (const part of this.parts) {
+      if (typeof part === "number") {
+        offset = writeVarint(output, offset, part);
+      } else if (part instanceof Uint8Array) {
+        output.set(part, offset);
+        offset += part.length;
+      } else if (part.kind === "length") {
+        offset = writeVarint(output, offset, part.value);
+      } else {
+        view.setFloat64(offset, part.value, true);
+        offset += 8;
+      }
+    }
+    if (offset !== output.length) throw new Error("D1 query wire size mismatch");
+    return output;
+  }
+}
+
+/** @param {WirePlan} plan @param {unknown} value */
+function appendParam(plan, value) {
+  const normalized = normalizeD1Param(value);
+  if (normalized == null) {
+    plan.varintField(1, 1);
+  } else if (typeof normalized === "number") {
+    plan.doubleField(2, normalized);
+  } else if (typeof normalized === "string") {
+    plan.stringField(3, normalized);
+  } else if (Array.isArray(normalized)) {
+    plan.bytesField(4, Uint8Array.from(normalized));
+  } else {
+    throw new Error(`D1_TYPE_ERROR: Type '${typeof normalized}' not supported for query wire`);
+  }
+}
+
+/** @param {WirePlan} plan @param {D1QueryStatementInput | null | undefined} statement */
+function appendStatement(plan, statement) {
+  plan.nonEmptyStringField(1, statement?.sql);
+  for (const param of statement?.params || []) {
+    const message = plan.beginMessage(2);
+    appendParam(plan, param);
+    plan.endMessage(message);
+  }
 }
 
 /** @param {D1QueryRequestInput | null | undefined} input */
 export function encodeD1QueryRequest(input) {
-  /** @type {ByteArray[]} */
-  const chunks = [
-    ...nonEmptyStringField(1, input?.namespace),
-    ...nonEmptyStringField(2, input?.databaseId),
-    ...nonEmptyStringField(3, input?.binding),
-    ...nonEmptyStringField(4, input?.mode),
-  ];
+  const plan = new WirePlan();
+  plan.nonEmptyStringField(1, input?.namespace);
+  plan.nonEmptyStringField(2, input?.databaseId);
+  plan.nonEmptyStringField(3, input?.binding);
+  plan.nonEmptyStringField(4, input?.mode);
   for (const statement of input?.statements || []) {
-    chunks.push(...messageField(5, encodeStatement(statement)));
+    const message = plan.beginMessage(5);
+    appendStatement(plan, statement);
+    plan.endMessage(message);
   }
-  return concat(chunks);
+  return plan.finish();
 }
 
 class Reader {
@@ -183,18 +218,19 @@ class Reader {
         ? new Uint8Array(bytes)
         : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     this.offset = 0;
+    this.end = this.bytes.length;
   }
 
   /** @returns {boolean} */
   done() {
-    return this.offset >= this.bytes.length;
+    return this.offset >= this.end;
   }
 
   /** @returns {number} */
   readVarint() {
     let shift = 0;
     let out = 0;
-    while (this.offset < this.bytes.length && shift <= 49) {
+    while (this.offset < this.end && shift <= 49) {
       const byte = this.bytes[this.offset++];
       out += (byte & 0x7f) * 2 ** shift;
       if ((byte & 0x80) === 0) return out;
@@ -211,15 +247,41 @@ class Reader {
 
   /** @param {number} length */
   readBytes(length) {
-    if (length < 0 || this.offset + length > this.bytes.length) throw new Error("truncated length-delimited field");
+    if (length < 0 || this.offset + length > this.end) throw new Error("truncated length-delimited field");
     const out = this.bytes.subarray(this.offset, this.offset + length);
     this.offset += length;
     return out;
   }
 
+  /** @returns {number} */
+  readLengthDelimitedEnd() {
+    const length = this.readVarint();
+    const end = this.offset + length;
+    if (end < this.offset || end > this.end) throw new Error("truncated length-delimited field");
+    return end;
+  }
+
   /** @returns {Uint8Array} */
   readLengthDelimited() {
-    return this.readBytes(this.readVarint());
+    const end = this.readLengthDelimitedEnd();
+    return this.readBytes(end - this.offset);
+  }
+
+  /**
+   * @template T
+   * @param {(reader: Reader) => T} decode
+   * @returns {T}
+   */
+  readMessage(decode) {
+    const parentEnd = this.end;
+    const childEnd = this.readLengthDelimitedEnd();
+    this.end = childEnd;
+    try {
+      return decode(this);
+    } finally {
+      this.offset = childEnd;
+      this.end = parentEnd;
+    }
   }
 
   /** @returns {string} */
@@ -244,16 +306,15 @@ class Reader {
       return;
     }
     if (wireType === WIRE_LEN) {
-      this.readLengthDelimited();
+      this.offset = this.readLengthDelimitedEnd();
       return;
     }
     throw new Error(`unsupported wire type ${wireType}`);
   }
 }
 
-/** @param {ArrayBuffer | ArrayBufferView<ArrayBufferLike>} bytes */
-function decodeParam(bytes) {
-  const reader = new Reader(bytes);
+/** @param {Reader} reader */
+function decodeParam(reader) {
   let seen = false;
   let value = null;
   while (!reader.done()) {
@@ -276,9 +337,8 @@ function decodeParam(bytes) {
   return value;
 }
 
-/** @param {ArrayBuffer | ArrayBufferView<ArrayBufferLike>} bytes */
-function decodeStatement(bytes) {
-  const reader = new Reader(bytes);
+/** @param {Reader} reader */
+function decodeStatement(reader) {
   /** @type {D1QueryStatement} */
   const statement = { sql: "", params: [] };
   while (!reader.done()) {
@@ -286,7 +346,7 @@ function decodeStatement(bytes) {
     if (field === 1 && wireType === WIRE_LEN) {
       statement.sql = reader.readString();
     } else if (field === 2 && wireType === WIRE_LEN) {
-      statement.params.push(decodeParam(reader.readLengthDelimited()));
+      statement.params.push(reader.readMessage(decodeParam));
     } else {
       reader.skip(wireType);
     }
@@ -310,7 +370,7 @@ export function decodeD1QueryRequest(bytes) {
     } else if (field === 4 && wireType === WIRE_LEN) {
       out.mode = reader.readString();
     } else if (field === 5 && wireType === WIRE_LEN) {
-      out.statements.push(decodeStatement(reader.readLengthDelimited()));
+      out.statements.push(reader.readMessage(decodeStatement));
     } else {
       reader.skip(wireType);
     }
@@ -318,56 +378,64 @@ export function decodeD1QueryRequest(bytes) {
   return out;
 }
 
-/**
- * @param {string} key
- * @param {unknown} value
- */
-function encodeObjectEntry(key, value) {
-  return concat([
-    ...stringField(1, key),
-    ...valueField(2, value),
-  ]);
-}
-
-/** @param {unknown} value */
-function encodeValue(value) {
-  if (value == null) return concat(boolField(1, true));
-  if (typeof value === "boolean") return concat(boolField(2, value));
+/** @param {WirePlan} plan @param {unknown} value */
+function appendValue(plan, value) {
+  if (value == null) {
+    plan.varintField(1, 1);
+    return;
+  }
+  if (typeof value === "boolean") {
+    plan.varintField(2, value ? 1 : 0);
+    return;
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error("D1 response value contains a non-finite number");
-    return concat(doubleField(3, value));
+    plan.doubleField(3, value);
+    return;
   }
-  if (typeof value === "string") return concat(stringField(4, value));
-  if (value instanceof Uint8Array) return concat(bytesField(5, value));
-  if (value instanceof ArrayBuffer) return concat(bytesField(5, new Uint8Array(value)));
+  if (typeof value === "string") {
+    plan.stringField(4, value);
+    return;
+  }
+  if (value instanceof Uint8Array) {
+    plan.bytesField(5, value);
+    return;
+  }
+  if (value instanceof ArrayBuffer) {
+    plan.bytesField(5, new Uint8Array(value));
+    return;
+  }
   if (ArrayBuffer.isView(value)) {
-    return concat(bytesField(5, new Uint8Array(value.buffer, value.byteOffset, value.byteLength)));
+    plan.bytesField(5, new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    return;
   }
   if (Array.isArray(value)) {
-    /** @type {ByteArray[]} */
-    const chunks = [
-      ...boolField(8, true),
-    ];
-    for (const item of value) chunks.push(...valueField(6, item));
-    return concat(chunks);
+    plan.varintField(8, 1);
+    for (const item of value) {
+      const message = plan.beginMessage(6);
+      appendValue(plan, item);
+      plan.endMessage(message);
+    }
+    return;
   }
   if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    /** @type {ByteArray[]} */
-    const chunks = [
-      ...boolField(9, true),
-    ];
+    plan.varintField(9, 1);
     for (const [key, item] of Object.entries(value)) {
       if (item === undefined) continue;
-      chunks.push(...messageField(7, encodeObjectEntry(key, item)));
+      const entryMessage = plan.beginMessage(7);
+      plan.stringField(1, key);
+      const valueMessage = plan.beginMessage(2);
+      appendValue(plan, item);
+      plan.endMessage(valueMessage);
+      plan.endMessage(entryMessage);
     }
-    return concat(chunks);
+    return;
   }
   throw new Error(`D1 response value type ${Object.prototype.toString.call(value)} is not supported`);
 }
 
-/** @param {ArrayBuffer | ArrayBufferView<ArrayBufferLike>} bytes @returns {[string, unknown]} */
-function decodeObjectEntry(bytes) {
-  const reader = new Reader(bytes);
+/** @param {Reader} reader @returns {[string, unknown]} */
+function decodeObjectEntry(reader) {
   let key = "";
   /** @type {unknown} */
   let value = null;
@@ -376,7 +444,7 @@ function decodeObjectEntry(bytes) {
     if (field === 1 && wireType === WIRE_LEN) {
       key = reader.readString();
     } else if (field === 2 && wireType === WIRE_LEN) {
-      value = decodeValue(reader.readLengthDelimited());
+      value = reader.readMessage(decodeValue);
     } else {
       reader.skip(wireType);
     }
@@ -391,9 +459,8 @@ function assertScalarCompatible(kind) {
   }
 }
 
-/** @param {ArrayBuffer | ArrayBufferView<ArrayBufferLike>} bytes */
-function decodeValue(bytes) {
-  const reader = new Reader(bytes);
+/** @param {Reader} reader */
+function decodeValue(reader) {
   let kind = "unset";
   /** @type {unknown} */
   let value = null;
@@ -426,14 +493,14 @@ function decodeValue(bytes) {
         value = [];
       }
       if (kind !== "array") throw new Error("mixed D1 response value wire kinds");
-      /** @type {unknown[]} */ (value).push(decodeValue(reader.readLengthDelimited()));
+      /** @type {unknown[]} */ (value).push(reader.readMessage(decodeValue));
     } else if (field === 7 && wireType === WIRE_LEN) {
       if (kind === "unset") {
         kind = "object";
         value = {};
       }
       if (kind !== "object") throw new Error("mixed D1 response value wire kinds");
-      const [key, item] = decodeObjectEntry(reader.readLengthDelimited());
+      const [key, item] = reader.readMessage(decodeObjectEntry);
       setDataField(/** @type {Record<string, unknown>} */ (value), key, item);
     } else if (field === 8 && wireType === WIRE_VARINT) {
       reader.readVarint();
@@ -459,10 +526,12 @@ function decodeValue(bytes) {
 
 /** @param {unknown} payload */
 export function encodeD1QueryResponse(payload) {
-  return encodeValue(payload);
+  const plan = new WirePlan();
+  appendValue(plan, payload);
+  return plan.finish();
 }
 
 /** @param {ArrayBuffer | ArrayBufferView<ArrayBufferLike>} bytes */
 export function decodeD1QueryResponse(bytes) {
-  return decodeValue(bytes);
+  return decodeValue(new Reader(bytes));
 }

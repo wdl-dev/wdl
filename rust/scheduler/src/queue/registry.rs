@@ -17,11 +17,10 @@ use crate::{
 use super::{
     Consumer, MAX_BATCH_SIZE_CAP, MAX_BATCH_TIMEOUT_MS, MAX_QUEUE_DELAY_SECONDS, MAX_RETRIES,
     QUEUE_CONSUMER_INDEX_KEY, QUEUE_CONSUMER_SCAN_PATTERN, QUEUE_DELAYED_INDEX_KEY,
-    QUEUE_DELAYED_SCAN_PATTERN, QUEUE_STREAM_INDEX_KEY, QUEUE_STREAM_SCAN_PATTERN,
-    parse_consumer_key, queue_consumer_key, queue_stream_key,
+    QUEUE_DELAYED_SCAN_PATTERN, QUEUE_REDIS_READ_BATCH_SIZE, QUEUE_STREAM_INDEX_KEY,
+    QUEUE_STREAM_SCAN_PATTERN, parse_consumer_key, queue_consumer_key, queue_stream_key,
 };
 
-const QUEUE_RECONCILE_CONSUMER_HASH_BATCH_SIZE: usize = 128;
 const RECONCILE_QUEUE_GROUPS_SCRIPT: &str = r#"
 local results = {}
 for index = 2, #KEYS do
@@ -112,6 +111,13 @@ struct ConsumerResolution {
     invalid_projection: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ConsumerLookup<'a> {
+    pub(crate) stream_key: &'a str,
+    pub(crate) ns: &'a str,
+    pub(crate) queue: &'a str,
+}
+
 fn resolve_consumer_projection(
     ns: &str,
     queue: &str,
@@ -167,23 +173,32 @@ async fn reconcile_queue_groups(
     parse_reconcile_group_reply(reply, stream_keys.len())
 }
 
+fn consumer_hash_pipeline(keys: &[String]) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    for key in keys {
+        pipe.cmd("HGETALL").arg(key);
+    }
+    pipe
+}
+
+async fn load_consumer_hash_batch(
+    state: &AppState,
+    keys: &[String],
+) -> Result<Vec<HashMap<String, String>>, redis::RedisError> {
+    state
+        .redis
+        .with_conn(async |mut conn| consumer_hash_pipeline(keys).query_async(&mut conn).await)
+        .await
+}
+
 pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
     let mut seen = HashSet::new();
     let mut registry_changed = false;
     let mut reconcile_error_count = 0usize;
     let mut first_reconcile_error = None;
     let consumer_keys = indexed_existing_keys(&state, QUEUE_CONSUMER_INDEX_KEY, "hash").await?;
-    for consumer_key_chunk in consumer_keys.chunks(QUEUE_RECONCILE_CONSUMER_HASH_BATCH_SIZE) {
-        let consumer_hashes: Vec<HashMap<String, String>> = state
-            .redis
-            .with_conn(async |mut conn| {
-                let mut pipe = redis::pipe();
-                for key in consumer_key_chunk {
-                    pipe.cmd("HGETALL").arg(key);
-                }
-                pipe.query_async(&mut conn).await
-            })
-            .await?;
+    for consumer_key_chunk in consumer_keys.chunks(QUEUE_REDIS_READ_BATCH_SIZE) {
+        let consumer_hashes = load_consumer_hash_batch(&state, consumer_key_chunk).await?;
         let mut resolved = Vec::with_capacity(consumer_key_chunk.len());
         for (key, hash) in consumer_key_chunk.iter().zip(consumer_hashes) {
             let Some((ns, queue)) = parse_consumer_key(key) else {
@@ -338,6 +353,45 @@ pub(crate) async fn resolve_consumer(
     Ok(resolution.consumer)
 }
 
+pub(crate) async fn resolve_consumer_batch(
+    state: &AppState,
+    lookups: &[ConsumerLookup<'_>],
+) -> SchedulerResult<Vec<Option<Consumer>>> {
+    if lookups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut resolved = Vec::with_capacity(lookups.len());
+    for lookup_chunk in lookups.chunks(QUEUE_REDIS_READ_BATCH_SIZE) {
+        let consumer_keys = lookup_chunk
+            .iter()
+            .map(|lookup| queue_consumer_key(lookup.ns, lookup.queue))
+            .collect::<Vec<_>>();
+        let hashes = load_consumer_hash_batch(state, &consumer_keys).await?;
+        if hashes.len() != lookup_chunk.len() {
+            return Err(SchedulerError::internal_error(
+                "queue consumer hash batch response count mismatch",
+            ));
+        }
+        for (lookup, hash) in lookup_chunk.iter().zip(hashes) {
+            let resolution = resolve_consumer_projection(lookup.ns, lookup.queue, &hash);
+            if resolution.invalid_projection {
+                log(
+                    state,
+                    LogLevel::Warn,
+                    "queue_consumer_projection_invalid",
+                    json!({ "ns": lookup.ns, "queue": lookup.queue }),
+                );
+            }
+            resolved.push((*lookup, resolution));
+        }
+    }
+    write_resolved_consumer_batch(&state.queues, &resolved).await;
+    Ok(resolved
+        .into_iter()
+        .map(|(_, resolution)| resolution.consumer)
+        .collect())
+}
+
 async fn resolve_consumer_with_hash_loader<F, Fut>(
     queues: &QueueState,
     stream_key: &str,
@@ -360,26 +414,55 @@ async fn write_resolved_consumer(
     stream_key: &str,
     consumer: Option<&Consumer>,
 ) {
-    let previous = if let Some(consumer) = consumer {
-        queues
-            .registry
-            .write()
-            .await
-            .insert(stream_key.to_string(), consumer.clone())
-    } else {
-        queues.registry.write().await.remove(stream_key)
+    let registry_changed = {
+        let mut registry = queues.registry.write().await;
+        update_resolved_consumer(&mut registry, stream_key, consumer)
     };
-    let registry_changed = previous.as_ref() != consumer;
     if registry_changed {
         refresh_consumer_streams_for(queues).await;
         queues.delayed_changed.notify_one();
     }
 }
 
+async fn write_resolved_consumer_batch(
+    queues: &QueueState,
+    resolved: &[(ConsumerLookup<'_>, ConsumerResolution)],
+) {
+    let registry_changed = {
+        let mut registry = queues.registry.write().await;
+        let mut changed = false;
+        for (lookup, resolution) in resolved {
+            changed |= update_resolved_consumer(
+                &mut registry,
+                lookup.stream_key,
+                resolution.consumer.as_ref(),
+            );
+        }
+        changed
+    };
+    if registry_changed {
+        refresh_consumer_streams_for(queues).await;
+        queues.delayed_changed.notify_one();
+    }
+}
+
+fn update_resolved_consumer(
+    registry: &mut HashMap<String, Consumer>,
+    stream_key: &str,
+    consumer: Option<&Consumer>,
+) -> bool {
+    let previous = if let Some(consumer) = consumer {
+        registry.insert(stream_key.to_string(), consumer.clone())
+    } else {
+        registry.remove(stream_key)
+    };
+    previous.as_ref() != consumer
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::scheduler_projection_contract;
+    use crate::test_fixtures::{parse_packed_commands, scheduler_projection_contract};
     use std::sync::{Arc as StdArc, Mutex};
 
     fn str_map(items: &[(&str, &str)]) -> HashMap<String, String> {
@@ -429,6 +512,25 @@ mod tests {
                 existing: vec!["queue:demo:jobs:s".to_string()],
                 stale: vec!["queue:demo:old:s".to_string()],
             }
+        );
+    }
+
+    #[test]
+    fn consumer_hash_pipeline_preserves_request_order() {
+        let keys = vec![
+            queue_consumer_key("demo", "a"),
+            queue_consumer_key("demo", "b"),
+            queue_consumer_key("demo", "c"),
+        ];
+        let commands = parse_packed_commands(&consumer_hash_pipeline(&keys).get_packed_pipeline());
+
+        assert_eq!(
+            commands,
+            [
+                ["HGETALL", "queue-consumer:demo:a"],
+                ["HGETALL", "queue-consumer:demo:b"],
+                ["HGETALL", "queue-consumer:demo:c"],
+            ]
         );
     }
 
@@ -597,6 +699,55 @@ mod tests {
         assert_eq!(
             snapshot.as_ref(),
             &vec!["queue:demo:a:s".to_string(), "queue:demo:z:s".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_consumer_batch_updates_registry_and_stream_snapshot_together() {
+        let queues = QueueState::default();
+        let stream_a = queue_stream_key("demo", "a");
+        let stream_b = queue_stream_key("demo", "b");
+        let stale_b = hydrate_consumer("demo", "b", &valid_consumer_hash("old", "v1")).unwrap();
+        queues
+            .registry
+            .write()
+            .await
+            .insert(stream_b.clone(), stale_b);
+        refresh_consumer_streams_for(&queues).await;
+
+        let lookups = [
+            ConsumerLookup {
+                stream_key: &stream_a,
+                ns: "demo",
+                queue: "a",
+            },
+            ConsumerLookup {
+                stream_key: &stream_b,
+                ns: "demo",
+                queue: "b",
+            },
+        ];
+        let resolved = vec![
+            (
+                lookups[0],
+                resolve_consumer_projection("demo", "a", &valid_consumer_hash("fresh", "v2")),
+            ),
+            (
+                lookups[1],
+                resolve_consumer_projection("demo", "b", &HashMap::new()),
+            ),
+        ];
+
+        write_resolved_consumer_batch(&queues, &resolved).await;
+
+        let registry = queues.registry.read().await;
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry[&stream_a].worker_id, "demo:fresh:v2");
+        assert!(!registry.contains_key(&stream_b));
+        drop(registry);
+        assert_eq!(
+            queues.consumer_streams.read().await.as_ref(),
+            &vec![stream_a]
         );
     }
 

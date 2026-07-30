@@ -272,6 +272,9 @@ function mkBundle(meta, files) {
 }
 
 test("bundleToWorkerCode: module + data + wasm + json + text + cjs", () => {
+  const binaryBacking = Uint8Array.of(9, 1, 2, 9, 0, 97, 115, 109, 9);
+  const dataBytes = binaryBacking.subarray(1, 3);
+  const wasmBytes = binaryBacking.subarray(4, 8);
   const meta = {
     mainModule: "worker.js",
     modules: {
@@ -286,8 +289,8 @@ test("bundleToWorkerCode: module + data + wasm + json + text + cjs", () => {
   const code = bundleToWorkerCode(
     mkBundle(meta, {
       "worker.js": enc.encode("export default {}"),
-      "icon.png": new Uint8Array([1, 2]),
-      "lib.wasm": new Uint8Array([0, 97, 115, 109]),
+      "icon.png": dataBytes,
+      "lib.wasm": wasmBytes,
       "config.json": enc.encode('{"k":1}'),
       "readme.txt": enc.encode("hello"),
       "commonjs.cjs": enc.encode("module.exports = 1"),
@@ -303,6 +306,10 @@ test("bundleToWorkerCode: module + data + wasm + json + text + cjs", () => {
   const cjsModule = /** @type {{ cjs: string }} */ (code.modules["commonjs.cjs"]);
   assert.deepEqual(Array.from(dataModule.data), [1, 2]);
   assert.deepEqual(Array.from(wasmModule.wasm), [0, 97, 115, 109]);
+  assert.notEqual(dataModule.data.buffer, binaryBacking.buffer);
+  assert.notEqual(wasmModule.wasm.buffer, binaryBacking.buffer);
+  assert.equal(dataModule.data.buffer.byteLength, dataModule.data.byteLength);
+  assert.equal(wasmModule.wasm.buffer.byteLength, wasmModule.wasm.byteLength);
   assert.deepEqual(jsonModule.json, { k: 1 });
   assert.equal(textModule.text, "hello");
   assert.equal(cjsModule.cjs, "module.exports = 1");

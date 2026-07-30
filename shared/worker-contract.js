@@ -1,8 +1,6 @@
 // Canonical JS contract for immutable worker versions and the control-plane
 // Redis keys and channels shared across in-tree tiers.
 
-const VERSION_RE = /^v([1-9][0-9]*)$/;
-
 /**
  * @param {unknown} n
  * @returns {string}
@@ -20,11 +18,17 @@ export function formatVersion(n) {
  * @returns {number | null}
  */
 export function parseVersion(tag) {
-  if (typeof tag !== "string") return null;
-  const m = tag.match(VERSION_RE);
-  if (!m) return null;
-  const parsed = Number.parseInt(m[1], 10);
-  return Number.isSafeInteger(parsed) ? parsed : null;
+  if (typeof tag !== "string" || tag.length < 2 || tag[0] !== "v" || tag[1] === "0") {
+    return null;
+  }
+  let parsed = 0;
+  for (let i = 1; i < tag.length; i += 1) {
+    const digit = tag.charCodeAt(i) - 0x30;
+    if (digit < 0 || digit > 9) return null;
+    parsed = (parsed * 10) + digit;
+    if (!Number.isSafeInteger(parsed)) return null;
+  }
+  return parsed;
 }
 
 // `v:` infix separates the integer-indexed bundle namespace from sibling

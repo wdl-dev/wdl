@@ -5,6 +5,7 @@
 import { splitSqlStatements } from "./_wdl-sql-splitter.js";
 import { normalizeD1Param } from "./_wdl-d1-params.js";
 import { decodeD1Transport } from "./_wdl-d1-transport.js";
+import { setDataField } from "./_wdl-d1-data-field.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
 const D1_SESSION_CONSTRAINT_FIRST_PRIMARY = "first-primary";
@@ -32,9 +33,26 @@ function normalizeResults(result) {
   if (!("results" in record)) return { ...record, results: [] };
   if (Array.isArray(record.results)) return record;
   const { columns, rows } = /** @type {RawD1Rows} */ (record.results);
+  const normalizedRows = new Array(rows.length);
+  const hasMagicColumn = columns.includes("__proto__");
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const values = rows[rowIndex];
+    /** @type {D1Row} */
+    const row = {};
+    if (hasMagicColumn) {
+      for (let columnIndex = 0; columnIndex < columns.length; columnIndex += 1) {
+        setDataField(row, columns[columnIndex], values[columnIndex]);
+      }
+    } else {
+      for (let columnIndex = 0; columnIndex < columns.length; columnIndex += 1) {
+        row[columns[columnIndex]] = values[columnIndex];
+      }
+    }
+    normalizedRows[rowIndex] = row;
+  }
   return {
     ...record,
-    results: rows.map((row) => Object.fromEntries(columns.map((column, idx) => [column, row[idx]]))),
+    results: normalizedRows,
   };
 }
 

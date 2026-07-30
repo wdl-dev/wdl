@@ -124,3 +124,66 @@ test("generated host wrappers alias legal entrypoint names without declaration c
     assert.ok(new wrapped[name]({}, {}) instanceof userModule[name]);
   }
 });
+
+test("default host wrappers reuse stripping work without sharing request-scoped facades", async () => {
+  const userUrl = moduleDataUrl(`
+    export default {
+      fetch(request, env) {
+        return { env, requestId: env.DB.requestId() };
+      },
+    };
+  `);
+  const cloudflareUrl = moduleDataUrl(`
+    export class WorkerEntrypoint {}
+    export function abortIsolate() {}
+  `);
+  const d1Url = moduleDataUrl(`
+    export class D1Database {
+      constructor(binding, options) {
+        this.binding = binding;
+        this.options = options;
+      }
+      requestId() {
+        return typeof this.options.requestIdProvider === "function"
+          ? this.options.requestIdProvider()
+          : this.options.requestId;
+      }
+    }
+  `);
+  const source = applyModuleReplacements(
+    generateHostBindingWrapperModule("worker.js", ["DB"], [], [], {}, []),
+    [
+      ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
+      ['from "./_wdl-d1-client.js"', `from ${JSON.stringify(d1Url)}`],
+      [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+    ]
+  );
+  const wrapped = await import(moduleDataUrl(source));
+  let internalReads = 0;
+  const rawEnv = { DB: { name: "db" }, PLAIN: "original" };
+  Object.defineProperty(rawEnv, "__WDL_UNUSED__", {
+    enumerable: true,
+    get() {
+      internalReads += 1;
+      return { hidden: true };
+    },
+  });
+
+  const first = wrapped.default.fetch(new Request("https://example.test/", {
+    headers: { "x-request-id": "request-a" },
+  }), rawEnv, {});
+  first.env.PLAIN = "mutated";
+  const second = wrapped.default.fetch(new Request("https://example.test/", {
+    headers: { "x-request-id": "request-b" },
+  }), rawEnv, {});
+
+  assert.equal(internalReads, 1);
+  assert.notEqual(first.env, second.env);
+  assert.notEqual(first.env.DB, second.env.DB);
+  assert.equal(first.requestId, "request-a");
+  assert.equal(second.requestId, "request-b");
+  assert.equal(first.env.__WDL_UNUSED__, undefined);
+  assert.equal(second.env.__WDL_UNUSED__, undefined);
+  assert.equal(second.env.PLAIN, "original");
+});

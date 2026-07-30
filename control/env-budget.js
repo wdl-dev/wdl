@@ -167,17 +167,11 @@ export function estimatedWorkerLoaderEnv({
   return estimated;
 }
 
-/** @param {string} value */
-function hasNonLatin1(value) {
-  for (let i = 0; i < value.length; i += 1) {
-    if (value.charCodeAt(i) > 0xff) return true;
-  }
-  return false;
-}
+const NON_LATIN1_RE = /[\u0100-\uffff]/;
 
 /** @param {string} value */
 function v8TwoByteStringPenalty(value) {
-  if (!hasNonLatin1(value)) return 0;
+  if (!NON_LATIN1_RE.test(value)) return 0;
   return Math.max(0, (2 * value.length) - Buffer.byteLength(value, "utf8"));
 }
 
@@ -186,9 +180,9 @@ function v8StringPenalty(value) {
   if (typeof value === "string") return v8TwoByteStringPenalty(value);
   if (!value || typeof value !== "object") return 0;
   let bytes = 0;
-  for (const [key, child] of Object.entries(value)) {
+  for (const key of Object.keys(value)) {
     bytes += v8TwoByteStringPenalty(key);
-    bytes += v8StringPenalty(child);
+    bytes += v8StringPenalty(/** @type {Record<string, unknown>} */ (value)[key]);
   }
   return bytes;
 }

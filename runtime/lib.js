@@ -194,8 +194,8 @@ const moduleDecoderEntries = [
   ["cjs", (bytes) => ({ cjs: utf8Decoder.decode(bytes) })],
   ["text", (bytes) => ({ text: utf8Decoder.decode(bytes) })],
   ["json", (bytes) => ({ json: JSON.parse(utf8Decoder.decode(bytes)) })],
-  ["wasm", (bytes) => ({ wasm: bytes })],
-  ["data", (bytes) => ({ data: bytes })],
+  ["wasm", (bytes) => ({ wasm: bytes.slice() })],
+  ["data", (bytes) => ({ data: bytes.slice() })],
 ];
 /** @type {ReadonlyMap<string, (bytes: Uint8Array) => WorkerModuleValue>} */
 const moduleDecoders = new Map(moduleDecoderEntries);

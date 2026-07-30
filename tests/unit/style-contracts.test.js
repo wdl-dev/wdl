@@ -295,13 +295,16 @@ test("runtime workflow clients use the same backend base URL", () => {
   );
 });
 
-test("D1 object field setters stay shared across wire and transport codecs", () => {
+test("D1 object field setters stay shared across codecs and row normalization", () => {
   assert.match(readRepoFile("shared/d1-data-field.js"), /export function setDataField\(/);
   for (const file of ["shared/d1-query-wire.js", "shared/d1-transport.js"]) {
     const source = withoutLineComments(readRepoFile(file));
     assert.match(source, /import \{ setDataField \} from "shared-d1-data-field";/, file);
     assert.doesNotMatch(source, /function setDataField\(/, file);
   }
+  const client = withoutLineComments(readRepoFile("runtime/d1-client.js"));
+  assert.match(client, /import \{ setDataField \} from "\.\/_wdl-d1-data-field\.js";/);
+  assert.doesNotMatch(client, /function setDataField\(/);
 });
 
 test("control handlers do not bypass jsonError for literal error responses", () => {
@@ -2080,8 +2083,8 @@ test("host wrapper hides raw exports whenever internal Fetchers are injected", (
   assert.match(wrapper, /const hidesRawEnvExports = doBindings\.length \|\| Object\.keys\(workflowBindings\)\.length;/);
   assert.match(wrapper, /const starExport = hidesRawEnvExports\s*\?\s*"[^"]*only wrapped entrypoints are re-exported\."/);
 
-  const wrapEnv = source.slice(
-    source.indexOf("function wrapEnv"),
+  const envPreparation = source.slice(
+    source.indexOf("function envTemplateState"),
     source.indexOf("async function notifyWorkflowCallback")
   );
   for (const binding of [
@@ -2089,7 +2092,7 @@ test("host wrapper hides raw exports whenever internal Fetchers are injected", (
     "DO_OWNER_NETWORK_BINDING",
     "WORKFLOWS_BACKEND_BINDING",
   ]) {
-    assert.match(wrapEnv, new RegExp(`delete out\\[${RegExp.escape(binding)}\\]`));
+    assert.match(envPreparation, new RegExp(`delete template\\[${RegExp.escape(binding)}\\]`));
   }
 });
 

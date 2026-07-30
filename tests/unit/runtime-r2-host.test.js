@@ -461,6 +461,41 @@ test("R2 host list parses escaped keys, prefixes, truncation cursor, and timesta
   }
 });
 
+test("R2 list resolves the binding prefix once per operation", async () => {
+  let namespaceReads = 0;
+  let bucketNameReads = 0;
+  const props = {
+    get ns() {
+      namespaceReads += 1;
+      return "demo";
+    },
+    get bucketName() {
+      bucketNameReads += 1;
+      return "uploads";
+    },
+  };
+  const restore = installR2FetchMock(async () => new Response([
+    "<ListBucketResult>",
+    "<Contents><Key>r2/demo/uploads/a.txt</Key></Contents>",
+    "<Contents><Key>r2/demo/uploads/b.txt</Key></Contents>",
+    "<CommonPrefixes><Prefix>r2/demo/uploads/folder/</Prefix></CommonPrefixes>",
+    "</ListBucketResult>",
+  ].join("")));
+
+  try {
+    const listed = await makeR2Bucket({}, props).list({ delimiter: "/" });
+    assert.deepEqual(
+      listed.objects.map((/** @type {{ key: string }} */ object) => object.key),
+      ["a.txt", "b.txt"]
+    );
+    assert.deepEqual(listed.delimitedPrefixes, ["folder/"]);
+    assert.equal(namespaceReads, 1);
+    assert.equal(bucketNameReads, 1);
+  } finally {
+    restore();
+  }
+});
+
 test("R2 host list rejects CommonPrefixes outside the binding prefix", async () => {
   const restore = installR2FetchMock(async () => new Response(
     [

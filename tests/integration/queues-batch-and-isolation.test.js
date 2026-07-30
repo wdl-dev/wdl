@@ -14,7 +14,6 @@ import {
   BATCH_SIZE_RECORDER,
   BLOCKING_BATCH_RECORDER,
   FAST_QUEUE_CONSUMER,
-  HANG_QUEUE_CONSUMER,
   deployConsumer,
   deployQueueConsumerWorker,
   deployQueueProducer,
@@ -22,6 +21,7 @@ import {
   sendQueueMessage,
   setupQueueIntegrationSuite,
 } from "./helpers/queue-scenarios.js";
+import { redisXInfoGroups } from "./helpers/redis.js";
 
 setupQueueIntegrationSuite();
 
@@ -111,10 +111,11 @@ test("fault injection: blocked queue dispatch keeps PEL within maxBatchSize", as
   assert.equal(queuePendingCount(streamKey), 0, "PEL must drain after blocked batches ack");
 });
 
-test("one queue's hung handler does not block other queues (HoL isolation)", async () => {
+test("a later queue dispatch is not blocked by an in-flight slow queue", async () => {
   const ns = uniqueNs("qhol");
+  const slowStream = queueStreamKey(ns, "slow");
 
-  await deployQueueConsumerWorker(ns, "hang", HANG_QUEUE_CONSUMER, [
+  const slowVersion = await deployQueueConsumerWorker(ns, "slow", BLOCKING_BATCH_RECORDER, [
     { queue: "slow", maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 0 },
   ]);
 
@@ -125,16 +126,38 @@ test("one queue's hung handler does not block other queues (HoL isolation)", asy
   const slowProdVer = await deployQueueProducer(ns, "slow", "slow-prod");
   const fastProdVer = await deployQueueProducer(ns, "fastq", "fast-prod");
 
-  // Seed slow first so XREADGROUP likely returns it alongside fastq in
-  // the same poll; serial dispatch would then wait on slow's timeout.
-  sendQueueMessage(ns, "slow-prod", slowProdVer, { hang: true });
-  sendQueueMessage(ns, "fast-prod", fastProdVer, { fast: true });
+  await waitUntil("slow and fast consumer groups are ready", async () => {
+    return [slowStream, queueStreamKey(ns, "fastq")].every((stream) => {
+      const groups = redisXInfoGroups(stream, { db: 1 });
+      return !groups.includes("missing") && groups.includes("wdl-scheduler");
+    });
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+
+  const slowSend = sendQueueMessage(ns, "slow-prod", slowProdVer, { hang: true });
+  assertStatus(slowSend, 200, "slow queue send");
+  const slowConsumerId = gatewayWorkerId(ns, "slow", slowVersion);
+  await waitUntil("slow queue handler starts blocking", async () => {
+    const res = runtimeInternalPost("/", { "x-worker-id": slowConsumerId }, "");
+    if (res.status !== 200) return false;
+    const snap = responseJson(res);
+    return snap.sizes.length === 1 && snap.total === 0;
+  }, { timeoutMs: 15_000, intervalMs: 250 });
+  assert.equal(queuePendingCount(slowStream), 1, "slow queue must be in the PEL");
+
+  // This message arrives after the Scheduler is already awaiting the slow
+  // handler, so same-wave parallelism cannot make the test pass.
+  const fastSend = sendQueueMessage(ns, "fast-prod", fastProdVer, { fast: true });
+  assertStatus(fastSend, 200, "fast queue send");
 
   const fastConsumerId = gatewayWorkerId(ns, "fast", fastVersion);
-  await waitUntil("fastq delivered while slow still hanging", async () => {
+  await waitUntil("later fast queue delivered while slow remains in flight", async () => {
     const res = runtimeInternalPost("/", { "x-worker-id": fastConsumerId }, "");
     if (res.status !== 200) return false;
     const snap = responseJson(res);
     return snap.total >= 1;
-  }, { timeoutMs: 25_000, intervalMs: 1_000 });
+  }, { timeoutMs: 3_000, intervalMs: 250 });
+  const slowSnapshot = responseJson(runtimeInternalPost("/", {
+    "x-worker-id": slowConsumerId,
+  }, ""));
+  assert.equal(slowSnapshot.total, 0, "slow queue must still be in flight");
 });

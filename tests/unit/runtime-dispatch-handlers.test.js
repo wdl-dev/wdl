@@ -148,6 +148,69 @@ test("handleScheduledDispatch checks active subscriptions before appending tail 
   }
 });
 
+test("handleFetchDispatch skips tail envelope work for a fresh inactive-worker cache hit", async () => {
+  const fetchSpy = installTailFetchSpy([]);
+  const identity = {
+    namespace: "demo",
+    workerName: "fresh-miss-fetch-worker",
+    workerId: "demo:fresh-miss-fetch-worker:v1",
+    requestId: "rid-fresh-miss",
+  };
+  const env = {
+    REDIS_PROXY_URL: "http://proxy/",
+    WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
+  };
+  const stub = makeStub({
+    async fetch() {
+      return new Response("ok");
+    },
+  });
+
+  try {
+    const primeCtx = makeCtx();
+    await handleFetchDispatch({
+      request: new Request("http://runtime.test/prime"),
+      scope: makeScope(),
+      env,
+      ctx: primeCtx,
+      identity,
+      stub,
+    });
+    await Promise.all(primeCtx.tasks);
+
+    let urlReads = 0;
+    const request = /** @type {Request} */ ({
+      method: "GET",
+      get url() {
+        urlReads += 1;
+        return "http://runtime.test/should-not-be-read";
+      },
+    });
+    const cachedCtx = makeCtx();
+    await handleFetchDispatch({
+      request,
+      scope: makeScope(),
+      env,
+      ctx: cachedCtx,
+      identity,
+      stub,
+    });
+
+    assert.equal(urlReads, 0);
+    assert.equal(cachedCtx.tasks.length, 0);
+    assert.equal(
+      fetchSpy.calls.filter((call) => call.url === "http://proxy/logs/tail/active").length,
+      1
+    );
+    assert.equal(
+      fetchSpy.calls.filter((call) => call.url === "http://proxy/logs/tail/append").length,
+      0
+    );
+  } finally {
+    fetchSpy.restore();
+  }
+});
+
 test("handleFetchDispatch emits start and finish tail events with status", async () => {
   const fetchSpy = installTailFetchSpy(["demo:fetch-worker"]);
   const ctx = makeCtx();

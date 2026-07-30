@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures_util::FutureExt;
 use redis::aio::ConnectionManagerConfig;
@@ -37,6 +37,8 @@ pub(crate) type Redis = RedisConnection;
 pub(crate) struct QueueState {
     pub(crate) registry: RwLock<HashMap<String, Consumer>>,
     pub(crate) consumer_streams: RwLock<Arc<Vec<String>>>,
+    pub(crate) dispatching_streams: Mutex<HashSet<String>>,
+    pub(crate) stream_dispatch_completed: Notify,
     pub(crate) known_streams: RwLock<HashSet<String>>,
     pub(crate) known_delayed: RwLock<HashSet<String>>,
     pub(crate) delayed_changed: Notify,

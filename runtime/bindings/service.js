@@ -73,13 +73,12 @@ export class ServiceBinding extends WorkerEntrypoint {
       workerId: targetId,
       requestId,
     };
-    const baseFields = fetchTailFields(forwarded);
     const tail = startTailEnvelope({
       env: self.env,
       ctx: self.ctx,
       identity,
       event: "worker_fetch",
-      fields: baseFields,
+      fields: () => fetchTailFields(forwarded),
     });
     try {
       const response = await targetStub(self, requestId)

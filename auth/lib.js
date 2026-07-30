@@ -169,6 +169,13 @@ export const DELEGATED_ISSUE_TEMPLATES = Object.freeze([
   }),
 ]);
 
+const STORED_TIMESTAMP_FIELDS = Object.freeze([
+  "created_at",
+  "expires_at",
+  "revoked_at",
+  "expired_at",
+]);
+
 /** @param {string} value */
 export function isCanonicalStoredTimestamp(value) {
   if (!STRICT_ISO_UTC_RE.test(value)) return false;
@@ -595,7 +602,7 @@ export function validateRecordShape(record) {
   if (typeof persisted.hash !== "string" || !SHA256_HEX_RE.test(persisted.hash)) {
     return { ok: false, reason: "invalid_record_hash" };
   }
-  for (const field of ["created_at", "expires_at", "revoked_at", "expired_at"]) {
+  for (const field of STORED_TIMESTAMP_FIELDS) {
     const value = /** @type {Record<string, unknown>} */ (persisted)[field];
     if (value !== undefined && (typeof value !== "string" || !isCanonicalStoredTimestamp(value))) {
       return { ok: false, reason: "invalid_record_timestamp" };

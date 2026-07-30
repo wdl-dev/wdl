@@ -186,6 +186,12 @@ Data-plane bindings use their own storage:
 - Secret hash values in DB 0 are envelope ciphertext. redis-proxy decrypts them during
   runtime-load and fails closed when provider configuration or envelope validation
   fails.
+- Runtime decodes bundle entries as views over the bounded cold-load envelope. Text and
+  JSON modules are decoded from those views; wasm and data modules receive standalone
+  byte copies so tenant-visible buffers cannot expose adjacent modules or secrets.
+- Loaded host-binding wrappers cache only the stripped template for a stable workerd env
+  object. Every event receives a fresh top-level env copy and fresh facade instances, so
+  request-id context and tenant mutation remain request-scoped.
 - KV and queue producers use DB 1 through `redis-proxy`.
 - Workflow bindings call `workflows`; runtime does not read DB 2 directly.
 - D1 and DO bindings call their dedicated runtime services.

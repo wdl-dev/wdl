@@ -37,8 +37,8 @@ export class D1ReadCache {
   beginRead(query, owner) {
     return /** @type {any} */ (globalThis).__d1RouterTestBeginRead?.(query, owner, this) || { hit: false, token: null };
   }
-  finishRead(token, payload) {
-    this.finished.push({ token, payload });
+  finishRead(token, bytes) {
+    this.finished.push({ token, bytes });
     return true;
   }
   invalidate(reason) {
@@ -86,7 +86,10 @@ export function encodeD1ActorQueryRequest(query, owner) {
 }
 export function normalizeQueryRequest(value) { return value; }
 export async function readD1QueryRequest(request) { return await request.json(); }
-export async function readD1QueryResponse(response) { return await response.json(); }
+export async function readD1QueryResponseWithBytes(response) {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return { bytes, payload: JSON.parse(new TextDecoder().decode(bytes)) };
+}
 `);
 const stateUrl = moduleDataUrl(`
 export const SERVICE = "d1-runtime";
@@ -98,7 +101,14 @@ export function json(data, init = {}) {
   return Response.json(data, init);
 }
 export function d1QueryResponse(data, init = {}) {
+  globalThis.__d1RouterReencodeCalls = (globalThis.__d1RouterReencodeCalls || 0) + 1;
   return Response.json(data, init);
+}
+export function d1QueryBytesResponse(bytes, init = {}) {
+  return new Response(bytes, {
+    ...init,
+    headers: { "content-type": "application/" + "vnd.wdl.d1-query-response", ...(init.headers || {}) },
+  });
 }
 `);
 
@@ -285,7 +295,89 @@ test("D1 router returns row/column payloads without objectifying internal respon
   const response = await handleQuery(request, env, "rid");
 
   await assertJsonResponse(response, 200, payload);
-  assert.deepEqual(/** @type {any} */ (globalThis).__d1RouterTestCacheInstances[0].finished, [{ token: "read-token", payload }]);
+  assert.deepEqual(/** @type {any} */ (globalThis).__d1RouterTestCacheInstances[0].finished, [{
+    token: "read-token",
+    bytes: new TextEncoder().encode(JSON.stringify(payload)),
+  }]);
+});
+
+test("D1 router forwards the owner's exact query response bytes", async () => {
+  /** @type {any} */ (globalThis).__d1RouterTestCacheInstances = [];
+  /** @type {any} */ (globalThis).__d1RouterTestBeginRead = () => ({ hit: false, token: "read-token" });
+  /** @type {any} */ (globalThis).__d1RouterReencodeCalls = 0;
+  const wireBody = '{"success":true, "results":{"columns":["id"],"rows":[["m1"]]},"meta":{"changed_db":false}}';
+  const env = {
+    D1_DATABASES: {
+      idFromName(/** @type {string} */ dbKey) { return dbKey; },
+      get() {
+        return {
+          fetch: async () => new Response(wireBody, {
+            headers: { "content-type": "application/" + "vnd.wdl.d1-query-response" },
+          }),
+        };
+      },
+    },
+  };
+  const request = new Request("http://d1-runtime/query", {
+    method: "POST",
+    body: JSON.stringify({
+      dbKey: "tenant-a:wire-passthrough",
+      namespace: "tenant-a",
+      databaseId: "wire-passthrough",
+      mode: "all",
+      statements: [{ sql: "select id from messages", params: [] }],
+    }),
+  });
+
+  try {
+    const response = await handleQuery(request, env, "rid");
+
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), wireBody);
+    assert.equal(/** @type {any} */ (globalThis).__d1RouterReencodeCalls, 0);
+  } finally {
+    delete /** @type {any} */ (globalThis).__d1RouterTestBeginRead;
+    delete /** @type {any} */ (globalThis).__d1RouterReencodeCalls;
+  }
+});
+
+test("D1 router replays cached query response bytes without re-encoding", async () => {
+  const wireBody = '{"success":true, "results":["cached"],"meta":{"changed_db":false}}';
+  /** @type {any} */ (globalThis).__d1RouterTestCacheInstances = [];
+  /** @type {any} */ (globalThis).__d1RouterTestBeginRead = () => ({
+    hit: true,
+    bytes: new TextEncoder().encode(wireBody),
+  });
+  /** @type {any} */ (globalThis).__d1RouterReencodeCalls = 0;
+  const env = {
+    D1_DATABASES: {
+      idFromName(/** @type {string} */ dbKey) { return dbKey; },
+      get() {
+        throw new Error("cache hit must not reach the actor");
+      },
+    },
+  };
+  const request = new Request("http://d1-runtime/query", {
+    method: "POST",
+    body: JSON.stringify({
+      dbKey: "tenant-a:wire-cache-hit",
+      namespace: "tenant-a",
+      databaseId: "wire-cache-hit",
+      mode: "all",
+      statements: [{ sql: "select value from cache", params: [] }],
+    }),
+  });
+
+  try {
+    const response = await handleQuery(request, env, "rid");
+
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), wireBody);
+    assert.equal(/** @type {any} */ (globalThis).__d1RouterReencodeCalls, 0);
+  } finally {
+    delete /** @type {any} */ (globalThis).__d1RouterTestBeginRead;
+    delete /** @type {any} */ (globalThis).__d1RouterReencodeCalls;
+  }
 });
 
 test("D1 router delays idempotent DDL invalidation until actor reports changed_db", async () => {

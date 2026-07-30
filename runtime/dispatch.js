@@ -140,7 +140,7 @@ export async function handleFetchDispatch({ request, stub, scope, env, ctx, iden
   const tail = startTailEnvelope({
     env, ctx, identity,
     event: "worker_fetch",
-    fields: fetchTailFields(request),
+    fields: () => fetchTailFields(request),
   });
   try {
     const response = await stub.getEntrypoint().fetch(request);

@@ -4,6 +4,7 @@ pub(crate) const MAX_BATCH_SIZE_CAP: usize = 100;
 pub(crate) const MAX_BATCH_TIMEOUT_MS: i64 = 60_000;
 pub(crate) const MAX_QUEUE_DELAY_SECONDS: i64 = 86_400;
 pub(crate) const MAX_RETRIES: i64 = 100;
+pub(crate) const QUEUE_REDIS_READ_BATCH_SIZE: usize = 128;
 
 mod consume;
 mod delayed;

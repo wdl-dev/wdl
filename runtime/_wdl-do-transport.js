@@ -240,6 +240,14 @@ function headerEntries(headers) {
   return out;
 }
 
+/** @param {[string, string][]} headers */
+function hardenHeaderEntriesForJson(headers) {
+  for (let i = 0; i < headers.length; i++) {
+    intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [headers[i], null]);
+  }
+  intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [headers, null]);
+}
+
 /** @template T @param {Set<T>} set @param {T} value */
 function setHas(set, value) {
   return intrinsicReflectApply(intrinsicSetHas, set, [value]);
@@ -360,6 +368,13 @@ function numberValue(value) {
 /** @param {unknown} value */
 function stringifyJson(value) {
   return intrinsicReflectApply(intrinsicJsonStringify, IntrinsicJSON, [value]);
+}
+
+/** @returns {Record<string, unknown>} */
+function jsonObject() {
+  return /** @type {Record<string, unknown>} */ (
+    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
+  );
 }
 
 /**
@@ -489,9 +504,7 @@ function cloneJsonRpcData(value, field, seen = new IntrinsicWeakSet()) {
     }
     const symbols = intrinsicReflectApply(intrinsicObjectGetOwnPropertySymbols, IntrinsicObject, [objectValue]);
     if (symbols.length > 0) throw new TypeError(`${field} must not contain symbol keys`);
-    const out = /** @type {Record<string, unknown>} */ (
-      intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
-    );
+    const out = jsonObject();
     const entries = /** @type {[string, unknown][]} */ (
       intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [objectValue])
     );
@@ -534,14 +547,10 @@ export function rpcInvokeBody(props, objectName, method, args) {
   if (byteLength(stringifyJson(stableArgs)) > MAX_DO_REQUEST_BODY_BYTES) {
     throw new TypeError(`rpc.args exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
   }
-  const rpc = /** @type {Record<string, unknown>} */ (
-    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
-  );
+  const rpc = jsonObject();
   rpc.method = method;
   rpc.args = stableArgs;
-  const metadata = /** @type {Record<string, unknown>} */ (
-    intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null])
-  );
+  const metadata = jsonObject();
   metadata.ns = props.ns;
   metadata.worker = props.worker;
   metadata.version = props.version;
@@ -574,15 +583,15 @@ function binaryInvokeHeaders(requestId) {
  */
 export async function fetchInvokeInit(props, objectName, request, requestId) {
   const { spec, bodyBytes } = await requestSpec(request, requestId);
-  const metadata = /** @type {Record<string, unknown>} */ (cloneJsonRpcData({
-    ns: props.ns,
-    worker: props.worker,
-    version: props.version,
-    doStorageId: props.doStorageId,
-    className: props.className,
-    objectName,
-    request: spec,
-  }, "invoke"));
+  hardenHeaderEntriesForJson(spec.headers);
+  const metadata = jsonObject();
+  metadata.ns = props.ns;
+  metadata.worker = props.worker;
+  metadata.version = props.version;
+  metadata.doStorageId = props.doStorageId;
+  metadata.className = props.className;
+  metadata.objectName = objectName;
+  metadata.request = spec;
   return {
     method: "POST",
     headers: binaryInvokeHeaders(requestId),
@@ -648,17 +657,19 @@ export async function requestSpec(request, requestId) {
   const method = stringToUpperCase(requestMethod(forwarded));
   const headers = headerEntries(forwardedHeaders);
   enforceRequestHeadersBudget(headers);
-  const spec = {
-    method,
-    url: requestUrl(forwarded),
-    headers,
-  };
+  const spec = jsonObject();
+  spec.method = method;
+  spec.url = requestUrl(forwarded);
+  spec.headers = headers;
   let bodyBytes = null;
   if (method !== "GET" && method !== "HEAD") {
     const body = await readRequestBodyBytes(forwarded);
     if (byteArrayLength(body) > 0) bodyBytes = body;
   }
-  return { spec, bodyBytes };
+  return {
+    spec: /** @type {{ method: string, url: string, headers: [string, string][] }} */ (spec),
+    bodyBytes,
+  };
 }
 
 /** @param {[string, string][]} headers */

@@ -17,14 +17,22 @@ export function json(data, init = {}) {
 }
 
 /**
+ * @param {Uint8Array<ArrayBuffer>} bytes
+ * @param {ResponseInit} [init]
+ */
+export function d1QueryBytesResponse(bytes, init = {}) {
+  return new Response(bytes, {
+    ...init,
+    headers: { "content-type": D1_QUERY_RESPONSE_CONTENT_TYPE, ...(init.headers || {}) },
+  });
+}
+
+/**
  * @param {unknown} data
  * @param {ResponseInit} [init]
  */
 export function d1QueryResponse(data, init = {}) {
-  return new Response(encodeD1QueryResponse(encodeD1Transport(data)), {
-    ...init,
-    headers: { "content-type": D1_QUERY_RESPONSE_CONTENT_TYPE, ...(init.headers || {}) },
-  });
+  return d1QueryBytesResponse(encodeD1QueryResponse(encodeD1Transport(data)), init);
 }
 
 /**

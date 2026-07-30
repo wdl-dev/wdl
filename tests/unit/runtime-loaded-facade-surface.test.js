@@ -16,6 +16,8 @@ const d1Facade = await importRepositoryModule("runtime/d1-client.js", [
   [/import \{ splitSqlStatements \} from "\.\/_wdl-sql-splitter\.js";/, "const splitSqlStatements = (sql) => [{ sql, params: [] }];"],
   [/import \{ normalizeD1Param \} from "\.\/_wdl-d1-params\.js";/, "const normalizeD1Param = (value) => value;"],
   [/import \{ decodeD1Transport \} from "\.\/_wdl-d1-transport\.js";/, "const decodeD1Transport = (value) => value;"],
+  [/import \{ setDataField \} from "\.\/_wdl-d1-data-field\.js";/,
+    `import { setDataField } from ${JSON.stringify(repositoryFileUrl("shared/d1-data-field.js"))};`],
   [/import \{ requestIdFromOptions \} from "\.\/_wdl-request-id\.js";/, requestIdFromOptionsStub],
 ]);
 

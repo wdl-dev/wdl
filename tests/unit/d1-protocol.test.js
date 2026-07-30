@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 import { loadD1Protocol } from "../helpers/load-d1-protocol.js";
 
@@ -20,7 +21,7 @@ const {
   encodeD1QueryRequest,
   normalizeD1Param,
   normalizeQueryRequest,
-  readD1QueryResponse,
+  readD1QueryResponseWithBytes,
   readD1ActorControlRequest,
   readD1ActorQueryRequest,
   readD1QueryRequest,
@@ -29,6 +30,16 @@ const {
 } = await loadD1Protocol();
 
 const textEncoder = new TextEncoder();
+
+/** @param {Uint8Array} bytes */
+function wireDigest(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** @param {Response} response */
+async function readD1QueryResponse(response) {
+  return (await readD1QueryResponseWithBytes(response)).payload;
+}
 
 /**
  * @param {unknown} err
@@ -80,6 +91,88 @@ test("D1 protocol: normalizes D1 bind parameter types", () => {
   assert.equal(normalizeD1Param(null), null);
   assert.deepEqual(normalizeD1Param(new Uint8Array([1, 2])), [1, 2]);
   assert.deepEqual(normalizeD1Param(new Uint8Array([3, 4]).buffer), [3, 4]);
+});
+
+test("D1 query wire bytes remain stable across representative and varint-boundary payloads", () => {
+  const cases = [
+    {
+      name: "request",
+      bytes: encodeD1QueryRequest({
+        namespace: "tenant-a",
+        databaseId: "main",
+        binding: "DB",
+        mode: "batch",
+        statements: [
+          {
+            sql: "select ? as text, ? as blob, ? as n",
+            params: ["caf\u00e9\ud83c\udf0c", new Uint8Array([0, 1, 127, 128, 255]), 42, null],
+          },
+          { sql: "select 2", params: [] },
+        ],
+      }),
+      length: 115,
+      digest: "62b756f5d83f518a12d06ed973ac1b280c823061f08e1ff208b96dbe8380af5b",
+    },
+    {
+      name: "response",
+      bytes: encodeD1QueryResponse({
+        success: true,
+        results: [{
+          text: "caf\u00e9\ud83c\udf0c",
+          blob: new Uint8Array([0, 1, 127, 128, 255]),
+          nested: [
+            null,
+            true,
+            3.5,
+            JSON.parse('{"empty":"","__proto__":"data"}'),
+          ],
+        }],
+        meta: { duration: 1.25, changed_db: false },
+      }),
+      length: 198,
+      digest: "a180c0f94b7f42731a1e4e3c5a4e8523a66fcf9afa043d21e51b8cd56ffd060a",
+    },
+    {
+      name: "error response",
+      bytes: encodeD1QueryResponse({
+        success: false,
+        error: "SQLITE_CONSTRAINT: duplicate",
+        code: "constraint",
+        meta: { duration: 0 },
+      }),
+      length: 115,
+      digest: "588a59fbc6a9ad13680d6883b8191e7e760a366134625e20b81a1f1c102c9f09",
+    },
+    {
+      name: "127-byte string",
+      bytes: encodeD1QueryResponse("x".repeat(127)),
+      length: 129,
+      digest: "15b114504d512e7a41a51e855a4ab5b072e6899f71f59fdedda0b0d078cacb07",
+    },
+    {
+      name: "128-byte string",
+      bytes: encodeD1QueryResponse("x".repeat(128)),
+      length: 131,
+      digest: "4e8a04b2c4edda8088a2c0c88caac5173a25e6428c690161c1658c552d1378c5",
+    },
+    {
+      name: "16383-byte string",
+      bytes: encodeD1QueryResponse("x".repeat(16_383)),
+      length: 16_386,
+      digest: "c2689583d7dd0cf7bc42e7c54840bd273b69877806c42b33a94cda89d2a8db36",
+    },
+    {
+      name: "16384-byte string",
+      bytes: encodeD1QueryResponse("x".repeat(16_384)),
+      length: 16_388,
+      digest: "b15af4fc7ee4bd941c118f20781d5280ded81fa3fc5454b876611520f529e90a",
+    },
+  ];
+
+  for (const item of cases) {
+    assert.equal(item.bytes.length, item.length, item.name);
+    assert.equal(wireDigest(item.bytes), item.digest, item.name);
+  }
 });
 
 test("D1 protocol: restores wire byte arrays for SQLite binding", () => {
@@ -248,6 +341,16 @@ test("D1 protocol: decodes binary query wire responses", async () => {
     results: [{ ok: 1, empty: "", "": "empty-key", blob: { __wdl_d1_binary_v1: true, base64: "AQI=" } }, {}, []],
     meta: {},
   });
+});
+
+test("D1 protocol: can decode a query response while retaining its exact wire bytes", async () => {
+  const body = encodeD1QueryResponse({ success: true, results: ["ok"], meta: {} });
+  const result = await readD1QueryResponseWithBytes(new Response(body, {
+    headers: { "content-type": D1_QUERY_RESPONSE_CONTENT_TYPE },
+  }));
+
+  assert.deepEqual(result.payload, { success: true, results: ["ok"], meta: {} });
+  assert.deepEqual(result.bytes, body);
 });
 
 test("D1 protocol: query response preserves magic object keys as data fields", async () => {

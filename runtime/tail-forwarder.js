@@ -110,11 +110,16 @@ export function makeActiveSetCache() {
   }
 
   /** @param {string} key */
+  function isFreshInactive(key) {
+    return !isPositiveHit(key) && isFreshMiss(key);
+  }
+
+  /** @param {string} key */
   function snapshotHas(key) {
     return activeSet.has(key);
   }
 
-  return { isPositiveHit, snapshotHas, refreshIfStale, markMiss };
+  return { isFreshInactive, isPositiveHit, snapshotHas, refreshIfStale, markMiss };
 }
 
 const activeSetCache = makeActiveSetCache();
@@ -273,7 +278,7 @@ export async function forwardTailEntries(env, ctx, entries) {
  *   identity: { namespace?: string, workerName?: string, workerId?: string, requestId?: string | null },
  *   event: string,
  *   phase: string,
- *   fields?: Record<string, unknown>,
+ *   fields?: Record<string, unknown> | (() => Record<string, unknown>),
  *   after?: Promise<unknown> | null,
  * }} options
  */
@@ -282,6 +287,9 @@ export function emitRuntimeTailEvent({ env, ctx, identity, event, phase, fields 
   // tenant tail events. They still go through normal runtime logs; tail append
   // stays scoped to a concrete ns/worker stream key.
   if (!ctx?.waitUntil || !identity?.namespace || !identity?.workerName) return null;
+  const key = `${identity.namespace}:${identity.workerName}`;
+  if (activeSetCache.isFreshInactive(key)) return null;
+  const resolvedFields = typeof fields === "function" ? fields() : fields;
   const task = Promise.resolve(after)
     .catch(() => {})
     .then(() => forwardTailEntry(env, {
@@ -293,7 +301,7 @@ export function emitRuntimeTailEvent({ env, ctx, identity, event, phase, fields 
         ts: Date.now(),
         worker_id: identity.workerId,
         request_id: identity.requestId,
-        ...fields,
+        ...resolvedFields,
       },
     }));
   ctx.waitUntil(task);
@@ -306,16 +314,24 @@ export function emitRuntimeTailEvent({ env, ctx, identity, event, phase, fields 
  *   ctx: { waitUntil?: (promise: Promise<unknown>) => void },
  *   identity: { namespace?: string, workerName?: string, workerId?: string, requestId?: string | null },
  *   event: string,
- *   fields: Record<string, unknown>,
+ *   fields: Record<string, unknown> | (() => Record<string, unknown>),
  * }} options
  */
 export function startTailEnvelope({ env, ctx, identity, event, fields }) {
   const startedAt = Date.now();
+  /** @type {Record<string, unknown> | null} */
+  let resolvedFields = null;
+  function baseFields() {
+    if (resolvedFields === null) {
+      resolvedFields = typeof fields === "function" ? fields() : fields;
+    }
+    return resolvedFields;
+  }
   const startTailEvent = emitRuntimeTailEvent({
     env, ctx, identity,
     event,
     phase: "start",
-    fields,
+    fields: baseFields,
   });
 
   /** @param {Record<string, unknown>} extraFields */
@@ -326,11 +342,11 @@ export function startTailEnvelope({ env, ctx, identity, event, fields }) {
       event,
       phase: "finish",
       after: startTailEvent,
-      fields: {
-        ...fields,
+      fields: () => ({
+        ...baseFields(),
         ...extraFields,
         duration_ms: durationMs,
-      },
+      }),
     });
     return durationMs;
   }

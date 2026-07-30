@@ -28,7 +28,7 @@ Rust 服务（`scheduler`、`redis-proxy`、`workflows`、`supervisor`）使用�
 Live tail 是 activation-gated pipe，不是持久日志系统：
 
 - workerd tails 把 console、exception、fetch、scheduled 和 queue event 交给 runtime tail worker。Runtime 始终保留结构化 stdout 作为持久平台日志路径。
-- `runtime/tail-forwarder.js` append 前会检查 redis-proxy `/logs/tail/active`。Active-set 的命中和未命中都会短暂 cache，避免 inactive worker 每个 event 都付出 Redis write。
+- `runtime/tail-forwarder.js` append 前会检查 redis-proxy `/logs/tail/active`。Active-set 的命中和未命中都会短暂 cache；fresh miss 会在 event 到达 redis-proxy 前跳过 envelope payload 构造和后台 append work。
 - Control 为每个 SSE tail session 做授权，在 `logs:tail:active` 写入/刷新 worker gate，读取 `logs:<ns>:<worker>:s`，并输出 SSE frame。Gate 续期与 admission 共用一个原子操作，因此并发 session 不会突破 10,000-field active-gate 上限。Reconnect 会重新走正常 auth。
 - redis-proxy 写入有界 stream entry，使用 `MAXLEN ~ 500` 并刷新 TTL。这个 stream 用来衔接 live consumer，不用于保存历史。
 - 单 worker `wdl tail` 可以用 `Last-Event-ID` 在 stream 窗口内 resume。多 worker tail 是 fan-in session；reconnect 从新会话开始，因为单个 SSE cursor 无法表达每个 worker 一个 cursor。
@@ -63,7 +63,7 @@ Tail streams 使用有界 `MAXLEN ~ 500`，并在写入时刷新 TTL。它们是
 ## Ownership / 并发 / 失败语义
 
 - 结构化 stdout 是持久平台日志的事实来源。
-- 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过 per-event stream append work。
+- 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过 tail-envelope payload 和 stream-append work。
 - Active tail session 是有时限的授权租约，必须通过正常 auth reconnect。`LOG_TAIL_MAX_SESSION_MS` 设置 control-side 最大时长；非法值或空值会回退到 15 分钟。
 - 当前 stock workerd 的行为（上游 issue [#6832](https://github.com/cloudflare/workerd/issues/6832) 跟踪）不会可靠地在 client disconnect 时触发 async response-body `ReadableStream.cancel()`。WDL 把它当作永久兼容边界处理：Control 的独立 watchdog 不是等待上游修复的临时 workaround。max-session watchdog 负责 reauthorization 上界，idle-pull watchdog 在 SSE body 连续三个 keepalive 周期没有被 pull 时关闭 session。活跃客户端会因为每次 heartbeat 腾出 queue 空间而自然按 keepalive 粒度继续 pull；遗弃客户端会停止 pull，因此不需要等完整 session lifetime 才清理。TCP 连接还在但应用层长时间不读的客户端可能被关闭，应自行 reconnect。
 - 与 activation race 的 tail event 可以丢失。

@@ -69,13 +69,13 @@ function isTaggedBinary(value) {
  * @returns {void}
  */
 function assertSupportedBinaryTag(value) {
+  if (typeof value.base64 !== "string") return;
   const keys = Object.keys(value);
   const tagKey = keys.find((key) => BINARY_TAG_RE.test(key));
   if (
     !tagKey ||
     tagKey === BINARY_TAG ||
     value[tagKey] !== true ||
-    typeof value.base64 !== "string" ||
     !keys.every((key) => key === tagKey || key === "base64")
   ) {
     return;
@@ -98,13 +98,41 @@ function walkD1Transport(value, objectLeaf) {
   if (value == null || typeof value !== "object") return value;
   const leaf = objectLeaf(value);
   if (leaf !== undefined) return leaf;
-  if (Array.isArray(value) && value.length === 0) return value;
-  if (Array.isArray(value)) return value.map((item) => walkD1Transport(item, objectLeaf));
-  if (Object.keys(value).length === 0) return value;
-  /** @type {Record<string, unknown>} */
-  const out = {};
-  for (const [key, item] of Object.entries(value)) setDataField(out, key, walkD1Transport(item, objectLeaf));
-  return out;
+  if (Array.isArray(value)) {
+    /** @type {unknown[] | null} */
+    let out = null;
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) continue;
+      const item = value[index];
+      const transformed = walkD1Transport(item, objectLeaf);
+      if (out === null && transformed !== item) {
+        out = new Array(value.length);
+        for (let prior = 0; prior < index; prior += 1) {
+          if (prior in value) out[prior] = value[prior];
+        }
+      }
+      if (out !== null) out[index] = transformed;
+    }
+    return out ?? value;
+  }
+
+  const keys = Object.keys(value);
+  /** @type {Record<string, unknown> | null} */
+  let out = null;
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    const item = /** @type {Record<string, unknown>} */ (value)[key];
+    const transformed = walkD1Transport(item, objectLeaf);
+    if (out === null && transformed !== item) {
+      out = {};
+      for (let prior = 0; prior < index; prior += 1) {
+        const priorKey = keys[prior];
+        setDataField(out, priorKey, /** @type {Record<string, unknown>} */ (value)[priorKey]);
+      }
+    }
+    if (out !== null) setDataField(out, key, transformed);
+  }
+  return out ?? value;
 }
 
 /**

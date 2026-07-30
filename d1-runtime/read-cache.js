@@ -12,8 +12,8 @@ const IDEMPOTENT_SCHEMA_DDL_RE = /^\s*create\s+(table|(?:unique\s+)?index)\s+if\
  * @typedef {{ dbKey?: unknown, generation?: unknown }} ReadCacheOwner
  * @typedef {{ increment(name: string, labels?: Record<string, unknown>, value?: number): void }} ReadCacheMetrics
  * @typedef {{ key: string, version: number, expiresAt: number, maxEntries: number }} ReadCacheToken
- * @typedef {{ expiresAt: number, payload: Record<string, unknown> }} ReadCacheEntry
- * @typedef {{ hit: boolean, payload?: Record<string, unknown>, token?: ReadCacheToken | null }} ReadCacheBeginResult
+ * @typedef {{ expiresAt: number, bytes: Uint8Array<ArrayBuffer> }} ReadCacheEntry
+ * @typedef {{ hit: boolean, bytes?: Uint8Array<ArrayBuffer>, token?: ReadCacheToken | null }} ReadCacheBeginResult
  */
 
 /**
@@ -127,11 +127,6 @@ function readCacheKey(query, owner) {
   });
 }
 
-/** @param {unknown} value */
-function cloneJson(value) {
-  return structuredClone(value);
-}
-
 export class D1ReadCache {
   /**
    * @param {Partial<ReadCacheConfigInput> | null | undefined} env
@@ -197,21 +192,19 @@ export class D1ReadCache {
     this.observe("hit");
     return {
       hit: true,
-      payload: /** @type {Record<string, unknown>} */ (cloneJson(entry.payload)),
+      bytes: entry.bytes,
     };
   }
 
   /**
    * @param {ReadCacheToken | null | undefined} token
-   * @param {unknown} payload
+   * @param {Uint8Array<ArrayBuffer>} bytes
    */
-  finishRead(token, payload) {
+  finishRead(token, bytes) {
     if (!token || token.version !== this.mutationVersion) return false;
-    const record = /** @type {Record<string, unknown>} */ (Object(payload));
-    if (!payload || record.success === false || payloadChangedDb(payload)) return false;
     this.entries.set(token.key, {
       expiresAt: token.expiresAt,
-      payload: /** @type {Record<string, unknown>} */ (cloneJson(payload)),
+      bytes,
     });
     while (this.entries.size > token.maxEntries) {
       const oldestKey = this.entries.keys().next().value;

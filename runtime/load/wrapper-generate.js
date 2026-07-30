@@ -253,21 +253,36 @@ function wrapClassInstance(instance, requestContext) {
   });
 }
 
+let lastRawEnv = null;
+let lastEnvTemplateState = null;
+
+function envTemplateState(env) {
+  if (env === lastRawEnv && lastEnvTemplateState) return lastEnvTemplateState;
+  const template = { ...env };
+  const state = {
+    template,
+    doBackend: template[DO_BACKEND_BINDING],
+    doOwnerNetwork: template[DO_OWNER_NETWORK_BINDING],
+    workflowsBackend: template[WORKFLOWS_BACKEND_BINDING],
+  };
+  delete template[DO_BACKEND_BINDING];
+  delete template[DO_OWNER_NETWORK_BINDING];
+  delete template[WORKFLOWS_BACKEND_BINDING];
+  __WdlHostRuntime__.forEachArray(__WdlHostRuntime__.objectKeys(template), (name) => {
+    if (__WdlHostRuntime__.regexpTest(INTERNAL_BINDING_RE, name)) delete template[name];
+  });
+  lastRawEnv = env;
+  lastEnvTemplateState = state;
+  return state;
+}
+
 function wrapEnv(env, requestIdOrContext = null) {
   // Idempotence is a contract, not an optimization: WorkerEntrypoint methods
   // and default handlers may re-enter with an env already wrapped by this
   // module. A symbol marker cannot be forged by tenant vars/secrets.
   if (!env || env[HOST_BINDINGS_WRAPPED] === true) return env;
-  const out = { ...env };
-  const doBackend = out[DO_BACKEND_BINDING];
-  const doOwnerNetwork = out[DO_OWNER_NETWORK_BINDING];
-  const workflowsBackend = out[WORKFLOWS_BACKEND_BINDING];
-  delete out[DO_BACKEND_BINDING];
-  delete out[DO_OWNER_NETWORK_BINDING];
-  delete out[WORKFLOWS_BACKEND_BINDING];
-  __WdlHostRuntime__.forEachArray(__WdlHostRuntime__.objectKeys(out), (name) => {
-    if (__WdlHostRuntime__.regexpTest(INTERNAL_BINDING_RE, name)) delete out[name];
-  });
+  const { template, doBackend, doOwnerNetwork, workflowsBackend } = envTemplateState(env);
+  const out = { ...template };
   __WdlHostRuntime__.forEachArray(D1_BINDINGS, (name) => {
     if (out[name] !== undefined) out[name] = new D1Database(out[name], requestIdOptions(requestIdOrContext));
   });

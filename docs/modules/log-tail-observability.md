@@ -35,8 +35,9 @@ Live tail is an activation-gated pipe, not a durable logging system:
   runtime tail worker. Runtime always keeps structured stdout as the durable platform
   log path.
 - `runtime/tail-forwarder.js` checks redis-proxy `/logs/tail/active` before append.
-  Positive and negative active-set results are cached briefly so inactive workers do not
-  pay a Redis write per event.
+  Positive and negative active-set results are cached briefly. A fresh negative result
+  suppresses envelope payload construction and background append work before the event
+  reaches redis-proxy.
 - Control authorizes each SSE tail session, writes/refreshes the worker gate in
   `logs:tail:active`, reads `logs:<ns>:<worker>:s`, and emits SSE frames. Reconnects
   re-enter normal auth. Gate renewal and admission share one atomic operation, so
@@ -83,8 +84,8 @@ pipe, not durable log storage.
 ## Ownership / Concurrency / Failure Semantics
 
 - Structured stdout is the source of truth for durable platform logging.
-- No active tailer means runtime still logs stdout but skips per-event stream append
-  work after local active-set miss caching.
+- No active tailer means runtime still logs stdout but skips tail-envelope payload and
+  stream-append work after local active-set miss caching.
 - Active tail sessions are time-bounded authorization leases and must reconnect through
   normal auth. `LOG_TAIL_MAX_SESSION_MS` sets the control-side maximum; invalid or
   empty values fall back to 15 minutes.

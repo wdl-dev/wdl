@@ -59,9 +59,12 @@ const mod = await importRepositoryModule("runtime/bindings/r2.js", [
 
 export const { R2Bucket } = mod;
 
-export function makeR2Bucket(envOverrides = {}) {
+export function makeR2Bucket(
+  envOverrides = {},
+  bindingProps = { ns: "demo", bucketName: "uploads" }
+) {
   return new R2Bucket(
-    { props: { ns: "demo", bucketName: "uploads" } },
+    { props: bindingProps },
     {
       SERVICE_NAME: "user-runtime",
       R2_S3_ACCESS_KEY_ID: "test",

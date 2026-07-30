@@ -70,6 +70,8 @@ Platform binding 是 WDL-specific、指向 platform-tier namespace（例如 `__p
 Runtime 通过 `redis-proxy` 从 DB 0 读取不可变 bundle 和 metadata。Data-plane binding 使用各自的 storage：
 
 - DB 0 中的 secret hash value 是 envelope ciphertext。redis-proxy 在 runtime-load 时解密；provider 配置或 envelope 校验失败时 fail closed。
+- Runtime 将 bundle entry 解码为指向有界 cold-load envelope 的 view。Text 和 JSON module 直接从 view 解码；wasm 和 data module 获得独立 byte copy，tenant 可见 buffer 无法暴露相邻 module 或 secret。
+- Loaded host-binding wrapper 只为稳定的 workerd env object 缓存完成 stripping 的 template。每个 event 仍获得新的顶层 env copy 和 facade instance，因此 request-id context 与 tenant mutation 保持 request scoped。
 - KV 和 queue producer 通过 `redis-proxy` 使用 DB 1。
 - Workflow binding 调用 `workflows`；runtime 不直接读取 DB 2。
 - D1 和 DO binding 调用专门 runtime service。

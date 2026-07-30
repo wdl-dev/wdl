@@ -6,7 +6,7 @@ import {
   d1ErrorPayload,
   normalizeQueryRequest,
   readD1QueryRequest,
-  readD1QueryResponse,
+  readD1QueryResponseWithBytes,
 } from "d1-runtime-protocol";
 import {
   resolveTaskIdentity,
@@ -45,7 +45,7 @@ import {
   metrics,
   SERVICE,
 } from "d1-runtime-state";
-import { d1QueryResponse } from "d1-runtime-http";
+import { d1QueryBytesResponse, d1QueryResponse } from "d1-runtime-http";
 
 const D1_OWNER_HINT_HEADERS = [
   "x-wdl-d1-owner-task-id",
@@ -60,7 +60,7 @@ const ROUTER_READ_CACHE_MAX_DBS = 10_000;
  * @typedef {import("d1-runtime-protocol").NormalizedStatement} D1Statement
  * @typedef {{ dbKey: string, namespace: string, databaseId: string, binding: string | null, mode: string, slot: number, statements: D1Statement[] }} D1Query
  * @typedef {{ taskId: string, endpoint: string, generation: number, dbKey: string }} D1Owner
- * @typedef {{ token: unknown, hit: boolean, payload?: unknown, preInvalidated?: boolean, mayHaveWrittenWithoutPreInvalidation?: boolean }} RouterRead
+ * @typedef {{ token: unknown, hit: boolean, bytes?: Uint8Array<ArrayBuffer>, preInvalidated?: boolean, mayHaveWrittenWithoutPreInvalidation?: boolean }} RouterRead
  */
 
 /** @type {Map<string, D1ReadCache>} */
@@ -168,7 +168,7 @@ async function beginRouterRead(query, env, owner) {
   return {
     token: read.hit ? null : read.token,
     hit: read.hit === true,
-    payload: read.hit ? read.payload : undefined,
+    bytes: read.hit ? read.bytes : undefined,
     preInvalidated: false,
     mayHaveWrittenWithoutPreInvalidation,
   };
@@ -224,7 +224,10 @@ export async function handleQuery(request, env, requestId = null, options = {}) 
       if (!forwarded) {
         recordQueryComplete({ requestId, query, startedAt, status, code, outcome, forwarded });
       }
-      return d1QueryResponse(routerRead.payload, { status, headers: ownerHeaders(owner) });
+      return d1QueryBytesResponse(
+        /** @type {Uint8Array<ArrayBuffer>} */ (routerRead.bytes),
+        { status, headers: ownerHeaders(owner) }
+      );
     }
     const response = await routeQueryToOwner(
       query,
@@ -235,7 +238,7 @@ export async function handleQuery(request, env, requestId = null, options = {}) 
       hopCount
     );
     status = response.status;
-    const payload = await readD1QueryResponse(response);
+    const { bytes, payload } = await readD1QueryResponseWithBytes(response);
     const payloadRecord = /** @type {Record<string, unknown>} */ (Object(payload));
     code = typeof payloadRecord.error === "string" ? payloadRecord.error : (response.ok ? "ok" : "internal-error");
     outcome = response.ok && payloadRecord.success !== false ? "ok" : "error";
@@ -246,7 +249,7 @@ export async function handleQuery(request, env, requestId = null, options = {}) 
         invalidateRouterReadCache(query.dbKey, "changed-db");
       } else if (routerRead.token) {
         const cache = getRouterReadCache(env, query.dbKey);
-        cache.finishRead(routerRead.token, payload);
+        cache.finishRead(routerRead.token, bytes);
       }
     } else if (routerRead.mayHaveWrittenWithoutPreInvalidation) {
       invalidateRouterReadCache(query.dbKey, "write");
@@ -255,7 +258,7 @@ export async function handleQuery(request, env, requestId = null, options = {}) 
     if (!forwarded) {
       recordQueryComplete({ requestId, query, startedAt, status, code, outcome, forwarded });
     }
-    return d1QueryResponse(payload, { status, headers });
+    return d1QueryBytesResponse(bytes, { status, headers });
   } catch (err) {
     const classified = classifyD1Error(err);
     status = classified.status;

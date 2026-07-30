@@ -14,7 +14,8 @@ use crate::{
 };
 
 use super::{
-    parse_delayed_key, queue_orphaned_key, queue_stream_key, resolve_consumer, stream_id_to_entry,
+    Consumer, ConsumerLookup, QUEUE_REDIS_READ_BATCH_SIZE, parse_delayed_key, queue_orphaned_key,
+    queue_stream_key, resolve_consumer_batch, stream_id_to_entry,
 };
 
 const QUEUE_DELAYED_CLAIM_SAFETY_MS: u64 = 5_000;
@@ -51,6 +52,35 @@ redis.call("DEL", KEYS[1])
 return 1
 "#;
 
+struct DelayedQueueProbe {
+    delayed_key: String,
+    stream_key: String,
+    ns: String,
+    queue: String,
+}
+
+impl DelayedQueueProbe {
+    fn parse(delayed_key: String) -> Result<Self, String> {
+        let Some((ns, queue)) = parse_delayed_key(&delayed_key) else {
+            return Err(delayed_key);
+        };
+        Ok(Self {
+            stream_key: queue_stream_key(&ns, &queue),
+            delayed_key,
+            ns,
+            queue,
+        })
+    }
+
+    fn consumer_lookup(&self) -> ConsumerLookup<'_> {
+        ConsumerLookup {
+            stream_key: &self.stream_key,
+            ns: &self.ns,
+            queue: &self.queue,
+        }
+    }
+}
+
 pub(crate) fn wait_ms_until_due(now_ms: i64, due_ms: i64) -> u64 {
     due_ms.saturating_sub(now_ms).max(0) as u64
 }
@@ -70,6 +100,101 @@ pub(crate) fn earliest_due_from_zrange_heads(
         earliest = Some(earliest.map_or(due, |current: i64| current.min(due)));
     }
     (earliest, empty_keys)
+}
+
+fn delayed_due_probe_pipeline(
+    probes: &[DelayedQueueProbe],
+    consumers: &[Option<Consumer>],
+    due_at_ms: i64,
+    limit: usize,
+) -> redis::Pipeline {
+    debug_assert_eq!(probes.len(), consumers.len());
+    let mut pipe = redis::pipe();
+    for (probe, consumer) in probes.iter().zip(consumers) {
+        let command = pipe.cmd("ZRANGEBYSCORE").arg(&probe.delayed_key).arg(0);
+        if consumer.is_some() {
+            command.arg(due_at_ms);
+        } else {
+            command.arg("+inf");
+        }
+        command.arg("LIMIT").arg(0).arg(limit);
+    }
+    pipe
+}
+
+async fn load_delayed_due_members(
+    state: &AppState,
+    probes: &[DelayedQueueProbe],
+    consumers: &[Option<Consumer>],
+    due_at_ms: i64,
+) -> SchedulerResult<Vec<Vec<String>>> {
+    if probes.len() != consumers.len() {
+        return Err(SchedulerError::internal_error(
+            "delayed queue consumer response count mismatch",
+        ));
+    }
+    let mut members = Vec::with_capacity(probes.len());
+    for (probe_chunk, consumer_chunk) in probes
+        .chunks(QUEUE_REDIS_READ_BATCH_SIZE)
+        .zip(consumers.chunks(QUEUE_REDIS_READ_BATCH_SIZE))
+    {
+        let chunk_members: Vec<Vec<String>> = state
+            .data_redis
+            .with_conn(async |mut conn| {
+                delayed_due_probe_pipeline(
+                    probe_chunk,
+                    consumer_chunk,
+                    due_at_ms,
+                    state.config.queue_sweep_batch_size,
+                )
+                .query_async(&mut conn)
+                .await
+            })
+            .await?;
+        if chunk_members.len() != probe_chunk.len() {
+            return Err(SchedulerError::internal_error(
+                "delayed queue due probe response count mismatch",
+            ));
+        }
+        members.extend(chunk_members);
+    }
+    Ok(members)
+}
+
+fn delayed_head_pipeline(delayed_keys: &[String]) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    for delayed_key in delayed_keys {
+        pipe.cmd("ZRANGE")
+            .arg(delayed_key)
+            .arg(0)
+            .arg(0)
+            .arg("WITHSCORES");
+    }
+    pipe
+}
+
+async fn load_delayed_heads(
+    state: &AppState,
+    delayed_keys: &[String],
+) -> SchedulerResult<Vec<Vec<(String, f64)>>> {
+    let mut heads = Vec::with_capacity(delayed_keys.len());
+    for key_chunk in delayed_keys.chunks(QUEUE_REDIS_READ_BATCH_SIZE) {
+        let chunk_heads: Vec<Vec<(String, f64)>> = state
+            .data_redis
+            .with_conn(async |mut conn| {
+                delayed_head_pipeline(key_chunk)
+                    .query_async(&mut conn)
+                    .await
+            })
+            .await?;
+        if chunk_heads.len() != key_chunk.len() {
+            return Err(SchedulerError::internal_error(
+                "delayed queue head probe response count mismatch",
+            ));
+        }
+        heads.extend(chunk_heads);
+    }
+    Ok(heads)
 }
 
 pub(crate) fn record_queue_delayed_wake_read_error(metrics: &Metrics) {
@@ -260,49 +385,31 @@ async fn apply_claimed_delayed_members(
 
 pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
     let mut made_progress = false;
-    let delayed_keys = state
+    let probes = state
         .queues
         .known_delayed
         .read()
         .await
         .iter()
         .cloned()
+        .filter_map(|key| DelayedQueueProbe::parse(key).ok())
         .collect::<Vec<_>>();
-    for delayed_key in delayed_keys {
-        let Some((ns, queue)) = parse_delayed_key(&delayed_key) else {
-            continue;
-        };
-        let stream_key = queue_stream_key(&ns, &queue);
-        let consumer = resolve_consumer(&state, &stream_key, &ns, &queue).await?;
-        let (max_score, orphaned) = if consumer.is_some() {
-            (now_ms().to_string(), false)
-        } else {
-            ("+inf".to_string(), true)
-        };
-        let limit = state.config.queue_sweep_batch_size;
-        let members: Vec<String> = state
-            .data_redis
-            .with_conn(async |mut conn| {
-                let delayed_key = delayed_key.clone();
-                redis::cmd("ZRANGEBYSCORE")
-                    .arg(delayed_key)
-                    .arg(0)
-                    .arg(max_score)
-                    .arg("LIMIT")
-                    .arg(0)
-                    .arg(limit)
-                    .query_async(&mut conn)
-                    .await
-            })
-            .await?;
+    let lookups = probes
+        .iter()
+        .map(DelayedQueueProbe::consumer_lookup)
+        .collect::<Vec<_>>();
+    let consumers = resolve_consumer_batch(&state, &lookups).await?;
+    let due_members = load_delayed_due_members(&state, &probes, &consumers, now_ms()).await?;
+    for ((probe, consumer), members) in probes.into_iter().zip(consumers).zip(due_members) {
         if members.is_empty() {
             continue;
         }
-        let claimed = claim_delayed_members(&state, &delayed_key, members).await?;
+        let claimed = claim_delayed_members(&state, &probe.delayed_key, members).await?;
         if claimed.is_empty() {
             continue;
         }
 
+        let orphaned = consumer.is_none();
         let mut move_batch = Vec::with_capacity(claimed.len());
         let mut corrupt = Vec::new();
         for (member, claim_key) in &claimed {
@@ -318,15 +425,15 @@ pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
         }
         let (target_key, trim) = if orphaned {
             (
-                queue_orphaned_key(&ns, &queue),
+                queue_orphaned_key(&probe.ns, &probe.queue),
                 Some(state.config.max_orphaned_len),
             )
         } else {
-            (stream_key, None)
+            (probe.stream_key, None)
         };
         let result = apply_claimed_delayed_members(
             &state,
-            &delayed_key,
+            &probe.delayed_key,
             &target_key,
             trim,
             &move_batch,
@@ -339,7 +446,7 @@ pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
                 &state,
                 LogLevel::Warn,
                 "queue_delayed_corrupt_members_dropped",
-                json!({ "ns": ns, "queue": queue, "count": result.dropped }),
+                json!({ "ns": probe.ns, "queue": probe.queue, "count": result.dropped }),
             );
         }
         let moved = result.moved + result.dropped;
@@ -349,7 +456,7 @@ pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
                 &state,
                 LogLevel::Info,
                 "queue_delayed_orphaned",
-                json!({ "ns": ns, "queue": queue, "count": result.moved }),
+                json!({ "ns": probe.ns, "queue": probe.queue, "count": result.moved }),
             );
         }
         if result.remaining == 0 {
@@ -358,7 +465,7 @@ pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
                 .known_delayed
                 .write()
                 .await
-                .remove(&delayed_key);
+                .remove(&probe.delayed_key);
         }
     }
     Ok(made_progress)
@@ -375,40 +482,30 @@ pub(crate) async fn queue_next_due_ms(state: &AppState) -> SchedulerResult<Optio
         .collect::<Vec<_>>();
     let mut earliest = None;
     let mut empty_keys = Vec::new();
-    let mut zrange_keys = Vec::new();
+    let mut probes = Vec::new();
     for delayed_key in delayed_keys {
-        let Some((ns, queue)) = parse_delayed_key(&delayed_key) else {
-            empty_keys.push(delayed_key);
-            continue;
-        };
-        let stream_key = queue_stream_key(&ns, &queue);
-        if resolve_consumer(state, &stream_key, &ns, &queue)
-            .await?
-            .is_none()
-        {
-            // A removed consumer makes every delayed member orphan-eligible.
-            // Wake the sweep immediately; it drains with +inf and removes the
-            // key from known_delayed, so this is a bounded cleanup trigger.
-            return Ok(Some(now_ms()));
+        match DelayedQueueProbe::parse(delayed_key) {
+            Ok(probe) => probes.push(probe),
+            Err(invalid_key) => empty_keys.push(invalid_key),
         }
-        zrange_keys.push(delayed_key);
     }
+    let lookups = probes
+        .iter()
+        .map(DelayedQueueProbe::consumer_lookup)
+        .collect::<Vec<_>>();
+    let consumers = resolve_consumer_batch(state, &lookups).await?;
+    if consumers.iter().any(Option::is_none) {
+        // A removed consumer makes every delayed member orphan-eligible. Wake
+        // the sweep immediately; it drains with +inf and removes the key from
+        // known_delayed, so this is a bounded cleanup trigger.
+        return Ok(Some(now_ms()));
+    }
+    let zrange_keys = probes
+        .iter()
+        .map(|probe| probe.delayed_key.clone())
+        .collect::<Vec<_>>();
     if !zrange_keys.is_empty() {
-        let heads: Vec<Vec<(String, f64)>> = state
-            .data_redis
-            .with_conn(async |mut conn| {
-                let zrange_keys = zrange_keys.clone();
-                let mut pipe = redis::pipe();
-                for delayed_key in zrange_keys {
-                    pipe.cmd("ZRANGE")
-                        .arg(delayed_key)
-                        .arg(0)
-                        .arg(0)
-                        .arg("WITHSCORES");
-                }
-                pipe.query_async(&mut conn).await
-            })
-            .await?;
+        let heads = load_delayed_heads(state, &zrange_keys).await?;
         let (next_due, mut zrange_empty_keys) =
             earliest_due_from_zrange_heads(&zrange_keys, &heads);
         earliest = next_due;
@@ -538,6 +635,19 @@ mod tests {
     use super::*;
     use crate::test_fixtures::parse_packed_commands;
 
+    fn consumer(ns: &str, queue: &str) -> Consumer {
+        Consumer {
+            ns: ns.to_string(),
+            queue: queue.to_string(),
+            max_batch_size: 10,
+            max_batch_timeout_ms: 5000,
+            max_retries: 3,
+            retry_delay_secs: 0,
+            dead_letter_queue: None,
+            worker_id: format!("{ns}:worker:v1"),
+        }
+    }
+
     #[test]
     fn delayed_queue_wall_clock_wait_is_zero_once_due() {
         assert_eq!(wait_ms_until_due(10_000, 12_345), 2_345);
@@ -562,6 +672,59 @@ mod tests {
         let (earliest, empty) = earliest_due_from_zrange_heads(&keys, &heads);
         assert_eq!(earliest, Some(10_000));
         assert_eq!(empty, vec!["queue-delayed:demo:b"]);
+    }
+
+    #[test]
+    fn delayed_due_probe_pipeline_aligns_consumer_state_with_each_key() {
+        let probes = vec![
+            DelayedQueueProbe::parse("queue-delayed:demo:active".to_string()).unwrap(),
+            DelayedQueueProbe::parse("queue-delayed:demo:removed".to_string()).unwrap(),
+        ];
+        let consumers = vec![Some(consumer("demo", "active")), None];
+        let commands = parse_packed_commands(
+            &delayed_due_probe_pipeline(&probes, &consumers, 12_345, 100).get_packed_pipeline(),
+        );
+
+        assert_eq!(
+            commands,
+            [
+                [
+                    "ZRANGEBYSCORE",
+                    "queue-delayed:demo:active",
+                    "0",
+                    "12345",
+                    "LIMIT",
+                    "0",
+                    "100",
+                ],
+                [
+                    "ZRANGEBYSCORE",
+                    "queue-delayed:demo:removed",
+                    "0",
+                    "+inf",
+                    "LIMIT",
+                    "0",
+                    "100",
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn delayed_head_pipeline_preserves_key_order() {
+        let keys = vec![
+            "queue-delayed:demo:a".to_string(),
+            "queue-delayed:demo:b".to_string(),
+        ];
+        let commands = parse_packed_commands(&delayed_head_pipeline(&keys).get_packed_pipeline());
+
+        assert_eq!(
+            commands,
+            [
+                ["ZRANGE", "queue-delayed:demo:a", "0", "0", "WITHSCORES"],
+                ["ZRANGE", "queue-delayed:demo:b", "0", "0", "WITHSCORES"],
+            ]
+        );
     }
 
     #[test]

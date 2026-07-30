@@ -322,6 +322,38 @@ test("list honors limit and keeps pagination self-terminating", async () => {
   for (let i = 0; i < total; i++) assert.ok(seen.has(`k${i}`), `missing k${i}`);
 });
 
+test("list pagination spans every KV hash bucket", async () => {
+  const ns = "kvns-list-buckets";
+  const keys = oneKeyPerBucket("list-bucket-");
+  await setup(ns);
+  for (const key of keys) {
+    await call(ns, { op: "put", key, val: key });
+  }
+
+  const seen = new Set();
+  let cursor = "";
+  let guard = 0;
+  for (;;) {
+    if (guard++ > 32) throw new Error("bucket pagination did not terminate");
+    /** @type {Record<string, string>} */
+    const params = { op: "list", prefix: "list-bucket-", limit: "8" };
+    if (cursor) params.cursor = cursor;
+    const response = await call(ns, params);
+    assert.equal(response.status, 200);
+    const page = await responseJson(response);
+    assert.ok(page.keys.length <= 8, `expected at most 8 keys, got ${page.keys.length}`);
+    for (const { name } of page.keys) {
+      assert.equal(seen.has(name), false, `duplicate key ${name}`);
+      seen.add(name);
+    }
+    if (page.list_complete) break;
+    assert.ok(page.cursor, "expected cursor when list_complete=false");
+    cursor = page.cursor;
+  }
+
+  assert.deepEqual([...seen].toSorted(), keys.toSorted());
+});
+
 test("list clamps oversized user limits to Cloudflare's 1000-key page cap", async () => {
   const ns = "kvns-list-cap";
   await setup(ns);

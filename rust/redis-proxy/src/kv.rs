@@ -20,6 +20,7 @@ use crate::{AppError, AppResult, AppState, SERVICE, empty};
 mod cursor;
 
 const KV_HASH_BUCKETS: u32 = 32;
+const KV_LIST_SCAN_BUCKET_BATCH: u32 = 8;
 const VALUE_FIELD_PREFIX: &str = "v:";
 const META_FIELD_PREFIX: &str = "m:";
 const KV_KEY_MAX_BYTES: usize = 512;
@@ -191,6 +192,67 @@ fn value_field(key: &str) -> String {
 
 fn meta_field(key: &str) -> String {
     format!("{META_FIELD_PREFIX}{key}")
+}
+
+fn kv_list_scan_pipeline(
+    ns: &str,
+    id: &str,
+    bucket: u32,
+    scan_cursor: &str,
+    pattern: &str,
+    count: usize,
+) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    let end = bucket
+        .saturating_add(KV_LIST_SCAN_BUCKET_BATCH)
+        .min(KV_HASH_BUCKETS);
+    for scan_bucket in bucket..end {
+        pipe.cmd("HSCAN")
+            .arg(hash_key(ns, id, scan_bucket))
+            .arg(if scan_bucket == bucket {
+                scan_cursor
+            } else {
+                "0"
+            })
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(count)
+            .arg("NOVALUES");
+    }
+    pipe
+}
+
+fn apply_kv_list_scan_replies(
+    bucket: &mut u32,
+    scan_cursor: &mut String,
+    overflow: &mut Vec<String>,
+    raw_fields: &mut Vec<String>,
+    limit: usize,
+    replies: Vec<(String, Vec<String>)>,
+) {
+    let first_bucket = *bucket;
+    for (offset, (next_cursor, mut batch)) in replies.into_iter().enumerate() {
+        if raw_fields.len() >= limit {
+            break;
+        }
+
+        *bucket = first_bucket + offset as u32;
+        *scan_cursor = next_cursor;
+        let remaining = limit - raw_fields.len();
+        if batch.len() > remaining {
+            overflow.extend(batch.drain(remaining..));
+            raw_fields.extend(batch);
+            break;
+        }
+
+        raw_fields.extend(batch);
+        if scan_cursor == "0" {
+            *bucket += 1;
+        } else {
+            break;
+        }
+    }
 }
 
 type GroupedHmgetCommand = (String, Vec<usize>, Vec<String>);
@@ -749,7 +811,6 @@ pub(crate) async fn kv_list(
     let pattern = format!("{VALUE_FIELD_PREFIX}{}*", escape_glob_literal(&prefix));
     let mut raw_fields = Vec::new();
     while raw_fields.len() < limit && bucket < KV_HASH_BUCKETS {
-        let redis_key = hash_key(&q.ns, &q.id, bucket);
         overflow.retain(|field| cursor_overflow_field_allowed(field, &prefix));
         if !overflow.is_empty() {
             let remaining = limit - raw_fields.len();
@@ -759,7 +820,8 @@ pub(crate) async fn kv_list(
                 Vec::new()
             };
             raw_fields.extend(
-                existing_cursor_overflow_fields(&state, redis_key.clone(), overflow).await?,
+                existing_cursor_overflow_fields(&state, hash_key(&q.ns, &q.id, bucket), overflow)
+                    .await?,
             );
             overflow = pending_overflow;
             if !overflow.is_empty() {
@@ -770,34 +832,19 @@ pub(crate) async fn kv_list(
                 continue;
             }
         }
-        let pattern_arg = pattern.clone();
-        let cursor_arg = scan_cursor.clone();
-        let (next_cursor, batch): (String, Vec<String>) = state
-            .with_redis(async |mut conn| {
-                redis::cmd("HSCAN")
-                    .arg(redis_key)
-                    .arg(cursor_arg)
-                    .arg("MATCH")
-                    .arg(pattern_arg)
-                    .arg("COUNT")
-                    .arg(limit)
-                    .arg("NOVALUES")
-                    .query_async(&mut conn)
-                    .await
-            })
+        let scan_pipeline =
+            kv_list_scan_pipeline(&q.ns, &q.id, bucket, &scan_cursor, &pattern, limit);
+        let replies: Vec<(String, Vec<String>)> = state
+            .with_redis(async |mut conn| scan_pipeline.query_async(&mut conn).await)
             .await?;
-        scan_cursor = next_cursor;
-        let remaining = limit - raw_fields.len();
-        if batch.len() <= remaining {
-            raw_fields.extend(batch);
-            if scan_cursor == "0" {
-                bucket += 1;
-            }
-        } else {
-            raw_fields.extend(batch[..remaining].iter().cloned());
-            overflow.extend(batch[remaining..].iter().cloned());
-            break;
-        }
+        apply_kv_list_scan_replies(
+            &mut bucket,
+            &mut scan_cursor,
+            &mut overflow,
+            &mut raw_fields,
+            limit,
+            replies,
+        );
     }
     let user_keys = raw_fields
         .into_iter()
@@ -989,6 +1036,96 @@ mod tests {
                 assert_eq!(fields[offset], meta_field(&keys[*index]));
             }
         }
+    }
+
+    #[test]
+    fn kv_list_scan_pipeline_prefetches_a_bounded_bucket_window() {
+        let commands = parse_packed_commands(
+            &kv_list_scan_pipeline("tenant", "store", 7, "42", "v:item-*", 25)
+                .get_packed_pipeline(),
+        );
+
+        assert_eq!(commands.len(), KV_LIST_SCAN_BUCKET_BATCH as usize);
+        assert_eq!(
+            commands[0],
+            [
+                "HSCAN",
+                "kvh:tenant:store:b:7",
+                "42",
+                "MATCH",
+                "v:item-*",
+                "COUNT",
+                "25",
+                "NOVALUES",
+            ]
+        );
+        assert_eq!(commands[1][1], "kvh:tenant:store:b:8");
+        assert_eq!(commands[1][2], "0");
+        assert_eq!(commands[7][1], "kvh:tenant:store:b:14");
+
+        let final_commands = parse_packed_commands(
+            &kv_list_scan_pipeline("tenant", "store", 30, "0", "v:*", 10).get_packed_pipeline(),
+        );
+        assert_eq!(final_commands.len(), 2);
+        assert_eq!(final_commands[1][1], "kvh:tenant:store:b:31");
+    }
+
+    #[test]
+    fn kv_list_scan_replies_stop_at_the_first_unfinished_bucket() {
+        let mut bucket = 4;
+        let mut scan_cursor = "9".to_string();
+        let mut overflow = Vec::new();
+        let mut fields = Vec::new();
+
+        apply_kv_list_scan_replies(
+            &mut bucket,
+            &mut scan_cursor,
+            &mut overflow,
+            &mut fields,
+            10,
+            vec![
+                ("0".to_string(), vec!["v:first".to_string()]),
+                ("17".to_string(), vec!["v:second".to_string()]),
+                ("0".to_string(), vec!["v:ignored".to_string()]),
+            ],
+        );
+
+        assert_eq!(bucket, 5);
+        assert_eq!(scan_cursor, "17");
+        assert_eq!(fields, ["v:first", "v:second"]);
+        assert!(overflow.is_empty());
+    }
+
+    #[test]
+    fn kv_list_scan_replies_preserve_page_overflow_at_its_bucket() {
+        let mut bucket = 8;
+        let mut scan_cursor = "0".to_string();
+        let mut overflow = Vec::new();
+        let mut fields = Vec::new();
+
+        apply_kv_list_scan_replies(
+            &mut bucket,
+            &mut scan_cursor,
+            &mut overflow,
+            &mut fields,
+            2,
+            vec![
+                (
+                    "0".to_string(),
+                    vec![
+                        "v:first".to_string(),
+                        "v:second".to_string(),
+                        "v:third".to_string(),
+                    ],
+                ),
+                ("0".to_string(), vec!["v:ignored".to_string()]),
+            ],
+        );
+
+        assert_eq!(bucket, 8);
+        assert_eq!(scan_cursor, "0");
+        assert_eq!(fields, ["v:first", "v:second"]);
+        assert_eq!(overflow, ["v:third"]);
     }
 
     #[test]

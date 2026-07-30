@@ -1,4 +1,4 @@
-import { stripR2PhysicalPrefix } from "runtime-r2-utils";
+import { stripR2PhysicalPrefixWith } from "runtime-r2-utils";
 import { collectXmlFields, xmlEscape, xmlLocalName, xmlUnescape } from "shared-s3-xml";
 import { stripEtag } from "runtime-bindings-r2-metadata";
 
@@ -9,9 +9,9 @@ const LIST_PREFIX_TAGS = new Set(["Prefix"]);
 
 /**
  * @param {string} xml
- * @param {{ ns: string, bucketName: string }} props
+ * @param {string} physicalPrefix
  */
-export function parseListObjects(xml, props) {
+export function parseListObjects(xml, physicalPrefix) {
   const objects = [];
   const delimitedPrefixes = [];
   let cursor;
@@ -26,7 +26,7 @@ export function parseListObjects(xml, props) {
       const httpEtag = fields.ETag || "";
       const uploaded = fields.LastModified ? new Date(fields.LastModified).getTime() : Date.now();
       objects.push({
-        key: stripR2PhysicalPrefix(props, fields.Key),
+        key: stripR2PhysicalPrefixWith(physicalPrefix, fields.Key),
         version: "",
         size: Number(fields.Size ?? "0"),
         etag: stripEtag(httpEtag),
@@ -40,7 +40,7 @@ export function parseListObjects(xml, props) {
     } else if (entry === "CommonPrefixes") {
       const fields = collectXmlFields(match[2], LIST_PREFIX_TAGS);
       if (fields.Prefix) {
-        delimitedPrefixes.push(stripR2PhysicalPrefix(props, fields.Prefix));
+        delimitedPrefixes.push(stripR2PhysicalPrefixWith(physicalPrefix, fields.Prefix));
       }
     } else if (entry === "IsTruncated") {
       truncated = xmlUnescape(match[4]).trim() === "true";

@@ -12,6 +12,12 @@ import {
 
 const env = { D1_READ_CACHE_TTL_MS: "1000", D1_READ_CACHE_MAX_ENTRIES: "2" };
 const owner = { taskId: "task-a", dbKey: "tenant-a:d1_main", generation: 7 };
+const textEncoder = new TextEncoder();
+
+/** @param {unknown} value */
+function wireBytes(value) {
+  return textEncoder.encode(JSON.stringify(value));
+}
 
 /** @type {Array<{ name: string, labels: any }>} */
 let observed;
@@ -91,11 +97,12 @@ test("D1 read cache: stores by router cache instance and owner generation", () =
     statements: [{ sql: "select body from messages where id = ?", params: ["m1"] }],
   });
   const payload = { success: true, results: [{ body: "hello" }], meta: { changed_db: false } };
+  const bytes = wireBytes(payload);
 
   const miss = c.beginRead(q, owner);
   assert.equal(miss.hit, false);
-  assert.equal(c.finishRead(miss.token, payload), true);
-  assert.deepEqual(c.beginRead(q, owner).payload, payload);
+  assert.equal(c.finishRead(miss.token, bytes), true);
+  assert.deepEqual(c.beginRead(q, owner).bytes, bytes);
   assert.equal(c.beginRead(q, { ...owner, generation: 8 }).hit, false);
 });
 
@@ -105,7 +112,7 @@ test("D1 read cache: keys include database identity", () => {
     statements: [{ sql: "select body from messages where id = ?", params: ["m1"] }],
   });
   const read = c.beginRead(q, owner);
-  assert.equal(c.finishRead(read.token, { success: true, results: [{ body: "db-a" }], meta: {} }), true);
+  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: [{ body: "db-a" }], meta: {} })), true);
 
   const otherDb = c.beginRead({ ...q, dbKey: "tenant-b:d1_main" }, { ...owner, dbKey: "tenant-b:d1_main" });
 
@@ -129,12 +136,18 @@ test("D1 read cache: evicts oldest entry per cache instance", () => {
   for (const id of ["a", "b", "c"]) {
     const q = query(`select * from messages where id = '${id}'`);
     const read = c.beginRead(q, owner);
-    c.finishRead(read.token, { success: true, results: [id], meta: {} });
+    c.finishRead(read.token, wireBytes({ success: true, results: [id], meta: {} }));
   }
 
   assert.equal(c.beginRead(query("select * from messages where id = 'a'"), owner).hit, false);
-  assert.deepEqual(/** @type {any} */ (c.beginRead(query("select * from messages where id = 'b'"), owner).payload).results, ["b"]);
-  assert.deepEqual(/** @type {any} */ (c.beginRead(query("select * from messages where id = 'c'"), owner).payload).results, ["c"]);
+  assert.deepEqual(
+    c.beginRead(query("select * from messages where id = 'b'"), owner).bytes,
+    wireBytes({ success: true, results: ["b"], meta: {} })
+  );
+  assert.deepEqual(
+    c.beginRead(query("select * from messages where id = 'c'"), owner).bytes,
+    wireBytes({ success: true, results: ["c"], meta: {} })
+  );
 });
 
 test("D1 read cache: expired entries are purged before lookup", () => {
@@ -142,7 +155,7 @@ test("D1 read cache: expired entries are purged before lookup", () => {
   const q = query("select * from messages where id = 'expired'");
   const read = c.beginRead(q, owner);
   /** @type {any} */ (read.token).expiresAt = 0;
-  assert.equal(c.finishRead(read.token, { success: true, results: ["expired"], meta: {} }), true);
+  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: ["expired"], meta: {} })), true);
 
   const reread = c.beginRead(q, owner);
 
@@ -155,7 +168,7 @@ test("D1 read cache: mutation version prevents stale read store after write", ()
   const q = query("select * from messages");
   const read = c.beginRead(q, owner);
   c.invalidate("write");
-  assert.equal(c.finishRead(read.token, { success: true, results: [], meta: {} }), false);
+  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: [], meta: {} })), false);
   assert.equal(c.beginRead(q, owner).hit, false);
 });
 
@@ -164,7 +177,7 @@ test("D1 read cache: invalidation only records a reason when entries existed", (
   c.invalidate("write");
 
   const read = c.beginRead(query("select * from messages"), owner);
-  assert.equal(c.finishRead(read.token, { success: true, results: [], meta: {} }), true);
+  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: [], meta: {} })), true);
   c.invalidate("changed-db");
 
   assert.deepEqual(
@@ -178,47 +191,22 @@ test("D1 read cache: invalidation only records a reason when entries existed", (
   );
 });
 
-test("D1 read cache: changed-db payloads are not stored", () => {
-  const c = cache();
-  const q = query("select * from messages");
+test("D1 read cache: changed-db classification handles single and batch payloads", () => {
   const payload = { success: true, results: [], meta: { changed_db: true } };
-  const read = c.beginRead(q, owner);
 
   assert.equal(payloadChangedDb(payload), true);
-  assert.equal(c.finishRead(read.token, payload), false);
-  assert.equal(c.beginRead(q, owner).hit, false);
+  assert.equal(payloadChangedDb([payload]), true);
+  assert.equal(payloadChangedDb({ success: true, meta: { changed_db: false } }), false);
 });
 
-test("D1 read cache: cached payloads are isolated from caller mutation", () => {
+test("D1 read cache: stores opaque query wire bytes", () => {
   const c = cache();
   const q = query("select body from messages where id = 'm1'");
-  const payload = { success: true, results: [{ body: "original" }], meta: {} };
+  const bytes = Uint8Array.from([0x48, 0x01, 0x3a, 0x03, 0xff, 0x00, 0x7f]);
   const read = c.beginRead(q, owner);
-  assert.equal(c.finishRead(read.token, payload), true);
-  payload.results[0].body = "mutated-after-store";
+  assert.equal(c.finishRead(read.token, bytes), true);
 
   const hit = c.beginRead(q, owner);
   assert.equal(hit.hit, true);
-  const hitPayload = /** @type {any} */ (hit.payload);
-  assert.deepEqual(hitPayload.results, [{ body: "original" }]);
-  hitPayload.results[0].body = "mutated-after-hit";
-  assert.deepEqual(/** @type {any} */ (c.beginRead(q, owner).payload).results, [{ body: "original" }]);
-});
-
-test("D1 read cache: blob payload survives cache hit", () => {
-  const c = cache();
-  const q = query("select blob_col from messages where id = 'm1'");
-  const payload = {
-    success: true,
-    results: { columns: ["blob_col"], rows: [[new Uint8Array([0, 1, 2, 255])]] },
-    meta: { changed_db: false },
-  };
-
-  const read = c.beginRead(q, owner);
-  assert.equal(c.finishRead(read.token, payload), true);
-  const hit = c.beginRead(q, owner);
-  assert.equal(hit.hit, true);
-  const results = /** @type {{ rows: Uint8Array[][] }} */ (/** @type {any} */ (hit.payload).results);
-  assert.ok(results.rows[0][0] instanceof Uint8Array);
-  assert.deepEqual(Array.from(results.rows[0][0]), [0, 1, 2, 255]);
+  assert.deepEqual(hit.bytes, bytes);
 });

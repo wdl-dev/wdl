@@ -1087,10 +1087,11 @@ test("decodeRuntimeLoadPayload: reads length-prefixed bundle bytes and secrets",
     worker_secrets: { A: "worker", B: "local" },
   });
 
-  const decoded = decodeRuntimeLoadPayload(bufferToArrayBuffer(payload));
+  const payloadBuffer = bufferToArrayBuffer(payload);
+  const decoded = decodeRuntimeLoadPayload(payloadBuffer);
   assert.equal(new TextDecoder().decode(decoded.bundle["worker.js"]), "export default {};");
   assert.deepEqual([...decoded.bundle["data.bin"]], [0, 1, 255]);
-  assert.equal(decoded.bundle["data.bin"].buffer.byteLength, 3);
+  assert.equal(decoded.bundle["data.bin"].buffer, payloadBuffer);
   assert.deepEqual(decoded.ns_secrets, { A: "ns" });
   assert.deepEqual(decoded.worker_secrets, { A: "worker", B: "local" });
 });
@@ -1109,6 +1110,7 @@ test("decodeRuntimeLoadPayload: preserves magic bundle keys as data entries", ()
   });
 
   const decoded = decodeRuntimeLoadPayload(bufferToArrayBuffer(payload));
+  assert.equal(Object.getPrototypeOf(decoded.bundle), null);
   assert.equal(Object.hasOwn(decoded.bundle, "__proto__"), true);
   assert.equal(new TextDecoder().decode(decoded.bundle.__proto__), "magic-entry");
 });

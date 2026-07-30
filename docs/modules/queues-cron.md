@@ -144,13 +144,16 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    `max_batch_size`, which must be in `[1, 100]`; out-of-range projections are rejected.
    Each read caps `COUNT` to the current consumer batch-size snapshot for the active
    stream set so one poll does not place more entries into the PEL than a current
-   consumer can dispatch in one batch.
-   PEL reap uses the same per-consumer cap when the consumer still exists; missing-
-   consumer orphan movement may still page up to the hard cap. Consume and PEL reap can
-   dispatch streams in parallel under the queue semaphore. Before each dispatch path
-   sends messages to runtime, scheduler re-reads the authoritative `queue-consumer`
-   hash for that stream and updates the in-memory registry, so a promoted consumer
-   version does not wait for the next reconcile tick once messages are selected.
+   consumer can dispatch in one batch. The consume loop keeps at most one batch in
+   flight per stream on each Scheduler replica, but continues polling and dispatching
+   other streams under the shared queue semaphore instead of waiting for a slow runtime
+   handler. PEL reap uses the same per-consumer cap when the consumer still exists;
+   missing-consumer orphan movement may still page up to the hard cap. Consume and PEL
+   reap can dispatch streams in parallel under the queue semaphore. Before each
+   dispatch path sends messages to runtime, scheduler re-reads the authoritative
+   `queue-consumer` hash for that stream and updates the in-memory registry, so a
+   promoted consumer version does not wait for the next reconcile tick once messages
+   are selected.
    `max_batch_timeout_ms` is not a batching wait window in the current model.
 4. Runtime returns a queue outcome envelope. Explicit `ack`, explicit `retry`, batch
    retry, and implicit ack are resolved in scheduler. Retry and DLQ transitions execute
@@ -162,9 +165,12 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    dispatch bodies, go directly to DLQ without consuming the retry budget. Aggregate
    request-body-too-large responses are split and retried with smaller batches first.
 5. The delayed loop wakes from `queue-delayed-wake` and from wall-clock sleeps until the
-   next due delayed member. Each due member first takes a `queue-delayed-claim:*` lease
-   sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the winner moves it back to the main
-   stream, or to the orphan stream if the consumer vanished.
+   next due delayed member. Each pass reads authoritative consumer projections and
+   delayed heads or due ranges in bounded pipelines; only queues with eligible members
+   enter the per-key mutation path. Each due member first takes a
+   `queue-delayed-claim:*` lease sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the
+   winner moves it back to the main stream, or to the orphan stream if the consumer
+   vanished.
 6. Orphan/Pending-Entry cleanup is diagnostic and protective. It prevents consumer
    deletion or scheduler crash paths from silently losing messages, but the main queue
    stream remains the durable backlog and is intentionally not trimmed. Delayed ZSET and

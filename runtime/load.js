@@ -135,7 +135,7 @@ export function decodeRuntimeLoadPayload(buffer) {
   const entryCount = readU32(view, offset);
   offset += 4;
   /** @type {Record<string, Uint8Array>} */
-  const bundle = {};
+  const bundle = Object.create(null);
   for (let i = 0; i < entryCount; i++) {
     const keyLen = readU32(view, offset);
     offset += 4;
@@ -146,14 +146,9 @@ export function decodeRuntimeLoadPayload(buffer) {
     }
     const key = utf8Decoder.decode(bytes.subarray(offset, offset + keyLen));
     offset += keyLen;
-    // Copy each module value so user-visible wasm/data modules cannot expose
-    // the full cold-load envelope, which also contains secrets.
-    Object.defineProperty(bundle, key, {
-      value: bytes.slice(offset, offset + valueLen),
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
+    // Keep envelope views here. bundleToWorkerCode owns the defensive copy for
+    // wasm/data modules whose bytes become tenant-visible.
+    bundle[key] = bytes.subarray(offset, offset + valueLen);
     offset += valueLen;
   }
   if (offset !== bytes.length) {

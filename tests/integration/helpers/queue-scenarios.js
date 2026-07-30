@@ -144,13 +144,6 @@ export default {
 };
 `;
 
-export const HANG_QUEUE_CONSUMER = `
-export default {
-  fetch() { return new Response("hang"); },
-  async queue() { await new Promise(() => {}); },
-};
-`;
-
 export const FAST_QUEUE_CONSUMER = `
 const store = {};
 export default {

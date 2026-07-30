@@ -98,7 +98,15 @@ export function r2PhysicalKey(props, key) {
  * @returns {string}
  */
 export function stripR2PhysicalPrefix(props, physicalKey) {
-  const prefix = r2PhysicalPrefix(props);
+  return stripR2PhysicalPrefixWith(r2PhysicalPrefix(props), physicalKey);
+}
+
+/**
+ * @param {string} prefix
+ * @param {unknown} physicalKey
+ * @returns {string}
+ */
+export function stripR2PhysicalPrefixWith(prefix, physicalKey) {
   if (typeof physicalKey !== "string" || !physicalKey.startsWith(prefix)) {
     throw new Error("R2 backend returned an object outside the binding prefix");
   }

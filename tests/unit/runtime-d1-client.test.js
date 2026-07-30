@@ -40,6 +40,7 @@ const d1ClientModule = await importRepositoryModule("runtime/d1-client.js", [
     "./_wdl-sql-splitter.js": repositoryFileUrl("shared/sql-splitter.js"),
     "./_wdl-d1-params.js": repositoryFileUrl("shared/d1-params.js"),
     "./_wdl-d1-transport.js": d1TransportDataUrl(),
+    "./_wdl-d1-data-field.js": repositoryFileUrl("shared/d1-data-field.js"),
     "./_wdl-request-id.js": repositoryFileUrl("runtime/_wdl-request-id.js"),
   }),
 ]);
@@ -227,6 +228,25 @@ test("D1 local client: raw({ columnNames }) preserves empty result column names"
     await db.prepare("select id, body from messages where id = ?").bind("missing").raw({ columnNames: true }),
     [["id", "body"]]
   );
+});
+
+test("D1 local client: row normalization preserves duplicate and magic column semantics", async () => {
+  const { db } = makeLocalDb(() => ({
+    success: true,
+    results: {
+      columns: ["value", "__proto__", "value"],
+      rows: [["first", "row-prototype", "last"]],
+    },
+    meta: { duration: 0 },
+  }));
+
+  const result = await db.prepare("select 1").all();
+  const rows = /** @type {Record<string, unknown>[]} */ (result.results);
+  const row = rows[0];
+  assert.equal(Object.getPrototypeOf(row), Object.prototype);
+  assert.equal(Object.hasOwn(row, "__proto__"), true);
+  assert.equal(row.__proto__, "row-prototype");
+  assert.equal(row.value, "last");
 });
 
 test("D1 local client: batch accepts nested prepare().bind() statements without awaits", async () => {
