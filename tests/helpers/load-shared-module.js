@@ -14,6 +14,7 @@ const SHARED_BASE64_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/base64.j
 const SHARED_NS_PATTERN_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/ns-pattern.js")).href;
 const WORKER_CONTRACT_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/worker-contract.js")).href;
 const SHARED_HEX_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/hex.js")).href;
+const SHARED_UTF8_URL = pathToFileURL(path.resolve(REPO_ROOT, "shared/utf8.js")).href;
 const SHARED_OPTIMISTIC_RETRY_URL = pathToFileURL(
   path.resolve(REPO_ROOT, "shared/optimistic-retry.js")
 ).href;
@@ -135,6 +136,7 @@ export function sharedModuleDataUrl(relativePath) {
     [/from "shared-optimistic-retry";?/g, `from ${JSON.stringify(SHARED_OPTIMISTIC_RETRY_URL)};`],
     [/from "\.\/errors\.js";?/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
     [/from "\.\/hex\.js";?/g, `from ${JSON.stringify(SHARED_HEX_URL)};`],
+    [/from "\.\/utf8\.js";?/g, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
   ]);
   return moduleDataUrl(src);
 }

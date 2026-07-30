@@ -1,9 +1,10 @@
+import { utf8ByteLength } from "shared-utf8";
+
 export const WORKFLOW_RESULT_BYTES_MAX = 1024 * 1024;
 export const WORKFLOW_BACKEND_REQUEST_BYTES_MAX = 2 * 1024 * 1024;
 export const WORKFLOW_PAYLOAD_TOO_LARGE_CODE = "workflow_payload_too_large";
 const WORKFLOW_JSON_ENCODE_CHARS = 8192;
 const WORKFLOW_JSON_FLUSH_CHARS = 8192;
-const utf8Encoder = new TextEncoder();
 
 /**
  * @param {string} code
@@ -46,7 +47,7 @@ export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BY
       const last = part.charCodeAt(end - 1);
       if (end < part.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
       const chunk = part.slice(offset, end);
-      bytes += utf8Encoder.encode(chunk).byteLength;
+      bytes += utf8ByteLength(chunk);
       if (bytes > maxBytes) throw workflowPayloadTooLarge(kind, maxBytes);
       parts.push(chunk);
       offset = end;
@@ -180,6 +181,42 @@ export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BY
     return Number(value);
   };
   /**
+   * @param {Record<string, unknown> | unknown[]} entry
+   * @param {boolean} array
+   */
+  const writeContainer = (entry, array) => {
+    if (seen.has(entry)) throw new TypeError("Converting circular structure to JSON");
+    seen.add(entry);
+    if (array) {
+      const values = /** @type {unknown[]} */ (entry);
+      push("[");
+      for (let i = 0; i < values.length; i += 1) {
+        if (i > 0) push(",");
+        if (!writeValue(values[i], String(i))) push("null");
+      }
+      push("]");
+    } else {
+      const objectValue = /** @type {Record<string, unknown>} */ (entry);
+      push("{");
+      let first = true;
+      for (const prop of Object.keys(objectValue)) {
+        const child = normalize(objectValue[prop], prop);
+        if (!writable(child)) continue;
+        if (!first) push(",");
+        first = false;
+        writeString(prop);
+        push(":");
+        const beforeValue = bytes;
+        writeValue(child, prop, true);
+        if (fieldCaps[prop] && bytes - beforeValue > fieldCaps[prop].maxBytes) {
+          throw workflowPayloadTooLarge(fieldCaps[prop].kind, fieldCaps[prop].maxBytes);
+        }
+      }
+      push("}");
+    }
+    seen.delete(entry);
+  };
+  /**
    * @param {unknown} entry
    * @param {string} [key]
    * @param {boolean} [alreadyNormalized]
@@ -189,56 +226,34 @@ export function stringifyWorkflowJson(value, kind, maxBytes = WORKFLOW_RESULT_BY
     if (!writable(normalized)) return false;
     if (normalized === null) {
       push("null");
-    } else if (isBigIntWrapper(normalized)) {
+    } else if (typeof normalized === "string") {
+      writeString(normalized);
+    } else if (typeof normalized === "number") {
+      push(Number.isFinite(normalized) ? String(normalized) : "null");
+    } else if (typeof normalized === "boolean") {
+      push(normalized ? "true" : "false");
+    } else if (typeof normalized === "bigint") {
       throw new TypeError("Do not know how to serialize a BigInt");
-    } else if (boxedValue(normalized, String.prototype.valueOf).ok) {
-      writeString(String(normalized));
-    } else if (boxedValue(normalized, Number.prototype.valueOf).ok) {
-      const value = numberWrapperValue(normalized);
-      push(Number.isFinite(value) ? String(value) : "null");
+    } else if (Array.isArray(normalized)) {
+      writeContainer(normalized, true);
     } else {
-      const boxedBoolean = boxedValue(normalized, Boolean.prototype.valueOf);
-      if (boxedBoolean.ok) {
-        push(boxedBoolean.value ? "true" : "false");
-      } else if (typeof normalized === "string") {
-        writeString(normalized);
-      } else if (typeof normalized === "number") {
-        push(Number.isFinite(normalized) ? String(normalized) : "null");
-      } else if (typeof normalized === "boolean") {
-        push(normalized ? "true" : "false");
-      } else if (typeof normalized === "bigint") {
+      const prototype = Object.getPrototypeOf(normalized);
+      if (prototype === Object.prototype || prototype === null) {
+        writeContainer(/** @type {Record<string, unknown>} */ (normalized), false);
+      } else if (isBigIntWrapper(normalized)) {
         throw new TypeError("Do not know how to serialize a BigInt");
-      } else if (Array.isArray(normalized)) {
-        if (seen.has(normalized)) throw new TypeError("Converting circular structure to JSON");
-        seen.add(normalized);
-        push("[");
-        for (let i = 0; i < normalized.length; i += 1) {
-          if (i > 0) push(",");
-          if (!writeValue(normalized[i], String(i))) push("null");
-        }
-        push("]");
-        seen.delete(normalized);
+      } else if (boxedValue(normalized, String.prototype.valueOf).ok) {
+        writeString(String(normalized));
+      } else if (boxedValue(normalized, Number.prototype.valueOf).ok) {
+        const value = numberWrapperValue(normalized);
+        push(Number.isFinite(value) ? String(value) : "null");
       } else {
-        const objectValue = /** @type {Record<string, unknown>} */ (normalized);
-        if (seen.has(objectValue)) throw new TypeError("Converting circular structure to JSON");
-        seen.add(objectValue);
-        push("{");
-        let first = true;
-        for (const prop of Object.keys(objectValue)) {
-          const child = normalize(objectValue[prop], prop);
-          if (!writable(child)) continue;
-          if (!first) push(",");
-          first = false;
-          writeString(prop);
-          push(":");
-          const beforeValue = bytes;
-          writeValue(child, prop, true);
-          if (fieldCaps[prop] && bytes - beforeValue > fieldCaps[prop].maxBytes) {
-            throw workflowPayloadTooLarge(fieldCaps[prop].kind, fieldCaps[prop].maxBytes);
-          }
+        const boxedBoolean = boxedValue(normalized, Boolean.prototype.valueOf);
+        if (boxedBoolean.ok) {
+          push(boxedBoolean.value ? "true" : "false");
+        } else {
+          writeContainer(/** @type {Record<string, unknown>} */ (normalized), false);
         }
-        push("}");
-        seen.delete(objectValue);
       }
     }
     return true;

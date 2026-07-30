@@ -107,17 +107,17 @@ test("SUBDOMAIN_NS_PATTERN matches tenants and explicit reserved ns only", () =>
   assert.equal("__platform__:platform-demo.workers.local".match(re), null);
 });
 
-test("ROUTES_ALLOWED_RESERVED_NS whitelists __system__ only", () => {
+test("ROUTES_ALLOWED_RESERVED_NS allowlists __system__ only", () => {
   assert.ok(ROUTES_ALLOWED_RESERVED_NS.has("__system__"));
   assert.ok(!ROUTES_ALLOWED_RESERVED_NS.has("__platform__"));
   assert.ok(!ROUTES_ALLOWED_RESERVED_NS.has("__community__"));
 });
 
-test("PLATFORM_TIER_RESERVED_NS whitelists platform binding runtime targets", () => {
+test("PLATFORM_TIER_RESERVED_NS allowlists platform binding runtime targets", () => {
   assert.deepEqual(PLATFORM_TIER_RESERVED_NS, new Set(["__platform__"]));
 });
 
-test("isValidRouteNs accepts tenant routes and whitelisted reserved routes only", () => {
+test("isValidRouteNs accepts tenant routes and allowlisted reserved routes only", () => {
   assert.equal(isValidRouteNs("demo"), true);
   assert.equal(isValidRouteNs("a".repeat(63)), true);
   assert.equal(isValidRouteNs("__system__"), true);
@@ -162,7 +162,7 @@ test("WORKER_NAME_RE accepts CF-compatible worker names up to 255 chars", () => 
   assert.ok(!WORKER_NAME_RE.test("_leading-underscore"));
 });
 
-test("QUEUE_NAME_RE rejects ':' (would corrupt queue:<ns>:<id>:s key parsing)", () => {
+test("QUEUE_NAME_RE accepts lowercase queue names and rejects incompatible syntax", () => {
   assert.ok(QUEUE_NAME_RE.test("orders"));
   assert.ok(QUEUE_NAME_RE.test("orders-dlq"));
   assert.ok(!QUEUE_NAME_RE.test(""));

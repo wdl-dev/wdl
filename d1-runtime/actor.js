@@ -26,12 +26,12 @@ import {
   runD1ActorTestHook,
 } from "d1-runtime-test-hooks";
 import { fnv1a32Utf8 } from "shared-fnv1a32";
+import { utf8ByteLength } from "shared-utf8";
 
 const DEFAULT_D1_MAX_RESULT_ROWS = 65_536;
 const DEFAULT_D1_MAX_RESULT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_D1_ACTOR_IDLE_WAIT_TIMEOUT_MS = 10_000;
 const D1_ACTOR_IDLE_WAIT_POLL_MS = 25;
-const utf8Encoder = new TextEncoder();
 const SCHEMA_MUTATION_SQL_RE = /\b(?:create|drop|alter|reindex|vacuum|attach|detach)\b/i;
 
 /**
@@ -154,7 +154,7 @@ function resultValueBytes(value) {
   if (value == null) return 0;
   if (typeof value === "boolean") return 1;
   if (typeof value === "number" || typeof value === "bigint") return 8;
-  if (typeof value === "string") return utf8Encoder.encode(value).byteLength;
+  if (typeof value === "string") return utf8ByteLength(value);
   if (value instanceof Uint8Array) return value.byteLength;
   if (value instanceof ArrayBuffer) return value.byteLength;
   if (ArrayBuffer.isView(value)) return value.byteLength;
@@ -163,11 +163,11 @@ function resultValueBytes(value) {
   }
   if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
     return Object.entries(value).reduce(
-      (sum, [key, item]) => sum + utf8Encoder.encode(key).byteLength + resultValueBytes(item),
+      (sum, [key, item]) => sum + utf8ByteLength(key) + resultValueBytes(item),
       0
     );
   }
-  return utf8Encoder.encode(String(value)).byteLength;
+  return utf8ByteLength(String(value));
 }
 
 /**
@@ -180,7 +180,7 @@ function resultRowBytes(row, columns, resultsFormat) {
   let bytes = 0;
   for (const value of row) bytes += resultValueBytes(value);
   if (resultsFormat === "ARRAY_OF_OBJECTS") {
-    bytes += columns.reduce((sum, column) => sum + utf8Encoder.encode(column).byteLength, 0);
+    bytes += columns.reduce((sum, column) => sum + utf8ByteLength(column), 0);
   }
   return bytes;
 }
@@ -204,7 +204,7 @@ export function resultFromCursor(
   const rows = [];
   consumeResultBudget(
     budget,
-    columns.reduce((sum, column) => sum + utf8Encoder.encode(column).byteLength, 0)
+    columns.reduce((sum, column) => sum + utf8ByteLength(column), 0)
   );
   for (const row of cursor.raw()) {
     if (rows.length >= rowLimit) {

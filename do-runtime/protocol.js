@@ -21,6 +21,7 @@ import {
 } from "shared-bounded-body";
 import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 import { isValidRuntimeLoadNs, WORKER_NAME_RE } from "shared-ns-pattern";
+import { utf8ByteLength } from "shared-utf8";
 import { parseVersion } from "shared-worker-contract";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
@@ -172,7 +173,7 @@ async function readBoundedText(request, maxBytes) {
 
 /** @param {string} value */
 function byteLength(value) {
-  return utf8Encoder.encode(value).byteLength;
+  return utf8ByteLength(value);
 }
 
 /**

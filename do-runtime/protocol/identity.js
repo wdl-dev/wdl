@@ -7,8 +7,8 @@ import {
 } from "do-runtime-protocol-wire-grammar";
 import { DoRuntimeError } from "do-runtime-protocol-errors";
 import { fnv1a32Utf8 } from "shared-fnv1a32";
+import { utf8ByteLength } from "shared-utf8";
 
-const utf8Encoder = new TextEncoder();
 
 /** @param {unknown} value */
 export function isWellFormedUnicodeString(value) {
@@ -17,7 +17,7 @@ export function isWellFormedUnicodeString(value) {
 
 /** @param {string} value */
 function byteLength(value) {
-  return utf8Encoder.encode(value).byteLength;
+  return utf8ByteLength(value);
 }
 
 /**

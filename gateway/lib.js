@@ -17,9 +17,11 @@ const INTERNAL_FORWARD_HEADERS = [
 /** @param {Headers} headers */
 export function deleteGatewayInternalHeaders(headers) {
   for (const name of INTERNAL_FORWARD_HEADERS) headers.delete(name);
-  for (const name of [...headers.keys()]) {
-    if (name.toLowerCase().startsWith(INTERNAL_HEADER_PREFIX)) headers.delete(name);
+  const privateHeaders = [];
+  for (const name of headers.keys()) {
+    if (name.startsWith(INTERNAL_HEADER_PREFIX)) privateHeaders.push(name);
   }
+  for (const name of privateHeaders) headers.delete(name);
 }
 
 /** @param {string} s */

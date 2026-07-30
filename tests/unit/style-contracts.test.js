@@ -986,8 +986,6 @@ test("gateway strips every client-supplied platform header it injects", () => {
     `gateway INTERNAL_FORWARD_HEADERS must include injected non-prefixed internal headers: ${missing.join(", ")}`
   );
   assert.match(owner, /const INTERNAL_HEADER_PREFIX = "x-wdl-"/);
-  assert.match(owner, /name\.toLowerCase\(\)\.startsWith\(INTERNAL_HEADER_PREFIX\)/);
-  assert.match(owner, /headers\.delete\(name\)/);
   assert.match(gateway, /deleteGatewayInternalHeaders\(forwardRequest\.headers\)/);
 
   const websocket = withoutLineComments(readRepoFile("gateway/websocket.js"));

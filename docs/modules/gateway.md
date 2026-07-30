@@ -119,9 +119,12 @@ whether a route changed.
   pub/sub messages are not durable.
 - Subscriber reconnects clear local caches, and the next request re-reads Redis; missed
   invalidations therefore degrade to bounded stale cache, not permanent drift.
-- An invalidation that arrives during a cold Redis read discards that reply. Gateway
-  retries at most five snapshots, then returns `503 gateway_routing_unavailable` rather
-  than letting unrelated invalidation churn hold the request indefinitely.
+- Membership-gate reads restart when that gate changes. Once the gate is warm, a cold
+  route or pattern projection read is fenced by its namespace or host plus the global
+  reset generation: invalidation of that key or a full reset discards the reply, while
+  unrelated key invalidations do not. Per-key generations exist only while reads are
+  in flight. Gateway retries at most five snapshots, then returns
+  `503 gateway_routing_unavailable`.
 - Pattern-host reassignment between namespaces has the same non-durable hint window:
   ordinary control writers publish invalidation, but Redis state is authoritative only
   after the gateway drops or refreshes its local cache.

@@ -14,6 +14,7 @@ const D1_TIMEOUT_URL = sharedModuleDataUrl("shared/d1-timeout.js");
 const RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const INTERNAL_AUTH_URL = repositoryFileUrl("shared/internal-auth.js");
 const OWNER_ENDPOINT_URL = repositoryFileUrl("shared/owner-endpoint.js");
+const UTF8_URL = repositoryFileUrl("shared/utf8.js");
 
 export function d1ProtocolDataUrl() {
   const queryWireUrl = d1QueryWireDataUrl();
@@ -25,6 +26,7 @@ export function d1ProtocolDataUrl() {
     [/from "shared-bounded-body";/g, `from ${JSON.stringify(BOUNDED_BODY_URL)};`],
     [/from "shared-errors";/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
     [/from "shared-ns-pattern";/g, `from ${JSON.stringify(NS_PATTERN_URL)};`],
+    [/from "shared-utf8";/g, `from ${JSON.stringify(UTF8_URL)};`],
     [/from "shared-d1-query-wire";/g, `from ${JSON.stringify(queryWireUrl)};`],
   ]);
 }

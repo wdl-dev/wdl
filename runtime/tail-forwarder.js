@@ -8,6 +8,7 @@ import {
 } from "runtime-bindings-proxy";
 import { errorMessage } from "shared-errors";
 import { withInternalAuth } from "shared-internal-auth";
+import { utf8ByteLength } from "shared-utf8";
 
 // Active-set cache. Keep the timing constants beside the implementation;
 // higher-level docs should describe behavior without restating these numbers.
@@ -20,7 +21,6 @@ const POST_EVENT_TIMEOUT_MS = 150;
 const MAX_TAIL_PATH_CHARS = 1024;
 export const TAIL_EVENT_MAX_BYTES = 5 * 1024;
 
-const utf8Encoder = new TextEncoder();
 
 /**
  * @typedef {{ REDIS_PROXY_URL?: unknown, [key: string]: unknown }} RuntimeTailEnv
@@ -160,7 +160,7 @@ async function postEvent(env, ns, worker, payload) {
 
 /** @param {string} json */
 export function tailEventByteLength(json) {
-  return utf8Encoder.encode(json).byteLength;
+  return utf8ByteLength(json);
 }
 
 /** @param {unknown} payload */

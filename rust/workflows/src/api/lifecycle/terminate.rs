@@ -64,7 +64,7 @@ pub(crate) async fn terminate_instance(
     let by_version = by_version_key(&identity.ns, &identity.worker, &identity.frozen_version);
     let ended_at_ms = now_ms();
     let now = ended_at_ms.to_string();
-    let retention_ms = terminal_retention_ms(&existing, "failed")?;
+    let retention_ms = terminal_retention_ms(&existing, "terminated")?;
     let retention_expires_at = ended_at_ms.saturating_add(retention_ms).to_string();
     let retention = retention_key().to_string();
     let expected_generation = identity.generation.clone();

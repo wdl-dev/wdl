@@ -18,6 +18,11 @@ declare module "runtime-d1-params-source" {
   export default source;
 }
 
+declare module "runtime-utf8-source" {
+  const source: string;
+  export default source;
+}
+
 declare module "runtime-sql-splitter-source" {
   const source: string;
   export default source;

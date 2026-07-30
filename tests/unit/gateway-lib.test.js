@@ -18,6 +18,7 @@ test("deleteGatewayInternalHeaders removes fixed and prefixed private headers", 
     "x-worker-prefix": "/worker",
     "x-wdl-upstream-binding": "RUNTIME_USER",
     "x-wdl-future-private": "private",
+    "X-WDL-Mixed-Case": "private",
     "x-request-id": "keep-request-id",
     "sec-websocket-protocol": "keep-protocol",
   });

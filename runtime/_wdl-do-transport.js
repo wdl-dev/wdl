@@ -97,6 +97,7 @@ const intrinsicSetHas = Set.prototype.has;
 const intrinsicStringToLowerCase = String.prototype.toLowerCase;
 const intrinsicStringToUpperCase = String.prototype.toUpperCase;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
+const intrinsicTextEncoderEncodeInto = TextEncoder.prototype.encodeInto;
 const intrinsicUint8ArraySet = Uint8Array.prototype.set;
 const intrinsicUint8ArrayBufferGet = /** @type {(this: Uint8Array) => ArrayBufferLike} */ (
   prototypeGetter(Uint8Array.prototype, "buffer")
@@ -135,6 +136,7 @@ const intrinsicResponseWebSocketGet = /** @type {((this: Response) => WebSocket 
   prototypeGetter(Response.prototype, "webSocket")
 );
 const utf8Encoder = new TextEncoder();
+const requestHeaderUtf8Scratch = new IntrinsicUint8Array(MAX_DO_REQUEST_HEADER_BYTES + 1);
 
 const DO_CONNECT_HEADERS = {
   ns: "x-wdl-do-ns",
@@ -385,6 +387,15 @@ function encodeDoInvokeEnvelope(metadata, bodyBytes = null) {
 /** @param {string} value */
 function byteLength(value) {
   return byteArrayLength(encodeUtf8(value));
+}
+
+/** @param {string} value */
+function boundedRequestHeaderByteLength(value) {
+  const result = intrinsicReflectApply(intrinsicTextEncoderEncodeInto, utf8Encoder, [
+    value,
+    requestHeaderUtf8Scratch,
+  ]);
+  return result.read === value.length ? result.written : Infinity;
 }
 
 /**
@@ -660,7 +671,7 @@ function enforceRequestHeadersBudget(headers) {
     const entry = headers[i];
     const name = entry[0];
     const value = entry[1];
-    total += byteLength(name) + byteLength(value);
+    total += boundedRequestHeaderByteLength(name) + boundedRequestHeaderByteLength(value);
     if (total > MAX_DO_REQUEST_HEADER_BYTES) {
       throw new TypeError(`Durable Object fetch headers exceed ${MAX_DO_REQUEST_HEADER_BYTES} bytes`);
     }

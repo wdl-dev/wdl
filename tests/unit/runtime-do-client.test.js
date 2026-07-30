@@ -302,6 +302,22 @@ test("DurableObjectNamespace fetch rejects oversized aggregate headers before tr
   );
 });
 
+test("DO requestSpec header budget counts exact UTF-8 bytes", async () => {
+  const exactValue = `${"\u00e9".repeat((MAX_DO_REQUEST_HEADER_BYTES - 2) / 2)}a`;
+  const exact = new Request("https://demo.workers.example/send", {
+    headers: { x: exactValue },
+  });
+  await assert.doesNotReject(() => requestSpec(exact, null));
+
+  const oversized = new Request("https://demo.workers.example/send", {
+    headers: { x: `${exactValue}\u00e9` },
+  });
+  await assert.rejects(
+    () => requestSpec(oversized, null),
+    /fetch headers exceed 65536 bytes/
+  );
+});
+
 test("DurableObjectNamespace fetch rejects oversized invoke envelopes before transport", async () => {
   const backend = {
     async fetch() {
@@ -909,23 +925,23 @@ test("DurableObjectNamespace strips owner metadata with patched Headers methods"
   assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
 });
 
-test("DO requestSpec header budget uses captured TextEncoder.encode", async () => {
-  const textEncode = TextEncoder.prototype.encode;
-  let hostileEncodeCalls = 0;
+test("DO requestSpec header budget uses captured TextEncoder.encodeInto", async () => {
+  const textEncodeInto = TextEncoder.prototype.encodeInto;
+  let hostileEncodeIntoCalls = 0;
   const request = new Request("https://demo.workers.example/send", {
     headers: { "x-oversized": "a".repeat(MAX_DO_REQUEST_HEADER_BYTES + 1) },
   });
 
   await withMockedProperty(
     TextEncoder.prototype,
-    "encode",
+    "encodeInto",
     /** @this {TextEncoder} */
-    function targetedEncode(value = "") {
+    function targetedEncodeInto(value = "", destination) {
       if (value.length > MAX_DO_REQUEST_HEADER_BYTES) {
-        hostileEncodeCalls += 1;
-        return new Uint8Array();
+        hostileEncodeIntoCalls += 1;
+        return { read: value.length, written: 0 };
       }
-      return Reflect.apply(textEncode, this, [value]);
+      return Reflect.apply(textEncodeInto, this, [value, destination]);
     },
     async () => {
       await assert.rejects(
@@ -934,7 +950,7 @@ test("DO requestSpec header budget uses captured TextEncoder.encode", async () =
       );
     }
   );
-  assert.equal(hostileEncodeCalls, 0);
+  assert.equal(hostileEncodeIntoCalls, 0);
 });
 
 test("DO request method and upgrade decisions use captured string normalization", async () => {

@@ -8,6 +8,7 @@ const {
   D1_ACTOR_QUERY_CONTENT_TYPE,
   D1_MAX_QUERY_ENVELOPE_BYTES,
   D1_MAX_QUERY_PAYLOAD_BYTES,
+  D1_MAX_SQL_STATEMENT_BYTES,
   D1_MAX_STATEMENTS,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
@@ -144,6 +145,23 @@ test("D1 protocol: enforces Cloudflare-aligned statement and parameter limits", 
     (err) => isProtocolError(err, 413, "limit-exceeded")
   );
   assert.equal(D1_MAX_QUERY_PAYLOAD_BYTES, D1_MAX_QUERY_ENVELOPE_BYTES);
+});
+
+test("D1 protocol: SQL statement cap counts exact UTF-8 bytes", () => {
+  const exact = "\u00e9".repeat(D1_MAX_SQL_STATEMENT_BYTES / 2);
+  assert.doesNotThrow(() => normalizeQueryRequest({
+    namespace: "tenant-a",
+    databaseId: "main",
+    statements: [{ sql: exact, params: [] }],
+  }));
+  assert.throws(
+    () => normalizeQueryRequest({
+      namespace: "tenant-a",
+      databaseId: "main",
+      statements: [{ sql: `${exact}\u00e9`, params: [] }],
+    }),
+    (err) => isProtocolError(err, 413, "limit-exceeded")
+  );
 });
 
 test("D1 protocol: normalizes query request to slot and statements", () => {

@@ -51,9 +51,15 @@ function stableLabelEntries(labels) {
  * @returns {string}
  */
 function metricKey(name, labels) {
-  return `${name}|${stableLabelEntries(labels)
-    .map(([k, v]) => `${k}=${v}`)
-    .join(",")}`;
+  const keys = Object.keys(labels);
+  keys.sort((a, b) => a.localeCompare(b));
+  let out = `${name}|`;
+  for (let i = 0; i < keys.length; i += 1) {
+    if (i > 0) out += ",";
+    const key = keys[i];
+    out += `${key}=${labels[key]}`;
+  }
+  return out;
 }
 
 /**
@@ -82,17 +88,28 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-/** @param {unknown} value */
-function safeJsonStringify(value) {
-  const seen = new WeakSet();
-  return JSON.stringify(value, (_key, fieldValue) => {
-    if (typeof fieldValue === "bigint") return fieldValue.toString();
-    if (fieldValue && typeof fieldValue === "object") {
-      if (seen.has(fieldValue)) return "[Circular]";
-      seen.add(fieldValue);
+/** @param {unknown} value @param {Record<string, unknown>} fallback */
+function safeJsonStringify(value, fallback) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    /** @type {object[]} */
+    const ancestors = [];
+    try {
+      return JSON.stringify(value, function replaceUnsupported(_key, fieldValue) {
+        if (typeof fieldValue === "bigint") return fieldValue.toString();
+        if (!fieldValue || typeof fieldValue !== "object") return fieldValue;
+        while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
+          ancestors.pop();
+        }
+        if (ancestors.includes(fieldValue)) return "[Circular]";
+        ancestors.push(fieldValue);
+        return fieldValue;
+      });
+    } catch {
+      return JSON.stringify(fallback);
     }
-    return fieldValue;
-  });
+  }
 }
 
 /**
@@ -103,14 +120,30 @@ function safeJsonStringify(value) {
  * @returns {void}
  */
 function emitStructuredLogLine(service, level, event, fields = {}) {
-  const payload = {
-    ts: nowIso(),
+  const ts = nowIso();
+  const core = {
+    ts,
     service,
     level,
     event,
-    ...fields,
   };
-  const line = safeJsonStringify(payload);
+  const fallback = {
+    __proto__: null,
+    ...core,
+    error_message: "Structured log fields could not be serialized",
+  };
+  let line;
+  try {
+    const payload = /** @type {Record<string, unknown>} */ ({
+      __proto__: null,
+      ...core,
+      ...fields,
+    });
+    if (typeof payload.toJSON === "function") delete payload.toJSON;
+    line = safeJsonStringify(payload, fallback);
+  } catch {
+    line = JSON.stringify(fallback);
+  }
   if (level === "error") console.error(line);
   else console.log(line);
 }

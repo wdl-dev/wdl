@@ -1,15 +1,6 @@
+import { utf8ByteLength } from "./utf8.js";
+
 export const D1_MAX_VALUE_BYTES = 2_000_000;
-
-const utf8Encoder = new TextEncoder();
-
-/**
- * @param {string} value
- * @returns {number}
- */
-function byteLength(value) {
-  if (value.length > D1_MAX_VALUE_BYTES) return value.length;
-  return utf8Encoder.encode(value).byteLength;
-}
 
 /**
  * @param {number} bytes
@@ -44,7 +35,9 @@ export function normalizeD1Param(value) {
     return Number(value);
   }
   if (typeof value === "string") {
-    assertValueBytes(byteLength(value), "string");
+    if (value.length * 3 > D1_MAX_VALUE_BYTES) {
+      assertValueBytes(utf8ByteLength(value), "string");
+    }
     return value;
   }
   if (typeof value === "boolean") return value ? 1 : 0;

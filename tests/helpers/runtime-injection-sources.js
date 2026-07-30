@@ -9,6 +9,7 @@ const REAL_RUNTIME_INJECTION_SOURCE_PATHS = Object.freeze({
   d1ClientSource: "runtime/d1-client.js",
   d1DataFieldSource: "shared/d1-data-field.js",
   d1ParamsSource: "shared/d1-params.js",
+  utf8Source: "shared/utf8.js",
   sqlSplitterSource: "shared/sql-splitter.js",
   d1TransportSource: "shared/d1-transport.js",
   r2ClientSource: "runtime/r2-client.js",
@@ -25,6 +26,7 @@ const RUNTIME_INJECTION_SOURCE_SPECIFIERS = Object.freeze({
   d1ClientSource: "runtime-d1-client-source",
   d1DataFieldSource: "runtime-d1-data-field-source",
   d1ParamsSource: "runtime-d1-params-source",
+  utf8Source: "runtime-utf8-source",
   sqlSplitterSource: "runtime-sql-splitter-source",
   d1TransportSource: "runtime-d1-transport-source",
   r2ClientSource: "runtime-r2-client-source",
@@ -43,7 +45,9 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
   d1DataFieldSource:
     "export function setDataField(target, key, value) { target[key] = value; }",
   d1ParamsSource:
-    "export function normalizeD1Param(value) { return value; }",
+    'import { utf8ByteLength } from "./utf8.js"; export function normalizeD1Param(value) { utf8ByteLength(String(value)); return value; }',
+  utf8Source:
+    "export function utf8ByteLength(value) { return value.length; }",
   sqlSplitterSource:
     "export function splitSqlStatements(sql) { return [{ sql, params: [] }]; }",
   d1TransportSource:

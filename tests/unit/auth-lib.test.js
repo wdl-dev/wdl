@@ -123,6 +123,12 @@ test("extractToken accepts plain object via bracket-access fallback", () => {
   assert.equal(extractToken({ "x-admin-token": "ok" }), "ok");
 });
 
+test("extractToken applies its header cap to UTF-8 bytes", () => {
+  const exact = "\u00e9".repeat(MAX_TOKEN_HEADER_BYTES / 2);
+  assert.equal(extractToken({ "x-admin-token": exact }), exact);
+  assert.equal(extractToken({ "x-admin-token": `${exact}\u00e9` }), null);
+});
+
 // --- expiresAt validation ---------------------------------------------------
 
 test("validateExpiresAt rejects past + invalid input + non-string", () => {

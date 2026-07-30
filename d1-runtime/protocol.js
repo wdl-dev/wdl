@@ -3,6 +3,7 @@ import { fnv1a32CodeUnits } from "shared-fnv1a32";
 import { BodyTooLargeError, readBoundedBytes as readRequestBoundedBytes } from "shared-bounded-body";
 import { errorMessage as sharedErrorMessage } from "shared-errors";
 import { D1_DATABASE_ID_RE, isValidRuntimeLoadNs } from "shared-ns-pattern";
+import { utf8ByteLength } from "shared-utf8";
 import {
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
@@ -51,7 +52,7 @@ const utf8Decoder = new TextDecoder();
 
 /** @param {string} value */
 function textBytes(value) {
-  return utf8Encoder.encode(value).byteLength;
+  return utf8ByteLength(value);
 }
 
 /**

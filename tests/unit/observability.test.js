@@ -402,8 +402,9 @@ test("logStructured emits createLogger-shaped JSON", () => {
 });
 
 test("logStructured does not throw on BigInt or circular fields", () => {
+  const shared = { label: "shared" };
   /** @type {Record<string, unknown>} */
-  const fields = { count: 3n };
+  const fields = { count: 3n, first: shared, second: shared };
   fields.self = fields;
 
   withCapturedConsole(({ stdout }) => {
@@ -412,8 +413,87 @@ test("logStructured does not throw on BigInt or circular fields", () => {
     assert.equal(stdout.length, 1);
     const payload = parseStdoutJson(stdout[0], "safe structured log");
     assert.equal(payload.count, "3");
-    assert.deepEqual(payload.self, { count: "3", self: "[Circular]" });
+    assert.deepEqual(payload.first, shared);
+    assert.deepEqual(payload.second, shared);
+    assert.deepEqual(payload.self, {
+      count: "3",
+      first: shared,
+      second: shared,
+      self: "[Circular]",
+    });
   });
+});
+
+test("logStructured preserves its core envelope when nested fields cannot be serialized", () => {
+  const nested = {};
+  Object.defineProperty(nested, "value", {
+    enumerable: true,
+    get() {
+      throw new Error("hostile getter");
+    },
+  });
+
+  withCapturedConsole(({ stdout }) => {
+    assert.doesNotThrow(() => {
+      logStructured("test-svc", "warn", "odd_payload", { nested });
+    });
+
+    assert.equal(stdout.length, 1);
+    const payload = parseStdoutJson(stdout[0], "serialization fallback log");
+    assert.equal(payload.service, "test-svc");
+    assert.equal(payload.level, "warn");
+    assert.equal(payload.event, "odd_payload");
+    assert.equal(payload.error_message, "Structured log fields could not be serialized");
+    assert.equal(Object.hasOwn(payload, "nested"), false);
+  });
+});
+
+test("logStructured preserves its core envelope when reading a top-level field fails", () => {
+  /** @type {Record<string, unknown>} */
+  const fields = {};
+  Object.defineProperty(fields, "value", {
+    enumerable: true,
+    get() {
+      throw new Error("hostile getter");
+    },
+  });
+
+  withCapturedConsole(({ stdout }) => {
+    assert.doesNotThrow(() => {
+      logStructured("test-svc", "warn", "odd_payload", fields);
+    });
+
+    assert.equal(stdout.length, 1);
+    const payload = parseStdoutJson(stdout[0], "field access fallback log");
+    assert.equal(payload.service, "test-svc");
+    assert.equal(payload.level, "warn");
+    assert.equal(payload.event, "odd_payload");
+    assert.equal(payload.error_message, "Structured log fields could not be serialized");
+    assert.equal(Object.hasOwn(payload, "value"), false);
+  });
+});
+
+test("logStructured ignores callable root toJSON fields", () => {
+  for (const toJSON of [
+    () => undefined,
+    () => ({ forged: true }),
+  ]) {
+    withCapturedConsole(({ stdout }) => {
+      logStructured("test-svc", "warn", "odd_payload", {
+        marker: "kept",
+        toJSON,
+      });
+
+      assert.equal(stdout.length, 1);
+      const payload = parseStdoutJson(stdout[0], "root toJSON log");
+      assert.equal(payload.service, "test-svc");
+      assert.equal(payload.level, "warn");
+      assert.equal(payload.event, "odd_payload");
+      assert.equal(payload.marker, "kept");
+      assert.equal(Object.hasOwn(payload, "toJSON"), false);
+      assert.equal(Object.hasOwn(payload, "forged"), false);
+    });
+  }
 });
 
 test("setLogLevel does not affect MetricsRegistry counters (metrics bypass the gate)", () => {

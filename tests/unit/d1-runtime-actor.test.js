@@ -76,6 +76,24 @@ test("D1 actor: result materialization enforces a request byte cap", () => {
   );
 });
 
+test("D1 actor: result byte cap counts exact UTF-8 bytes", () => {
+  const cursor = {
+    columnNames: ["x"],
+    raw() {
+      return [["\ud83d\ude00"]];
+    },
+  };
+
+  assert.deepEqual(resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 5), {
+    columns: ["x"],
+    rows: [["\ud83d\ude00"]],
+  });
+  assert.throws(
+    () => resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 4),
+    /maximum result bytes per request is 4/
+  );
+});
+
 test("D1 actor: result byte cap includes empty result column metadata", () => {
   const cursor = {
     columnNames: ["0123456789"],

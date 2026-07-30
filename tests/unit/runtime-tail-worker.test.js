@@ -14,6 +14,7 @@ import { delay } from "../helpers/timing.js";
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_UTF8_URL = repositoryFileUrl("shared/utf8.js");
 const OBSERVABILITY_STUB_SRC = `const createLogger = (service) => (level, event, fields) => /** @type {any} */ (globalThis).__runtimeTailLogs.push({ service, level, event, fields });
 const createLogLevelBinder = () => {
   let logLevelSet = false;
@@ -27,12 +28,14 @@ const forwarderSrc = applyModuleReplacements(readRepositoryFile("runtime/tail-fo
   [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
   [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
   [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
+  [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
 ]);
 const tailWorkerRawSrc = applyModuleReplacements(readRepositoryFile("runtime/tail-worker.js"), [
   [
     /import \{ createLogLevelBinder, createLogger \} from "shared-observability";/,
     OBSERVABILITY_STUB_SRC
   ],
+  [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
 ]);
 
 /** @param {string} tag */

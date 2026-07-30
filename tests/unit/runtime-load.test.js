@@ -1719,7 +1719,9 @@ test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserv
   assert.equal(/** @type {any} */ (workerCode.modules)["src/worker.js"], "import x from './lib.js'; export default { fetch() { return x; } };");
   assert.equal(/** @type {any} */ (workerCode.modules)["src/lib.js"], "export default 1;");
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-data-field.js"], /setDataField/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-utf8.js"], /utf8ByteLength/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-params.js"], /normalizeD1Param/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-params.js"], /from "\.\/_wdl-utf8\.js";/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-sql-splitter.js"], /splitSqlStatements/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-transport.js"], /decodeD1Transport/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-transport.js"], /from "\.\/_wdl-d1-data-field\.js";/);

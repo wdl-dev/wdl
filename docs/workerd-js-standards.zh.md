@@ -39,6 +39,8 @@ implementation 的 no-`any` 标准覆盖 `auth/`、`control/`、`gateway/`、`ru
 
 重复的二进制/字符串路径应使用模块级 `TextEncoder` / `TextDecoder` 单例。一次性测试里内联创建可以接受；生产 decode path、Redis payload 解析和 binding adapter 应复用模块单例，除非确实需要有状态 decoder 选项。
 
+只需要精确 UTF-8 byte count 的路径应使用 `shared/utf8.js#utf8ByteLength`，不要分配编码后的 byte array。该 helper 对短字符串使用 arithmetic path，对长字符串交给 native encoder。需要 intrinsic hardening 的 injected module 若引入 shared module 会削弱 capture boundary，可以保留本地捕获的 `encodeInto()` scratch path。
+
 ## 所有权
 
 Entrypoint 应保持薄：负责 dispatch、auth/routing、observability wiring，并调用具名 helper。纯 route parsing、key construction、normalization 和 policy decision 应放在不依赖 workerd 的可单测文件中。

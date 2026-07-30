@@ -1,4 +1,5 @@
 import { createLogLevelBinder, createLogger } from "shared-observability";
+import { utf8ByteLength } from "shared-utf8";
 import {
   TAIL_EVENT_MAX_BYTES,
   forwardTailEntries,
@@ -38,14 +39,13 @@ function loggerLevel(consoleLevel) {
   return "info";
 }
 
-const utf8Encoder = new TextEncoder();
 const TAIL_MESSAGE_MAX_DEPTH = 64;
 
 class TailEventTooLarge extends Error {}
 
 /** @param {{ remaining: number }} budget @param {unknown} value */
 function chargeBudget(budget, value) {
-  budget.remaining -= utf8Encoder.encode(String(value)).byteLength;
+  budget.remaining -= utf8ByteLength(String(value));
   if (budget.remaining < 0) throw new TailEventTooLarge("tail event too large");
 }
 

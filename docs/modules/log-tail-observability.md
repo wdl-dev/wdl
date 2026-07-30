@@ -162,8 +162,14 @@ Common rules:
   `shared/observability.js`; Rust services use
   `wdl-rust-common::log::emit_log_line`. Error text is emitted as `error_message`;
   throwables that cannot be converted to text degrade to `Unknown error` instead of
-  replacing the original failure. Secret values, raw credentials, token material, raw
-  Redis keys, and unbounded payloads are not emitted.
+  replacing the original failure. JS logging uses native JSON semantics for ordinary
+  values, including repeated non-circular object references. Its fallback converts
+  BigInt values to strings and marks ancestor cycles as `[Circular]`. A callable root
+  `toJSON` field is ignored so caller fields cannot replace the log envelope through
+  that hook. If field access, nested getters, or nested `toJSON()` hooks prevent
+  serialization, logging emits only the core `ts` / `service` / `level` / `event`
+  envelope plus a serialization `error_message`. Secret values, raw credentials, token
+  material, raw Redis keys, and unbounded payloads are not emitted.
 - Product API response bodies should use camelCase unless an endpoint explicitly
   documents a different wire contract.
 - Metrics should use bounded enumerated labels only.

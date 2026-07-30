@@ -4,9 +4,9 @@
 // identically — drift between the two would let a sanitation bypass on
 // either side surface as an auth policy bug that's hard to correlate.
 
-export const MAX_TOKEN_HEADER_BYTES = 256;
+import { utf8ByteLength } from "./utf8.js";
 
-const utf8Encoder = new TextEncoder();
+export const MAX_TOKEN_HEADER_BYTES = 256;
 
 // Returns the cleaned token, or null if the header is missing / dirty
 // (caller treats both as 401 missing token).
@@ -27,7 +27,7 @@ export function extractToken(headersLike) {
   if (raw.includes(",")) return null;
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  if (utf8Encoder.encode(trimmed).length > MAX_TOKEN_HEADER_BYTES) return null;
+  if (utf8ByteLength(trimmed) > MAX_TOKEN_HEADER_BYTES) return null;
   for (let i = 0; i < trimmed.length; i++) {
     const code = trimmed.charCodeAt(i);
     if (code < 0x20 || code === 0x7f) return null;

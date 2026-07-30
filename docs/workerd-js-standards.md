@@ -65,6 +65,12 @@ paths. Creating them inline is acceptable in one-off tests, but production decod
 Redis payload parsing, and binding adapters should reuse the module singleton unless
 stateful decoder options are required.
 
+When a path only needs an exact UTF-8 byte count, use `shared/utf8.js#utf8ByteLength`
+instead of allocating an encoded byte array. The helper keeps short strings on its
+arithmetic path and delegates long strings to the native encoder. Intrinsic-hardened
+injected modules may keep a local captured `encodeInto()` scratch path when importing a
+shared module would weaken their capture boundary.
+
 ## Ownership
 
 Entrypoints should stay thin. They should dispatch, authenticate or route, wire

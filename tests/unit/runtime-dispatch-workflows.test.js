@@ -4,6 +4,8 @@ import { parseJsonText } from "../helpers/json-payload.js";
 import { loadRuntimeDispatch } from "../helpers/load-runtime-dispatch.js";
 import {
   importRepositoryModule,
+  importSpecifierReplacements,
+  repositoryFileUrl,
   readRepositoryJson,
 } from "../helpers/load-shared-module.js";
 import {
@@ -16,7 +18,12 @@ import { readJsonResponse } from "../helpers/response-json.js";
 import { delay } from "../helpers/timing.js";
 
 const { runtimeDispatch, runtimeDispatchWorkflowStep } = await loadRuntimeDispatch();
-const workflowJson = await importRepositoryModule("runtime/dispatch/workflow-json.js");
+const workflowJson = await importRepositoryModule(
+  "runtime/dispatch/workflow-json.js",
+  importSpecifierReplacements({
+    "shared-utf8": repositoryFileUrl("shared/utf8.js"),
+  })
+);
 const workflowLimits = /** @type {{ resultBytesMax: number, backendRequestBytesMax: number, payloadTooLargeCode: string }} */ (
   readRepositoryJson("tests/fixtures/workflow-limits.json")
 );
@@ -65,6 +72,12 @@ test("workflow payload limits match the shared Rust/JS contract", () => {
 test("workflow bounded JSON serializer matches JSON.stringify for supported values", () => {
   const inherited = Object.create({ hidden: true });
   inherited.visible = "yes";
+  const nullPrototype = Object.assign(Object.create(null), { visible: "yes" });
+  class CustomRecord {
+    constructor() {
+      this.visible = "yes";
+    }
+  }
   const nestedToJson = {
     x: {
       toJSON() {
@@ -129,8 +142,14 @@ test("workflow bounded JSON serializer matches JSON.stringify for supported valu
     { b: 2, a: [3, { y: null, x: "ok" }], skipped: undefined, fn() {}, sym: Symbol("skip") },
     { toJSON() { return { z: "ok" }; } },
     { date: new Date("2026-05-13T12:00:00.000Z") },
+    new CustomRecord(),
+    new Map([["ignored", true]]),
+    new Set(["ignored"]),
+    /ignored/,
+    new Error("ignored"),
     nestedToJson,
     inherited,
+    nullPrototype,
   ];
   for (const value of cases) {
     assert.equal(_stringifyWorkflowJsonForTest(value), JSON.stringify(value));

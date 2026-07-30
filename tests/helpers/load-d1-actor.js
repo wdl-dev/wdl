@@ -128,6 +128,10 @@ const source = applyModuleReplacements(readRepositoryFile("d1-runtime/actor.js")
     /import \{ fnv1a32Utf8 \} from "shared-fnv1a32";/,
     `import { fnv1a32Utf8 } from ${JSON.stringify(sharedModuleDataUrl("shared/fnv1a32.js"))};`
   ],
+  [
+    /import \{ utf8ByteLength \} from "shared-utf8";/,
+    `import { utf8ByteLength } from ${JSON.stringify(sharedModuleDataUrl("shared/utf8.js"))};`
+  ],
 ]);
 
 /** @returns {Promise<any>} */

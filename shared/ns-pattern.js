@@ -78,7 +78,7 @@ export function isValidTenantNs(ns) {
          NS_RE.test(ns);
 }
 
-// __system__ is the one whitelist entry because control-plane workers
+// __system__ is the one allowlist entry because control-plane workers
 // (dashboard / webhook-receiver) legitimately need public HTTP. Every
 // other reserved ns is JSRPC-only by policy; adding one must be
 // deliberate.

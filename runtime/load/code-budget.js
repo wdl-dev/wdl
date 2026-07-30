@@ -48,6 +48,7 @@ const utf8Decoder = new TextDecoder();
  *   d1ClientSource: string,
  *   d1DataFieldSource: string,
  *   d1ParamsSource: string,
+ *   utf8Source: string,
  *   sqlSplitterSource: string,
  *   d1TransportSource: string,
  *   r2ClientSource: string,
@@ -71,6 +72,10 @@ function moduleBodyByteLength(body) {
 function runtimeModuleInjections(sources) {
   /** @type {RuntimeModuleInjection} */
   const requestIdModuleInjection = ["_wdl-request-id.js", sources.requestIdSource];
+  const d1ParamsInjectedSource = sources.d1ParamsSource.replace(
+    '"./utf8.js"',
+    '"./_wdl-utf8.js"'
+  );
   const d1TransportInjectedSource = sources.d1TransportSource.replace(
     /from "shared-d1-data-field";/,
     `from "./${D1_DATA_FIELD_MODULE_NAME}";`
@@ -79,7 +84,8 @@ function runtimeModuleInjections(sources) {
   const d1ModuleInjections = [
     requestIdModuleInjection,
     [D1_DATA_FIELD_MODULE_NAME, sources.d1DataFieldSource],
-    ["_wdl-d1-params.js", sources.d1ParamsSource],
+    ["_wdl-utf8.js", sources.utf8Source],
+    ["_wdl-d1-params.js", d1ParamsInjectedSource],
     ["_wdl-sql-splitter.js", sources.sqlSplitterSource],
     ["_wdl-d1-transport.js", d1TransportInjectedSource],
     ["_wdl-d1-client.js", sources.d1ClientSource],
