@@ -1,11 +1,13 @@
 import {
   workflowBackendBody,
+  workflowStepSuccessBackendBody,
   workflowStepError,
 } from "runtime-dispatch-workflow-json";
 import {
   WORKFLOW_REPLAY_PAGE_SIZE,
   canonicalJson,
   getWorkflowReplayCache,
+  readWorkflowReplayStepOutput,
   recordWorkflowReplayCacheOutcome,
   rememberWorkflowReplayStep,
   workflowReplayIdentity,
@@ -151,6 +153,22 @@ function parseSleepUntilMs(value) {
  * @returns {Promise<Record<string, unknown>>}
  */
 async function workflowBackendCall(backend, path, body, requestId = null) {
+  return await workflowBackendRequest(
+    backend,
+    path,
+    workflowBackendBody(path, body),
+    requestId
+  );
+}
+
+/**
+ * @param {WorkflowBackend | null | undefined} backend
+ * @param {string} path
+ * @param {string} body
+ * @param {string | null} [requestId]
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function workflowBackendRequest(backend, path, body, requestId = null) {
   if (!backend || typeof backend.fetch !== "function") {
     throw workflowStepError("workflow_backend_unavailable", "Workflow backend binding is not configured");
   }
@@ -160,7 +178,7 @@ async function workflowBackendCall(backend, path, body, requestId = null) {
   const response = await backend.fetch(`${WORKFLOWS_BASE_URL}/${path}`, {
     method: "POST",
     headers,
-    body: workflowBackendBody(path, body),
+    body,
   });
   let parsed;
   try {
@@ -414,7 +432,7 @@ export function createStepController(run, backend, requestId = null) {
   /**
    * @param {string} name
    * @param {unknown} config
-   * @returns {StepIdentity & WorkflowRun & { ordinal: number, stepName: string, nameCount: number, dependencies: number[], config: unknown, startedAtMs: number }}
+   * @returns {StepIdentity & WorkflowRun & { startedAtMs: number }}
    */
   const nextStepIdentity = (name, config) => {
     const nameCount = (nameCounts.get(name) || 0) + 1;
@@ -505,7 +523,7 @@ export function createStepController(run, backend, requestId = null) {
     const cached = await cachedStep(identity);
     if (!cached) return null;
     if (cached.status === "completed") {
-      return { state: "complete", output: cached.output ?? null };
+      return { state: "complete", output: readWorkflowReplayStepOutput(cached) };
     }
     if (cached.status === "failed") {
       return { state: "failed", error: cached.error ?? { name: "Error", message: "Workflow step failed" } };
@@ -603,12 +621,22 @@ export function createStepController(run, backend, requestId = null) {
           rememberTerminalStepFailure(err, error);
           throw err;
         }
-        await workflowBackendCall(backend, "commit-step-success", {
+        const committedStep = workflowStepSuccessBackendBody({
           ...identity,
           attempt,
           output: output ?? null,
-        }, requestId);
-        cacheStep(identity, { status: "completed", attempt, output: output ?? null });
+        });
+        await workflowBackendRequest(
+          backend,
+          "commit-step-success",
+          committedStep.bodyJson,
+          requestId
+        );
+        cacheStep(identity, {
+          status: "completed",
+          attempt,
+          outputJson: committedStep.outputJson,
+        });
         markStepCompleted(identity);
         return output;
       })(), identity);

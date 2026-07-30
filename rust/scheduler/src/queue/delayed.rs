@@ -23,6 +23,10 @@ const QUEUE_DELAYED_NO_PROGRESS_BACKOFF_MS: u64 = 100;
 const QUEUE_DELAYED_WAKE_RETRY_BASE_MS: u64 = 1_000;
 const QUEUE_DELAYED_WAKE_RETRY_MAX_MS: u64 = 10_000;
 const QUEUE_DELAYED_WAKE_RETRY_JITTER_MS: u64 = 250;
+const DELAYED_HEAD_SCORE_SCRIPT: &str = r#"
+local head = redis.call("ZRANGE", KEYS[1], 0, 0, "WITHSCORES")
+return head[2]
+"#;
 const MOVE_CLAIMED_DELAYED_MEMBER_SCRIPT: &str = r#"
 if redis.call("GET", KEYS[1]) ~= ARGV[1] then
   return 0
@@ -56,6 +60,7 @@ static MOVE_CLAIMED_DELAYED_MEMBER: StaticRedisScript =
     StaticRedisScript::new(MOVE_CLAIMED_DELAYED_MEMBER_SCRIPT);
 static DROP_CLAIMED_DELAYED_MEMBER: StaticRedisScript =
     StaticRedisScript::new(DROP_CLAIMED_DELAYED_MEMBER_SCRIPT);
+static DELAYED_HEAD_SCORE: StaticRedisScript = StaticRedisScript::new(DELAYED_HEAD_SCORE_SCRIPT);
 
 struct DelayedQueueProbe {
     delayed_key: String,
@@ -90,14 +95,14 @@ pub(crate) fn wait_ms_until_due(now_ms: i64, due_ms: i64) -> u64 {
     due_ms.saturating_sub(now_ms).max(0) as u64
 }
 
-pub(crate) fn earliest_due_from_zrange_heads(
+pub(crate) fn earliest_due_from_scores(
     delayed_keys: &[String],
-    heads: &[Vec<(String, f64)>],
+    scores: &[Option<f64>],
 ) -> (Option<i64>, Vec<String>) {
     let mut earliest = None;
     let mut empty_keys = Vec::new();
-    for (delayed_key, first) in delayed_keys.iter().zip(heads) {
-        let Some((_, score)) = first.first() else {
+    for (delayed_key, score) in delayed_keys.iter().zip(scores) {
+        let Some(score) = score else {
             empty_keys.push(delayed_key.clone());
             continue;
         };
@@ -107,99 +112,172 @@ pub(crate) fn earliest_due_from_zrange_heads(
     (earliest, empty_keys)
 }
 
-fn delayed_due_probe_pipeline(
+fn delayed_eligibility_pipeline(
     probes: &[DelayedQueueProbe],
     consumers: &[Option<Consumer>],
     due_at_ms: i64,
-    limit: usize,
 ) -> redis::Pipeline {
     debug_assert_eq!(probes.len(), consumers.len());
     let mut pipe = redis::pipe();
     for (probe, consumer) in probes.iter().zip(consumers) {
+        if consumer.is_some() {
+            pipe.cmd("ZCOUNT")
+                .arg(&probe.delayed_key)
+                .arg(0)
+                .arg(due_at_ms);
+        } else {
+            pipe.cmd("ZCARD").arg(&probe.delayed_key);
+        }
+    }
+    pipe
+}
+
+async fn load_delayed_eligibility(
+    state: &AppState,
+    probes: &[DelayedQueueProbe],
+    consumers: &[Option<Consumer>],
+    due_at_ms: i64,
+) -> SchedulerResult<Vec<usize>> {
+    if probes.len() != consumers.len() {
+        return Err(SchedulerError::internal_error(
+            "delayed queue consumer response count mismatch",
+        ));
+    }
+    let counts: Vec<usize> = state
+        .data_redis
+        .with_conn(async |mut conn| {
+            delayed_eligibility_pipeline(probes, consumers, due_at_ms)
+                .query_async(&mut conn)
+                .await
+        })
+        .await?;
+    if counts.len() != probes.len() {
+        return Err(SchedulerError::internal_error(
+            "delayed queue eligibility response count mismatch",
+        ));
+    }
+    Ok(counts)
+}
+
+fn delayed_due_members_pipeline(
+    probes: &[DelayedQueueProbe],
+    consumers: &[Option<Consumer>],
+    counts: &[usize],
+    due_at_ms: i64,
+    batch_size: usize,
+) -> (redis::Pipeline, Vec<usize>) {
+    debug_assert_eq!(probes.len(), consumers.len());
+    debug_assert_eq!(probes.len(), counts.len());
+    let limits = delayed_member_limits(counts, batch_size);
+    let eligible = limits.iter().filter(|limit| **limit > 0).count();
+    let mut indices = Vec::with_capacity(eligible);
+    let mut pipe = redis::pipe();
+    for (index, ((probe, consumer), limit)) in probes.iter().zip(consumers).zip(&limits).enumerate()
+    {
+        if *limit == 0 {
+            continue;
+        }
+        indices.push(index);
         let command = pipe.cmd("ZRANGEBYSCORE").arg(&probe.delayed_key).arg(0);
         if consumer.is_some() {
             command.arg(due_at_ms);
         } else {
             command.arg("+inf");
         }
-        command.arg("LIMIT").arg(0).arg(limit);
+        command.arg("LIMIT").arg(0).arg(*limit);
     }
-    pipe
+    (pipe, indices)
+}
+
+fn delayed_member_limits(counts: &[usize], batch_size: usize) -> Vec<usize> {
+    let mut eligible = counts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, count)| (*count > 0).then_some(index))
+        .collect::<Vec<_>>();
+    if eligible.is_empty() {
+        return vec![0; counts.len()];
+    }
+
+    let total = counts
+        .iter()
+        .fold(0_usize, |sum, count| sum.saturating_add(*count));
+    let budget = total.min(batch_size.max(eligible.len()));
+    eligible.sort_by_key(|index| (counts[*index], *index));
+
+    let mut limits = vec![0; counts.len()];
+    let mut remaining = budget;
+    for (position, index) in eligible.iter().enumerate() {
+        let queues_left = eligible.len() - position;
+        let fair_share = (remaining / queues_left).max(1);
+        let allocated = counts[*index].min(fair_share);
+        limits[*index] = allocated;
+        remaining -= allocated;
+    }
+    debug_assert_eq!(remaining, 0);
+    limits
 }
 
 async fn load_delayed_due_members(
     state: &AppState,
     probes: &[DelayedQueueProbe],
     consumers: &[Option<Consumer>],
+    counts: &[usize],
     due_at_ms: i64,
-) -> SchedulerResult<Vec<Vec<String>>> {
-    if probes.len() != consumers.len() {
+) -> SchedulerResult<Vec<(usize, Vec<String>)>> {
+    let (pipeline, indices) = delayed_due_members_pipeline(
+        probes,
+        consumers,
+        counts,
+        due_at_ms,
+        state.config.queue_sweep_batch_size,
+    );
+    if indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    let replies: Vec<Vec<String>> = state
+        .data_redis
+        .with_conn(async |mut conn| pipeline.query_async(&mut conn).await)
+        .await?;
+    if replies.len() != indices.len() {
         return Err(SchedulerError::internal_error(
-            "delayed queue consumer response count mismatch",
+            "delayed queue due member response count mismatch",
         ));
     }
-    let mut members = Vec::with_capacity(probes.len());
-    for (probe_chunk, consumer_chunk) in probes
-        .chunks(QUEUE_REDIS_READ_BATCH_SIZE)
-        .zip(consumers.chunks(QUEUE_REDIS_READ_BATCH_SIZE))
-    {
-        let chunk_members: Vec<Vec<String>> = state
-            .data_redis
-            .with_conn(async |mut conn| {
-                delayed_due_probe_pipeline(
-                    probe_chunk,
-                    consumer_chunk,
-                    due_at_ms,
-                    state.config.queue_sweep_batch_size,
-                )
-                .query_async(&mut conn)
-                .await
-            })
-            .await?;
-        if chunk_members.len() != probe_chunk.len() {
-            return Err(SchedulerError::internal_error(
-                "delayed queue due probe response count mismatch",
-            ));
-        }
-        members.extend(chunk_members);
-    }
-    Ok(members)
+    Ok(indices.into_iter().zip(replies).collect())
 }
 
-fn delayed_head_pipeline(delayed_keys: &[String]) -> redis::Pipeline {
+fn delayed_head_score_pipeline(delayed_keys: &[String]) -> redis::Pipeline {
     let mut pipe = redis::pipe();
+    let script = DELAYED_HEAD_SCORE.prepare_pipeline(&mut pipe, delayed_keys.len());
     for delayed_key in delayed_keys {
-        pipe.cmd("ZRANGE")
-            .arg(delayed_key)
-            .arg(0)
-            .arg(0)
-            .arg("WITHSCORES");
+        script.append(&mut pipe, &[delayed_key], &[]);
     }
     pipe
 }
 
-async fn load_delayed_heads(
+async fn load_delayed_head_scores(
     state: &AppState,
     delayed_keys: &[String],
-) -> SchedulerResult<Vec<Vec<(String, f64)>>> {
-    let mut heads = Vec::with_capacity(delayed_keys.len());
+) -> SchedulerResult<Vec<Option<f64>>> {
+    let mut scores = Vec::with_capacity(delayed_keys.len());
     for key_chunk in delayed_keys.chunks(QUEUE_REDIS_READ_BATCH_SIZE) {
-        let chunk_heads: Vec<Vec<(String, f64)>> = state
+        let chunk_scores: Vec<Option<f64>> = state
             .data_redis
             .with_conn(async |mut conn| {
-                delayed_head_pipeline(key_chunk)
+                delayed_head_score_pipeline(key_chunk)
                     .query_async(&mut conn)
                     .await
             })
             .await?;
-        if chunk_heads.len() != key_chunk.len() {
+        if chunk_scores.len() != key_chunk.len() {
             return Err(SchedulerError::internal_error(
                 "delayed queue head probe response count mismatch",
             ));
         }
-        heads.extend(chunk_heads);
+        scores.extend(chunk_scores);
     }
-    Ok(heads)
+    Ok(scores)
 }
 
 pub(crate) fn record_queue_delayed_wake_read_error(metrics: &Metrics) {
@@ -404,73 +482,85 @@ pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
         .map(DelayedQueueProbe::consumer_lookup)
         .collect::<Vec<_>>();
     let consumers = resolve_consumer_batch(&state, &lookups).await?;
-    let due_members = load_delayed_due_members(&state, &probes, &consumers, now_ms()).await?;
-    for ((probe, consumer), members) in probes.into_iter().zip(consumers).zip(due_members) {
-        if members.is_empty() {
-            continue;
-        }
-        let claimed = claim_delayed_members(&state, &probe.delayed_key, members).await?;
-        if claimed.is_empty() {
-            continue;
-        }
-
-        let orphaned = consumer.is_none();
-        let mut move_batch = Vec::with_capacity(claimed.len());
-        let mut corrupt = Vec::new();
-        for (member, claim_key) in &claimed {
-            let Some(mut entry) = parse_json_entry(member) else {
-                corrupt.push((member.clone(), claim_key.clone()));
+    let due_at_ms = now_ms();
+    for (probe_chunk, consumer_chunk) in probes
+        .chunks(QUEUE_REDIS_READ_BATCH_SIZE)
+        .zip(consumers.chunks(QUEUE_REDIS_READ_BATCH_SIZE))
+    {
+        let eligible =
+            load_delayed_eligibility(&state, probe_chunk, consumer_chunk, due_at_ms).await?;
+        let due_members =
+            load_delayed_due_members(&state, probe_chunk, consumer_chunk, &eligible, due_at_ms)
+                .await?;
+        for (index, members) in due_members {
+            if members.is_empty() {
                 continue;
-            };
-            if orphaned {
-                entry.insert("reason".to_string(), "consumer-removed".to_string());
-                entry.insert("source".to_string(), "delayed".to_string());
             }
-            move_batch.push((member.clone(), claim_key.clone(), entry));
-        }
-        let (target_key, trim) = if orphaned {
-            (
-                queue_orphaned_key(&probe.ns, &probe.queue),
-                Some(state.config.max_orphaned_len),
+            let probe = &probe_chunk[index];
+            let consumer = &consumer_chunk[index];
+            let claimed = claim_delayed_members(&state, &probe.delayed_key, members).await?;
+            if claimed.is_empty() {
+                continue;
+            }
+
+            let orphaned = consumer.is_none();
+            let mut move_batch = Vec::with_capacity(claimed.len());
+            let mut corrupt = Vec::new();
+            for (member, claim_key) in &claimed {
+                let Some(mut entry) = parse_json_entry(member) else {
+                    corrupt.push((member.clone(), claim_key.clone()));
+                    continue;
+                };
+                if orphaned {
+                    entry.insert("reason".to_string(), "consumer-removed".to_string());
+                    entry.insert("source".to_string(), "delayed".to_string());
+                }
+                move_batch.push((member.clone(), claim_key.clone(), entry));
+            }
+            let (target_key, trim) = if orphaned {
+                (
+                    queue_orphaned_key(&probe.ns, &probe.queue),
+                    Some(state.config.max_orphaned_len),
+                )
+            } else {
+                (probe.stream_key.clone(), None)
+            };
+            let result = apply_claimed_delayed_members(
+                &state,
+                &probe.delayed_key,
+                &target_key,
+                trim,
+                &move_batch,
+                &corrupt,
             )
-        } else {
-            (probe.stream_key, None)
-        };
-        let result = apply_claimed_delayed_members(
-            &state,
-            &probe.delayed_key,
-            &target_key,
-            trim,
-            &move_batch,
-            &corrupt,
-        )
-        .await?;
-        record_queue_delayed_corrupt_members(&state.metrics, result.dropped);
-        if result.dropped > 0 {
-            log(
-                &state,
-                LogLevel::Warn,
-                "queue_delayed_corrupt_members_dropped",
-                json!({ "ns": probe.ns, "queue": probe.queue, "count": result.dropped }),
-            );
-        }
-        let moved = result.moved + result.dropped;
-        made_progress = made_progress || moved > 0;
-        if orphaned {
-            log(
-                &state,
-                LogLevel::Info,
-                "queue_delayed_orphaned",
-                json!({ "ns": probe.ns, "queue": probe.queue, "count": result.moved }),
-            );
-        }
-        if result.remaining == 0 {
-            state
-                .queues
-                .known_delayed
-                .write()
-                .await
-                .remove(&probe.delayed_key);
+            .await?;
+            record_queue_delayed_corrupt_members(&state.metrics, result.dropped);
+            if result.dropped > 0 {
+                log(
+                    &state,
+                    LogLevel::Warn,
+                    "queue_delayed_corrupt_members_dropped",
+                    json!({ "ns": &probe.ns, "queue": &probe.queue, "count": result.dropped }),
+                );
+            }
+            let moved = result.moved + result.dropped;
+            made_progress = made_progress || moved > 0;
+            if orphaned {
+                log(
+                    &state,
+                    LogLevel::Info,
+                    "queue_delayed_orphaned",
+                    json!({ "ns": &probe.ns, "queue": &probe.queue, "count": result.moved }),
+                );
+            }
+            if result.remaining == 0 {
+                state
+                    .queues
+                    .known_delayed
+                    .write()
+                    .await
+                    .remove(&probe.delayed_key);
+            }
         }
     }
     Ok(made_progress)
@@ -510,9 +600,8 @@ pub(crate) async fn queue_next_due_ms(state: &AppState) -> SchedulerResult<Optio
         .map(|probe| probe.delayed_key.clone())
         .collect::<Vec<_>>();
     if !zrange_keys.is_empty() {
-        let heads = load_delayed_heads(state, &zrange_keys).await?;
-        let (next_due, mut zrange_empty_keys) =
-            earliest_due_from_zrange_heads(&zrange_keys, &heads);
+        let scores = load_delayed_head_scores(state, &zrange_keys).await?;
+        let (next_due, mut zrange_empty_keys) = earliest_due_from_scores(&zrange_keys, &scores);
         earliest = next_due;
         empty_keys.append(&mut zrange_empty_keys);
     }
@@ -663,32 +752,29 @@ mod tests {
     }
 
     #[test]
-    fn delayed_queue_pipeline_heads_preserve_key_alignment() {
+    fn delayed_queue_head_scores_preserve_key_alignment() {
         let keys = vec![
             "queue-delayed:demo:a".to_string(),
             "queue-delayed:demo:b".to_string(),
             "queue-delayed:demo:c".to_string(),
         ];
-        let heads = vec![
-            vec![("m1".to_string(), 30_000.0)],
-            vec![],
-            vec![("m2".to_string(), 10_000.0)],
-        ];
-        let (earliest, empty) = earliest_due_from_zrange_heads(&keys, &heads);
+        let scores = vec![Some(30_000.0), None, Some(10_000.0)];
+        let (earliest, empty) = earliest_due_from_scores(&keys, &scores);
         assert_eq!(earliest, Some(10_000));
         assert_eq!(empty, vec!["queue-delayed:demo:b"]);
     }
 
     #[test]
-    fn delayed_due_probe_pipeline_aligns_consumer_state_with_each_key() {
+    fn delayed_due_member_pipeline_shares_the_chunk_budget() {
         let probes = vec![
             DelayedQueueProbe::parse("queue-delayed:demo:active".to_string()).unwrap(),
+            DelayedQueueProbe::parse("queue-delayed:demo:empty".to_string()).unwrap(),
             DelayedQueueProbe::parse("queue-delayed:demo:removed".to_string()).unwrap(),
         ];
-        let consumers = vec![Some(consumer("demo", "active")), None];
-        let commands = parse_packed_commands(
-            &delayed_due_probe_pipeline(&probes, &consumers, 12_345, 100).get_packed_pipeline(),
-        );
+        let consumers = vec![Some(consumer("demo", "active")), None, None];
+        let (pipeline, indices) =
+            delayed_due_members_pipeline(&probes, &consumers, &[3, 0, 5], 12_345, 4);
+        let commands = parse_packed_commands(&pipeline.get_packed_pipeline());
 
         assert_eq!(
             commands,
@@ -700,7 +786,7 @@ mod tests {
                     "12345",
                     "LIMIT",
                     "0",
-                    "100",
+                    "2",
                 ],
                 [
                     "ZRANGEBYSCORE",
@@ -709,25 +795,111 @@ mod tests {
                     "+inf",
                     "LIMIT",
                     "0",
-                    "100",
+                    "2",
                 ],
+            ]
+        );
+        assert_eq!(indices, [0, 2]);
+    }
+
+    #[test]
+    fn delayed_due_member_pipeline_keeps_one_slot_per_eligible_queue() {
+        let probes = (0..128)
+            .map(|index| DelayedQueueProbe::parse(format!("queue-delayed:demo:q-{index}")).unwrap())
+            .collect::<Vec<_>>();
+        let consumers = probes
+            .iter()
+            .map(|probe| Some(consumer("demo", &probe.queue)))
+            .collect::<Vec<_>>();
+        let (pipeline, indices) =
+            delayed_due_members_pipeline(&probes, &consumers, &[1; 128], 12_345, 100);
+        let commands = parse_packed_commands(&pipeline.get_packed_pipeline());
+
+        assert_eq!(indices.len(), 128);
+        assert_eq!(commands.len(), 128);
+        assert!(
+            commands
+                .iter()
+                .all(|command| command.last().unwrap() == "1")
+        );
+    }
+
+    #[test]
+    fn delayed_member_limits_reuse_unclaimed_queue_budget() {
+        assert_eq!(delayed_member_limits(&[1, 1000], 100), [1, 99]);
+        assert_eq!(delayed_member_limits(&[1, 1, 1000], 100), [1, 1, 98]);
+
+        for (counts, batch_size) in [
+            (vec![], 100),
+            (vec![0, 0], 100),
+            (vec![3, 0, 5], 4),
+            (vec![2, 2, 2], 4),
+            (vec![60, 60, 60], 100),
+            (vec![1; 128], 100),
+            (vec![usize::MAX, 1], 100),
+        ] {
+            let limits = delayed_member_limits(&counts, batch_size);
+            let eligible = counts.iter().filter(|count| **count > 0).count();
+            let total = counts
+                .iter()
+                .fold(0_usize, |sum, count| sum.saturating_add(*count));
+            assert_eq!(
+                limits.iter().sum::<usize>(),
+                total.min(batch_size.max(eligible))
+            );
+            assert!(
+                limits
+                    .iter()
+                    .zip(&counts)
+                    .all(|(limit, count)| limit <= count)
+            );
+            assert!(
+                limits
+                    .iter()
+                    .zip(&counts)
+                    .all(|(limit, count)| *count == 0 || *limit >= 1)
+            );
+        }
+    }
+
+    #[test]
+    fn delayed_eligibility_reads_only_counts() {
+        let probes = vec![
+            DelayedQueueProbe::parse("queue-delayed:demo:active".to_string()).unwrap(),
+            DelayedQueueProbe::parse("queue-delayed:demo:removed".to_string()).unwrap(),
+        ];
+        let consumers = vec![Some(consumer("demo", "active")), None];
+        let commands = parse_packed_commands(
+            &delayed_eligibility_pipeline(&probes, &consumers, 12_345).get_packed_pipeline(),
+        );
+
+        assert_eq!(
+            commands,
+            vec![
+                vec!["ZCOUNT", "queue-delayed:demo:active", "0", "12345"],
+                vec!["ZCARD", "queue-delayed:demo:removed"],
             ]
         );
     }
 
     #[test]
-    fn delayed_head_pipeline_preserves_key_order() {
+    fn delayed_head_pipeline_returns_scores_without_message_members() {
         let keys = vec![
             "queue-delayed:demo:a".to_string(),
             "queue-delayed:demo:b".to_string(),
         ];
-        let commands = parse_packed_commands(&delayed_head_pipeline(&keys).get_packed_pipeline());
+        let commands =
+            parse_packed_commands(&delayed_head_score_pipeline(&keys).get_packed_pipeline());
+        let hash = redis::Script::new(DELAYED_HEAD_SCORE_SCRIPT)
+            .get_hash()
+            .to_string();
 
         assert_eq!(
             commands,
-            [
-                ["ZRANGE", "queue-delayed:demo:a", "0", "0", "WITHSCORES"],
-                ["ZRANGE", "queue-delayed:demo:b", "0", "0", "WITHSCORES"],
+            vec![
+                vec!["SCRIPT", "LOAD", DELAYED_HEAD_SCORE_SCRIPT],
+                vec!["EVALSHA", hash.as_str(), "1", "queue-delayed:demo:a",],
+                vec!["EVALSHA", hash.as_str(), "1", "queue-delayed:demo:b",],
             ]
         );
     }

@@ -13,9 +13,8 @@ import {
   adminPost,
   deployAndPromote,
   fetchWithToken,
-  parseJsonText,
   responseJson,
-  sh,
+  structuredServiceLogEvents,
   uniqueNs,
   waitUntil,
   setupIntegrationSuite,
@@ -582,26 +581,6 @@ test("referrer cross-ns DELETE blocker: same-tenant ns sees only same-ns details
 // Auth is a socket-less JSRPC worker, so these logs are the observable product
 // contract; it does not maintain a private metrics registry.
 
-/** @param {string} servicesGrep @param {string} eventName */
-function findStructuredLogLines(servicesGrep, eventName) {
-  const raw = sh(`docker compose logs --no-color --tail=2000 ${servicesGrep}`);
-  /** @type {any[]} */
-  const out = [];
-  for (const line of raw.split("\n")) {
-    // workerd console.* surfaces both raw + structured; we want the
-    // structured form (single-line JSON object). Quick filter then parse.
-    const idx = line.indexOf("{");
-    if (idx < 0) continue;
-    const candidate = line.slice(idx);
-    if (!candidate.includes(`"event":"${eventName}"`)) continue;
-    try {
-      const obj = parseJsonText(candidate, `${eventName} structured log line`);
-      if (obj.event === eventName) out.push(obj);
-    } catch { /* not JSON, skip */ }
-  }
-  return out;
-}
-
 test("observability contract: auth_verify ok + reject log payload shape, no gate field, request_id propagation", async () => {
   // Use unique request IDs so we can pinpoint the exact log lines this
   // test produced — system-runtime stdout is shared across the whole run.
@@ -632,7 +611,11 @@ test("observability contract: auth_verify ok + reject log payload shape, no gate
   /** @type {any} */ let okLog = null;
   /** @type {any} */ let rejectLog = null;
   await waitUntil("auth_verify log lines surfaced", () => {
-    const lines = findStructuredLogLines("system-runtime", "auth_verify");
+    const lines = structuredServiceLogEvents(
+      "system-runtime",
+      "auth_verify",
+      { tail: 2000 }
+    );
     okLog = lines.find((l) => l.request_id === okReqId);
     rejectLog = lines.find((l) => l.request_id === rejectReqId);
     return Boolean(okLog && rejectLog);
@@ -680,7 +663,11 @@ test("observability contract: auth_issue lifecycle log carries no verify-side fi
 
   /** @type {any} */ let issueLog = null;
   await waitUntil("auth_issue log line surfaced", () => {
-    const lines = findStructuredLogLines("system-runtime", "auth_issue");
+    const lines = structuredServiceLogEvents(
+      "system-runtime",
+      "auth_issue",
+      { tail: 2000 }
+    );
     issueLog = lines.find((l) => l.request_id === reqId);
     return Boolean(issueLog);
   }, { timeoutMs: 8000, intervalMs: 250 });

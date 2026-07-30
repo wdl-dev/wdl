@@ -423,15 +423,14 @@ test("namespace secret PUT batches retained state across workers", async () => {
 
     assert.equal(response.status, 200);
     assert.deepEqual(
-      redis.commands.filter(([command]) => command === "zRange" || command === "zRangeMany"),
-      [["zRangeMany", ["worker-versions:demo:api", "worker-versions:demo:jobs"], 0, -1]]
-    );
-    assert.deepEqual(
-      redis.commands.filter(([command, key]) =>
-        (command === "hGetAll" || command === "hGetAllMany") &&
-        (Array.isArray(key) || String(key).startsWith("secrets:demo:"))
-      ),
-      [["hGetAllMany", ["secrets:demo:api", "secrets:demo:jobs"]]]
+      redis.commands.filter(([command]) => command === "zRangeManyAndHGetAllMany"),
+      [[
+        "zRangeManyAndHGetAllMany",
+        ["worker-versions:demo:api", "worker-versions:demo:jobs"],
+        ["secrets:demo:api", "secrets:demo:jobs"],
+        0,
+        -1,
+      ]]
     );
     assert.deepEqual(
       redis.commands.filter(([command]) => command === "hGetMany"),

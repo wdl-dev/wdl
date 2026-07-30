@@ -136,6 +136,108 @@ export class RedisCommandSurface {
     };
   }
 
+  /**
+   * @param {string} hashKey
+   * @param {string} field
+   * @param {string} sortedSetKey
+   * @param {number} start
+   * @param {number} stop
+   */
+  async hGetAndZRange(hashKey, field, sortedSetKey, start, stop) {
+    const [fieldReply, membersReply] = await this._execPipeline("HGET_ZRANGE_PIPELINE", [
+      ["HGET", hashKey, field],
+      ["ZRANGE", sortedSetKey, String(start), String(stop)],
+    ]);
+    return {
+      field: decodeBulk(fieldReply),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
+  }
+
+  /**
+   * @param {string[]} sortedSetKeys
+   * @param {string[]} hashKeys
+   * @param {number} start
+   * @param {number} stop
+   */
+  async zRangeManyAndHGetAllMany(sortedSetKeys, hashKeys, start, stop) {
+    const replies = await this._execPipeline("ZRANGE_HGETALL_PIPELINE", [
+      ...sortedSetKeys.map((key) => ["ZRANGE", key, String(start), String(stop)]),
+      ...hashKeys.map((key) => ["HGETALL", key]),
+    ]);
+    return {
+      ranges: replies.slice(0, sortedSetKeys.length)
+        .map((reply) => decodeStringArray(/** @type {unknown[] | null} */ (reply))),
+      hashes: replies.slice(sortedSetKeys.length)
+        .map((reply) => decodeHashObject(/** @type {unknown[] | null} */ (reply))),
+    };
+  }
+
+  /**
+   * @param {string[]} sortedSetKeys
+   * @param {string[]} existenceKeys
+   * @param {number} start
+   * @param {number} stop
+   */
+  async zRangeManyAndExistsMany(sortedSetKeys, existenceKeys, start, stop) {
+    const replies = await this._execPipeline("ZRANGE_EXISTS_PIPELINE", [
+      ...sortedSetKeys.map((key) => ["ZRANGE", key, String(start), String(stop)]),
+      ...existenceKeys.map((key) => ["EXISTS", key]),
+    ]);
+    return {
+      ranges: replies.slice(0, sortedSetKeys.length)
+        .map((reply) => decodeStringArray(/** @type {unknown[] | null} */ (reply))),
+      exists: replies.slice(sortedSetKeys.length).map((reply) => reply === 1),
+    };
+  }
+
+  /** @param {string} setKey @param {string} hashKey */
+  async sMembersAndHGetAll(setKey, hashKey) {
+    const [membersReply, hashReply] = await this._execPipeline(
+      "SMEMBERS_HGETALL_PIPELINE",
+      [
+        ["SMEMBERS", setKey],
+        ["HGETALL", hashKey],
+      ]
+    );
+    return {
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+    };
+  }
+
+  /** @param {string} namespacesKey @param {string} hashKey @param {string} setKey */
+  async sMembersHGetAllAndSMembers(namespacesKey, hashKey, setKey) {
+    const [namespacesReply, hashReply, membersReply] = await this._execPipeline(
+      "SMEMBERS_HGETALL_SMEMBERS_PIPELINE",
+      [
+        ["SMEMBERS", namespacesKey],
+        ["HGETALL", hashKey],
+        ["SMEMBERS", setKey],
+      ]
+    );
+    return {
+      namespaces: decodeStringArray(/** @type {unknown[] | null} */ (namespacesReply)),
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
+  }
+
+  /** @param {string} hashKey @param {string} setKey */
+  async hGetAllAndSMembers(hashKey, setKey) {
+    const [hashReply, membersReply] = await this._execPipeline(
+      "HGETALL_SMEMBERS_PIPELINE",
+      [
+        ["HGETALL", hashKey],
+        ["SMEMBERS", setKey],
+      ]
+    );
+    return {
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
+  }
+
   /** @param {string} key @param {...RedisHSetArg} rest */
   async hSet(key, ...rest) {
     return /** @type {number} */ (await this._exec(...buildHSetArgs(key, rest)));
@@ -193,6 +295,32 @@ export class RedisCommandSurface {
     return replies.map(decodeStringArray);
   }
 
+  /** @param {string} key @param {string|string[]} members */
+  async sAdd(key, members) {
+    const values = Array.isArray(members) ? members : [members];
+    if (values.length === 0) return 0;
+    return /** @type {number} */ (await this._exec("SADD", key, ...values));
+  }
+
+  /** @param {string} key @param {string|string[]} members */
+  async sRem(key, members) {
+    const values = Array.isArray(members) ? members : [members];
+    if (values.length === 0) return 0;
+    return /** @type {number} */ (await this._exec("SREM", key, ...values));
+  }
+
+  /** @param {string} key */
+  async sMembers(key) {
+    return decodeStringArray(
+      /** @type {unknown[] | null} */ (await this._exec("SMEMBERS", key))
+    );
+  }
+
+  /** @param {string} key @param {string} member */
+  async sIsMember(key, member) {
+    return (await this._exec("SISMEMBER", key, member)) === 1;
+  }
+
   /** @param {string} key */
   async sCard(key) {
     return /** @type {number} */ (await this._exec("SCARD", key));
@@ -223,6 +351,20 @@ export class RedisCommandSurface {
       keys.map((key) => ["EXISTS", key])
     ));
     return replies.map((value) => value > 0);
+  }
+
+  /** @param {string} key */
+  async zCard(key) {
+    return /** @type {number} */ (await this._exec("ZCARD", key));
+  }
+
+  /** @param {string} key @param {number} start @param {number} stop */
+  async zRange(key, start, stop) {
+    return decodeStringArray(
+      /** @type {unknown[] | null} */ (
+        await this._exec("ZRANGE", key, String(start), String(stop))
+      )
+    );
   }
 
   /** @param {string} src @param {string} dst @param {RedisCopyOptions} [opts] */

@@ -150,6 +150,31 @@ export default {
 export const BLOCKING_BATCH_RECORDER = blockingBatchRecorder(5_000);
 export const LONG_BLOCKING_BATCH_RECORDER = blockingBatchRecorder(30_000);
 
+export const SLOW_FIRST_BATCH_RECORDER = `
+let started = 0;
+let total = 0;
+let firstCompletedAt = null;
+let secondStartedAt = null;
+export default {
+  async fetch() {
+    return Response.json({ started, total, firstCompletedAt, secondStartedAt });
+  },
+  async queue(batch) {
+    started += 1;
+    if (started === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 4200));
+      firstCompletedAt = Date.now();
+    } else if (started === 2) {
+      secondStartedAt = Date.now();
+    }
+    for (const message of batch.messages) {
+      message.ack();
+      total += 1;
+    }
+  },
+};
+`;
+
 export const FAST_QUEUE_CONSUMER = `
 const store = {};
 export default {

@@ -15,8 +15,10 @@ import assert from "node:assert/strict";
  *   set: (key: string, value: string) => Promise<unknown>,
  *   setIfEq: (key: string, value: string, expected: string) => Promise<boolean>,
  *   delIfEq: (key: string, expected: string) => Promise<number>,
- *   sAdd: (key: string, member: string) => Promise<unknown>,
+ *   sAdd: (key: string, members: string|string[]) => Promise<number>,
+ *   sRem: (key: string, members: string|string[]) => Promise<number>,
  *   sMembers: (key: string) => Promise<string[]>,
+ *   sIsMember: (key: string, member: string) => Promise<boolean>,
  *   sCard: (key: string) => Promise<number>,
  *   sCardMany: (keys: string[]) => Promise<number[]>,
  *   zAdd: (key: string, score: number, member: string) => Promise<unknown>,
@@ -122,6 +124,24 @@ export const redisConformanceCases = [
       assert.equal(await redis.sCard(members), 2);
       assert.equal(await redis.sCard(missing), 0);
       assert.deepEqual(await redis.sCardMany([members, missing]), [2, 0]);
+    },
+  },
+  {
+    id: "set-mutations",
+    name: "set mutations support arrays, counts, membership, and empty no-ops",
+    /** @param {RedisConformanceAdapter} redis */
+    async run(redis) {
+      const members = redis.key("set-mutations");
+      await redis.del(members);
+
+      assert.equal(await redis.sAdd(members, ["one", "two", "one"]), 2);
+      assert.equal(await redis.sAdd(members, "two"), 0);
+      assert.equal(await redis.sAdd(members, []), 0);
+      assert.equal(await redis.sIsMember(members, "one"), true);
+      assert.equal(await redis.sRem(members, ["one", "missing"]), 1);
+      assert.equal(await redis.sRem(members, []), 0);
+      assert.equal(await redis.sIsMember(members, "one"), false);
+      assert.deepEqual(await redis.sMembers(members), ["two"]);
     },
   },
   {

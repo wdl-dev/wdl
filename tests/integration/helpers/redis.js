@@ -154,14 +154,24 @@ export function redisSMembers(key, options = {}) {
   return out ? out.split("\n") : [];
 }
 
-/** @param {string} key @param {string} member @param {{ db?: number }} [options] */
-export function redisSAdd(key, member, options = {}) {
-  redisCommand(`SADD ${shellQuote(key)} ${shellQuote(member)}`, options);
+/** @param {string} key @param {string|string[]} members @param {{ db?: number }} [options] @returns {number} */
+export function redisSAdd(key, members, options = {}) {
+  const values = Array.isArray(members) ? members : [members];
+  if (values.length === 0) return 0;
+  return Number(redisCommand(
+    `SADD ${shellQuote(key)} ${values.map(shellQuote).join(" ")}`,
+    options
+  ));
 }
 
-/** @param {string} key @param {string} member @param {{ db?: number }} [options] */
-export function redisSRem(key, member, options = {}) {
-  redisCommand(`SREM ${shellQuote(key)} ${shellQuote(member)}`, options);
+/** @param {string} key @param {string|string[]} members @param {{ db?: number }} [options] @returns {number} */
+export function redisSRem(key, members, options = {}) {
+  const values = Array.isArray(members) ? members : [members];
+  if (values.length === 0) return 0;
+  return Number(redisCommand(
+    `SREM ${shellQuote(key)} ${values.map(shellQuote).join(" ")}`,
+    options
+  ));
 }
 
 /** @param {string} key @param {{ db?: number }} [options] @returns {number} */

@@ -184,7 +184,7 @@ npm install -g @wdl-dev/cli@1.6.1
 - `examples/` 保存手动 demo 和参考项目。integration tests 不应静默依赖这些路径；需要测试拥有形态时，应迁到 `test-workers/`。
 - `tests/integration/manual/` 放 `*.manual.mjs` 复现脚本，**故意不被 runner 发现**。
 - CLI integration tests 必须在文件顶部加入 `// @wdl-cli-integration` 标记，供 CLI subset runner 发现。
-- Rust crate-local test helper 放在 crate 自己的 `#[cfg(test)]` module 里（例如 `rust/redis-proxy/src/lib.rs::test_support`）。同一个 crate 内重复的 parser/protocol 断言 helper 走这里，不在 sibling Rust module 里复制。
+- 多个 crate 共用的 Rust test helper 放在 `wdl-rust-common/test-support` 后；共享 RESP packed-command parser 是其中一例。只有单个 crate 拥有的行为仍把 helper 放在该 crate 的 `#[cfg(test)]` module 中，不为局部需求扩大 common test surface。
 
 ### 哪些保留 inline
 

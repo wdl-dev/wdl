@@ -184,17 +184,27 @@ Key families:
   invalidate in-flight execution.
 - Runtime replay cache is advisory. DB 2 step state is authoritative. A runtime isolate
   may reuse terminal step records across run claims for the same instance incarnation;
-  a new claim reopens bounded paging so records committed by another isolate remain
-  discoverable.
+  successful outputs are retained as serialized snapshots and decoded for each replay
+  so tenant mutation cannot alter later claims. Retained serialized data has a global
+  16 MiB cap per runtime isolate; oversized records are not cached and older caches are
+  evicted under pressure. The `workflow_replay_cache_bytes` gauge reports that retained
+  serialized size. A new claim reopens bounded paging so records committed by another
+  isolate remain discoverable.
+  Backend replay records are projected to the fields Runtime actually consumes before
+  byte accounting and retention, so unconsumed response metadata cannot bypass the
+  cache budget.
 - Runtime may issue multiple `step.do` calls concurrently, commonly via `Promise.all`;
   each call receives a deterministic ordinal in user-code call order, records DAG
   dependencies from the current completed-step frontier, and commits independently under
-  the run fence. A `step.do` callback must not start another workflow step, including
-  after an `await`; create parallel sibling promises from the run body before callback
-  code is in flight. A run that returns before all started steps settle fails as
-  invalid, so user code must await the concurrent step promises. Suspending operations
-  (`step.sleep`, `step.sleepUntil`, `step.waitForEvent`) remain exclusive and must not
-  overlap another in-flight step because they suspend the whole workflow run.
+  the run fence. Step config is JSON data passed by value across the workerLoader JSRPC
+  boundary; callable hooks are not part of that contract. Workflows owns canonical
+  config encoding and its exact 64 KiB limit. A `step.do` callback must not start another
+  workflow step, including after an `await`; create parallel sibling promises from the
+  run body before callback code is in flight. A run that returns before all started
+  steps settle fails as invalid, so user code must await the concurrent step promises.
+  Suspending operations (`step.sleep`, `step.sleepUntil`, `step.waitForEvent`) remain
+  exclusive and must not overlap another in-flight step because they suspend the whole
+  workflow run.
 - Completed instances use success retention; failed and terminated instances use error
   retention. Both retention classes default to 8 hours for newly created instances and
   may be overridden with
@@ -207,8 +217,13 @@ Key families:
 - A single workflow result is capped at 1 MiB and a runtime-to-workflows backend JSON
   request at 2 MiB. Runtime prevalidation and the Rust backend share the pinned
   `workflow_payload_too_large` contract. The per-instance aggregate payload cap is
-  16 MiB. Step/event over-cap writes fail the request; over-cap runtime terminal
-  results transition the instance to failed in the same transaction.
+  16 MiB. Runtime dispatch bounds serialized result and workflows-backend request bytes
+  before forwarding; those documents allow at most 127 object/array levels including the
+  platform envelope and reject lone UTF-16 surrogates in keys or values, matching the
+  locked Rust JSON parser. Workflows owns backend JSON parsing, canonical step config,
+  and persisted aggregate accounting. Step/event over-cap writes fail the request;
+  over-cap runtime terminal results transition the instance to failed in the same
+  transaction.
 - Workflows semantic request caps use `request_too_large`; this is distinct from
   HTTP-body parser `request_body_too_large` in control/runtime protocols. Workflow
   errors otherwise use the platform `{ error, message }` envelope on HTTP boundaries.
@@ -394,6 +409,7 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 ## Tests That Protect This Module
 
 - `tests/unit/runtime-dispatch-workflows.test.js`
+- `tests/unit/workflow-replay-cache.test.js`
 - `tests/unit/runtime-load.test.js`
 - `tests/unit/runtime-workflows-client.test.js`
 - `tests/unit/control-handlers-workflows.test.js`

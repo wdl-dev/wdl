@@ -90,8 +90,10 @@ async function validateNamespaceSecretBudget({
   nsName,
   nsSecrets,
 }) {
-  const activeRoutes = await redis.hGetAll(routesKey(nsName));
-  const indexedWorkers = await redis.sMembers(workersIndexKey(nsName));
+  const {
+    hash: activeRoutes,
+    members: indexedWorkers,
+  } = await redis.sMembersAndHGetAll(workersIndexKey(nsName), routesKey(nsName));
   const workerNames = new Set([
     ...indexedWorkers.filter((worker) => typeof worker === "string" && worker),
     ...Object.keys(activeRoutes),
@@ -118,8 +120,10 @@ async function validateNamespaceSecretBudget({
     const batch = workers.slice(offset, offset + NS_SECRET_WORKER_READ_BATCH_SIZE);
     const versionKeys = batch.map((worker) => workerVersionsKey(nsName, worker));
     const secretKeys = batch.map((worker) => workerSecretsKey(nsName, worker));
-    const retainedByWorker = await redis.zRangeMany(versionKeys, 0, -1);
-    const encryptedByWorker = await redis.hGetAllMany(secretKeys);
+    const {
+      ranges: retainedByWorker,
+      hashes: encryptedByWorker,
+    } = await redis.zRangeManyAndHGetAllMany(versionKeys, secretKeys, 0, -1);
     const secretsByWorker = await Promise.all(encryptedByWorker.map((encrypted, index) =>
       decryptSecretHash({
         encrypted,

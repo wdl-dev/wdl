@@ -39,8 +39,10 @@ function fakeRedisConformanceAdapter(redis, prefix) {
       await redis.set(key, value, { ifeq: expected }) === "OK"
     ),
     delIfEq: (key, expected) => redis.delIfEq(key, expected),
-    sAdd: (key, member) => redis.sAdd(key, member),
+    sAdd: (key, members) => redis.sAdd(key, members),
+    sRem: (key, members) => redis.sRem(key, members),
     sMembers: (key) => redis.sMembers(key),
+    sIsMember: (key, member) => redis.sIsMember(key, member),
     sCard: (key) => redis.sCard(key),
     sCardMany: (keys) => redis.sCardMany(keys),
     zAdd: (key, score, member) => redis.session((session) => session.multi().zAdd(key, score, member).exec()),
@@ -213,32 +215,144 @@ test("fake redis zRange mirrors sorted-set ordering and inclusive indexes", asyn
   });
 });
 
-test("fake redis sessions support batched zRange and exists reads", async () => {
+test("fake redis set commands match shared client and session semantics", async () => {
+  const redis = createFakeRedis();
+
+  assert.equal(await redis.sAdd("members", ["one", "two", "one"]), 2);
+  assert.equal(await redis.sAdd("members", "two"), 0);
+  assert.equal(await redis.sIsMember("members", "one"), true);
+  assert.equal(await redis.sRem("members", ["one", "missing"]), 1);
+
+  await redis.session(async (session) => {
+    assert.equal(await session.sAdd("members", ["two", "three"]), 1);
+    assert.equal(await session.sIsMember("members", "one"), false);
+    assert.equal(await session.sRem("members", ["two", "three"]), 2);
+    assert.deepEqual(await session.sMembers("members"), []);
+  });
+  assert.equal(await redis.exists("members"), 0);
+});
+
+test("fake redis snapshots set member arrays in command history", async () => {
+  const redis = createFakeRedis();
+  const added = ["one", "two"];
+  const removed = ["one"];
+
+  await redis.sAdd("members", added);
+  await redis.session((session) => session.sRem("members", removed));
+  added[0] = "changed";
+  removed[0] = "changed";
+
+  assert.deepEqual(redis.commands, [
+    ["sAdd", "members", ["one", "two"]],
+    ["sRem", "members", ["one"]],
+  ]);
+});
+
+test("fake redis direct set empty batches have no observable side effects", async () => {
+  const redis = createFakeRedis(undefined, { nowMs: () => 2_000 });
+  redis.sets.set("members", new Set(["one"]));
+  redis.expirations.set("members", 1_000);
+  redis.revisions.set("members", 7);
+
+  assert.equal(await redis.sAdd("members", []), 0);
+  await redis.session(async (session) => {
+    assert.equal(await session.sRem("members", []), 0);
+  });
+
+  assert.deepEqual(redis.commands, []);
+  assert.deepEqual(redis.sets.get("members"), new Set(["one"]));
+  assert.equal(redis.expirations.get("members"), 1_000);
+  assert.equal(redis.revisions.get("members"), 7);
+});
+
+test("fake redis multi set arrays use one aggregate reply and skip empty batches", async () => {
+  const redis = createFakeRedis();
+
+  const replies = await redis.session((session) => session.multi()
+    .sAdd("members", [])
+    .sAdd("members", ["one", "two", "one"])
+    .sRem("members", [])
+    .sRem("members", ["one", "missing"])
+    .exec());
+
+  assert.deepEqual(replies, [2, 1]);
+  assert.deepEqual(redis.commands, [
+    ["sAdd", "members", "one", "two", "one"],
+    ["sRem", "members", "one", "missing"],
+  ]);
+  assert.deepEqual(await redis.sMembers("members"), ["two"]);
+});
+
+test("fake redis multi applies key expiry before set mutations", async () => {
+  const redis = createFakeRedis(undefined, { nowMs: () => 2_000 });
+  redis.sets.set("add-members", new Set(["stale"]));
+  redis.expirations.set("add-members", 1_000);
+  redis.sets.set("remove-members", new Set(["stale"]));
+  redis.expirations.set("remove-members", 1_000);
+
+  const replies = await redis.session((session) => session.multi()
+    .sAdd("add-members", "new")
+    .expireAt("add-members", 60)
+    .sRem("remove-members", "stale")
+    .exec());
+
+  assert.deepEqual(replies, [1, 1, 0]);
+  assert.deepEqual(await redis.sMembers("add-members"), ["new"]);
+  assert.deepEqual(await redis.sMembers("remove-members"), []);
+});
+
+test("fake redis surfaces support aligned compound reads", async () => {
   const redis = createFakeRedis();
   redis.zsets.set("versions:a", new Map([
     ["v2", 2],
     ["v1", 1],
   ]));
   redis.zsets.set("versions:b", new Map([["v3", 3]]));
+  redis.hashes.set("secrets:a", { API_KEY: "a" });
   redis.hashes.set("secrets:b", { TOKEN: "value" });
 
+  assert.deepEqual(
+    await redis.zRangeManyAndHGetAllMany(
+      ["versions:a", "versions:b"],
+      ["secrets:a", "secrets:b"],
+      0,
+      -1
+    ),
+    {
+      ranges: [["v1", "v2"], ["v3"]],
+      hashes: [{ API_KEY: "a" }, { TOKEN: "value" }],
+    }
+  );
   await redis.session(async (session) => {
-    assert.deepEqual(await session.zRangeMany(["versions:a", "versions:b", "versions:c"], 0, -1), [
-      ["v1", "v2"],
-      ["v3"],
-      [],
-    ]);
-    assert.deepEqual(await session.existsMany(["secrets:a", "secrets:b"]), [false, true]);
-    assert.deepEqual(await session.zRangeMany(["versions:a", "versions:b"], -1, -1), [
-      ["v2"],
-      ["v3"],
-    ]);
+    assert.deepEqual(
+      await session.zRangeManyAndExistsMany(
+        ["versions:a", "versions:b", "versions:c"],
+        ["secrets:a", "secrets:missing"],
+        0,
+        -1
+      ),
+      {
+        ranges: [["v1", "v2"], ["v3"], []],
+        exists: [true, false],
+      }
+    );
   });
 
   assert.deepEqual(redis.commands, [
-    ["zRangeMany", ["versions:a", "versions:b", "versions:c"], 0, -1],
-    ["existsMany", ["secrets:a", "secrets:b"]],
-    ["zRangeMany", ["versions:a", "versions:b"], -1, -1],
+    [
+      "zRangeManyAndHGetAllMany",
+      ["versions:a", "versions:b"],
+      ["secrets:a", "secrets:b"],
+      0,
+      -1,
+    ],
+    [
+      "zRangeManyAndExistsMany",
+      ["versions:a", "versions:b", "versions:c"],
+      ["secrets:a", "secrets:missing"],
+      0,
+      -1,
+    ],
   ]);
 });
 

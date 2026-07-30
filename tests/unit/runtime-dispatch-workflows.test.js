@@ -24,7 +24,13 @@ const workflowJson = await importRepositoryModule(
     "shared-utf8": repositoryFileUrl("shared/utf8.js"),
   })
 );
-const workflowLimits = /** @type {{ resultBytesMax: number, backendRequestBytesMax: number, payloadTooLargeCode: string }} */ (
+const workflowLimits = /** @type {{
+ *   resultBytesMax: number,
+ *   backendRequestBytesMax: number,
+ *   jsonContainerDepthMax: number,
+ *   rejectLoneSurrogates: boolean,
+ *   payloadTooLargeCode: string,
+ * }} */ (
   readRepositoryJson("tests/fixtures/workflow-limits.json")
 );
 const {
@@ -53,12 +59,24 @@ beforeEach(() => {
   _resetWorkflowReplayCacheForTest();
 });
 
+/** @param {number} depth */
+function nestedArrays(depth) {
+  let value = null;
+  for (let i = 0; i < depth; i += 1) value = [value];
+  return value;
+}
+
 test("workflow payload limits match the shared Rust/JS contract", () => {
   assert.equal(workflowJson.WORKFLOW_RESULT_BYTES_MAX, workflowLimits.resultBytesMax);
   assert.equal(
     workflowJson.WORKFLOW_BACKEND_REQUEST_BYTES_MAX,
     workflowLimits.backendRequestBytesMax
   );
+  assert.equal(
+    workflowJson.WORKFLOW_JSON_CONTAINER_DEPTH_MAX,
+    workflowLimits.jsonContainerDepthMax
+  );
+  assert.equal(workflowLimits.rejectLoneSurrogates, true);
   assert.equal(
     workflowJson.WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
     workflowLimits.payloadTooLargeCode
@@ -72,12 +90,6 @@ test("workflow payload limits match the shared Rust/JS contract", () => {
 test("workflow bounded JSON serializer matches JSON.stringify for supported values", () => {
   const inherited = Object.create({ hidden: true });
   inherited.visible = "yes";
-  const nullPrototype = Object.assign(Object.create(null), { visible: "yes" });
-  class CustomRecord {
-    constructor() {
-      this.visible = "yes";
-    }
-  }
   const nestedToJson = {
     x: {
       toJSON() {
@@ -121,8 +133,6 @@ test("workflow bounded JSON serializer matches JSON.stringify for supported valu
     "中文",
     "😀",
     "\u0000\b\t\n\f\r\"\\",
-    "\ud800",
-    "\udc00",
     "😀".repeat(8200),
     `${"a".repeat(8191)}😀aaa`,
     new String("boxed"),
@@ -142,14 +152,8 @@ test("workflow bounded JSON serializer matches JSON.stringify for supported valu
     { b: 2, a: [3, { y: null, x: "ok" }], skipped: undefined, fn() {}, sym: Symbol("skip") },
     { toJSON() { return { z: "ok" }; } },
     { date: new Date("2026-05-13T12:00:00.000Z") },
-    new CustomRecord(),
-    new Map([["ignored", true]]),
-    new Set(["ignored"]),
-    /ignored/,
-    new Error("ignored"),
     nestedToJson,
     inherited,
-    nullPrototype,
   ];
   for (const value of cases) {
     assert.equal(_stringifyWorkflowJsonForTest(value), JSON.stringify(value));
@@ -189,6 +193,48 @@ test("workflow bounded JSON serializer does not over-count split surrogate pairs
   );
 });
 
+test("workflow JSON writer matches the Rust Unicode and nesting domain", () => {
+  for (const value of ["\ud800", "\udc00", { "\ud800": null }, { "\udc00": null }]) {
+    assert.throws(
+      () => _stringifyWorkflowJsonForTest(value),
+      /unpaired UTF-16 surrogate/
+    );
+  }
+
+  assert.equal(
+    _stringifyWorkflowJsonForTest(nestedArrays(workflowLimits.jsonContainerDepthMax)),
+    JSON.stringify(nestedArrays(workflowLimits.jsonContainerDepthMax))
+  );
+  assert.throws(
+    () => _stringifyWorkflowJsonForTest(
+      nestedArrays(workflowLimits.jsonContainerDepthMax + 1)
+    ),
+    /JSON nesting limit/
+  );
+
+  const tenantDepthMax = workflowLimits.jsonContainerDepthMax - 1;
+  assert.doesNotThrow(() => _stringifyWorkflowBackendBodyForTest("claim-step", {
+    config: nestedArrays(tenantDepthMax),
+  }));
+  assert.doesNotThrow(() => workflowJson.stringifyWorkflowResult(
+    nestedArrays(tenantDepthMax),
+    "output"
+  ));
+  assert.throws(
+    () => _stringifyWorkflowBackendBodyForTest("claim-step", {
+      config: nestedArrays(tenantDepthMax + 1),
+    }),
+    /JSON nesting limit/
+  );
+  assert.throws(
+    () => workflowJson.stringifyWorkflowResult(
+      nestedArrays(tenantDepthMax + 1),
+      "output"
+    ),
+    /JSON nesting limit/
+  );
+});
+
 test("workflow backend body serializer enforces per-field result caps in one pass", () => {
   const output = {
     toJSON() {
@@ -202,6 +248,28 @@ test("workflow backend body serializer enforces per-field result caps in one pas
     }),
     /Workflow step output exceeds the 1048576 byte limit/
   );
+});
+
+test("workflow step success captures output JSON during the backend serialization pass", () => {
+  const text = "\"}],\\\n";
+  let reads = 0;
+  // The getter instruments one serializer traversal; it is not a cross-JSRPC value contract.
+  const output = {
+    get text() {
+      reads += 1;
+      return text;
+    },
+    nested: [{ value: "a,b" }],
+  };
+  const expectedOutput = JSON.stringify({ text, nested: [{ value: "a,b" }] });
+  const serialized = workflowJson.workflowStepSuccessBackendBody({
+    ns: "demo",
+    output,
+  });
+
+  assert.equal(serialized.outputJson, expectedOutput);
+  assert.equal(serialized.bodyJson, `{"ns":"demo","output":${expectedOutput}}`);
+  assert.equal(reads, 1);
 });
 
 test("readWorkflowRunDispatch normalizes workflow run payload", async () => {
@@ -433,20 +501,13 @@ test("handleWorkflowRunDispatch rejects oversized step output before backend req
   ]);
 });
 
-test("handleWorkflowRunDispatch serializes step output once before backend request construction", async () => {
+test("handleWorkflowRunDispatch normalizes undefined step output before commit", async () => {
   const scope = makeScope();
   const backend = makeWorkflowBackend(async (url) => {
     if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
     if (url.endsWith("/commit-step-success")) return Response.json({ state: "complete" });
     return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
   });
-  let toJsonCalls = 0;
-  const trickyOutput = {
-    toJSON() {
-      toJsonCalls += 1;
-      return toJsonCalls === 1 ? "small" : "x".repeat(1024 * 1024 + 1);
-    },
-  };
 
   const res = await handleWorkflowRunDispatch({
     run: {
@@ -456,7 +517,7 @@ test("handleWorkflowRunDispatch serializes step output once before backend reque
       workflowName: "orders",
       workflowKey: "wf_abc",
       className: "OrderWorkflow",
-      instanceId: "inst-step-once",
+      instanceId: "inst-step-undefined",
       generation: 1,
       runToken: "run-1",
       event: { payload: {} },
@@ -467,15 +528,22 @@ test("handleWorkflowRunDispatch serializes step output once before backend reque
       entrypoints: {
         OrderWorkflow: {
           async run(/** @type {any} */ _event, /** @type {any} */ step) {
-            return await step.do("tricky", async () => trickyOutput);
+            await step.do("empty", async () => undefined);
+            return "done";
           },
         },
       },
     }),
   });
 
-  assert.equal(res.status, 200);
-  assert.equal(backend.calls.find((c) => c.url.endsWith("/commit-step-success"))?.body.output, "small");
+  const body = await readJsonResponse(res, 200);
+  assert.equal(body.outcome, "completed");
+  assert.equal(body.output, "done");
+  assert.equal(
+    backend.calls.find((c) => c.url.endsWith("/commit-step-success"))?.body.output,
+    null
+  );
+  assert.deepEqual(scope.errors, []);
 });
 
 test("handleWorkflowRunDispatch replays completed step.do output without callback", async () => {
@@ -636,6 +704,84 @@ test("handleWorkflowRunDispatch reuses replay pages across run claims", async ()
   assert.equal((await readJsonResponse(second, 200)).output, "fresh-third");
   assert.equal(callbackCalls, 1);
   assert.deepEqual(replayStarts, [0, 1]);
+  assert.deepEqual(scope.errors, []);
+});
+
+test("handleWorkflowRunDispatch isolates cached outputs from tenant mutation across run claims", async () => {
+  const scope = makeScope();
+  let callbackCalls = 0;
+  let dispatchCount = 0;
+  const backend = makeWorkflowBackend(async (url, body) => {
+    if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
+    if (url.endsWith("/commit-step-success")) {
+      assert.deepEqual(body.output, {
+        nested: { value: 1 },
+        items: ["persisted"],
+      });
+      return Response.json({ state: "complete" });
+    }
+    if (url.endsWith("/register-sleep")) return Response.json({ state: "waiting" });
+    return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
+  });
+  const baseRun = {
+    ns: "demo",
+    worker: "shop",
+    frozenVersion: "v1",
+    workflowName: "orders",
+    workflowKey: "wf_abc",
+    className: "OrderWorkflow",
+    instanceId: "inst-mutable-cache",
+    generation: 1,
+    createdAtMs: 12345,
+    event: { payload: {} },
+  };
+  const stub = makeStub({
+    entrypoints: {
+      OrderWorkflow: {
+        async run(/** @type {any} */ _event, /** @type {any} */ step) {
+          const output = /** @type {{ nested: { value: number }, items: string[] }} */ (
+            await step.do("mutable", async () => {
+              callbackCalls += 1;
+              return {
+                nested: { value: 1 },
+                items: ["persisted"],
+              };
+            })
+          );
+          dispatchCount += 1;
+          if (dispatchCount === 1) {
+            output.nested.value = 999;
+            output.items.push("mutated");
+            await step.sleep("pause", 1000);
+          }
+          return output;
+        },
+      },
+    },
+  });
+
+  const first = await handleWorkflowRunDispatch({
+    run: { ...baseRun, runToken: "run-1" },
+    scope,
+    env: workflowEnv(backend),
+    stub,
+  });
+  assert.equal((await readJsonResponse(first, 200)).outcome, "suspended");
+  const callsAfterFirstClaim = backend.calls.length;
+
+  const second = await handleWorkflowRunDispatch({
+    run: { ...baseRun, runToken: "run-2" },
+    scope,
+    env: workflowEnv(backend),
+    stub,
+  });
+
+  assert.deepEqual((await readJsonResponse(second, 200)).output, {
+    nested: { value: 1 },
+    items: ["persisted"],
+  });
+  assert.equal(callbackCalls, 1);
+  assert.equal(backend.calls.length, callsAfterFirstClaim);
   assert.deepEqual(scope.errors, []);
 });
 

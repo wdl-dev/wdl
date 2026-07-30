@@ -157,9 +157,10 @@ service behavior. Axum-facing and Redis-facing helpers sit behind the `axum` and
 `redis` features so consumers such as the D1/DO supervisor binaries do not pull Axum
 or async Redis through the shared crate unless they need those helpers.
 
-The `test-support` feature exposes the single process-environment override helper used
-by Rust service tests. It serializes overrides across modules in one test process and
-restores all values during unwinding; production dependency builds leave it disabled.
+The `test-support` feature exposes the process-environment override helper and the RESP
+packed-command parser shared by Rust service tests. Environment overrides are serialized
+across modules in one test process and restored during unwinding; production dependency
+builds leave this feature disabled.
 
 Local explicit code is still preferable when sidecars have different behavior around:
 

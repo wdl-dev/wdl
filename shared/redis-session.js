@@ -336,36 +336,24 @@ export class RedisSession extends RedisCommandSurface {
    * @param {string[]} existenceKeys
    * @param {Array<[string, string]>} lengthPairs
    */
-  async watchAndExistsManyAndHStrLenMany(watchKeys, existenceKeys, lengthPairs) {
+  async watchAndExistsAndHStrLenMany(watchKeys, existenceKeys, lengthPairs) {
+    const existenceCommand = existenceKeys.length > 0
+      ? [["EXISTS", ...existenceKeys]]
+      : [];
     const replies = /** @type {number[]} */ (await this._watchAndExecPipeline(
       "EXISTS_HSTRLEN_PIPELINE",
       watchKeys,
       [
-        ...existenceKeys.map((key) => ["EXISTS", key]),
+        ...existenceCommand,
         ...lengthPairs.map(([key, field]) => ["HSTRLEN", key, field]),
       ]
     ));
     return {
-      exists: replies.slice(0, existenceKeys.length).map((value) => value > 0),
-      lengths: replies.slice(existenceKeys.length),
+      existsCount: existenceKeys.length > 0 ? replies[0] : 0,
+      lengths: replies.slice(existenceCommand.length),
     };
   }
 
-  /** @param {string} key @param {string|string[]} members */
-  async sAdd(key, members) {
-    const arr = Array.isArray(members) ? members : [members];
-    return this._exec("SADD", key, ...arr);
-  }
-  /** @param {string} key @param {string|string[]} members */
-  async sRem(key, members) {
-    const arr = Array.isArray(members) ? members : [members];
-    return this._exec("SREM", key, ...arr);
-  }
-  /** @param {string} key */
-  async sMembers(key) {
-    const arr = /** @type {unknown[] | null} */ (await this._exec("SMEMBERS", key));
-    return decodeStringArray(arr);
-  }
   /** @param {string[]} watchKeys @param {string} key */
   async watchAndSMembers(watchKeys, key) {
     const [membersReply] = await this._watchAndExecPipeline(
@@ -375,8 +363,6 @@ export class RedisSession extends RedisCommandSurface {
     );
     return decodeStringArray(/** @type {unknown[] | null} */ (membersReply));
   }
-  /** @param {string} key @param {string} member */
-  async sIsMember(key, member) { return (await this._exec("SISMEMBER", key, member)) === 1; }
   /** @param {string} key @param {...string} members */
   async sMIsMember(key, ...members) {
     if (members.length === 0) return [];
@@ -446,25 +432,6 @@ export class RedisSession extends RedisCommandSurface {
       nowMs: decodeRedisTimeMs(replies.at(-1)),
     };
   }
-  /** @param {string} key */
-  async zCard(key) { return this._exec("ZCARD", key); }
-  /** @param {string} key @param {number} start @param {number} stop */
-  async zRange(key, start, stop) {
-    const arr = /** @type {unknown[] | null} */ (
-      await this._exec("ZRANGE", key, String(start), String(stop))
-    );
-    return decodeStringArray(arr);
-  }
-
-  /** @param {string[]} keys @param {number} start @param {number} stop */
-  async zRangeMany(keys, start, stop) {
-    const replies = /** @type {(unknown[] | null)[]} */ (await this._execPipeline(
-      "ZRANGE_PIPELINE",
-      keys.map((key) => ["ZRANGE", key, String(start), String(stop)])
-    ));
-    return replies.map(decodeStringArray);
-  }
-
   /** @param {string[]} watchKeys @param {string[]} keys */
   async watchAndExistsMany(watchKeys, keys) {
     const replies = /** @type {number[]} */ (await this._watchAndExecPipeline(
@@ -493,11 +460,13 @@ export class RedisMulti {
   /** @param {string} key @param {string|string[]} members */
   sAdd(key, members) {
     const arr = Array.isArray(members) ? members : [members];
+    if (arr.length === 0) return this;
     this._commands.push(["SADD", key, ...arr]); return this;
   }
   /** @param {string} key @param {string|string[]} members */
   sRem(key, members) {
     const arr = Array.isArray(members) ? members : [members];
+    if (arr.length === 0) return this;
     this._commands.push(["SREM", key, ...arr]); return this;
   }
   /** @param {...string} keys */

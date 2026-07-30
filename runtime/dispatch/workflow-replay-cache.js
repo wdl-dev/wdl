@@ -1,4 +1,5 @@
 import { metrics } from "runtime-metrics";
+import { utf8ByteLength } from "shared-utf8";
 
 const utf8Encoder = new TextEncoder();
 
@@ -25,50 +26,72 @@ export function canonicalJson(value) {
 
 /** @param {unknown} value @returns {string} */
 function canonicalJsonValue(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJsonValue).join(",")}]`;
+  if (Array.isArray(value)) {
+    let json = "[";
+    for (let i = 0; i < value.length; i += 1) {
+      if (i > 0) json += ",";
+      json += canonicalJsonValue(value[i]);
+    }
+    return `${json}]`;
+  }
   if (value && typeof value === "object") {
     const record = /** @type {Record<string, unknown>} */ (value);
     const keys = Object.keys(record)
       .map((key) => ({ key, bytes: utf8Encoder.encode(key) }));
     keys.sort(compareEncodedKeys);
-    return `{${keys.map(({ key }) => `${JSON.stringify(key)}:${canonicalJsonValue(record[key])}`).join(",")}}`;
+    let json = "{";
+    for (let i = 0; i < keys.length; i += 1) {
+      if (i > 0) json += ",";
+      const key = keys[i].key;
+      json += `${JSON.stringify(key)}:${canonicalJsonValue(record[key])}`;
+    }
+    return `${json}}`;
   }
   return typeof value === "number" ? canonicalJsonNumber(value) : JSON.stringify(value);
 }
 
 export const WORKFLOW_REPLAY_PAGE_SIZE = 64;
 export const WORKFLOW_REPLAY_CACHE_MAX_INSTANCES = 256;
+export const WORKFLOW_REPLAY_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE = 256;
 /**
  * @typedef {{
- *   ordinal?: number,
  *   name?: unknown,
  *   nameCount?: unknown,
  *   dependencies?: unknown,
  *   config?: unknown,
  *   status?: unknown,
- *   output?: unknown,
+ *   outputJson?: string,
  *   error?: { name?: unknown, message?: unknown } | null,
- *   dueAtMs?: unknown,
- *   [key: string]: unknown,
  * }} WorkflowReplayStepRecord
- * @typedef {{ key: string, lastRunToken: string, steps: Map<number, WorkflowReplayStepRecord>, nextOrdinal: number, complete: boolean }} WorkflowReplayCache
+ * @typedef {WorkflowReplayStepRecord & {
+ *   ordinal?: number,
+ *   output?: unknown,
+ *   [key: string]: unknown,
+ * }} WorkflowReplayStepInput
+ * @typedef {{ key: string, lastRunToken: string, steps: Map<number, WorkflowReplayStepRecord>, nextOrdinal: number, complete: boolean, bytes: number }} WorkflowReplayCache
  */
 
 /** @type {Map<string, WorkflowReplayCache>} */
 const workflowReplayCaches = new Map();
 let workflowReplayCacheSteps = 0;
+let workflowReplayCacheBytes = 0;
+/** @type {WeakMap<WorkflowReplayStepRecord, number>} */
+let workflowReplayStepBytes = new WeakMap();
 
 /** @lintignore data-URL unit tests import this hook from a rewritten module. */
 export function _resetWorkflowReplayCacheForTest() {
   workflowReplayCaches.clear();
   workflowReplayCacheSteps = 0;
+  workflowReplayCacheBytes = 0;
+  workflowReplayStepBytes = new WeakMap();
   recordWorkflowReplayCacheSize();
 }
 
 function recordWorkflowReplayCacheSize() {
   metrics.setGauge("workflow_replay_cache_instances", {}, workflowReplayCaches.size);
   metrics.setGauge("workflow_replay_cache_steps", {}, workflowReplayCacheSteps);
+  metrics.setGauge("workflow_replay_cache_bytes", {}, workflowReplayCacheBytes);
 }
 
 /** @param {string} outcome */
@@ -94,6 +117,59 @@ export function workflowReplayIdentity(run) {
   };
 }
 
+/** @param {WorkflowReplayStepRecord} step */
+function serializedReplayStepBytes(step) {
+  const configBytes = typeof step.config === "string" ? utf8ByteLength(step.config) : 0;
+  const outputBytes = typeof step.outputJson === "string" ? utf8ByteLength(step.outputJson) : 0;
+  const metadataJson = JSON.stringify([
+    step.name ?? null,
+    step.nameCount ?? null,
+    step.dependencies ?? null,
+    step.status ?? null,
+    step.error ?? null,
+  ]) ?? "null";
+  return configBytes + outputBytes + utf8ByteLength(metadataJson);
+}
+
+/** @param {unknown} status @param {unknown} error */
+function projectReplayStepError(status, error) {
+  if (status !== "failed" || !error || typeof error !== "object") return undefined;
+  const record = /** @type {Record<string, unknown>} */ (error);
+  const name = typeof record.name === "string" ? record.name : undefined;
+  const message = typeof record.message === "string" ? record.message : undefined;
+  if (name !== undefined && message !== undefined) return { name, message };
+  if (name !== undefined) return { name };
+  if (message !== undefined) return { message };
+  return undefined;
+}
+
+/** @param {WorkflowReplayCache} cache @param {number} ordinal */
+function deleteReplayStep(cache, ordinal) {
+  const step = cache.steps.get(ordinal);
+  if (!step || !cache.steps.delete(ordinal)) return;
+  const bytes = workflowReplayStepBytes.get(step) ?? 0;
+  cache.bytes -= bytes;
+  workflowReplayCacheSteps -= 1;
+  workflowReplayCacheBytes -= bytes;
+}
+
+/** @param {string} key */
+function evictWorkflowReplayCache(key) {
+  const cache = workflowReplayCaches.get(key);
+  if (!cache) return;
+  workflowReplayCacheSteps -= cache.steps.size;
+  workflowReplayCacheBytes -= cache.bytes;
+  workflowReplayCaches.delete(key);
+  cache.steps.clear();
+  cache.bytes = 0;
+  cache.complete = false;
+}
+
+function evictOldestWorkflowReplayCache() {
+  const oldest = workflowReplayCaches.keys().next().value;
+  if (oldest !== undefined) evictWorkflowReplayCache(oldest);
+}
+
 /** @param {{ ns: string, workflowKey: string, instanceId: string, generation: number, createdAtMs: number, runToken: string }} run */
 export function getWorkflowReplayCache(run) {
   const key = workflowReplayCacheKey(run);
@@ -113,14 +189,11 @@ export function getWorkflowReplayCache(run) {
     steps: new Map(),
     nextOrdinal: 0,
     complete: false,
+    bytes: 0,
   };
   workflowReplayCaches.set(key, created);
   while (workflowReplayCaches.size > WORKFLOW_REPLAY_CACHE_MAX_INSTANCES) {
-    const oldest = workflowReplayCaches.keys().next().value;
-    if (oldest === undefined) break;
-    const evicted = workflowReplayCaches.get(oldest);
-    if (evicted) workflowReplayCacheSteps -= evicted.steps.size;
-    workflowReplayCaches.delete(oldest);
+    evictOldestWorkflowReplayCache();
   }
   recordWorkflowReplayCacheSize();
   return created;
@@ -129,20 +202,47 @@ export function getWorkflowReplayCache(run) {
 /**
  * @param {WorkflowReplayCache} cache
  * @param {number} ordinal
- * @param {WorkflowReplayStepRecord} step
+ * @param {WorkflowReplayStepInput} step
  */
 export function rememberWorkflowReplayStep(cache, ordinal, step) {
-  const countInGlobalCache = workflowReplayCaches.get(cache.key) === cache;
-  if (cache.steps.has(ordinal)) {
-    cache.steps.delete(ordinal);
-  } else if (countInGlobalCache) {
-    workflowReplayCacheSteps += 1;
+  if (workflowReplayCaches.get(cache.key) !== cache) return;
+  /** @type {WorkflowReplayStepRecord} */
+  const storedStep = {
+    name: step.name,
+    nameCount: step.nameCount,
+    dependencies: step.dependencies,
+    config: step.config,
+    status: step.status,
+    outputJson: step.outputJson,
+  };
+  const error = projectReplayStepError(step.status, step.error);
+  if (error !== undefined) storedStep.error = error;
+  if (storedStep.status === "completed" && typeof storedStep.outputJson !== "string") {
+    storedStep.outputJson = JSON.stringify(step.output ?? null) ?? "null";
   }
-  cache.steps.set(ordinal, step);
+  if (cache.steps.has(ordinal)) deleteReplayStep(cache, ordinal);
+  const bytes = serializedReplayStepBytes(storedStep);
+  if (bytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
+    recordWorkflowReplayCacheSize();
+    return;
+  }
+  workflowReplayStepBytes.set(storedStep, bytes);
+  cache.steps.set(ordinal, storedStep);
+  cache.bytes += bytes;
+  workflowReplayCacheSteps += 1;
+  workflowReplayCacheBytes += bytes;
   while (cache.steps.size > WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE) {
     const oldest = cache.steps.keys().next().value;
     if (oldest === undefined) break;
-    if (cache.steps.delete(oldest) && countInGlobalCache) workflowReplayCacheSteps -= 1;
+    deleteReplayStep(cache, oldest);
+  }
+  while (workflowReplayCacheBytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
+    evictOldestWorkflowReplayCache();
   }
   recordWorkflowReplayCacheSize();
+}
+
+/** @param {WorkflowReplayStepRecord} step */
+export function readWorkflowReplayStepOutput(step) {
+  return typeof step.outputJson === "string" ? JSON.parse(step.outputJson) : null;
 }

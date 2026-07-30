@@ -325,10 +325,10 @@ Prefer the narrow helper that matches the response or fixture source:
   are intentionally not discovered by the runner.
 - CLI integration tests must include a top-level `// @wdl-cli-integration`
   marker so the CLI subset runner can discover them.
-- Rust crate-local test helpers live inside crate `#[cfg(test)]` modules (for
-  example `rust/redis-proxy/src/lib.rs::test_support`). Use those for repeated
-  parser/protocol assertions within one crate instead of duplicating helpers in
-  sibling Rust modules.
+- Rust test helpers used by multiple crates live behind
+  `wdl-rust-common/test-support`; the shared RESP packed-command parser is one
+  example. Keep helpers inside a crate's `#[cfg(test)]` modules when only that crate
+  owns the behavior, instead of growing the common test surface.
 
 ### What stays inline
 

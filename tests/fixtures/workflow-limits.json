@@ -1,6 +1,8 @@
 {
   "resultBytesMax": 1048576,
   "backendRequestBytesMax": 2097152,
+  "jsonContainerDepthMax": 127,
+  "rejectLoneSurrogates": true,
   "createBatchMax": 100,
   "payloadTooLargeCode": "workflow_payload_too_large"
 }

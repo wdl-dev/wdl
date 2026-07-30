@@ -88,7 +88,7 @@ Crate root 和目录级 `mod` glue 可以保留既有的显式本地 prelude，�
 
 `wdl-rust-common`（`rust/common/`）是仓库唯一的 shared Rust helper crate。它只拥有必须跨 crate 保持一致的小 primitive，例如环境变量数字解析、日志等级解析、HTTP health probe、shutdown/in-flight tracking、通用 JSON log-line emission、wall-clock millisecond helper、短 non-cryptographic random hex suffix、稳定 non-cryptographic hash、queue Redis key builders、worker version / bundle-key parsing、Prometheus metric storage/formatting、Prometheus text response、结构化错误字段合并、internal-auth token/header matching、Redis command construction helper、中立的 Redis connection execution wrapper，以及 UTF-8 安全的字符串截断。它不能变成 service 行为的杂物箱。Axum-facing 与 Redis-facing helper 分别放在 `axum` 与 `redis` feature 之后，因此 D1/DO supervisor binaries 这类 consumer 不会在不需要这些 helper 时通过 shared crate 拉入 Axum 或异步 Redis client。
 
-`test-support` feature 暴露 Rust service tests 共用的唯一 process-environment override helper。它在同一 test process 的 module 之间串行化 override，并在 unwind 时恢复全部值；production dependency build 不启用该 feature。
+`test-support` feature 暴露 Rust service tests 共用的 process-environment override helper 和 RESP packed-command parser。Environment override 会在同一 test process 的 module 之间串行化，并在 unwind 时恢复全部值；production dependency build 不启用该 feature。
 
 当 sidecar/service 在这些方面行为不同，本地显式代码仍然更好：
 

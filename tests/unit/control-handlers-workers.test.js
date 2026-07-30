@@ -95,21 +95,19 @@ test("workers handler lists namespace state through one Redis session", async ()
     ],
   });
   assert.deepEqual(state.redis.commands, [
-    ["sMembers", "workers:demo"],
-    ["hGetAll", "routes:demo"],
-    ["zRangeMany", [
+    ["sMembersAndHGetAll", "workers:demo", "routes:demo"],
+    ["zRangeManyAndExistsMany", [
       "worker-versions:demo:alpha",
       "worker-versions:demo:beta",
       "worker-versions:demo:gamma",
-    ], 0, -1],
-    ["existsMany", [
+    ], [
       "secrets:demo:alpha",
       "secrets:demo:beta",
       "secrets:demo:gamma",
       "wf:defs:demo:alpha",
       "wf:defs:demo:beta",
       "wf:defs:demo:gamma",
-    ]],
+    ], 0, -1],
   ]);
   assert.deepEqual(state.logs, [{
     level: "info",

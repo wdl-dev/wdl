@@ -15,6 +15,7 @@ import {
   BLOCKING_BATCH_RECORDER,
   FAST_QUEUE_CONSUMER,
   LONG_BLOCKING_BATCH_RECORDER,
+  SLOW_FIRST_BATCH_RECORDER,
   deployConsumer,
   deployQueueConsumerWorker,
   deployQueueProducer,
@@ -158,4 +159,50 @@ test("a later queue dispatch is not blocked by an in-flight slow queue", async (
     "x-worker-id": slowConsumerId,
   }, ""));
   assert.equal(slowSnapshot.total, 0, "slow queue must still be in flight");
+});
+
+test("a busy stream continues promptly while another registered stream is idle", async () => {
+  const ns = uniqueNs("qbusyidle");
+  const busyStream = queueStreamKey(ns, "busy");
+  const idleStream = queueStreamKey(ns, "idle");
+  const consumerVersion = await deployQueueConsumerWorker(
+    ns,
+    "busy",
+    SLOW_FIRST_BATCH_RECORDER,
+    [{ queue: "busy", maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 0 }]
+  );
+  await deployQueueConsumerWorker(ns, "idle", FAST_QUEUE_CONSUMER, [
+    { queue: "idle", maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 0 },
+  ]);
+  const producerVersion = await deployQueueProducer(ns, "busy");
+
+  await waitForQueueConsumerGroups([busyStream, idleStream], {
+    label: "busy and idle consumer groups are ready",
+  });
+
+  assertStatus(
+    sendQueueMessage(ns, "producer", producerVersion, ["first", "second"]),
+    200,
+    "busy queue send"
+  );
+  const workerId = gatewayWorkerId(ns, "busy", consumerVersion);
+  await waitUntil("first busy batch is in flight", async () => {
+    const snapshot = responseJson(runtimeInternalPost("/", { "x-worker-id": workerId }, ""));
+    return snapshot.started === 1 && snapshot.total === 0;
+  }, { timeoutMs: 15_000, intervalMs: 100 });
+
+  await waitUntil("second busy batch starts without waiting for the idle read timeout", async () => {
+    const snapshot = responseJson(runtimeInternalPost("/", { "x-worker-id": workerId }, ""));
+    return snapshot.secondStartedAt !== null;
+  }, { timeoutMs: 8_000, intervalMs: 50 });
+  const timing = responseJson(runtimeInternalPost("/", { "x-worker-id": workerId }, ""));
+  assert.ok(
+    timing.secondStartedAt - timing.firstCompletedAt < 1_000,
+    `the second busy batch waited ${timing.secondStartedAt - timing.firstCompletedAt}ms`
+  );
+
+  await waitUntil("both busy batches complete", async () => {
+    const snapshot = responseJson(runtimeInternalPost("/", { "x-worker-id": workerId }, ""));
+    return snapshot.total === 2;
+  }, { timeoutMs: 5_000, intervalMs: 100 });
 });

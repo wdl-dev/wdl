@@ -66,10 +66,13 @@ Redis payload parsing, and binding adapters should reuse the module singleton un
 stateful decoder options are required.
 
 When a path only needs an exact UTF-8 byte count, use `shared/utf8.js#utf8ByteLength`
-instead of allocating an encoded byte array. The helper keeps short strings on its
-arithmetic path and delegates long strings to the native encoder. Intrinsic-hardened
-injected modules may keep a local captured `encodeInto()` scratch path when importing a
-shared module would weaken their capture boundary.
+instead of open-coding an encoder. The helper keeps short strings on its allocation-free
+arithmetic path and delegates long strings to the native encoder, which may allocate a
+transient result. Intrinsic-hardened injected modules may keep a local captured
+`encodeInto()` scratch path when importing a shared module would weaken their capture
+boundary. Node-compatible host modules that already depend on `Buffer` may use
+`Buffer.byteLength(value, "utf8")`; it is also exact and avoids allocating the encoded
+bytes.
 
 ## Ownership
 

@@ -26,8 +26,14 @@ mod tests {
     struct WorkflowLimitsContract {
         result_bytes_max: usize,
         backend_request_bytes_max: usize,
+        json_container_depth_max: usize,
+        reject_lone_surrogates: bool,
         create_batch_max: usize,
         payload_too_large_code: String,
+    }
+
+    fn nested_array_json(depth: usize) -> String {
+        format!("{}null{}", "[".repeat(depth), "]".repeat(depth))
     }
 
     #[test]
@@ -42,10 +48,26 @@ mod tests {
             contract.backend_request_bytes_max,
             MAX_WORKFLOW_JSON_BODY_BYTES
         );
+        assert_eq!(contract.json_container_depth_max, 127);
+        assert!(contract.reject_lone_surrogates);
         assert_eq!(contract.create_batch_max, MAX_CREATE_BATCH_SIZE);
         assert_eq!(
             contract.payload_too_large_code,
             WORKFLOW_PAYLOAD_TOO_LARGE_CODE
         );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&nested_array_json(
+                contract.json_container_depth_max
+            ))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&nested_array_json(
+                contract.json_container_depth_max + 1
+            ))
+            .is_err()
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(r#""\ud800""#).is_err());
+        assert!(serde_json::from_str::<serde_json::Value>(r#"{"\udc00":null}"#).is_err());
     }
 }

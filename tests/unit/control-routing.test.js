@@ -727,9 +727,9 @@ test("promoteWithRoutes batches D1, service, and queue dependency reads", async 
 
   assert.deepEqual(
     redis.state.commands.find(([command]) =>
-      command === "watchAndExistsManyAndHStrLenMany"),
+      command === "watchAndExistsAndHStrLenMany"),
     [
-      "watchAndExistsManyAndHStrLenMany",
+      "watchAndExistsAndHStrLenMany",
       [...d1Keys, ...servicePairs.map(([key]) => key)],
       d1Keys,
       servicePairs,
@@ -768,7 +768,7 @@ test("promoteWithRoutes deduplicates and bounds service dependency metadata prob
   await promoteWithRoutes(redis, "demo", "worker", "v1");
 
   const reads = redis.state.commands.flatMap(([command, _watchKeys, _existsKeys, pairs]) =>
-    command === "watchAndExistsManyAndHStrLenMany"
+    command === "watchAndExistsAndHStrLenMany"
       ? [/** @type {Array<[string, string]>} */ (pairs)]
       : []
   ).concat(
@@ -798,10 +798,10 @@ test("promoteWithRoutes bounds D1 dependency existence probes", async () => {
 
   const reads = redis.state.commands.flatMap((entry) => {
     const [command] = entry;
-    if (command === "watchAndExistsManyAndHStrLenMany") {
+    if (command === "watchAndExistsAndHStrLenMany") {
       return [/** @type {string[]} */ (entry[2])];
     }
-    return command === "existsMany" ? [/** @type {string[]} */ (entry[1])] : [];
+    return command === "exists" ? [/** @type {string[]} */ (entry.slice(1))] : [];
   });
   assert.deepEqual(reads.map((keys) => keys.length), [64, 1]);
   assert.equal(new Set(reads.flat()).size, 65);
@@ -988,9 +988,9 @@ test("bumpActiveAndPromote stages D1 referrers from production binding metadata"
   assert.ok(redis.state.watched.includes("d1:database:demo:d1_main"));
   assert.deepEqual(
     redis.state.commands.find(([command]) =>
-      command === "watchAndExistsManyAndHStrLenMany"),
+      command === "watchAndExistsAndHStrLenMany"),
     [
-      "watchAndExistsManyAndHStrLenMany",
+      "watchAndExistsAndHStrLenMany",
       ["d1:database:demo:d1_main"],
       ["d1:database:demo:d1_main"],
       [],

@@ -1685,6 +1685,38 @@ test("workerLoader code estimator reuses an exact user-module byte subtotal", ()
   );
 });
 
+test("workerLoader code estimator excludes decoded ESM, CommonJS, and text module BOMs", () => {
+  const moduleSource = Buffer.from("\ufeffexport default {};", "utf8");
+  const commonJsSource = Buffer.from("\ufeffmodule.exports = {};", "utf8");
+  const textSource = Buffer.from("\ufeffplain text", "utf8");
+  const data = new Uint8Array([0xef, 0xbb, 0xbf, 1]);
+  const meta = {
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": { type: "module" },
+      "legacy.cjs": { type: "cjs" },
+      "note.txt": { type: "text" },
+      "asset.bin": { type: "data" },
+    },
+  };
+
+  assert.equal(
+    estimateWorkerLoaderUserCodeBytes({
+      normalized: [
+        ["worker.js", moduleSource],
+        ["legacy.cjs", commonJsSource],
+        ["note.txt", textSource],
+        ["asset.bin", data],
+      ],
+      meta,
+    }),
+    Buffer.byteLength("export default {};", "utf8") +
+      Buffer.byteLength("module.exports = {};", "utf8") +
+      Buffer.byteLength("plain text", "utf8") +
+      data.byteLength
+  );
+});
+
 test("workerLoader code estimator does not rewrite CommonJS workflow strings", () => {
   const source = 'module.exports = { label: "cloudflare:workflows" };';
   const meta = {

@@ -37,6 +37,7 @@ export async function loadRuntimeDispatch() {
     ]);
     const workflowReplayCacheUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-replay-cache.js", [
       [/from "runtime-metrics";/, `from ${JSON.stringify(METRICS_MOCK_URL)};`],
+      [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
     ]);
     const workflowStepUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-step.js", [
       [/from "runtime-dispatch-workflow-json";/g, `from ${JSON.stringify(workflowJsonUrl)};`],

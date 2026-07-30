@@ -479,16 +479,18 @@ async function assertBundleDependenciesPresent(iso, ns, targetLabel, d1Refs, out
     0,
     DEPENDENCY_READ_BATCH_SIZE - firstD1Keys.length
   );
-  const firstSnapshot = await iso.watchAndExistsManyAndHStrLenMany(
+  const firstSnapshot = await iso.watchAndExistsAndHStrLenMany(
     dependencyKeys,
     firstD1Keys,
     firstOutgoingKeys.map((key) => [key, "__meta__"])
   );
-  assertD1DependencySnapshot(
-    targetLabel,
-    d1Refs.slice(0, firstD1Keys.length),
-    firstSnapshot.exists
-  );
+  if (firstSnapshot.existsCount !== firstD1Keys.length) {
+    assertD1DependencySnapshot(
+      targetLabel,
+      d1Refs.slice(0, firstD1Keys.length),
+      await iso.existsMany(firstD1Keys)
+    );
+  }
 
   for (
     let offset = firstD1Keys.length;
@@ -496,11 +498,13 @@ async function assertBundleDependenciesPresent(iso, ns, targetLabel, d1Refs, out
     offset += DEPENDENCY_READ_BATCH_SIZE
   ) {
     const batch = d1Keys.slice(offset, offset + DEPENDENCY_READ_BATCH_SIZE);
-    assertD1DependencySnapshot(
-      targetLabel,
-      d1Refs.slice(offset, offset + batch.length),
-      await iso.existsMany(batch)
-    );
+    if (await iso.exists(...batch) !== batch.length) {
+      assertD1DependencySnapshot(
+        targetLabel,
+        d1Refs.slice(offset, offset + batch.length),
+        await iso.existsMany(batch)
+      );
+    }
   }
 
   assertOutgoingDependencySnapshot(

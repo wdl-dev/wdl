@@ -13,15 +13,25 @@ export async function handle({ method, nsName, requestId }) {
   }
 
   const workers = await redis.session(async (session) => {
-    const names = /** @type {string[]} */ ((await session.sMembers(workersIndexKey(nsName))).toSorted());
-
-    const routesHash = /** @type {Record<string, string>} */ (await session.hGetAll(routesKey(nsName)));
+    const snapshot = await session.sMembersAndHGetAll(
+      workersIndexKey(nsName),
+      routesKey(nsName)
+    );
+    const names = snapshot.members.toSorted();
+    const routesHash = snapshot.hash;
 
     const versionKeys = names.map((name) => workerVersionsKey(nsName, name));
     const secretKeys = names.map((name) => workerSecretsKey(nsName, name));
     const definitionKeys = names.map((name) => workflowDefsKey(nsName, name));
-    const versionsByWorker = await session.zRangeMany(versionKeys, 0, -1);
-    const stateFlags = await session.existsMany([...secretKeys, ...definitionKeys]);
+    const {
+      ranges: versionsByWorker,
+      exists: stateFlags,
+    } = await session.zRangeManyAndExistsMany(
+      versionKeys,
+      [...secretKeys, ...definitionKeys],
+      0,
+      -1
+    );
     const secretFlags = stateFlags.slice(0, names.length);
     const definitionFlags = stateFlags.slice(names.length);
 

@@ -3,8 +3,6 @@ import { RedisCommandSurface } from "shared-redis-command-surface";
 import { RedisSession } from "shared-redis-session";
 import { errorMessage } from "./errors.js";
 import {
-  decodeBulk,
-  decodeHashObject,
   decodeRedisTimeMs,
   decodeStringArray,
   encodeCommand,
@@ -207,102 +205,6 @@ export class RedisClient extends RedisCommandSurface {
   /** @param {string} key @param {...string} members */
   async zrem(key, ...members) {
     return this._exec("ZREM", key, ...members);
-  }
-
-  // --- camelCase surface: decodes bulk strings, matches node-redis.
-  // Binary-safe runtime paths stay on the lowercase methods above.
-
-  /**
-   * @param {string} hashKey
-   * @param {string} field
-   * @param {string} sortedSetKey
-   * @param {number} start
-   * @param {number} stop
-   */
-  async hGetAndZRange(hashKey, field, sortedSetKey, start, stop) {
-    const [fieldReply, membersReply] = await this._execPipeline("HGET_ZRANGE_PIPELINE", [
-      ["HGET", hashKey, field],
-      ["ZRANGE", sortedSetKey, String(start), String(stop)],
-    ]);
-    return {
-      field: decodeBulk(fieldReply),
-      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
-    };
-  }
-
-  /** @param {string} setKey @param {string} hashKey */
-  async sMembersAndHGetAll(setKey, hashKey) {
-    const [membersReply, hashReply] = await this._execPipeline(
-      "SMEMBERS_HGETALL_PIPELINE",
-      [
-        ["SMEMBERS", setKey],
-        ["HGETALL", hashKey],
-      ]
-    );
-    return {
-      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
-      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
-    };
-  }
-
-  /** @param {string} namespacesKey @param {string} hashKey @param {string} setKey */
-  async sMembersHGetAllAndSMembers(namespacesKey, hashKey, setKey) {
-    const [namespacesReply, hashReply, membersReply] = await this._execPipeline(
-      "SMEMBERS_HGETALL_SMEMBERS_PIPELINE",
-      [
-        ["SMEMBERS", namespacesKey],
-        ["HGETALL", hashKey],
-        ["SMEMBERS", setKey],
-      ]
-    );
-    return {
-      namespaces: decodeStringArray(/** @type {unknown[] | null} */ (namespacesReply)),
-      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
-      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
-    };
-  }
-
-  /** @param {string} hashKey @param {string} setKey */
-  async hGetAllAndSMembers(hashKey, setKey) {
-    const [hashReply, membersReply] = await this._execPipeline(
-      "HGETALL_SMEMBERS_PIPELINE",
-      [
-        ["HGETALL", hashKey],
-        ["SMEMBERS", setKey],
-      ]
-    );
-    return {
-      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
-      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
-    };
-  }
-
-  /** @param {string} key @param {string|string[]} members */
-  async sAdd(key, members) {
-    const arr = Array.isArray(members) ? members : [members];
-    return /** @type {number} */ (await this._exec("SADD", key, ...arr));
-  }
-
-  /** @param {string} key @param {string|string[]} members */
-  async sRem(key, members) {
-    const arr = Array.isArray(members) ? members : [members];
-    return /** @type {number} */ (await this._exec("SREM", key, ...arr));
-  }
-
-  /** @param {string} key */
-  async sMembers(key) { return this.smembers(key); }
-  /** @param {string} key @param {string} member */
-  async sIsMember(key, member) { return this.sismember(key, member); }
-
-  /** @param {string} key */
-  async zCard(key) { return /** @type {number} */ (await this._exec("ZCARD", key)); }
-  /** @param {string} key @param {number} start @param {number} stop */
-  async zRange(key, start, stop) {
-    const arr = /** @type {Uint8Array[] | null} */ (
-      await this._exec("ZRANGE", key, String(start), String(stop))
-    );
-    if (!arr) return [];
-    return decodeStringArray(arr);
   }
 
   /** @param {string} key @param {string} start @param {string} end @param {number} count */

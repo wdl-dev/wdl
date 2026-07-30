@@ -71,6 +71,18 @@ function moduleBodyByteLength(body) {
 }
 
 /** @param {NormalizedModuleBody} body */
+function decodedTextModuleByteLength(body) {
+  if (typeof body === "string") return Buffer.byteLength(body, "utf8");
+  const hasUtf8Bom = (
+    body.byteLength >= 3 &&
+    body[0] === 0xef &&
+    body[1] === 0xbb &&
+    body[2] === 0xbf
+  );
+  return body.byteLength - (hasUtf8Bom ? 3 : 0);
+}
+
+/** @param {NormalizedModuleBody} body */
 function containsWorkflowsImportMarker(body) {
   if (typeof body === "string") return body.includes(WORKFLOWS_IMPORT_MARKER);
   const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
@@ -370,7 +382,9 @@ export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
   for (const [name, body] of normalized) {
     const type = moduleType(meta.modules, name);
     if (type !== "module" || !containsWorkflowsImportMarker(body)) {
-      total += moduleBodyByteLength(body);
+      total += type === "module" || type === "cjs" || type === "text"
+        ? decodedTextModuleByteLength(body)
+        : moduleBodyByteLength(body);
       continue;
     }
     jsModules[name] = typeof body === "string" ? body : utf8Decoder.decode(body);

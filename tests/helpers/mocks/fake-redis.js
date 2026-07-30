@@ -98,6 +98,52 @@ function hashField(state, key, field) {
 }
 
 /**
+ * @param {FakeRedisState} state
+ * @param {{ encodeGet?: boolean, nowMs?: () => number }} options
+ * @param {string[]} sortedSetKeys
+ * @param {string[]} hashKeys
+ * @param {number} start
+ * @param {number} stop
+ */
+function zRangeAndHashSnapshots(state, options, sortedSetKeys, hashKeys, start, stop) {
+  return {
+    ranges: sortedSetKeys.map((key) => {
+      expireIfNeeded(state, key, options);
+      return zRangeMembers(state, key, start, stop);
+    }),
+    hashes: hashKeys.map((key) => {
+      expireIfNeeded(state, key, options);
+      return { ...(state.hashes.get(key) || {}) };
+    }),
+  };
+}
+
+/**
+ * @param {FakeRedisState} state
+ * @param {{ encodeGet?: boolean, nowMs?: () => number }} options
+ * @param {string[]} sortedSetKeys
+ * @param {string[]} existenceKeys
+ * @param {number} start
+ * @param {number} stop
+ */
+function zRangeAndExistenceSnapshots(
+  state,
+  options,
+  sortedSetKeys,
+  existenceKeys,
+  start,
+  stop
+) {
+  return {
+    ranges: sortedSetKeys.map((key) => {
+      expireIfNeeded(state, key, options);
+      return zRangeMembers(state, key, start, stop);
+    }),
+    exists: existenceKeys.map((key) => keyExists(state, key, options)),
+  };
+}
+
+/**
  * @param {FakeRedisState} [state]
  * @param {{ encodeGet?: boolean, nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
  * @returns {ReturnType<typeof createFakeRedisClient> & FakeRedisState & { state: FakeRedisState }}
@@ -290,6 +336,45 @@ export function createFakeRedisClient(state, options = {}) {
         members: zRangeMembers(state, sortedSetKey, start, stop),
       };
     },
+    /**
+     * @param {string[]} sortedSetKeys
+     * @param {string[]} hashKeys
+     * @param {number} start
+     * @param {number} stop
+     */
+    async zRangeManyAndHGetAllMany(sortedSetKeys, hashKeys, start, stop) {
+      state.commands.push([
+        "zRangeManyAndHGetAllMany",
+        [...sortedSetKeys],
+        [...hashKeys],
+        start,
+        stop,
+      ]);
+      return zRangeAndHashSnapshots(state, options, sortedSetKeys, hashKeys, start, stop);
+    },
+    /**
+     * @param {string[]} sortedSetKeys
+     * @param {string[]} existenceKeys
+     * @param {number} start
+     * @param {number} stop
+     */
+    async zRangeManyAndExistsMany(sortedSetKeys, existenceKeys, start, stop) {
+      state.commands.push([
+        "zRangeManyAndExistsMany",
+        [...sortedSetKeys],
+        [...existenceKeys],
+        start,
+        stop,
+      ]);
+      return zRangeAndExistenceSnapshots(
+        state,
+        options,
+        sortedSetKeys,
+        existenceKeys,
+        start,
+        stop
+      );
+    },
     /** @param {string} setKey @param {string} hashKey */
     async sMembersAndHGetAll(setKey, hashKey) {
       expireIfNeeded(state, setKey, options);
@@ -385,14 +470,25 @@ export function createFakeRedisClient(state, options = {}) {
         return state.sets.get(key)?.size || 0;
       });
     },
-    /** @param {string} key @param {string} member */
-    async sAdd(key, member) {
+    /** @param {string} key @param {string|string[]} members */
+    async sAdd(key, members) {
+      if (setMemberValues(members).length === 0) return 0;
       expireIfNeeded(state, key, options);
-      state.commands.push(["sAdd", key, member]);
-      const set = ensureSet(state, key);
-      const before = set.size;
-      set.add(member);
-      if (set.size !== before) markKeyModified(state, key);
+      state.commands.push(["sAdd", key, snapshotSetMembers(members)]);
+      return addSetMembers(state, key, members);
+    },
+    /** @param {string} key @param {string|string[]} members */
+    async sRem(key, members) {
+      if (setMemberValues(members).length === 0) return 0;
+      expireIfNeeded(state, key, options);
+      state.commands.push(["sRem", key, snapshotSetMembers(members)]);
+      return removeSetMembers(state, key, members);
+    },
+    /** @param {string} key @param {string} member */
+    async sIsMember(key, member) {
+      expireIfNeeded(state, key, options);
+      state.commands.push(["sIsMember", key, member]);
+      return state.sets.get(key)?.has(member) ?? false;
     },
     /** @param {string} key */
     async zCard(key) {
@@ -575,6 +671,45 @@ export function createFakeRedisSession(state, options = {}) {
         return { ...(state.hashes.get(key) || {}) };
       });
     },
+    /**
+     * @param {string[]} sortedSetKeys
+     * @param {string[]} hashKeys
+     * @param {number} start
+     * @param {number} stop
+     */
+    async zRangeManyAndHGetAllMany(sortedSetKeys, hashKeys, start, stop) {
+      state.commands.push([
+        "zRangeManyAndHGetAllMany",
+        [...sortedSetKeys],
+        [...hashKeys],
+        start,
+        stop,
+      ]);
+      return zRangeAndHashSnapshots(state, options, sortedSetKeys, hashKeys, start, stop);
+    },
+    /**
+     * @param {string[]} sortedSetKeys
+     * @param {string[]} existenceKeys
+     * @param {number} start
+     * @param {number} stop
+     */
+    async zRangeManyAndExistsMany(sortedSetKeys, existenceKeys, start, stop) {
+      state.commands.push([
+        "zRangeManyAndExistsMany",
+        [...sortedSetKeys],
+        [...existenceKeys],
+        start,
+        stop,
+      ]);
+      return zRangeAndExistenceSnapshots(
+        state,
+        options,
+        sortedSetKeys,
+        existenceKeys,
+        start,
+        stop
+      );
+    },
     /** @param {Array<[string, string]>} pairs */
     async hStrLenMany(pairs) {
       state.commands.push(["hStrLenMany", pairs.map(([key, field]) => [key, field])]);
@@ -588,20 +723,30 @@ export function createFakeRedisSession(state, options = {}) {
      * @param {string[]} existenceKeys
      * @param {Array<[string, string]>} lengthPairs
      */
-    async watchAndExistsManyAndHStrLenMany(watchKeys, existenceKeys, lengthPairs) {
+    async watchAndExistsAndHStrLenMany(watchKeys, existenceKeys, lengthPairs) {
       captureWatch(watchKeys);
       state.commands.push([
-        "watchAndExistsManyAndHStrLenMany",
+        "watchAndExistsAndHStrLenMany",
         [...watchKeys],
         [...existenceKeys],
         lengthPairs.map(([key, field]) => [key, field]),
       ]);
       return {
-        exists: existenceKeys.map((key) => keyExists(state, key, options)),
+        existsCount: existenceKeys.filter((key) => keyExists(state, key, options)).length,
         lengths: lengthPairs.map(([key, field]) => {
           expireIfNeeded(state, key, options);
           return redisByteLength(hashField(state, key, field));
         }),
+      };
+    },
+    /** @param {string} setKey @param {string} hashKey */
+    async sMembersAndHGetAll(setKey, hashKey) {
+      expireIfNeeded(state, setKey, options);
+      expireIfNeeded(state, hashKey, options);
+      state.commands.push(["sMembersAndHGetAll", setKey, hashKey]);
+      return {
+        members: [...(state.sets.get(setKey) || new Set())],
+        hash: { ...(state.hashes.get(hashKey) || {}) },
       };
     },
     /** @param {string} hashKey @param {string} stringKey */
@@ -766,6 +911,26 @@ export function createFakeRedisSession(state, options = {}) {
       const set = state.sets.get(key) || new Set();
       return members.map((member) => set.has(member));
     },
+    /** @param {string} key @param {string|string[]} members */
+    async sAdd(key, members) {
+      if (setMemberValues(members).length === 0) return 0;
+      expireIfNeeded(state, key, options);
+      state.commands.push(["sAdd", key, snapshotSetMembers(members)]);
+      return addSetMembers(state, key, members);
+    },
+    /** @param {string} key @param {string|string[]} members */
+    async sRem(key, members) {
+      if (setMemberValues(members).length === 0) return 0;
+      expireIfNeeded(state, key, options);
+      state.commands.push(["sRem", key, snapshotSetMembers(members)]);
+      return removeSetMembers(state, key, members);
+    },
+    /** @param {string} key @param {string} member */
+    async sIsMember(key, member) {
+      expireIfNeeded(state, key, options);
+      state.commands.push(["sIsMember", key, member]);
+      return state.sets.get(key)?.has(member) ?? false;
+    },
     /** @param {string} key */
     async sMembers(key) {
       expireIfNeeded(state, key, options);
@@ -813,14 +978,6 @@ export function createFakeRedisSession(state, options = {}) {
       const result = zRangeMembers(state, key, start, stop);
       state.commands.push(["zRange", key, start, stop, result]);
       return result;
-    },
-    /** @param {string[]} keys @param {number} start @param {number} stop */
-    async zRangeMany(keys, start, stop) {
-      state.commands.push(["zRangeMany", [...keys], start, stop]);
-      return keys.map((key) => {
-        expireIfNeeded(state, key, options);
-        return zRangeMembers(state, key, start, stop);
-      });
     },
     /** @param {...string} keys */
     async del(...keys) {
@@ -890,14 +1047,16 @@ export function createFakeRedisMulti(state, options = {}, watchContext = undefin
       ops.push(["del", ...keys]);
       return chain;
     },
-    /** @param {string} key @param {(string | string[])[]} values */
-    sAdd(key, ...values) {
-      for (const value of values.flat()) ops.push(["sAdd", key, value]);
+    /** @param {string} key @param {string|string[]} members */
+    sAdd(key, members) {
+      const values = setMemberValues(members);
+      if (values.length > 0) ops.push(["sAdd", key, ...values]);
       return chain;
     },
-    /** @param {string} key @param {(string | string[])[]} values */
-    sRem(key, ...values) {
-      for (const value of values.flat()) ops.push(["sRem", key, value]);
+    /** @param {string} key @param {string|string[]} members */
+    sRem(key, members) {
+      const values = setMemberValues(members);
+      if (values.length > 0) ops.push(["sRem", key, ...values]);
       return chain;
     },
     /** @param {string} key @param {number} score @param {string} member */
@@ -960,9 +1119,9 @@ export function applyFakeRedisOp(state, op, options = {}) {
   }
 
   const key = /** @type {string} */ (op[1]);
+  if (kind !== "publish") expireIfNeeded(state, key, options);
   if (kind === "set") {
     const setOptions = /** @type {{ nx?: boolean, ttl?: number, ifeq?: string | Uint8Array } | undefined} */ (op[3]) ?? {};
-    expireIfNeeded(state, key, options);
     if (setOptions.nx && keyExists(state, key, options)) return null;
     if (setOptions.ifeq != null && !storedStringEquals(state.strings.get(key), setOptions.ifeq)) return null;
     state.strings.set(key, /** @type {string} */ (op[2]));
@@ -1005,19 +1164,10 @@ export function applyFakeRedisOp(state, op, options = {}) {
     return copyKey(state, key, dst, copyOptions, options);
   }
   if (kind === "sAdd") {
-    const set = ensureSet(state, key);
-    const before = set.size;
-    set.add(/** @type {string} */ (op[2]));
-    const added = set.size > before ? 1 : 0;
-    if (added === 1) markKeyModified(state, key);
-    return added;
+    return addSetMembers(state, key, /** @type {string[]} */ (op.slice(2)));
   }
   if (kind === "sRem") {
-    const set = state.sets.get(key);
-    const removed = set?.delete(/** @type {string} */ (op[2])) ? 1 : 0;
-    if (set?.size === 0) state.sets.delete(key);
-    if (removed === 1) markKeyModified(state, key);
-    return removed;
+    return removeSetMembers(state, key, /** @type {string[]} */ (op.slice(2)));
   }
   if (kind === "zAdd") {
     const zset = state.zsets.get(key) || new Map();
@@ -1039,7 +1189,6 @@ export function applyFakeRedisOp(state, op, options = {}) {
   }
   if (kind === "publish") return 0;
   if (kind === "expireAt") {
-    expireIfNeeded(state, key, options);
     if (!keyExists(state, key, options)) return 0;
     state.expirations.set(key, Number(op[2]) * 1000);
     markKeyModified(state, key);
@@ -1052,6 +1201,54 @@ export function applyFakeRedisOp(state, op, options = {}) {
 function ensureSet(state, key) {
   if (!state.sets.has(key)) state.sets.set(key, new Set());
   return /** @type {Set<string>} */ (state.sets.get(key));
+}
+
+/** @param {string|string[]} members */
+function setMemberValues(members) {
+  return Array.isArray(members) ? members : [members];
+}
+
+/** @param {string|string[]} members */
+function snapshotSetMembers(members) {
+  return Array.isArray(members) ? [...members] : members;
+}
+
+/**
+ * @param {FakeRedisState} state
+ * @param {string} key
+ * @param {string|string[]} members
+ */
+function addSetMembers(state, key, members) {
+  const values = setMemberValues(members);
+  if (values.length === 0) return 0;
+  const set = ensureSet(state, key);
+  let added = 0;
+  for (const member of values) {
+    if (!set.has(member)) added += 1;
+    set.add(member);
+  }
+  if (added > 0) markKeyModified(state, key);
+  return added;
+}
+
+/**
+ * @param {FakeRedisState} state
+ * @param {string} key
+ * @param {string|string[]} members
+ */
+function removeSetMembers(state, key, members) {
+  const set = state.sets.get(key);
+  if (!set) return 0;
+  let removed = 0;
+  for (const member of setMemberValues(members)) {
+    if (set.delete(member)) removed += 1;
+  }
+  if (set.size === 0) {
+    state.sets.delete(key);
+    state.expirations.delete(key);
+  }
+  if (removed > 0) markKeyModified(state, key);
+  return removed;
 }
 
 /** @param {FakeRedisState} state @param {string} key @param {Record<string, string>} fields */

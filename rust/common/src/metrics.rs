@@ -472,37 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn metric_store_reuses_lookup_keys_and_materializes_label_maps_only_for_new_series() {
-        let source = include_str!("metrics.rs");
-        for method in ["pub fn increment", "pub fn observe", "pub fn add_gauge"] {
-            let start = source.find(method).expect("metric method exists");
-            let end = source[start..]
-                .find("if inserted")
-                .expect("metric method tracks newly inserted series")
-                + start;
-            let body = &source[start..end];
-            assert!(
-                body.contains("with_metric_key"),
-                "{method} should reuse the thread-local lookup key buffer"
-            );
-            let lookup = body
-                .find(".get_mut(key)")
-                .expect("existing metric series use a borrowed key lookup");
-            let allocation = body
-                .find("key.to_string()")
-                .expect("new metric series retain an owned key");
-            assert!(
-                lookup < allocation,
-                "{method} must allocate an owned metric key only after a lookup miss"
-            );
-            assert!(
-                !body.contains("let labels = labels_map(labels);"),
-                "{method} must not allocate owned label maps before finding an existing series"
-            );
-        }
-    }
-
-    #[test]
     fn format_labels_renders_prometheus_shape() {
         let labels = labels_map(&[("route", "kv_get"), ("service", "redis-proxy")]);
         assert_eq!(

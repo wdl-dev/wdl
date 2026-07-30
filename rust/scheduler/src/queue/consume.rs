@@ -16,6 +16,8 @@ use super::{
     stream_id_to_entry,
 };
 
+const QUEUE_IN_FLIGHT_POLL_MS: u64 = 100;
+
 struct QueueStreamClaim {
     queues: Arc<QueueState>,
     stream: String,
@@ -74,10 +76,11 @@ pub(crate) async fn queue_consume_loop(state: AppState) -> SchedulerResult<()> {
                 .arg(CONSUMER_GROUP)
                 .arg(&state.instance_id)
                 .arg("COUNT")
-                .arg(read_count)
-                .arg("BLOCK")
-                .arg(state.config.queue_block_ms)
-                .arg("STREAMS");
+                .arg(read_count);
+            if !has_in_flight {
+                cmd.arg("BLOCK").arg(state.config.queue_block_ms);
+            }
+            cmd.arg("STREAMS");
             for stream in &streams {
                 cmd.arg(stream);
             }
@@ -122,6 +125,15 @@ pub(crate) async fn queue_consume_loop(state: AppState) -> SchedulerResult<()> {
             }
         };
         if reply.keys.is_empty() {
+            if has_in_flight {
+                tokio::select! {
+                    _ = dispatch_completed => {}
+                    _ = sleep(Duration::from_millis(
+                        state.config.queue_block_ms.clamp(1, QUEUE_IN_FLIGHT_POLL_MS)
+                    )) => {}
+                    _ = state.shutdown.stop_notified() => break,
+                }
+            }
             continue;
         }
         for key in reply.keys {

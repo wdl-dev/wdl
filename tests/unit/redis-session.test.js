@@ -274,7 +274,68 @@ testRedisCommandSurface(
     { kind: "ops" },
   ],
   "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:a\r\n" +
-    "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:b\r\n"
+      "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:b\r\n"
+);
+
+testRedisCommandSurface(
+  "sAdd",
+  ":2\r\n",
+  (surface) => surface.sAdd("members", ["one", "two"]),
+  2,
+  "*4\r\n$4\r\nSADD\r\n$7\r\nmembers\r\n$3\r\none\r\n$3\r\ntwo\r\n"
+);
+
+testRedisCommandSurface(
+  "sRem",
+  ":1\r\n",
+  (surface) => surface.sRem("members", "one"),
+  1,
+  "*3\r\n$4\r\nSREM\r\n$7\r\nmembers\r\n$3\r\none\r\n"
+);
+
+test("Redis set helpers make empty member batches no-ops", async () => {
+  const connect = () => {
+    throw new Error("empty set batches must not open a socket");
+  };
+  for (const surface of [
+    new RedisClient("x", { connect }),
+    new RedisSession("x", { connect }),
+  ]) {
+    assert.equal(await surface.sAdd("members", []), 0);
+    assert.equal(await surface.sRem("members", []), 0);
+  }
+});
+
+testRedisCommandSurface(
+  "sMembers",
+  "*2\r\n$3\r\none\r\n$3\r\ntwo\r\n",
+  (surface) => surface.sMembers("members"),
+  ["one", "two"],
+  "*2\r\n$8\r\nSMEMBERS\r\n$7\r\nmembers\r\n"
+);
+
+testRedisCommandSurface(
+  "sIsMember",
+  ":1\r\n",
+  (surface) => surface.sIsMember("members", "one"),
+  true,
+  "*3\r\n$9\r\nSISMEMBER\r\n$7\r\nmembers\r\n$3\r\none\r\n"
+);
+
+testRedisCommandSurface(
+  "zCard",
+  ":3\r\n",
+  (surface) => surface.zCard("ranked"),
+  3,
+  "*2\r\n$5\r\nZCARD\r\n$6\r\nranked\r\n"
+);
+
+testRedisCommandSurface(
+  "zRange",
+  "*2\r\n$3\r\none\r\n$3\r\ntwo\r\n",
+  (surface) => surface.zRange("ranked", 0, -1),
+  ["one", "two"],
+  "*4\r\n$6\r\nZRANGE\r\n$6\r\nranked\r\n$1\r\n0\r\n$2\r\n-1\r\n"
 );
 
 test("RedisSession.hGetAllManyAndHKeysMany preserves grouped reply order", async () => {
@@ -436,100 +497,108 @@ test("RedisClient.hGetAllAndGet reads a hash and string on one socket", async ()
   );
 });
 
-test("RedisClient.hGetAndZRange reads one version snapshot on one socket", async () => {
-  const socket = makeFakeSocket([bytes("$2\r\nv2\r\n*2\r\n$2\r\nv1\r\n$2\r\nv2\r\n")]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-
-  const snapshot = await client.hGetAndZRange(
+testRedisCommandSurface(
+  "hGetAndZRange",
+  "$2\r\nv2\r\n*2\r\n$2\r\nv1\r\n$2\r\nv2\r\n",
+  (surface) => surface.hGetAndZRange(
     "routes:demo",
     "api",
     "worker-versions:demo:api",
     0,
     -1
-  );
+  ),
+  { field: "v2", members: ["v1", "v2"] },
+  "*3\r\n$4\r\nHGET\r\n$11\r\nroutes:demo\r\n$3\r\napi\r\n" +
+    "*4\r\n$6\r\nZRANGE\r\n$24\r\nworker-versions:demo:api\r\n$1\r\n0\r\n$2\r\n-1\r\n"
+);
 
-  assert.deepEqual(snapshot, { field: "v2", members: ["v1", "v2"] });
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*3\r\n$4\r\nHGET\r\n$11\r\nroutes:demo\r\n$3\r\napi\r\n" +
-      "*4\r\n$6\r\nZRANGE\r\n$24\r\nworker-versions:demo:api\r\n$1\r\n0\r\n$2\r\n-1\r\n"
-  );
-});
+testRedisCommandSurface(
+  "zRangeManyAndHGetAllMany",
+  "*2\r\n$2\r\nv1\r\n$2\r\nv2\r\n" +
+    "*1\r\n$2\r\nv3\r\n" +
+    "*2\r\n$5\r\nTOKEN\r\n$5\r\nalpha\r\n" +
+    "*2\r\n$5\r\nTOKEN\r\n$4\r\nbeta\r\n",
+  (surface) => surface.zRangeManyAndHGetAllMany(
+    ["versions:a", "versions:b"],
+    ["secrets:a", "secrets:b"],
+    0,
+    -1
+  ),
+  {
+    ranges: [["v1", "v2"], ["v3"]],
+    hashes: [{ TOKEN: "alpha" }, { TOKEN: "beta" }],
+  },
+  "*4\r\n$6\r\nZRANGE\r\n$10\r\nversions:a\r\n$1\r\n0\r\n$2\r\n-1\r\n" +
+    "*4\r\n$6\r\nZRANGE\r\n$10\r\nversions:b\r\n$1\r\n0\r\n$2\r\n-1\r\n" +
+    "*2\r\n$7\r\nHGETALL\r\n$9\r\nsecrets:a\r\n" +
+    "*2\r\n$7\r\nHGETALL\r\n$9\r\nsecrets:b\r\n"
+);
 
-test("RedisClient.sMembersAndHGetAll reads a gateway snapshot on one socket", async () => {
-  const socket = makeFakeSocket([
-    bytes("*2\r\n$4\r\ndemo\r\n$6\r\nsystem\r\n*2\r\n$3\r\napp\r\n$2\r\nv3\r\n"),
-  ]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
+testRedisCommandSurface(
+  "zRangeManyAndExistsMany",
+  "*2\r\n$2\r\nv1\r\n$2\r\nv2\r\n" +
+    "*1\r\n$2\r\nv3\r\n" +
+    ":1\r\n" +
+    ":0\r\n",
+  (surface) => surface.zRangeManyAndExistsMany(
+    ["versions:a", "versions:b"],
+    ["secrets:a", "secrets:b"],
+    0,
+    -1
+  ),
+  {
+    ranges: [["v1", "v2"], ["v3"]],
+    exists: [true, false],
+  },
+  "*4\r\n$6\r\nZRANGE\r\n$10\r\nversions:a\r\n$1\r\n0\r\n$2\r\n-1\r\n" +
+    "*4\r\n$6\r\nZRANGE\r\n$10\r\nversions:b\r\n$1\r\n0\r\n$2\r\n-1\r\n" +
+    "*2\r\n$6\r\nEXISTS\r\n$9\r\nsecrets:a\r\n" +
+    "*2\r\n$6\r\nEXISTS\r\n$9\r\nsecrets:b\r\n"
+);
 
-  const snapshot = await client.sMembersAndHGetAll("namespaces", "routes:demo");
-
-  assert.deepEqual(snapshot, {
+testRedisCommandSurface(
+  "sMembersAndHGetAll",
+  "*2\r\n$4\r\ndemo\r\n$6\r\nsystem\r\n*2\r\n$3\r\napp\r\n$2\r\nv3\r\n",
+  (surface) => surface.sMembersAndHGetAll("namespaces", "routes:demo"),
+  {
     members: ["demo", "system"],
     hash: { app: "v3" },
-  });
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$8\r\nSMEMBERS\r\n$10\r\nnamespaces\r\n" +
-      "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n"
-  );
-});
+  },
+  "*2\r\n$8\r\nSMEMBERS\r\n$10\r\nnamespaces\r\n" +
+    "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n"
+);
 
-test("RedisClient.sMembersHGetAllAndSMembers reads the disabled-set snapshot on one socket", async () => {
-  const socket = makeFakeSocket([
-    bytes(
-      "*1\r\n$4\r\ndemo\r\n" +
-        "*2\r\n$3\r\napp\r\n$2\r\nv3\r\n" +
-        "*1\r\n$3\r\napp\r\n"
-    ),
-  ]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-
-  const snapshot = await client.sMembersHGetAllAndSMembers(
+testRedisCommandSurface(
+  "sMembersHGetAllAndSMembers",
+  "*1\r\n$4\r\ndemo\r\n" +
+    "*2\r\n$3\r\napp\r\n$2\r\nv3\r\n" +
+    "*1\r\n$3\r\napp\r\n",
+  (surface) => surface.sMembersHGetAllAndSMembers(
     "namespaces",
     "routes:demo",
     "platform-domain-disabled:demo"
-  );
-
-  assert.deepEqual(snapshot, {
+  ),
+  {
     namespaces: ["demo"],
     hash: { app: "v3" },
     members: ["app"],
-  });
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$8\r\nSMEMBERS\r\n$10\r\nnamespaces\r\n" +
-      "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n" +
-      "*2\r\n$8\r\nSMEMBERS\r\n$29\r\nplatform-domain-disabled:demo\r\n"
-  );
-});
+  },
+  "*2\r\n$8\r\nSMEMBERS\r\n$10\r\nnamespaces\r\n" +
+    "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n" +
+    "*2\r\n$8\r\nSMEMBERS\r\n$29\r\nplatform-domain-disabled:demo\r\n"
+);
 
-test("RedisClient.hGetAllAndSMembers reads the warm-miss route snapshot on one socket", async () => {
-  const socket = makeFakeSocket([
-    bytes("*2\r\n$3\r\napp\r\n$2\r\nv3\r\n" + "*1\r\n$3\r\napp\r\n"),
-  ]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-
-  const snapshot = await client.hGetAllAndSMembers(
+testRedisCommandSurface(
+  "hGetAllAndSMembers",
+  "*2\r\n$3\r\napp\r\n$2\r\nv3\r\n*1\r\n$3\r\napp\r\n",
+  (surface) => surface.hGetAllAndSMembers(
     "routes:demo",
     "platform-domain-disabled:demo"
-  );
-
-  assert.deepEqual(snapshot, { hash: { app: "v3" }, members: ["app"] });
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n" +
-      "*2\r\n$8\r\nSMEMBERS\r\n$29\r\nplatform-domain-disabled:demo\r\n"
-  );
-});
+  ),
+  { hash: { app: "v3" }, members: ["app"] },
+  "*2\r\n$7\r\nHGETALL\r\n$11\r\nroutes:demo\r\n" +
+    "*2\r\n$8\r\nSMEMBERS\r\n$29\r\nplatform-domain-disabled:demo\r\n"
+);
 
 test("RedisSession.hGetAllAndGet preserves empty hash and missing string replies", async () => {
   const socket = makeFakeSocket([bytes("*0\r\n$-1\r\n")]);
@@ -841,6 +910,30 @@ test("RedisMulti.exec commits on success", async () => {
   assert.ok(pipeline.endsWith("*1\r\n$4\r\nEXEC\r\n"));
 });
 
+test("RedisMulti set arrays use one aggregate reply and skip empty batches", async () => {
+  const socket = makeFakeSocket([
+    bytes("+OK\r\n+QUEUED\r\n+QUEUED\r\n*2\r\n:2\r\n:1\r\n"),
+  ]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+
+  const replies = await client.session((/** @type {any} */ session) => session.multi()
+    .sAdd("members", [])
+    .sAdd("members", ["one", "two", "one"])
+    .sRem("members", [])
+    .sRem("members", ["one", "missing"])
+    .exec());
+
+  assert.deepEqual(replies, [2, 1]);
+  assert.equal(
+    decode(socket._writes[0]),
+    "*1\r\n$5\r\nMULTI\r\n" +
+      "*5\r\n$4\r\nSADD\r\n$7\r\nmembers\r\n$3\r\none\r\n$3\r\ntwo\r\n$3\r\none\r\n" +
+      "*4\r\n$4\r\nSREM\r\n$7\r\nmembers\r\n$3\r\none\r\n$7\r\nmissing\r\n" +
+      "*1\r\n$4\r\nEXEC\r\n"
+  );
+});
+
 test("RedisMulti.exec bounds large transaction writes without changing replies", async () => {
   const socket = makeFakeSocket([
     bytes("+OK\r\n+QUEUED\r\n+QUEUED\r\n+QUEUED\r\n*3\r\n:1\r\n:1\r\n:1\r\n"),
@@ -900,11 +993,11 @@ test("RedisMulti.exec consumes inline EXEC errors before later session reads", a
 });
 
 test("RedisMulti.exec drains queue-time errors before later session reads", async () => {
-  // MULTI +OK, invalid SADD errors, SET queues, EXEC aborts, then GET succeeds.
+  // MULTI +OK, invalid HDEL errors, SET queues, EXEC aborts, then GET succeeds.
   const socket = makeFakeSocket([
     bytes(
       "+OK\r\n" +
-      "-ERR wrong number of arguments for 'sadd' command\r\n" +
+      "-ERR wrong number of arguments for 'hdel' command\r\n" +
       "+QUEUED\r\n" +
       "-EXECABORT Transaction discarded because of previous errors.\r\n" +
       "$3\r\nbar\r\n"
@@ -915,7 +1008,7 @@ test("RedisMulti.exec drains queue-time errors before later session reads", asyn
   await client.session(async (/** @type {any} */ s) => {
     await assert.rejects(
       s.multi()
-        .sAdd("set", [])
+        .hDel("hash")
         .set("k", "v")
         .exec(),
       /Redis error: ERR wrong number of arguments/
@@ -983,52 +1076,25 @@ test("RedisSession watch snapshot sends WATCH before typed reads in one write", 
 });
 
 test("RedisSession watch snapshot batches bounded dependency probes", async () => {
-  const socket = makeFakeSocket([bytes("+OK\r\n:1\r\n:0\r\n:12\r\n")]);
+  const socket = makeFakeSocket([bytes("+OK\r\n:2\r\n:12\r\n")]);
   const { connect } = scriptedConnect(socket);
   const client = new RedisClient("x", { connect });
   const snapshot = await client.session((/** @type {any} */ session) =>
-    session.watchAndExistsManyAndHStrLenMany(
+    session.watchAndExistsAndHStrLenMany(
       ["d1:one", "d1:two", "worker:target"],
       ["d1:one", "d1:two"],
       [["worker:target", "__meta__"]],
     ));
 
   assert.deepEqual(snapshot, {
-    exists: [true, false],
+    existsCount: 2,
     lengths: [12],
   });
   assert.equal(
     decode(socket._writes[0]),
     "*4\r\n$5\r\nWATCH\r\n$6\r\nd1:one\r\n$6\r\nd1:two\r\n$13\r\nworker:target\r\n" +
-      "*2\r\n$6\r\nEXISTS\r\n$6\r\nd1:one\r\n" +
-      "*2\r\n$6\r\nEXISTS\r\n$6\r\nd1:two\r\n" +
+      "*3\r\n$6\r\nEXISTS\r\n$6\r\nd1:one\r\n$6\r\nd1:two\r\n" +
       "*3\r\n$7\r\nHSTRLEN\r\n$13\r\nworker:target\r\n$8\r\n__meta__\r\n"
-  );
-});
-
-test("RedisSession read pipelines batch independent ZRANGE and EXISTS commands", async () => {
-  const socket = makeFakeSocket([
-    bytes("*2\r\n$2\r\nv1\r\n$2\r\nv2\r\n*1\r\n$2\r\nv3\r\n:0\r\n:1\r\n"),
-  ]);
-  const { connect } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  await client.session(async (/** @type {any} */ s) => {
-    assert.deepEqual(
-      await s.zRangeMany(["worker-versions:demo:a", "worker-versions:demo:b"], 0, -1),
-      [["v1", "v2"], ["v3"]]
-    );
-    assert.deepEqual(await s.existsMany(["secrets:demo:a", "secrets:demo:b"]), [false, true]);
-  });
-
-  assert.equal(
-    decode(socket._writes[0]),
-    "*4\r\n$6\r\nZRANGE\r\n$22\r\nworker-versions:demo:a\r\n$1\r\n0\r\n$2\r\n-1\r\n" +
-      "*4\r\n$6\r\nZRANGE\r\n$22\r\nworker-versions:demo:b\r\n$1\r\n0\r\n$2\r\n-1\r\n"
-  );
-  assert.equal(
-    decode(socket._writes[1]),
-    "*2\r\n$6\r\nEXISTS\r\n$14\r\nsecrets:demo:a\r\n" +
-      "*2\r\n$6\r\nEXISTS\r\n$14\r\nsecrets:demo:b\r\n"
   );
 });
 
