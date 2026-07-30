@@ -5,8 +5,8 @@ import { sh } from "./cli.js";
 import { gatewayWorkerId } from "./gateway-http.js";
 import { responseJson } from "./http-response.js";
 import { runtimeInternalPost } from "./internal-http.js";
-import { redisFlushAll, redisXPendingCount } from "./redis.js";
-import { setupIntegrationSuite, waitForScheduler } from "./stack.js";
+import { redisFlushAll, redisXInfoGroups, redisXPendingCount } from "./redis.js";
+import { setupIntegrationSuite, waitForScheduler, waitUntil } from "./stack.js";
 
 export function setupQueueIntegrationSuite() {
   setupIntegrationSuite({
@@ -128,14 +128,16 @@ export default {
 };
 `;
 
-export const BLOCKING_BATCH_RECORDER = `
+/** @param {number} delayMs */
+function blockingBatchRecorder(delayMs) {
+  return `
 let sizes = [];
 let total = 0;
 export default {
   async fetch() { return Response.json({ sizes, total }); },
   async queue(batch) {
     sizes.push(batch.messages.length);
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
     for (const m of batch.messages) {
       m.ack();
       total += 1;
@@ -143,6 +145,10 @@ export default {
   },
 };
 `;
+}
+
+export const BLOCKING_BATCH_RECORDER = blockingBatchRecorder(5_000);
+export const LONG_BLOCKING_BATCH_RECORDER = blockingBatchRecorder(30_000);
 
 export const FAST_QUEUE_CONSUMER = `
 const store = {};
@@ -238,4 +244,23 @@ export function readConsumerMessage(ns, consumerVersion, key, consumerName = "co
  */
 export function queuePendingCount(streamKey) {
   return redisXPendingCount(streamKey, "wdl-scheduler", { db: 1 });
+}
+
+/**
+ * @param {string|string[]} streams
+ * @param {{ label?: string, timeoutMs?: number, intervalMs?: number }} [options]
+ */
+export async function waitForQueueConsumerGroups(streams, options = {}) {
+  const streamKeys = Array.isArray(streams) ? streams : [streams];
+  await waitUntil(
+    options.label || "queue consumer groups ready",
+    async () => streamKeys.every((streamKey) => {
+      const groups = redisXInfoGroups(streamKey, { db: 1 });
+      return !groups.includes("missing") && groups.includes("wdl-scheduler");
+    }),
+    {
+      timeoutMs: options.timeoutMs ?? 30_000,
+      intervalMs: options.intervalMs ?? 500,
+    }
+  );
 }

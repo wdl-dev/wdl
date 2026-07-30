@@ -88,8 +88,25 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-/** @param {unknown} value @param {Record<string, unknown>} fallback */
-function safeJsonStringify(value, fallback) {
+/** @param {string} ts @param {string} service @param {string} level @param {string} event */
+function serializationFallback(ts, service, level, event) {
+  return JSON.stringify({
+    ts,
+    service,
+    level,
+    event,
+    error_message: "Structured log fields could not be serialized",
+  });
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} ts
+ * @param {string} service
+ * @param {string} level
+ * @param {string} event
+ */
+function safeJsonStringify(value, ts, service, level, event) {
   try {
     return JSON.stringify(value);
   } catch {
@@ -107,7 +124,7 @@ function safeJsonStringify(value, fallback) {
         return fieldValue;
       });
     } catch {
-      return JSON.stringify(fallback);
+      return serializationFallback(ts, service, level, event);
     }
   }
 }
@@ -121,28 +138,21 @@ function safeJsonStringify(value, fallback) {
  */
 function emitStructuredLogLine(service, level, event, fields = {}) {
   const ts = nowIso();
-  const core = {
-    ts,
-    service,
-    level,
-    event,
-  };
-  const fallback = {
-    __proto__: null,
-    ...core,
-    error_message: "Structured log fields could not be serialized",
-  };
   let line;
   try {
     const payload = /** @type {Record<string, unknown>} */ ({
-      __proto__: null,
-      ...core,
+      ts,
+      service,
+      level,
+      event,
       ...fields,
     });
-    if (typeof payload.toJSON === "function") delete payload.toJSON;
-    line = safeJsonStringify(payload, fallback);
+    if (typeof payload.toJSON === "function") {
+      Object.defineProperty(payload, "toJSON", { value: undefined });
+    }
+    line = safeJsonStringify(payload, ts, service, level, event);
   } catch {
-    line = JSON.stringify(fallback);
+    line = serializationFallback(ts, service, level, event);
   }
   if (level === "error") console.error(line);
   else console.log(line);

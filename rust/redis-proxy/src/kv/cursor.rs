@@ -100,7 +100,7 @@ fn existing_cursor_overflow_fields_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::parse_packed_commands;
+    use wdl_rust_common::test_support::parse_packed_commands;
 
     #[test]
     fn existing_cursor_overflow_fields_pipeline_only_probes_existence() {

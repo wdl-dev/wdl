@@ -14,14 +14,15 @@ import {
   BATCH_SIZE_RECORDER,
   BLOCKING_BATCH_RECORDER,
   FAST_QUEUE_CONSUMER,
+  LONG_BLOCKING_BATCH_RECORDER,
   deployConsumer,
   deployQueueConsumerWorker,
   deployQueueProducer,
   queuePendingCount,
   sendQueueMessage,
   setupQueueIntegrationSuite,
+  waitForQueueConsumerGroups,
 } from "./helpers/queue-scenarios.js";
-import { redisXInfoGroups } from "./helpers/redis.js";
 
 setupQueueIntegrationSuite();
 
@@ -115,7 +116,7 @@ test("a later queue dispatch is not blocked by an in-flight slow queue", async (
   const ns = uniqueNs("qhol");
   const slowStream = queueStreamKey(ns, "slow");
 
-  const slowVersion = await deployQueueConsumerWorker(ns, "slow", BLOCKING_BATCH_RECORDER, [
+  const slowVersion = await deployQueueConsumerWorker(ns, "slow", LONG_BLOCKING_BATCH_RECORDER, [
     { queue: "slow", maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 0 },
   ]);
 
@@ -126,12 +127,9 @@ test("a later queue dispatch is not blocked by an in-flight slow queue", async (
   const slowProdVer = await deployQueueProducer(ns, "slow", "slow-prod");
   const fastProdVer = await deployQueueProducer(ns, "fastq", "fast-prod");
 
-  await waitUntil("slow and fast consumer groups are ready", async () => {
-    return [slowStream, queueStreamKey(ns, "fastq")].every((stream) => {
-      const groups = redisXInfoGroups(stream, { db: 1 });
-      return !groups.includes("missing") && groups.includes("wdl-scheduler");
-    });
-  }, { timeoutMs: 30_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups([slowStream, queueStreamKey(ns, "fastq")], {
+    label: "slow and fast consumer groups are ready",
+  });
 
   const slowSend = sendQueueMessage(ns, "slow-prod", slowProdVer, { hang: true });
   assertStatus(slowSend, 200, "slow queue send");
@@ -155,7 +153,7 @@ test("a later queue dispatch is not blocked by an in-flight slow queue", async (
     if (res.status !== 200) return false;
     const snap = responseJson(res);
     return snap.total >= 1;
-  }, { timeoutMs: 3_000, intervalMs: 250 });
+  }, { timeoutMs: 10_000, intervalMs: 250 });
   const slowSnapshot = responseJson(runtimeInternalPost("/", {
     "x-worker-id": slowConsumerId,
   }, ""));

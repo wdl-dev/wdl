@@ -43,6 +43,7 @@ const gatewayWorker :Workerd.Worker = (
     (name = "worker-contract.js", esModule = embed "../shared/worker-contract.js"),
     (name = "shared-redis", esModule = embed "../shared/redis.js"),
     (name = "shared-redis-command-client", esModule = embed "../shared/redis-command-client.js"),
+    (name = "shared-redis-command-surface", esModule = embed "../shared/redis-command-surface.js"),
     (name = "shared-redis-resp", esModule = embed "../shared/redis-resp.js"),
     (name = "shared-utf8", esModule = embed "../shared/utf8.js"),
     (name = "shared-redis-session", esModule = embed "../shared/redis-session.js"),

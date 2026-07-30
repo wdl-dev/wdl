@@ -266,7 +266,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::test_support::parse_packed_commands;
+    use wdl_rust_common::test_support::parse_packed_commands;
 
     fn queue_action(body_bytes: usize) -> QueueAction {
         serde_json::from_value(json!({

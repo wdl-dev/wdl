@@ -29,3 +29,4 @@ zeroize = "1.8"
 
 [dev-dependencies]
 serde_urlencoded = "0.7"
+wdl-rust-common = { workspace = true, features = ["axum", "redis", "test-support"] }

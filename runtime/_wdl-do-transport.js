@@ -378,12 +378,12 @@ function jsonObject() {
 }
 
 /**
- * @param {Record<string, unknown>} metadata
+ * @param {string} metadataJson
  * @param {Uint8Array | null} [bodyBytes]
  * @returns {Uint8Array}
  */
-function encodeDoInvokeEnvelope(metadata, bodyBytes = null) {
-  const metadataBytes = encodeUtf8(stringifyJson(metadata));
+function encodeDoInvokeEnvelopeJson(metadataJson, bodyBytes = null) {
+  const metadataBytes = encodeUtf8(metadataJson);
   const body = bodyBytes == null ? new IntrinsicUint8Array() : bodyBytes;
   const metadataLength = byteArrayLength(metadataBytes);
   const bodyLength = byteArrayLength(body);
@@ -397,6 +397,15 @@ function encodeDoInvokeEnvelope(metadata, bodyBytes = null) {
   setBytes(envelope, metadataBytes, 4);
   setBytes(envelope, body, 4 + metadataLength);
   return envelope;
+}
+
+/**
+ * @param {Record<string, unknown>} metadata
+ * @param {Uint8Array | null} [bodyBytes]
+ * @returns {Uint8Array}
+ */
+function encodeDoInvokeEnvelope(metadata, bodyBytes = null) {
+  return encodeDoInvokeEnvelopeJson(stringifyJson(metadata), bodyBytes);
 }
 
 /** @param {string} value */
@@ -544,22 +553,20 @@ export function rpcInvokeBody(props, objectName, method, args) {
     throw new TypeError("rpc.args must be an array");
   }
   const stableArgs = /** @type {unknown[]} */ (cloneJsonRpcData(args, "rpc.args"));
-  if (byteLength(stringifyJson(stableArgs)) > MAX_DO_REQUEST_BODY_BYTES) {
+  const argsJson = stringifyJson(stableArgs);
+  if (byteLength(argsJson) > MAX_DO_REQUEST_BODY_BYTES) {
     throw new TypeError(`rpc.args exceeds ${MAX_DO_REQUEST_BODY_BYTES} bytes`);
   }
-  const rpc = jsonObject();
-  rpc.method = method;
-  rpc.args = stableArgs;
-  const metadata = jsonObject();
-  metadata.ns = props.ns;
-  metadata.worker = props.worker;
-  metadata.version = props.version;
-  metadata.doStorageId = props.doStorageId;
-  metadata.className = props.className;
-  metadata.objectName = objectName;
-  metadata.kind = "rpc";
-  metadata.rpc = rpc;
-  return encodeDoInvokeEnvelope(metadata);
+  const metadataJson =
+    `{"ns":${stringifyJson(props.ns)}` +
+    `,"worker":${stringifyJson(props.worker)}` +
+    `,"version":${stringifyJson(props.version)}` +
+    `,"doStorageId":${stringifyJson(props.doStorageId)}` +
+    `,"className":${stringifyJson(props.className)}` +
+    `,"objectName":${stringifyJson(objectName)}` +
+    `,"kind":"rpc","rpc":{"method":${stringifyJson(method)}` +
+    `,"args":${argsJson}}}`;
+  return encodeDoInvokeEnvelopeJson(metadataJson);
 }
 
 /**

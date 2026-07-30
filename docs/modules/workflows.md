@@ -200,7 +200,10 @@ Key families:
   may be overridden with
   `create({ retention: { successRetention, errorRetention } })`.
 - `Workflow.createBatch()` accepts at most 100 entries per call. Runtime prevalidation
-  and Rust admission share this pinned limit.
+  and Rust admission share this pinned limit. Rust reads the deduplicated instance-state
+  snapshot in one bounded pipeline and shares the mutation preflight across entries;
+  each new instance still keeps its own create token, post-create control-plane
+  revalidation, cleanup, and finalize fence.
 - A single workflow result is capped at 1 MiB and a runtime-to-workflows backend JSON
   request at 2 MiB. Runtime prevalidation and the Rust backend share the pinned
   `workflow_payload_too_large` contract. The per-instance aggregate payload cap is

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value as JsonValue;
 use wdl_rust_common::redis_eval::StaticRedisScript;
@@ -10,7 +10,7 @@ use super::{
     CreateBatchResponse, InstanceResponse, InstanceRouteKeys, MAX_CREATE_BATCH_SIZE,
     PENDING_CREATE_TTL_MS, WorkflowRequest, cleanup_created_instance, ensure_worker_not_deleting,
     eval_script, finalize_created_instance, instance_id, log_instance_event_from_request,
-    params_json, payload_bytes_arg, pending_create_token, read_public_state,
+    params_json, payload_bytes_arg, pending_create_token, public_state_or_empty,
     request_with_active_version, response_from_state, retention_policy,
     spawn_progress_from_request, validate_identity, verify_active_workflow_current,
     verify_workflow_def, wait_for_public_create_state, workflow_referrer_member,
@@ -50,6 +50,11 @@ return 1
 "#;
 
 static CREATE_INSTANCE: StaticRedisScript = StaticRedisScript::new(CREATE_INSTANCE_SCRIPT);
+
+struct CreateInstanceOutcome {
+    response: InstanceResponse,
+    created: bool,
+}
 
 fn callback_json(value: &JsonValue) -> WorkflowResult<String> {
     if value.is_null() {
@@ -124,9 +129,17 @@ async fn create_instance_prevalidated(
     state: &AppState,
     req: WorkflowRequest,
 ) -> WorkflowResult<InstanceResponse> {
-    let id = instance_id(&req)?.to_string();
     ensure_worker_not_deleting(state, &req.ns, &req.worker).await?;
+    Ok(create_instance_after_delete_preflight(state, req)
+        .await?
+        .response)
+}
 
+async fn create_instance_after_delete_preflight(
+    state: &AppState,
+    req: WorkflowRequest,
+) -> WorkflowResult<CreateInstanceOutcome> {
+    let id = instance_id(&req)?.to_string();
     let params = params_json(&req.params)?;
     let retention = retention_policy(&req.retention)?;
     let callback = callback_json(&req.callback)?;
@@ -190,7 +203,11 @@ async fn create_instance_prevalidated(
             state
                 .metrics
                 .increment("workflow_instances", &[("outcome", "existing")], 1.0);
-            return response_from_state(state, &req.ns, &req.workflow_key, &id, &existing).await;
+            return Ok(CreateInstanceOutcome {
+                response: response_from_state(state, &req.ns, &req.workflow_key, &id, &existing)
+                    .await?,
+                created: false,
+            });
         }
     }
 
@@ -223,13 +240,52 @@ async fn create_instance_prevalidated(
             None,
         );
     }
-    Ok(InstanceResponse {
-        id,
-        status: "queued".to_string(),
-        output: None,
-        error: None,
-        steps: None,
+    Ok(CreateInstanceOutcome {
+        response: InstanceResponse {
+            id,
+            status: "queued".to_string(),
+            output: None,
+            error: None,
+            steps: None,
+        },
+        created: true,
     })
+}
+
+async fn read_batch_public_states(
+    state: &AppState,
+    requests: &[WorkflowRequest],
+) -> WorkflowResult<Vec<HashMap<String, String>>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state_keys = requests
+        .iter()
+        .map(|req| {
+            let id = instance_id(req)?;
+            Ok(InstanceRouteKeys::new(&req.ns, &req.workflow_key, id).state())
+        })
+        .collect::<WorkflowResult<Vec<_>>>()?;
+    let raw_states: Vec<HashMap<String, String>> = state
+        .redis
+        .with_conn(async |mut conn| {
+            let mut pipe = redis::pipe();
+            for key in &state_keys {
+                pipe.cmd("HGETALL").arg(key);
+            }
+            pipe.query_async(&mut conn).await
+        })
+        .await?;
+    if raw_states.len() != requests.len() {
+        return Err(WorkflowError::internal_error(
+            "Workflow createBatch state reply count mismatch",
+        ));
+    }
+    let mut public_states = Vec::with_capacity(raw_states.len());
+    for existing in raw_states {
+        public_states.push(public_state_or_empty(state, existing).await?);
+    }
+    Ok(public_states)
 }
 
 pub(crate) async fn create_batch(
@@ -250,8 +306,8 @@ pub(crate) async fn create_batch(
     let req = request_with_active_version(state, req).await?;
     validate_identity(&req)?;
     verify_workflow_def(state, &req).await?;
-    let mut instances = Vec::with_capacity(req.entries.len());
     let mut seen = HashSet::new();
+    let mut children = Vec::with_capacity(req.entries.len());
     for entry in &req.entries {
         if !seen.insert(entry.instance_id.clone()) {
             continue;
@@ -280,10 +336,27 @@ pub(crate) async fn create_batch(
             entries: Vec::new(),
             request_id: req.request_id.clone(),
         };
-        if !read_public_state(state, &child).await?.is_empty() {
-            continue;
+        children.push(child);
+    }
+    let states = read_batch_public_states(state, &children).await?;
+    let pending = children
+        .into_iter()
+        .zip(states)
+        .filter_map(|(child, existing)| existing.is_empty().then_some(child))
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(CreateBatchResponse {
+            instances: Vec::new(),
+        });
+    }
+
+    ensure_worker_not_deleting(state, &req.ns, &req.worker).await?;
+    let mut instances = Vec::with_capacity(pending.len());
+    for child in pending {
+        let outcome = create_instance_after_delete_preflight(state, child).await?;
+        if outcome.created {
+            instances.push(outcome.response);
         }
-        instances.push(create_instance_prevalidated(state, child).await?);
     }
     Ok(CreateBatchResponse { instances })
 }

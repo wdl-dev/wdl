@@ -10,6 +10,7 @@ export { adminFetch, adminGet, adminGetFresh, adminPost, adminPut, deployAndProm
 export { gatewayFetch, gatewayUrl, gatewayWorkerId, hostFetch, rawHttpGet, uniqueNs } from "./gateway-http.js";
 export { assertIntegrationJson, readIntegrationJson, responseJson, responseJsonOrNull, withResponseJsonAccessors } from "./http-response.js";
 export { parseBase64Json, parseJsonText, parseStdoutJson } from "./json-payload.js";
+export { structuredServiceLogEvents } from "./structured-logs.js";
 export { cronId, readMeta } from "./misc.js";
 export { shellQuote } from "./shell-quote.js";
 export { workerFetchCallerSource } from "./worker-source.js";

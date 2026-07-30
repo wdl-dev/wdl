@@ -50,6 +50,31 @@ async function loadGatewayRuntime() {
 const gatewayTestGlobal = /** @type {any} */ (globalThis);
 const utf8Encoder = new TextEncoder();
 
+/**
+ * @typedef {{
+ *   onConnect(): void,
+ *   onMessage(channel: string, payload: Uint8Array): void,
+ * }} GatewaySubscriberHandlers
+ */
+
+/**
+ * @template T
+ * @param {(address: string) => Promise<unknown>} ensureGatewaySubscriber
+ * @param {(handlers: GatewaySubscriberHandlers) => Promise<T>} fn
+ */
+async function withGatewaySubscriber(ensureGatewaySubscriber, fn) {
+  try {
+    await ensureGatewaySubscriber("redis:6379");
+    const handlers = /** @type {GatewaySubscriberHandlers} */ (
+      gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers
+    );
+    handlers.onConnect();
+    return await fn(handlers);
+  } finally {
+    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
+  }
+}
+
 const { runtimeForwardOutcome } = await loadGatewayRuntime();
 
 test("runtimeForwardOutcome treats websocket upgrades as successful forwards", () => {
@@ -143,11 +168,7 @@ test("resolveNamespaceRoutes subtracts opt-outs on a warm-cache miss in one roun
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
-
+  await withGatewaySubscriber(ensureGatewaySubscriber, async (handlers) => {
     // Cold read fills knownNs + routeCache; a per-ns route invalidation drops
     // only that route cache entry (knownNs stays), so the next read is a
     // warm-cache miss that must still fold the disabled set into one snapshot.
@@ -162,9 +183,7 @@ test("resolveNamespaceRoutes subtracts opt-outs on a warm-cache miss in one roun
       ["sMembersHGetAllAndSMembers", "namespaces", "routes:demo", "platform-domain-disabled:demo"],
       ["hGetAllAndSMembers", "routes:demo", "platform-domain-disabled:demo"],
     ]);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("unrelated route invalidation does not restart a warm namespace read", async () => {
@@ -184,10 +203,7 @@ test("unrelated route invalidation does not restart a warm namespace read", asyn
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async (handlers) => {
     await resolveNamespaceRoutes(redis, "demo");
     handlers.onMessage("routes:invalidate", utf8Encoder.encode("demo"));
 
@@ -195,9 +211,7 @@ test("unrelated route invalidation does not restart a warm namespace read", asyn
 
     assert.deepEqual([...result.routes], [["app", "v2"]]);
     assert.equal(warmReads, 1);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("same-namespace invalidation restarts concurrent warm route reads", async () => {
@@ -215,10 +229,7 @@ test("same-namespace invalidation restarts concurrent warm route reads", async (
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async (handlers) => {
     await resolveNamespaceRoutes(redis, "demo");
     handlers.onMessage("routes:invalidate", utf8Encoder.encode("demo"));
 
@@ -236,9 +247,7 @@ test("same-namespace invalidation restarts concurrent warm route reads", async (
       assert.deepEqual([...result.routes], [["app", "v2"]]);
     }
     assert.equal(warmReads, 4);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("full route reset restarts a warm namespace read", async () => {
@@ -264,10 +273,7 @@ test("full route reset restarts a warm namespace read", async () => {
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async (handlers) => {
     await resolveNamespaceRoutes(redis, "demo");
     handlers.onMessage("routes:invalidate", utf8Encoder.encode("demo"));
 
@@ -276,9 +282,7 @@ test("full route reset restarts a warm namespace read", async () => {
     assert.deepEqual([...result.routes], [["app", "v2"]]);
     assert.equal(coldReads, 2);
     assert.equal(warmReads, 1);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("resolveNamespaceRoutes keeps concurrent cold replies associated with their namespace", async () => {
@@ -384,10 +388,7 @@ test("unrelated pattern invalidation does not restart a warm host read", async (
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async () => {
     await resolveHostPatterns(redis, "a.example", "rid-a");
 
     const result = await resolveHostPatterns(redis, "b.example", "rid-b");
@@ -395,9 +396,7 @@ test("unrelated pattern invalidation does not restart a warm host read", async (
     assert.deepEqual(result.patterns, { "/b/*": "projection-b" });
     assert.equal(coldReads, 1);
     assert.equal(warmReads, 1);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("same-host invalidation restarts a warm pattern read", async () => {
@@ -428,10 +427,7 @@ test("same-host invalidation restarts a warm pattern read", async () => {
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async () => {
     await resolveHostPatterns(redis, "a.example", "rid-a");
 
     const result = await resolveHostPatterns(redis, "b.example", "rid-b");
@@ -439,9 +435,7 @@ test("same-host invalidation restarts a warm pattern read", async () => {
     assert.deepEqual(result.patterns, { "/b/*": "projection-v2" });
     assert.equal(coldReads, 2);
     assert.equal(warmReads, 1);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("full pattern reset restarts a warm host read", async () => {
@@ -468,9 +462,7 @@ test("full pattern reset restarts a warm host read", async () => {
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async () => {
     await resolveHostPatterns(redis, "a.example", "rid-a");
 
     const result = await resolveHostPatterns(redis, "b.example", "rid-b");
@@ -478,9 +470,7 @@ test("full pattern reset restarts a warm host read", async () => {
     assert.deepEqual(result.patterns, { "/b/*": "projection-v2" });
     assert.equal(coldReads, 2);
     assert.equal(warmReads, 1);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("resolveHostPatterns does not decode projections for an undeclared host", async () => {
@@ -520,10 +510,7 @@ test("route invalidation prevents an older cold snapshot from restoring stale st
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async (handlers) => {
     const pending = resolveNamespaceRoutes(redis, "demo");
     handlers.onMessage("routes:invalidate", utf8Encoder.encode("demo"));
     firstRead.resolve({ namespaces: ["demo"], hash: { app: "v1" }, members: [] });
@@ -532,9 +519,7 @@ test("route invalidation prevents an older cold snapshot from restoring stale st
     assert.equal(result.known, true);
     assert.deepEqual([...result.routes], [["app", "v2"]]);
     assert.equal(reads, 2);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("pattern invalidation prevents an older cold snapshot from restoring stale state", async () => {
@@ -549,10 +534,7 @@ test("pattern invalidation prevents an older cold snapshot from restoring stale 
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    const handlers = gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-    handlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async (handlers) => {
     const pending = resolveHostPatterns(redis, "api.example", "rid");
     handlers.onMessage("patterns:invalidate", utf8Encoder.encode("api.example"));
     firstRead.resolve({ members: ["api.example"], hash: { "/v1/*": "projection-v1" } });
@@ -561,9 +543,7 @@ test("pattern invalidation prevents an older cold snapshot from restoring stale 
     assert.equal(result.known, true);
     assert.deepEqual(result.patterns, { "/v2/*": "projection-v2" });
     assert.equal(reads, 2);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("route resolution fails closed after bounded invalidation churn", async () => {
@@ -586,9 +566,7 @@ test("route resolution fails closed after bounded invalidation churn", async () 
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async () => {
     await assert.rejects(
       resolveNamespaceRoutes(redis, "demo"),
       (err) => {
@@ -601,9 +579,7 @@ test("route resolution fails closed after bounded invalidation churn", async () 
       }
     );
     assert.equal(reads, 5);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });
 
 test("pattern resolution fails closed after bounded invalidation churn", async () => {
@@ -626,15 +602,11 @@ test("pattern resolution fails closed after bounded invalidation churn", async (
     },
   };
 
-  try {
-    await ensureGatewaySubscriber("redis:6379");
-    gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers.onConnect();
+  await withGatewaySubscriber(ensureGatewaySubscriber, async () => {
     await assert.rejects(
       resolveHostPatterns(redis, "api.example", "rid"),
       (err) => err instanceof GatewayRoutingUnavailableError
     );
     assert.equal(reads, 5);
-  } finally {
-    delete gatewayTestGlobal.__gatewayRuntimeSubscriberHandlers;
-  }
+  });
 });

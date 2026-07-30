@@ -921,6 +921,7 @@ test("Redis command observability goes through recordRedisCommand", () => {
 test("Redis command metric allow-list covers shared Redis wrappers", () => {
   const redis = [
     "shared/redis-command-client.js",
+    "shared/redis-command-surface.js",
     "shared/redis-session.js",
   ].map((file) => withoutLineComments(readRepoFile(file))).join("\n");
   const observability = withoutLineComments(readRepoFile("shared/observability.js"));

@@ -38,6 +38,7 @@ import {
   readConsumerKeys,
   sendQueueMessage,
   setupQueueIntegrationSuite,
+  waitForQueueConsumerGroups,
 } from "./helpers/queue-scenarios.js";
 
 setupQueueIntegrationSuite();
@@ -53,10 +54,7 @@ test("PEL reap: idle pending entry is XCLAIMed and redelivered to live consumer"
     { queue: queueName, maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 3 },
   ]);
 
-  await waitUntil("consumer group created", async () => {
-    const out = redisXInfoGroups(streamKey, { db: 1 });
-    return !out.includes("missing") && out.includes("wdl-scheduler");
-  }, { timeoutMs: 10_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups(streamKey, { timeoutMs: 10_000 });
 
   // Stop scheduler so its XREADGROUP BLOCK can't snatch the seeded message
   // before our fake "crashed-instance" XREADGROUP puts it in PEL.
@@ -134,10 +132,7 @@ test("consumer removal → PEL + unread tail + delayed ZSET all land in queue-or
     { queue: queueName, maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 3 },
   ]);
 
-  await waitUntil("consumer group created", async () => {
-    const out = redisXInfoGroups(streamKey, { db: 1 });
-    return !out.includes("missing") && out.includes("wdl-scheduler");
-  }, { timeoutMs: 10_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups(streamKey, { timeoutMs: 10_000 });
 
   await withServiceStopped("scheduler", async () => {
     // Stop scheduler so its XREADGROUP BLOCK can't race us while seeding.
@@ -199,10 +194,7 @@ test("rollback: re-promoting consumer doesn't un-orphan already-moved messages",
     { queue: queueName, maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 3 },
   ]);
 
-  await waitUntil("consumer group created", async () => {
-    const out = redisXInfoGroups(streamKey, { db: 1 });
-    return !out.includes("missing") && out.includes("wdl-scheduler");
-  }, { timeoutMs: 10_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups(streamKey, { timeoutMs: 10_000 });
 
   // Stop scheduler so the seeded message doesn't get consumed before removal.
   await withServiceStopped("scheduler", async () => {

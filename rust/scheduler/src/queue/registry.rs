@@ -130,6 +130,15 @@ fn resolve_consumer_projection(
     }
 }
 
+fn log_invalid_consumer_projection(state: &AppState, ns: &str, queue: &str) {
+    log(
+        state,
+        LogLevel::Warn,
+        "queue_consumer_projection_invalid",
+        json!({ "ns": ns, "queue": queue }),
+    );
+}
+
 fn parse_reconcile_group_reply(
     reply: Vec<(i64, String)>,
     expected: usize,
@@ -225,7 +234,11 @@ async fn queue_reconcile_with_groups(
             let Some((ns, queue)) = parse_consumer_key(key) else {
                 continue;
             };
-            let Some(consumer) = hydrate_consumer(&ns, &queue, &hash) else {
+            let resolution = resolve_consumer_projection(&ns, &queue, &hash);
+            if resolution.invalid_projection {
+                log_invalid_consumer_projection(&state, &ns, &queue);
+            }
+            let Some(consumer) = resolution.consumer else {
                 continue;
             };
             let stream_key = queue_stream_key(&ns, &queue);
@@ -380,12 +393,7 @@ pub(crate) async fn resolve_consumer(
         })
         .await?;
     if resolution.invalid_projection {
-        log(
-            state,
-            LogLevel::Warn,
-            "queue_consumer_projection_invalid",
-            json!({ "ns": ns, "queue": queue }),
-        );
+        log_invalid_consumer_projection(state, ns, queue);
     }
     Ok(resolution.consumer)
 }
@@ -412,12 +420,7 @@ pub(crate) async fn resolve_consumer_batch(
         for (lookup, hash) in lookup_chunk.iter().zip(hashes) {
             let resolution = resolve_consumer_projection(lookup.ns, lookup.queue, &hash);
             if resolution.invalid_projection {
-                log(
-                    state,
-                    LogLevel::Warn,
-                    "queue_consumer_projection_invalid",
-                    json!({ "ns": lookup.ns, "queue": lookup.queue }),
-                );
+                log_invalid_consumer_projection(state, lookup.ns, lookup.queue);
             }
             resolved.push((*lookup, resolution));
         }

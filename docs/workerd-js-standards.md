@@ -160,6 +160,10 @@ retaining a socket or request-created promise across invocations. Use `RedisSess
 only when one invocation or one long-lived owning task intentionally holds the
 connection for a WATCH/transaction or subscription lifecycle.
 
+Transport-independent command construction and reply decoding belong to the shared
+typed command surface. `RedisClient` and `RedisSession` own their distinct connection
+lifetimes and expose additional operations only where those lifetimes require them.
+
 Do not add a generic pipeline escape hatch to application code. Add the smallest typed,
 bounded helper that can validate reply count, reply order, and domain decoding at the
 Redis owner.

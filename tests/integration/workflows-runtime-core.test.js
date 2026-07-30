@@ -54,6 +54,52 @@ test("workflow binding creates and reads an instance through workflows", async (
   const batch = await gatewayFetch(ns, "/shop/batch");
   assert.deepEqual(await readIntegrationJson(batch, 200, "workflow response"), { ids: ["batch-a", "batch-b"] });
 
+  const mixedBatch = serviceInternalPost(
+    "workflows",
+    9120,
+    "/internal/workflows/create-batch",
+    {
+      ns,
+      worker: "shop",
+      frozenVersion: version,
+      workflowName: "orders",
+      workflowKey,
+      className: "OrderWorkflow",
+      entries: [
+        { instanceId: "batch-a", params: { n: 4 } },
+        { instanceId: "batch-c", params: { n: 5 } },
+        { instanceId: "batch-c", params: { n: 6 } },
+        { instanceId: "batch-d", params: { n: 7 } },
+      ],
+    },
+  );
+  assert.equal(mixedBatch.status, 200, mixedBatch.body);
+  assert.deepEqual(
+    responseJson(mixedBatch).instances.map((/** @type {any} */ instance) => instance.id),
+    ["batch-c", "batch-d"],
+  );
+
+  const existingBatch = serviceInternalPost(
+    "workflows",
+    9120,
+    "/internal/workflows/create-batch",
+    {
+      ns,
+      worker: "shop",
+      frozenVersion: version,
+      workflowName: "orders",
+      workflowKey,
+      className: "OrderWorkflow",
+      entries: [
+        { instanceId: "batch-a" },
+        { instanceId: "batch-c" },
+        { instanceId: "batch-d" },
+      ],
+    },
+  );
+  assert.equal(existingBatch.status, 200, existingBatch.body);
+  assert.deepEqual(responseJson(existingBatch).instances, []);
+
   const firstPage = serviceInternalPost(
     "workflows",
     9120,
@@ -89,8 +135,27 @@ test("workflow binding creates and reads an instance through workflows", async (
   );
   assert.equal(secondPage.status, 200, secondPage.body);
   const secondPageBody = responseJson(secondPage);
-  assert.deepEqual(secondPageBody.instances.map((/** @type {any} */ entry) => entry.id), ["batch-b"]);
-  assert.equal(secondPageBody.cursor, null);
+  assert.deepEqual(secondPageBody.instances.map((/** @type {any} */ entry) => entry.id), ["batch-b", "batch-c"]);
+  assert.equal(secondPageBody.cursor, "4");
+
+  const thirdPage = serviceInternalPost(
+    "workflows",
+    9120,
+    "/internal/workflows/instances",
+    {
+      ns,
+      worker: "shop",
+      frozenVersion: version,
+      workflowName: "orders",
+      workflowKey,
+      className: "OrderWorkflow",
+      options: { limit: 2, cursor: secondPageBody.cursor },
+    },
+  );
+  assert.equal(thirdPage.status, 200, thirdPage.body);
+  const thirdPageBody = responseJson(thirdPage);
+  assert.deepEqual(thirdPageBody.instances.map((/** @type {any} */ entry) => entry.id), ["batch-d"]);
+  assert.equal(thirdPageBody.cursor, null);
 
   assert.ok(workflowKey);
 

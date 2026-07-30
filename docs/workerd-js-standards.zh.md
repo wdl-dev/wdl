@@ -100,6 +100,8 @@ WATCH/MULTI 行为应由一个 owner 负责。不要把 preflight read 和 commi
 
 Workerd I/O object 与创建它的 `IoContext` 绑定。共享 `RedisClient` 应保持 socket-per-call；相关命令应在一个 typed operation 内批处理，不要跨 invocation 保留 socket 或 request 创建的 Promise。只有当单个 invocation 或单个 long-lived owning task 明确需要在 WATCH/transaction 或 subscription lifecycle 内持有连接时，才使用 `RedisSession`。
 
+与 transport 无关的命令构造和 reply 解码属于共享 typed command surface。`RedisClient` 与 `RedisSession` 各自拥有不同的 connection lifecycle，仅在该 lifecycle 确有需要时暴露额外操作。
+
 不要向 application code 暴露 generic pipeline escape hatch。应在 Redis owner 处增加满足需求的最小 typed、bounded helper，并在那里校验 reply count、reply order 和领域解码。
 
 共享 RESP pipeline 与 transaction 应通过公共的 bounded command writer 写入。该 writer 保持完整 command framing 与 reply order，并把普通命令组成有界 buffer；单个超过目标大小的命令独占一个 write group。

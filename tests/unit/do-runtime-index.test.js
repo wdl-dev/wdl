@@ -4,6 +4,7 @@ import { beforeEach, test } from "node:test";
 import { doProtocolDataUrl } from "../helpers/load-do-protocol.js";
 import { sharedOwnerForwarderUrl } from "../helpers/load-owner-harness.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
+import { RUNTIME_BINDING_STUB_SOURCE } from "../helpers/mocks/runtime-bindings.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import {
   importSpecifierReplacements,
@@ -109,17 +110,7 @@ export async function forwardToOwner() { throw new Error("unexpected forward"); 
 export async function forwardConnectToOwner() { throw new Error("unexpected connect forward"); }
 `);
 const doTransportUrl = repositoryFileUrl("runtime/_wdl-do-transport.js");
-const emptyBindingUrl = stub(`
-export class KV {}
-export class Assets {}
-export class ServiceBinding {}
-export class QueueProducer {}
-export class D1Database {}
-export class R2Bucket {}
-export class DurableObjectNamespace {}
-export class DoAlarmBinding {}
-export class InternalAuthBackend {}
-`);
+const emptyBindingUrl = stub(RUNTIME_BINDING_STUB_SOURCE);
 
 // do-runtime/index.js is intentionally tested as the real dispatcher with
 // lightweight edge stubs. Keep this map in sync when index.js imports change.

@@ -8,6 +8,7 @@ import {
   delay,
   gatewayWorkerId,
   runtimeInternalPost,
+  structuredServiceLogEvents,
   uniqueNs,
   waitUntil,
   withServiceStopped,
@@ -27,7 +28,6 @@ import {
   redisXAdd,
   redisXGroupCreate,
   redisXGroupDestroy,
-  redisXInfoGroups,
   redisXLen,
   redisXPendingCount,
 } from "./helpers/redis.js";
@@ -38,6 +38,7 @@ import {
   deployQueueConsumerWorker,
   deployQueueProducer,
   setupQueueIntegrationSuite,
+  waitForQueueConsumerGroups,
 } from "./helpers/queue-scenarios.js";
 
 setupQueueIntegrationSuite();
@@ -184,10 +185,9 @@ test("queue consume repairs a missing group for an already registered stream", a
     { queue: queueName, maxBatchSize: 3, maxBatchTimeoutMs: 2000, maxRetries: 3 },
   ]);
   const streamKey = queueStreamKey(ns, queueName);
-  await waitUntil("queue group registered before deletion", async () => {
-    const groups = redisXInfoGroups(streamKey, { db: 1 });
-    return !groups.includes("missing") && groups.includes("wdl-scheduler");
-  }, { timeoutMs: 30_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups(streamKey, {
+    label: "queue group registered before deletion",
+  });
 
   redisXGroupDestroy(streamKey, "wdl-scheduler", { db: 1 });
   redisXAdd(
@@ -281,12 +281,9 @@ test("scheduler reconcile removes a registered stream that later becomes invalid
   const badStream = queueStreamKey(ns, badQueue);
   const healthyStream = queueStreamKey(ns, healthyQueue);
 
-  await waitUntil("both queue groups registered before stream corruption", async () => {
-    return [badStream, healthyStream].every((stream) => {
-      const groups = redisXInfoGroups(stream, { db: 1 });
-      return !groups.includes("missing") && groups.includes("wdl-scheduler");
-    });
-  }, { timeoutMs: 30_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups([badStream, healthyStream], {
+    label: "both queue groups registered before stream corruption",
+  });
 
   redisDel(badStream, { db: 1 });
   redisSet(badStream, "wrong-type", { db: 1 });
@@ -325,6 +322,29 @@ test("scheduler reconcile removes a registered stream that later becomes invalid
   }, { timeoutMs: 30_000, intervalMs: 500 });
 });
 
+test("scheduler reconcile warns when a consumer projection becomes malformed", async () => {
+  const ns = uniqueNs("qinvalidprojection");
+  const queueName = "jobs";
+  await deployConsumer(ns, DELIVERY_SET_RECORDER, [
+    { queue: queueName, maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 3 },
+  ]);
+  const streamKey = queueStreamKey(ns, queueName);
+  const consumerKey = queueConsumerKey(ns, queueName);
+  await waitForQueueConsumerGroups(streamKey, {
+    label: "queue group registered before projection corruption",
+  });
+
+  redisHSet(consumerKey, { max_batch_size: "0" });
+  try {
+    await waitUntil("malformed queue projection warning", async () => (
+      structuredServiceLogEvents("scheduler", "queue_consumer_projection_invalid")
+        .some((entry) => entry.ns === ns && entry.queue === queueName)
+    ), { timeoutMs: 15_000, intervalMs: 500 });
+  } finally {
+    redisHSet(consumerKey, { max_batch_size: "1" });
+  }
+});
+
 test("queue dispatch rereads authoritative consumer hash before delivery", async () => {
   const ns = uniqueNs("qfresh");
   const queueName = "freshq";
@@ -335,10 +355,10 @@ test("queue dispatch rereads authoritative consumer hash before delivery", async
     { queue: queueName, maxBatchSize: 1, maxBatchTimeoutMs: 2000, maxRetries: 3 },
   ]);
   const v1WorkerId = gatewayWorkerId(ns, "consumer", v1);
-  await waitUntil("consumer group created for initial version", async () => {
-    const out = redisXInfoGroups(streamKey, { db: 1 });
-    return !out.includes("missing") && out.includes("wdl-scheduler");
-  }, { timeoutMs: 10_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups(streamKey, {
+    label: "consumer group created for initial version",
+    timeoutMs: 10_000,
+  });
 
   redisXAdd(
     streamKey,

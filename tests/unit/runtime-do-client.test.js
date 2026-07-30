@@ -42,6 +42,29 @@ function headerValue(headers, name) {
 }
 
 /**
+ * @param {Record<string, string>} props
+ * @param {string} objectName
+ * @param {string} method
+ * @param {unknown[]} args
+ */
+function referenceRpcInvokeBody(props, objectName, method, args) {
+  const metadataBytes = new TextEncoder().encode(JSON.stringify({
+    ns: props.ns,
+    worker: props.worker,
+    version: props.version,
+    doStorageId: props.doStorageId,
+    className: props.className,
+    objectName,
+    kind: "rpc",
+    rpc: { method, args },
+  }));
+  const envelope = new Uint8Array(4 + metadataBytes.byteLength);
+  new DataView(envelope.buffer).setUint32(0, metadataBytes.byteLength, false);
+  envelope.set(metadataBytes, 4);
+  return envelope;
+}
+
+/**
  * @template T
  * @param {Promise<T>} promise
  * @param {string} message
@@ -544,6 +567,34 @@ test("DO RPC snapshots tenant arguments once before sizing and encoding", () => 
   const { metadata } = decodeDoEnvelope(envelope);
   assert.equal(reads, 1);
   assert.equal(/** @type {any} */ (metadata).rpc.args[0].payload, "stable");
+});
+
+test("DO RPC envelope preserves canonical metadata bytes", () => {
+  const props = {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+    className: "Room",
+  };
+  for (const { objectName, method, args } of [
+    { objectName: "room-a", method: "ping", args: [] },
+    {
+      objectName: "房间-1",
+      method: "save",
+      args: [{ text: "line\n雪", nested: [true, null, 1.25] }],
+    },
+    {
+      objectName: "room-large",
+      method: "append",
+      args: ["abc雪".repeat(4096)],
+    },
+  ]) {
+    assert.deepEqual(
+      rpcInvokeBody(props, objectName, method, args),
+      referenceRpcInvokeBody(props, objectName, method, args),
+    );
+  }
 });
 
 test("DurableObjectNamespace RPC rejects oversized args before transport", async () => {

@@ -939,7 +939,7 @@ mod tests {
         KV_LIST_CURSOR_OVERFLOW_MAX, KV_LIST_CURSOR_PREFIX, KV_LIST_LIMIT_DEFAULT,
         KV_LIST_LIMIT_MAX,
     };
-    use crate::test_support::parse_packed_commands;
+    use wdl_rust_common::test_support::parse_packed_commands;
 
     #[test]
     fn escape_glob_literal_escapes_scan_wildcards() {

@@ -1130,7 +1130,7 @@ function keyRevision(state, key) {
 function redisByteLength(value) {
   if (value == null) return 0;
   if (value instanceof Uint8Array) return value.byteLength;
-  return new TextEncoder().encode(String(value)).byteLength;
+  return utf8Encoder.encode(String(value)).byteLength;
 }
 
 /** @param {FakeRedisState} state @param {string} key */
@@ -1241,7 +1241,7 @@ function globToRegExp(glob) {
 /** @param {string | null} value @param {{ encodeGet?: boolean }} options */
 function encodeMaybe(value, options) {
   if (!options.encodeGet || value == null) return value;
-  return new TextEncoder().encode(value);
+  return utf8Encoder.encode(value);
 }
 
 /** @param {string | undefined} stored @param {string | Uint8Array} expected */

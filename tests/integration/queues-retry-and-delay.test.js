@@ -6,9 +6,8 @@ import {
   delay,
   deployAndPromote,
   gatewayWorkerId,
-  parseJsonText,
   runtimeInternalPost,
-  sh,
+  structuredServiceLogEvents,
   uniqueNs,
   waitUntil,
   withServiceStopped,
@@ -45,24 +44,9 @@ import {
 
 setupQueueIntegrationSuite();
 
-/** @returns {any[]} */
+/** @returns {Record<string, unknown>[]} */
 function queueTransitionFailureLogs() {
-  const raw = sh("docker compose logs --no-color --tail=500 scheduler");
-  /** @type {any[]} */
-  const failures = [];
-  for (const line of raw.split("\n")) {
-    const jsonStart = line.indexOf("{");
-    if (jsonStart < 0) continue;
-    const candidate = line.slice(jsonStart);
-    if (!candidate.includes("\"event\":\"queue_message_transition_failed\"")) continue;
-    try {
-      const entry = parseJsonText(candidate, "queue transition failure log");
-      if (entry.event === "queue_message_transition_failed") failures.push(entry);
-    } catch {
-      // Docker may interleave non-JSON service output with structured lines.
-    }
-  }
-  return failures;
+  return structuredServiceLogEvents("scheduler", "queue_message_transition_failed");
 }
 
 test("producer sendBatch batches delayed ZADD and emits one earliest-due wake", async () => {

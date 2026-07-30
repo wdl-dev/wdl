@@ -8,6 +8,7 @@ import {
   readRepositoryFile,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { RUNTIME_BINDING_STUB_SOURCE } from "../helpers/mocks/runtime-bindings.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
@@ -59,16 +60,7 @@ export function getLoadedWorkerStub({ env, ns, worker, version }) {
   return { workerId, stub: env.LOADER.get(workerId, async () => ({})) };
 }
 `);
-const emptyBindingUrl = moduleDataUrl(`
-export class KV {}
-export class Assets {}
-export class ServiceBinding {}
-export class QueueProducer {}
-export class D1Database {}
-export class R2Bucket {}
-export class DurableObjectNamespace {}
-export class InternalAuthBackend {}
-`);
+const emptyBindingUrl = moduleDataUrl(RUNTIME_BINDING_STUB_SOURCE);
 const emptyInternalUrl = moduleDataUrl(`export default class RuntimeInternal {}`);
 
 const IMPORT_STUBS = {

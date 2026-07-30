@@ -2,15 +2,13 @@ import { metrics } from "runtime-metrics";
 
 const utf8Encoder = new TextEncoder();
 
-/** @param {string} left @param {string} right */
-function compareUtf8(left, right) {
-  const a = utf8Encoder.encode(left);
-  const b = utf8Encoder.encode(right);
-  const length = Math.min(a.length, b.length);
+/** @param {{ bytes: Uint8Array }} left @param {{ bytes: Uint8Array }} right */
+function compareEncodedKeys(left, right) {
+  const length = Math.min(left.bytes.length, right.bytes.length);
   for (let i = 0; i < length; i += 1) {
-    if (a[i] !== b[i]) return a[i] - b[i];
+    if (left.bytes[i] !== right.bytes[i]) return left.bytes[i] - right.bytes[i];
   }
-  return a.length - b.length;
+  return left.bytes.length - right.bytes.length;
 }
 
 /** @param {number} value */
@@ -30,7 +28,10 @@ function canonicalJsonValue(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJsonValue).join(",")}]`;
   if (value && typeof value === "object") {
     const record = /** @type {Record<string, unknown>} */ (value);
-    return `{${Object.keys(record).toSorted(compareUtf8).map((key) => `${JSON.stringify(key)}:${canonicalJsonValue(record[key])}`).join(",")}}`;
+    const keys = Object.keys(record)
+      .map((key) => ({ key, bytes: utf8Encoder.encode(key) }));
+    keys.sort(compareEncodedKeys);
+    return `{${keys.map(({ key }) => `${JSON.stringify(key)}:${canonicalJsonValue(record[key])}`).join(",")}}`;
   }
   return typeof value === "number" ? canonicalJsonNumber(value) : JSON.stringify(value);
 }

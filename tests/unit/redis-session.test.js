@@ -19,13 +19,18 @@ const redisRespUrl = repositoryModuleDataUrl("shared/redis-resp.js", [
   [/from "shared-utf8";/, `from ${JSON.stringify(utf8Url)};`],
   [/from "\.\/errors\.js";/, `from ${JSON.stringify(errorsUrl)};`],
 ]);
+const redisCommandSurfaceUrl = repositoryModuleDataUrl("shared/redis-command-surface.js", [
+  [/from "shared-redis-resp";/g, `from ${JSON.stringify(redisRespUrl)};`],
+]);
 const redisSessionUrl = repositoryModuleDataUrl("shared/redis-session.js", [
   [/import \{ connect \} from "cloudflare:sockets";/, "const connect = null;"],
+  [/from "shared-redis-command-surface";/g, `from ${JSON.stringify(redisCommandSurfaceUrl)};`],
   [/from "shared-redis-resp";/g, `from ${JSON.stringify(redisRespUrl)};`],
   [/from "\.\/errors\.js";/, `from ${JSON.stringify(errorsUrl)};`],
 ]);
 const clientMod = await importRepositoryModule("shared/redis-command-client.js", [
   [/import \{ connect \} from "cloudflare:sockets";/, "const connect = null;"],
+  [/from "shared-redis-command-surface";/g, `from ${JSON.stringify(redisCommandSurfaceUrl)};`],
   [/from "shared-redis-resp";/g, `from ${JSON.stringify(redisRespUrl)};`],
   [/from "shared-redis-session";/g, `from ${JSON.stringify(redisSessionUrl)};`],
   [/from "\.\/errors\.js";/, `from ${JSON.stringify(errorsUrl)};`],
@@ -98,6 +103,30 @@ function scriptedConnect(socket) {
       return socket;
     },
   };
+}
+
+/**
+ * @param {string} method
+ * @param {string} reply
+ * @param {(surface: any) => Promise<unknown>} invoke
+ * @param {unknown} expected
+ * @param {string} expectedWrite
+ */
+function testRedisCommandSurface(method, reply, invoke, expected, expectedWrite) {
+  for (const owner of ["RedisClient", "RedisSession"]) {
+    test(`${owner}.${method} follows the shared typed command contract`, async () => {
+      const socket = makeFakeSocket([bytes(reply)]);
+      const { connect, state } = scriptedConnect(socket);
+      const client = new RedisClient("x", { connect });
+      const actual = owner === "RedisClient"
+        ? await invoke(client)
+        : await client.session(invoke);
+
+      assert.deepEqual(actual, expected);
+      assert.equal(state.count, 1);
+      assert.equal(decode(socket._writes[0]), expectedWrite);
+    });
+  }
 }
 
 /** @param {string[]} chunks */
@@ -236,25 +265,17 @@ test("RedisSession.open fails explicitly after close", async () => {
   await assert.rejects(() => session.open(), /Redis session closed/);
 });
 
-test("RedisSession.hGetAllMany batches independent HGETALL reads", async () => {
-  const socket = makeFakeSocket([
-    bytes("*4\r\n$4\r\nkind\r\n$2\r\nns\r\n$2\r\nns\r\n$6\r\ndemo-a\r\n*2\r\n$4\r\nkind\r\n$3\r\nops\r\n"),
-  ]);
-  const { connect } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const records = await client.session((/** @type {any} */ s) =>
-    s.hGetAllMany(["auth:token:a", "auth:token:b"]));
-
-  assert.deepEqual(records, [
+testRedisCommandSurface(
+  "hGetAllMany",
+  "*4\r\n$4\r\nkind\r\n$2\r\nns\r\n$2\r\nns\r\n$6\r\ndemo-a\r\n*2\r\n$4\r\nkind\r\n$3\r\nops\r\n",
+  (surface) => surface.hGetAllMany(["auth:token:a", "auth:token:b"]),
+  [
     { kind: "ns", ns: "demo-a" },
     { kind: "ops" },
-  ]);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:a\r\n" +
-      "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:b\r\n"
-  );
-});
+  ],
+  "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:a\r\n" +
+    "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:b\r\n"
+);
 
 test("RedisSession.hGetAllManyAndHKeysMany preserves grouped reply order", async () => {
   const socket = makeFakeSocket([
@@ -385,59 +406,14 @@ test("RedisClient.sCardMany batches independent set cardinalities", async () => 
   );
 });
 
-test("RedisClient.hGetAllMany batches independent HGETALL reads", async () => {
-  const socket = makeFakeSocket([
-    bytes("*4\r\n$4\r\nkind\r\n$2\r\nns\r\n$2\r\nns\r\n$6\r\ndemo-a\r\n*2\r\n$4\r\nkind\r\n$3\r\nops\r\n"),
-  ]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const records = await client.hGetAllMany(["auth:token:a", "auth:token:b"]);
-
-  assert.deepEqual(records, [
-    { kind: "ns", ns: "demo-a" },
-    { kind: "ops" },
-  ]);
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:a\r\n" +
-      "*2\r\n$7\r\nHGETALL\r\n$12\r\nauth:token:b\r\n"
-  );
-});
-
-test("RedisSession.sMembersMany batches independent SMEMBERS reads", async () => {
-  const socket = makeFakeSocket([
-    bytes("*2\r\n$3\r\none\r\n$3\r\ntwo\r\n*1\r\n$5\r\nthree\r\n"),
-  ]);
-  const { connect } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const members = await client.session((/** @type {any} */ session) =>
-    session.sMembersMany(["set:a", "set:b"]));
-
-  assert.deepEqual(members, [["one", "two"], ["three"]]);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$8\r\nSMEMBERS\r\n$5\r\nset:a\r\n" +
-      "*2\r\n$8\r\nSMEMBERS\r\n$5\r\nset:b\r\n"
-  );
-});
-
-test("RedisClient.sMembersMany batches independent SMEMBERS reads", async () => {
-  const socket = makeFakeSocket([
-    bytes("*2\r\n$3\r\none\r\n$3\r\ntwo\r\n*1\r\n$5\r\nthree\r\n"),
-  ]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const members = await client.sMembersMany(["set:a", "set:b"]);
-
-  assert.deepEqual(members, [["one", "two"], ["three"]]);
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$8\r\nSMEMBERS\r\n$5\r\nset:a\r\n" +
-      "*2\r\n$8\r\nSMEMBERS\r\n$5\r\nset:b\r\n"
-  );
-});
+testRedisCommandSurface(
+  "sMembersMany",
+  "*2\r\n$3\r\none\r\n$3\r\ntwo\r\n*1\r\n$5\r\nthree\r\n",
+  (surface) => surface.sMembersMany(["set:a", "set:b"]),
+  [["one", "two"], ["three"]],
+  "*2\r\n$8\r\nSMEMBERS\r\n$5\r\nset:a\r\n" +
+    "*2\r\n$8\r\nSMEMBERS\r\n$5\r\nset:b\r\n"
+);
 
 test("RedisClient.hGetAllAndGet reads a hash and string on one socket", async () => {
   const socket = makeFakeSocket([
@@ -636,37 +612,19 @@ test("RedisSession.getMany batches independent GET reads", async () => {
   );
 });
 
-test("RedisSession.hGetMany batches independent HGET reads", async () => {
-  const socket = makeFakeSocket([bytes("$2\r\nv1\r\n$-1\r\n$2\r\nv3\r\n")]);
-  const { connect } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const values = await client.session((/** @type {any} */ s) =>
-    s.hGetMany([["hash:1", "field"], ["hash:2", "field"], ["hash:3", "other"]]));
-
-  assert.deepEqual(values, ["v1", null, "v3"]);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*3\r\n$4\r\nHGET\r\n$6\r\nhash:1\r\n$5\r\nfield\r\n" +
-      "*3\r\n$4\r\nHGET\r\n$6\r\nhash:2\r\n$5\r\nfield\r\n" +
-      "*3\r\n$4\r\nHGET\r\n$6\r\nhash:3\r\n$5\r\nother\r\n"
-  );
-});
-
-test("RedisClient.hGetMany batches independent HGET reads", async () => {
-  const socket = makeFakeSocket([bytes("$2\r\nv1\r\n$-1\r\n$2\r\nv3\r\n")]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const values = await client.hGetMany([["hash:1", "field"], ["hash:2", "field"], ["hash:3", "other"]]);
-
-  assert.deepEqual(values, ["v1", null, "v3"]);
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*3\r\n$4\r\nHGET\r\n$6\r\nhash:1\r\n$5\r\nfield\r\n" +
-      "*3\r\n$4\r\nHGET\r\n$6\r\nhash:2\r\n$5\r\nfield\r\n" +
-      "*3\r\n$4\r\nHGET\r\n$6\r\nhash:3\r\n$5\r\nother\r\n"
-  );
-});
+testRedisCommandSurface(
+  "hGetMany",
+  "$2\r\nv1\r\n$-1\r\n$2\r\nv3\r\n",
+  (surface) => surface.hGetMany([
+    ["hash:1", "field"],
+    ["hash:2", "field"],
+    ["hash:3", "other"],
+  ]),
+  ["v1", null, "v3"],
+  "*3\r\n$4\r\nHGET\r\n$6\r\nhash:1\r\n$5\r\nfield\r\n" +
+    "*3\r\n$4\r\nHGET\r\n$6\r\nhash:2\r\n$5\r\nfield\r\n" +
+    "*3\r\n$4\r\nHGET\r\n$6\r\nhash:3\r\n$5\r\nother\r\n"
+);
 
 test("RedisClient.getWithTime batches GET and TIME on one socket", async () => {
   const socket = makeFakeSocket([bytes("$5\r\nowner\r\n*2\r\n$10\r\n1700000000\r\n$6\r\n123456\r\n")]);

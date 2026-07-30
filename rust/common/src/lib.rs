@@ -29,6 +29,8 @@ pub mod request_id;
 pub mod shutdown;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_env;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod text;
 pub mod time;
 pub mod worker_contract;
