@@ -144,6 +144,7 @@ const {
 } = mod;
 const {
   estimateFinalWorkerLoaderCodeBytes,
+  estimateWorkerLoaderUserCodeBytes,
   injectRuntimeModulesForHostBindings,
 } = codeBudgetMod;
 
@@ -1647,6 +1648,41 @@ test("workerLoader code estimator matches runtime wrapper injection exactly", ()
     /"\.\.\/_wdl-cloudflare-workflows\.js"/
   );
   assert.match(/** @type {string} */ (workerCode.modules["_wdl-wrapper.js"]), new RegExp(entrypoint));
+});
+
+test("workerLoader code estimator reuses an exact user-module byte subtotal", () => {
+  const source = 'export default { fetch() { return new Response("cafe\u0301"); } };';
+  const data = new Uint8Array([0, 1, 2, 255]);
+  const meta = {
+    mainModule: "src/worker.js",
+    modules: {
+      "src/worker.js": { type: "module" },
+      "asset.bin": { type: "data" },
+    },
+    bindings: { CACHE: { type: "kv", id: "cache" } },
+  };
+  const normalized = [
+    ["src/worker.js", Buffer.from(source)],
+    ["asset.bin", data],
+  ];
+  const userCodeBytes = estimateWorkerLoaderUserCodeBytes({ normalized, meta });
+
+  assert.equal(userCodeBytes, Buffer.byteLength(source, "utf8") + data.byteLength);
+  assert.equal(
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized,
+      meta,
+      runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+      userCodeBytes,
+    }),
+    estimateFinalWorkerLoaderCodeBytes({
+      mainModule: meta.mainModule,
+      normalized,
+      meta,
+      runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+    })
+  );
 });
 
 test("workerLoader code estimator does not rewrite CommonJS workflow strings", () => {

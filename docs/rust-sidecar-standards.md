@@ -202,9 +202,11 @@ explicit.
 - Use `wdl_rust_common::redis_eval::StaticRedisScript` for direct Lua execution so
   steady-state calls use EVALSHA and script-cache loss is recovered through SCRIPT
   LOAD/NOSCRIPT handling. Keep script bodies and replay policy in the owning service.
-- Keep Lua source-based EVAL in pipelines unless the owner has a proven protocol for
-  recovering a partially executed pipeline. Never retry an entire mixed pipeline on
-  NOSCRIPT: commands before the failure may already have committed.
+- Use the same owner for pipelined Lua. A singleton invocation uses source EVAL; repeated
+  invocations of one script prepend one ignored `SCRIPT LOAD` in the same pipeline and
+  then use EVALSHA. Command ordering makes the script available before those invocations
+  without replaying the pipeline. Never retry an entire mixed pipeline on NOSCRIPT:
+  commands before the failure may already have committed.
 - Service error types own their machine code, human message, and HTTP status. Do not
   reconstruct HTTP status from string codes in a separate server layer.
 - Redis schema markers should fail closed when the persisted shape does not match the

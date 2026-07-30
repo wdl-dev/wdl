@@ -26,6 +26,7 @@ import {
   redisSet,
   redisXAdd,
   redisXGroupCreate,
+  redisXGroupDestroy,
   redisXInfoGroups,
   redisXLen,
   redisXPendingCount,
@@ -174,6 +175,38 @@ test("scheduler reconcile restores multiple pre-existing consumer groups", async
     "x-worker-id": consumerWorkerId,
   }, ""));
   assert.deepEqual(snapshot.bodies.toSorted(), ["body-0", "body-1", "body-2"]);
+});
+
+test("queue consume repairs a missing group for an already registered stream", async () => {
+  const ns = uniqueNs("qnogroup");
+  const queueName = "orders";
+  const consumerVersion = await deployConsumer(ns, DELIVERY_SET_RECORDER, [
+    { queue: queueName, maxBatchSize: 3, maxBatchTimeoutMs: 2000, maxRetries: 3 },
+  ]);
+  const streamKey = queueStreamKey(ns, queueName);
+  await waitUntil("queue group registered before deletion", async () => {
+    const groups = redisXInfoGroups(streamKey, { db: 1 });
+    return !groups.includes("missing") && groups.includes("wdl-scheduler");
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+
+  redisXGroupDestroy(streamKey, "wdl-scheduler", { db: 1 });
+  redisXAdd(
+    streamKey,
+    queueStreamMessageFields({
+      id: "after-group-delete",
+      body: "after-group-delete",
+      contentType: "text",
+      firstSeenMs: 1,
+    }),
+    { db: 1 }
+  );
+
+  const consumerWorkerId = gatewayWorkerId(ns, "consumer", consumerVersion);
+  await waitUntil("message delivered after forced group repair", async () => {
+    const res = runtimeInternalPost("/", { "x-worker-id": consumerWorkerId }, "");
+    return res.status === 200
+      && responseJson(res).bodies.includes("after-group-delete");
+  }, { timeoutMs: 30_000, intervalMs: 500 });
 });
 
 test("scheduler reconcile isolates a bad stream and continues into later consumer batches", async () => {

@@ -191,12 +191,33 @@ async fn load_consumer_hash_batch(
         .await
 }
 
+fn needs_queue_group_reconcile(
+    already_registered: bool,
+    stream_is_live: bool,
+    force_group_reconcile: bool,
+) -> bool {
+    force_group_reconcile || !already_registered || !stream_is_live
+}
+
 pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
+    queue_reconcile_with_groups(state, false).await
+}
+
+pub(crate) async fn queue_reconcile_after_nogroup(state: AppState) -> SchedulerResult<()> {
+    queue_reconcile_with_groups(state, true).await
+}
+
+async fn queue_reconcile_with_groups(
+    state: AppState,
+    force_group_reconcile: bool,
+) -> SchedulerResult<()> {
     let mut seen = HashSet::new();
     let mut registry_changed = false;
     let mut reconcile_error_count = 0usize;
     let mut first_reconcile_error = None;
     let consumer_keys = indexed_existing_keys(&state, QUEUE_CONSUMER_INDEX_KEY, "hash").await?;
+    let streams = indexed_existing_data_keys(&state, QUEUE_STREAM_INDEX_KEY, "stream").await?;
+    let mut known_streams = streams.into_iter().collect::<HashSet<_>>();
     for consumer_key_chunk in consumer_keys.chunks(QUEUE_REDIS_READ_BATCH_SIZE) {
         let consumer_hashes = load_consumer_hash_batch(&state, consumer_key_chunk).await?;
         let mut resolved = Vec::with_capacity(consumer_key_chunk.len());
@@ -210,14 +231,34 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
             let stream_key = queue_stream_key(&ns, &queue);
             resolved.push((stream_key, consumer));
         }
-        let stream_keys = resolved
+        let (needs_group, already_registered): (Vec<_>, Vec<_>) = {
+            let registry = state.queues.registry.read().await;
+            resolved.into_iter().partition(|(stream_key, _)| {
+                needs_queue_group_reconcile(
+                    registry.contains_key(stream_key),
+                    known_streams.contains(stream_key),
+                    force_group_reconcile,
+                )
+            })
+        };
+        {
+            let mut registry = state.queues.registry.write().await;
+            for (stream_key, consumer) in already_registered {
+                seen.insert(stream_key.clone());
+                if registry.get(&stream_key) != Some(&consumer) {
+                    registry_changed = true;
+                }
+                registry.insert(stream_key, consumer);
+            }
+        }
+        let stream_keys = needs_group
             .iter()
             .map(|(stream_key, _)| stream_key.clone())
             .collect::<Vec<_>>();
         let group_results = match reconcile_queue_groups(&state, &stream_keys).await {
             Ok(results) => results,
             Err(err) => {
-                reconcile_error_count += resolved.len();
+                reconcile_error_count += needs_group.len();
                 first_reconcile_error.get_or_insert_with(|| err.message.clone());
                 // The whole batch has an unknown outcome. Preserve any prior
                 // in-memory consumers for these streams while later chunks
@@ -227,17 +268,18 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
             }
         };
         let mut registry = state.queues.registry.write().await;
-        for ((stream_key, consumer), group_result) in resolved.into_iter().zip(group_results) {
+        for ((stream_key, consumer), group_result) in needs_group.into_iter().zip(group_results) {
             if let Err(message) = group_result {
                 reconcile_error_count += 1;
                 first_reconcile_error.get_or_insert(message);
                 continue;
             }
             seen.insert(stream_key.clone());
-            let previous = registry.insert(stream_key, consumer.clone());
-            if previous.as_ref() != Some(&consumer) {
+            known_streams.insert(stream_key.clone());
+            if registry.get(&stream_key) != Some(&consumer) {
                 registry_changed = true;
             }
+            registry.insert(stream_key, consumer);
         }
     }
     {
@@ -252,12 +294,7 @@ pub(crate) async fn queue_reconcile(state: AppState) -> SchedulerResult<()> {
     // final retain so blocking reads see the registry state produced by this pass.
     refresh_consumer_streams(&state).await;
 
-    let streams = indexed_existing_data_keys(&state, QUEUE_STREAM_INDEX_KEY, "stream").await?;
-    {
-        let mut known = state.queues.known_streams.write().await;
-        known.clear();
-        known.extend(streams);
-    }
+    *state.queues.known_streams.write().await = known_streams;
     let delayed = indexed_existing_data_keys(&state, QUEUE_DELAYED_INDEX_KEY, "zset").await?;
     let delayed_changed = {
         let delayed = delayed.into_iter().collect::<HashSet<_>>();
@@ -634,6 +671,14 @@ mod tests {
         let err = parse_reconcile_group_reply(vec![(7, String::new())], 1)
             .expect_err("unknown script statuses must fail closed");
         assert_eq!(err.code, "internal_error");
+    }
+
+    #[test]
+    fn queue_group_reconcile_skips_registered_streams_unless_forced() {
+        assert!(!needs_queue_group_reconcile(true, true, false));
+        assert!(needs_queue_group_reconcile(false, true, false));
+        assert!(needs_queue_group_reconcile(true, false, false));
+        assert!(needs_queue_group_reconcile(true, true, true));
     }
 
     #[test]

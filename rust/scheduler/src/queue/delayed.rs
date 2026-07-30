@@ -6,7 +6,7 @@ use serde_json::json;
 use tokio::time::sleep;
 use wdl_rust_common::hash::fnv1a64;
 use wdl_rust_common::queue_keys::{QUEUE_DELAYED_WAKE_KEY_FIELD, QUEUE_DELAYED_WAKE_STREAM};
-use wdl_rust_common::redis_eval::append_eval_cmd;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 
 use crate::{
     AppState, LogLevel, Metrics, SERVICE, SchedulerError, SchedulerResult, log, now_ms,
@@ -51,6 +51,11 @@ end
 redis.call("DEL", KEYS[1])
 return 1
 "#;
+
+static MOVE_CLAIMED_DELAYED_MEMBER: StaticRedisScript =
+    StaticRedisScript::new(MOVE_CLAIMED_DELAYED_MEMBER_SCRIPT);
+static DROP_CLAIMED_DELAYED_MEMBER: StaticRedisScript =
+    StaticRedisScript::new(DROP_CLAIMED_DELAYED_MEMBER_SCRIPT);
 
 struct DelayedQueueProbe {
     delayed_key: String,
@@ -306,11 +311,12 @@ fn delayed_mutation_pipeline(
     corrupt: &[(String, String)],
 ) -> redis::Pipeline {
     let mut pipe = redis::pipe();
+    let move_script = MOVE_CLAIMED_DELAYED_MEMBER.prepare_pipeline(&mut pipe, moved.len());
+    let drop_script = DROP_CLAIMED_DELAYED_MEMBER.prepare_pipeline(&mut pipe, corrupt.len());
     let trim_arg = trim.map(|value| value.to_string()).unwrap_or_default();
     for (member, claim_key, entry) in moved {
-        append_eval_cmd(
+        move_script.append(
             &mut pipe,
-            MOVE_CLAIMED_DELAYED_MEMBER_SCRIPT,
             &[claim_key.as_str(), delayed_key, target_key],
             &[instance_id, member.as_str(), trim_arg.as_str()],
         );
@@ -319,9 +325,8 @@ fn delayed_mutation_pipeline(
         }
     }
     for (member, claim_key) in corrupt {
-        append_eval_cmd(
+        drop_script.append(
             &mut pipe,
-            DROP_CLAIMED_DELAYED_MEMBER_SCRIPT,
             &[claim_key.as_str(), delayed_key],
             &[instance_id, member.as_str()],
         );

@@ -163,7 +163,7 @@ test("workflow replay canonical JSON matches Rust canonical form for cache compa
   }
 });
 
-test("workflow replay cache isolates entries by run token", async () => {
+test("workflow replay cache reuses entries across claims in one incarnation", async () => {
   const {
     _resetWorkflowReplayCacheForTest,
     getWorkflowReplayCache,
@@ -173,29 +173,20 @@ test("workflow replay cache isolates entries by run token", async () => {
   const gaugeStartIndex = metricsState().gauges.length;
 
   const oldClaim = getWorkflowReplayCache(runWithToken(0, "run-old"));
-  rememberWorkflowReplayStep(oldClaim, 0, { status: "completed", output: "stale-0" });
-  rememberWorkflowReplayStep(oldClaim, 1, { status: "completed", output: "stale-1" });
-  rememberWorkflowReplayStep(oldClaim, 2, { status: "completed", output: "stale-2" });
+  rememberWorkflowReplayStep(oldClaim, 0, { status: "completed", output: "cached-0" });
+  rememberWorkflowReplayStep(oldClaim, 1, { status: "completed", output: "cached-1" });
+  rememberWorkflowReplayStep(oldClaim, 2, { status: "completed", output: "cached-2" });
+  oldClaim.complete = true;
 
   const newClaim = getWorkflowReplayCache(runWithToken(0, "run-new"));
-  assert.notEqual(oldClaim, newClaim);
-  assert.equal(oldClaim.steps.has(0), true);
-  assert.equal(newClaim.steps.has(0), false);
+  assert.equal(oldClaim, newClaim);
+  assert.equal(newClaim.complete, false);
+  assert.equal(newClaim.steps.get(0)?.output, "cached-0");
   assert.equal(latestGaugeSince("workflow_replay_cache_instances", gaugeStartIndex), 1);
-  assert.equal(latestGaugeSince("workflow_replay_cache_steps", gaugeStartIndex), 0);
-  rememberWorkflowReplayStep(newClaim, 1, { status: "completed", output: "fresh" });
-  assert.equal(newClaim.steps.has(1), true);
-  assert.equal(oldClaim.steps.has(1), true);
-  assert.equal(newClaim.steps.get(1)?.output, "fresh");
-  assert.equal(oldClaim.steps.get(1)?.output, "stale-1");
-  assert.equal(latestGaugeSince("workflow_replay_cache_instances", gaugeStartIndex), 1);
-  assert.equal(latestGaugeSince("workflow_replay_cache_steps", gaugeStartIndex), 1);
+  assert.equal(latestGaugeSince("workflow_replay_cache_steps", gaugeStartIndex), 3);
 
-  const stepGaugeBeforeStaleWrite = latestGaugeSince("workflow_replay_cache_steps", gaugeStartIndex);
-  rememberWorkflowReplayStep(oldClaim, 3, { status: "completed", output: "ignored" });
-  assert.equal(oldClaim.steps.has(3), true);
-  assert.equal(
-    latestGaugeSince("workflow_replay_cache_steps", gaugeStartIndex),
-    stepGaugeBeforeStaleWrite,
-  );
+  newClaim.complete = true;
+  assert.equal(getWorkflowReplayCache(runWithToken(0, "run-new")).complete, true);
+  assert.equal(latestGaugeSince("workflow_replay_cache_instances", gaugeStartIndex), 1);
+  assert.equal(latestGaugeSince("workflow_replay_cache_steps", gaugeStartIndex), 3);
 });

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 
@@ -18,6 +19,10 @@ const CARDINALITY_WARN_LIMIT: usize = 100;
 const METRIC_SHARDS: usize = 16;
 #[cfg(feature = "axum")]
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+thread_local! {
+    static METRIC_KEY_BUFFER: RefCell<String> = const { RefCell::new(String::new()) };
+}
 
 pub struct MetricStore {
     counters: Vec<Mutex<HashMap<String, MetricSample>>>,
@@ -50,69 +55,73 @@ struct CardinalityState {
 
 impl MetricStore {
     pub fn increment(&self, name: &str, labels: &[(&str, &str)], delta: f64) {
-        let key = metric_key_for_label_pairs(name, labels);
-        let mut counters = lock_metric(&self.counters[metric_shard(&key)]);
-        let mut inserted = false;
-        counters
-            .entry(key)
-            .and_modify(|sample| sample.value += delta)
-            .or_insert_with(|| {
-                inserted = true;
-                MetricSample {
-                    name: name.to_string(),
-                    labels: labels_map(labels),
-                    value: delta,
-                }
-            });
-        drop(counters);
+        let inserted = with_metric_key(name, labels, |key| {
+            let mut counters = lock_metric(&self.counters[metric_shard(key)]);
+            if let Some(sample) = counters.get_mut(key) {
+                sample.value += delta;
+                false
+            } else {
+                counters.insert(
+                    key.to_string(),
+                    MetricSample {
+                        name: name.to_string(),
+                        labels: labels_map(labels),
+                        value: delta,
+                    },
+                );
+                true
+            }
+        });
         if inserted {
             self.track_series(name);
         }
     }
 
     pub fn observe(&self, name: &str, labels: &[(&str, &str)], value: f64) {
-        let key = metric_key_for_label_pairs(name, labels);
-        let mut summaries = lock_metric(&self.summaries[metric_shard(&key)]);
-        let mut inserted = false;
-        summaries
-            .entry(key)
-            .and_modify(|sample| {
+        let inserted = with_metric_key(name, labels, |key| {
+            let mut summaries = lock_metric(&self.summaries[metric_shard(key)]);
+            if let Some(sample) = summaries.get_mut(key) {
                 sample.count += 1;
                 sample.sum += value;
                 sample.max = sample.max.max(value);
-            })
-            .or_insert_with(|| {
-                inserted = true;
-                SummarySample {
-                    name: name.to_string(),
-                    labels: labels_map(labels),
-                    count: 1,
-                    sum: value,
-                    max: value,
-                }
-            });
-        drop(summaries);
+                false
+            } else {
+                summaries.insert(
+                    key.to_string(),
+                    SummarySample {
+                        name: name.to_string(),
+                        labels: labels_map(labels),
+                        count: 1,
+                        sum: value,
+                        max: value,
+                    },
+                );
+                true
+            }
+        });
         if inserted {
             self.track_series(name);
         }
     }
 
     pub fn add_gauge(&self, name: &str, labels: &[(&str, &str)], delta: f64) {
-        let key = metric_key_for_label_pairs(name, labels);
-        let mut gauges = lock_metric(&self.gauges[metric_shard(&key)]);
-        let mut inserted = false;
-        gauges
-            .entry(key)
-            .and_modify(|sample| sample.value += delta)
-            .or_insert_with(|| {
-                inserted = true;
-                MetricSample {
-                    name: name.to_string(),
-                    labels: labels_map(labels),
-                    value: delta,
-                }
-            });
-        drop(gauges);
+        let inserted = with_metric_key(name, labels, |key| {
+            let mut gauges = lock_metric(&self.gauges[metric_shard(key)]);
+            if let Some(sample) = gauges.get_mut(key) {
+                sample.value += delta;
+                false
+            } else {
+                gauges.insert(
+                    key.to_string(),
+                    MetricSample {
+                        name: name.to_string(),
+                        labels: labels_map(labels),
+                        value: delta,
+                    },
+                );
+                true
+            }
+        });
         if inserted {
             self.track_series(name);
         }
@@ -255,23 +264,41 @@ pub fn metric_key(name: &str, labels: &BTreeMap<String, String>) -> String {
     format!("{name}|{suffix}")
 }
 
+fn with_metric_key<R>(name: &str, labels: &[(&str, &str)], use_key: impl FnOnce(&str) -> R) -> R {
+    METRIC_KEY_BUFFER.with_borrow_mut(|key| {
+        write_metric_key(key, name, labels);
+        use_key(key)
+    })
+}
+
+#[cfg(test)]
 fn metric_key_for_label_pairs(name: &str, labels: &[(&str, &str)]) -> String {
-    if labels.is_empty() {
-        return format!("{name}|");
-    }
-    let mut sorted = labels.to_vec();
-    sorted.sort_by(|left, right| left.0.cmp(right.0));
-    if sorted.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return metric_key(name, &labels_map(labels));
-    }
-    let label_len = sorted
-        .iter()
-        .map(|(key, value)| key.len() + 1 + value.len())
-        .sum::<usize>();
-    let mut out =
-        String::with_capacity(name.len() + 1 + label_len + sorted.len().saturating_sub(1));
+    let mut out = String::new();
+    write_metric_key(&mut out, name, labels);
+    out
+}
+
+fn write_metric_key(out: &mut String, name: &str, labels: &[(&str, &str)]) {
+    out.clear();
     out.push_str(name);
     out.push('|');
+    if labels.is_empty() {
+        return;
+    }
+    let mut sorted = labels.to_vec();
+    sorted.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    if sorted.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        let labels = labels_map(labels);
+        for (index, (key, value)) in labels.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(key);
+            out.push('=');
+            out.push_str(value);
+        }
+        return;
+    }
     for (index, (key, value)) in sorted.into_iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -280,7 +307,6 @@ fn metric_key_for_label_pairs(name: &str, labels: &[(&str, &str)]) -> String {
         out.push('=');
         out.push_str(value);
     }
-    out
 }
 
 pub fn format_labels(labels: &BTreeMap<String, String>) -> String {
@@ -446,18 +472,28 @@ mod tests {
     }
 
     #[test]
-    fn metric_store_materializes_label_maps_only_for_new_series() {
+    fn metric_store_reuses_lookup_keys_and_materializes_label_maps_only_for_new_series() {
         let source = include_str!("metrics.rs");
         for method in ["pub fn increment", "pub fn observe", "pub fn add_gauge"] {
             let start = source.find(method).expect("metric method exists");
             let end = source[start..]
-                .find("drop(")
-                .expect("metric method drops shard lock")
+                .find("if inserted")
+                .expect("metric method tracks newly inserted series")
                 + start;
             let body = &source[start..end];
             assert!(
-                body.contains("metric_key_for_label_pairs"),
-                "{method} should build lookup keys from borrowed label pairs"
+                body.contains("with_metric_key"),
+                "{method} should reuse the thread-local lookup key buffer"
+            );
+            let lookup = body
+                .find(".get_mut(key)")
+                .expect("existing metric series use a borrowed key lookup");
+            let allocation = body
+                .find("key.to_string()")
+                .expect("new metric series retain an owned key");
+            assert!(
+                lookup < allocation,
+                "{method} must allocate an owned metric key only after a lookup miss"
             );
             assert!(
                 !body.contains("let labels = labels_map(labels);"),

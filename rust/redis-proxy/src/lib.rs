@@ -238,13 +238,13 @@ fn record_request_complete(
     let elapsed = started_at.elapsed();
     let duration_ms = elapsed.as_secs_f64() * 1000.0;
     let log_duration_ms = duration_ms_for_log(elapsed);
-    let status_label = status.as_u16().to_string();
+    let status_label = status.as_str();
     state.metrics.increment(
         "requests",
         &[
             ("service", SERVICE),
             ("route", route),
-            ("status", &status_label),
+            ("status", status_label),
         ],
         1.0,
     );
@@ -259,7 +259,7 @@ fn record_request_complete(
             &[
                 ("service", SERVICE),
                 ("route", route),
-                ("status", &status_label),
+                ("status", status_label),
             ],
             1.0,
         );

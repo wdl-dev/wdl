@@ -9,6 +9,10 @@ pub(super) static FINALIZE_DO_ALARM: StaticRedisScript =
 pub(super) static DISCARD_CORRUPT_DO_ALARM: StaticRedisScript =
     StaticRedisScript::new(DISCARD_CORRUPT_DO_ALARM_SCRIPT);
 pub(super) static RETRY_DO_ALARM: StaticRedisScript = StaticRedisScript::new(RETRY_DO_ALARM_SCRIPT);
+pub(super) static CLEANUP_DO_ALARM_FOR_STORAGE: StaticRedisScript =
+    StaticRedisScript::new(CLEANUP_DO_ALARM_FOR_STORAGE_SCRIPT);
+pub(super) static MOVE_DUE_DO_ALARM: StaticRedisScript =
+    StaticRedisScript::new(MOVE_DUE_DO_ALARM_SCRIPT);
 
 pub(super) const SET_DO_ALARM_SCRIPT: &str = r#"
 local generation = tonumber(redis.call("HGET", KEYS[1], "generation") or "0")

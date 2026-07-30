@@ -129,10 +129,13 @@ Queue dispatch is stream-driven rather than wall-clock driven:
 2. Scheduler repairs `queue:index:*` discovery sets from authoritative hashes, streams,
    and delayed ZSETs at startup and every `SCHEDULER_SWEEP_MS` (five minutes by
    default). The 1.5-second reconcile loop reads those indexes, removes stale members,
-   creates the fixed `wdl-scheduler` consumer group for live streams, and keeps an
-   in-memory set of known delayed queues. Writers remain responsible for updating the
-   indexes on normal writes; periodic repair bounds recovery from an interrupted
-   data-plus-index write without putting a keyspace scan on the reconcile hot path.
+   creates the fixed `wdl-scheduler` consumer group for newly registered streams, and
+   keeps an in-memory set of known delayed queues. Existing registered streams retain
+   their group without repeating `XGROUP CREATE`; an observed `NOGROUP` forces a
+   synchronous group repair before the consume loop retries. Writers remain responsible
+   for updating the indexes on normal writes; periodic repair bounds recovery from an
+   interrupted data-plus-index write without putting a keyspace scan on the reconcile
+   hot path.
    Missing optional consumer fields default to
    `max_batch_size=10`, `max_batch_timeout_ms=5000`, `max_retries=3`,
    `retry_delay_secs=0`, and no `dead_letter_queue`. Present malformed/out-of-range

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use redis::Pipeline;
 use serde_json::json;
-use wdl_rust_common::redis_eval::append_eval_cmd;
+use wdl_rust_common::redis_eval::{PreparedPipelineScript, StaticRedisScript};
 
 use crate::{
     AppState, CONSUMER_GROUP, LogLevel, Metrics, SERVICE, SchedulerError, SchedulerResult, log,
@@ -74,6 +74,9 @@ end
 return {1, ""}
 "#;
 
+static QUEUE_MESSAGE_TRANSITION: StaticRedisScript =
+    StaticRedisScript::new(QUEUE_MESSAGE_TRANSITION_SCRIPT);
+
 struct DlqLog {
     target: String,
     msg_id: String,
@@ -98,6 +101,58 @@ struct QueueTransition {
 pub(crate) struct RetryBatchPlan {
     pub(crate) pipe: Pipeline,
     transitions: Vec<QueueTransition>,
+}
+
+struct TransitionPipeline {
+    pipe: Pipeline,
+    script: PreparedPipelineScript<'static>,
+}
+
+impl TransitionPipeline {
+    fn new(invocation_count: usize) -> Self {
+        let mut pipe = redis::pipe();
+        let script = QUEUE_MESSAGE_TRANSITION.prepare_pipeline(&mut pipe, invocation_count);
+        Self { pipe, script }
+    }
+
+    fn append(
+        &mut self,
+        keys: &[&str],
+        mode: &'static str,
+        msg: &QueueMessage,
+        entry: &HashMap<String, String>,
+        max_dlq_len: usize,
+        delayed: Option<(i64, &str)>,
+    ) -> SchedulerResult<()> {
+        let max_dlq_len = max_dlq_len.to_string();
+        let visible_at_ms = delayed
+            .map(|(value, _)| value.to_string())
+            .unwrap_or_default();
+        let delayed_member = delayed.map(|(_, member)| member).unwrap_or("");
+        self.script.append(
+            &mut self.pipe,
+            keys,
+            &[
+                mode,
+                &msg.stream_id,
+                &max_dlq_len,
+                &visible_at_ms,
+                delayed_member,
+                entry_field(entry, "id")?,
+                entry_field(entry, "body_b64")?,
+                entry_field(entry, "content_type")?,
+                entry_field(entry, "attempts")?,
+                entry_field(entry, "first_seen_ms")?,
+                entry.get("reason").map(String::as_str).unwrap_or(""),
+                CONSUMER_GROUP,
+            ],
+        );
+        Ok(())
+    }
+
+    fn finish(self) -> Pipeline {
+        self.pipe
+    }
 }
 
 struct TransitionBatchOutcome {
@@ -213,42 +268,6 @@ fn entry_field<'a>(entry: &'a HashMap<String, String>, field: &str) -> Scheduler
         .get(field)
         .map(String::as_str)
         .ok_or_else(|| SchedulerError::internal_error(format!("queue retry entry missing {field}")))
-}
-
-fn append_transition(
-    pipe: &mut Pipeline,
-    keys: &[&str],
-    mode: &'static str,
-    msg: &QueueMessage,
-    entry: &HashMap<String, String>,
-    max_dlq_len: usize,
-    delayed: Option<(i64, &str)>,
-) -> SchedulerResult<()> {
-    let max_dlq_len = max_dlq_len.to_string();
-    let visible_at_ms = delayed
-        .map(|(value, _)| value.to_string())
-        .unwrap_or_default();
-    let delayed_member = delayed.map(|(_, member)| member).unwrap_or("");
-    append_eval_cmd(
-        pipe,
-        QUEUE_MESSAGE_TRANSITION_SCRIPT,
-        keys,
-        &[
-            mode,
-            &msg.stream_id,
-            &max_dlq_len,
-            &visible_at_ms,
-            delayed_member,
-            entry_field(entry, "id")?,
-            entry_field(entry, "body_b64")?,
-            entry_field(entry, "content_type")?,
-            entry_field(entry, "attempts")?,
-            entry_field(entry, "first_seen_ms")?,
-            entry.get("reason").map(String::as_str).unwrap_or(""),
-            CONSUMER_GROUP,
-        ],
-    );
-    Ok(())
 }
 
 fn invalid_attempt_log(msg: &QueueMessage) -> Option<InvalidAttemptLog> {
@@ -389,7 +408,7 @@ pub(crate) fn build_retry_batch_plan(
     now: i64,
 ) -> SchedulerResult<RetryBatchPlan> {
     let stream_key_owned = stream_key.to_string();
-    let mut pipe = redis::pipe();
+    let mut pipe = TransitionPipeline::new(retries.len());
     let mut transitions = Vec::with_capacity(retries.len());
 
     for (msg, delay_secs) in retries {
@@ -408,8 +427,7 @@ pub(crate) fn build_retry_batch_plan(
                 entry,
             } => {
                 let dlq_key = queue_dlq_key(&consumer.ns, &target);
-                append_transition(
-                    &mut pipe,
+                pipe.append(
                     &[&stream_key_owned, &dlq_key],
                     TRANSITION_DLQ,
                     &msg,
@@ -436,8 +454,7 @@ pub(crate) fn build_retry_batch_plan(
             } => {
                 let delayed_key = queue_delayed_key(&consumer.ns, &consumer.queue);
                 let member = serde_json::to_string(&entry)?;
-                append_transition(
-                    &mut pipe,
+                pipe.append(
                     &[&stream_key_owned, &delayed_key, QUEUE_DELAYED_INDEX_KEY],
                     TRANSITION_DELAY,
                     &msg,
@@ -455,8 +472,7 @@ pub(crate) fn build_retry_batch_plan(
                 });
             }
             RetryAction::Immediate { entry } => {
-                append_transition(
-                    &mut pipe,
+                pipe.append(
                     &[&stream_key_owned, &stream_key_owned],
                     TRANSITION_IMMEDIATE,
                     &msg,
@@ -476,7 +492,10 @@ pub(crate) fn build_retry_batch_plan(
         }
     }
 
-    Ok(RetryBatchPlan { pipe, transitions })
+    Ok(RetryBatchPlan {
+        pipe: pipe.finish(),
+        transitions,
+    })
 }
 
 pub(crate) fn build_terminal_batch_plan(
@@ -487,7 +506,7 @@ pub(crate) fn build_terminal_batch_plan(
     reason: &str,
 ) -> SchedulerResult<RetryBatchPlan> {
     let stream_key_owned = stream_key.to_string();
-    let mut pipe = redis::pipe();
+    let mut pipe = TransitionPipeline::new(messages.len());
     let mut transitions = Vec::with_capacity(messages.len());
 
     for msg in messages {
@@ -507,8 +526,7 @@ pub(crate) fn build_terminal_batch_plan(
             .unwrap_or(&consumer.queue)
             .to_string();
         let dlq_key = queue_dlq_key(&consumer.ns, &target);
-        append_transition(
-            &mut pipe,
+        pipe.append(
             &[&stream_key_owned, &dlq_key],
             TRANSITION_DLQ,
             &msg,
@@ -530,7 +548,10 @@ pub(crate) fn build_terminal_batch_plan(
         });
     }
 
-    Ok(RetryBatchPlan { pipe, transitions })
+    Ok(RetryBatchPlan {
+        pipe: pipe.finish(),
+        transitions,
+    })
 }
 
 pub(crate) fn record_queue_messages(metrics: &Metrics, outcome: &str, count: usize) {
@@ -572,7 +593,7 @@ mod tests {
     }
 
     fn eval_parts(command: &[String]) -> (&[String], &[String]) {
-        assert_eq!(command[0], "EVAL");
+        assert!(matches!(command[0].as_str(), "EVAL" | "EVALSHA"));
         let key_count = command[2].parse::<usize>().expect("valid EVAL key count");
         (&command[3..3 + key_count], &command[3 + key_count..])
     }
@@ -789,13 +810,19 @@ mod tests {
         .unwrap();
 
         let commands = parse_packed_commands(&plan.pipe.get_packed_pipeline());
-        assert_eq!(commands.len(), 4);
-        let (immediate_keys, immediate_args) = eval_parts(&commands[0]);
+        assert_eq!(commands.len(), 5);
+        assert_eq!(
+            commands[0][..2],
+            ["SCRIPT", "LOAD"],
+            "the repeated script source is loaded once"
+        );
+        assert!(commands[1..].iter().all(|command| command[0] == "EVALSHA"));
+        let (immediate_keys, immediate_args) = eval_parts(&commands[1]);
         assert_eq!(immediate_keys, ["queue:demo:jobs:s", "queue:demo:jobs:s"]);
         assert_eq!(immediate_args[0], TRANSITION_IMMEDIATE);
         assert_eq!(immediate_args[1], "1-0");
 
-        let (delayed_keys, delayed_args) = eval_parts(&commands[1]);
+        let (delayed_keys, delayed_args) = eval_parts(&commands[2]);
         assert_eq!(
             delayed_keys,
             [
@@ -807,10 +834,10 @@ mod tests {
         assert_eq!(delayed_args[0], TRANSITION_DELAY);
         assert_eq!(delayed_args[3], "1007000");
 
-        let (_, second_delayed_args) = eval_parts(&commands[2]);
+        let (_, second_delayed_args) = eval_parts(&commands[3]);
         assert_eq!(second_delayed_args[3], "1009000");
 
-        let (dlq_keys, dlq_args) = eval_parts(&commands[3]);
+        let (dlq_keys, dlq_args) = eval_parts(&commands[4]);
         assert_eq!(dlq_keys, ["queue:demo:jobs:s", "queue:demo:failures:dlq"]);
         assert_eq!(dlq_args[0], TRANSITION_DLQ);
         assert_eq!(dlq_args[2], "99");

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use redis::Value;
+use serde::Serialize;
 use serde_json::json;
 
 use crate::{
@@ -9,7 +10,6 @@ use crate::{
 };
 
 use super::super::{Consumer, OutcomePlan, QueueMessage};
-use super::message::messages_for_runtime;
 use super::outcome::decide_outcome;
 use super::retry::{
     record_queue_dispatch_failures, record_queue_messages, retry_messages_batch,
@@ -19,7 +19,7 @@ use super::retry::{
 pub(crate) async fn apply_queue_outcome(
     state: &AppState,
     res: &RuntimeResponse,
-    messages: &[QueueMessage],
+    messages: Vec<QueueMessage>,
     stream_key: &str,
     consumer: &Consumer,
 ) -> SchedulerResult<()> {
@@ -74,8 +74,8 @@ pub(crate) async fn apply_queue_outcome(
             if !to_ack.is_empty() {
                 let acked = to_ack.len();
                 let ids = to_ack
-                    .iter()
-                    .map(|m| m.stream_id.clone())
+                    .into_iter()
+                    .map(|message| message.stream_id)
                     .collect::<Vec<_>>();
                 let key = stream_key.to_string();
                 state
@@ -135,6 +135,12 @@ fn split_oversized_batch(
     Some((messages, right))
 }
 
+#[derive(Serialize)]
+struct QueueRuntimeRequest<'a> {
+    queue: &'a str,
+    messages: &'a [QueueMessage],
+}
+
 pub(crate) async fn dispatch_messages(
     state: &AppState,
     messages: Vec<QueueMessage>,
@@ -143,8 +149,15 @@ pub(crate) async fn dispatch_messages(
     kind: &str,
 ) -> SchedulerResult<()> {
     let size = consumer.max_batch_size;
-    for (index, chunk) in messages.chunks(size).enumerate() {
-        let mut pending = VecDeque::from([(index * size, 0_usize, chunk.to_vec())]);
+    let mut messages = messages.into_iter();
+    let mut batch_offset = 0;
+    loop {
+        let batch = messages.by_ref().take(size).collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+        let batch_size = batch.len();
+        let mut pending = VecDeque::from([(batch_offset, 0_usize, batch)]);
         while let Some((offset, split_depth, batch)) = pending.pop_front() {
             let request_id = queue_dispatch_request_id(
                 kind,
@@ -154,17 +167,12 @@ pub(crate) async fn dispatch_messages(
                 split_depth,
             );
             let fired_at = now_ms();
-            let res = post_runtime(
-                state,
-                "/_queued",
-                json!({
-                    "queue": consumer.queue,
-                    "messages": messages_for_runtime(&batch),
-                }),
-                &consumer.worker_id,
-                &request_id,
-            )
-            .await;
+            let body = QueueRuntimeRequest {
+                queue: &consumer.queue,
+                messages: &batch,
+            };
+            let res =
+                post_runtime(state, "/_queued", &body, &consumer.worker_id, &request_id).await;
             let duration_ms = now_ms() - fired_at;
             let outcome = crate::runtime_outcome_label(&res);
             state.metrics.observe(
@@ -224,8 +232,9 @@ pub(crate) async fn dispatch_messages(
                 pending.push_front((offset, split_depth + 1, left));
                 continue;
             }
-            apply_queue_outcome(state, &res, &batch, stream_key, consumer).await?;
+            apply_queue_outcome(state, &res, batch, stream_key, consumer).await?;
         }
+        batch_offset += batch_size;
     }
     Ok(())
 }

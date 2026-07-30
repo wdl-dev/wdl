@@ -1,5 +1,4 @@
 use serde_json::json;
-use wdl_rust_common::redis_eval::append_eval_cmd;
 use wdl_rust_common::time::{now_ms, random_hex_64};
 use wdl_rust_common::worker_contract::do_storage_id_key;
 
@@ -10,7 +9,7 @@ use super::model::{
     DoAlarmCleanupRequest, DoAlarmDeleteRequest, DoAlarmMutationResponse, DoAlarmSetRequest,
     job_keys_for_identity, validate_cleanup_request, validate_delete_request, validate_set_request,
 };
-use super::scripts::{CLEANUP_DO_ALARM_FOR_STORAGE_SCRIPT, DELETE_DO_ALARM, SET_DO_ALARM};
+use super::scripts::{CLEANUP_DO_ALARM_FOR_STORAGE, DELETE_DO_ALARM, SET_DO_ALARM};
 
 const DO_ALARM_CLEANUP_BATCH_SIZE: usize = 256;
 const DO_ALARM_CLEANUP_SNAPSHOT_TTL_SECONDS: usize = 60;
@@ -241,14 +240,15 @@ pub(crate) async fn cleanup_do_alarms_for_worker(
             .redis
             .with_conn(async |mut conn| {
                 let mut pipe = redis::pipe();
+                let script =
+                    CLEANUP_DO_ALARM_FOR_STORAGE.prepare_pipeline(&mut pipe, job_ids.len());
                 for job_id in &job_ids {
                     let keys = crate::DoAlarmJobKeys::new(job_id.to_string());
                     let state = keys.state();
                     let due = keys.due();
                     let ready = keys.ready();
-                    append_eval_cmd(
+                    script.append(
                         &mut pipe,
-                        CLEANUP_DO_ALARM_FOR_STORAGE_SCRIPT,
                         &[
                             state.as_str(),
                             due.as_str(),

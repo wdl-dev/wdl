@@ -114,7 +114,7 @@ Redis-facing 代码应显式表达 key ownership、error classification 和 sche
 
 - 分类 Redis server error 时，应使用稳定 error code（`err.code()`），不要在格式化后的错误字符串上做 substring matching。测试可以搜索 Lua source string 来保护脚本内容，但 runtime 逻辑不应这么做。
 - 直接执行 Lua 时应使用 `wdl_rust_common::redis_eval::StaticRedisScript`，使稳态调用走 EVALSHA，并通过 SCRIPT LOAD/NOSCRIPT handling 从 script-cache loss 恢复。Script body 和 replay policy 仍由 owning service 负责。
-- Pipeline 中的 Lua 应继续使用携带源码的 EVAL，除非 owner 已经有可证明安全的 partial-pipeline recovery protocol。不能在 NOSCRIPT 后重试整个 mixed pipeline，因为失败命令之前的操作可能已经提交。
+- Pipeline 中的 Lua 也应使用同一 owner。单次调用使用携带源码的 EVAL；同一脚本重复调用时，在同一 pipeline 中先追加一条忽略返回值的 `SCRIPT LOAD`，后续调用使用 EVALSHA。命令顺序保证脚本先加载，且不需要重放 pipeline。不能在 NOSCRIPT 后重试整个 mixed pipeline，因为失败命令之前的操作可能已经提交。
 - Service error type 应拥有 machine code、human message 和 HTTP status。不要在独立 server 层再从 string code 反向推导 HTTP status。
 - Redis schema marker 不符合 service contract 时应 fail closed。维护窗口 migration 已完成后，不要继续保留假的兼容、markerless adoption 或 destructive reset command。未来如果需要 migration，应作为新的显式 migration path 设计。
 - 如果某个 service 写 runtime claim、token、lease 或 generation fence，这些 fence fields 应由该 service 的 state machine 拥有，并由本地测试保护。避免在多个 module 中复制同一套 fence key derivation。

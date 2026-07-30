@@ -75,59 +75,55 @@ pub fn emit_log_line(
 }
 
 fn log_payload_line(service: &str, level: LogLevel, event: &str, fields: JsonValue) -> String {
-    let payload = log_payload(service, level, event, fields);
-    let mut line = String::from("{");
+    let ts = now_log_ts();
+    let extra = fields.as_object();
+    let mut line = Vec::with_capacity(128);
+    line.push(b'{');
     let mut first = true;
-    for key in ["ts", "service", "level", "event"] {
-        if let Some(value) = payload.get(key) {
-            push_json_entry(&mut line, &mut first, key, value);
+    for (key, fallback) in [
+        ("ts", ts.as_str()),
+        ("service", service),
+        ("level", level.as_str()),
+        ("event", event),
+    ] {
+        if let Some(value) = extra
+            .and_then(|fields| fields.get(key))
+            .filter(|value| !value.is_null())
+        {
+            push_json_value_entry(&mut line, &mut first, key, value);
+        } else {
+            push_json_string_entry(&mut line, &mut first, key, fallback);
         }
     }
-    for (key, value) in &payload {
-        if !matches!(key.as_str(), "ts" | "service" | "level" | "event") {
-            push_json_entry(&mut line, &mut first, key, value);
-        }
-    }
-    line.push('}');
-    line
-}
-
-fn push_json_entry(line: &mut String, first: &mut bool, key: &str, value: &JsonValue) {
-    if *first {
-        *first = false;
-    } else {
-        line.push(',');
-    }
-    line.push_str(&serde_json::to_string(key).expect("serializing log key should not fail"));
-    line.push(':');
-    line.push_str(&serde_json::to_string(value).expect("serializing log value should not fail"));
-}
-
-fn log_payload(
-    service: &str,
-    level: LogLevel,
-    event: &str,
-    fields: JsonValue,
-) -> serde_json::Map<String, JsonValue> {
-    let mut payload = serde_json::Map::new();
-    payload.insert("ts".to_string(), JsonValue::String(now_log_ts()));
-    payload.insert(
-        "service".to_string(),
-        JsonValue::String(service.to_string()),
-    );
-    payload.insert(
-        "level".to_string(),
-        JsonValue::String(level.as_str().to_string()),
-    );
-    payload.insert("event".to_string(), JsonValue::String(event.to_string()));
-    if let JsonValue::Object(extra) = fields {
+    if let Some(extra) = extra {
         for (key, value) in extra {
-            if !value.is_null() {
-                payload.insert(key, value);
+            if !value.is_null() && !matches!(key.as_str(), "ts" | "service" | "level" | "event") {
+                push_json_value_entry(&mut line, &mut first, key, value);
             }
         }
     }
-    payload
+    line.push(b'}');
+    String::from_utf8(line).expect("serialized JSON log line must be UTF-8")
+}
+
+fn begin_json_entry(line: &mut Vec<u8>, first: &mut bool, key: &str) {
+    if *first {
+        *first = false;
+    } else {
+        line.push(b',');
+    }
+    serde_json::to_writer(&mut *line, key).expect("serializing log key should not fail");
+    line.push(b':');
+}
+
+fn push_json_string_entry(line: &mut Vec<u8>, first: &mut bool, key: &str, value: &str) {
+    begin_json_entry(line, first, key);
+    serde_json::to_writer(line, value).expect("serializing log string should not fail");
+}
+
+fn push_json_value_entry(line: &mut Vec<u8>, first: &mut bool, key: &str, value: &JsonValue) {
+    begin_json_entry(line, first, key);
+    serde_json::to_writer(line, value).expect("serializing log value should not fail");
 }
 
 fn now_log_ts() -> String {
@@ -204,8 +200,8 @@ mod tests {
     }
 
     #[test]
-    fn log_payload_keeps_stable_fields_and_skips_null_extras() {
-        let payload = log_payload(
+    fn log_payload_line_keeps_stable_fields_and_skips_null_extras() {
+        let line = log_payload_line(
             "scheduler",
             LogLevel::Warn,
             "cron_tick",
@@ -214,13 +210,14 @@ mod tests {
                 "ignored": null
             }),
         );
+        let payload: JsonValue = serde_json::from_str(&line).unwrap();
 
         assert!(payload.get("ts").and_then(JsonValue::as_str).is_some());
         assert_eq!(payload.get("service"), Some(&json!("scheduler")));
         assert_eq!(payload.get("level"), Some(&json!("warn")));
         assert_eq!(payload.get("event"), Some(&json!("cron_tick")));
         assert_eq!(payload.get("namespace"), Some(&json!("demo")));
-        assert!(!payload.contains_key("ignored"));
+        assert!(payload.get("ignored").is_none());
     }
 
     #[test]
@@ -245,6 +242,28 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing ordered marker {marker:?} in {line}"));
             position += offset + marker.len();
         }
+    }
+
+    #[test]
+    fn log_payload_line_preserves_fixed_field_overrides_and_skips_nulls() {
+        let line = log_payload_line(
+            "scheduler",
+            LogLevel::Info,
+            "started",
+            json!({
+                "ts": "caller-ts",
+                "service": "caller-service",
+                "level": null,
+                "event": "caller-event",
+                "alpha": 1,
+                "ignored": null,
+            }),
+        );
+
+        assert_eq!(
+            line,
+            r#"{"ts":"caller-ts","service":"caller-service","level":"info","event":"caller-event","alpha":1}"#
+        );
     }
 
     #[test]

@@ -246,6 +246,11 @@ export function redisXGroupCreate(key, group, options = {}) {
   );
 }
 
+/** @param {string} key @param {string} group @param {{ db?: number }} [options] */
+export function redisXGroupDestroy(key, group, options = {}) {
+  redisCommand(`XGROUP DESTROY ${shellQuote(key)} ${shellQuote(group)}`, options);
+}
+
 /** @param {string} key @param {string} group @param {string} consumer @param {{ db?: number, count?: number, id?: string }} [options] */
 export function redisXReadGroup(key, group, consumer, options = {}) {
   const count = options.count ?? 1;

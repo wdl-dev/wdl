@@ -51,19 +51,16 @@ const WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE = 256;
  *   dueAtMs?: unknown,
  *   [key: string]: unknown,
  * }} WorkflowReplayStepRecord
- * @typedef {{ key: string, ownerKey: string, steps: Map<number, WorkflowReplayStepRecord>, nextOrdinal: number, complete: boolean }} WorkflowReplayCache
+ * @typedef {{ key: string, lastRunToken: string, steps: Map<number, WorkflowReplayStepRecord>, nextOrdinal: number, complete: boolean }} WorkflowReplayCache
  */
 
 /** @type {Map<string, WorkflowReplayCache>} */
 const workflowReplayCaches = new Map();
-/** @type {Map<string, string>} */
-const workflowReplayCacheKeysByOwner = new Map();
 let workflowReplayCacheSteps = 0;
 
 /** @lintignore data-URL unit tests import this hook from a rewritten module. */
 export function _resetWorkflowReplayCacheForTest() {
   workflowReplayCaches.clear();
-  workflowReplayCacheKeysByOwner.clear();
   workflowReplayCacheSteps = 0;
   recordWorkflowReplayCacheSize();
 }
@@ -79,13 +76,8 @@ export function recordWorkflowReplayCacheOutcome(outcome) {
   recordWorkflowReplayCacheSize();
 }
 
-/** @param {{ ns: string, workflowKey: string, instanceId: string, generation: number, createdAtMs: number, runToken: string }} run */
-function workflowReplayCacheKey(run) {
-  return `${run.ns}\t${run.workflowKey}\t${run.instanceId}\t${run.generation}\t${run.createdAtMs}\t${run.runToken}`;
-}
-
 /** @param {{ ns: string, workflowKey: string, instanceId: string, generation: number, createdAtMs: number }} run */
-function workflowReplayOwnerKey(run) {
+function workflowReplayCacheKey(run) {
   return `${run.ns}\t${run.workflowKey}\t${run.instanceId}\t${run.generation}\t${run.createdAtMs}`;
 }
 
@@ -104,32 +96,29 @@ export function workflowReplayIdentity(run) {
 /** @param {{ ns: string, workflowKey: string, instanceId: string, generation: number, createdAtMs: number, runToken: string }} run */
 export function getWorkflowReplayCache(run) {
   const key = workflowReplayCacheKey(run);
-  const ownerKey = workflowReplayOwnerKey(run);
   const existing = workflowReplayCaches.get(key);
   if (existing) {
     workflowReplayCaches.delete(key);
     workflowReplayCaches.set(key, existing);
+    if (existing.lastRunToken !== run.runToken) {
+      existing.lastRunToken = run.runToken;
+      existing.complete = false;
+    }
     return existing;
   }
-  const previousKey = workflowReplayCacheKeysByOwner.get(ownerKey);
-  if (previousKey) {
-    const previous = workflowReplayCaches.get(previousKey);
-    if (previous) workflowReplayCacheSteps -= previous.steps.size;
-    workflowReplayCaches.delete(previousKey);
-  }
-  const created = { key, ownerKey, steps: new Map(), nextOrdinal: 0, complete: false };
+  const created = {
+    key,
+    lastRunToken: run.runToken,
+    steps: new Map(),
+    nextOrdinal: 0,
+    complete: false,
+  };
   workflowReplayCaches.set(key, created);
-  workflowReplayCacheKeysByOwner.set(ownerKey, key);
   while (workflowReplayCaches.size > WORKFLOW_REPLAY_CACHE_MAX_INSTANCES) {
     const oldest = workflowReplayCaches.keys().next().value;
     if (oldest === undefined) break;
     const evicted = workflowReplayCaches.get(oldest);
-    if (evicted) {
-      workflowReplayCacheSteps -= evicted.steps.size;
-      if (workflowReplayCacheKeysByOwner.get(evicted.ownerKey) === oldest) {
-        workflowReplayCacheKeysByOwner.delete(evicted.ownerKey);
-      }
-    }
+    if (evicted) workflowReplayCacheSteps -= evicted.steps.size;
     workflowReplayCaches.delete(oldest);
   }
   recordWorkflowReplayCacheSize();

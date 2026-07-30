@@ -4,10 +4,11 @@ use axum::extract::{Query, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
+use base64::display::Base64Display;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Value as RedisValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use wdl_rust_common::hash::fnv1a32;
@@ -566,11 +567,40 @@ fn decode_metadata(bytes: Option<Vec<u8>>) -> AppResult<Option<Value>> {
         .transpose()
 }
 
+struct Base64Bytes(Vec<u8>);
+
+impl Serialize for Base64Bytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(&Base64Display::new(&self.0, &STANDARD))
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct KvValueWithMetadataResponse {
+    metadata: Option<Value>,
+    value_b64: Option<Base64Bytes>,
+}
+
+#[derive(Serialize)]
+struct KvBatchEntry {
+    key: String,
+    metadata: Option<Value>,
+    value_b64: Option<Base64Bytes>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct KvBatchResponse {
+    entries: Vec<KvBatchEntry>,
+}
+
 fn decode_batch_entries(
     keys: Vec<String>,
     include_metadata: bool,
     mut raw: Vec<Option<Vec<u8>>>,
-) -> AppResult<Vec<Value>> {
+) -> AppResult<Vec<KvBatchEntry>> {
     let width = if include_metadata { 2 } else { 1 };
     let expected = keys
         .len()
@@ -588,11 +618,11 @@ fn decode_batch_entries(
         } else {
             None
         };
-        entries.push(json!({
-            "key": key,
-            "value_b64": value.map(|bytes| STANDARD.encode(bytes)),
-            "metadata": metadata,
-        }));
+        entries.push(KvBatchEntry {
+            key,
+            metadata,
+            value_b64: value.map(Base64Bytes),
+        });
     }
     Ok(entries)
 }
@@ -648,7 +678,7 @@ pub(crate) async fn kv_get(
 pub(crate) async fn kv_get_with_metadata(
     State(state): State<AppState>,
     Query(q): Query<KvParams>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<KvValueWithMetadataResponse>> {
     q.validate_scope()?;
     let key = q.key.unwrap_or_default();
     validate_kv_key(&key)?;
@@ -666,10 +696,10 @@ pub(crate) async fn kv_get_with_metadata(
         })
         .await?;
     let Some(bytes) = bytes else {
-        return Ok(Json(json!({
-            "value_b64": null,
-            "metadata": null,
-        })));
+        return Ok(Json(KvValueWithMetadataResponse {
+            metadata: None,
+            value_b64: None,
+        }));
     };
     record_kv_value_bytes(state.metrics(), "get_with_metadata", "value", bytes.len());
     if let Some(metadata) = metadata.as_ref() {
@@ -680,17 +710,17 @@ pub(crate) async fn kv_get_with_metadata(
             metadata.len(),
         );
     }
-    Ok(Json(json!({
-        "value_b64": STANDARD.encode(bytes),
-        "metadata": decode_metadata(metadata)?,
-    })))
+    Ok(Json(KvValueWithMetadataResponse {
+        metadata: decode_metadata(metadata)?,
+        value_b64: Some(Base64Bytes(bytes)),
+    }))
 }
 
 pub(crate) async fn kv_get_batch(
     State(state): State<AppState>,
     Query(q): Query<KvParams>,
     Json(body): Json<KvBatchBody>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<KvBatchResponse>> {
     q.validate_scope()?;
     validate_batch_keys(&body.keys)?;
     let include_metadata = body.metadata.unwrap_or(false);
@@ -717,7 +747,7 @@ pub(crate) async fn kv_get_batch(
         budget.actual_bytes,
     );
     let entries = decode_batch_entries(keys, include_metadata, raw)?;
-    Ok(Json(json!({ "entries": entries })))
+    Ok(Json(KvBatchResponse { entries }))
 }
 
 pub(crate) async fn kv_put(
@@ -1156,11 +1186,17 @@ mod tests {
     }
 
     #[test]
-    fn batch_decode_preserves_empty_values_and_ignores_orphan_metadata() {
+    fn batch_decode_preserves_binary_and_empty_values_and_ignores_orphan_metadata() {
         let entries = decode_batch_entries(
-            vec!["empty".to_string(), "missing".to_string()],
+            vec![
+                "binary".to_string(),
+                "empty".to_string(),
+                "missing".to_string(),
+            ],
             true,
             vec![
+                Some(vec![0, 0xff, 0x10]),
+                Some(br#"{"kind":"binary"}"#.to_vec()),
                 Some(Vec::new()),
                 Some(br#"{"kind":"empty"}"#.to_vec()),
                 None,
@@ -1170,24 +1206,57 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            entries,
-            vec![
-                json!({
+            serde_json::to_value(entries).unwrap(),
+            json!([
+                {
+                    "key": "binary",
+                    "value_b64": "AP8Q",
+                    "metadata": { "kind": "binary" },
+                },
+                {
                     "key": "empty",
                     "value_b64": "",
                     "metadata": { "kind": "empty" },
-                }),
-                json!({
+                },
+                {
                     "key": "missing",
                     "value_b64": null,
                     "metadata": null,
-                }),
-            ]
+                },
+            ])
         );
 
-        let err = decode_batch_entries(vec!["key".to_string()], true, vec![None])
-            .expect_err("misaligned value/metadata replies must fail closed");
+        let Err(err) = decode_batch_entries(vec!["key".to_string()], true, vec![None]) else {
+            panic!("misaligned value/metadata replies must fail closed");
+        };
         assert_eq!(err.code, "internal_error");
+    }
+
+    #[test]
+    fn get_with_metadata_response_serializes_binary_and_missing_values() {
+        let found = KvValueWithMetadataResponse {
+            metadata: Some(json!({ "kind": "binary" })),
+            value_b64: Some(Base64Bytes(vec![0xff, 0])),
+        };
+        assert_eq!(
+            serde_json::to_value(found).unwrap(),
+            json!({
+                "value_b64": "/wA=",
+                "metadata": { "kind": "binary" },
+            })
+        );
+
+        let missing = KvValueWithMetadataResponse {
+            metadata: None,
+            value_b64: None,
+        };
+        assert_eq!(
+            serde_json::to_value(missing).unwrap(),
+            json!({
+                "value_b64": null,
+                "metadata": null,
+            })
+        );
     }
 
     #[test]

@@ -3,7 +3,6 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
-use wdl_rust_common::redis_eval::append_eval_cmd;
 use wdl_rust_common::time::now_ms;
 use wdl_rust_common::worker_contract::{
     do_storage_id_key, parse_version_tag, routes_key, worker_versions_key,
@@ -20,8 +19,7 @@ use super::super::{
 };
 use super::model::{DoAlarmJob, job_from_state, map_hgetall};
 use super::scripts::{
-    CLAIM_DO_ALARM, DISCARD_CORRUPT_DO_ALARM, FINALIZE_DO_ALARM, MOVE_DUE_DO_ALARM_SCRIPT,
-    RETRY_DO_ALARM,
+    CLAIM_DO_ALARM, DISCARD_CORRUPT_DO_ALARM, FINALIZE_DO_ALARM, MOVE_DUE_DO_ALARM, RETRY_DO_ALARM,
 };
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
@@ -119,13 +117,13 @@ pub(crate) async fn move_due_do_alarms(app: &AppState) -> WorkflowResult<usize> 
         .redis
         .with_conn(async |mut conn| {
             let mut pipe = redis::pipe();
+            let script = MOVE_DUE_DO_ALARM.prepare_pipeline(&mut pipe, shards.len());
             for shard in shards {
                 let due = queue.due(shard);
                 let ready = queue.ready(shard);
                 let shard_arg = shard.to_string();
-                append_eval_cmd(
+                script.append(
                     &mut pipe,
-                    MOVE_DUE_DO_ALARM_SCRIPT,
                     &[&due, &ready, queue.ready_active()],
                     &[&now_arg, &limit, &shard_arg],
                 );

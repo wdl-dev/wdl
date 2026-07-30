@@ -545,6 +545,100 @@ test("handleWorkflowRunDispatch replays completed step.do output without callbac
   assert.deepEqual(scope.errors, []);
 });
 
+test("handleWorkflowRunDispatch reuses replay pages across run claims", async () => {
+  const scope = makeScope();
+  let callbackCalls = 0;
+  /** @type {number[]} */
+  const replayStarts = [];
+  const backend = makeWorkflowBackend(async (url, body) => {
+    if (url.endsWith("/claim-step") && body.ordinal === 2) {
+      return Response.json({ state: "run", attempt: 1 });
+    }
+    if (url.endsWith("/commit-step-success") && body.ordinal === 2) {
+      return Response.json({ state: "complete" });
+    }
+    return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
+  }, {
+    replayPage: (body) => {
+      replayStarts.push(body.startOrdinal);
+      return {
+        steps: [{
+          ordinal: body.startOrdinal,
+          name: body.startOrdinal === 0 ? "first" : "second",
+          nameCount: 1,
+          dependencies: body.startOrdinal === 0 ? [] : [0],
+          config: "null",
+          status: "completed",
+          attempt: 1,
+          output: body.startOrdinal,
+        }],
+        nextOrdinal: body.startOrdinal + 1,
+        done: true,
+      };
+    },
+  });
+  const baseRun = {
+    ns: "demo",
+    worker: "shop",
+    frozenVersion: "v1",
+    workflowName: "orders",
+    workflowKey: "wf_abc",
+    className: "OrderWorkflow",
+    instanceId: "inst-resume-cache",
+    generation: 1,
+    createdAtMs: 12345,
+    event: { payload: {} },
+  };
+  const first = await handleWorkflowRunDispatch({
+    run: { ...baseRun, runToken: "run-1" },
+    scope,
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            return await step.do("first", async () => {
+              callbackCalls += 1;
+              return "fresh-first";
+            });
+          },
+        },
+      },
+    }),
+  });
+  const second = await handleWorkflowRunDispatch({
+    run: { ...baseRun, runToken: "run-2" },
+    scope,
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            await step.do("first", async () => {
+              callbackCalls += 1;
+              return "fresh-first";
+            });
+            await step.do("second", async () => {
+              callbackCalls += 1;
+              return "fresh-second";
+            });
+            return await step.do("third", async () => {
+              callbackCalls += 1;
+              return "fresh-third";
+            });
+          },
+        },
+      },
+    }),
+  });
+
+  assert.equal((await readJsonResponse(first, 200)).output, 0);
+  assert.equal((await readJsonResponse(second, 200)).output, "fresh-third");
+  assert.equal(callbackCalls, 1);
+  assert.deepEqual(replayStarts, [0, 1]);
+  assert.deepEqual(scope.errors, []);
+});
+
 test("handleWorkflowRunDispatch replays failed step.do as ordinary persisted error", async () => {
   const scope = makeScope();
   const backend = makeWorkflowBackend(async () => {

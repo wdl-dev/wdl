@@ -331,14 +331,8 @@ async fn process_ref(
         let worker_id = format!("{}:{}:{}", parts.ns, parts.worker, active_version);
         let request_id = format!("sched-{}-{}-{}", state.instance_id, slot_ms, parts.cron_id);
         let fired_at = now_ms();
-        let res = post_runtime(
-            &state,
-            "/_scheduled",
-            json!({ "scheduledTime": slot_ms, "cron": entry.cron }),
-            &worker_id,
-            &request_id,
-        )
-        .await;
+        let body = json!({ "scheduledTime": slot_ms, "cron": entry.cron });
+        let res = post_runtime(&state, "/_scheduled", &body, &worker_id, &request_id).await;
         let duration_ms = now_ms() - fired_at;
         let outcome = crate::runtime_outcome_label(&res);
         state.metrics.observe(

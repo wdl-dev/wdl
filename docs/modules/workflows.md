@@ -182,7 +182,10 @@ Key families:
   mutate a later instance recreated under the same id with a different creation
   timestamp. Lifecycle paths rotate `generation` in the same Lua commit when they
   invalidate in-flight execution.
-- Runtime replay cache is advisory. DB 2 step state is authoritative.
+- Runtime replay cache is advisory. DB 2 step state is authoritative. A runtime isolate
+  may reuse terminal step records across run claims for the same instance incarnation;
+  a new claim reopens bounded paging so records committed by another isolate remain
+  discoverable.
 - Runtime may issue multiple `step.do` calls concurrently, commonly via `Promise.all`;
   each call receives a deterministic ordinal in user-code call order, records DAG
   dependencies from the current completed-step frontier, and commits independently under

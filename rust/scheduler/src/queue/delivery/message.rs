@@ -1,12 +1,15 @@
 use redis::Value;
 use redis::streams::StreamId;
 
-use super::super::{QueueMessage, RuntimeMessage, StreamEntry};
+use super::super::{QueueMessage, StreamEntry};
 
-pub(crate) fn value_to_string(value: &Value) -> String {
+fn value_into_string(value: Value) -> String {
     match value {
-        Value::BulkString(bytes) => String::from_utf8_lossy(bytes).to_string(),
-        Value::SimpleString(s) => s.clone(),
+        Value::BulkString(bytes) => match String::from_utf8(bytes) {
+            Ok(value) => value,
+            Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+        },
+        Value::SimpleString(value) => value,
         Value::Okay => "OK".to_string(),
         Value::Int(n) => n.to_string(),
         Value::Double(n) => n.to_string(),
@@ -17,54 +20,40 @@ pub(crate) fn value_to_string(value: &Value) -> String {
 }
 
 pub(crate) fn stream_id_to_entry(id: StreamId) -> StreamEntry {
-    let fields = id
-        .map
-        .iter()
-        .map(|(key, value)| (key.clone(), value_to_string(value)))
+    let StreamId { id, map, .. } = id;
+    let fields = map
+        .into_iter()
+        .map(|(key, value)| (key, value_into_string(value)))
         .collect();
-    StreamEntry { id: id.id, fields }
+    StreamEntry { id, fields }
 }
 
 pub(crate) fn entries_to_messages(entries: Vec<StreamEntry>, now: i64) -> Vec<QueueMessage> {
     let now = now.to_string();
     entries
         .into_iter()
-        .map(|entry| QueueMessage {
-            stream_id: entry.id.clone(),
-            id: entry
+        .map(|mut entry| {
+            let id = entry
                 .fields
-                .get("id")
-                .cloned()
-                .unwrap_or_else(|| entry.id.clone()),
-            body_b64: entry.fields.get("body_b64").cloned().unwrap_or_default(),
-            content_type: entry
-                .fields
-                .get("content_type")
-                .cloned()
-                .unwrap_or_else(|| "json".to_string()),
-            attempts: entry
-                .fields
-                .get("attempts")
-                .cloned()
-                .unwrap_or_else(|| "0".to_string()),
-            first_seen_ms: entry
-                .fields
-                .get("first_seen_ms")
-                .cloned()
-                .unwrap_or_else(|| now.clone()),
-        })
-        .collect()
-}
-
-pub(crate) fn messages_for_runtime(messages: &[QueueMessage]) -> Vec<RuntimeMessage> {
-    messages
-        .iter()
-        .map(|msg| RuntimeMessage {
-            id: msg.id.clone(),
-            body_b64: msg.body_b64.clone(),
-            content_type: msg.content_type.clone(),
-            attempts: msg.attempts.clone(),
-            first_seen_ms: msg.first_seen_ms.clone(),
+                .remove("id")
+                .unwrap_or_else(|| entry.id.clone());
+            QueueMessage {
+                stream_id: entry.id,
+                id,
+                body_b64: entry.fields.remove("body_b64").unwrap_or_default(),
+                content_type: entry
+                    .fields
+                    .remove("content_type")
+                    .unwrap_or_else(|| "json".to_string()),
+                attempts: entry
+                    .fields
+                    .remove("attempts")
+                    .unwrap_or_else(|| "0".to_string()),
+                first_seen_ms: entry
+                    .fields
+                    .remove("first_seen_ms")
+                    .unwrap_or_else(|| now.clone()),
+            }
         })
         .collect()
 }
@@ -126,13 +115,16 @@ mod tests {
     }
 
     #[test]
-    fn messages_for_runtime_drops_stream_id() {
-        let runtime = messages_for_runtime(&[msg("m1", "1700000000000-0", "1")]);
-        assert_eq!(runtime.len(), 1);
-        assert_eq!(runtime[0].id, "m1");
-        assert_eq!(runtime[0].body_b64, "aGVsbG8=");
-        assert_eq!(runtime[0].content_type, "text");
-        assert_eq!(runtime[0].attempts, "1");
-        assert_eq!(runtime[0].first_seen_ms, "1699999999999");
+    fn queue_message_serialization_drops_stream_id() {
+        assert_eq!(
+            serde_json::to_value(msg("m1", "1700000000000-0", "1")).unwrap(),
+            serde_json::json!({
+                "id": "m1",
+                "body_b64": "aGVsbG8=",
+                "content_type": "text",
+                "attempts": "1",
+                "first_seen_ms": "1699999999999",
+            })
+        );
     }
 }

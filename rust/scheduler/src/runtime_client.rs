@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::{AppState, Config};
@@ -38,13 +39,16 @@ fn pick_runtime(config: &Config, worker_id: &str) -> (String, u16) {
     }
 }
 
-pub(crate) async fn post_runtime(
+pub(crate) async fn post_runtime<T>(
     state: &AppState,
     path: &str,
-    body: JsonValue,
+    body: &T,
     worker_id: &str,
     request_id: &str,
-) -> RuntimeResponse {
+) -> RuntimeResponse
+where
+    T: Serialize + ?Sized,
+{
     let (host, port) = pick_runtime(&state.config, worker_id);
     let url = format!("http://{host}:{port}{path}");
     let result = state
@@ -58,7 +62,7 @@ pub(crate) async fn post_runtime(
         .header("x-worker-id", worker_id)
         .header("x-request-id", request_id)
         .timeout(Duration::from_millis(state.config.fire_timeout_ms))
-        .json(&body)
+        .json(body)
         .send()
         .await;
     let Ok(response) = result else {

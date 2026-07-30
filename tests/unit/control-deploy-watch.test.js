@@ -317,7 +317,7 @@ function assertTestWorkerCodeBytes({ meta, normalized }) {
     worker: "unit",
     meta,
     normalized,
-  });
+  }).bytes;
 }
 
 const { commitWithWatch, handle } = await importControlHandler("control/handlers/deploy.js", {

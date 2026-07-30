@@ -1,5 +1,8 @@
 use axum::body::Body;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq},
+};
 use serde_json::{Value as JsonValue, json};
 
 use crate::{AppState, LogLevel, WorkflowError, WorkflowResult, log};
@@ -145,31 +148,37 @@ pub(super) fn step_summary_json(record: &StepRecord) -> WorkflowResult<String> {
     })
 }
 
-pub(crate) fn canonical_json(value: &JsonValue) -> WorkflowResult<String> {
-    fn canonical_value(value: &JsonValue) -> WorkflowResult<JsonValue> {
-        match value {
-            JsonValue::Array(values) => values
-                .iter()
-                .map(canonical_value)
-                .collect::<WorkflowResult<Vec<_>>>()
-                .map(JsonValue::Array),
+struct CanonicalJson<'a>(&'a JsonValue);
+
+impl Serialize for CanonicalJson<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.0 {
+            JsonValue::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(&CanonicalJson(value))?;
+                }
+                sequence.end()
+            }
             JsonValue::Object(map) => {
                 let mut keys = map.keys().collect::<Vec<_>>();
                 keys.sort();
-                let mut out = serde_json::Map::with_capacity(map.len());
+                let mut entries = serializer.serialize_map(Some(map.len()))?;
                 for key in keys {
-                    let value = map.get(key).ok_or_else(|| {
-                        WorkflowError::internal_error("canonical JSON key disappeared")
-                    })?;
-                    out.insert(key.clone(), canonical_value(value)?);
+                    entries.serialize_entry(key, &CanonicalJson(&map[key]))?;
                 }
-                Ok(JsonValue::Object(out))
+                entries.end()
             }
-            _ => Ok(value.clone()),
+            value => value.serialize(serializer),
         }
     }
-    let canonical = canonical_value(value)?;
-    serde_json::to_string(&canonical)
+}
+
+pub(crate) fn canonical_json(value: &JsonValue) -> WorkflowResult<String> {
+    serde_json::to_string(&CanonicalJson(value))
         .map_err(|err| WorkflowError::invalid_request(format!("Invalid JSON value: {err}")))
 }
 

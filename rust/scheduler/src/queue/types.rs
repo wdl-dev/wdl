@@ -19,8 +19,9 @@ pub(crate) struct StreamEntry {
     pub(crate) fields: HashMap<String, String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct QueueMessage {
+    #[serde(skip)]
     pub(crate) stream_id: String,
     pub(crate) id: String,
     pub(crate) body_b64: String,
@@ -29,14 +30,6 @@ pub(crate) struct QueueMessage {
     pub(crate) first_seen_ms: String,
 }
 
-#[derive(Clone, Serialize)]
-pub(crate) struct RuntimeMessage {
-    pub(crate) id: String,
-    pub(crate) body_b64: String,
-    pub(crate) content_type: String,
-    pub(crate) attempts: String,
-    pub(crate) first_seen_ms: String,
-}
 pub(crate) enum OutcomePlan {
     Normal {
         to_ack: Vec<QueueMessage>,

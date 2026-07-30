@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use wdl_rust_common::{redis_eval::append_eval_cmd, time::now_ms};
+use wdl_rust_common::{redis_eval::StaticRedisScript, time::now_ms};
 
 use crate::{
     AppState, InstanceIdentity, WorkflowError, WorkflowResult, by_version_key, by_worker_key,
@@ -71,6 +71,10 @@ redis.call("ZREM", KEYS[9], ARGV[3])
 redis.call("ZREM", KEYS[10], ARGV[5])
 return 1
 "#;
+
+static REMOVE_RETENTION_TOKEN: StaticRedisScript =
+    StaticRedisScript::new(REMOVE_RETENTION_TOKEN_SCRIPT);
+static CLEANUP_RETENTION: StaticRedisScript = StaticRedisScript::new(CLEANUP_RETENTION_SCRIPT);
 
 pub(super) async fn cleanup_retention(app: &AppState) -> WorkflowResult<usize> {
     let now = now_ms();
@@ -184,10 +188,17 @@ async fn apply_retention_actions(
     }
     let now_arg = now.to_string();
     let mut cleanup_slots = Vec::with_capacity(actions.len());
+    let remove_count = actions
+        .iter()
+        .filter(|action| matches!(action, RetentionAction::RemoveToken { .. }))
+        .count();
+    let cleanup_count = actions.len() - remove_count;
     let results: Vec<i64> = app
         .redis
         .with_conn(async |mut conn| {
             let mut pipe = redis::pipe();
+            let remove_script = REMOVE_RETENTION_TOKEN.prepare_pipeline(&mut pipe, remove_count);
+            let cleanup_script = CLEANUP_RETENTION.prepare_pipeline(&mut pipe, cleanup_count);
             for action in actions {
                 match action {
                     RetentionAction::RemoveToken {
@@ -203,9 +214,8 @@ async fn apply_retention_actions(
                         if let Some(state_key) = state_key {
                             keys.push(state_key);
                         }
-                        append_eval_cmd(
+                        remove_script.append(
                             &mut pipe,
-                            REMOVE_RETENTION_TOKEN_SCRIPT,
                             &keys,
                             &[
                                 token,
@@ -242,9 +252,8 @@ async fn apply_retention_actions(
                         // workflow-scoped index stores the bare instance id.
                         let referrer =
                             workflow_referrer_member(&identity.workflow_key, &identity.instance_id);
-                        append_eval_cmd(
+                        cleanup_script.append(
                             &mut pipe,
-                            CLEANUP_RETENTION_SCRIPT,
                             &[
                                 &state_key,
                                 &payloads_key,

@@ -52,6 +52,8 @@ redis.call("ZREM", KEYS[1], ARGV[1])
 return 1
 "#;
 
+static MOVE_DUE_TOKEN: StaticRedisScript = StaticRedisScript::new(MOVE_DUE_TOKEN_SCRIPT);
+
 pub(super) struct ReadyTokenGuard {
     pub(super) ns: String,
     pub(super) workflow_key: String,
@@ -74,7 +76,7 @@ pub(super) async fn move_due_tokens(app: &AppState) -> WorkflowResult<usize> {
             per_shard_limit: WORKFLOW_READY_BATCH_SIZE,
             scan_overfetch_factor: DUE_SCAN_OVERFETCH_FACTOR,
         },
-        MOVE_DUE_TOKEN_SCRIPT,
+        &MOVE_DUE_TOKEN,
         |token| {
             parse_ready_token(token).map(|(ns, workflow_key, instance_id)| DuePromotionMember {
                 member: token.to_string(),

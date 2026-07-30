@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use wdl_rust_common::redis_eval::{StaticRedisScript, append_eval_cmd};
+use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::time::now_ms;
 
 use crate::{AppState, ShardQueueKeys, WorkflowError, WorkflowResult};
@@ -83,6 +83,8 @@ if redis.call("SCARD", KEYS[1]) == 0 then
 end
 return 0
 "#;
+
+static PRUNE_READY_SHARD: StaticRedisScript = StaticRedisScript::new(PRUNE_READY_SHARD_SCRIPT);
 
 pub(crate) const REMOVE_READY_MEMBER_IF_STATE_MISSING_SCRIPT: &str = r#"
 if redis.call("EXISTS", KEYS[1]) == 0 then
@@ -183,15 +185,11 @@ async fn prune_ready_shards_if_empty(
     app.redis
         .with_conn(async |mut conn| {
             let mut pipe = redis::pipe();
+            let script = PRUNE_READY_SHARD.prepare_pipeline(&mut pipe, shards.len());
             for shard in shards {
                 let ready = keys.ready(*shard);
                 let shard_arg = shard.to_string();
-                append_eval_cmd(
-                    &mut pipe,
-                    PRUNE_READY_SHARD_SCRIPT,
-                    &[&ready, keys.ready_active()],
-                    &[&shard_arg],
-                );
+                script.append(&mut pipe, &[&ready, keys.ready_active()], &[&shard_arg]);
             }
             pipe.query_async::<Vec<i64>>(&mut conn).await
         })
@@ -236,7 +234,7 @@ pub(crate) async fn promote_due_members<F>(
     app: &AppState,
     keys: ShardQueueKeys,
     config: DuePromotionConfig,
-    promote_script: &str,
+    promote_script: &StaticRedisScript,
     prepare_member: F,
 ) -> WorkflowResult<usize>
 where
@@ -315,6 +313,7 @@ where
                 .redis
                 .with_conn(async |mut conn| {
                     let mut pipe = redis::pipe();
+                    let script = promote_script.prepare_pipeline(&mut pipe, end - offset);
                     for candidate in &candidates[offset..end] {
                         let mut script_keys =
                             vec![due.as_str(), ready.as_str(), keys.ready_active()];
@@ -325,7 +324,7 @@ where
                             shard_arg.as_str(),
                         ];
                         script_args.extend(candidate.extra_args.iter().map(String::as_str));
-                        append_eval_cmd(&mut pipe, promote_script, &script_keys, &script_args);
+                        script.append(&mut pipe, &script_keys, &script_args);
                     }
                     pipe.query_async(&mut conn).await
                 })

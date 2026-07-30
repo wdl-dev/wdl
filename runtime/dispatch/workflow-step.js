@@ -458,6 +458,10 @@ export function createStepController(run, backend, requestId = null) {
 
   /** @param {number} targetOrdinal */
   const fetchReplayThrough = async (targetOrdinal) => {
+    if (!replayCache.steps.has(targetOrdinal) && targetOrdinal < replayCache.nextOrdinal) {
+      replayCache.nextOrdinal = targetOrdinal;
+      replayCache.complete = false;
+    }
     while (!replayCache.complete && targetOrdinal >= replayCache.nextOrdinal) {
       replayFetchPromise ??= fetchReplayStepPage(backend, run, replayCache, targetOrdinal, requestId)
         .finally(() => {

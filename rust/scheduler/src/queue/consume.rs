@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     Consumer, StreamEntry, dispatch_messages, entries_to_messages, move_to_orphaned,
-    parse_stream_key, queue_reconcile, redis_error_is_nogroup, resolve_consumer,
+    parse_stream_key, queue_reconcile_after_nogroup, redis_error_is_nogroup, resolve_consumer,
     stream_id_to_entry,
 };
 
@@ -89,10 +89,9 @@ pub(crate) async fn queue_consume_loop(state: AppState) -> SchedulerResult<()> {
         let reply = match entries {
             Ok(reply) => reply,
             Err(err) if redis_error_is_nogroup(&err) => {
-                // Likely a newly registered stream whose group hasn't been
-                // MKSTREAM'd yet — run reconcile synchronously so the next
-                // iteration finds the group. BUSYGROUP on retry is fine.
-                if let Err(reconcile_err) = queue_reconcile(state.clone()).await {
+                // A stream in the read snapshot has no group. Force group repair
+                // synchronously so the next iteration can retry the whole snapshot.
+                if let Err(reconcile_err) = queue_reconcile_after_nogroup(state.clone()).await {
                     log(
                         &state,
                         LogLevel::Error,

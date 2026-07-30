@@ -6,12 +6,12 @@ use crate::RuntimeResponse;
 
 use super::super::{OutcomePlan, QueueMessage};
 
-pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: &[QueueMessage]) -> OutcomePlan {
+pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: Vec<QueueMessage>) -> OutcomePlan {
     if let Some((kind, reason)) = terminal_failure(res) {
         return OutcomePlan::TerminalAll {
             kind,
             reason,
-            messages: messages.to_vec(),
+            messages,
         };
     }
 
@@ -23,7 +23,7 @@ pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: &[QueueMessage]) -
                 .clone()
                 .or_else(|| res.text.clone())
                 .unwrap_or_else(|| "no response body".to_string()),
-            messages: messages.to_vec(),
+            messages,
         };
     }
 
@@ -34,7 +34,7 @@ pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: &[QueueMessage]) -
         return OutcomePlan::RetryAll {
             kind: "handler_error",
             reason: "outer_outcome_error".to_string(),
-            messages: messages.to_vec(),
+            messages,
         };
     }
     // Runtime always wraps the handler return in `{outcome, result, ...}`
@@ -44,14 +44,14 @@ pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: &[QueueMessage]) -
         return OutcomePlan::RetryAll {
             kind: "handler_error",
             reason: "missing_result_envelope".to_string(),
-            messages: messages.to_vec(),
+            messages,
         };
     };
     if result.get("outcome").and_then(JsonValue::as_str) == Some("exception") {
         return OutcomePlan::RetryAll {
             kind: "handler_error",
             reason: "inner_outcome_exception".to_string(),
-            messages: messages.to_vec(),
+            messages,
         };
     }
 
@@ -95,13 +95,13 @@ pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: &[QueueMessage]) -
     let mut to_retry = Vec::new();
     for msg in messages {
         if explicit_acks.contains(&msg.id) {
-            to_ack.push(msg.clone());
+            to_ack.push(msg);
         } else if let Some(delay) = retry_map.get(&msg.id) {
-            to_retry.push((msg.clone(), *delay));
+            to_retry.push((msg, *delay));
         } else if batch_retry {
-            to_retry.push((msg.clone(), batch_retry_delay));
+            to_retry.push((msg, batch_retry_delay));
         } else {
-            to_ack.push(msg.clone());
+            to_ack.push(msg);
         }
     }
     OutcomePlan::Normal { to_ack, to_retry }
@@ -165,7 +165,7 @@ mod tests {
                 text: None,
                 error: Some("ECONNREFUSED".to_string()),
             },
-            &messages,
+            messages.clone(),
         );
         match transport {
             OutcomePlan::RetryAll {
@@ -187,7 +187,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages.clone(),
         );
         assert!(matches!(
             outer,
@@ -205,7 +205,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages.clone(),
         );
         assert!(matches!(
             inner,
@@ -235,7 +235,7 @@ mod tests {
                 error: None,
             },
         ] {
-            match decide_outcome(&response, &messages) {
+            match decide_outcome(&response, messages.clone()) {
                 OutcomePlan::TerminalAll {
                     messages: planned, ..
                 } => assert_eq!(planned.len(), 2),
@@ -267,7 +267,7 @@ mod tests {
                 error: None,
             },
         ] {
-            match decide_outcome(&response, &messages) {
+            match decide_outcome(&response, messages.clone()) {
                 OutcomePlan::RetryAll { messages, .. } => assert_eq!(messages.len(), 1),
                 _ => panic!("expected auth and unknown 4xx to keep existing retry behavior"),
             }
@@ -285,7 +285,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages.clone(),
         ) {
             OutcomePlan::Normal { to_ack, to_retry } => {
                 assert_eq!(
@@ -306,7 +306,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages.clone(),
         ) {
             OutcomePlan::Normal { to_ack, to_retry } => {
                 assert!(to_ack.is_empty());
@@ -328,7 +328,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages.clone(),
         ) {
             OutcomePlan::Normal { to_ack, to_retry } => {
                 assert_eq!(
@@ -354,7 +354,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages.clone(),
         ) {
             OutcomePlan::Normal { to_ack, to_retry } => {
                 assert_eq!(
@@ -380,7 +380,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages.clone(),
         ) {
             OutcomePlan::Normal { to_retry, .. } => {
                 assert_eq!(to_retry.len(), 1);
@@ -401,7 +401,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages,
         ) {
             OutcomePlan::RetryAll {
                 kind: "handler_error",
@@ -424,7 +424,7 @@ mod tests {
                 text: None,
                 error: None,
             },
-            &messages,
+            messages,
         ) {
             OutcomePlan::Normal { to_ack, to_retry } => {
                 assert_eq!(to_ack[0].id, "a");

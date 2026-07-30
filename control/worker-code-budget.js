@@ -1,6 +1,7 @@
 import {
   WORKER_LOADER_CODE_MAX_BYTES,
   estimateFinalWorkerLoaderCodeBytes,
+  estimateWorkerLoaderUserCodeBytes,
 } from "runtime-load-code-budget";
 import { RUNTIME_INJECTION_SOURCES } from "runtime-load-injection-sources";
 import { HOST_BINDING_RESERVED_MODULE_NAMES } from "runtime-load-module-rewrite";
@@ -107,6 +108,7 @@ function assertFinalWorkerCodeShape({ mainModule, meta, normalized, ns, worker, 
  * @param {{
  *   meta: { mainModule?: unknown, modules?: Record<string, { type?: unknown }> | null, [key: string]: unknown },
  *   normalized: Array<[string, string | Uint8Array]>,
+ *   userCodeBytes?: number,
  * }} bundle
  * @param {{ ns?: string, worker?: string, version?: string }} [context]
  */
@@ -126,21 +128,27 @@ function estimateWorkerLoaderCodeBytesWithContext(bundle, context = {}) {
       worker: context.worker,
       version: context.version,
     });
+    const userCodeBytes = bundle.userCodeBytes ??
+      estimateWorkerLoaderUserCodeBytes({ normalized: bundle.normalized, meta: bundle.meta });
     const runtimeBytes = estimateFinalWorkerLoaderCodeBytes({
       mainModule: /** @type {string} */ (mainModule),
       normalized: bundle.normalized,
       meta: bundle.meta,
       runtimeSources: RUNTIME_INJECTION_SOURCES,
+      userCodeBytes,
     });
     // do-runtime cold-loads the same bundle after the generic runtime wrapper has
     // made `_wdl-wrapper.js` the main module, then adds its alarm-storage wrapper
     // around exported DO classes. The stock workerLoader 64 MiB cap applies to
     // that second WorkerCode too.
-    return runtimeBytes + estimateDoRuntimeInjectedCodeBytes(
-      "_wdl-wrapper.js",
-      bundle.meta,
-      DO_ALARM_SHIM_SOURCE
-    );
+    return {
+      bytes: runtimeBytes + estimateDoRuntimeInjectedCodeBytes(
+        "_wdl-wrapper.js",
+        bundle.meta,
+        DO_ALARM_SHIM_SOURCE
+      ),
+      userCodeBytes,
+    };
   } catch (err) {
     throw wrapWorkerCodeInvalid(err, details);
   }
@@ -153,20 +161,32 @@ function estimateWorkerLoaderCodeBytesWithContext(bundle, context = {}) {
  *   version?: string,
  *   meta: { mainModule?: unknown, modules?: Record<string, { type?: unknown }> | null, [key: string]: unknown },
  *   normalized: Array<[string, string | Uint8Array]>,
+ *   userCodeBytes?: number,
  * }} args
+ * @returns {{ bytes: number, userCodeBytes: number }}
  */
-export function assertWorkerLoaderCodeBudget({ ns, worker, version = undefined, meta, normalized }) {
-  const bytes = estimateWorkerLoaderCodeBytesWithContext({ meta, normalized }, { ns, worker, version });
-  if (bytes <= WORKER_LOADER_CODE_MAX_BYTES) return bytes;
+export function assertWorkerLoaderCodeBudget({
+  ns,
+  worker,
+  version = undefined,
+  meta,
+  normalized,
+  userCodeBytes = undefined,
+}) {
+  const estimate = estimateWorkerLoaderCodeBytesWithContext(
+    { meta, normalized, userCodeBytes },
+    { ns, worker, version }
+  );
+  if (estimate.bytes <= WORKER_LOADER_CODE_MAX_BYTES) return estimate;
   const label = version ? `${ns}/${worker}@${version}` : `${ns}/${worker}`;
   throw new WorkerCodeBudgetError(
-    `final WorkerCode for ${label} totals ${bytes} bytes, ` +
+    `final WorkerCode for ${label} totals ${estimate.bytes} bytes, ` +
       `exceeding workerd workerLoader code limit ${WORKER_LOADER_CODE_MAX_BYTES} bytes`,
     {
       namespace: ns,
       worker,
       ...(version ? { version } : {}),
-      code_bytes: bytes,
+      code_bytes: estimate.bytes,
       max_code_bytes: WORKER_LOADER_CODE_MAX_BYTES,
     }
   );

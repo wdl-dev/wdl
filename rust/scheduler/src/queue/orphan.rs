@@ -1,6 +1,6 @@
 use redis::streams::{StreamAutoClaimReply, StreamRangeReply};
 use serde_json::json;
-use wdl_rust_common::redis_eval::{StaticRedisScript, append_eval_cmd};
+use wdl_rust_common::redis_eval::StaticRedisScript;
 
 use crate::{
     AppState, CONSUMER_GROUP, LogLevel, SchedulerResult, log, now_ms, redis_fields_with_error,
@@ -91,6 +91,11 @@ redis.call("XDEL", KEYS[1], ARGV[1])
 return 1
 "#;
 
+static MOVE_PEL_TO_ORPHANED: StaticRedisScript =
+    StaticRedisScript::new(MOVE_PEL_TO_ORPHANED_SCRIPT);
+static MOVE_STREAM_TAIL_TO_ORPHANED: StaticRedisScript =
+    StaticRedisScript::new(MOVE_STREAM_TAIL_TO_ORPHANED_SCRIPT);
+
 pub(crate) async fn xrange_count(
     state: &AppState,
     stream_key: &str,
@@ -135,7 +140,7 @@ pub(crate) async fn move_to_orphaned(
     .await?;
     let pel_count = move_entries_to_orphaned(
         state,
-        MOVE_PEL_TO_ORPHANED_SCRIPT,
+        &MOVE_PEL_TO_ORPHANED,
         stream_key,
         &orphaned_key,
         pel_entries,
@@ -143,7 +148,7 @@ pub(crate) async fn move_to_orphaned(
     .await?;
     let tail_count = move_entries_to_orphaned(
         state,
-        MOVE_STREAM_TAIL_TO_ORPHANED_SCRIPT,
+        &MOVE_STREAM_TAIL_TO_ORPHANED,
         stream_key,
         &orphaned_key,
         tail,
@@ -202,7 +207,7 @@ async fn cleanup_empty_orphaned_stream(
 
 async fn move_entries_to_orphaned(
     state: &AppState,
-    script: &str,
+    script: &StaticRedisScript,
     stream_key: &str,
     orphaned_key: &str,
     entries: Vec<StreamEntry>,
@@ -214,11 +219,11 @@ async fn move_entries_to_orphaned(
         .data_redis
         .with_conn(async |mut conn| {
             let mut pipe = redis::pipe();
+            let script = script.prepare_pipeline(&mut pipe, entries.len());
             let trim_arg = state.config.max_orphaned_len.to_string();
             for entry in entries {
-                append_eval_cmd(
+                script.append(
                     &mut pipe,
-                    script,
                     &[stream_key, orphaned_key],
                     &[entry.id.as_str(), trim_arg.as_str(), CONSUMER_GROUP],
                 );
