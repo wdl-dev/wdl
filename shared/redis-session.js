@@ -5,12 +5,12 @@ import {
   buildHSetExArgs,
   buildHSetArgs,
   buildSetArgs,
-  concatBuffers,
   decodeBulk,
   decodeHashObject,
   decodeRedisTimeMs,
   decodeStringArray,
   encodeCommand,
+  writeRedisCommands,
   normalizeRedisDb,
   utf8Decoder,
   warnRedisCallback,
@@ -152,7 +152,7 @@ export class RedisSession {
     const { writer, parser } = requireSessionIo(this);
     const startedAt = Date.now();
     try {
-      await writer.write(concatBuffers(commands.map((args) => encodeCommand(args))));
+      await writeRedisCommands(writer, commands);
       const replies = [];
       /** @type {RedisReplyError | null} */
       let firstReplyError = null;
@@ -184,6 +184,29 @@ export class RedisSession {
       });
       throw err;
     }
+  }
+
+  /**
+   * WATCH must be the first command so every following read is protected when
+   * Redis evaluates it. The typed public helpers below keep reply decoding at
+   * the same owner as the corresponding non-WATCH pipeline.
+   *
+   * @param {string} command
+   * @param {string[]} watchKeys
+   * @param {RedisCommand[]} readCommands
+   */
+  async _watchAndExecPipeline(command, watchKeys, readCommands) {
+    if (watchKeys.length === 0) {
+      throw new Error("WATCH snapshot requires at least one key");
+    }
+    if (readCommands.length === 0) {
+      throw new Error("WATCH snapshot requires at least one read");
+    }
+    const replies = await this._execPipeline(command, [
+      ["WATCH", ...watchKeys],
+      ...readCommands,
+    ]);
+    return replies.slice(1);
   }
 
   /** @param {...string} keys */
@@ -228,6 +251,64 @@ export class RedisSession {
     return replies.map(decodeHashObject);
   }
 
+  /**
+   * @param {Array<[string, string]>} fieldPairs
+   * @param {string[]} hashKeys
+   */
+  async hGetManyAndHGetAllMany(fieldPairs, hashKeys) {
+    const replies = /** @type {unknown[]} */ (await this._execPipeline(
+      "HGET_HGETALL_PIPELINE",
+      [
+        ...fieldPairs.map(([key, field]) => ["HGET", key, field]),
+        ...hashKeys.map((key) => ["HGETALL", key]),
+      ]
+    ));
+    return {
+      fields: replies.slice(0, fieldPairs.length).map(decodeBulk),
+      hashes: replies.slice(fieldPairs.length)
+        .map((reply) => decodeHashObject(/** @type {unknown[] | null} */ (reply))),
+    };
+  }
+
+  /**
+   * @param {Array<[string, string]>} fieldPairs
+   * @param {string[]} setKeys
+   */
+  async hGetManyAndSMembersMany(fieldPairs, setKeys) {
+    const replies = /** @type {unknown[]} */ (await this._execPipeline(
+      "HGET_SMEMBERS_PIPELINE",
+      [
+        ...fieldPairs.map(([key, field]) => ["HGET", key, field]),
+        ...setKeys.map((key) => ["SMEMBERS", key]),
+      ]
+    ));
+    return {
+      fields: replies.slice(0, fieldPairs.length).map(decodeBulk),
+      memberLists: replies.slice(fieldPairs.length)
+        .map((reply) => decodeStringArray(/** @type {unknown[] | null} */ (reply))),
+    };
+  }
+
+  /**
+   * @param {string[]} hashKeys
+   * @param {string[]} keyListHashes
+   */
+  async hGetAllManyAndHKeysMany(hashKeys, keyListHashes) {
+    const replies = /** @type {unknown[]} */ (await this._execPipeline(
+      "HGETALL_HKEYS_PIPELINE",
+      [
+        ...hashKeys.map((key) => ["HGETALL", key]),
+        ...keyListHashes.map((key) => ["HKEYS", key]),
+      ]
+    ));
+    return {
+      hashes: replies.slice(0, hashKeys.length)
+        .map((reply) => decodeHashObject(/** @type {unknown[] | null} */ (reply))),
+      keyLists: replies.slice(hashKeys.length)
+        .map((reply) => decodeStringArray(/** @type {unknown[] | null} */ (reply))),
+    };
+  }
+
   /** @param {string} hashKey @param {string} stringKey */
   async hGetAllAndGet(hashKey, stringKey) {
     const [hashReply, valueReply] = await this._execPipeline("HGETALL_GET_PIPELINE", [
@@ -240,10 +321,53 @@ export class RedisSession {
     };
   }
 
+  /**
+   * @param {string[]} watchKeys
+   * @param {string} hashKey
+   * @param {string} stringKey
+   */
+  async watchAndHGetAllAndGet(watchKeys, hashKey, stringKey) {
+    const [hashReply, valueReply] = await this._watchAndExecPipeline(
+      "HGETALL_GET_PIPELINE",
+      watchKeys,
+      [
+        ["HGETALL", hashKey],
+        ["GET", stringKey],
+      ]
+    );
+    return {
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      value: decodeBulk(valueReply),
+    };
+  }
+
   /** @param {string} hashKey @param {string} stringKey @param {string} setKey */
   async hGetAllGetSMembers(hashKey, stringKey, setKey) {
     const [hashReply, valueReply, membersReply] = await this._execPipeline(
       "HGETALL_GET_SMEMBERS_PIPELINE",
+      [
+        ["HGETALL", hashKey],
+        ["GET", stringKey],
+        ["SMEMBERS", setKey],
+      ]
+    );
+    return {
+      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
+      value: decodeBulk(valueReply),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
+  }
+
+  /**
+   * @param {string[]} watchKeys
+   * @param {string} hashKey
+   * @param {string} stringKey
+   * @param {string} setKey
+   */
+  async watchAndHGetAllGetSMembers(watchKeys, hashKey, stringKey, setKey) {
+    const [hashReply, valueReply, membersReply] = await this._watchAndExecPipeline(
+      "HGETALL_GET_SMEMBERS_PIPELINE",
+      watchKeys,
       [
         ["HGETALL", hashKey],
         ["GET", stringKey],
@@ -296,6 +420,26 @@ export class RedisSession {
     ));
   }
 
+  /**
+   * @param {string[]} watchKeys
+   * @param {string[]} existenceKeys
+   * @param {Array<[string, string]>} lengthPairs
+   */
+  async watchAndExistsManyAndHStrLenMany(watchKeys, existenceKeys, lengthPairs) {
+    const replies = /** @type {number[]} */ (await this._watchAndExecPipeline(
+      "EXISTS_HSTRLEN_PIPELINE",
+      watchKeys,
+      [
+        ...existenceKeys.map((key) => ["EXISTS", key]),
+        ...lengthPairs.map(([key, field]) => ["HSTRLEN", key, field]),
+      ]
+    ));
+    return {
+      exists: replies.slice(0, existenceKeys.length).map((value) => value > 0),
+      lengths: replies.slice(existenceKeys.length),
+    };
+  }
+
   /** @param {string} key @param {string|string[]} members */
   async sAdd(key, members) {
     const arr = Array.isArray(members) ? members : [members];
@@ -310,6 +454,15 @@ export class RedisSession {
   async sMembers(key) {
     const arr = /** @type {unknown[] | null} */ (await this._exec("SMEMBERS", key));
     return decodeStringArray(arr);
+  }
+  /** @param {string[]} watchKeys @param {string} key */
+  async watchAndSMembers(watchKeys, key) {
+    const [membersReply] = await this._watchAndExecPipeline(
+      "SMEMBERS_PIPELINE",
+      watchKeys,
+      [["SMEMBERS", key]]
+    );
+    return decodeStringArray(/** @type {unknown[] | null} */ (membersReply));
   }
   /** @param {string[]} keys */
   async sMembersMany(keys) {
@@ -375,6 +528,25 @@ export class RedisSession {
       fields: replies.slice(getKeys.length).map(decodeBulk),
     };
   }
+  /**
+   * @param {string[]} watchKeys
+   * @param {string[]} getKeys
+   * @param {Array<[string, string]>} hgetPairs
+   */
+  async watchAndGetManyAndHGetMany(watchKeys, getKeys, hgetPairs) {
+    const replies = /** @type {unknown[]} */ (await this._watchAndExecPipeline(
+      "GET_HGET_PIPELINE",
+      watchKeys,
+      [
+        ...getKeys.map((key) => ["GET", key]),
+        ...hgetPairs.map(([key, field]) => ["HGET", key, field]),
+      ]
+    ));
+    return {
+      values: replies.slice(0, getKeys.length).map(decodeBulk),
+      fields: replies.slice(getKeys.length).map(decodeBulk),
+    };
+  }
   /** @param {string} key */
   async getWithTime(key) {
     const { values, nowMs } = await this.getManyWithTime([key]);
@@ -429,6 +601,16 @@ export class RedisSession {
   async existsMany(keys) {
     const replies = /** @type {number[]} */ (await this._execPipeline(
       "EXISTS_PIPELINE",
+      keys.map((key) => ["EXISTS", key])
+    ));
+    return replies.map((value) => value > 0);
+  }
+
+  /** @param {string[]} watchKeys @param {string[]} keys */
+  async watchAndExistsMany(watchKeys, keys) {
+    const replies = /** @type {number[]} */ (await this._watchAndExecPipeline(
+      "EXISTS_PIPELINE",
+      watchKeys,
       keys.map((key) => ["EXISTS", key])
     ));
     return replies.map((value) => value > 0);
@@ -531,14 +713,11 @@ export class RedisMulti {
     const session = this._session;
     if (session._closed) throw new Error("Redis session closed");
     const { writer, parser } = requireSessionIo(session);
-    const parts = [encodeCommand(["MULTI"])];
-    for (const cmd of this._commands) parts.push(encodeCommand(cmd));
-    parts.push(encodeCommand(["EXEC"]));
-    const buf = concatBuffers(parts);
+    const commands = [["MULTI"], ...this._commands, ["EXEC"]];
 
     const startedAt = Date.now();
     try {
-      await writer.write(buf);
+      await writeRedisCommands(writer, commands);
       const replyCount = this._commands.length + 2;
       /** @type {RedisReplyError | null} */
       let firstReplyError = null;

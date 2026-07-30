@@ -16,8 +16,10 @@ import { delay } from "../helpers/timing.js";
 
 const observabilityUrl = repositoryFileUrl("shared/observability.js");
 const errorsUrl = repositoryFileUrl("shared/errors.js");
+const utf8Url = repositoryFileUrl("shared/utf8.js");
 const redisRespUrl = repositoryModuleDataUrl("shared/redis-resp.js", [
   [/from "shared-observability";/, `from ${JSON.stringify(observabilityUrl)};`],
+  [/from "shared-utf8";/, `from ${JSON.stringify(utf8Url)};`],
   [/from "\.\/errors\.js";/, `from ${JSON.stringify(errorsUrl)};`],
 ]);
 const respMod = await import(redisRespUrl);
@@ -25,7 +27,7 @@ const subscriberMod = await importRepositoryModule("shared/redis-subscriber.js",
   [/import \{ connect \} from "cloudflare:sockets";/, "const connect = null;"],
   [/from "shared-redis-resp";/g, `from ${JSON.stringify(redisRespUrl)};`],
 ]);
-const { decodeRedisTimeMs, encodeCommand, RespReader } = respMod;
+const { decodeRedisTimeMs, encodeCommand, encodeCommands, RespReader } = respMod;
 const { RedisSubscriber, defaultBackoff } = subscriberMod;
 
 /** @param {Uint8Array[]} chunks */
@@ -60,6 +62,24 @@ test("encodeCommand preserves binary args as-is", () => {
   const headerEnd = str.indexOf("$4\r\n") + 4;
   assert.equal(str.slice(0, headerEnd), "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4\r\n");
   assert.deepEqual(Array.from(out.slice(headerEnd, headerEnd + 4)), [0, 1, 2, 255]);
+});
+
+test("encodeCommands preserves the concatenated RESP byte stream", () => {
+  const binary = new Uint8Array([0, 1, 2, 255]);
+  const commands = [
+    ["SET", "plain", "value"],
+    ["HSET", "binary", "field", binary],
+    ["PUBLISH", "events", "\ud800"],
+  ];
+  const expectedParts = commands.map((command) => encodeCommand(command));
+  const expected = new Uint8Array(expectedParts.reduce((sum, part) => sum + part.byteLength, 0));
+  let offset = 0;
+  for (const part of expectedParts) {
+    expected.set(part, offset);
+    offset += part.byteLength;
+  }
+
+  assert.deepEqual(encodeCommands(commands), expected);
 });
 
 test("RespReader parses multiple replies in sequence", async () => {

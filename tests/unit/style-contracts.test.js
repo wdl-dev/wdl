@@ -202,7 +202,6 @@ test("shared Redis public barrel does not expose RESP sibling-internal helpers",
   const source = withoutLineComments(readRepoFile("shared/redis.js"));
   for (const name of [
     "buildHSetArgs",
-    "concatBuffers",
     "decodeHashObject",
     "decodeStringArray",
     "utf8Decoder",

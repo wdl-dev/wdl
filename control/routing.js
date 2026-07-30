@@ -72,6 +72,7 @@ const DEPENDENCY_READ_BATCH_SIZE = 64;
  * @typedef {{ cronSeq: number, persistSequence: boolean, addedWithPlacement: Array<CronSpec & { id: string, gen: number, slot: number }>, removed: Array<{ id: string, gen: string | number }> }} CronPlan
  * @typedef {{ newQueueConsumers: QueueConsumer[], removedQueueConsumers: QueueConsumer[] }} QueuePlan
  * @typedef {{ newRoutes: RoutePattern[], workersDev: boolean, newCrons: CronSpec[], newQueueConsumers: QueueConsumer[], newExports: ExportSpec[], d1Refs: D1Ref[], outgoingRefs: OutgoingRef[] }} PromoteBundleInputs
+ * @typedef {{ currentVersion: string | null | undefined, inputs: PromoteBundleInputs }} PromoteInitialSnapshot
  * @typedef {{ oldRoutes: RoutePattern[], oldQueueConsumers: QueueConsumer[], affectedHosts: Set<string>, hostState: HostState }} PromoteObservedState
  * @typedef {{ newRouteKeys: Set<string>, nsHostsAdd: string[], nsHostsRem: string[], cronKey: string, cronHash: Record<string, string>, cronPlan: CronPlan, queuePlan: QueuePlan }} PromoteStagePlan
  * @typedef {{ log?: (level: string, event: string, fields: Record<string, unknown>) => void, requestId?: string, ns?: string, workerName?: string }} LogContext
@@ -80,8 +81,8 @@ const DEPENDENCY_READ_BATCH_SIZE = 64;
  * @typedef {{ routes?: RoutePattern[], workersDev?: boolean, crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
  * @typedef {Record<string, Record<string, string | null | undefined>>} HostState
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
- * @typedef {{ watch: (...keys: string[]) => Promise<unknown>, unwatch: () => Promise<unknown>, hGet: (key: string, field: string) => Promise<string | null | undefined>, hGetMany: (pairs: Array<[string, string]>) => Promise<Array<string | null | undefined>>, hGetAll: (key: string) => Promise<Record<string, string | null | undefined>>, hGetAllMany: (keys: string[]) => Promise<Array<Record<string, string | null | undefined>>>, hGetAllAndGet: (hashKey: string, stringKey: string) => Promise<{ hash: Record<string, string | null | undefined>, value: string | null | undefined }>, hStrLenMany: (pairs: Array<[string, string]>) => Promise<number[]>, get: (key: string) => Promise<string | null | undefined>, exists: (...keys: string[]) => Promise<number>, existsMany: (keys: string[]) => Promise<boolean[]>, sMIsMember: (key: string, ...members: string[]) => Promise<boolean[]>, sMembers: (key: string) => Promise<string[]>, sMembersMany: (keys: string[]) => Promise<string[][]>, zRange: (key: string, start: number, stop: number) => Promise<string[]>, copy: (src: string, dst: string, options?: Record<string, unknown>) => Promise<number>, multi: () => RedisMulti }} RedisIso
- * @typedef {{ hGet: (key: string, field: string) => Promise<string | null | undefined>, incr: (key: string) => Promise<number>, session: <T>(fn: (iso: RedisIso) => Promise<T>) => Promise<T> }} RedisClient
+ * @typedef {import("shared-redis").RedisSession} RedisIso
+ * @typedef {import("shared-redis").RedisClient} RedisClient
  */
 
 // Routing owns promotion/route-specific machine codes. Keep this separate from
@@ -412,12 +413,8 @@ function stageQueueConsumerPlan(multi, ns, workerName, newVersion, queuePlan) {
   }
 }
 
-/** @param {RedisIso} iso @param {string} ns @param {string} targetLabel @param {D1Ref[]} d1Refs */
-async function assertD1DependenciesPresent(iso, ns, targetLabel, d1Refs) {
-  const keys = d1Refs.map((ref) => d1DatabaseKey(ns, ref.databaseId));
-  await watchKeys(iso, keys);
-  if (keys.length === 0 || await iso.exists(...keys) === keys.length) return;
-  const exists = await iso.existsMany(keys);
+/** @param {string} targetLabel @param {D1Ref[]} d1Refs @param {boolean[]} exists */
+function assertD1DependencySnapshot(targetLabel, d1Refs, exists) {
   const missingIndex = exists.findIndex((present) => !present);
   if (missingIndex !== -1) {
     const ref = d1Refs[missingIndex];
@@ -431,31 +428,95 @@ async function assertD1DependenciesPresent(iso, ns, targetLabel, d1Refs) {
   }
 }
 
-/** @param {RedisIso} iso @param {string} targetLabel @param {OutgoingRef[]} outgoingRefs */
-async function assertOutgoingDependenciesPresent(iso, targetLabel, outgoingRefs) {
+/** @param {OutgoingRef[]} outgoingRefs */
+function outgoingDependenciesByKey(outgoingRefs) {
   /** @type {Map<string, OutgoingRef>} */
   const firstRefByKey = new Map();
   for (const ref of outgoingRefs) {
     const key = bundleKey(ref.targetNs, ref.targetWorker, ref.targetVersion);
     if (!firstRefByKey.has(key)) firstRefByKey.set(key, ref);
   }
-  const keys = [...firstRefByKey.keys()];
-  await watchKeys(iso, keys);
-  for (let offset = 0; offset < keys.length; offset += DEPENDENCY_READ_BATCH_SIZE) {
-    const batch = keys.slice(offset, offset + DEPENDENCY_READ_BATCH_SIZE);
+  return firstRefByKey;
+}
+
+/**
+ * @param {string} targetLabel
+ * @param {Map<string, OutgoingRef>} firstRefByKey
+ * @param {string[]} keys
+ * @param {number[]} lengths
+ */
+function assertOutgoingDependencySnapshot(targetLabel, firstRefByKey, keys, lengths) {
+  const missingIndex = lengths.findIndex((length) => length === 0);
+  if (missingIndex !== -1) {
+    const ref = /** @type {OutgoingRef} */ (firstRefByKey.get(keys[missingIndex]));
+    throw new RoutingError(
+      409,
+      "service_binding_dependency_missing",
+      `Cannot ${targetLabel}: binding "${ref.binding}" ` +
+        `depends on ${ref.targetNs}/${ref.targetWorker}/${ref.targetVersion} ` +
+        `which is no longer present`,
+      { broken_dependency: ref }
+    );
+  }
+}
+
+/**
+ * @param {RedisIso} iso
+ * @param {string} ns
+ * @param {string} targetLabel
+ * @param {D1Ref[]} d1Refs
+ * @param {OutgoingRef[]} outgoingRefs
+ */
+async function assertBundleDependenciesPresent(iso, ns, targetLabel, d1Refs, outgoingRefs) {
+  const d1Keys = d1Refs.map((ref) => d1DatabaseKey(ns, ref.databaseId));
+  const firstOutgoingRefByKey = outgoingDependenciesByKey(outgoingRefs);
+  const outgoingKeys = [...firstOutgoingRefByKey.keys()];
+  const dependencyKeys = uniqueKeys([...d1Keys, ...outgoingKeys]);
+  if (dependencyKeys.length === 0) return;
+
+  const firstD1Keys = d1Keys.slice(0, DEPENDENCY_READ_BATCH_SIZE);
+  const firstOutgoingKeys = outgoingKeys.slice(
+    0,
+    DEPENDENCY_READ_BATCH_SIZE - firstD1Keys.length
+  );
+  const firstSnapshot = await iso.watchAndExistsManyAndHStrLenMany(
+    dependencyKeys,
+    firstD1Keys,
+    firstOutgoingKeys.map((key) => [key, "__meta__"])
+  );
+  assertD1DependencySnapshot(
+    targetLabel,
+    d1Refs.slice(0, firstD1Keys.length),
+    firstSnapshot.exists
+  );
+
+  for (
+    let offset = firstD1Keys.length;
+    offset < d1Keys.length;
+    offset += DEPENDENCY_READ_BATCH_SIZE
+  ) {
+    const batch = d1Keys.slice(offset, offset + DEPENDENCY_READ_BATCH_SIZE);
+    assertD1DependencySnapshot(
+      targetLabel,
+      d1Refs.slice(offset, offset + batch.length),
+      await iso.existsMany(batch)
+    );
+  }
+
+  assertOutgoingDependencySnapshot(
+    targetLabel,
+    firstOutgoingRefByKey,
+    firstOutgoingKeys,
+    firstSnapshot.lengths
+  );
+  for (
+    let offset = firstOutgoingKeys.length;
+    offset < outgoingKeys.length;
+    offset += DEPENDENCY_READ_BATCH_SIZE
+  ) {
+    const batch = outgoingKeys.slice(offset, offset + DEPENDENCY_READ_BATCH_SIZE);
     const lengths = await iso.hStrLenMany(batch.map((key) => [key, "__meta__"]));
-    const missingIndex = lengths.findIndex((length) => length === 0);
-    if (missingIndex !== -1) {
-      const ref = /** @type {OutgoingRef} */ (firstRefByKey.get(batch[missingIndex]));
-      throw new RoutingError(
-        409,
-        "service_binding_dependency_missing",
-        `Cannot ${targetLabel}: binding "${ref.binding}" ` +
-          `depends on ${ref.targetNs}/${ref.targetWorker}/${ref.targetVersion} ` +
-          `which is no longer present`,
-        { broken_dependency: ref }
-      );
-    }
+    assertOutgoingDependencySnapshot(targetLabel, firstOutgoingRefByKey, batch, lengths);
   }
 }
 
@@ -619,9 +680,19 @@ async function assertPlatformAsAvailable(iso, ns, workerName, newExports) {
   }
 }
 
-/** @param {RedisIso} iso @param {string} ns @param {string} workerName @param {string} newVersion */
-async function readPromoteBundleInputs(iso, ns, workerName, newVersion) {
-  const callerLock = await iso.get(deleteLockKey(ns, workerName));
+/** @param {RedisIso} iso @param {string} ns @param {string} workerName @param {string} newVersion @param {string[]} watchKeys @returns {Promise<PromoteInitialSnapshot>} */
+async function readPromoteInitialSnapshot(iso, ns, workerName, newVersion, watchKeys) {
+  const lockKey = deleteLockKey(ns, workerName);
+  const candidateKey = bundleKey(ns, workerName, newVersion);
+  const snapshot = await iso.watchAndGetManyAndHGetMany(
+    watchKeys,
+    [lockKey],
+    [
+      [candidateKey, "__meta__"],
+      [routesKey(ns), workerName],
+    ]
+  );
+  const [callerLock] = snapshot.values;
   if (callerLock) {
     throw new RoutingError(
       409,
@@ -632,7 +703,7 @@ async function readPromoteBundleInputs(iso, ns, workerName, newVersion) {
 
   // Every retry re-reads under WATCH: a concurrent single-version
   // delete (DEL bundle) surfaces here as a 404.
-  const metaRaw = await iso.hGet(bundleKey(ns, workerName, newVersion), "__meta__");
+  const [metaRaw, currentVersion] = snapshot.fields;
   if (metaRaw == null) {
     throw new RoutingError(404, "version_not_found", `Version ${newVersion} not found for ${ns}/${workerName}`);
   }
@@ -656,13 +727,16 @@ async function readPromoteBundleInputs(iso, ns, workerName, newVersion) {
   }
 
   return {
-    newRoutes,
-    workersDev,
-    newCrons,
-    newQueueConsumers,
-    newExports,
-    d1Refs: extractD1Refs(meta.bindings),
-    outgoingRefs: extractOutgoingRefs(meta.bindings, ns),
+    currentVersion,
+    inputs: {
+      newRoutes,
+      workersDev,
+      newCrons,
+      newQueueConsumers,
+      newExports,
+      d1Refs: extractD1Refs(meta.bindings),
+      outgoingRefs: extractOutgoingRefs(meta.bindings, ns),
+    },
   };
 }
 
@@ -671,13 +745,25 @@ async function readPromoteBundleInputs(iso, ns, workerName, newVersion) {
  * @param {string} ns
  * @param {string} workerName
  * @param {string} newVersion
+ * @param {string | null | undefined} currentVersion
  * @param {PromoteBundleInputs} inputs
  */
-async function readAndAssertPromoteState(iso, ns, workerName, newVersion, inputs) {
-  await assertD1DependenciesPresent(iso, ns, `promote ${ns}/${workerName}/${newVersion}`, inputs.d1Refs);
-  await assertOutgoingDependenciesPresent(iso, `promote ${ns}/${workerName}/${newVersion}`, inputs.outgoingRefs);
+async function readAndAssertPromoteState(
+  iso,
+  ns,
+  workerName,
+  newVersion,
+  currentVersion,
+  inputs
+) {
+  await assertBundleDependenciesPresent(
+    iso,
+    ns,
+    `promote ${ns}/${workerName}/${newVersion}`,
+    inputs.d1Refs,
+    inputs.outgoingRefs
+  );
 
-  const currentVersion = await iso.hGet(routesKey(ns), workerName);
   const currentMeta = await readMeta(iso, ns, workerName, currentVersion);
   const oldRoutes = currentMeta && Array.isArray(currentMeta.routes) ? currentMeta.routes : [];
   const oldQueueConsumers = currentMeta && Array.isArray(currentMeta.queueConsumers)
@@ -818,17 +904,30 @@ export async function promoteWithRoutes(redis, ns, workerName, newVersion, optio
       );
     },
   }, async (iso) => {
-    await iso.watch(
+    const initialWatchKeys = [
       routesKey(ns),
       hostsKey(ns),
       cronKey,
       cronSequenceKey(ns, workerName),
       deleteLockKey(ns, workerName),
       bundleKey(ns, workerName, newVersion),
-    );
+    ];
 
-    const inputs = await readPromoteBundleInputs(iso, ns, workerName, newVersion);
-    const observed = await readAndAssertPromoteState(iso, ns, workerName, newVersion, inputs);
+    const { currentVersion, inputs } = await readPromoteInitialSnapshot(
+      iso,
+      ns,
+      workerName,
+      newVersion,
+      initialWatchKeys
+    );
+    const observed = await readAndAssertPromoteState(
+      iso,
+      ns,
+      workerName,
+      newVersion,
+      currentVersion,
+      inputs
+    );
     const plan = await buildPromoteStagePlan(
       iso,
       ns,
@@ -884,13 +983,17 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
       );
     },
   }, async (iso) => {
-    await iso.watch(
+    const initialWatchKeys = [
       routesKey(ns),
       hostsKey(ns),
       deleteLockKey(ns, workerName),
+    ];
+    const initialSnapshot = await iso.watchAndGetManyAndHGetMany(
+      initialWatchKeys,
+      [deleteLockKey(ns, workerName)],
+      [[routesKey(ns), workerName]]
     );
-
-    const callerLock = await iso.get(deleteLockKey(ns, workerName));
+    const [callerLock] = initialSnapshot.values;
     if (callerLock) {
       throw new RoutingError(
         409,
@@ -899,7 +1002,7 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
       );
     }
 
-    const currentVersion = await iso.hGet(routesKey(ns), workerName);
+    const [currentVersion] = initialSnapshot.fields;
     if (!currentVersion) {
       throw new RoutingError(
         404,
@@ -910,9 +1013,12 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
 
     const srcKey = bundleKey(ns, workerName, currentVersion);
     const dstKey = bundleKey(ns, workerName, newVersion);
-    await iso.watch(srcKey, dstKey);
-
-    const srcMetaRaw = await iso.hGet(srcKey, "__meta__");
+    const srcSnapshot = await iso.watchAndGetManyAndHGetMany(
+      [srcKey, dstKey],
+      [],
+      [[srcKey, "__meta__"]]
+    );
+    const [srcMetaRaw] = srcSnapshot.fields;
     if (srcMetaRaw == null) {
       await retryIfRouteChanged(iso, ns, workerName, currentVersion);
       throw new RoutingError(
@@ -929,8 +1035,13 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     const outgoingRefs = extractOutgoingRefs(srcMeta && srcMeta.bindings, ns);
     const d1Refs = extractD1Refs(srcMeta && srcMeta.bindings);
     await assertDeclaredHosts(iso, ns, routes);
-    await assertOutgoingDependenciesPresent(iso, `bump ${ns}/${workerName}`, outgoingRefs);
-    await assertD1DependenciesPresent(iso, ns, `bump ${ns}/${workerName}`, d1Refs);
+    await assertBundleDependenciesPresent(
+      iso,
+      ns,
+      `bump ${ns}/${workerName}`,
+      d1Refs,
+      outgoingRefs
+    );
 
     const affectedHosts = new Set();
     for (const r of routes) affectedHosts.add(r.host);
@@ -948,8 +1059,11 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     // Scheduler builds x-worker-id from cron __meta__.version.
     const cronKey = cronWorkerKey(ns, workerName);
     const cronSeqKey = cronSequenceKey(ns, workerName);
-    await iso.watch(cronKey, cronSeqKey);
-    const cronSnapshot = await iso.hGetAllAndGet(cronKey, cronSeqKey);
+    const cronSnapshot = await iso.watchAndHGetAllAndGet(
+      [cronKey, cronSeqKey],
+      cronKey,
+      cronSeqKey
+    );
     const cronMetaRaw = cronSnapshot.hash.__meta__;
     let cronMetaParsed = null;
     let cronSequence = null;
@@ -1057,8 +1171,7 @@ export async function reconcileHosts(redis, ns, body, platformDomain) {
       );
     },
   }, async (iso) => {
-    await iso.watch(hostsKey(ns));
-    const current = await iso.sMembers(hostsKey(ns));
+    const current = await iso.watchAndSMembers([hostsKey(ns)], hostsKey(ns));
     const currentSet = new Set(current);
     const toAdd = [...bodySet.difference(currentSet)];
     const toRemove = [...currentSet.difference(bodySet)];

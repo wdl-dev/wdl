@@ -164,6 +164,10 @@ Do not add a generic pipeline escape hatch to application code. Add the smallest
 bounded helper that can validate reply count, reply order, and domain decoding at the
 Redis owner.
 
+Shared RESP pipelines and transactions write through the common bounded command writer.
+It preserves complete command framing and reply order while grouping ordinary commands
+into bounded buffers; one command larger than the target occupies its own write group.
+
 ## Tests
 
 Tests should protect real contracts:

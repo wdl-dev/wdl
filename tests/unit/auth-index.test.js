@@ -785,6 +785,41 @@ test("delegatedIssue: active quota de-duplicates repeated SCAN keys", async () =
   assert.equal(activeRecords.length, 2);
 });
 
+test("delegatedIssue: scans with a higher count before reading token records in bounded batches", async () => {
+  const { auth } = await freshAuth({ delegatedTemplatePatch: TINY_RANDOM_HIGH_QUOTA_TEMPLATE });
+  const issuer = await auth.issue({
+    kind: "token-issuer",
+    issueTemplates: ["wdl-chat-ns-pool"],
+    issuerTokenId: "bootstrap",
+  });
+  const state = authMockState();
+  const tokenKeys = Array.from({ length: 130 }, (_, idx) => `auth:token:scanned-${idx}`);
+  state.scanPages = [
+    { next: "1", keys: tokenKeys.slice(0, 65) },
+    { next: "2", keys: [tokenKeys[0], ...tokenKeys.slice(65)] },
+    { next: "0", keys: [] },
+  ];
+  state.commands = [];
+  state.scanCalls = [];
+  state.hGetAllManyCalls = [];
+
+  await auth.delegatedIssue({ issuerTokenId: issuer.tokenId, template: "wdl-chat-ns-pool" });
+
+  assert.deepEqual(state.scanCalls, [
+    ["0", "auth:token:*", 2000],
+    ["1", "auth:token:*", 2000],
+    ["2", "auth:token:*", 2000],
+  ]);
+  assert.deepEqual(state.hGetAllManyCalls.map((/** @type {string[]} */ keys) => keys.length), [128, 2]);
+  assert.equal(new Set(state.hGetAllManyCalls.flat()).size, 130);
+  assert.deepEqual(
+    state.commands
+      .map((/** @type {any} */ entry) => entry.command)
+      .filter((/** @type {string} */ command) => command === "SCAN" || command === "HGETALL_PIPELINE"),
+    ["SCAN", "SCAN", "SCAN", "HGETALL_PIPELINE", "HGETALL_PIPELINE"],
+  );
+});
+
 test("delegatedIssue: expired issue lock prevents writing after slow quota scan", async () => {
   const { auth } = await freshAuth();
   const issuer = await auth.issue({

@@ -458,45 +458,22 @@ const PLATFORM_AUTH_META = Object.freeze({
  * }} [options]
  */
 function installPlatformAuthWarningFixture(options = {}) {
-  /** @type {any} */ (globalThis).__controlDeployTestState.parsedPlatformBindings = [
+  const state = /** @type {any} */ (globalThis).__controlDeployTestState;
+  state.parsedPlatformBindings = [
     { binding: PLATFORM_AUTH_WARNING.binding, platform: PLATFORM_AUTH_WARNING.platform },
   ];
-  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
-    async hKeys() {
-      return [];
-    },
-    /** @param {string} key */
-    async hGetAll(key) {
-      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGETALL", key]);
-      return key === "routes:__platform__" ? { auth: "v1" } : {};
-    },
-    /** @param {string[]} keys */
-    async hGetAllMany(keys) {
-      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGETALLMANY", keys]);
-      return keys.map((key) => key === "routes:__platform__" ? { auth: "v1" } : {});
-    },
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGET", key, field]);
-      if (key === "worker:__platform__:auth:v:1" && field === "__meta__") {
-        return JSON.stringify(PLATFORM_AUTH_META);
-      }
-      return null;
-    },
-    /** @param {Array<[string, string]>} pairs */
-    async hGetMany(pairs) {
-      /** @type {any} */ (globalThis).__controlDeployTestState.redisCommands.push(["PLATFORM_HGETMANY", pairs]);
-      return pairs.map(([key, field]) => {
-        if (key === "worker:__platform__:auth:v:1" && field === "__meta__") {
-          return JSON.stringify(PLATFORM_AUTH_META);
-        }
-        return null;
-      });
-    },
+  state.hashes.set("routes:__platform__", { auth: "v1" });
+  state.hashes.set("worker:__platform__:auth:v:1", {
+    __meta__: JSON.stringify(PLATFORM_AUTH_META),
+  });
+  state.redis = {
     async incr() {
       return await (options.incr ? options.incr() : 1);
     },
-    ...(options.session ? { session: options.session } : {}),
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await (options.session ? options.session(fn) : fn(makeSession()));
+    },
   };
 }
 
@@ -682,10 +659,9 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
       bindingReads.push(["HGET", key, field]);
       return await session.hGet(key, field);
     },
-    /** @param {Array<[string, string]>} pairs */
-    async hGetMany(pairs) {
-      bindingReads.push(["HGETMANY", pairs]);
-      return await session.hGetMany(pairs);
+    /** @param {Array<[string, string]>} _pairs */
+    async hGetMany(_pairs) {
+      throw new Error("deploy preflight must use one Redis session");
     },
     /** @param {string} key */
     async hGetAll(key) {
@@ -696,7 +672,16 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
     },
     /** @param {(s: typeof session) => Promise<unknown>} fn */
     async session(fn) {
-      return await fn(session);
+      const hGetMany = session.hGetMany.bind(session);
+      session.hGetMany = async (pairs) => {
+        bindingReads.push(["HGETMANY", pairs]);
+        return await hGetMany(pairs);
+      };
+      try {
+        return await fn(session);
+      } finally {
+        session.hGetMany = hGetMany;
+      }
     },
   };
   /** @type {any} */ (globalThis).__controlDeployTestState.redis = redis;
@@ -746,6 +731,7 @@ test("deploy handler persists workersDev=false for a routed worker", async () =>
     value: "/",
   }];
   const session = makeSession();
+  let sessionCalls = 0;
   /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
     async incr() {
       return 1;
@@ -760,6 +746,7 @@ test("deploy handler persists workersDev=false for a routed worker", async () =>
       return await session.hGet(key, field);
     },
     async session(/** @type {(iso: any) => Promise<any>} */ fn) {
+      sessionCalls += 1;
       return await fn(session);
     },
   };
@@ -782,6 +769,7 @@ test("deploy handler persists workersDev=false for a routed worker", async () =>
 
   assert.equal((await readJsonResponse(response, 201)).workersDev, false);
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.workersDev, false);
+  assert.equal(sessionCalls, 1);
 });
 
 test("deploy handler validates workersDev before allocating a version", async () => {
@@ -838,17 +826,17 @@ test("deploy handler validates workersDev before allocating a version", async ()
 });
 
 test("deploy handler classifies empty service target metadata before commit", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
+    ["routes:other", { api: "v1" }],
+    ["worker:other:api:v:1", { __meta__: "" }],
+  ]);
   /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
-    /** @param {Array<[string, string]>} pairs */
-    async hGetMany(pairs) {
-      return pairs.map(([key, field]) => {
-        if (key === "routes:other" && field === "api") return "v1";
-        if (key === "worker:other:api:v:1" && field === "__meta__") return "";
-        return null;
-      });
-    },
     async incr() {
       throw new Error("corrupt target metadata must fail before version allocation");
+    },
+    /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
+    async session(fn) {
+      return await fn(makeSession());
     },
   };
 
@@ -880,13 +868,10 @@ test("deploy handler classifies empty service target metadata before commit", as
 
 test("deploy handler fails closed instead of hiding empty platform export metadata", async () => {
   installPlatformAuthWarningFixture();
-  /** @param {Array<[string, string]>} pairs */
-  const corruptPlatformMetaHGetMany = async (pairs) => {
-    return pairs.map(([key, field]) =>
-      key === "worker:__platform__:auth:v:1" && field === "__meta__" ? "" : null
-    );
-  };
-  /** @type {any} */ (globalThis).__controlDeployTestState.redis.hGetMany = corruptPlatformMetaHGetMany;
+  /** @type {any} */ (globalThis).__controlDeployTestState.hashes.set(
+    "worker:__platform__:auth:v:1",
+    { __meta__: "" }
+  );
 
   const response = await handle({
     request: new Request("http://control/ns/tenant-a/workers/caller/deploy", {
@@ -1078,9 +1063,12 @@ test("deploy handler counts runtime-generated wrapper code before allocating a v
     assert.equal(body.max_code_bytes, WORKER_LOADER_CODE_MAX_BYTES);
     assert.equal(incrCalled, false);
     assert.deepEqual(CONTROL_DEPLOY_TEST_STATE.redisCommands.filter((/** @type {unknown[]} */ command) =>
-      String(command[0]).startsWith("PLATFORM_")), [
-      ["PLATFORM_HGETALLMANY", ["routes:__platform__"]],
-      ["PLATFORM_HGETMANY", [["worker:__platform__:auth:v:1", "__meta__"]]],
+      command[0] === "hGetAllManyAndHKeysMany" || command[0] === "hGetMany"), [
+      ["hGetAllManyAndHKeysMany", ["routes:__platform__"], [
+        "secrets:tenant-a",
+        "secrets:tenant-a:code-heavy",
+      ]],
+      ["hGetMany", [["worker:__platform__:auth:v:1", "__meta__"]]],
     ]);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;

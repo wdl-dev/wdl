@@ -63,8 +63,29 @@ function resetWorkflowsHandlerState() {
   return /** @type {any} */ (state);
 }
 
+/**
+ * @param {any} state
+ * @param {(session: any) => void} configure
+ */
+function configureWorkflowListSession(state, configure) {
+  const redis = /** @type {any} */ (state.redis);
+  const originalSession = redis.session.bind(redis);
+  redis.session = async (/** @type {(session: unknown) => Promise<unknown>} */ fn) =>
+    originalSession(async (/** @type {any} */ session) => {
+      configure(session);
+      return await fn(session);
+    });
+}
+
 test("workflows handler lists active workflow definitions from bundle metadata", async () => {
   const state = resetWorkflowsHandlerState();
+  const redis = /** @type {any} */ (state.redis);
+  const originalSession = redis.session.bind(redis);
+  let sessionCalls = 0;
+  redis.session = async (/** @type {(session: unknown) => Promise<unknown>} */ fn) => {
+    sessionCalls += 1;
+    return await originalSession(fn);
+  };
 
   const response = await handle({
     method: "GET",
@@ -88,10 +109,12 @@ test("workflows handler lists active workflow definitions from bundle metadata",
   });
   assert.deepEqual(state.redis.commands, [
     ["hGetAll", "routes:demo"],
-    ["hGetMany", [["worker:demo:api:v:2", "__meta__"]]],
-    ["hGetAllMany", ["wf:defs:demo:api"]],
+    ["hGetManyAndHGetAllMany", [
+      ["worker:demo:api:v:2", "__meta__"],
+    ], ["wf:defs:demo:api"]],
     ["hGetAll", "routes:demo"],
   ]);
+  assert.equal(sessionCalls, 1);
   assert.deepEqual(state.logs, [{
     level: "info",
     event: "workflows_listed",
@@ -237,12 +260,18 @@ test("workflows handler fails closed on malformed persisted workflow definitions
 test("workflows handler retries a list snapshot split by whole-worker delete", async () => {
   const state = resetWorkflowsHandlerState();
   const redis = /** @type {any} */ (state.redis);
-  redis.hGetMany = async (/** @type {Array<[string, string]>} */ pairs) => {
-    redis.commands.push(["hGetMany", pairs]);
-    redis.hashes.set("routes:demo", {});
-    redis.hashes.set("worker:demo:api:v:2", {});
-    return pairs.map(() => null);
-  };
+  configureWorkflowListSession(state, (session) => {
+    const originalRead = session.hGetManyAndHGetAllMany.bind(session);
+    session.hGetManyAndHGetAllMany = async (
+      /** @type {Array<[string, string]>} */ pairs,
+      /** @type {string[]} */ keys
+    ) => {
+      const snapshot = await originalRead(pairs, keys);
+      redis.hashes.set("routes:demo", {});
+      redis.hashes.set("worker:demo:api:v:2", {});
+      return snapshot;
+    };
+  });
 
   const response = await handle({
     method: "GET",
@@ -349,11 +378,13 @@ for (const [label, rawMeta] of [
       { api: "v2", billing: "v2" },
       { api: "v2", billing: "v3" },
     ];
-    redis.hGetAll = async (/** @type {string} */ key) => {
-      redis.commands.push(["hGetAll", key]);
-      if (key === "routes:demo") return routeSnapshots.shift() ?? routeSnapshots.at(-1) ?? {};
-      return redis.hashes.get(key) ?? {};
-    };
+    configureWorkflowListSession(state, (session) => {
+      session.hGetAll = async (/** @type {string} */ key) => {
+        redis.commands.push(["hGetAll", key]);
+        if (key === "routes:demo") return routeSnapshots.shift() ?? routeSnapshots.at(-1) ?? {};
+        return redis.hashes.get(key) ?? {};
+      };
+    });
 
     const response = await handle({
       method: "GET",
@@ -385,11 +416,13 @@ test("workflows handler returns contention when list routes never stabilize", as
     { api: "v3" },
     { api: "v4" },
   ];
-  redis.hGetAll = async (/** @type {string} */ key) => {
-    redis.commands.push(["hGetAll", key]);
-    if (key === "routes:demo") return routeSnapshots.shift() ?? {};
-    return redis.hashes.get(key) ?? {};
-  };
+  configureWorkflowListSession(state, (session) => {
+    session.hGetAll = async (/** @type {string} */ key) => {
+      redis.commands.push(["hGetAll", key]);
+      if (key === "routes:demo") return routeSnapshots.shift() ?? {};
+      return redis.hashes.get(key) ?? {};
+    };
+  });
 
   const response = await handle({
     method: "GET",
@@ -473,15 +506,13 @@ test("workflows handler lists empty namespaces without batch reads", async () =>
 
 test("workflows handler preserves metadata-unavailable error shape for batched reads", async () => {
   const state = resetWorkflowsHandlerState();
-  state.redis.hGetAll = async (/** @type {string} */ key) => {
-    state.redis.commands.push(["hGetAll", key]);
-    if (key === "routes:demo") return { api: "v2", billing: "v5" };
-    return {};
-  };
-  state.redis.hGetMany = async (/** @type {Array<[string, string]>} */ pairs) => {
-    state.redis.commands.push(["hGetMany", pairs]);
-    throw new Error("redis unavailable");
-  };
+  const redis = /** @type {any} */ (state.redis);
+  redis.hashes.set("routes:demo", { api: "v2", billing: "v5" });
+  configureWorkflowListSession(state, (session) => {
+    session.hGetManyAndHGetAllMany = async () => {
+      throw new Error("redis unavailable");
+    };
+  });
 
   const response = await handle({
     method: "GET",
@@ -521,17 +552,15 @@ test("workflows handler preserves metadata-unavailable error shape for batched r
   ]);
 });
 
-test("workflows handler wraps workflow definition batch read failures", async () => {
+test("workflows handler wraps combined metadata batch read failures", async () => {
   const state = resetWorkflowsHandlerState();
-  state.redis.hGetAll = async (/** @type {string} */ key) => {
-    state.redis.commands.push(["hGetAll", key]);
-    if (key === "routes:demo") return { api: "v2", billing: "v5" };
-    return {};
-  };
-  state.redis.hGetAllMany = async (/** @type {string[]} */ keys) => {
-    state.redis.commands.push(["hGetAllMany", keys]);
-    throw new Error("defs unavailable");
-  };
+  const redis = /** @type {any} */ (state.redis);
+  redis.hashes.set("routes:demo", { api: "v2", billing: "v5" });
+  configureWorkflowListSession(state, (session) => {
+    session.hGetManyAndHGetAllMany = async () => {
+      throw new Error("defs unavailable");
+    };
+  });
 
   const response = await handle({
     method: "GET",

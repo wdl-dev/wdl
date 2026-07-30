@@ -271,7 +271,9 @@ function resetDeleteHandlerState({
         }
         return token;
       }
-      if (key === "worker:do-storage:demo:api") return doStorageIdDuringExec;
+      if (key === "worker:do-storage:demo:api") {
+        return watchedKeys.length > 0 ? doStorageIdDuringExec : doStorageId;
+      }
       return null;
     },
     /** @param {string} key */
@@ -284,16 +286,36 @@ function resetDeleteHandlerState({
       if (key === "routes:demo") return routeVersions[field] || null;
       if (key.startsWith("patterns:")) return patternRecordsDuringExec[key]?.[field] || null;
       if (queueConsumerKeys.includes(key) && field === "worker") {
-        return queueConsumerWorkerDuringExec;
+        return watchedKeys.length > 0 ? queueConsumerWorkerDuringExec : queueConsumerWorker;
       }
+      if (/^worker:demo:api:v:\d+$/.test(key) && field === "__meta__") return meta;
       return null;
     },
     /** @param {Array<[string, string]>} pairs */
     async hGetMany(pairs) {
       commands.push(["HGETMANY", pairs.map(([key, field]) => [key, field])]);
-      return pairs.map(([key, field]) =>
-        queueConsumerKeys.includes(key) && field === "worker" ? queueConsumerWorkerDuringExec : null
-      );
+      return pairs.map(([key, field]) => {
+        if (/^worker:demo:api:v:\d+$/.test(key) && field === "__meta__") return meta;
+        if (queueConsumerKeys.includes(key) && field === "worker") {
+          return watchedKeys.length > 0 ? queueConsumerWorkerDuringExec : queueConsumerWorker;
+        }
+        return null;
+      });
+    },
+    /**
+     * @param {Array<[string, string]>} pairs
+     * @param {string[]} setKeys
+     */
+    async hGetManyAndSMembersMany(pairs, setKeys) {
+      commands.push([
+        "HGETMANY_SMEMBERSMANY",
+        pairs.map(([key, field]) => [key, field]),
+        [...setKeys],
+      ]);
+      return {
+        fields: await this.hGetMany(pairs),
+        memberLists: setKeys.map((key) => versionReferrers(key)),
+      };
     },
     /** @param {string} key */
     async exists(key) {
@@ -315,7 +337,8 @@ function resetDeleteHandlerState({
     /** @param {string} key */
     async sCard(key) {
       commands.push(["SESSION_SCARD", key]);
-      return key === "do:objects:do_old" ? doObjectCountDuringExec : 0;
+      if (key !== "do:objects:do_old") return 0;
+      return watchedKeys.length > 0 ? doObjectCountDuringExec : doObjectCount;
     },
     /** @param {string[]} keys */
     async sMembersMany(keys) {
@@ -327,17 +350,27 @@ function resetDeleteHandlerState({
       commands.push(["SESSION_HGETALLMANY", keys]);
       return keys.map((key) => {
         if (queueConsumerKeys.includes(key)) {
-          return queueConsumerWorkerDuringExec ? { worker: queueConsumerWorkerDuringExec } : {};
+          const worker = watchedKeys.length > 0
+            ? queueConsumerWorkerDuringExec
+            : queueConsumerWorker;
+          return worker ? { worker } : {};
         }
-        return patternRecordsDuringExec[key] || {};
+        return watchedKeys.length > 0
+          ? patternRecordsDuringExec[key] || {}
+          : patternRecords[key] || {};
       });
     },
     /** @param {string} _cursor @param {string} pattern */
     async scan(_cursor, pattern) {
-      commands.push(["SESSION_SCAN", pattern]);
-      if (pattern === "do:owner:scope:do_old%3A*") return ["0", doOwnerKeysDuringExec];
-      if (pattern === "queue-consumer:demo:*" && queueConsumerWorkerDuringExec) {
-        return ["0", queueConsumerKeysDuringExec];
+      commands.push(["SESSION_SCAN", pattern, watchedKeys.length > 0]);
+      if (pattern === "do:owner:scope:do_old%3A*") {
+        return ["0", watchedKeys.length > 0 ? doOwnerKeysDuringExec : doOwnerKeys];
+      }
+      const queueWorker = watchedKeys.length > 0
+        ? queueConsumerWorkerDuringExec
+        : queueConsumerWorker;
+      if (pattern === "queue-consumer:demo:*" && queueWorker) {
+        return ["0", watchedKeys.length > 0 ? queueConsumerKeysDuringExec : queueConsumerKeys];
       }
       return ["0", []];
     },
@@ -390,6 +423,17 @@ function resetDeleteHandlerState({
     async zRange(key) {
       if (key === "worker-versions:demo:api") return retainedVersions;
       return [];
+    },
+    /**
+     * @param {string} hashKey
+     * @param {string} field
+     * @param {string} sortedSetKey
+     */
+    async hGetAndZRange(hashKey, field, sortedSetKey) {
+      if (hashKey !== "routes:demo" || sortedSetKey !== "worker-versions:demo:api") {
+        return { field: null, members: [] };
+      }
+      return { field: routeVersions[field] || null, members: retainedVersions };
     },
     /** @param {string} key @param {string} field */
     async hGet(key, field) {
@@ -454,6 +498,7 @@ function resetDeleteHandlerState({
     multiCalls,
     releaseCalls: 0,
     redis,
+    session,
     metrics: { increment() {}, observe() {} },
     service: "control",
     workflowChecks: [],
@@ -568,21 +613,26 @@ function resetVersionDeleteHandlerState({
 
 function resetVersionListHandlerState() {
   const redis = {
-    /** @param {string} key @param {string} field */
-    async hGet(key, field) {
-      if (key === "routes:demo" && field === "api") return "v2";
-      return null;
-    },
     /**
-     * @param {string} key
+     * @param {string} hashKey
+     * @param {string} field
+     * @param {string} sortedSetKey
      * @param {number} start
      * @param {number} stop
      */
-    async zRange(key, start, stop) {
-      assert.equal(key, "worker-versions:demo:api");
+    async hGetAndZRange(hashKey, field, sortedSetKey, start, stop) {
+      assert.equal(hashKey, "routes:demo");
+      assert.equal(field, "api");
+      assert.equal(sortedSetKey, "worker-versions:demo:api");
       assert.equal(start, 0);
       assert.equal(stop, -1);
-      return ["v1", "v2"];
+      return { field: "v2", members: ["v1", "v2"] };
+    },
+    async hGet() {
+      throw new Error("versions GET must use one typed Redis snapshot");
+    },
+    async zRange() {
+      throw new Error("versions GET must use one typed Redis snapshot");
     },
     async get() {
       throw new Error("versions GET must not read next_version");
@@ -640,8 +690,8 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, true);
   assert.deepEqual(
-    testState.commands.find((/** @type {unknown[]} */ call) => call[0] === "CLIENT_EXISTSMANY"),
-    ["CLIENT_EXISTSMANY", ["secrets:demo:api", "wf:defs:demo:api"]]
+    testState.commands.find((/** @type {unknown[]} */ call) => call[0] === "SESSION_EXISTSMANY"),
+    ["SESSION_EXISTSMANY", ["secrets:demo:api", "wf:defs:demo:api"]]
   );
   assert.deepEqual(testState.lockKinds, ["whole"]);
   assert.deepEqual(testState.workflowChecks, [{
@@ -845,17 +895,8 @@ test("worker delete collects retained version metadata without serial round trip
     queueConsumerWorker: null,
     retainedVersions: ["v1", "v2", "v3"],
   });
-  const originalHGet = testState.redis.hGet.bind(testState.redis);
-  let activeBundleMetaReads = 0;
-  let maxActiveBundleMetaReads = 0;
-  testState.redis.hGet = async (/** @type {string} */ key, /** @type {string} */ field) => {
-    if (/^worker:demo:api:v:\d+$/.test(key) && field === "__meta__") {
-      activeBundleMetaReads += 1;
-      maxActiveBundleMetaReads = Math.max(maxActiveBundleMetaReads, activeBundleMetaReads);
-      await Promise.resolve();
-      activeBundleMetaReads -= 1;
-    }
-    return await originalHGet(key, field);
+  testState.redis.hGet = async () => {
+    throw new Error("retained metadata must use the collection session");
   };
 
   const response = await handle({
@@ -871,9 +912,19 @@ test("worker delete collects retained version metadata without serial round trip
   assert.equal(body.deleted, true);
   assert.deepEqual(testState.lockKinds, ["whole"]);
   assert.deepEqual(body.versionsDeleted, ["v1", "v2", "v3"]);
-  assert.ok(
-    maxActiveBundleMetaReads > 1,
-    `expected concurrent retained-version meta reads, saw ${maxActiveBundleMetaReads}`
+  assert.deepEqual(
+    testState.commands.find((/** @type {unknown[]} */ call) =>
+      call[0] === "HGETMANY_SMEMBERSMANY"
+    ),
+    ["HGETMANY_SMEMBERSMANY", [
+      ["worker:demo:api:v:1", "__meta__"],
+      ["worker:demo:api:v:2", "__meta__"],
+      ["worker:demo:api:v:3", "__meta__"],
+    ], [
+      "worker-version-referrers:demo:api:v1",
+      "worker-version-referrers:demo:api:v2",
+      "worker-version-referrers:demo:api:v3",
+    ]]
   );
 });
 
@@ -923,7 +974,9 @@ test("worker delete retries instead of committing when DO object count drifts af
   const body = await readJsonResponse(response, 503);
   assert.equal(body.error, "whole_delete_contention");
   assert.equal(testState.commands.some((/** @type {unknown[]} */ call) =>
-    call[0] === "SESSION_SCAN" && call[1] === "do:owner:scope:do_old%3A*"
+    call[0] === "SESSION_SCAN" &&
+    call[1] === "do:owner:scope:do_old%3A*" &&
+    call[2] === true
   ), false);
   assert.equal(testState.multiCalls.some((/** @type {any} */ call) => call[0] === "EXEC"), false);
   assert.deepEqual(testState.doAlarmCleanups, []);
@@ -949,7 +1002,11 @@ test("worker delete retries instead of committing when queue consumer keys drift
   const body = await readJsonResponse(response, 503);
   assert.equal(body.error, "whole_delete_contention");
   assert.deepEqual(
-    testState.commands.find((/** @type {unknown[]} */ call) => call[0] === "HGETMANY"),
+    testState.commands.find((/** @type {unknown[]} */ call) => (
+      call[0] === "HGETMANY" &&
+      Array.isArray(call[1]) &&
+      call[1][0]?.[0]?.startsWith("queue-consumer:")
+    )),
     ["HGETMANY", [
       ["queue-consumer:demo:jobs", "worker"],
       ["queue-consumer:demo:email", "worker"],
@@ -983,8 +1040,12 @@ test("worker delete deduplicates Redis SCAN results before drift checks and coun
   assert.equal(body.deleted, true);
   assert.equal(body.queueConsumersRemoved, 1);
   assert.deepEqual(
-    testState.commands.find((/** @type {unknown[]} */ call) => call[0] === "CLIENT_HGETMANY"),
-    ["CLIENT_HGETMANY", [[queueKey, "worker"]]],
+    testState.commands.find((/** @type {unknown[]} */ call) => (
+      call[0] === "HGETMANY" &&
+      Array.isArray(call[1]) &&
+      call[1][0]?.[0] === queueKey
+    )),
+    ["HGETMANY", [[queueKey, "worker"]]],
   );
   assert.equal(
     (testState.watchBatches.at(-1) || []).filter((key) => key === ownerKey).length,
@@ -1026,6 +1087,20 @@ test("worker delete bounds and batches under-WATCH projection snapshots", async 
   assert.deepEqual(
     setBatches.flat(),
     retainedVersions.map((version) => `worker-version-referrers:demo:api:${version}`)
+  );
+  const collectionBatches = testState.commands
+    .filter((/** @type {unknown[]} */ call) => call[0] === "HGETMANY_SMEMBERSMANY");
+  assert.equal(collectionBatches.length, 5);
+  assert.ok(collectionBatches.every((call) =>
+    /** @type {unknown[]} */ (call[1]).length <= 16 &&
+    /** @type {unknown[]} */ (call[2]).length <= 16
+  ));
+  assert.deepEqual(
+    collectionBatches.flatMap((call) => /** @type {unknown[][]} */ (call[1])),
+    retainedVersions.map((version) => [
+      `worker:demo:api:v:${version.slice(1)}`,
+      "__meta__",
+    ])
   );
   assert.ok(testState.commands.some((/** @type {unknown[]} */ call) =>
     call[0] === "SESSION_SCARD" && call[1] === "do:objects:do_old"
@@ -1244,10 +1319,14 @@ test("worker delete dry-run retries an active/index snapshot split by a secret b
     retainedVersions: ["v1", "v2"],
   });
   let versionReads = 0;
-  testState.redis.zRange = async (/** @type {string} */ key) => {
+  testState.session.zRange = async (/** @type {string} */ key) => {
     assert.equal(key, "worker-versions:demo:api");
     versionReads += 1;
     return versionReads === 1 ? ["v1"] : ["v1", "v2"];
+  };
+  testState.redis.hGetAndZRange = async () => {
+    versionReads += 1;
+    return { field: "v2", members: ["v1", "v2"] };
   };
 
   const response = await handle({
@@ -1310,7 +1389,7 @@ test("worker delete dry-run retries when a retained version is deleted during co
     queueConsumerWorker: null,
   });
   let versionReads = 0;
-  testState.redis.zRange = async (/** @type {string} */ key) => {
+  testState.session.zRange = async (/** @type {string} */ key) => {
     assert.equal(key, "worker-versions:demo:api");
     versionReads += 1;
     return versionReads === 1 ? ["v1"] : [];

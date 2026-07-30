@@ -36,17 +36,17 @@ import {
   workerVersionsKey,
 } from "shared-worker-contract";
 import { workerSecretsKey } from "shared-secret-keys";
-import { decodeBulk, WatchError } from "shared-redis";
+import { WatchError } from "shared-redis";
 import { queueConsumerScanPrefix } from "shared-queue-keys";
 import { discardResponseBody } from "shared-respond";
 import { buildWorkerDeleteCleanup, stageWorkerDelete } from "control-handlers-delete-plan";
 
 const MAX_DELETE_ATTEMPTS = 5;
-const DELETE_COLLECT_READ_CONCURRENCY = 16;
-const DELETE_VERIFY_READ_BATCH_SIZE = 16;
+const DELETE_READ_BATCH_SIZE = 16;
 
 /**
  * @typedef {import("shared-redis").RedisClient} RedisClient
+ * @typedef {import("shared-redis").RedisSession} RedisSession
  * @typedef {import("control-shared").ControlLogger} ControlLogger
  * @typedef {import("control-lib").AccessPrincipal} AccessPrincipal
  * @typedef {{ scan(cursor: string, match: string, count?: number): Promise<[string, string[]]> }} RedisScanner
@@ -424,13 +424,16 @@ function assertActiveVersionRetained(collected) {
 /** @param {RedisClient} redis @param {DeleteInputs} collected */
 async function assertDryRunActiveVersionRetained(redis, collected) {
   if (!collected.activeVersion || collected.retainedVersions.includes(collected.activeVersion)) return;
-  const [retainedVersions, activeVersion] = await Promise.all([
-    redis.zRange(workerVersionsKey(collected.ns, collected.name), 0, -1),
-    redis.hGet(routesKey(collected.ns), collected.name),
-  ]);
+  const snapshot = await redis.hGetAndZRange(
+    routesKey(collected.ns),
+    collected.name,
+    workerVersionsKey(collected.ns, collected.name),
+    0,
+    -1
+  );
   if (
-    activeVersion !== collected.activeVersion ||
-    !arraysShallowEqual(retainedVersions, collected.retainedVersions)
+    snapshot.field !== collected.activeVersion ||
+    !arraysShallowEqual(snapshot.members, collected.retainedVersions)
   ) {
     throw new DriftSignal("active version or retained versions changed during dry-run");
   }
@@ -463,7 +466,7 @@ async function scanDoOwnerKeys(redis, doStorageId) {
 }
 
 /**
- * @param {RedisScanner & Pick<RedisClient, "hGet"> & Partial<Pick<RedisClient, "hGetMany">>} redis
+ * @param {RedisScanner & Pick<RedisSession, "hGetMany">} redis
  * @param {string} ns
  * @param {string} name
  */
@@ -474,11 +477,13 @@ async function scanQueueConsumerKeysForWorker(redis, ns, name) {
   do {
     const [next, found] = await redis.scan(cursor, `${prefix}*`, 100);
     const keys = [...new Set(found)];
-    const workers = typeof redis.hGetMany === "function"
-      ? await redis.hGetMany(keys.map((k) => [k, "worker"]))
-      : await mapConcurrent(keys, DELETE_COLLECT_READ_CONCURRENCY, (k) =>
-        redis.hGet(k, "worker")
-      );
+    const workerPairs = /** @type {Array<[string, string]>} */ (
+      keys.map((key) => [key, "worker"])
+    );
+    const workers = await readDeleteBatches(
+      workerPairs,
+      (pairs) => redis.hGetMany(pairs)
+    );
     for (let i = 0; i < keys.length; i += 1) {
       if (workers[i] === name) queueConsumerKeys.add(keys[i]);
     }
@@ -563,9 +568,17 @@ async function cleanupDoAlarmsOrWarn({ ns, worker, doStorageId, requestId, log }
  * @returns {Promise<DeleteInputs>}
  */
 async function collectDeleteInputs({ redis, ns, name }) {
-  const doStorageId = /** @type {string | null} */ (
-    decodeBulk((await redis.get(doStorageIdKey(ns, name))) ?? null) ?? null
+  return await redis.session((session) =>
+    collectDeleteInputsFromSession({ redis: session, ns, name })
   );
+}
+
+/**
+ * @param {{ redis: RedisSession, ns: string, name: string }} args
+ * @returns {Promise<DeleteInputs>}
+ */
+async function collectDeleteInputsFromSession({ redis, ns, name }) {
+  const doStorageId = (await redis.get(doStorageIdKey(ns, name))) ?? null;
   const doObjectRegistry = doStorageId ? doObjectRegistryKey(doStorageId) : null;
   const doObjectCount = doObjectRegistry ? await redis.sCard(doObjectRegistry) : 0;
 
@@ -584,12 +597,18 @@ async function collectDeleteInputs({ redis, ns, name }) {
   const outgoingRefsByVersion = {};
   /** @type {Record<string, string[]>} */
   const referrersByVersion = {};
-  const retainedReads = await mapConcurrent(retainedVersions, DELETE_COLLECT_READ_CONCURRENCY, async (ver) => {
-    const [rawMeta, referrers] = await Promise.all([
-      redis.hGet(bundleKey(ns, name, ver), "__meta__"),
-      redis.sMembers(referrersKey(ns, name, ver)),
-    ]);
-    return { ver, rawMeta, referrers };
+  /** @type {Map<string, unknown>} */
+  const parsedMetaByVersion = new Map();
+  const retainedReads = await readDeleteBatches(retainedVersions, async (versions) => {
+    const snapshot = await redis.hGetManyAndSMembersMany(
+      versions.map((version) => [bundleKey(ns, name, version), "__meta__"]),
+      versions.map((version) => referrersKey(ns, name, version))
+    );
+    return versions.map((ver, index) => ({
+      ver,
+      rawMeta: snapshot.fields[index],
+      referrers: snapshot.memberLists[index],
+    }));
   });
   for (const { ver, rawMeta, referrers } of retainedReads) {
     if (rawMeta == null) {
@@ -608,6 +627,7 @@ async function collectDeleteInputs({ redis, ns, name }) {
         detail: reason,
       }),
     });
+    parsedMetaByVersion.set(ver, meta);
     const assetPrefix = bundleAssetPrefix(meta);
     if (assetPrefix !== null) prefixByVersion[ver] = assetPrefix;
     d1RefsByVersion[ver] = extractD1Refs(meta.bindings);
@@ -621,23 +641,26 @@ async function collectDeleteInputs({ redis, ns, name }) {
   /** @type {RouteSlot[]} */
   let activeRoutes = [];
   if (activeVersion) {
-    const rawMeta = await redis.hGet(bundleKey(ns, name, activeVersion), "__meta__");
-    if (rawMeta == null) {
-      const currentActive = await redis.hGet(routesKey(ns), name);
-      if (currentActive !== activeVersion) {
-        throw new DriftSignal("active version changed during collection");
+    let meta = parsedMetaByVersion.get(activeVersion);
+    if (meta === undefined) {
+      const rawMeta = await redis.hGet(bundleKey(ns, name, activeVersion), "__meta__");
+      if (rawMeta == null) {
+        const currentActive = await redis.hGet(routesKey(ns), name);
+        if (currentActive !== activeVersion) {
+          throw new DriftSignal("active version changed during collection");
+        }
       }
+      meta = parseBundleMeta(rawMeta, {
+        ns,
+        worker: name,
+        version: activeVersion,
+        makeError: ({ reason }) => new WholeDeleteError(500, "corrupt_meta", {
+          namespace: ns, name, version: activeVersion,
+          stage: "active_meta_parse",
+          detail: reason,
+        }),
+      });
     }
-    const meta = parseBundleMeta(rawMeta, {
-      ns,
-      worker: name,
-      version: activeVersion,
-      makeError: ({ reason }) => new WholeDeleteError(500, "corrupt_meta", {
-        namespace: ns, name, version: activeVersion,
-        stage: "active_meta_parse",
-        detail: reason,
-      }),
-    });
     activeRoutes = normalizeActiveRoutes(meta, {
       namespace: ns,
       name,
@@ -649,7 +672,10 @@ async function collectDeleteInputs({ redis, ns, name }) {
   // pattern slot on it — SREMing because we just happen to own a slot
   // there would strand those other workers from their declared host.
   const hostsInActiveRoutes = [...new Set(activeRoutes.map((r) => r.host))];
-  const hostPatternReads = await redis.hGetAllMany(hostsInActiveRoutes.map((host) => patternsKey(host)));
+  const hostPatternReads = await readDeleteBatches(
+    hostsInActiveRoutes.map((host) => patternsKey(host)),
+    (keys) => redis.hGetAllMany(keys)
+  );
   const hostsLosingNsOwnership = findHostsLosingNsOwnership(
     ns,
     activeRoutes,
@@ -789,30 +815,14 @@ function findHostsLosingNsOwnership(ns, activeRoutes, hosts, patternRecords) {
 /**
  * @template T,U
  * @param {T[]} items
- * @param {number} concurrency
- * @param {(item: T) => Promise<U>} fn
- * @returns {Promise<U[]>}
- */
-async function mapConcurrent(items, concurrency, fn) {
-  /** @type {U[]} */
-  const out = [];
-  for (let i = 0; i < items.length; i += concurrency) {
-    out.push(...await Promise.all(items.slice(i, i + concurrency).map(fn)));
-  }
-  return out;
-}
-
-/**
- * @template T,U
- * @param {T[]} items
  * @param {(batch: T[]) => Promise<U[]>} fn
  * @returns {Promise<U[]>}
  */
-async function readDeleteVerifyBatches(items, fn) {
+async function readDeleteBatches(items, fn) {
   /** @type {U[]} */
   const out = [];
-  for (let offset = 0; offset < items.length; offset += DELETE_VERIFY_READ_BATCH_SIZE) {
-    out.push(...await fn(items.slice(offset, offset + DELETE_VERIFY_READ_BATCH_SIZE)));
+  for (let offset = 0; offset < items.length; offset += DELETE_READ_BATCH_SIZE) {
+    out.push(...await fn(items.slice(offset, offset + DELETE_READ_BATCH_SIZE)));
   }
   return out;
 }
@@ -870,7 +880,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       });
     }
     const currentNamespaceStillActive = Object.keys(curRoutes).some((worker) => worker !== name);
-    const currentPatternRecords = await readDeleteVerifyBatches(
+    const currentPatternRecords = await readDeleteBatches(
       collected.affectedHosts.map((host) => patternsKey(host)),
       (keys) => iso.hGetAllMany(keys)
     );
@@ -894,7 +904,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
     }
 
     const setSnapshotKeys = collected.retainedVersions.map((ver) => referrersKey(ns, name, ver));
-    const setSnapshots = await readDeleteVerifyBatches(
+    const setSnapshots = await readDeleteBatches(
       setSnapshotKeys,
       (keys) => iso.sMembersMany(keys)
     );
@@ -948,7 +958,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       }
     }
 
-    const queueConsumerRecords = await readDeleteVerifyBatches(
+    const queueConsumerRecords = await readDeleteBatches(
       collected.queueConsumerKeys,
       (keys) => iso.hGetAllMany(keys)
     );

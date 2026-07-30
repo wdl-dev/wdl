@@ -79,7 +79,7 @@ const DEPLOY_PREFLIGHT_READ_BATCH_SIZE = 32;
 class DeployAbort extends ControlAbort {}
 
 /**
- * @param {RedisClient} redis
+ * @param {RedisReader} redis
  * @param {Array<[string, string]>} pairs
  */
 async function readDeployHGetMany(redis, pairs) {
@@ -90,6 +90,23 @@ async function readDeployHGetMany(redis, pairs) {
     values.push(...batch.map((value) => value ?? null));
   }
   return values;
+}
+
+/**
+ * @param {{ ns: string, name: string, bindings: BindingMap }} args
+ */
+function serviceBindingPreflightTargets({ ns, name, bindings }) {
+  /** @type {Map<string, { targetNs: string, worker: string }>} */
+  const targets = new Map();
+  for (const spec of Object.values(bindings)) {
+    if (!spec || spec.type !== "service" || typeof spec.service !== "string" || !spec.service) continue;
+    const targetNs = spec.ns == null ? ns : spec.ns;
+    if (typeof targetNs !== "string") continue;
+    if (targetNs === ns && spec.service === name) continue;
+    if (PLATFORM_TIER_RESERVED_NS.has(targetNs)) continue;
+    targets.set(`${targetNs}\0${spec.service}`, { targetNs, worker: spec.service });
+  }
+  return [...targets.values()];
 }
 
 /** @param {Record<string, unknown>} details */
@@ -103,6 +120,7 @@ function deployAbortLogContext(details) {
  * @typedef {import("control-shared").ControlLogger} ControlLogger
  * @typedef {import("shared-redis").RedisClient} RedisClient
  * @typedef {import("shared-redis").RedisSession} RedisSession
+ * @typedef {RedisClient | RedisSession} RedisReader
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
  * @typedef {import("control-topology").RoutePattern} RoutePattern
  * @typedef {import("control-topology").CronSpec} CronSpec
@@ -361,21 +379,15 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, bindings: BindingMap }} args
+ * @param {{
+ *   redis: RedisReader,
+ *   ns: string,
+ *   name: string,
+ *   bindings: BindingMap,
+ *   targetList: Array<{ targetNs: string, worker: string }>,
+ * }} args
  */
-async function validateServiceBindingsPreflight({ redis, ns, name, bindings }) {
-  /** @type {Map<string, { targetNs: string, worker: string }>} */
-  const targets = new Map();
-  for (const spec of Object.values(bindings)) {
-    if (!spec || spec.type !== "service" || typeof spec.service !== "string" || !spec.service) continue;
-    const targetNs = spec.ns == null ? ns : spec.ns;
-    if (typeof targetNs !== "string") continue;
-    if (targetNs === ns && spec.service === name) continue;
-    if (PLATFORM_TIER_RESERVED_NS.has(targetNs)) continue;
-    targets.set(`${targetNs}\0${spec.service}`, { targetNs, worker: spec.service });
-  }
-
-  const targetList = [...targets.values()];
+async function validateServiceBindingsPreflight({ redis, ns, name, bindings, targetList }) {
   const versions = await readDeployHGetMany(
     redis,
     targetList.map(({ targetNs, worker }) => [routesKey(targetNs), worker])
@@ -436,12 +448,12 @@ async function validateServiceBindingsPreflight({ redis, ns, name, bindings }) {
   }
 }
 
-/** @param {RedisClient} redis */
-async function collectPlatformExports(redis) {
-  const platformNamespaces = [...PLATFORM_TIER_RESERVED_NS];
-  const routeHashes = await redis.hGetAllMany(
-    platformNamespaces.map((platformNs) => routesKey(platformNs))
-  );
+/**
+ * @param {RedisReader} redis
+ * @param {string[]} platformNamespaces
+ * @param {Array<Record<string, string | null | undefined>>} routeHashes
+ */
+async function collectPlatformExports(redis, platformNamespaces, routeHashes) {
   const routeEntries = platformNamespaces.flatMap((platformNs, index) => {
     const platformRoutesHash = routeHashes[index];
     return Object.entries(platformRoutesHash)
@@ -480,22 +492,24 @@ async function collectPlatformExports(redis) {
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, bindings: BindingMap, platformBindingsList: PlatformBindingRequest[] }} args
+ * @param {{ redis: RedisSession, ns: string, name: string, bindings: BindingMap, platformBindingsList: PlatformBindingRequest[] }} args
  */
 async function resolvePlatformBindings({ redis, ns, name, bindings, platformBindingsList }) {
   /** @type {DeployWarning[]} */
   const warnings = [];
   if (!platformBindingsList.length) return { bindings, warnings };
 
-  const [
-    platformExports,
-    nsSecretKeys,
-    workerSecretKeys,
-  ] = await Promise.all([
-    collectPlatformExports(redis),
-    redis.hKeys(nsSecretsKey(ns)),
-    redis.hKeys(workerSecretsKey(ns, name)),
-  ]);
+  const platformNamespaces = [...PLATFORM_TIER_RESERVED_NS];
+  const snapshot = await redis.hGetAllManyAndHKeysMany(
+    platformNamespaces.map((platformNs) => routesKey(platformNs)),
+    [nsSecretsKey(ns), workerSecretsKey(ns, name)]
+  );
+  const platformExports = await collectPlatformExports(
+    redis,
+    platformNamespaces,
+    snapshot.hashes
+  );
+  const [nsSecretKeys, workerSecretKeys] = snapshot.keyLists;
   const availableCallerSecrets = new Set([...nsSecretKeys, ...workerSecretKeys]);
   const expandedBindings = { ...bindings };
 
@@ -662,18 +676,37 @@ async function parseDeployRequestForHandler({ request, ns, platformDomain }) {
  * @param {{ redis: RedisClient, ns: string, name: string, deployRequest: DeployRequest }} args
  */
 async function runDeployPreflight({ redis, ns, name, deployRequest }) {
-  await validateServiceBindingsPreflight({
-    redis,
+  const targetList = serviceBindingPreflightTargets({
     ns,
     name,
     bindings: deployRequest.mergedBindings,
   });
-  return await resolvePlatformBindings({
-    redis,
-    ns,
-    name,
-    bindings: deployRequest.mergedBindings,
-    platformBindingsList: deployRequest.platformBindingsList,
+  if (targetList.length === 0 && deployRequest.platformBindingsList.length === 0) {
+    await validateServiceBindingsPreflight({
+      redis,
+      ns,
+      name,
+      bindings: deployRequest.mergedBindings,
+      targetList,
+    });
+    return { bindings: deployRequest.mergedBindings, warnings: [] };
+  }
+
+  return await redis.session(async (session) => {
+    await validateServiceBindingsPreflight({
+      redis: session,
+      ns,
+      name,
+      bindings: deployRequest.mergedBindings,
+      targetList,
+    });
+    return await resolvePlatformBindings({
+      redis: session,
+      ns,
+      name,
+      bindings: deployRequest.mergedBindings,
+      platformBindingsList: deployRequest.platformBindingsList,
+    });
   });
 }
 

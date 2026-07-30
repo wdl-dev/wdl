@@ -6,8 +6,10 @@ import {
 
 const SHARED_OBSERVABILITY_URL = repositoryFileUrl("shared/observability.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_UTF8_URL = repositoryFileUrl("shared/utf8.js");
 const SHARED_REDIS_RESP_URL = repositoryModuleDataUrl("shared/redis-resp.js", [
   [/from "shared-observability";/, `from ${JSON.stringify(SHARED_OBSERVABILITY_URL)};`],
+  [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
   [/from "\.\/errors\.js";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
 ]);
 const utf8Encoder = new TextEncoder();
@@ -265,6 +267,29 @@ export function createFakeRedisClient(state, options = {}) {
         value: state.strings.get(stringKey) ?? null,
       };
     },
+    /**
+     * @param {string} hashKey
+     * @param {string} field
+     * @param {string} sortedSetKey
+     * @param {number} start
+     * @param {number} stop
+     */
+    async hGetAndZRange(hashKey, field, sortedSetKey, start, stop) {
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, sortedSetKey, options);
+      state.commands.push([
+        "hGetAndZRange",
+        hashKey,
+        field,
+        sortedSetKey,
+        start,
+        stop,
+      ]);
+      return {
+        field: hashField(state, hashKey, field),
+        members: zRangeMembers(state, sortedSetKey, start, stop),
+      };
+    },
     /** @param {string} setKey @param {string} hashKey */
     async sMembersAndHGetAll(setKey, hashKey) {
       expireIfNeeded(state, setKey, options);
@@ -419,20 +444,23 @@ export function createFakeRedisSession(state, options = {}) {
       watchedSnapshots.clear();
     },
   };
+  /** @param {string[]} keys */
+  function captureWatch(keys) {
+    state.watched.push(...keys);
+    state.watchBatches.push([...keys]);
+    for (const key of keys) {
+      if (!watchedSnapshots.has(key)) {
+        watchedSnapshots.set(key, {
+          fingerprint: fakeKeyFingerprint(state, key, options),
+          revision: keyRevision(state, key),
+        });
+      }
+    }
+  }
   return {
     /** @param {string[]} keys */
     async watch(...keys) {
-      state.watched.push(...keys);
-      state.watchBatches.push(keys);
-      for (const key of keys) {
-        if (!watchedSnapshots.has(key)) {
-          const fingerprint = fakeKeyFingerprint(state, key, options);
-          watchedSnapshots.set(key, {
-            fingerprint,
-            revision: keyRevision(state, key),
-          });
-        }
-      }
+      captureWatch(keys);
     },
     async unwatch() {
       watchContext.clear();
@@ -455,6 +483,30 @@ export function createFakeRedisSession(state, options = {}) {
     async getManyAndHGetMany(getKeys, hgetPairs) {
       state.commands.push([
         "getManyAndHGetMany",
+        [...getKeys],
+        hgetPairs.map(([key, field]) => [key, field]),
+      ]);
+      return {
+        values: getKeys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return state.strings.get(key) ?? null;
+        }),
+        fields: hgetPairs.map(([key, field]) => {
+          expireIfNeeded(state, key, options);
+          return hashField(state, key, field);
+        }),
+      };
+    },
+    /**
+     * @param {string[]} watchKeys
+     * @param {string[]} getKeys
+     * @param {Array<[string, string]>} hgetPairs
+     */
+    async watchAndGetManyAndHGetMany(watchKeys, getKeys, hgetPairs) {
+      captureWatch(watchKeys);
+      state.commands.push([
+        "watchAndGetManyAndHGetMany",
+        [...watchKeys],
         [...getKeys],
         hgetPairs.map(([key, field]) => [key, field]),
       ]);
@@ -531,11 +583,47 @@ export function createFakeRedisSession(state, options = {}) {
         return redisByteLength(hashField(state, key, field));
       });
     },
+    /**
+     * @param {string[]} watchKeys
+     * @param {string[]} existenceKeys
+     * @param {Array<[string, string]>} lengthPairs
+     */
+    async watchAndExistsManyAndHStrLenMany(watchKeys, existenceKeys, lengthPairs) {
+      captureWatch(watchKeys);
+      state.commands.push([
+        "watchAndExistsManyAndHStrLenMany",
+        [...watchKeys],
+        [...existenceKeys],
+        lengthPairs.map(([key, field]) => [key, field]),
+      ]);
+      return {
+        exists: existenceKeys.map((key) => keyExists(state, key, options)),
+        lengths: lengthPairs.map(([key, field]) => {
+          expireIfNeeded(state, key, options);
+          return redisByteLength(hashField(state, key, field));
+        }),
+      };
+    },
     /** @param {string} hashKey @param {string} stringKey */
     async hGetAllAndGet(hashKey, stringKey) {
       expireIfNeeded(state, hashKey, options);
       expireIfNeeded(state, stringKey, options);
       state.commands.push(["hGetAllAndGet", hashKey, stringKey]);
+      return {
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+        value: state.strings.get(stringKey) ?? null,
+      };
+    },
+    /**
+     * @param {string[]} watchKeys
+     * @param {string} hashKey
+     * @param {string} stringKey
+     */
+    async watchAndHGetAllAndGet(watchKeys, hashKey, stringKey) {
+      captureWatch(watchKeys);
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, stringKey, options);
+      state.commands.push(["watchAndHGetAllAndGet", [...watchKeys], hashKey, stringKey]);
       return {
         hash: { ...(state.hashes.get(hashKey) || {}) },
         value: state.strings.get(stringKey) ?? null,
@@ -551,6 +639,93 @@ export function createFakeRedisSession(state, options = {}) {
         hash: { ...(state.hashes.get(hashKey) || {}) },
         value: state.strings.get(stringKey) ?? null,
         members: [...(state.sets.get(setKey) || new Set())],
+      };
+    },
+    /**
+     * @param {string[]} watchKeys
+     * @param {string} hashKey
+     * @param {string} stringKey
+     * @param {string} setKey
+     */
+    async watchAndHGetAllGetSMembers(watchKeys, hashKey, stringKey, setKey) {
+      captureWatch(watchKeys);
+      expireIfNeeded(state, hashKey, options);
+      expireIfNeeded(state, stringKey, options);
+      expireIfNeeded(state, setKey, options);
+      state.commands.push([
+        "watchAndHGetAllGetSMembers",
+        [...watchKeys],
+        hashKey,
+        stringKey,
+        setKey,
+      ]);
+      return {
+        hash: { ...(state.hashes.get(hashKey) || {}) },
+        value: state.strings.get(stringKey) ?? null,
+        members: [...(state.sets.get(setKey) || new Set())],
+      };
+    },
+    /**
+     * @param {Array<[string, string]>} fieldPairs
+     * @param {string[]} hashKeys
+     */
+    async hGetManyAndHGetAllMany(fieldPairs, hashKeys) {
+      state.commands.push([
+        "hGetManyAndHGetAllMany",
+        fieldPairs.map(([key, field]) => [key, field]),
+        [...hashKeys],
+      ]);
+      return {
+        fields: fieldPairs.map(([key, field]) => {
+          expireIfNeeded(state, key, options);
+          return hashField(state, key, field);
+        }),
+        hashes: hashKeys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return { ...(state.hashes.get(key) || {}) };
+        }),
+      };
+    },
+    /**
+     * @param {Array<[string, string]>} fieldPairs
+     * @param {string[]} setKeys
+     */
+    async hGetManyAndSMembersMany(fieldPairs, setKeys) {
+      state.commands.push([
+        "hGetManyAndSMembersMany",
+        fieldPairs.map(([key, field]) => [key, field]),
+        [...setKeys],
+      ]);
+      return {
+        fields: fieldPairs.map(([key, field]) => {
+          expireIfNeeded(state, key, options);
+          return hashField(state, key, field);
+        }),
+        memberLists: setKeys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return [...(state.sets.get(key) || new Set())];
+        }),
+      };
+    },
+    /**
+     * @param {string[]} hashKeys
+     * @param {string[]} keyListHashes
+     */
+    async hGetAllManyAndHKeysMany(hashKeys, keyListHashes) {
+      state.commands.push([
+        "hGetAllManyAndHKeysMany",
+        [...hashKeys],
+        [...keyListHashes],
+      ]);
+      return {
+        hashes: hashKeys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return { ...(state.hashes.get(key) || {}) };
+        }),
+        keyLists: keyListHashes.map((key) => {
+          expireIfNeeded(state, key, options);
+          return Object.keys(state.hashes.get(key) || {});
+        }),
       };
     },
     /** @param {string} key */
@@ -578,6 +753,12 @@ export function createFakeRedisSession(state, options = {}) {
       state.commands.push(["existsMany", [...keys]]);
       return keys.map((key) => keyExists(state, key, options));
     },
+    /** @param {string[]} watchKeys @param {string[]} keys */
+    async watchAndExistsMany(watchKeys, keys) {
+      captureWatch(watchKeys);
+      state.commands.push(["watchAndExistsMany", [...watchKeys], [...keys]]);
+      return keys.map((key) => keyExists(state, key, options));
+    },
     /** @param {string} key @param {string[]} members */
     async sMIsMember(key, ...members) {
       expireIfNeeded(state, key, options);
@@ -589,6 +770,13 @@ export function createFakeRedisSession(state, options = {}) {
     async sMembers(key) {
       expireIfNeeded(state, key, options);
       state.commands.push(["sMembers", key]);
+      return [...(state.sets.get(key) || new Set())];
+    },
+    /** @param {string[]} watchKeys @param {string} key */
+    async watchAndSMembers(watchKeys, key) {
+      captureWatch(watchKeys);
+      expireIfNeeded(state, key, options);
+      state.commands.push(["watchAndSMembers", [...watchKeys], key]);
       return [...(state.sets.get(key) || new Set())];
     },
     /** @param {string[]} keys */

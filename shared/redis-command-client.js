@@ -6,12 +6,12 @@ import {
   buildHSetExArgs,
   buildHSetArgs,
   buildSetArgs,
-  concatBuffers,
   decodeBulk,
   decodeHashObject,
   decodeRedisTimeMs,
   decodeStringArray,
   encodeCommand,
+  writeRedisCommands,
   normalizeRedisDb,
   utf8Decoder,
   warnRedisCallback,
@@ -87,7 +87,7 @@ export class RedisClient {
   async _execPipeline(command, commands) {
     if (commands.length === 0) return [];
     return this._withSocket(command, async (writer, _reader, parser) => {
-      await writer.write(concatBuffers(commands.map((args) => encodeCommand(args))));
+      await writeRedisCommands(writer, commands);
       const replies = [];
       for (let i = 0; i < commands.length; i += 1) replies.push(await parser.parseOne());
       return replies;
@@ -201,13 +201,8 @@ export class RedisClient {
 
   /** @param {RedisCommand[]} cmdList */
   async multiExec(cmdList) {
-    const parts = [encodeCommand(["MULTI"])];
-    for (const cmd of cmdList) parts.push(encodeCommand(cmd));
-    parts.push(encodeCommand(["EXEC"]));
-    const buf = concatBuffers(parts);
-
     return this._withSocket("MULTI_EXEC", async (writer, _reader, resp) => {
-      await writer.write(buf);
+      await writeRedisCommands(writer, [["MULTI"], ...cmdList, ["EXEC"]]);
       await resp.parseOne();
       for (let i = 0; i < cmdList.length; i += 1) await resp.parseOne();
       return resp.parseOne();
@@ -305,6 +300,24 @@ export class RedisClient {
       keys.map((key) => ["HGETALL", key])
     ));
     return replies.map(decodeHashObject);
+  }
+
+  /**
+   * @param {string} hashKey
+   * @param {string} field
+   * @param {string} sortedSetKey
+   * @param {number} start
+   * @param {number} stop
+   */
+  async hGetAndZRange(hashKey, field, sortedSetKey, start, stop) {
+    const [fieldReply, membersReply] = await this._execPipeline("HGET_ZRANGE_PIPELINE", [
+      ["HGET", hashKey, field],
+      ["ZRANGE", sortedSetKey, String(start), String(stop)],
+    ]);
+    return {
+      field: decodeBulk(fieldReply),
+      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
+    };
   }
 
   /** @param {string} hashKey @param {string} stringKey */

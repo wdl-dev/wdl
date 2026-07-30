@@ -61,11 +61,16 @@ export async function handle({ method, ns, name, subPath, principal, requestId }
 /** @param {{ ns: string, name: string }} args */
 async function handleGet({ ns, name }) {
   const redis = requireControlRedis();
-  const activeVersion = await redis.hGet(routesKey(ns), name);
-  const retainedVersions = await redis.zRange(workerVersionsKey(ns, name), 0, -1);
-  const versions = retainedVersions
+  const snapshot = await redis.hGetAndZRange(
+    routesKey(ns),
+    name,
+    workerVersionsKey(ns, name),
+    0,
+    -1
+  );
+  const versions = snapshot.members
     .filter((version) => parseVersion(version) !== null)
-    .map((version) => ({ version, active: version === activeVersion }));
+    .map((version) => ({ version, active: version === snapshot.field }));
   return jsonResponse(200, { namespace: ns, name, versions });
 }
 

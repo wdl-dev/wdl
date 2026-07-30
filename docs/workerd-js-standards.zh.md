@@ -102,6 +102,8 @@ Workerd I/O object 与创建它的 `IoContext` 绑定。共享 `RedisClient` 应
 
 不要向 application code 暴露 generic pipeline escape hatch。应在 Redis owner 处增加满足需求的最小 typed、bounded helper，并在那里校验 reply count、reply order 和领域解码。
 
+共享 RESP pipeline 与 transaction 应通过公共的 bounded command writer 写入。该 writer 保持完整 command framing 与 reply order，并把普通命令组成有界 buffer；单个超过目标大小的命令独占一个 write group。
+
 ## 测试
 
 测试应保护真实合同：

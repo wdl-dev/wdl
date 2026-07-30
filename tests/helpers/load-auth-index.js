@@ -93,6 +93,7 @@ export class RedisClient {
   }
   async hGetAllMany(keys) {
     const s = ensureState();
+    s.hGetAllManyCalls.push([...keys]);
     recordCommand("HGETALL_PIPELINE", true);
     return keys.map((key) => {
       const h = s.hashes.get(key);
@@ -165,8 +166,9 @@ export class RedisClient {
     recordCommand("SET", true);
     return "OK";
   }
-  async scan(_cursor, pattern, _count) {
+  async scan(cursor, pattern, count) {
     const s = ensureState();
+    s.scanCalls.push([cursor, pattern, count]);
     recordCommand("SCAN", true);
     if (s.scanPages && s.scanPages.length) {
       const page = s.scanPages.shift();
@@ -417,6 +419,8 @@ export function resetAuthMockState() {
     hGetAllThrows: new Set(),
     delIfEqThrows: new Set(),
     scanPages: [],
+    scanCalls: [],
+    hGetAllManyCalls: [],
     keyVersions: new Map(),
     afterSetAppliedBeforeReply: null,
     afterMultiExecAppliedBeforeReply: null,

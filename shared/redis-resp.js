@@ -1,4 +1,5 @@
 import { createLogger } from "shared-observability";
+import { utf8ByteLength } from "shared-utf8";
 import { errorMessage } from "./errors.js";
 
 /**
@@ -26,6 +27,12 @@ const ASCII_ZERO = 0x30;
 const ASCII_NINE = 0x39;
 const ASCII_MINUS = 0x2d;
 const RESP_RETAINED_BUFFER_LIMIT = 64 * 1024;
+const REDIS_WRITE_BATCH_BYTES = 256 * 1024;
+const SHORT_UTF8_ARG_MAX_CODE_UNITS = 512;
+
+/**
+ * @typedef {{ args: RedisCommand, byteLength: number, longUtf8: Array<Uint8Array | undefined> | null }} RedisCommandPlan
+ */
 
 /**
  * @param {string} event
@@ -147,31 +154,108 @@ export class RedisReplyError extends Error {
   }
 }
 
-/** @param {RedisCommand} args */
-export function encodeCommand(args) {
-  /** @type {Uint8Array[]} */
-  const encodedArgs = [];
+/** @param {RedisCommand} args @returns {RedisCommandPlan} */
+function planCommand(args) {
   const argc = String(args.length);
   let total = 1 + argc.length + 2;
-  for (const arg of args) {
-    const bytes = arg instanceof Uint8Array ? arg : utf8Encoder.encode(String(arg));
-    encodedArgs.push(bytes);
-    total += 1 + String(bytes.length).length + 2 + bytes.length + 2;
+  /** @type {Array<Uint8Array | undefined> | null} */
+  let longUtf8 = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    let byteLength;
+    if (arg instanceof Uint8Array) {
+      byteLength = arg.byteLength;
+    } else {
+      const value = String(arg);
+      if (value.length <= SHORT_UTF8_ARG_MAX_CODE_UNITS) {
+        byteLength = utf8ByteLength(value);
+      } else {
+        const bytes = utf8Encoder.encode(value);
+        if (!longUtf8) longUtf8 = [];
+        longUtf8[i] = bytes;
+        byteLength = bytes.byteLength;
+      }
+    }
+    total += 1 + String(byteLength).length + 2 + byteLength + 2;
   }
+  return { args, byteLength: total, longUtf8 };
+}
+
+/**
+ * @param {RedisCommandPlan[]} plans
+ * @param {number} total
+ */
+function encodeCommandPlans(plans, total) {
   const out = new Uint8Array(total);
   let off = 0;
-  off = writeAscii(out, off, "*");
-  off = writeAscii(out, off, argc);
-  off = writeAscii(out, off, "\r\n");
-  for (const bytes of encodedArgs) {
-    off = writeAscii(out, off, "$");
-    off = writeAscii(out, off, String(bytes.length));
+  for (const { args, longUtf8 } of plans) {
+    off = writeAscii(out, off, "*");
+    off = writeAscii(out, off, String(args.length));
     off = writeAscii(out, off, "\r\n");
-    out.set(bytes, off);
-    off += bytes.length;
-    off = writeAscii(out, off, "\r\n");
+    for (let i = 0; i < args.length; i += 1) {
+      const arg = args[i];
+      const value = arg instanceof Uint8Array ? arg : String(arg);
+      const bytes = arg instanceof Uint8Array ? arg : longUtf8?.[i];
+      const byteLength = bytes?.byteLength ?? utf8ByteLength(/** @type {string} */ (value));
+      off = writeAscii(out, off, "$");
+      off = writeAscii(out, off, String(byteLength));
+      off = writeAscii(out, off, "\r\n");
+      if (bytes) {
+        out.set(bytes, off);
+      } else {
+        const encoded = utf8Encoder.encodeInto(
+          /** @type {string} */ (value),
+          out.subarray(off, off + byteLength)
+        );
+        if (encoded.read !== value.length || encoded.written !== byteLength) {
+          throw new Error("Failed to encode Redis argument");
+        }
+      }
+      off += byteLength;
+      off = writeAscii(out, off, "\r\n");
+    }
   }
   return out;
+}
+
+/** @param {RedisCommand[]} commands */
+export function encodeCommands(commands) {
+  const plans = commands.map(planCommand);
+  return encodeCommandPlans(plans, plans.reduce((sum, plan) => sum + plan.byteLength, 0));
+}
+
+/** @param {RedisCommand} args */
+export function encodeCommand(args) {
+  return encodeCommands([args]);
+}
+
+/**
+ * Write complete RESP commands in bounded buffers. Command frames stay intact;
+ * only the transport write boundary changes.
+ *
+ * @param {WritableStreamDefaultWriter<Uint8Array>} writer
+ * @param {RedisCommand[]} commands
+ */
+export async function writeRedisCommands(writer, commands) {
+  /** @type {RedisCommandPlan[]} */
+  let plans = [];
+  let total = 0;
+  for (const command of commands) {
+    const plan = planCommand(command);
+    if (plans.length > 0 && total + plan.byteLength > REDIS_WRITE_BATCH_BYTES) {
+      await writer.write(encodeCommandPlans(plans, total));
+      plans = [];
+      total = 0;
+    }
+    plans.push(plan);
+    total += plan.byteLength;
+    if (total >= REDIS_WRITE_BATCH_BYTES) {
+      await writer.write(encodeCommandPlans(plans, total));
+      plans = [];
+      total = 0;
+    }
+  }
+  if (plans.length > 0) await writer.write(encodeCommandPlans(plans, total));
 }
 
 // Stateful RESP parser. Separate from one-shot exec so the subscriber can
@@ -325,19 +409,6 @@ export class RespReader {
   compact() {
     this._compactConsumed(true);
   }
-}
-
-/** @param {Uint8Array[]} parts */
-export function concatBuffers(parts) {
-  let total = 0;
-  for (const p of parts) total += p.length;
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    out.set(p, off);
-    off += p.length;
-  }
-  return out;
 }
 
 /** @param {unknown} value @param {number} [fallback] */

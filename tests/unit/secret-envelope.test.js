@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 
 import {
   SECRET_ENVELOPE_PREFIX,
+  bytesToBase64,
   decryptSecretValue,
   encryptSecretValue,
   isSecretEnvelope,
 } from "../../shared/secret-envelope.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 
 const SECRET_ENVELOPE_PARITY = readRepositoryJson("tests/fixtures/secret-envelope-parity.json");
 const env = {
@@ -46,6 +48,58 @@ test("secret envelope generation and decrypt match the shared parity vectors", a
       vector.name
     );
   }
+});
+
+test("secret envelope reuses the configured KEK while importing each DEK independently", async () => {
+  const firstKey = new Uint8Array(32).fill(0xa1);
+  const secondKey = new Uint8Array(32).fill(0xb2);
+  const firstEnv = {
+    SECRET_ENVELOPE_LOCAL_KEY_B64: bytesToBase64(firstKey),
+    SECRET_ENVELOPE_KID: "local:test:secret-envelope:cache",
+  };
+  const secondEnv = {
+    ...firstEnv,
+    SECRET_ENVELOPE_LOCAL_KEY_B64: bytesToBase64(secondKey),
+  };
+  /** @type {Uint8Array[]} */
+  const importedKeys = [];
+  const importKey = new Proxy(crypto.subtle.importKey, {
+    apply(target, thisArg, args) {
+      assert.ok(args[1] instanceof Uint8Array);
+      importedKeys.push(args[1].slice());
+      return Reflect.apply(target, thisArg, args);
+    },
+  });
+
+  await withMockedProperty(crypto.subtle, "importKey", importKey, async () => {
+    const firstEnvelope = await encryptSecretValue("first", {
+      env: firstEnv,
+      hashKey: "secrets:cache",
+      fieldName: "FIRST",
+      random: deterministicRandomFactory(),
+    });
+    await encryptSecretValue("second", {
+      env: firstEnv,
+      hashKey: "secrets:cache",
+      fieldName: "SECOND",
+      random: deterministicRandomFactory(64),
+    });
+    assert.equal(await decryptSecretValue(firstEnvelope, {
+      env: firstEnv,
+      hashKey: "secrets:cache",
+      fieldName: "FIRST",
+    }), "first");
+    await encryptSecretValue("rotated", {
+      env: secondEnv,
+      hashKey: "secrets:cache",
+      fieldName: "ROTATED",
+      random: deterministicRandomFactory(128),
+    });
+  });
+
+  assert.equal(importedKeys.filter((key) => bytesToBase64(key) === bytesToBase64(firstKey)).length, 1);
+  assert.equal(importedKeys.filter((key) => bytesToBase64(key) === bytesToBase64(secondKey)).length, 1);
+  assert.equal(importedKeys.length, 6);
 });
 
 test("secret envelope rejection behavior matches the shared parity vectors", async () => {

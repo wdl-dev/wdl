@@ -78,7 +78,15 @@ test("D1 store: create writes provisional metadata then flips ready", async () =
   assert.deepEqual(created, { ok: true, databaseId: "d1_main" });
   assert.deepEqual(
     redis.commands.filter(([command]) => command === "exists" || command === "existsMany"),
-    [["existsMany", ["d1:database-name:demo:main", "d1:database:demo:d1_main"]]]
+    []
+  );
+  assert.deepEqual(
+    redis.commands.find(([command]) => command === "watchAndExistsMany"),
+    [
+      "watchAndExistsMany",
+      ["d1:database:demo:d1_main", "d1:database-name:demo:main"],
+      ["d1:database-name:demo:main", "d1:database:demo:d1_main"],
+    ]
   );
   const provisional = redis.hashes.get("d1:database:demo:d1_main");
   assert.ok(provisional);
@@ -89,8 +97,16 @@ test("D1 store: create writes provisional metadata then flips ready", async () =
   const ready = await markDatabaseReady("demo", { databaseId: "d1_main", databaseName: "main" }, "2026-01-01T00:00:01.000Z");
   assert.deepEqual(ready, { ok: true });
   assert.deepEqual(
-    redis.commands.filter(([command]) => String(command).startsWith("hGetAll") || command === "get"),
-    [["hGetAllAndGet", "d1:database:demo:d1_main", "d1:database-name:demo:main"]]
+    redis.commands.filter(([command]) =>
+      command === "watchAndHGetAllAndGet" ||
+      String(command).startsWith("hGetAll") ||
+      command === "get"),
+    [[
+      "watchAndHGetAllAndGet",
+      ["d1:database:demo:d1_main", "d1:database-name:demo:main"],
+      "d1:database:demo:d1_main",
+      "d1:database-name:demo:main",
+    ]]
   );
   const readyRecord = redis.hashes.get("d1:database:demo:d1_main");
   assert.ok(readyRecord);
@@ -127,8 +143,20 @@ test("D1 store: rollback removes only provisional metadata", async () => {
   const rolledBack = await rollbackProvisionalDatabaseMetadata("demo", { databaseId: "d1_main", databaseName: "main" });
   assert.deepEqual(rolledBack, { rolledBack: true });
   assert.deepEqual(
-    redis.commands.filter(([command]) => String(command).startsWith("hGetAll") || command === "get"),
-    [["hGetAllAndGet", "d1:database:demo:d1_main", "d1:database-name:demo:main"]]
+    redis.commands.filter(([command]) =>
+      command === "watchAndHGetAllAndGet" ||
+      String(command).startsWith("hGetAll") ||
+      command === "get"),
+    [[
+      "watchAndHGetAllAndGet",
+      [
+        "d1:database:demo:d1_main",
+        "d1:database-name:demo:main",
+        "d1:database-referrers:demo:d1_main",
+      ],
+      "d1:database:demo:d1_main",
+      "d1:database-name:demo:main",
+    ]]
   );
   assert.equal(redis.hashes.has("d1:database:demo:d1_main"), false);
   assert.equal(redis.strings.has("d1:database-name:demo:main"), false);
@@ -151,9 +179,18 @@ test("D1 store: delete writes tombstone before removing active metadata", async 
   assert.equal(deleted.deleted, true);
   assert.deepEqual(
     redis.commands.filter(([command]) =>
-      String(command).startsWith("hGetAll") || command === "get" || command === "sMembers"),
+      command === "watchAndHGetAllGetSMembers" ||
+      String(command).startsWith("hGetAll") ||
+      command === "get" ||
+      command === "sMembers"),
     [[
-      "hGetAllGetSMembers",
+      "watchAndHGetAllGetSMembers",
+      [
+        "d1:database:demo:d1_main",
+        "d1:database-name:demo:main",
+        "d1:database-referrers:demo:d1_main",
+        "d1:database-tombstone:demo:d1_main",
+      ],
       "d1:database:demo:d1_main",
       "d1:database-name:demo:main",
       "d1:database-referrers:demo:d1_main",

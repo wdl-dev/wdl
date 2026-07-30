@@ -284,13 +284,16 @@ test("promoteWithRoutes retries from the new active when the prior bundle is del
     attempts += 1;
     return await originalSession(async (iso) => {
       if (attempts !== 1) return await fn(iso);
-      const originalHGet = iso.hGet.bind(iso);
+      const originalSnapshot = iso.watchAndGetManyAndHGetMany.bind(iso);
       let raced = false;
       return await fn({
         ...iso,
-        async hGet(key, field) {
-          const value = await originalHGet(key, field);
-          if (!raced && key === "routes:demo" && field === "worker") {
+        async watchAndGetManyAndHGetMany(watchKeys, getKeys, hgetPairs) {
+          const snapshot = await originalSnapshot(watchKeys, getKeys, hgetPairs);
+          if (
+            !raced &&
+            hgetPairs.some(([key, field]) => key === "routes:demo" && field === "worker")
+          ) {
             raced = true;
             redis.state.hashes.set("routes:demo", { worker: "v3" });
             redis.state.hashes.set("queue-consumer:demo:jobs", {
@@ -306,7 +309,7 @@ test("promoteWithRoutes retries from the new active when the prior bundle is del
             );
             redis.state.hashes.delete(productionBundleKey("demo", "worker", "v1"));
           }
-          return value;
+          return snapshot;
         },
       });
     });
@@ -666,6 +669,33 @@ test("promoteWithRoutes reads active bundle metadata once", async () => {
   ).length, 1);
 });
 
+test("promoteWithRoutes reads its initial watched state in one snapshot", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", { routes: [], queueConsumers: [] });
+
+  await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  assert.deepEqual(
+    redis.state.commands.find(([command]) => command === "watchAndGetManyAndHGetMany"),
+    [
+      "watchAndGetManyAndHGetMany",
+      [
+        "routes:demo",
+        "hosts:demo",
+        "crons:demo:worker",
+        "cron:seq:demo:worker",
+        "worker-delete-lock:demo:worker",
+        productionBundleKey("demo", "worker", "v1"),
+      ],
+      ["worker-delete-lock:demo:worker"],
+      [
+        [productionBundleKey("demo", "worker", "v1"), "__meta__"],
+        ["routes:demo", "worker"],
+      ],
+    ]
+  );
+});
+
 test("promoteWithRoutes batches D1, service, and queue dependency reads", async () => {
   const redis = makeRedis();
   const d1Keys = ["d1_a", "d1_b"].map((databaseId) => `d1:database:demo:${databaseId}`);
@@ -695,16 +725,19 @@ test("promoteWithRoutes batches D1, service, and queue dependency reads", async 
 
   await promoteWithRoutes(redis, "demo", "worker", "v1");
 
-  assert.ok(redis.state.commands.some((command) =>
-    command[0] === "exists" && command.slice(1).toSorted().join("\n") === d1Keys.toSorted().join("\n")
-  ));
+  assert.deepEqual(
+    redis.state.commands.find(([command]) =>
+      command === "watchAndExistsManyAndHStrLenMany"),
+    [
+      "watchAndExistsManyAndHStrLenMany",
+      [...d1Keys, ...servicePairs.map(([key]) => key)],
+      d1Keys,
+      servicePairs,
+    ]
+  );
   const batchedHashReads = redis.state.commands
     .filter(([command]) => command === "hGetMany")
     .map(([, pairs]) => /** @type {Array<[string, string]>} */ (pairs));
-  assert.deepEqual(
-    redis.state.commands.find(([command]) => command === "hStrLenMany")?.[1],
-    servicePairs
-  );
   assert.deepEqual(
     batchedHashReads.find((pairs) => pairs[0]?.[0] === queuePairs[0][0]),
     queuePairs
@@ -734,11 +767,44 @@ test("promoteWithRoutes deduplicates and bounds service dependency metadata prob
 
   await promoteWithRoutes(redis, "demo", "worker", "v1");
 
-  const reads = redis.state.commands
-    .filter(([command]) => command === "hStrLenMany")
-    .map(([, pairs]) => /** @type {Array<[string, string]>} */ (pairs));
+  const reads = redis.state.commands.flatMap(([command, _watchKeys, _existsKeys, pairs]) =>
+    command === "watchAndExistsManyAndHStrLenMany"
+      ? [/** @type {Array<[string, string]>} */ (pairs)]
+      : []
+  ).concat(
+    redis.state.commands
+      .filter(([command]) => command === "hStrLenMany")
+      .map(([, pairs]) => /** @type {Array<[string, string]>} */ (pairs))
+  );
   assert.deepEqual(reads.map((pairs) => pairs.length), [64, 1]);
   assert.equal(new Set(reads.flat().map(([key]) => key)).size, 65);
+});
+
+test("promoteWithRoutes bounds D1 dependency existence probes", async () => {
+  const redis = makeRedis();
+  const bindings = Object.fromEntries(Array.from({ length: 65 }, (_, index) => [
+    `DB_${index}`,
+    {
+      type: "d1",
+      databaseId: `database-${index}`,
+    },
+  ]));
+  seedBundle(redis, "v1", { bindings });
+  for (let index = 0; index < 65; index += 1) {
+    redis.state.hashes.set(`d1:database:demo:database-${index}`, { state: "ready" });
+  }
+
+  await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  const reads = redis.state.commands.flatMap((entry) => {
+    const [command] = entry;
+    if (command === "watchAndExistsManyAndHStrLenMany") {
+      return [/** @type {string[]} */ (entry[2])];
+    }
+    return command === "existsMany" ? [/** @type {string[]} */ (entry[1])] : [];
+  });
+  assert.deepEqual(reads.map((keys) => keys.length), [64, 1]);
+  assert.equal(new Set(reads.flat()).size, 65);
 });
 
 test("bumpActiveAndPromote rejects persisted workersDev=false without routes", async () => {
@@ -856,18 +922,21 @@ test("bumpActiveAndPromote retries when active changes before source metadata re
     attempts += 1;
     return await originalSession(async (iso) => {
       if (attempts !== 1) return await fn(iso);
-      const originalHGet = iso.hGet.bind(iso);
+      const originalSnapshot = iso.watchAndGetManyAndHGetMany.bind(iso);
       let raced = false;
       return await fn({
         ...iso,
-        async hGet(key, field) {
-          const value = await originalHGet(key, field);
-          if (!raced && key === "routes:demo" && field === "worker") {
+        async watchAndGetManyAndHGetMany(watchKeys, getKeys, hgetPairs) {
+          const snapshot = await originalSnapshot(watchKeys, getKeys, hgetPairs);
+          if (
+            !raced &&
+            hgetPairs.some(([key, field]) => key === "routes:demo" && field === "worker")
+          ) {
             raced = true;
             redis.state.hashes.set("routes:demo", { worker: "v3" });
             redis.state.hashes.delete(productionBundleKey("demo", "worker", "v1"));
           }
-          return value;
+          return snapshot;
         },
       });
     });
@@ -917,6 +986,16 @@ test("bumpActiveAndPromote stages D1 referrers from production binding metadata"
 
   assert.equal(result.version, "v2");
   assert.ok(redis.state.watched.includes("d1:database:demo:d1_main"));
+  assert.deepEqual(
+    redis.state.commands.find(([command]) =>
+      command === "watchAndExistsManyAndHStrLenMany"),
+    [
+      "watchAndExistsManyAndHStrLenMany",
+      ["d1:database:demo:d1_main"],
+      ["d1:database:demo:d1_main"],
+      [],
+    ]
+  );
   assert.ok(redis.state.sets.get("d1:database-referrers:demo:d1_main")?.has(encodeReferrerMember({
     callerNs: "demo",
     callerWorker: "worker",
@@ -1234,6 +1313,9 @@ test("reconcileHosts no-op watches only the namespace host source", async () => 
   await reconcileHosts(redis, "demo", { hosts: ["app.workers.example"] }, "workers.local");
 
   assert.deepEqual(redis.state.watchBatches, [["hosts:demo"]]);
+  assert.deepEqual(redis.state.commands, [
+    ["watchAndSMembers", ["hosts:demo"], "hosts:demo"],
+  ]);
   assert.equal(redis.state.ops.length, 0);
 });
 

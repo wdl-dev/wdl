@@ -58,6 +58,8 @@ import { NAMESPACES_KEY } from "shared-worker-contract";
 const DELEGATED_ISSUE_NAMESPACE_RETRIES = 16;
 const DELEGATED_ISSUE_LOCK_TTL_SECONDS = 30;
 const DELEGATED_ISSUE_LOCK_KEY_PREFIX = "auth:delegated-issue-lock:";
+const TOKEN_SCAN_COUNT = 2000;
+const TOKEN_RECORD_READ_BATCH_SIZE = 128;
 
 /** @param {string} issuerTokenId @param {string} templateId */
 function delegatedIssueLockKey(issuerTokenId, templateId) {
@@ -109,24 +111,31 @@ function validateIssuerForDelegatedIssue(issuer, templateId) {
 async function scanTokenRecords(runtime, session) {
   /** @type {Array<{ tokenId: string, record: TokenRecord }>} */
   const records = [];
+  /** @type {string[]} */
+  const tokenIds = [];
   const seen = new Set();
   let cursor = "0";
   do {
-    const [next, keys] = await session.scan(cursor, `${TOKEN_KEY_PREFIX}*`, 200);
+    const [next, keys] = await session.scan(cursor, `${TOKEN_KEY_PREFIX}*`, TOKEN_SCAN_COUNT);
     cursor = next;
-    const tokenIds = keys
-      .filter((/** @type {string} */ key) => key.startsWith(TOKEN_KEY_PREFIX))
-      .map((/** @type {string} */ key) => key.slice(TOKEN_KEY_PREFIX.length))
-      .filter((/** @type {string} */ tokenId) => {
-        if (seen.has(tokenId)) return false;
-        seen.add(tokenId);
-        return true;
-      });
-    const batch = await runtime.readRecords(session, tokenIds);
+    for (const key of keys) {
+      if (!key.startsWith(TOKEN_KEY_PREFIX)) continue;
+      const tokenId = key.slice(TOKEN_KEY_PREFIX.length);
+      if (seen.has(tokenId)) continue;
+      seen.add(tokenId);
+      tokenIds.push(tokenId);
+    }
+  } while (cursor !== "0");
+
+  for (let offset = 0; offset < tokenIds.length; offset += TOKEN_RECORD_READ_BATCH_SIZE) {
+    const batch = await runtime.readRecords(
+      session,
+      tokenIds.slice(offset, offset + TOKEN_RECORD_READ_BATCH_SIZE),
+    );
     for (const item of batch) {
       if (item.record) records.push(/** @type {{ tokenId: string, record: TokenRecord }} */ (item));
     }
-  } while (cursor !== "0");
+  }
   return records;
 }
 

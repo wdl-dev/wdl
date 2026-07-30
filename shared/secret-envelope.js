@@ -12,10 +12,13 @@ export const SECRET_ENVELOPE_KID_ENV = "SECRET_ENVELOPE_KID";
 const AES_GCM_TAG_BYTES = 16;
 const AES_GCM_IV_BYTES = 12;
 const AES_256_KEY_BYTES = 32;
+const LOCAL_PROVIDER_CACHE_MAX_ENTRIES = 4;
 const ENVELOPE_CANONICAL_FIELDS = ["v", "alg", "kid", "edek", "iv", "ct", "tag"];
 const ENVELOPE_FIELDS = ENVELOPE_CANONICAL_FIELDS.toSorted();
 const utf8Encoder = new TextEncoder();
 const utf8FatalDecoder = new TextDecoder("utf-8", { fatal: true });
+/** @type {Map<string, Promise<{ kid: string, key: CryptoKey }>>} */
+const localProviderCache = new Map();
 
 /**
  * @typedef {{
@@ -108,7 +111,10 @@ function dataKeyAadBytes(kid, hashKey, fieldName) {
   return textBytes(`WDL-SECRET-DEK\0${kid}\0${storageAadString(hashKey, fieldName)}`);
 }
 
-/** @param {Record<string, string | undefined>} [env] @returns {{ kid: string, keyBytes: Uint8Array }} */
+/**
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {{ kid: string, localKeyB64: string, keyBytes: Uint8Array }}
+ */
 function requireLocalConfig(env = {}) {
   const kid = env[SECRET_ENVELOPE_KID_ENV];
   if (typeof kid !== "string" || !kid.startsWith("local:")) {
@@ -117,9 +123,10 @@ function requireLocalConfig(env = {}) {
       `${SECRET_ENVELOPE_KID_ENV} must be a canonical local provider kid`
     );
   }
+  const localKeyB64 = env[SECRET_ENVELOPE_LOCAL_KEY_ENV];
   let keyBytes;
   try {
-    keyBytes = base64ToBytes(env[SECRET_ENVELOPE_LOCAL_KEY_ENV], SECRET_ENVELOPE_LOCAL_KEY_ENV);
+    keyBytes = base64ToBytes(localKeyB64, SECRET_ENVELOPE_LOCAL_KEY_ENV);
   } catch (err) {
     if (err instanceof SecretEnvelopeError) {
       throw new SecretEnvelopeError("secret_encryption_unconfigured", err.message);
@@ -132,7 +139,7 @@ function requireLocalConfig(env = {}) {
       `${SECRET_ENVELOPE_LOCAL_KEY_ENV} must decode to 32 bytes`
     );
   }
-  return { kid, keyBytes };
+  return { kid, localKeyB64: /** @type {string} */ (localKeyB64), keyBytes };
 }
 
 /** @param {Uint8Array} keyBytes @returns {Promise<CryptoKey>} */
@@ -147,14 +154,42 @@ async function importAesKey(keyBytes) {
 }
 
 /**
- * @param {Uint8Array} keyBytes
+ * @param {Record<string, string | undefined>} env
+ * @returns {Promise<{ kid: string, key: CryptoKey }>}
+ */
+async function requireLocalProvider(env) {
+  const kid = env[SECRET_ENVELOPE_KID_ENV];
+  const localKeyB64 = env[SECRET_ENVELOPE_LOCAL_KEY_ENV];
+  const unvalidatedCacheKey = typeof kid === "string" && typeof localKeyB64 === "string"
+    ? `${kid}\0${localKeyB64}`
+    : null;
+  const cached = unvalidatedCacheKey === null ? undefined : localProviderCache.get(unvalidatedCacheKey);
+  if (cached) return await cached;
+
+  const config = requireLocalConfig(env);
+  const cacheKey = `${config.kid}\0${config.localKeyB64}`;
+  const providerPromise = importAesKey(config.keyBytes).then((key) => ({ kid: config.kid, key }));
+  localProviderCache.set(cacheKey, providerPromise);
+  if (localProviderCache.size > LOCAL_PROVIDER_CACHE_MAX_ENTRIES) {
+    const oldest = localProviderCache.keys().next().value;
+    if (oldest !== undefined) localProviderCache.delete(oldest);
+  }
+  try {
+    return await providerPromise;
+  } catch (err) {
+    if (localProviderCache.get(cacheKey) === providerPromise) localProviderCache.delete(cacheKey);
+    throw err;
+  }
+}
+
+/**
+ * @param {CryptoKey} key
  * @param {Uint8Array} iv
  * @param {Uint8Array} plaintext
  * @param {Uint8Array} aad
  * @returns {Promise<{ ct: Uint8Array, tag: Uint8Array }>}
  */
-async function aesGcmEncrypt(keyBytes, iv, plaintext, aad) {
-  const key = await importAesKey(keyBytes);
+async function aesGcmEncryptWithKey(key, iv, plaintext, aad) {
   const encrypted = new Uint8Array(await crypto.subtle.encrypt(
     {
       name: "AES-GCM",
@@ -174,13 +209,23 @@ async function aesGcmEncrypt(keyBytes, iv, plaintext, aad) {
 /**
  * @param {Uint8Array} keyBytes
  * @param {Uint8Array} iv
+ * @param {Uint8Array} plaintext
+ * @param {Uint8Array} aad
+ * @returns {Promise<{ ct: Uint8Array, tag: Uint8Array }>}
+ */
+async function aesGcmEncrypt(keyBytes, iv, plaintext, aad) {
+  return await aesGcmEncryptWithKey(await importAesKey(keyBytes), iv, plaintext, aad);
+}
+
+/**
+ * @param {CryptoKey} key
+ * @param {Uint8Array} iv
  * @param {Uint8Array} ct
  * @param {Uint8Array} tag
  * @param {Uint8Array} aad
  * @returns {Promise<Uint8Array>}
  */
-async function aesGcmDecrypt(keyBytes, iv, ct, tag, aad) {
-  const key = await importAesKey(keyBytes);
+async function aesGcmDecryptWithKey(key, iv, ct, tag, aad) {
   const combined = new Uint8Array(ct.length + tag.length);
   combined.set(ct);
   combined.set(tag, ct.length);
@@ -201,6 +246,18 @@ async function aesGcmDecrypt(keyBytes, iv, ct, tag, aad) {
 }
 
 /**
+ * @param {Uint8Array} keyBytes
+ * @param {Uint8Array} iv
+ * @param {Uint8Array} ct
+ * @param {Uint8Array} tag
+ * @param {Uint8Array} aad
+ * @returns {Promise<Uint8Array>}
+ */
+async function aesGcmDecrypt(keyBytes, iv, ct, tag, aad) {
+  return await aesGcmDecryptWithKey(await importAesKey(keyBytes), iv, ct, tag, aad);
+}
+
+/**
  * @param {string} plaintext
  * @param {{
  *   env: Record<string, string | undefined>,
@@ -216,11 +273,11 @@ export async function encryptSecretValue(plaintext, { env, hashKey, fieldName, r
   if (typeof hashKey !== "string" || hashKey === "" || typeof fieldName !== "string" || fieldName === "") {
     throw new SecretEnvelopeError("invalid_secret_location", "secret hash key and field name are required");
   }
-  const { kid, keyBytes: localKeyBytes } = requireLocalConfig(env);
+  const { kid, key: localKey } = await requireLocalProvider(env);
   const dek = random(AES_256_KEY_BYTES);
   const dekIv = random(AES_GCM_IV_BYTES);
   const payloadIv = random(AES_GCM_IV_BYTES);
-  const wrappedDek = await aesGcmEncrypt(localKeyBytes, dekIv, dek, dataKeyAadBytes(kid, hashKey, fieldName));
+  const wrappedDek = await aesGcmEncryptWithKey(localKey, dekIv, dek, dataKeyAadBytes(kid, hashKey, fieldName));
   const edekBytes = new Uint8Array(dekIv.length + wrappedDek.ct.length + wrappedDek.tag.length);
   edekBytes.set(dekIv);
   edekBytes.set(wrappedDek.ct, dekIv.length);
@@ -298,7 +355,7 @@ export async function decryptSecretValue(envelopeValue, { env, hashKey, fieldNam
   if (typeof hashKey !== "string" || hashKey === "" || typeof fieldName !== "string" || fieldName === "") {
     throw new SecretEnvelopeError("invalid_secret_location", "secret hash key and field name are required");
   }
-  const { kid, keyBytes: localKeyBytes } = requireLocalConfig(env);
+  const { kid, key: localKey } = await requireLocalProvider(env);
   const envelope = parseEnvelope(envelopeValue);
   if (envelope.kid !== kid) {
     throw new SecretEnvelopeError("unknown_kid", "secret envelope kid is not configured");
@@ -310,7 +367,7 @@ export async function decryptSecretValue(envelopeValue, { env, hashKey, fieldNam
   const dekIv = edek.subarray(0, AES_GCM_IV_BYTES);
   const dekCt = edek.subarray(AES_GCM_IV_BYTES, AES_GCM_IV_BYTES + AES_256_KEY_BYTES);
   const dekTag = edek.subarray(AES_GCM_IV_BYTES + AES_256_KEY_BYTES);
-  const dek = await aesGcmDecrypt(localKeyBytes, dekIv, dekCt, dekTag, dataKeyAadBytes(kid, hashKey, fieldName));
+  const dek = await aesGcmDecryptWithKey(localKey, dekIv, dekCt, dekTag, dataKeyAadBytes(kid, hashKey, fieldName));
   if (dek.length !== AES_256_KEY_BYTES) {
     throw new SecretEnvelopeError("secret_decrypt_failed", "decrypted data key has invalid length");
   }

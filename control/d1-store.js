@@ -174,8 +174,10 @@ export async function commitDatabaseMetadata(ns, databaseName, databaseId, now) 
   }, async (session) => {
     const key = d1DatabaseKey(ns, databaseId);
     const nameKey = d1DatabaseNameKey(ns, databaseName);
-    await session.watch(key, nameKey);
-    const [nameExists, idExists] = await session.existsMany([nameKey, key]);
+    const [nameExists, idExists] = await session.watchAndExistsMany(
+      [key, nameKey],
+      [nameKey, key]
+    );
     if (nameExists) {
       return { ok: false, reason: "name-exists" };
     }
@@ -212,8 +214,11 @@ export async function markDatabaseReady(ns, database, now) {
   }, async (session) => {
     const key = d1DatabaseKey(ns, database.databaseId);
     const nameKey = d1DatabaseNameKey(ns, requireDatabaseName(database));
-    await session.watch(key, nameKey);
-    const snapshot = await session.hGetAllAndGet(key, nameKey);
+    const snapshot = await session.watchAndHGetAllAndGet(
+      [key, nameKey],
+      key,
+      nameKey
+    );
     const current = decodeDatabaseHash(snapshot.hash);
     const currentIdForName = decodeBulk(snapshot.value);
     if (!current || current.databaseId !== database.databaseId || current.state !== D1_DATABASE_STATE_PROVISIONAL) {
@@ -247,8 +252,11 @@ export async function rollbackProvisionalDatabaseMetadata(ns, database) {
     const key = d1DatabaseKey(ns, database.databaseId);
     const nameKey = d1DatabaseNameKey(ns, requireDatabaseName(database));
     const referrersKey = d1DatabaseReferrersKey(ns, database.databaseId);
-    await session.watch(key, nameKey, referrersKey);
-    const snapshot = await session.hGetAllAndGet(key, nameKey);
+    const snapshot = await session.watchAndHGetAllAndGet(
+      [key, nameKey, referrersKey],
+      key,
+      nameKey
+    );
     const current = decodeDatabaseHash(snapshot.hash);
     const currentIdForName = decodeBulk(snapshot.value);
     if (!current || current.databaseId !== database.databaseId || current.state !== D1_DATABASE_STATE_PROVISIONAL) {
@@ -298,8 +306,12 @@ export async function deleteDatabaseMetadata(ns, database, now, requestId) {
     const nameKey = d1DatabaseNameKey(ns, requireDatabaseName(database));
     const referrersKey = d1DatabaseReferrersKey(ns, database.databaseId);
     const tombstoneKey = d1DatabaseTombstoneKey(ns, database.databaseId);
-    await session.watch(key, nameKey, referrersKey, tombstoneKey);
-    const snapshot = await session.hGetAllGetSMembers(key, nameKey, referrersKey);
+    const snapshot = await session.watchAndHGetAllGetSMembers(
+      [key, nameKey, referrersKey, tombstoneKey],
+      key,
+      nameKey,
+      referrersKey
+    );
     const current = decodeDatabaseHash(snapshot.hash);
     const currentIdForName = decodeBulk(snapshot.value);
     if (!current || current.databaseId !== database.databaseId || current.state !== D1_DATABASE_STATE_READY) {

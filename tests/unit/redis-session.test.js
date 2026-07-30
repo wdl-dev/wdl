@@ -13,8 +13,10 @@ import {
 
 const observabilityUrl = repositoryFileUrl("shared/observability.js");
 const errorsUrl = repositoryFileUrl("shared/errors.js");
+const utf8Url = repositoryFileUrl("shared/utf8.js");
 const redisRespUrl = repositoryModuleDataUrl("shared/redis-resp.js", [
   [/from "shared-observability";/, `from ${JSON.stringify(observabilityUrl)};`],
+  [/from "shared-utf8";/, `from ${JSON.stringify(utf8Url)};`],
   [/from "\.\/errors\.js";/, `from ${JSON.stringify(errorsUrl)};`],
 ]);
 const redisSessionUrl = repositoryModuleDataUrl("shared/redis-session.js", [
@@ -254,6 +256,94 @@ test("RedisSession.hGetAllMany batches independent HGETALL reads", async () => {
   );
 });
 
+test("RedisSession.hGetAllManyAndHKeysMany preserves grouped reply order", async () => {
+  const socket = makeFakeSocket([
+    bytes(
+      "*4\r\n$3\r\napi\r\n$2\r\nv1\r\n$4\r\njobs\r\n$2\r\nv2\r\n" +
+      "*2\r\n$5\r\nTOKEN\r\n$6\r\nREGION\r\n" +
+      "*1\r\n$6\r\nSECRET\r\n"
+    ),
+  ]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const snapshot = await client.session((/** @type {any} */ session) =>
+    session.hGetAllManyAndHKeysMany(
+      ["routes:__platform__"],
+      ["secrets:demo", "secrets:demo:api"]
+    ));
+
+  assert.deepEqual(snapshot, {
+    hashes: [{ api: "v1", jobs: "v2" }],
+    keyLists: [["TOKEN", "REGION"], ["SECRET"]],
+  });
+  assert.equal(
+    decode(socket._writes[0]),
+    "*2\r\n$7\r\nHGETALL\r\n$19\r\nroutes:__platform__\r\n" +
+      "*2\r\n$5\r\nHKEYS\r\n$12\r\nsecrets:demo\r\n" +
+      "*2\r\n$5\r\nHKEYS\r\n$16\r\nsecrets:demo:api\r\n"
+  );
+});
+
+test("RedisSession.hGetManyAndHGetAllMany preserves grouped reply order", async () => {
+  const socket = makeFakeSocket([
+    bytes("$2\r\n{}\r\n$-1\r\n*2\r\n$6\r\norders\r\n$4\r\njson\r\n"),
+  ]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const snapshot = await client.session((/** @type {any} */ session) =>
+    session.hGetManyAndHGetAllMany(
+      [
+        ["worker:demo:api:v:1", "__meta__"],
+        ["worker:demo:jobs:v:2", "__meta__"],
+      ],
+      ["wf:defs:demo:api"]
+    ));
+
+  assert.deepEqual(snapshot, {
+    fields: ["{}", null],
+    hashes: [{ orders: "json" }],
+  });
+  assert.equal(
+    decode(socket._writes[0]),
+    "*3\r\n$4\r\nHGET\r\n$19\r\nworker:demo:api:v:1\r\n$8\r\n__meta__\r\n" +
+      "*3\r\n$4\r\nHGET\r\n$20\r\nworker:demo:jobs:v:2\r\n$8\r\n__meta__\r\n" +
+      "*2\r\n$7\r\nHGETALL\r\n$16\r\nwf:defs:demo:api\r\n"
+  );
+});
+
+test("RedisSession.hGetManyAndSMembersMany preserves grouped reply order", async () => {
+  const socket = makeFakeSocket([
+    bytes(
+      "$2\r\n{}\r\n$-1\r\n*2\r\n$8\r\ncaller-a\r\n$8\r\ncaller-b\r\n*0\r\n"
+    ),
+  ]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const snapshot = await client.session((/** @type {any} */ session) =>
+    session.hGetManyAndSMembersMany(
+      [
+        ["worker:demo:api:v:1", "__meta__"],
+        ["worker:demo:api:v:2", "__meta__"],
+      ],
+      [
+        "worker-version-referrers:demo:api:v1",
+        "worker-version-referrers:demo:api:v2",
+      ]
+    ));
+
+  assert.deepEqual(snapshot, {
+    fields: ["{}", null],
+    memberLists: [["caller-a", "caller-b"], []],
+  });
+  assert.equal(
+    decode(socket._writes[0]),
+    "*3\r\n$4\r\nHGET\r\n$19\r\nworker:demo:api:v:1\r\n$8\r\n__meta__\r\n" +
+      "*3\r\n$4\r\nHGET\r\n$19\r\nworker:demo:api:v:2\r\n$8\r\n__meta__\r\n" +
+      "*2\r\n$8\r\nSMEMBERS\r\n$36\r\nworker-version-referrers:demo:api:v1\r\n" +
+      "*2\r\n$8\r\nSMEMBERS\r\n$36\r\nworker-version-referrers:demo:api:v2\r\n"
+  );
+});
+
 test("RedisSession batches bounded hash lengths and set cardinalities", async () => {
   const socket = makeFakeSocket([bytes(":2\r\n:0\r\n:7\r\n:3\r\n:0\r\n")]);
   const { connect } = scriptedConnect(socket);
@@ -367,6 +457,28 @@ test("RedisClient.hGetAllAndGet reads a hash and string on one socket", async ()
     decode(socket._writes[0]),
     "*2\r\n$7\r\nHGETALL\r\n$21\r\nd1:database:demo:main\r\n" +
       "*2\r\n$3\r\nGET\r\n$26\r\nd1:database-name:demo:main\r\n"
+  );
+});
+
+test("RedisClient.hGetAndZRange reads one version snapshot on one socket", async () => {
+  const socket = makeFakeSocket([bytes("$2\r\nv2\r\n*2\r\n$2\r\nv1\r\n$2\r\nv2\r\n")]);
+  const { connect, state } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+
+  const snapshot = await client.hGetAndZRange(
+    "routes:demo",
+    "api",
+    "worker-versions:demo:api",
+    0,
+    -1
+  );
+
+  assert.deepEqual(snapshot, { field: "v2", members: ["v1", "v2"] });
+  assert.equal(state.count, 1);
+  assert.equal(
+    decode(socket._writes[0]),
+    "*3\r\n$4\r\nHGET\r\n$11\r\nroutes:demo\r\n$3\r\napi\r\n" +
+      "*4\r\n$6\r\nZRANGE\r\n$24\r\nworker-versions:demo:api\r\n$1\r\n0\r\n$2\r\n-1\r\n"
   );
 });
 
@@ -771,6 +883,27 @@ test("RedisMulti.exec commits on success", async () => {
   assert.ok(pipeline.endsWith("*1\r\n$4\r\nEXEC\r\n"));
 });
 
+test("RedisMulti.exec bounds large transaction writes without changing replies", async () => {
+  const socket = makeFakeSocket([
+    bytes("+OK\r\n+QUEUED\r\n+QUEUED\r\n+QUEUED\r\n*3\r\n:1\r\n:1\r\n:1\r\n"),
+  ]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const value = new Uint8Array(120 * 1024).fill(97);
+
+  const replies = await client.session((/** @type {any} */ session) => session.multi()
+    .hSet("bundle", "module-a", value)
+    .hSet("bundle", "module-b", value)
+    .hSet("bundle", "module-c", value)
+    .exec());
+
+  assert.deepEqual(replies, [1, 1, 1]);
+  assert.equal(socket._writes.length > 1, true);
+  const wire = decode(Buffer.concat(socket._writes));
+  assert.ok(wire.startsWith("*1\r\n$5\r\nMULTI\r\n"));
+  assert.ok(wire.endsWith("*1\r\n$4\r\nEXEC\r\n"));
+});
+
 test("RedisMulti.exec surfaces WATCH invalidation as WatchError", async () => {
   // WATCH → +OK, MULTI → +OK, HSET queued → +QUEUED, EXEC aborted → *-1.
   const socket = makeFakeSocket([bytes("+OK\r\n+OK\r\n+QUEUED\r\n*-1\r\n")]);
@@ -865,6 +998,54 @@ test("RedisSession.watch reads +OK ack on the session socket", async () => {
   assert.equal(state.count, 1);
   assert.equal(decode(socket._writes[0]), "*3\r\n$5\r\nWATCH\r\n$2\r\nk1\r\n$2\r\nk2\r\n");
   assert.equal(decode(socket._writes[1]), "*1\r\n$7\r\nUNWATCH\r\n");
+});
+
+test("RedisSession watch snapshot sends WATCH before typed reads in one write", async () => {
+  const socket = makeFakeSocket([bytes("+OK\r\n$-1\r\n$2\r\nv3\r\n$2\r\n{}\r\n")]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const snapshot = await client.session((/** @type {any} */ session) =>
+    session.watchAndGetManyAndHGetMany(
+      ["routes:demo", "lock:demo"],
+      ["lock:demo"],
+      [["routes:demo", "api"], ["worker:demo:api:v:3", "__meta__"]],
+    ));
+
+  assert.deepEqual(snapshot, {
+    values: [null],
+    fields: ["v3", "{}"],
+  });
+  assert.equal(
+    decode(socket._writes[0]),
+    "*3\r\n$5\r\nWATCH\r\n$11\r\nroutes:demo\r\n$9\r\nlock:demo\r\n" +
+      "*2\r\n$3\r\nGET\r\n$9\r\nlock:demo\r\n" +
+      "*3\r\n$4\r\nHGET\r\n$11\r\nroutes:demo\r\n$3\r\napi\r\n" +
+      "*3\r\n$4\r\nHGET\r\n$19\r\nworker:demo:api:v:3\r\n$8\r\n__meta__\r\n"
+  );
+});
+
+test("RedisSession watch snapshot batches bounded dependency probes", async () => {
+  const socket = makeFakeSocket([bytes("+OK\r\n:1\r\n:0\r\n:12\r\n")]);
+  const { connect } = scriptedConnect(socket);
+  const client = new RedisClient("x", { connect });
+  const snapshot = await client.session((/** @type {any} */ session) =>
+    session.watchAndExistsManyAndHStrLenMany(
+      ["d1:one", "d1:two", "worker:target"],
+      ["d1:one", "d1:two"],
+      [["worker:target", "__meta__"]],
+    ));
+
+  assert.deepEqual(snapshot, {
+    exists: [true, false],
+    lengths: [12],
+  });
+  assert.equal(
+    decode(socket._writes[0]),
+    "*4\r\n$5\r\nWATCH\r\n$6\r\nd1:one\r\n$6\r\nd1:two\r\n$13\r\nworker:target\r\n" +
+      "*2\r\n$6\r\nEXISTS\r\n$6\r\nd1:one\r\n" +
+      "*2\r\n$6\r\nEXISTS\r\n$6\r\nd1:two\r\n" +
+      "*3\r\n$7\r\nHSTRLEN\r\n$13\r\nworker:target\r\n$8\r\n__meta__\r\n"
+  );
 });
 
 test("RedisSession read pipelines batch independent ZRANGE and EXISTS commands", async () => {

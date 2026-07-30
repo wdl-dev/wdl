@@ -26,8 +26,9 @@ const MAX_WORKFLOW_SNAPSHOT_ATTEMPTS = 2;
 
 /**
  * @typedef {import("shared-redis").RedisClient} RedisClient
+ * @typedef {import("shared-redis").RedisSession} RedisSession
  * @typedef {{ method: string, url: URL, ns: string, subPath: string[], requestId: string }} WorkflowsHandlerArgs
- * @typedef {{ redis: RedisClient }} RedisDeps
+ * @typedef {{ redis: RedisClient | RedisSession }} RedisDeps
  * @typedef {{ name: string, binding: string, className: string, workflowKey: string }} ActiveWorkflowMeta
  * @typedef {{ name: string, binding: string | null, className: string, workflowKey: string, retired?: boolean }} WorkflowEntry
  * @typedef {WorkflowEntry & { namespace: string, worker: string, activeVersion: string }} ListedWorkflowEntry
@@ -157,10 +158,19 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
 }
 
 /**
- * @param {RedisDeps} deps
+ * @param {{ redis: RedisClient }} deps
  * @param {string} ns
  */
 async function listWorkflowDefinitions({ redis }, ns) {
+  return await redis.session(async (session) =>
+    listWorkflowDefinitionsFromSession({ redis: session }, ns));
+}
+
+/**
+ * @param {{ redis: RedisSession }} deps
+ * @param {string} ns
+ */
+async function listWorkflowDefinitionsFromSession({ redis }, ns) {
   for (let attempt = 0; attempt < MAX_WORKFLOW_SNAPSHOT_ATTEMPTS; attempt += 1) {
     const routes = await redis.hGetAll(routesKey(ns));
     /** @type {Array<[string, string]>} */
@@ -447,19 +457,21 @@ function corruptWorkflowEntries(ns, worker, version) {
 }
 
 /**
- * @param {RedisDeps} deps
+ * @param {{ redis: RedisSession }} deps
  * @param {string} ns
  * @param {Array<[string, string]>} routeEntries
  * @returns {Promise<[Array<string | null | undefined>, Array<Record<string, string | null | undefined>>]>}
  */
 async function readWorkflowListRaws({ redis }, ns, routeEntries) {
   try {
-    return await Promise.all([
-      redis.hGetMany(
-        routeEntries.map(([worker, activeVersion]) => [bundleKey(ns, worker, activeVersion), "__meta__"])
-      ),
-      redis.hGetAllMany(routeEntries.map(([worker]) => workflowDefsKey(ns, worker))),
-    ]);
+    const snapshot = await redis.hGetManyAndHGetAllMany(
+      routeEntries.map(([worker, activeVersion]) => [
+        bundleKey(ns, worker, activeVersion),
+        "__meta__",
+      ]),
+      routeEntries.map(([worker]) => workflowDefsKey(ns, worker))
+    );
+    return [snapshot.fields, snapshot.hashes];
   } catch (err) {
     requireControlLog()("error", "workflow_metadata_unavailable", {
       namespace: ns,
