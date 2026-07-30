@@ -17,7 +17,11 @@ import {
 import { readJsonResponse } from "../helpers/response-json.js";
 import { delay } from "../helpers/timing.js";
 
-const { runtimeDispatch, runtimeDispatchWorkflowStep } = await loadRuntimeDispatch();
+const {
+  runtimeDispatch,
+  runtimeDispatchWorkflowReplayCache,
+  runtimeDispatchWorkflowStep,
+} = await loadRuntimeDispatch();
 const workflowJson = await importRepositoryModule(
   "runtime/dispatch/workflow-json.js",
   importSpecifierReplacements({
@@ -47,6 +51,10 @@ const {
   MAX_WORKFLOW_STARTED_STEPS_PER_RUN_TURN,
   workflowError,
 } = runtimeDispatchWorkflowStep;
+const {
+  getWorkflowReplayCache,
+  WORKFLOW_REPLAY_CACHE_MAX_INSTANCES,
+} = runtimeDispatchWorkflowReplayCache;
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 
@@ -610,6 +618,94 @@ test("handleWorkflowRunDispatch replays completed step.do output without callbac
   assert.deepEqual(backend.calls.map((call) => call.url), [
     "http://workflows/internal/workflows/replay-steps",
   ]);
+  assert.deepEqual(scope.errors, []);
+});
+
+test("handleWorkflowRunDispatch keeps an evicted in-flight replay page locally usable", async () => {
+  const scope = makeScope();
+  const stepCount = 40;
+  let callbackCalls = 0;
+  let appliedCachePressure = false;
+  const run = {
+    ns: "demo",
+    worker: "shop",
+    frozenVersion: "v1",
+    workflowName: "orders",
+    workflowKey: "wf_abc",
+    className: "OrderWorkflow",
+    instanceId: "inst-evicted-replay",
+    generation: 1,
+    createdAtMs: 12345,
+    runToken: "run-1",
+    event: { payload: {} },
+  };
+  const controllerCache = getWorkflowReplayCache(run);
+  const replaySteps = Array.from({ length: stepCount }, (_, ordinal) => ({
+    ordinal,
+    name: `step-${ordinal}`,
+    nameCount: 1,
+    dependencies: ordinal === 0 ? [] : [ordinal - 1],
+    config: "null",
+    status: "completed",
+    output: ordinal,
+  }));
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) return Response.json({ state: "complete", output: "claimed" });
+    return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
+  }, {
+    replayPage: (body) => {
+      if (!appliedCachePressure) {
+        appliedCachePressure = true;
+        for (let i = 0; i < WORKFLOW_REPLAY_CACHE_MAX_INSTANCES; i += 1) {
+          getWorkflowReplayCache({
+            ns: "pressure",
+            workflowKey: "wf_pressure",
+            instanceId: `inst-${i}`,
+            generation: 1,
+            createdAtMs: i,
+            runToken: "pressure",
+          });
+        }
+      }
+      return {
+        steps: replaySteps.slice(body.startOrdinal),
+        nextOrdinal: stepCount,
+        done: true,
+      };
+    },
+  });
+  const res = await handleWorkflowRunDispatch({
+    run,
+    scope,
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            let output = null;
+            for (let ordinal = 0; ordinal < stepCount; ordinal += 1) {
+              output = await step.do(`step-${ordinal}`, async () => {
+                callbackCalls += 1;
+                return "fresh";
+              });
+            }
+            return output;
+          },
+        },
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(res, 200);
+  assert.deepEqual({ outcome: body.outcome, output: body.output }, {
+    outcome: "completed",
+    output: stepCount - 1,
+  });
+  assert.equal(callbackCalls, 0);
+  assert.equal(backend.calls.filter((call) => call.url.endsWith("/replay-steps")).length, 1);
+  assert.equal(backend.calls.filter((call) => call.url.endsWith("/claim-step")).length, 0);
+  assert.equal(controllerCache.steps.size, 0);
+  assert.equal(controllerCache.bytes, 0);
   assert.deepEqual(scope.errors, []);
 });
 

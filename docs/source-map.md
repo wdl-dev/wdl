@@ -19,7 +19,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `gateway/index.js` | Gateway worker dispatch branches: admin-host short-circuit, subdomain routing, and pattern routing. |
 | `gateway/dispatch.js` | Pure gateway dispatch decision tree and route target selection. |
 | `gateway/holder.js`, `gateway/websocket.js` | WebSocket holder, reconnect forwarding, and `101` upgrade preservation. |
-| `gateway/runtime.js` | Gateway route/pattern caches, Redis subscriber invalidation, logging, metrics, and health/metrics snapshots. |
+| `gateway/runtime.js` | Gateway static routing-option memoization, route/pattern caches, Redis subscriber invalidation, logging, metrics, and health/metrics snapshots. |
 | `gateway/lib.js` | Pure routing helpers used by workerd and Node tests. |
 | `runtime/config-user.capnp` | User runtime config: loader `:8081`, internal `:8088`, public-only loaded-worker outbound. |
 | `runtime/config-system.capnp` | System runtime config: loader `:8081`, internal `:8088`, control `:8082`, auth worker, private+public outbound. |
@@ -66,6 +66,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/internal-auth.js` | Shared internal mesh auth header and token helpers used by JS callers and receivers. |
 | `shared/secret-envelope.js`, `shared/secret-keys.js` | Secret envelope encryption/decryption, canonical base64/JSON handling, AAD binding helpers, and secret Redis key construction. |
 | `shared/base64.js` | Dependency-free byte/text base64 codec shared by workerd tiers, with a `Buffer` fast path under `nodejs_compat`. |
+| `shared/utf8.js` | Allocation-aware exact UTF-8 byte-length owner shared by workerd JavaScript tiers and injected runtime sources. |
 | `shared/hex.js`, `shared/random-id.js`, `shared/errors.js` | Small dependency-free primitives for byte-to-hex rendering, random hex ids, and string-only error message extraction. |
 | `shared/observability.js` | Structured logger, metrics registry, request-id helpers, and log-level handling for JS tiers. |
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |

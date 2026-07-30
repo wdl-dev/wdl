@@ -132,10 +132,10 @@ export function redisHGetJson(key, field, options = {}) {
   return parseJsonText(val, options.label || `${key} ${field}`);
 }
 
-/** @param {string} key @param {Record<string, string>} fields @param {{ db?: number }} [options] */
+/** @param {string} key @param {Record<string, string>} fields @param {{ db?: number }} [options] @returns {number} */
 export function redisHSet(key, fields, options = {}) {
   const args = Object.entries(fields).map(([k, v]) => `${shellQuote(k)} ${shellQuote(v)}`).join(" ");
-  redisCommand(`HSET ${shellQuote(key)} ${args}`, options);
+  return Number(redisCommand(`HSET ${shellQuote(key)} ${args}`, options));
 }
 
 /** @param {string} key @param {string[]} fields @param {{ db?: number }} [options] @returns {number} */

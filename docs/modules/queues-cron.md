@@ -145,20 +145,24 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    any aggregate reconcile failure after that healthy work is retained.
 3. The consume loop uses `XREADGROUP` to read main streams and dispatches batches up to
    `max_batch_size`, which must be in `[1, 100]`; out-of-range projections are rejected.
-   Each read caps `COUNT` to the current consumer batch-size snapshot for the active
-   stream set so one poll does not place more entries into the PEL than a current
-   consumer can dispatch in one batch. The consume loop keeps at most one batch in
-   flight per stream on each Scheduler replica, but continues polling and dispatching
-   other streams under the shared queue semaphore instead of waiting for a slow runtime
-   handler. While any stream is in flight, reads over the remaining stream set are
-   non-blocking; an empty read waits for dispatch completion or a bounded 100 ms poll
-   before rebuilding the set. PEL reap uses the same per-consumer cap when the consumer
-   still exists; missing-consumer orphan movement may still page up to the hard cap.
-   Consume and PEL reap can dispatch streams in parallel under the queue semaphore.
-   Before each dispatch path sends messages to runtime, scheduler re-reads the
-   authoritative `queue-consumer` hash for that stream and updates the in-memory
-   registry, so a promoted consumer version does not wait for the next reconcile tick
-   once messages are selected.
+   The shared readiness read caps `COUNT` to the smallest current consumer batch-size
+   snapshot in the active stream set. A stream that fills this shared probe may perform
+   one non-blocking, single-stream read to fill its own larger cap. These optional
+   top-ups share a 100-entry in-flight budget per Scheduler replica; unavailable budget
+   never delays entries already returned by the readiness probe. Redis applies `COUNT`
+   per stream, so the base readiness reply still scales with the number of simultaneously
+   non-empty streams; the top-up budget does not bound that reply. The consume loop keeps
+   at most one batch in flight per stream on each Scheduler replica, but continues
+   polling and dispatching other streams under the shared queue semaphore instead of
+   waiting for a slow runtime handler. While any stream is in flight, reads over the
+   remaining stream set are non-blocking; an empty read waits for dispatch completion
+   or a bounded 100 ms poll before rebuilding the set. PEL reap uses the same
+   per-consumer cap when the consumer still exists; missing-consumer orphan movement
+   may still page up to the hard cap. Consume and PEL reap can dispatch streams in
+   parallel under the queue semaphore. Before each dispatch path sends messages to
+   runtime, scheduler re-reads the authoritative `queue-consumer` hash for that stream
+   and updates the in-memory registry, so a promoted consumer version does not wait for
+   the next reconcile tick once messages are selected.
    `max_batch_timeout_ms` is not a batching wait window in the current model.
 4. Runtime returns a queue outcome envelope. Explicit `ack`, explicit `retry`, batch
    retry, and implicit ack are resolved in scheduler. Retry and DLQ transitions execute
@@ -176,8 +180,11 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    `QUEUE_SWEEP_BATCH_SIZE`, with at least one slot per eligible queue and unused
    allocation redistributed from shallow queues. The default therefore materializes at
    most 128 members per chunk. That chunk enters claim/mutation before the next chunk is
-   loaded, so full message bodies remain bounded without adding one round trip per
-   queue. Each due member takes a
+   loaded, so full message bodies remain bounded and active member reads do not add one
+   round trip per queue. A queue whose batched consumer projection is missing is a
+   destructive orphan candidate; immediately before claim, Scheduler re-reads that
+   queue's authoritative projection and keeps its members delayed if a consumer has
+   appeared. Each due member takes a
    `queue-delayed-claim:*` lease sized to `SCHEDULER_FIRE_TIMEOUT_MS + 5000ms`; the
    winner moves it back to the main stream, or to the orphan stream if the consumer
    vanished.

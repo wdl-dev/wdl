@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
  *   del: (...keys: string[]) => Promise<unknown>,
  *   exists: (key: string) => Promise<boolean>,
  *   existsCount: (...keys: string[]) => Promise<number>,
- *   hSet: (key: string, fields: Record<string, string>) => Promise<unknown>,
+ *   hSet: (key: string, fields: Record<string, string>) => Promise<number>,
  *   hGet: (key: string, field: string) => Promise<string | null>,
  *   hMGet: (key: string, fields: string[]) => Promise<Array<string | null>>,
  *   hGetAll: (key: string) => Promise<Record<string, string>>,
@@ -30,6 +30,23 @@ import assert from "node:assert/strict";
  */
 
 export const redisConformanceCases = [
+  {
+    id: "hash-set-cardinality",
+    name: "hash set returns the number of newly added fields",
+    /** @param {RedisConformanceAdapter} redis */
+    async run(redis) {
+      const hash = redis.key("hash-set-cardinality");
+      await redis.del(hash);
+
+      assert.equal(await redis.hSet(hash, { one: "1", two: "2" }), 2);
+      assert.equal(await redis.hSet(hash, { one: "updated", three: "3" }), 1);
+      assert.deepEqual(await redis.hGetAll(hash), {
+        one: "updated",
+        two: "2",
+        three: "3",
+      });
+    },
+  },
   {
     id: "multi-exists",
     name: "multi-key existence counts present keys including duplicates",

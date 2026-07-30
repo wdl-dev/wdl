@@ -376,6 +376,18 @@ test("R2 host single-object errors do not expose backend response bodies", async
 test("R2 host list include hydrates metadata with per-object HEAD", async () => {
   /** @type {Array<{ url: string, init: any }>} */
   const calls = [];
+  let namespaceReads = 0;
+  let bucketNameReads = 0;
+  const props = {
+    get ns() {
+      namespaceReads += 1;
+      return "demo";
+    },
+    get bucketName() {
+      bucketNameReads += 1;
+      return "uploads";
+    },
+  };
   const restore = installRecordingR2FetchMock(calls, {
     response: async (url) => {
       if (String(url).includes("list-type=2")) {
@@ -406,7 +418,7 @@ test("R2 host list include hydrates metadata with per-object HEAD", async () => 
     },
   });
   try {
-    const listed = await makeR2Bucket().list({
+    const listed = await makeR2Bucket({}, props).list({
       include: ["httpMetadata", "customMetadata"],
     });
 
@@ -416,6 +428,8 @@ test("R2 host list include hydrates metadata with per-object HEAD", async () => 
     assert.equal(listed.objects[0].key, "a&b.txt");
     assert.deepEqual(listed.objects[0].httpMetadata, { contentType: "text/plain" });
     assert.deepEqual(listed.objects[0].customMetadata, { color: "blue" });
+    assert.equal(namespaceReads, 1);
+    assert.equal(bucketNameReads, 1);
   } finally {
     restore();
   }

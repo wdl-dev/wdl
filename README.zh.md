@@ -187,10 +187,10 @@ npm run test:unit
 npm run test:integration
 
 # Rust checks from the repository root
-cargo fmt --manifest-path rust/Cargo.toml --all --check
-cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
-cargo test --manifest-path rust/Cargo.toml --workspace
-cargo deny --manifest-path rust/Cargo.toml check --config rust/deny.toml
+(cd rust && cargo fmt --all --check)
+(cd rust && cargo clippy --locked --workspace --all-targets -- -D warnings)
+(cd rust && cargo test --locked --workspace)
+(cd rust && cargo deny --manifest-path Cargo.toml check)
 ```
 
 Integration runner 行为、sharding、artifacts 和 debug flags 见 [docs/testing.zh.md](docs/testing.zh.md)。

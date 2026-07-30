@@ -411,7 +411,7 @@ export function createFakeRedisClient(state, options = {}) {
     async hSet(key, fields) {
       expireIfNeeded(state, key, options);
       state.commands.push(["hSet", key, { ...fields }]);
-      setHashFields(state, key, fields);
+      return setHashFields(state, key, fields);
     },
     /** @param {string} key @param {...string} fields */
     async hDel(key, ...fields) {
@@ -553,6 +553,16 @@ export function createFakeRedisSession(state, options = {}) {
       }
     }
   }
+  /** @param {string[]} keys @param {number} readCount */
+  function captureWatchSnapshot(keys, readCount) {
+    if (keys.length === 0) {
+      throw new Error("WATCH snapshot requires at least one key");
+    }
+    if (readCount === 0) {
+      throw new Error("WATCH snapshot requires at least one read");
+    }
+    captureWatch(keys);
+  }
   return {
     /** @param {string[]} keys */
     async watch(...keys) {
@@ -599,7 +609,7 @@ export function createFakeRedisSession(state, options = {}) {
      * @param {Array<[string, string]>} hgetPairs
      */
     async watchAndGetManyAndHGetMany(watchKeys, getKeys, hgetPairs) {
-      captureWatch(watchKeys);
+      captureWatchSnapshot(watchKeys, getKeys.length + hgetPairs.length);
       state.commands.push([
         "watchAndGetManyAndHGetMany",
         [...watchKeys],
@@ -724,7 +734,10 @@ export function createFakeRedisSession(state, options = {}) {
      * @param {Array<[string, string]>} lengthPairs
      */
     async watchAndExistsAndHStrLenMany(watchKeys, existenceKeys, lengthPairs) {
-      captureWatch(watchKeys);
+      captureWatchSnapshot(
+        watchKeys,
+        (existenceKeys.length > 0 ? 1 : 0) + lengthPairs.length,
+      );
       state.commands.push([
         "watchAndExistsAndHStrLenMany",
         [...watchKeys],
@@ -765,7 +778,7 @@ export function createFakeRedisSession(state, options = {}) {
      * @param {string} stringKey
      */
     async watchAndHGetAllAndGet(watchKeys, hashKey, stringKey) {
-      captureWatch(watchKeys);
+      captureWatchSnapshot(watchKeys, 2);
       expireIfNeeded(state, hashKey, options);
       expireIfNeeded(state, stringKey, options);
       state.commands.push(["watchAndHGetAllAndGet", [...watchKeys], hashKey, stringKey]);
@@ -793,7 +806,7 @@ export function createFakeRedisSession(state, options = {}) {
      * @param {string} setKey
      */
     async watchAndHGetAllGetSMembers(watchKeys, hashKey, stringKey, setKey) {
-      captureWatch(watchKeys);
+      captureWatchSnapshot(watchKeys, 3);
       expireIfNeeded(state, hashKey, options);
       expireIfNeeded(state, stringKey, options);
       expireIfNeeded(state, setKey, options);
@@ -900,7 +913,7 @@ export function createFakeRedisSession(state, options = {}) {
     },
     /** @param {string[]} watchKeys @param {string[]} keys */
     async watchAndExistsMany(watchKeys, keys) {
-      captureWatch(watchKeys);
+      captureWatchSnapshot(watchKeys, keys.length);
       state.commands.push(["watchAndExistsMany", [...watchKeys], [...keys]]);
       return keys.map((key) => keyExists(state, key, options));
     },
@@ -939,7 +952,7 @@ export function createFakeRedisSession(state, options = {}) {
     },
     /** @param {string[]} watchKeys @param {string} key */
     async watchAndSMembers(watchKeys, key) {
-      captureWatch(watchKeys);
+      captureWatchSnapshot(watchKeys, 1);
       expireIfNeeded(state, key, options);
       state.commands.push(["watchAndSMembers", [...watchKeys], key]);
       return [...(state.sets.get(key) || new Set())];
@@ -1064,9 +1077,9 @@ export function createFakeRedisMulti(state, options = {}, watchContext = undefin
       ops.push(["zAdd", key, score, member]);
       return chain;
     },
-    /** @param {string} key @param {string} member */
-    zRem(key, member) {
-      ops.push(["zRem", key, member]);
+    /** @param {string} key @param {string|string[]} members */
+    zRem(key, members) {
+      ops.push(["zRem", key, ...setMemberValues(members)]);
       return chain;
     },
     /** @param {string} key @param {string} value */
@@ -1182,9 +1195,12 @@ export function applyFakeRedisOp(state, op, options = {}) {
   }
   if (kind === "zRem") {
     const zset = state.zsets.get(key);
-    const removed = zset?.delete(/** @type {string} */ (op[2])) ? 1 : 0;
+    let removed = 0;
+    for (const member of /** @type {string[]} */ (op.slice(2))) {
+      if (zset?.delete(member)) removed += 1;
+    }
     if (zset?.size === 0) state.zsets.delete(key);
-    if (removed === 1) markKeyModified(state, key);
+    if (removed > 0) markKeyModified(state, key);
     return removed;
   }
   if (kind === "publish") return 0;

@@ -18,7 +18,8 @@ import {
   waitForScheduler,
   queueStreamKey,
 } from "./helpers/index.js";
-import { redisFlushAll, redisXInfoGroups, redisXLen, redisXPendingCount } from "./helpers/redis.js";
+import { waitForQueueConsumerGroups } from "./helpers/queue-scenarios.js";
+import { redisFlushAll, redisXLen, redisXPendingCount } from "./helpers/redis.js";
 
 setupIntegrationSuite({
   async afterStackUp() {
@@ -76,10 +77,11 @@ test("scheduler: SIGTERM mid-dispatch drains in-flight queue handler before exit
 
   // Wait for the consumer group so XADD lands while XREADGROUP BLOCK is active,
   // not while reconcile is still pending.
-  await waitUntil("scheduler registers consumer group", async () => {
-    const out = redisXInfoGroups(streamKey, { db: 1 });
-    return out.includes("wdl-scheduler");
-  }, { timeoutMs: 15_000, intervalMs: 500 });
+  await waitForQueueConsumerGroups(streamKey, {
+    label: "scheduler registers consumer group",
+    timeoutMs: 15_000,
+    intervalMs: 500,
+  });
 
   const sendRes = runtimeInternalPost("/", {
     "x-worker-id": gatewayWorkerId(ns, "p", producerVersion),

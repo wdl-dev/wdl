@@ -976,11 +976,13 @@ test("DurableObjectNamespace strips owner metadata with patched Headers methods"
   assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
 });
 
-test("DO requestSpec header budget uses captured TextEncoder.encodeInto", async () => {
+test("DO requestSpec header budget uses captured UTF-8 intrinsics", async () => {
   const textEncodeInto = TextEncoder.prototype.encodeInto;
+  const stringCharCodeAt = String.prototype.charCodeAt;
   let hostileEncodeIntoCalls = 0;
+  let hostileCharCodeAtCalls = 0;
   const request = new Request("https://demo.workers.example/send", {
-    headers: { "x-oversized": "a".repeat(MAX_DO_REQUEST_HEADER_BYTES + 1) },
+    headers: { "x-oversized": "\u00e9".repeat((MAX_DO_REQUEST_HEADER_BYTES / 2) + 1) },
   });
 
   await withMockedProperty(
@@ -988,20 +990,33 @@ test("DO requestSpec header budget uses captured TextEncoder.encodeInto", async 
     "encodeInto",
     /** @this {TextEncoder} */
     function targetedEncodeInto(value = "", destination) {
-      if (value.length > MAX_DO_REQUEST_HEADER_BYTES) {
+      if (value.length > MAX_DO_REQUEST_HEADER_BYTES / 2) {
         hostileEncodeIntoCalls += 1;
         return { read: value.length, written: 0 };
       }
       return Reflect.apply(textEncodeInto, this, [value, destination]);
     },
-    async () => {
-      await assert.rejects(
-        () => requestSpec(request, null),
-        /fetch headers exceed 65536 bytes/
-      );
-    }
+    () => withMockedProperty(
+      String.prototype,
+      "charCodeAt",
+      /** @this {string} */
+      function targetedCharCodeAt(index) {
+        if (this.length > MAX_DO_REQUEST_HEADER_BYTES / 2) {
+          hostileCharCodeAtCalls += 1;
+          return 0;
+        }
+        return Reflect.apply(stringCharCodeAt, this, [index]);
+      },
+      async () => {
+        await assert.rejects(
+          () => requestSpec(request, null),
+          /fetch headers exceed 65536 bytes/
+        );
+      }
+    )
   );
   assert.equal(hostileEncodeIntoCalls, 0);
+  assert.equal(hostileCharCodeAtCalls, 0);
 });
 
 test("DO request method and upgrade decisions use captured string normalization", async () => {

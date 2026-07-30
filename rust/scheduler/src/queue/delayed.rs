@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::time::Duration;
 
 use redis::streams::StreamReadReply;
@@ -15,7 +16,7 @@ use crate::{
 
 use super::{
     Consumer, ConsumerLookup, QUEUE_REDIS_READ_BATCH_SIZE, parse_delayed_key, queue_orphaned_key,
-    queue_stream_key, resolve_consumer_batch, stream_id_to_entry,
+    queue_stream_key, resolve_consumer, resolve_consumer_batch, stream_id_to_entry,
 };
 
 const QUEUE_DELAYED_CLAIM_SAFETY_MS: u64 = 5_000;
@@ -62,6 +63,13 @@ static DROP_CLAIMED_DELAYED_MEMBER: StaticRedisScript =
     StaticRedisScript::new(DROP_CLAIMED_DELAYED_MEMBER_SCRIPT);
 static DELAYED_HEAD_SCORE: StaticRedisScript = StaticRedisScript::new(DELAYED_HEAD_SCORE_SCRIPT);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DelayedConsumerDisposition {
+    Deliver,
+    KeepDelayed,
+    Orphan,
+}
+
 struct DelayedQueueProbe {
     delayed_key: String,
     stream_key: String,
@@ -89,6 +97,24 @@ impl DelayedQueueProbe {
             queue: &self.queue,
         }
     }
+}
+
+async fn delayed_consumer_disposition<F, Fut>(
+    snapshot: Option<&Consumer>,
+    reload: F,
+) -> Result<DelayedConsumerDisposition, redis::RedisError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Option<Consumer>, redis::RedisError>>,
+{
+    if snapshot.is_some() {
+        return Ok(DelayedConsumerDisposition::Deliver);
+    }
+    Ok(if reload().await?.is_some() {
+        DelayedConsumerDisposition::KeepDelayed
+    } else {
+        DelayedConsumerDisposition::Orphan
+    })
 }
 
 pub(crate) fn wait_ms_until_due(now_ms: i64, due_ms: i64) -> u64 {
@@ -498,12 +524,22 @@ pub(crate) async fn queue_due_sweep(state: AppState) -> SchedulerResult<bool> {
             }
             let probe = &probe_chunk[index];
             let consumer = &consumer_chunk[index];
+            // Absence selects the destructive +inf/orphan path. The batched
+            // snapshot can age while earlier queues drain, so restore the
+            // authoritative per-queue check immediately before claiming.
+            let disposition = delayed_consumer_disposition(consumer.as_ref(), || {
+                resolve_consumer(&state, &probe.stream_key, &probe.ns, &probe.queue)
+            })
+            .await?;
+            if disposition == DelayedConsumerDisposition::KeepDelayed {
+                continue;
+            }
             let claimed = claim_delayed_members(&state, &probe.delayed_key, members).await?;
             if claimed.is_empty() {
                 continue;
             }
 
-            let orphaned = consumer.is_none();
+            let orphaned = disposition == DelayedConsumerDisposition::Orphan;
             let mut move_batch = Vec::with_capacity(claimed.len());
             let mut corrupt = Vec::new();
             for (member, claim_key) in &claimed {
@@ -740,6 +776,35 @@ mod tests {
             dead_letter_queue: None,
             worker_id: format!("{ns}:worker:v1"),
         }
+    }
+
+    #[tokio::test]
+    async fn delayed_orphan_decision_rechecks_only_a_missing_consumer() {
+        let active = consumer("demo", "jobs");
+        assert_eq!(
+            delayed_consumer_disposition(Some(&active), || async {
+                Err::<Option<Consumer>, redis::RedisError>(
+                    (redis::ErrorKind::Client, "active consumer must not reload").into(),
+                )
+            })
+            .await
+            .unwrap(),
+            DelayedConsumerDisposition::Deliver
+        );
+        assert_eq!(
+            delayed_consumer_disposition(None, || async {
+                Ok::<_, redis::RedisError>(Some(consumer("demo", "jobs")))
+            })
+            .await
+            .unwrap(),
+            DelayedConsumerDisposition::KeepDelayed
+        );
+        assert_eq!(
+            delayed_consumer_disposition(None, || async { Ok::<_, redis::RedisError>(None) })
+                .await
+                .unwrap(),
+            DelayedConsumerDisposition::Orphan
+        );
     }
 
     #[test]

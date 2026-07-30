@@ -19,6 +19,10 @@ struct KvListCursor {
     overflow: Vec<String>,
 }
 
+fn is_valid_list_cursor_state(bucket: u32, overflow_len: usize) -> bool {
+    bucket < KV_HASH_BUCKETS && overflow_len <= KV_LIST_CURSOR_OVERFLOW_MAX
+}
+
 pub(crate) fn normalize_list_limit(limit: Option<u64>) -> u64 {
     limit
         .unwrap_or(KV_LIST_LIMIT_DEFAULT)
@@ -35,10 +39,7 @@ pub(crate) fn decode_list_cursor(cursor: Option<String>) -> AppResult<(u32, Stri
             .map_err(|_| AppError::bad_request("invalid KV list cursor"))?;
         let parsed = serde_json::from_slice::<KvListCursor>(&bytes)
             .map_err(|_| AppError::bad_request("invalid KV list cursor"))?;
-        if parsed.overflow.len() > KV_LIST_CURSOR_OVERFLOW_MAX {
-            return Err(AppError::bad_request("invalid KV list cursor"));
-        }
-        if parsed.bucket >= KV_HASH_BUCKETS {
+        if !is_valid_list_cursor_state(parsed.bucket, parsed.overflow.len()) {
             return Err(AppError::bad_request("invalid KV list cursor"));
         }
         return Ok((parsed.bucket, parsed.scan, parsed.overflow));
@@ -51,6 +52,9 @@ pub(crate) fn encode_list_cursor(
     scan: String,
     overflow: Vec<String>,
 ) -> AppResult<String> {
+    if !is_valid_list_cursor_state(bucket, overflow.len()) {
+        return Err(AppError::internal_error("invalid KV list cursor state"));
+    }
     let json = serde_json::to_vec(&KvListCursor {
         bucket,
         scan,
@@ -100,7 +104,42 @@ fn existing_cursor_overflow_fields_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use wdl_rust_common::test_support::parse_packed_commands;
+
+    #[test]
+    fn encoded_list_cursors_round_trip_at_supported_boundaries() {
+        for (bucket, scan, overflow) in [
+            (0, "0", Vec::new()),
+            (
+                KV_HASH_BUCKETS - 1,
+                "18446744073709551615",
+                vec!["v:item".to_string(); KV_LIST_CURSOR_OVERFLOW_MAX],
+            ),
+        ] {
+            let encoded = encode_list_cursor(bucket, scan.to_string(), overflow.clone()).unwrap();
+            assert_eq!(
+                decode_list_cursor(Some(encoded)).unwrap(),
+                (bucket, scan.to_string(), overflow)
+            );
+        }
+    }
+
+    #[test]
+    fn encoder_rejects_cursor_state_the_decoder_cannot_accept() {
+        for result in [
+            encode_list_cursor(KV_HASH_BUCKETS, "0".to_string(), Vec::new()),
+            encode_list_cursor(
+                0,
+                "0".to_string(),
+                vec!["v:item".to_string(); KV_LIST_CURSOR_OVERFLOW_MAX + 1],
+            ),
+        ] {
+            let err = result.unwrap_err();
+            assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(err.code, "internal_error");
+        }
+    }
 
     #[test]
     fn existing_cursor_overflow_fields_pipeline_only_probes_existence() {

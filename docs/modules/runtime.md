@@ -123,8 +123,10 @@ must be positive JavaScript safe integers; the proxy applies an expiring value-o
 write and stale-metadata removal atomically.
 `list()` is backed by Redis `HSCAN`, not a Cloudflare ordered B-tree: keys are not
 sorted, cursors are opaque WDL cursors, and concurrent writes may appear out of order or
-be re-seen. `limit` is capped at 1000. `cacheTtl` is accepted only as API shape; there
-is no Cloudflare edge read cache or global eventual-consistency window.
+be re-seen. A page with `list_complete: false` may contain fewer than `limit` keys,
+including zero; callers must continue with the returned cursor until `list_complete` is
+true. `limit` is capped at 1000. `cacheTtl` is accepted only as API shape; there is no
+Cloudflare edge read cache or global eventual-consistency window.
 
 R2 bindings map `bucket_name` to a namespace-scoped virtual bucket under the platform
 S3-compatible bucket: `r2/<ns>/<bucket_name>/<object-key>`. Workers in the same
@@ -190,8 +192,10 @@ Data-plane bindings use their own storage:
   JSON modules are decoded from those views; wasm and data modules receive standalone
   byte copies so tenant-visible buffers cannot expose adjacent modules or secrets.
 - Loaded host-binding wrappers cache only the stripped template for a stable workerd env
-  object. Every event receives a fresh top-level env copy and fresh facade instances, so
-  request-id context and tenant mutation remain request-scoped.
+  object. Default object/function handlers receive a fresh top-level env copy and fresh
+  facade instances per event. Persistent class entrypoints receive one wrapped env and
+  facade set at construction and reuse it; only their diagnostic context is refreshed
+  per invocation as described below.
 - KV and queue producers use DB 1 through `redis-proxy`.
 - Workflow bindings call `workflows`; runtime does not read DB 2 directly.
 - D1 and DO bindings call their dedicated runtime services.

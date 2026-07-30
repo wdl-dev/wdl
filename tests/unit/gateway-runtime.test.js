@@ -17,7 +17,9 @@ export class RedisSubscriber {
   start() { return Promise.resolve(); }
 }
 `);
+const nsPatternOwnerUrl = repositoryFileUrl("shared/ns-pattern.js");
 const nsPatternUrl = moduleDataUrl(`
+export { platformDomainFromEnv } from ${JSON.stringify(nsPatternOwnerUrl)};
 export function isValidRouteNs() { return true; }
 `);
 const routeProjectionUrl = moduleDataUrl(`
@@ -26,7 +28,9 @@ export function decodePatternProjection(raw) {
   return raw;
 }
 `);
+const gatewayLibOwnerUrl = repositoryFileUrl("gateway/lib.js");
 const gatewayLibUrl = moduleDataUrl(`
+export { normalizeRequestHost } from ${JSON.stringify(gatewayLibOwnerUrl)};
 export function isPatternInvalidationKey() { return true; }
 export function sortPatterns(entries) { return { sorted: entries, errors: [] }; }
 `);
@@ -76,6 +80,29 @@ async function withGatewaySubscriber(ensureGatewaySubscriber, fn) {
 }
 
 const { runtimeForwardOutcome } = await loadGatewayRuntime();
+
+test("gatewayRoutingOptionsFromEnv memoizes normalized options by env identity", async () => {
+  const { gatewayRoutingOptionsFromEnv } = await loadGatewayRuntime();
+  const firstEnv = {
+    PLATFORM_DOMAIN: " FIRST.WORKERS.EXAMPLE. ",
+    ADMIN_HOST: "FIRST-ADMIN.EXAMPLE.",
+  };
+  const secondEnv = {
+    PLATFORM_DOMAIN: "SECOND.WORKERS.EXAMPLE",
+    ADMIN_HOST: "SECOND-ADMIN.EXAMPLE.",
+  };
+
+  const first = gatewayRoutingOptionsFromEnv(firstEnv);
+  assert.deepEqual(first, {
+    platformDomain: "first.workers.example",
+    normalizedAdminHost: "first-admin.example",
+  });
+  assert.equal(gatewayRoutingOptionsFromEnv(firstEnv), first);
+  assert.deepEqual(gatewayRoutingOptionsFromEnv(secondEnv), {
+    platformDomain: "second.workers.example",
+    normalizedAdminHost: "second-admin.example",
+  });
+});
 
 test("runtimeForwardOutcome treats websocket upgrades as successful forwards", () => {
   assert.equal(runtimeForwardOutcome({ status: 101 }), "ok");

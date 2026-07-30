@@ -8,6 +8,7 @@ export const MAX_DO_REQUEST_BODY_BYTES = 1024 * 1024;
 export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
+const REQUEST_HEADER_UTF8_SCRATCH_BYTES = 2 * 1024;
 export const DO_ACCEPT_OWNER_HINT_HEADER = "x-wdl-do-accept-owner-hint";
 export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
@@ -94,6 +95,7 @@ const intrinsicReadableStreamReaderCancel = ReadableStreamDefaultReader.prototyp
 const intrinsicReadableStreamReaderRead = ReadableStreamDefaultReader.prototype.read;
 const intrinsicReadableStreamReaderReleaseLock = ReadableStreamDefaultReader.prototype.releaseLock;
 const intrinsicSetHas = Set.prototype.has;
+const intrinsicStringCharCodeAt = String.prototype.charCodeAt;
 const intrinsicStringToLowerCase = String.prototype.toLowerCase;
 const intrinsicStringToUpperCase = String.prototype.toUpperCase;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
@@ -136,7 +138,8 @@ const intrinsicResponseWebSocketGet = /** @type {((this: Response) => WebSocket 
   prototypeGetter(Response.prototype, "webSocket")
 );
 const utf8Encoder = new TextEncoder();
-const requestHeaderUtf8Scratch = new IntrinsicUint8Array(MAX_DO_REQUEST_HEADER_BYTES + 1);
+/** @type {Uint8Array | undefined} */
+let requestHeaderUtf8Scratch;
 
 const DO_CONNECT_HEADERS = {
   ns: "x-wdl-do-ns",
@@ -413,13 +416,42 @@ function byteLength(value) {
   return byteArrayLength(encodeUtf8(value));
 }
 
-/** @param {string} value */
-function boundedRequestHeaderByteLength(value) {
+/**
+ * @param {string} value
+ * @param {number} maxBytes
+ */
+function boundedRequestHeaderByteLength(value, maxBytes) {
+  // UTF-8 never uses fewer bytes than UTF-16 code units.
+  if (value.length > maxBytes) return maxBytes + 1;
+
+  requestHeaderUtf8Scratch ??= new IntrinsicUint8Array(REQUEST_HEADER_UTF8_SCRATCH_BYTES);
   const result = intrinsicReflectApply(intrinsicTextEncoderEncodeInto, utf8Encoder, [
     value,
     requestHeaderUtf8Scratch,
   ]);
-  return result.read === value.length ? result.written : Infinity;
+  let bytes = result.written;
+  if (bytes > maxBytes || result.read === value.length) return bytes;
+
+  for (let i = result.read; i < value.length; i += 1) {
+    const code = intrinsicReflectApply(intrinsicStringCharCodeAt, value, [i]);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = intrinsicReflectApply(intrinsicStringCharCodeAt, value, [i + 1]);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > maxBytes) return maxBytes + 1;
+  }
+  return bytes;
 }
 
 /**
@@ -689,7 +721,11 @@ function enforceRequestHeadersBudget(headers) {
     const entry = headers[i];
     const name = entry[0];
     const value = entry[1];
-    total += boundedRequestHeaderByteLength(name) + boundedRequestHeaderByteLength(value);
+    total += boundedRequestHeaderByteLength(name, MAX_DO_REQUEST_HEADER_BYTES - total);
+    if (total > MAX_DO_REQUEST_HEADER_BYTES) {
+      throw new TypeError(`Durable Object fetch headers exceed ${MAX_DO_REQUEST_HEADER_BYTES} bytes`);
+    }
+    total += boundedRequestHeaderByteLength(value, MAX_DO_REQUEST_HEADER_BYTES - total);
     if (total > MAX_DO_REQUEST_HEADER_BYTES) {
       throw new TypeError(`Durable Object fetch headers exceed ${MAX_DO_REQUEST_HEADER_BYTES} bytes`);
     }

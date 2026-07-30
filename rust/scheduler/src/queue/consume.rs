@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use redis::streams::StreamReadReply;
 use serde_json::json;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::sleep;
 
 use crate::{
@@ -34,6 +35,31 @@ impl QueueStreamClaim {
         };
         inserted.then_some(Self { queues, stream })
     }
+}
+
+fn queue_xreadgroup_command(
+    instance_id: &str,
+    streams: &[&str],
+    count: usize,
+    block_ms: Option<u64>,
+) -> redis::Cmd {
+    let mut cmd = redis::cmd("XREADGROUP");
+    cmd.arg("GROUP")
+        .arg(CONSUMER_GROUP)
+        .arg(instance_id)
+        .arg("COUNT")
+        .arg(count);
+    if let Some(block_ms) = block_ms {
+        cmd.arg("BLOCK").arg(block_ms);
+    }
+    cmd.arg("STREAMS");
+    for stream in streams {
+        cmd.arg(stream);
+    }
+    for _ in streams {
+        cmd.arg(">");
+    }
+    cmd
 }
 
 impl Drop for QueueStreamClaim {
@@ -71,22 +97,12 @@ pub(crate) async fn queue_consume_loop(state: AppState) -> SchedulerResult<()> {
         }
         let read_count = queue_xread_count(&state, streams.as_slice()).await;
         let entries: Result<StreamReadReply, redis::RedisError> = {
-            let mut cmd = redis::cmd("XREADGROUP");
-            cmd.arg("GROUP")
-                .arg(CONSUMER_GROUP)
-                .arg(&state.instance_id)
-                .arg("COUNT")
-                .arg(read_count);
-            if !has_in_flight {
-                cmd.arg("BLOCK").arg(state.config.queue_block_ms);
-            }
-            cmd.arg("STREAMS");
-            for stream in &streams {
-                cmd.arg(stream);
-            }
-            for _ in &streams {
-                cmd.arg(">");
-            }
+            let cmd = queue_xreadgroup_command(
+                &state.instance_id,
+                streams.as_slice(),
+                read_count,
+                (!has_in_flight).then_some(state.config.queue_block_ms),
+            );
             cmd.query_async(&mut conn).await
         };
         let reply = match entries {
@@ -159,14 +175,19 @@ pub(crate) async fn queue_consume_loop(state: AppState) -> SchedulerResult<()> {
             state.spawn_tracked("queue_stream_dispatch_failed", panic_fields, async move {
                 let _stream_claim = stream_claim;
                 let _permit = permit;
-                dispatch_queue_stream(&child, stream_key, raw).await;
+                dispatch_queue_stream(&child, stream_key, raw, read_count).await;
             });
         }
     }
     Ok(())
 }
 
-async fn dispatch_queue_stream(state: &AppState, stream_key: String, raw: Vec<StreamEntry>) {
+async fn dispatch_queue_stream(
+    state: &AppState,
+    stream_key: String,
+    mut raw: Vec<StreamEntry>,
+    probe_count: usize,
+) {
     let Some((ns, queue)) = parse_stream_key(&stream_key) else {
         log(
             state,
@@ -178,6 +199,9 @@ async fn dispatch_queue_stream(state: &AppState, stream_key: String, raw: Vec<St
     };
     match resolve_consumer(state, &stream_key, &ns, &queue).await {
         Ok(Some(consumer)) => {
+            let (extra, _top_up_permit) =
+                top_up_queue_batch(state, &stream_key, raw.len(), probe_count, &consumer).await;
+            raw.extend(extra);
             let messages = entries_to_messages(raw, now_ms());
             if let Err(err) =
                 dispatch_messages(state, messages, &stream_key, &consumer, "queue").await
@@ -232,6 +256,88 @@ async fn dispatch_queue_stream(state: &AppState, stream_key: String, raw: Vec<St
     }
 }
 
+fn queue_top_up_count(probe_len: usize, probe_count: usize, max_batch_size: usize) -> usize {
+    if probe_count >= max_batch_size || probe_len < probe_count {
+        return 0;
+    }
+    max_batch_size.saturating_sub(probe_len)
+}
+
+fn reserve_queue_top_up_entries(
+    semaphore: Arc<Semaphore>,
+    desired: usize,
+) -> Option<OwnedSemaphorePermit> {
+    // Probe entries must remain dispatchable while another stream holds the
+    // top-up budget, so this admission path must never wait for permits.
+    if desired == 0 {
+        return None;
+    }
+    let mut permit = semaphore.clone().try_acquire_owned().ok()?;
+    let extra = desired.saturating_sub(1).min(semaphore.available_permits());
+    if extra > 0
+        && let Ok(extra_permit) = semaphore.try_acquire_many_owned(extra as u32)
+    {
+        permit.merge(extra_permit);
+    }
+    Some(permit)
+}
+
+async fn top_up_queue_batch(
+    state: &AppState,
+    stream_key: &str,
+    probe_len: usize,
+    probe_count: usize,
+    consumer: &Consumer,
+) -> (Vec<StreamEntry>, Option<OwnedSemaphorePermit>) {
+    let desired = queue_top_up_count(probe_len, probe_count, consumer.max_batch_size);
+    let Some(mut reserved) =
+        reserve_queue_top_up_entries(state.dispatch.queue_top_up_entries.clone(), desired)
+    else {
+        return (Vec::new(), None);
+    };
+    let read_count = reserved.num_permits();
+    let reply = state
+        .data_redis
+        .with_conn(async |mut conn| {
+            queue_xreadgroup_command(&state.instance_id, &[stream_key], read_count, None)
+                .query_async::<StreamReadReply>(&mut conn)
+                .await
+        })
+        .await;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(err) => {
+            log(
+                state,
+                LogLevel::Warn,
+                "queue_batch_top_up_failed",
+                redis_fields_with_error(
+                    json!({
+                        "stream": stream_key,
+                        "requested": read_count,
+                    }),
+                    &err,
+                ),
+            );
+            return (Vec::new(), None);
+        }
+    };
+    let entries = reply
+        .keys
+        .into_iter()
+        .flat_map(|key| key.ids)
+        .map(stream_id_to_entry)
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return (entries, None);
+    }
+    let permit = reserved
+        .split(entries.len())
+        .expect("XREADGROUP COUNT must bound the returned entry count");
+    drop(reserved);
+    (entries, Some(permit))
+}
+
 fn available_queue_streams<'a>(streams: &'a [String], queues: &QueueState) -> (Vec<&'a str>, bool) {
     let dispatching = queues
         .dispatching_streams
@@ -270,6 +376,7 @@ pub(crate) fn is_block_timeout(err: &redis::RedisError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::parse_packed_commands;
     use redis::ErrorKind;
     use std::io;
 
@@ -310,6 +417,47 @@ mod tests {
         );
         assert_eq!(queue_xread_count_from_consumers([Some(&large)]), 25);
         assert_eq!(queue_xread_count_from_consumers([None]), 1);
+    }
+
+    #[test]
+    fn queue_top_up_only_fills_a_probe_limited_by_another_consumer() {
+        assert_eq!(queue_top_up_count(1, 1, 100), 99);
+        assert_eq!(queue_top_up_count(5, 5, 100), 95);
+        assert_eq!(queue_top_up_count(1, 10, 100), 0);
+        assert_eq!(queue_top_up_count(10, 10, 10), 0);
+    }
+
+    #[test]
+    fn queue_top_up_read_is_non_blocking_and_targets_one_stream() {
+        let command = queue_xreadgroup_command("scheduler-a", &["queue:demo:jobs:s"], 9, None);
+        assert_eq!(
+            parse_packed_commands(&command.get_packed_command()),
+            [vec![
+                "XREADGROUP",
+                "GROUP",
+                "wdl-scheduler",
+                "scheduler-a",
+                "COUNT",
+                "9",
+                "STREAMS",
+                "queue:demo:jobs:s",
+                ">",
+            ]]
+        );
+    }
+
+    #[test]
+    fn queue_top_up_reservation_is_immediate_and_per_replica_bounded() {
+        let semaphore = Arc::new(Semaphore::new(100));
+        let first = reserve_queue_top_up_entries(semaphore.clone(), 99).unwrap();
+        assert_eq!(first.num_permits(), 99);
+        let second = reserve_queue_top_up_entries(semaphore.clone(), 99).unwrap();
+        assert_eq!(second.num_permits(), 1);
+        assert!(reserve_queue_top_up_entries(semaphore.clone(), 1).is_none());
+
+        drop(first);
+        drop(second);
+        assert_eq!(semaphore.available_permits(), 100);
     }
 
     #[test]

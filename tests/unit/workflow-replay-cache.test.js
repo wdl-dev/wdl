@@ -93,7 +93,10 @@ function latestGaugeSince(name, startIndex) {
 test("workflow replay cache gauges track step count across replacement and eviction", async () => {
   const {
     _resetWorkflowReplayCacheForTest,
+    acquireWorkflowReplayCache,
     getWorkflowReplayCache,
+    readWorkflowReplayStepOutput,
+    releaseWorkflowReplayCache,
     rememberWorkflowReplayStep,
     recordWorkflowReplayCacheOutcome,
     WORKFLOW_REPLAY_CACHE_MAX_INSTANCES,
@@ -101,7 +104,7 @@ test("workflow replay cache gauges track step count across replacement and evict
   _resetWorkflowReplayCacheForTest();
   const workflowReplayCachePrefillCount = WORKFLOW_REPLAY_CACHE_MAX_INSTANCES - 1;
 
-  const cache = getWorkflowReplayCache(run(0));
+  const cache = acquireWorkflowReplayCache(run(0));
   const cacheHit = getWorkflowReplayCache(run(0));
   assert.equal(cacheHit, cache);
   assert.equal(latestGauge("workflow_replay_cache_instances"), 1);
@@ -137,15 +140,77 @@ test("workflow replay cache gauges track step count across replacement and evict
   const instanceGaugeBeforeStaleWrite = latestGauge("workflow_replay_cache_instances");
   const stepGaugeBeforeStaleWrite = latestGauge("workflow_replay_cache_steps");
   const byteGaugeBeforeStaleWrite = latestGauge("workflow_replay_cache_bytes");
-  assert.equal(cache.steps.size, 0);
-  rememberWorkflowReplayStep(cache, 1, { status: "completed", output: "stale-after-eviction" });
-  assert.equal(cache.steps.size, 0);
+  assert.equal(cache.steps.size, 2);
+  rememberWorkflowReplayStep(cache, 2, { status: "completed", output: "local-after-eviction" });
+  assert.equal(cache.steps.size, 3);
+  assert.equal(readWorkflowReplayStepOutput(cache.steps.get(2)), "local-after-eviction");
   assert.equal(latestGauge("workflow_replay_cache_instances"), instanceGaugeBeforeStaleWrite);
   assert.equal(latestGauge("workflow_replay_cache_steps"), stepGaugeBeforeStaleWrite);
   assert.equal(latestGauge("workflow_replay_cache_bytes"), byteGaugeBeforeStaleWrite);
+  releaseWorkflowReplayCache(cache);
+  assert.equal(cache.steps.size, 0);
+  assert.equal(cache.bytes, 0);
   const currentRun0Cache = getWorkflowReplayCache(run(0));
-  assert.equal(currentRun0Cache.steps.has(1), false);
+  assert.equal(currentRun0Cache.steps.has(2), false);
   assert.notEqual(currentRun0Cache, cache);
+});
+
+test("workflow replay cache clears released controller state on later global eviction", async () => {
+  const {
+    _resetWorkflowReplayCacheForTest,
+    acquireWorkflowReplayCache,
+    getWorkflowReplayCache,
+    releaseWorkflowReplayCache,
+    rememberWorkflowReplayStep,
+    WORKFLOW_REPLAY_CACHE_MAX_INSTANCES,
+  } = await loadReplayCacheModule();
+  _resetWorkflowReplayCacheForTest();
+
+  const cache = acquireWorkflowReplayCache(run(0));
+  rememberWorkflowReplayStep(cache, 0, { status: "completed", output: "retained" });
+  releaseWorkflowReplayCache(cache);
+  assert.equal(cache.steps.size, 1);
+
+  for (let i = 1; i <= WORKFLOW_REPLAY_CACHE_MAX_INSTANCES; i += 1) {
+    getWorkflowReplayCache(run(i));
+  }
+  assert.equal(cache.steps.size, 0);
+  assert.equal(cache.bytes, 0);
+
+  rememberWorkflowReplayStep(cache, 1, { status: "completed", output: "late" });
+  assert.equal(cache.steps.size, 0);
+  assert.equal(latestGauge("workflow_replay_cache_bytes"), 0);
+});
+
+test("workflow replay cache keeps detached state until every controller releases it", async () => {
+  const {
+    _resetWorkflowReplayCacheForTest,
+    acquireWorkflowReplayCache,
+    getWorkflowReplayCache,
+    releaseWorkflowReplayCache,
+    rememberWorkflowReplayStep,
+    WORKFLOW_REPLAY_CACHE_MAX_INSTANCES,
+  } = await loadReplayCacheModule();
+  _resetWorkflowReplayCacheForTest();
+
+  const firstController = acquireWorkflowReplayCache(run(0));
+  const secondController = acquireWorkflowReplayCache(run(0));
+  assert.equal(secondController, firstController);
+  rememberWorkflowReplayStep(firstController, 0, {
+    status: "completed",
+    output: "shared",
+  });
+
+  for (let i = 1; i <= WORKFLOW_REPLAY_CACHE_MAX_INSTANCES; i += 1) {
+    getWorkflowReplayCache(run(i));
+  }
+  releaseWorkflowReplayCache(firstController);
+  assert.equal(firstController.steps.size, 1);
+
+  releaseWorkflowReplayCache(secondController);
+  assert.equal(firstController.steps.size, 0);
+  assert.equal(firstController.bytes, 0);
+  assert.equal(latestGauge("workflow_replay_cache_bytes"), 0);
 });
 
 test("workflow replay canonical JSON matches Rust canonical form for cache comparisons", async () => {
@@ -170,8 +235,10 @@ test("workflow replay canonical JSON matches Rust canonical form for cache compa
 test("workflow replay cache reuses entries across claims in one incarnation", async () => {
   const {
     _resetWorkflowReplayCacheForTest,
+    acquireWorkflowReplayCache,
     getWorkflowReplayCache,
     readWorkflowReplayStepOutput,
+    releaseWorkflowReplayCache,
     rememberWorkflowReplayStep,
   } = await loadReplayCacheModule();
   _resetWorkflowReplayCacheForTest();
@@ -189,9 +256,11 @@ test("workflow replay cache reuses entries across claims in one incarnation", as
   mutableOutput.nested.value = 999;
   mutableOutput.items.push("mutated");
 
-  const newClaim = getWorkflowReplayCache(runWithToken(0, "run-new"));
+  const newClaim = acquireWorkflowReplayCache(runWithToken(0, "run-new"));
   assert.equal(oldClaim, newClaim);
   assert.equal(newClaim.complete, false);
+  releaseWorkflowReplayCache(newClaim);
+  assert.equal(newClaim.steps.size, 3);
   const firstRead = readWorkflowReplayStepOutput(newClaim.steps.get(0));
   assert.deepEqual(firstRead, {
     nested: { value: 1 },
@@ -215,13 +284,15 @@ test("workflow replay cache reuses entries across claims in one incarnation", as
 test("workflow replay cache bounds retained serialized bytes and resets its gauge", async () => {
   const {
     _resetWorkflowReplayCacheForTest,
+    acquireWorkflowReplayCache,
     getWorkflowReplayCache,
+    releaseWorkflowReplayCache,
     rememberWorkflowReplayStep,
     WORKFLOW_REPLAY_CACHE_MAX_BYTES,
   } = await loadReplayCacheModule();
   _resetWorkflowReplayCacheForTest();
 
-  const first = getWorkflowReplayCache(run(0));
+  const first = acquireWorkflowReplayCache(run(0));
   const retained = JSON.stringify("a".repeat(Math.floor(WORKFLOW_REPLAY_CACHE_MAX_BYTES * 0.6)));
   rememberWorkflowReplayStep(first, 0, {
     ordinal: 0,
@@ -245,7 +316,12 @@ test("workflow replay cache bounds retained serialized bytes and resets its gaug
   });
   assert.equal(latestGauge("workflow_replay_cache_bytes"), firstBytes);
   assert.equal(second.steps.size, 1);
-  assert.equal(getWorkflowReplayCache(run(0)).steps.size, 0);
+  assert.equal(first.steps.size, 1);
+  releaseWorkflowReplayCache(first);
+  assert.equal(first.steps.size, 0);
+  const reloadedFirst = getWorkflowReplayCache(run(0));
+  assert.notEqual(reloadedFirst, first);
+  assert.equal(reloadedFirst.steps.size, 0);
 
   const oversized = getWorkflowReplayCache(run(2));
   rememberWorkflowReplayStep(oversized, 0, {

@@ -163,10 +163,10 @@ npm run typecheck:strict
 npm run compile:workerd
 npm run test:unit
 npm run test:integration
-cargo fmt --manifest-path rust/Cargo.toml --all --check
-cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
-cargo test --manifest-path rust/Cargo.toml --workspace
-cargo deny --manifest-path rust/Cargo.toml check --config rust/deny.toml
+(cd rust && cargo fmt --all --check)
+(cd rust && cargo clippy --locked --workspace --all-targets -- -D warnings)
+(cd rust && cargo test --locked --workspace)
+(cd rust && cargo deny --manifest-path Cargo.toml check)
 ```
 
 Test helper and fixture selection, integration runner behavior, sharding, artifacts,

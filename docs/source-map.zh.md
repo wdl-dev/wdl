@@ -16,7 +16,7 @@
 | `gateway/index.js` | Gateway worker dispatch 分支：admin-host short-circuit、subdomain routing 和 pattern routing。 |
 | `gateway/dispatch.js` | 纯 gateway dispatch decision tree 和 route target selection。 |
 | `gateway/holder.js`、`gateway/websocket.js` | WebSocket holder、reconnect forwarding 和 `101` upgrade preservation。 |
-| `gateway/runtime.js` | Gateway route/pattern caches、Redis subscriber invalidation、logging、metrics 和 health/metrics snapshots。 |
+| `gateway/runtime.js` | Gateway 静态 routing-option memoization、route/pattern caches、Redis subscriber invalidation、logging、metrics 和 health/metrics snapshots。 |
 | `gateway/lib.js` | workerd 和 Node tests 共用的纯 routing helpers。 |
 | `runtime/config-user.capnp` | User runtime config：loader `:8081`、internal `:8088`、loaded-worker public-only outbound。 |
 | `runtime/config-system.capnp` | System runtime config：loader `:8081`、internal `:8088`、control `:8082`、auth worker、private+public outbound。 |
@@ -63,6 +63,7 @@
 | `shared/internal-auth.js` | JS caller 和 receiver 共用的 internal mesh auth header / token helpers。 |
 | `shared/secret-envelope.js`、`shared/secret-keys.js` | Secret envelope encryption/decryption、canonical base64/JSON handling、AAD binding helpers 和 secret Redis key construction。 |
 | `shared/base64.js` | Workerd tiers 共用的无依赖 byte/text base64 codec；在 `nodejs_compat` 下使用 `Buffer` fast path。 |
+| `shared/utf8.js` | Workerd JavaScript tiers 与注入 runtime source 共用的 allocation-aware 精确 UTF-8 byte-length owner。 |
 | `shared/hex.js`、`shared/random-id.js`、`shared/errors.js` | byte-to-hex rendering、random hex ids 和 string-only error message extraction 的无依赖小 primitive。 |
 | `shared/observability.js` | JS tiers 的 structured logger、metrics registry、request-id helpers 和 log-level handling。 |
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |

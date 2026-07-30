@@ -4,6 +4,12 @@
 
 - Pinned Quick Start and CLI integration to `@wdl-dev/cli@1.6.1`.
 - Updated compatible Rust dependencies.
+- Bounded sparse KV list scans to one unfinished Valkey `HSCAN` window per
+  request; incomplete pages may contain fewer than the requested limit,
+  including zero, and callers must follow the cursor until `list_complete`.
+- Updated the bundled workerd and Workers types pins to `1.20260730.1` and
+  `5.20260730.1`; upstream changes only advance release and maximum
+  compatibility dates.
 
 ## wdl.20260727.1 - 2026-07-27
 

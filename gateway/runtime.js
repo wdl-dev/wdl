@@ -1,6 +1,7 @@
 // Runtime helpers for gateway ingress. This module owns Redis clients,
-// route/pattern caches, subscriber invalidation, and gateway-local metrics/logs;
-// gateway/index.js owns request dispatch and forwarding decisions.
+// static routing-option memoization, route/pattern caches, subscriber
+// invalidation, and gateway-local metrics/logs; gateway/index.js owns request
+// dispatch and forwarding decisions.
 
 import { RedisClient, RedisSubscriber } from "shared-redis";
 import { decodePatternProjection } from "shared-route-projection";
@@ -10,7 +11,7 @@ import {
   formatError,
   recordRedisCommand,
 } from "shared-observability";
-import { isValidRouteNs } from "shared-ns-pattern";
+import { isValidRouteNs, platformDomainFromEnv } from "shared-ns-pattern";
 import {
   DECLARED_HOSTS_KEY,
   NAMESPACES_KEY,
@@ -21,7 +22,11 @@ import {
   platformDomainDisabledKey,
   routesKey,
 } from "shared-worker-contract";
-import { isPatternInvalidationKey, sortPatterns } from "gateway-lib";
+import {
+  isPatternInvalidationKey,
+  normalizeRequestHost,
+  sortPatterns,
+} from "gateway-lib";
 
 /**
  * @typedef {import("shared-route-projection").PatternProjection & { slot: string }} PatternEntry
@@ -29,8 +34,12 @@ import { isPatternInvalidationKey, sortPatterns } from "gateway-lib";
  * @typedef {{ known: true, patterns: PatternEntry[], cacheHit: boolean } | { known: false, patterns: null, cacheHit: false }} HostPatternResolution
  * @typedef {{ epoch: number, readers: number }} InFlightReadState
  * @typedef {{ state: InFlightReadState, epoch: number }} InFlightRead
+ * @typedef {{ PLATFORM_DOMAIN?: string, ADMIN_HOST?: string, [key: string]: unknown }} GatewayRoutingEnv
+ * @typedef {{ platformDomain: string, normalizedAdminHost: string }} GatewayRoutingOptions
  */
 
+/** @type {WeakMap<GatewayRoutingEnv, GatewayRoutingOptions>} */
+const routingOptionsByEnv = new WeakMap();
 /** @type {Set<string> | null} */
 let knownNs = null;
 /** @type {Set<string> | null} */
@@ -60,6 +69,22 @@ const utf8Decoder = new TextDecoder();
 
 export const metrics = new MetricsRegistry();
 export const log = createLogger("gateway");
+
+/**
+ * @param {GatewayRoutingEnv} env
+ * @returns {GatewayRoutingOptions}
+ */
+export function gatewayRoutingOptionsFromEnv(env) {
+  let options = routingOptionsByEnv.get(env);
+  if (!options) {
+    options = {
+      platformDomain: platformDomainFromEnv(env),
+      normalizedAdminHost: normalizeRequestHost(env.ADMIN_HOST || "").toLowerCase(),
+    };
+    routingOptionsByEnv.set(env, options);
+  }
+  return options;
+}
 
 export class GatewayRoutingUnavailableError extends Error {
   constructor() {

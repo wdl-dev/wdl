@@ -31,6 +31,7 @@ import {
   createGatewayRedis,
   ensureGatewaySubscriber,
   gatewayHealthSnapshot,
+  gatewayRoutingOptionsFromEnv,
   log,
   metrics,
   prepareGatewayMetrics,
@@ -39,7 +40,6 @@ import {
   runtimeForwardOutcome,
 } from "gateway-runtime";
 import { formatWorkerId } from "shared-worker-id";
-import { platformDomainFromEnv } from "shared-ns-pattern";
 
 // Re-exported so workerd's capnp `durableObjectNamespaces` entry resolves
 // the class name against this worker's exports.
@@ -112,12 +112,11 @@ export default {
       }
 
       // After health/metrics so a malformed PLATFORM_DOMAIN cannot 502 probes.
-      const platformDomain = platformDomainFromEnv(env);
+      const { platformDomain, normalizedAdminHost } = gatewayRoutingOptionsFromEnv(env);
 
       // Admin host short-circuit runs before any ns / Redis lookup so
       // control stays reachable even mid-FLUSHALL / Redis outage.
       const normalizedHost = normalizeRequestHost(url.hostname).toLowerCase();
-      const normalizedAdminHost = normalizeRequestHost(env.ADMIN_HOST || "").toLowerCase();
       const dispatch = await resolveGatewayDispatch({
         url,
         normalizedHost,
@@ -135,9 +134,13 @@ export default {
         return scope.respond(notFoundResponse());
       }
 
-      url.pathname = dispatch.forwardPath;
-
-      const forwardRequest = new Request(url.toString(), request);
+      let forwardRequest;
+      if (dispatch.forwardPath === url.pathname) {
+        forwardRequest = new Request(request);
+      } else {
+        url.pathname = dispatch.forwardPath;
+        forwardRequest = new Request(url.toString(), request);
+      }
       deleteGatewayInternalHeaders(forwardRequest.headers);
       // Loader branches carry worker identity + prefix; control is
       // infrastructure and has no worker id to inject.

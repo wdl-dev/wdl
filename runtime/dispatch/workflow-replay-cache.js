@@ -69,7 +69,7 @@ const WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE = 256;
  *   output?: unknown,
  *   [key: string]: unknown,
  * }} WorkflowReplayStepInput
- * @typedef {{ key: string, lastRunToken: string, steps: Map<number, WorkflowReplayStepRecord>, nextOrdinal: number, complete: boolean, bytes: number }} WorkflowReplayCache
+ * @typedef {{ key: string, lastRunToken: string, steps: Map<number, WorkflowReplayStepRecord>, nextOrdinal: number, complete: boolean, bytes: number, activeControllers: number, released: boolean }} WorkflowReplayCache
  */
 
 /** @type {Map<string, WorkflowReplayCache>} */
@@ -149,8 +149,19 @@ function deleteReplayStep(cache, ordinal) {
   if (!step || !cache.steps.delete(ordinal)) return;
   const bytes = workflowReplayStepBytes.get(step) ?? 0;
   cache.bytes -= bytes;
-  workflowReplayCacheSteps -= 1;
-  workflowReplayCacheBytes -= bytes;
+  if (workflowReplayCaches.get(cache.key) === cache) {
+    workflowReplayCacheSteps -= 1;
+    workflowReplayCacheBytes -= bytes;
+  }
+}
+
+/** @param {WorkflowReplayCache} cache */
+function clearWorkflowReplayCache(cache) {
+  cache.released = true;
+  cache.steps.clear();
+  cache.nextOrdinal = 0;
+  cache.complete = false;
+  cache.bytes = 0;
 }
 
 /** @param {string} key */
@@ -160,9 +171,7 @@ function evictWorkflowReplayCache(key) {
   workflowReplayCacheSteps -= cache.steps.size;
   workflowReplayCacheBytes -= cache.bytes;
   workflowReplayCaches.delete(key);
-  cache.steps.clear();
-  cache.bytes = 0;
-  cache.complete = false;
+  if (cache.activeControllers === 0) clearWorkflowReplayCache(cache);
 }
 
 function evictOldestWorkflowReplayCache() {
@@ -190,6 +199,8 @@ export function getWorkflowReplayCache(run) {
     nextOrdinal: 0,
     complete: false,
     bytes: 0,
+    activeControllers: 0,
+    released: false,
   };
   workflowReplayCaches.set(key, created);
   while (workflowReplayCaches.size > WORKFLOW_REPLAY_CACHE_MAX_INSTANCES) {
@@ -199,13 +210,28 @@ export function getWorkflowReplayCache(run) {
   return created;
 }
 
+/** @param {{ ns: string, workflowKey: string, instanceId: string, generation: number, createdAtMs: number, runToken: string }} run */
+export function acquireWorkflowReplayCache(run) {
+  const cache = getWorkflowReplayCache(run);
+  cache.activeControllers += 1;
+  return cache;
+}
+
+/** @param {WorkflowReplayCache} cache */
+export function releaseWorkflowReplayCache(cache) {
+  if (cache.activeControllers > 0) cache.activeControllers -= 1;
+  if (cache.activeControllers > 0 || workflowReplayCaches.get(cache.key) === cache) return;
+  clearWorkflowReplayCache(cache);
+}
+
 /**
  * @param {WorkflowReplayCache} cache
  * @param {number} ordinal
  * @param {WorkflowReplayStepInput} step
  */
 export function rememberWorkflowReplayStep(cache, ordinal, step) {
-  if (workflowReplayCaches.get(cache.key) !== cache) return;
+  if (cache.released) return;
+  const countInGlobalCache = workflowReplayCaches.get(cache.key) === cache;
   /** @type {WorkflowReplayStepRecord} */
   const storedStep = {
     name: step.name,
@@ -223,23 +249,27 @@ export function rememberWorkflowReplayStep(cache, ordinal, step) {
   if (cache.steps.has(ordinal)) deleteReplayStep(cache, ordinal);
   const bytes = serializedReplayStepBytes(storedStep);
   if (bytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
-    recordWorkflowReplayCacheSize();
+    if (countInGlobalCache) recordWorkflowReplayCacheSize();
     return;
   }
   workflowReplayStepBytes.set(storedStep, bytes);
   cache.steps.set(ordinal, storedStep);
   cache.bytes += bytes;
-  workflowReplayCacheSteps += 1;
-  workflowReplayCacheBytes += bytes;
+  if (countInGlobalCache) {
+    workflowReplayCacheSteps += 1;
+    workflowReplayCacheBytes += bytes;
+  }
   while (cache.steps.size > WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE) {
     const oldest = cache.steps.keys().next().value;
     if (oldest === undefined) break;
     deleteReplayStep(cache, oldest);
   }
-  while (workflowReplayCacheBytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
-    evictOldestWorkflowReplayCache();
+  if (countInGlobalCache) {
+    while (workflowReplayCacheBytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
+      evictOldestWorkflowReplayCache();
+    }
+    recordWorkflowReplayCacheSize();
   }
-  recordWorkflowReplayCacheSize();
 }
 
 /** @param {WorkflowReplayStepRecord} step */

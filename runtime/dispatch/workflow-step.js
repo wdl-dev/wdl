@@ -5,10 +5,11 @@ import {
 } from "runtime-dispatch-workflow-json";
 import {
   WORKFLOW_REPLAY_PAGE_SIZE,
+  acquireWorkflowReplayCache,
   canonicalJson,
-  getWorkflowReplayCache,
   readWorkflowReplayStepOutput,
   recordWorkflowReplayCacheOutcome,
+  releaseWorkflowReplayCache,
   rememberWorkflowReplayStep,
   workflowReplayIdentity,
 } from "runtime-dispatch-workflow-replay-cache";
@@ -241,7 +242,8 @@ export function createStepController(run, backend, requestId = null) {
   const activeStepPromises = new Set();
   const nameCounts = new Map();
   const dependencyFrontier = new Set();
-  const replayCache = getWorkflowReplayCache(run);
+  const replayCache = acquireWorkflowReplayCache(run);
+  let replayCacheReleased = false;
   /** @type {Set<{ identity: StepIdentity | null, settled: boolean }>} */
   const activeStepRecords = new Set();
   /** @type {Promise<void> | null} */
@@ -737,6 +739,10 @@ export function createStepController(run, backend, requestId = null) {
     },
     closeForRunReturn() {
       runReturned = true;
+      if (!replayCacheReleased) {
+        replayCacheReleased = true;
+        releaseWorkflowReplayCache(replayCache);
+      }
     },
     waitForInFlightSteps,
   };

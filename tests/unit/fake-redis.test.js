@@ -171,6 +171,34 @@ test("fake redis getManyWithTime matches the production empty-input contract", a
   });
 });
 
+test("fake redis typed WATCH snapshots reject empty watch and read sets", async () => {
+  const redis = createFakeRedis();
+  await redis.session(async (session) => {
+    const emptyWatchCalls = [
+      () => session.watchAndGetManyAndHGetMany([], ["key"], []),
+      () => session.watchAndExistsAndHStrLenMany([], ["key"], []),
+      () => session.watchAndHGetAllAndGet([], "hash", "key"),
+      () => session.watchAndHGetAllGetSMembers([], "hash", "key", "set"),
+      () => session.watchAndExistsMany([], ["key"]),
+      () => session.watchAndSMembers([], "set"),
+    ];
+    for (const call of emptyWatchCalls) {
+      await assert.rejects(call, /WATCH snapshot requires at least one key/);
+    }
+
+    const emptyReadCalls = [
+      () => session.watchAndGetManyAndHGetMany(["watch"], [], []),
+      () => session.watchAndExistsAndHStrLenMany(["watch"], [], []),
+      () => session.watchAndExistsMany(["watch"], []),
+    ];
+    for (const call of emptyReadCalls) {
+      await assert.rejects(call, /WATCH snapshot requires at least one read/);
+    }
+  });
+  assert.deepEqual(redis.watchBatches, []);
+  assert.deepEqual(redis.commands, []);
+});
+
 test("fake redis supports hash existence and key reads on clients and sessions", async () => {
   const redis = createFakeRedis();
   redis.hashes.set("hash:a", { one: "1", two: "2" });
@@ -281,6 +309,25 @@ test("fake redis multi set arrays use one aggregate reply and skip empty batches
     ["sRem", "members", "one", "missing"],
   ]);
   assert.deepEqual(await redis.sMembers("members"), ["two"]);
+});
+
+test("fake redis multi zRem arrays use one aggregate reply", async () => {
+  const redis = createFakeRedis();
+  redis.zsets.set("scores", new Map([
+    ["one", 1],
+    ["two", 2],
+    ["three", 3],
+  ]));
+
+  const replies = await redis.session((session) => session.multi()
+    .zRem("scores", ["one", "two", "missing"])
+    .exec());
+
+  assert.deepEqual(replies, [2]);
+  assert.deepEqual(redis.commands, [
+    ["zRem", "scores", "one", "two", "missing"],
+  ]);
+  assert.deepEqual(redis.zsets.get("scores"), new Map([["three", 3]]));
 });
 
 test("fake redis multi applies key expiry before set mutations", async () => {

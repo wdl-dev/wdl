@@ -50,7 +50,8 @@ export async function loadRuntimeDispatch() {
       [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
     ]);
 
-    const [runtimeDispatchWorkflowStep, runtimeDispatch] = await Promise.all([
+    const [runtimeDispatchWorkflowReplayCache, runtimeDispatchWorkflowStep, runtimeDispatch] = await Promise.all([
+      import(workflowReplayCacheUrl),
       import(workflowStepUrl),
       importRepositoryModule("runtime/dispatch.js", [
         [/from "shared-respond";/, `from ${JSON.stringify(RESPOND_URL)};`],
@@ -65,7 +66,7 @@ export async function loadRuntimeDispatch() {
         [/from "runtime-tail-forwarder";/, `from ${JSON.stringify(tailForwarderUrl)};`],
       ]),
     ]);
-    return { runtimeDispatch, runtimeDispatchWorkflowStep };
+    return { runtimeDispatch, runtimeDispatchWorkflowReplayCache, runtimeDispatchWorkflowStep };
   })();
   return dispatchPromise;
 }

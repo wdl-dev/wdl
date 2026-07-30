@@ -185,11 +185,14 @@ Key families:
 - Runtime replay cache is advisory. DB 2 step state is authoritative. A runtime isolate
   may reuse terminal step records across run claims for the same instance incarnation;
   successful outputs are retained as serialized snapshots and decoded for each replay
-  so tenant mutation cannot alter later claims. Retained serialized data has a global
-  16 MiB cap per runtime isolate; oversized records are not cached and older caches are
-  evicted under pressure. The `workflow_replay_cache_bytes` gauge reports that retained
-  serialized size. A new claim reopens bounded paging so records committed by another
-  isolate remain discoverable.
+  so tenant mutation cannot alter later claims. The module-level cross-request cache
+  retains at most 16 MiB of serialized data per runtime isolate; oversized records are
+  not cached and older caches are evicted under pressure. The
+  `workflow_replay_cache_bytes` gauge reports that cross-request retained size. Global
+  eviction stops cross-request retention; an in-flight controller keeps a bounded
+  controller-local replay working set so eviction cannot turn replay hits into fresh
+  claims, then releases that detached working set when dispatch ends. A new claim
+  reopens bounded paging so records committed by another isolate remain discoverable.
   Backend replay records are projected to the fields Runtime actually consumes before
   byte accounting and retention, so unconsumed response metadata cannot bypass the
   cache budget.

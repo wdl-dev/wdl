@@ -6,7 +6,7 @@ Gateway 是公开数据面入口，也是 admin-host 入口 shim。它把 tenant
 
 ## 当前实现
 
-workerd 入口是 `gateway/index.js`。纯 route 解析在 `gateway/dispatch.js` 和 `gateway/lib.js`；Redis/cache/subscriber 逻辑在 `gateway/runtime.js`；WebSocket 生命周期在 `gateway/holder.js` 和 `gateway/websocket.js`。
+workerd 入口是 `gateway/index.js`。纯 route 解析在 `gateway/dispatch.js` 和 `gateway/lib.js`；静态 routing option memoization 及 Redis/cache/subscriber 逻辑在 `gateway/runtime.js`；WebSocket 生命周期在 `gateway/holder.js` 和 `gateway/websocket.js`。
 
 Gateway 有三条 dispatch 分支：
 

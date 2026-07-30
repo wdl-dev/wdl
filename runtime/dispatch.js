@@ -307,6 +307,8 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
       );
     }
     return scope.respond(response);
+  } finally {
+    step?.closeForRunReturn();
   }
 }
 

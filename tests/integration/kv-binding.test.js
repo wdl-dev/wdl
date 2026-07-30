@@ -289,10 +289,10 @@ test("batch metadata reads span all KV hash buckets and recover after SCRIPT FLU
 });
 
 test("list honors limit and keeps pagination self-terminating", async () => {
-  // The shim uses Redis SCAN with a fixed internal COUNT, so whether
-  // pagination kicks in depends on total keys vs COUNT, not on `limit`
-  // alone. The contract we *can* check: `limit` bounds keys per call, and
-  // walking returned cursors always terminates with every key visible.
+  // HSCAN uses the normalized limit as a work hint, so cursor completion,
+  // not a fixed number of matching keys, determines pagination. The
+  // contract we can check: `limit` bounds keys per call, and walking
+  // returned cursors always terminates with every key visible.
   await setup("kvns13");
   const total = 12;
   for (let i = 0; i < total; i++) {
@@ -300,6 +300,7 @@ test("list honors limit and keeps pagination self-terminating", async () => {
   }
 
   const seen = new Set();
+  const seenCursors = new Set();
   let cursor = "";
   let guard = 0;
   for (;;) {
@@ -309,17 +310,58 @@ test("list honors limit and keeps pagination self-terminating", async () => {
     if (cursor) params.cursor = cursor;
     const r = await call("kvns13", params);
     const page = await responseJson(r);
+    assert.ok(page.keys.length <= 5, `expected at most 5 keys, got ${page.keys.length}`);
     // SCAN cursors mean "iteration not complete", not "more matching keys".
-    // A final empty page is valid as long as walking cursors terminates and
-    // every matching key is observed.
+    // Empty pages are valid as long as walking cursors terminates and every
+    // matching key is observed.
     for (const k of page.keys) seen.add(k.name);
     if (page.list_complete) break;
-    assert.ok(page.keys.length > 0, "intermediate page must make progress");
+    assert.ok(page.cursor, "expected cursor when list_complete=false");
+    assert.equal(seenCursors.has(page.cursor), false, "pagination cursor repeated");
+    seenCursors.add(page.cursor);
     cursor = page.cursor;
-    assert.ok(cursor, "expected cursor when list_complete=false");
   }
   assert.equal(seen.size, total);
   for (let i = 0; i < total; i++) assert.ok(seen.has(`k${i}`), `missing k${i}`);
+});
+
+test("list scans through filtered HSCAN windows within one bucket", async () => {
+  const ns = "kvns-list-filtered-scan";
+  const bucket = 7;
+  const matchingKeys = keysInBucket("target-", bucket, 3);
+  const noiseKeys = keysInBucket("noise-", bucket, 602);
+  // A 65-byte value forces hash-table encoding; 605 same-bucket fields
+  // ensure COUNT 10 needs multiple cursor windows.
+  const value = "x".repeat(65);
+
+  await setup(ns);
+  seedKvFields(
+    ns,
+    "test",
+    [...matchingKeys, ...noiseKeys].map((key) => [key, value])
+  );
+
+  const seen = new Set();
+  const seenCursors = new Set();
+  let cursor = "";
+  for (let pageCount = 0; ; pageCount += 1) {
+    assert.ok(pageCount < 128, "filtered pagination did not terminate");
+    /** @type {Record<string, string>} */
+    const params = { op: "list", prefix: "target-", limit: "10" };
+    if (cursor) params.cursor = cursor;
+    const response = await call(ns, params);
+    assert.equal(response.status, 200);
+    const page = await responseJson(response);
+    for (const { name } of page.keys) seen.add(name);
+    if (page.list_complete) break;
+    assert.ok(page.cursor, "expected cursor when list_complete=false");
+    assert.equal(seenCursors.has(page.cursor), false, "pagination cursor repeated");
+    seenCursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+
+  assert.ok(seenCursors.size > 0, "fixture must exercise an incomplete scan page");
+  assert.deepEqual([...seen].toSorted(), matchingKeys.toSorted());
 });
 
 test("list pagination spans every KV hash bucket", async () => {

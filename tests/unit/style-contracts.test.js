@@ -396,7 +396,7 @@ test("DNS hostname and platform domain validation use the shared owner", () => {
     "control/handlers/deploy.js",
     "control/handlers/promote.js",
     "control/handlers/hosts.js",
-    "gateway/index.js",
+    "gateway/runtime.js",
   ]) {
     const source = withoutLineComments(readRepoFile(file));
     assert.match(source, /\bplatformDomainFromEnv\b/, file);
@@ -723,13 +723,17 @@ test("auth entrypoint keeps runtime IO mechanics in auth/runtime.js", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("gateway entrypoint keeps cache and subscriber mechanics in gateway/runtime.js", () => {
+test("gateway entrypoint keeps persistent routing state in gateway/runtime.js", () => {
   const source = withoutLineComments(readRepoFile("gateway/index.js"));
   const offenders = [];
-  // Request dispatch can read cached routing state through gateway-runtime, but
-  // Redis clients, subscribers, and cache maps stay out of the entrypoint.
+  // Request dispatch can consume runtime-owned routing state, but Redis clients,
+  // subscribers, mutable route caches, and cross-request memoization stay out of
+  // the entrypoint.
   if (/from\s+"shared-redis"/.test(source)) offenders.push("redis import");
-  if (/\b(?:RedisSubscriber|RedisClient|routeCache|patternCache|knownNs)\b/.test(source)) {
+  if (
+    /\b(?:RedisSubscriber|RedisClient|routeCache|patternCache|knownNs|knownPatternHosts|routeReads|patternReads)\b/.test(source) ||
+    /\bnew\s+WeakMap\s*\(/.test(source)
+  ) {
     offenders.push("runtime state");
   }
   assert.deepEqual(offenders, []);
