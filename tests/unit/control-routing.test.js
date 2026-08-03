@@ -238,6 +238,67 @@ test("promoteWithRoutes rejects invalid persisted Durable Object rollout metadat
   assert.equal(redis.state.strings.has(durableObjectRolloutKey("demo", "worker")), false);
 });
 
+test("promoteWithRoutes rejects a Durable Object binding without storage identity", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    bindings: {
+      ROOM: { type: "do", className: "Room" },
+    },
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_meta");
+      assert.match(/** @type {Error} */ (err).message, /missing doStorageId/);
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
+test("promoteWithRoutes rejects Durable Object bindings with different storage identities", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    bindings: {
+      FIRST: { type: "do", className: "First", doStorageId: DO_STORAGE_ID },
+      SECOND: {
+        type: "do",
+        className: "Second",
+        doStorageId: "do_fedcba9876543210fedcba9876543210",
+      },
+    },
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_meta");
+      assert.match(/** @type {Error} */ (err).message, /disagree on doStorageId/);
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
+test("promoteWithRoutes rejects restart rollout metadata without a Durable Object binding", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    durableObjectRollout: "restart",
+    bindings: {},
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_meta");
+      assert.match(/** @type {Error} */ (err).message, /has no Durable Object binding/);
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
 for (const [label, rawMeta] of [
   ["missing", null],
   ["empty", ""],
@@ -558,6 +619,34 @@ test("promoteWithRoutes allocates and publishes each restart event once", async 
   );
 });
 
+test("promoteWithRoutes continues the restart sequence after worker recreation", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", doMeta("restart"));
+  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "7");
+
+  const result = await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  assert.equal(result.restartSequence, 8);
+  assert.equal(
+    redis.state.strings.get(durableObjectRolloutSequenceKey("demo", "worker")),
+    "8"
+  );
+  assert.deepEqual(
+    parseDurableObjectRolloutProjection(
+      redis.state.strings.get(durableObjectRolloutKey("demo", "worker"))
+    ),
+    { version: "v1", mode: "restart", restartSequence: 8 }
+  );
+  assert.deepEqual(
+    redis.state.ops
+      .filter(
+        ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+      )
+      .map(([, , payload]) => JSON.parse(String(payload))),
+    [{ ns: "demo", worker: "worker", version: "v1", restartSequence: 8 }]
+  );
+});
+
 test("promoteWithRoutes fails closed on malformed DO rollout allocator state", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v2", doMeta("restart"));
@@ -585,7 +674,7 @@ test("promoteWithRoutes fails closed when the DO rollout projection is not for t
   redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "1");
   redis.state.strings.set(
     durableObjectRolloutKey("demo", "worker"),
-    JSON.stringify({ version: "v0", mode: "restart", restartSequence: 1 })
+    JSON.stringify({ version: "v3", mode: "restart", restartSequence: 1 })
   );
 
   await assert.rejects(

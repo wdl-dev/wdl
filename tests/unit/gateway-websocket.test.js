@@ -322,6 +322,42 @@ test("gateway websocket proxy exposes and releases its rollout lifecycle registr
   assert.equal(unregisterCalls, 1);
 });
 
+test("gateway websocket proxy maps a registered lifecycle failure to 1011", () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {{ restart(): void, fail(): void } | undefined} */
+  let handlers;
+  let unregisterCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    null,
+    {},
+    {
+      registerLifecycle(/** @type {{ restart(): void, fail(): void }} */ nextHandlers) {
+        handlers = nextHandlers;
+        return () => {
+          unregisterCalls += 1;
+        };
+      },
+    }
+  );
+
+  assert.ok(handlers);
+  handlers.fail();
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1011,
+    reason: "lifecycle check failed",
+  });
+  assert.deepEqual(upstream.closed, {
+    code: 1011,
+    reason: "lifecycle check failed",
+  });
+  assert.equal(unregisterCalls, 1);
+});
+
 test("gateway websocket proxy ignores a rollout result after the client closes", async () => {
   const upstream = new FakeWebSocket("upstream");
   const { promise: lifecycle, resolve: resolveLifecycle } = Promise.withResolvers();
