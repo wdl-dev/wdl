@@ -40,7 +40,7 @@ setupIntegrationSuite();
 
 function queueCleanupIntents() {
   const stream = queueStreamKey("__system__", S3_CLEANUP_QUEUE_NAME);
-  const raw = redisCommand(`--raw XRANGE ${stream} - +`, { db: 1 });
+  const raw = redisCommand(["--raw", "XRANGE", stream, "-", "+"], { db: 1 });
   const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
   /** @type {Array<{ streamId: string, fields: Record<string, string>, body: any }>} */
   const out = [];

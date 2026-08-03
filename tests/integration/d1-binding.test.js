@@ -267,7 +267,14 @@ test("D1 binding wraps declared named entrypoints for service binding callers", 
   });
 
   await waitUntil("D1 named entrypoint request id log", () => {
-    const logs = sh("docker compose logs --no-color --tail=300 d1-runtime");
+    const logs = sh([
+      "docker",
+      "compose",
+      "logs",
+      "--no-color",
+      "--tail=300",
+      "d1-runtime",
+    ]);
     return logs.includes(`"request_id":"${requestId}"`);
   }, { timeoutMs: 10000, intervalMs: 500 });
 });

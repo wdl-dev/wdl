@@ -74,11 +74,11 @@ for (const conformanceCase of redisConformanceCases) {
 
 test("real redis conformance: HSET clears an existing hash field TTL", () => {
   const key = uniqueNs("redisconf-hset-ttl");
-  redisCommand(`HSETEX ${key} EX 60 FIELDS 1 value old`);
-  assert.ok(Number(redisCommand(`HPTTL ${key} FIELDS 1 value`)) > 0);
+  redisCommand(["HSETEX", key, "EX", "60", "FIELDS", "1", "value", "old"]);
+  assert.ok(Number(redisCommand(["HPTTL", key, "FIELDS", "1", "value"])) > 0);
 
   redisHSet(key, { value: "new" });
 
   assert.equal(redisHGet(key, "value"), "new");
-  assert.equal(Number(redisCommand(`HPTTL ${key} FIELDS 1 value`)), -1);
+  assert.equal(Number(redisCommand(["HPTTL", key, "FIELDS", "1", "value"])), -1);
 });

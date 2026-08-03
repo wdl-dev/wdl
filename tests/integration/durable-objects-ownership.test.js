@@ -282,7 +282,10 @@ test("Durable Object committed SQLite state survives hard owner SIGKILL and take
 
     const owner = redisGetDoOwner(ownerKey);
     assert.equal(owner.taskId, "do-runtime-a");
-    sh("COMPOSE_PROFILES=do-multi docker compose kill -s KILL do-runtime-a", { stdio: "pipe" });
+    sh(["docker", "compose", "kill", "-s", "KILL", "do-runtime-a"], {
+      stdio: "pipe",
+      env: { COMPOSE_PROFILES: "do-multi" },
+    });
     redisSetDoOwner(ownerKey, {
       ...owner,
       leaseExpiresAt: Date.now() - 1000,

@@ -59,10 +59,15 @@ function probeNodeEval(source) {
 
 /** @param {string} service */
 function inspectD1DataMount(service) {
-  const containerId = sh(`COMPOSE_PROFILES=d1-multi docker compose ps -q ${service}`, { stdio: "pipe" }).trim();
+  const containerId = sh(["docker", "compose", "ps", "-q", service], {
+    stdio: "pipe",
+    env: { COMPOSE_PROFILES: "d1-multi" },
+  }).trim();
   assert.ok(containerId, `missing container id for ${service}`);
   const mounts = parseStdoutJson(
-    sh(`docker inspect --format '{{json .Mounts}}' ${containerId}`, { stdio: "pipe" }).trim(),
+    sh(["docker", "inspect", "--format", "{{json .Mounts}}", containerId], {
+      stdio: "pipe",
+    }).trim(),
     `${service} mounts`
   );
   const mount = mounts.find((/** @type {any} */ entry) => entry.Destination === "/data/d1");
@@ -446,7 +451,10 @@ test("same DB survives hard owner loss with write then takeover read confirmatio
     assertStatus(init, 200, "init");
     assert.equal(d1RuntimeProbe("d1-runtime-b", dbKey).owner.taskId, "d1-runtime-a");
 
-    sh("COMPOSE_PROFILES=d1-multi docker compose kill -s KILL d1-runtime-a", { stdio: "pipe" });
+    sh(["docker", "compose", "kill", "-s", "KILL", "d1-runtime-a"], {
+      stdio: "pipe",
+      env: { COMPOSE_PROFILES: "d1-multi" },
+    });
     await waitUntil("takeover to d1-runtime-b after killing a", () => {
       const read = d1RuntimeQuery("d1-runtime-b", {
         namespace: ns,
@@ -529,7 +537,10 @@ test("same DB survives hard owner loss with write then takeover read confirmatio
       { id: "k2", body: "before-kill-c" },
     ]);
 
-    sh("COMPOSE_PROFILES=d1-multi docker compose kill -s KILL d1-runtime-c", { stdio: "pipe" });
+    sh(["docker", "compose", "kill", "-s", "KILL", "d1-runtime-c"], {
+      stdio: "pipe",
+      env: { COMPOSE_PROFILES: "d1-multi" },
+    });
     let survivor = "d1-runtime-b";
     await waitUntil("takeover after killing c", () => {
       for (const candidate of ["d1-runtime-a", "d1-runtime-b"]) {
@@ -618,7 +629,10 @@ test("same DB survives repeated hard owner loss with committed rows intact", {
       });
       assert.deepEqual(finalStatementRows(write), expectedRows);
 
-      sh(`COMPOSE_PROFILES=d1-multi docker compose kill -s KILL ${owner}`, { stdio: "pipe" });
+      sh(["docker", "compose", "kill", "-s", "KILL", owner], {
+        stdio: "pipe",
+        env: { COMPOSE_PROFILES: "d1-multi" },
+      });
       const killedOwner = owner;
       const candidates = services.filter((service) => service !== killedOwner);
       let nextOwner = null;
@@ -689,7 +703,10 @@ test("uncommitted test-hook transaction is not visible after hard owner loss", a
       timeoutMs: 10_000,
       intervalMs: 200,
     });
-    sh(`COMPOSE_PROFILES=d1-multi docker compose kill -s KILL ${owner}`, { stdio: "pipe" });
+    sh(["docker", "compose", "kill", "-s", "KILL", owner], {
+      stdio: "pipe",
+      env: { COMPOSE_PROFILES: "d1-multi" },
+    });
     await hold;
 
     await waitUntil("takeover after killing owner during uncommitted transaction", () => {

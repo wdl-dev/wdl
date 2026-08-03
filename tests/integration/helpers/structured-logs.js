@@ -1,6 +1,5 @@
 import { sh } from "./cli.js";
 import { parseJsonText } from "./json-payload.js";
-import { shellQuote } from "./shell-quote.js";
 
 /**
  * @param {string} service
@@ -10,9 +9,7 @@ import { shellQuote } from "./shell-quote.js";
  */
 export function structuredServiceLogEvents(service, event, options = {}) {
   const tail = options.tail ?? 500;
-  const raw = sh(
-    `docker compose logs --no-color --tail=${tail} ${shellQuote(service)}`
-  );
+  const raw = sh(["docker", "compose", "logs", "--no-color", `--tail=${tail}`, service]);
   /** @type {Record<string, unknown>[]} */
   const events = [];
   for (const line of raw.split("\n")) {

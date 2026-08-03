@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   adminPost,
   assertStatus,
-  composeUpNoBuildFlag,
+  composeUpNoBuildArgs,
   deployAndPromote,
   gatewayWorkerId,
   runtimeInternalPost,
@@ -25,7 +25,7 @@ setupIntegrationSuite({
   async afterStackUp() {
     // Drop stale registry/PEL from prior suites (same hygiene as queues-delivery.test.js).
     redisFlushAll();
-    sh("docker compose restart scheduler", { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "scheduler"], { stdio: "pipe" });
     await waitForScheduler();
   },
 });
@@ -97,7 +97,7 @@ test("scheduler: SIGTERM mid-dispatch drains in-flight queue handler before exit
 
   // -t 30s ≥ scheduler drain (25s) ≥ consumer latency (2s); docker default
   // 10s would SIGKILL before drain could finish in pathological cases.
-  sh("docker compose stop -t 30 scheduler", { stdio: "pipe" });
+  sh(["docker", "compose", "stop", "-t", "30", "scheduler"], { stdio: "pipe" });
 
   try {
     const pelCountAfter = redisXPendingCount(streamKey, "wdl-scheduler", { db: 1 });
@@ -116,6 +116,8 @@ test("scheduler: SIGTERM mid-dispatch drains in-flight queue handler before exit
   } finally {
     // Must restore even if asserts threw — otherwise queues/crons/s3-cleanup
     // suites cascade-fail. --wait blocks on the healthcheck, not on Redis.
-    sh(`docker compose up -d${composeUpNoBuildFlag()} --wait scheduler`, { stdio: "pipe" });
+    sh(["docker", "compose", "up", "-d", ...composeUpNoBuildArgs(), "--wait", "scheduler"], {
+      stdio: "pipe",
+    });
   }
 });

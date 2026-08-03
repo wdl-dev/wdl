@@ -641,7 +641,7 @@ test("scheduler sweep(): one bad entry must not block re-seeding the valid ones"
   // Wipe slot buckets so sweep is the only path that can re-seed.
   for (const k of redisKeys("cron-slot:*")) redisDel(k);
 
-  sh("docker compose restart scheduler", { stdio: "pipe" });
+  sh(["docker", "compose", "restart", "scheduler"], { stdio: "pipe" });
 
   await waitUntil("sweep to re-seed every valid ref despite bad neighbors", async () => {
     const slots = redisKeys("cron-slot:*");

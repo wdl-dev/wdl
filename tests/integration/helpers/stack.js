@@ -60,7 +60,7 @@ function prepareDirectIntegrationArtifacts() {
 export async function ensureStackUp() {
   if (stackReady) return;
   prepareDirectIntegrationArtifacts();
-  composeUp("--wait test-probe", { stdio: "pipe" });
+  composeUp(["--wait", "test-probe"], { stdio: "pipe" });
   if (process.env.WDL_INTEGRATION_SLOT_PREPPED === "1") {
     ensureD1SingleRuntime();
     ensureDoSingleRuntime();
@@ -69,7 +69,8 @@ export async function ensureStackUp() {
     stackReady = true;
     return;
   }
-  const state = sh("docker compose ps --format '{{.Service}} {{.State}}'").trim();
+  const state = sh(["docker", "compose", "ps", "--format", "{{.Service}} {{.State}}"])
+    .trim();
   const required = [
     "test-probe", "redis", "s3mock", "redis-proxy-user", "redis-proxy-system", "redis-proxy-do",
     "d1-runtime", "do-runtime", "user-runtime", "system-runtime", "gateway", "scheduler",
@@ -77,28 +78,28 @@ export async function ensureStackUp() {
   ];
   const missing = required.filter((s) => !new RegExp(`^${RegExp.escape(s)} running`, "m").test(state));
   if (missing.length) {
-    composeUp("", { stdio: "inherit" });
+    composeUp([], { stdio: "inherit" });
   } else {
     // Sequential, dep-order restart: parallel restart lets gateway's
     // workerd getaddrinfo("user-runtime") before Docker DNS updates,
     // which then caches the failure for the process lifetime.
-    sh("docker compose restart redis-proxy-user", { stdio: "pipe" });
-    composeUp("--wait redis-proxy-user", { stdio: "pipe" });
-    sh("docker compose restart redis-proxy-system", { stdio: "pipe" });
-    composeUp("--wait redis-proxy-system", { stdio: "pipe" });
-    sh("docker compose restart d1-runtime", { stdio: "pipe" });
-    composeUp("--wait d1-runtime", { stdio: "pipe" });
-    sh("docker compose restart redis-proxy-do", { stdio: "pipe" });
-    composeUp("--wait redis-proxy-do", { stdio: "pipe" });
-    sh("docker compose restart do-runtime", { stdio: "pipe" });
-    composeUp("--wait do-runtime", { stdio: "pipe" });
-    sh("docker compose restart user-runtime", { stdio: "pipe" });
-    composeUp("--wait user-runtime", { stdio: "pipe" });
-    sh("docker compose restart system-runtime", { stdio: "pipe" });
-    composeUp("--wait system-runtime", { stdio: "pipe" });
-    sh("docker compose restart gateway", { stdio: "pipe" });
-    composeUp("--wait gateway", { stdio: "pipe" });
-    composeUp("--force-recreate --wait scheduler", { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "redis-proxy-user"], { stdio: "pipe" });
+    composeUp(["--wait", "redis-proxy-user"], { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "redis-proxy-system"], { stdio: "pipe" });
+    composeUp(["--wait", "redis-proxy-system"], { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "d1-runtime"], { stdio: "pipe" });
+    composeUp(["--wait", "d1-runtime"], { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "redis-proxy-do"], { stdio: "pipe" });
+    composeUp(["--wait", "redis-proxy-do"], { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "do-runtime"], { stdio: "pipe" });
+    composeUp(["--wait", "do-runtime"], { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "user-runtime"], { stdio: "pipe" });
+    composeUp(["--wait", "user-runtime"], { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "system-runtime"], { stdio: "pipe" });
+    composeUp(["--wait", "system-runtime"], { stdio: "pipe" });
+    sh(["docker", "compose", "restart", "gateway"], { stdio: "pipe" });
+    composeUp(["--wait", "gateway"], { stdio: "pipe" });
+    composeUp(["--force-recreate", "--wait", "scheduler"], { stdio: "pipe" });
   }
   ensureD1SingleRuntime();
   ensureDoSingleRuntime();

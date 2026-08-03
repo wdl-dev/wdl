@@ -14,7 +14,7 @@ export function setupQueueIntegrationSuite() {
       // Restart scheduler to drop any stale queueBlockClient / registry state
       // that might linger from prior test files.
       redisFlushAll();
-      sh("docker compose restart scheduler", { stdio: "pipe" });
+      sh(["docker", "compose", "restart", "scheduler"], { stdio: "pipe" });
       await waitForScheduler();
     },
   });

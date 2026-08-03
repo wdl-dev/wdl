@@ -773,9 +773,12 @@ test("wdl tail: resume past the MAXLEN trim surfaces tail_warning{resume_point_t
   // through gatewayFetch 600× would be ~30s and brittle).
   for (let i = 0; i < 12; i++) {
     redisCommand(
-      `EVAL ${JSON.stringify(
-        `for i=1,50 do redis.call('XADD', KEYS[1], 'MAXLEN', '~', '500', '*', 'json', '{}') end return 1`
-      )} 1 ${JSON.stringify(`logs:${ns}:tail-target:s`)}`,
+      [
+        "EVAL",
+        "for i=1,50 do redis.call('XADD', KEYS[1], 'MAXLEN', '~', '500', '*', 'json', '{}') end return 1",
+        "1",
+        `logs:${ns}:tail-target:s`,
+      ],
       { db: 1 }
     );
   }

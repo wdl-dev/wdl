@@ -106,11 +106,21 @@ const GATEWAY_SOCKET_PROBE = `
 
 /** @returns {GatewaySocketStats} */
 function gatewaySocketStats() {
-  const containerId = sh("docker compose ps -q gateway").trim();
+  const containerId = sh(["docker", "compose", "ps", "-q", "gateway"]).trim();
   assert.match(containerId, /^[0-9a-f]{12,64}$/i, "gateway container id");
   const output = sh(
-    `docker run -i --rm --pull=never --network=none --pid=container:${containerId} ` +
-      "node:24-slim node --input-type=module",
+    [
+      "docker",
+      "run",
+      "-i",
+      "--rm",
+      "--pull=never",
+      "--network=none",
+      `--pid=container:${containerId}`,
+      "node:24-slim",
+      "node",
+      "--input-type=module",
+    ],
     { input: GATEWAY_SOCKET_PROBE }
   );
   const stats = /** @type {GatewaySocketStats} */ (
@@ -209,7 +219,7 @@ async function assertNoGatewayHangSince(since) {
   // Historical lifecycle failures reached abortFromHang within 500 ms. Leave
   // the Gateway idle before reading logs so this check cannot mask the signal.
   await delay(1_000);
-  const logs = sh(`docker compose logs --no-color --since=${since} gateway`);
+  const logs = sh(["docker", "compose", "logs", "--no-color", `--since=${since}`, "gateway"]);
   assert.doesNotMatch(logs, GATEWAY_HANG_PATTERN);
 }
 

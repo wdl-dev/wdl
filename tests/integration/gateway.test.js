@@ -400,7 +400,7 @@ test("boot race: promote during pre-subscribe window still converges", async () 
 
   // Fresh isolate so onConnect (not onDisconnect) is the only path that
   // can clear a pre-attach cache warm.
-  sh("docker compose restart gateway");
+  sh(["docker", "compose", "restart", "gateway"]);
   await waitForGateway();
 
   // Warm cache before SUBSCRIBE ack, then promote — v2's PUBLISH may be
