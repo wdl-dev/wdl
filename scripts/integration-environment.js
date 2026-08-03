@@ -36,10 +36,17 @@ function isExecutableFile(file) {
  */
 function resolveCommandOnPath(command, env) {
   const pathEnv = env.PATH || "";
+  const extensions = process.platform === "win32"
+    ? (env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) continue;
-    const candidate = path.join(dir, command);
-    if (isExecutableFile(candidate)) return candidate;
+    for (const ext of extensions) {
+      const candidate = path.join(dir, command + ext.toLowerCase());
+      if (isExecutableFile(candidate)) return candidate;
+      const upperCandidate = path.join(dir, command + ext.toUpperCase());
+      if (upperCandidate !== candidate && isExecutableFile(upperCandidate)) return upperCandidate;
+    }
   }
   return null;
 }
