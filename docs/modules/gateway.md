@@ -10,8 +10,9 @@ traffic to control without making control aware of gateway topology.
 
 The workerd entrypoint is `gateway/index.js`. Pure route parsing lives in
 `gateway/dispatch.js` and `gateway/lib.js`; static routing-option memoization plus
-Redis/cache/subscriber mechanics live in `gateway/runtime.js`; WebSocket lifetime
-management lives in `gateway/websocket.js`.
+Redis/cache/subscriber mechanics live in `gateway/runtime.js`; process-local WebSocket
+lifecycle admission and reconciliation live in `gateway/websocket-lifecycle.js`; and
+WebSocket transport management lives in `gateway/websocket.js`.
 
 Gateway has three dispatch branches:
 

@@ -14,6 +14,16 @@ const INTERNAL_FORWARD_HEADERS = [
   "x-worker-prefix",
 ];
 
+export class GatewayRoutingUnavailableError extends Error {
+  constructor() {
+    super("Gateway routing state changed throughout the bounded lookup");
+    this.name = "GatewayRoutingUnavailableError";
+    this.status = 503;
+    this.code = "gateway_routing_unavailable";
+    this.publicMessage = "Gateway routing temporarily unavailable";
+  }
+}
+
 /** @param {Headers} headers */
 export function deleteGatewayInternalHeaders(headers) {
   for (const name of INTERNAL_FORWARD_HEADERS) headers.delete(name);

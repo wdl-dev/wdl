@@ -19,8 +19,9 @@ are outside this map unless they own runtime or deployable service behavior.
 | `gateway/index.js` | Gateway worker dispatch branches: admin-host short-circuit, subdomain routing, pattern routing, and routed WebSocket proxy setup. |
 | `gateway/dispatch.js` | Pure gateway dispatch decision tree and route target selection. |
 | `gateway/websocket.js` | Local `WebSocketPair` termination, reconnect forwarding, `101` upgrade preservation, and rollout lifecycle closure. |
-| `gateway/runtime.js` | Gateway static routing-option memoization, route/pattern caches, Redis subscriber invalidation, process-local WebSocket lifecycle registry/reconciliation, atomic route/rollout reads, logging, metrics, and health/metrics snapshots. |
-| `gateway/lib.js` | Pure routing helpers used by workerd and Node tests. |
+| `gateway/runtime.js` | Gateway static routing-option memoization, route/pattern caches, Redis subscriber invalidation, logging, metrics, and health/metrics snapshots. |
+| `gateway/websocket-lifecycle.js` | Process-local WebSocket lifecycle admission, registry/reconciliation, and atomic route/rollout reads. |
+| `gateway/lib.js` | Pure routing helpers and shared routing-state error used by workerd and Node tests. |
 | `runtime/config-user.capnp` | User runtime config: loader `:8081`, internal `:8088`, public-only loaded-worker outbound. |
 | `runtime/config-system.capnp` | System runtime config: loader `:8081`, internal `:8088`, control `:8082`, auth worker, private+public outbound. |
 | `runtime/config-user-local.capnp`, `runtime/config-system-local.capnp` | Local runtime workerd configs compiled for Docker Compose with Envoy-backed private service routes. |

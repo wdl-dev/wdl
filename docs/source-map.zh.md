@@ -16,8 +16,9 @@
 | `gateway/index.js` | Gateway worker dispatch 分支：admin-host short-circuit、subdomain routing、pattern routing 和 routed WebSocket proxy setup。 |
 | `gateway/dispatch.js` | 纯 gateway dispatch decision tree 和 route target selection。 |
 | `gateway/websocket.js` | 本地 `WebSocketPair` 终结、reconnect forwarding、`101` upgrade preservation 和 rollout lifecycle closure。 |
-| `gateway/runtime.js` | Gateway 静态 routing-option memoization、route/pattern caches、Redis subscriber invalidation、进程内 WebSocket lifecycle registry/reconciliation、atomic route/rollout reads、logging、metrics 和 health/metrics snapshots。 |
-| `gateway/lib.js` | workerd 和 Node tests 共用的纯 routing helpers。 |
+| `gateway/runtime.js` | Gateway 静态 routing-option memoization、route/pattern caches、Redis subscriber invalidation、logging、metrics 和 health/metrics snapshots。 |
+| `gateway/websocket-lifecycle.js` | 进程内 WebSocket lifecycle admission、registry/reconciliation 和 atomic route/rollout reads。 |
+| `gateway/lib.js` | workerd 和 Node tests 共用的纯 routing helpers 与 routing-state error。 |
 | `runtime/config-user.capnp` | User runtime config：loader `:8081`、internal `:8088`、loaded-worker public-only outbound。 |
 | `runtime/config-system.capnp` | System runtime config：loader `:8081`、internal `:8088`、control `:8082`、auth worker、private+public outbound。 |
 | `runtime/config-user-local.capnp`、`runtime/config-system-local.capnp` | 为 Docker Compose 编译的本地 runtime workerd configs，使用 Envoy-backed private service routes。 |

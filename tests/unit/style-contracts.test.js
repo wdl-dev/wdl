@@ -732,15 +732,15 @@ test("auth entrypoint keeps runtime IO mechanics in auth/runtime.js", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("gateway entrypoint keeps persistent routing state in gateway/runtime.js", () => {
+test("gateway entrypoint keeps persistent state in Gateway owner modules", () => {
   const source = withoutLineComments(readRepoFile("gateway/index.js"));
   const offenders = [];
   // Request dispatch can consume runtime-owned routing state, but Redis clients,
-  // subscribers, mutable route caches, and cross-request memoization stay out of
-  // the entrypoint.
+  // subscribers, mutable route/lifecycle state, and cross-request memoization
+  // stay out of the entrypoint.
   if (/from\s+"shared-redis"/.test(source)) offenders.push("redis import");
   if (
-    /\b(?:RedisSubscriber|RedisClient|routeCache|patternCache|knownNs|knownPatternHosts|routeReads|patternReads)\b/.test(source) ||
+    /\b(?:RedisSubscriber|RedisClient|routeCache|patternCache|knownNs|knownPatternHosts|routeReads|patternReads|createGatewayWebSocketLifecycleManager)\b/.test(source) ||
     /\bnew\s+WeakMap\s*\(/.test(source)
   ) {
     offenders.push("runtime state");

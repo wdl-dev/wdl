@@ -36,6 +36,7 @@ const gatewayWorker :Workerd.Worker = (
     (name = "gateway-dispatch", esModule = embed "dispatch.js"),
     (name = "gateway-lib", esModule = embed "lib.js"),
     (name = "gateway-runtime", esModule = embed "runtime.js"),
+    (name = "gateway-websocket-lifecycle", esModule = embed "websocket-lifecycle.js"),
     (name = "gateway-websocket", esModule = embed "websocket.js"),
     (name = "shared-worker-id", esModule = embed "../shared/worker-id.js"),
     (name = "ns-pattern.js", esModule = embed "../shared/ns-pattern.js"),

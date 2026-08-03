@@ -50,10 +50,24 @@ export function decodePatternProjection(raw) {
 `);
 const gatewayLibOwnerUrl = repositoryFileUrl("gateway/lib.js");
 const gatewayLibUrl = moduleDataUrl(`
-export { normalizeRequestHost } from ${JSON.stringify(gatewayLibOwnerUrl)};
+export {
+  GatewayRoutingUnavailableError,
+  normalizeRequestHost,
+} from ${JSON.stringify(gatewayLibOwnerUrl)};
 export function isPatternInvalidationKey() { return true; }
 export function sortPatterns(entries) { return { sorted: entries, errors: [] }; }
 `);
+const webSocketLifecycleSrc = applyModuleReplacements(
+  readRepositoryFile("gateway/websocket-lifecycle.js"),
+  [
+    [/from "shared-redis";/, `from ${JSON.stringify(redisUrl)};`],
+    [/from "shared-observability";/, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};`],
+    [/from "shared-ns-pattern";/, `from ${JSON.stringify(nsPatternUrl)};`],
+    [/from "shared-worker-contract";/, `from ${JSON.stringify(repositoryFileUrl("shared/worker-contract.js"))};`],
+    [/from "gateway-lib";/, `from ${JSON.stringify(gatewayLibUrl)};`],
+  ]
+);
+const webSocketLifecycleUrl = moduleDataUrl(webSocketLifecycleSrc);
 
 const src = applyModuleReplacements(readRepositoryFile("gateway/runtime.js"), [
   [/from "shared-redis";/, `from ${JSON.stringify(redisUrl)};`],
@@ -62,6 +76,7 @@ const src = applyModuleReplacements(readRepositoryFile("gateway/runtime.js"), [
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(nsPatternUrl)};`],
   [/from "shared-worker-contract";/, `from ${JSON.stringify(repositoryFileUrl("shared/worker-contract.js"))};`],
   [/from "gateway-lib";/, `from ${JSON.stringify(gatewayLibUrl)};`],
+  [/from "gateway-websocket-lifecycle";/, `from ${JSON.stringify(webSocketLifecycleUrl)};`],
 ]);
 
 let runtimeLoadSerial = 0;
