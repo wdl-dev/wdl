@@ -27,7 +27,13 @@ const subscriberMod = await importRepositoryModule("shared/redis-subscriber.js",
   [/import \{ connect \} from "cloudflare:sockets";/, "const connect = null;"],
   [/from "shared-redis-resp";/g, `from ${JSON.stringify(redisRespUrl)};`],
 ]);
-const { decodeRedisTimeMs, encodeCommand, encodeCommands, RespReader } = respMod;
+const {
+  decodeRedisTimeMs,
+  encodeCommand,
+  encodeCommands,
+  RedisReplyError,
+  RespReader,
+} = respMod;
 const { RedisSubscriber, defaultBackoff } = subscriberMod;
 
 /** @param {Uint8Array[]} chunks */
@@ -140,7 +146,16 @@ test("RespReader.compact releases an oversized consumed buffer", async () => {
 test("RespReader surfaces Redis -ERR replies as throws", async () => {
   const reader = mockReader([bytes("-NOAUTH required\r\n")]);
   const parser = new RespReader(reader);
-  await assert.rejects(() => parser.parseOne(), /Redis error: NOAUTH required/);
+  await assert.rejects(
+    () => parser.parseOne(),
+    (err) => {
+      assert.ok(err instanceof RedisReplyError);
+      const replyError = /** @type {InstanceType<typeof RedisReplyError>} */ (err);
+      assert.equal(replyError.code, "NOAUTH");
+      assert.match(replyError.message, /Redis error: NOAUTH required/);
+      return true;
+    }
+  );
 });
 
 test("RespReader consumes full arrays before surfacing inline Redis errors", async () => {

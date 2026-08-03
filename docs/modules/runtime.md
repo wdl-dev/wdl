@@ -274,7 +274,9 @@ when a matching active tail session exists.
   path or dispatch body.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
   Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
-  available without that flag in the bundled workerd baseline.
+  available without that flag in the bundled workerd baseline. The current upstream
+  implementation removes the loader cache identity while allowing outstanding calls to
+  drain; workerd upgrades must reverify that behavior.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
   `allow_irrevocable_stub_storage` deny policy at deploy; runtime rejects retained
   metadata containing either class. Static host workers also omit the irrevocable-stub
@@ -338,7 +340,15 @@ when a matching active tail session exists.
 
 - Runtime does not query Redis on every hot request to decide whether a version is
   active.
-- Historical isolates can remain until eviction or container recycle.
+- Active-version cold-load eviction is asynchronous and is not coordinated with Gateway
+  cache invalidation. In the bundled workerd, `abortIsolate()` removes the historical
+  loader cache entry but does not abort outstanding calls. A request or WebSocket already
+  admitted to the previous immutable version can therefore drain and retain that isolate
+  until it finishes or the container recycles.
+- During promotion's brief stale-route window, an ordinary request can still be admitted
+  to the previous immutable version and complete there. Gateway WebSocket lifecycle
+  snapshots reject a stale initial upgrade and do not reload an inactive pinned version
+  after backend loss; they do not add an active-version lookup to ordinary Runtime calls.
 - Workflow replay cache is advisory only.
 - Runtime is not the control-plane authorization boundary.
 - Service-binding cold loads for pinned historical versions may recur after promote

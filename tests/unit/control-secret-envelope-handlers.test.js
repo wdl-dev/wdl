@@ -861,6 +861,8 @@ test("worker secret PUT encrypts before WATCH retries and reuses the envelope", 
       "worker-versions:demo:api",
       "worker:demo:api:v:1",
       "worker:demo:api:v:2",
+      "worker:do-rollout-seq:demo:api",
+      "worker:do-rollout:demo:api",
     ]);
     const attempts = redisHSetAttempts(redis, "secrets:demo:api");
     assert.equal(attempts.length, 2);

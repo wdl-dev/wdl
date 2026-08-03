@@ -108,7 +108,7 @@ Runtime 为 loading、binding operation、`redis-proxy` call、workflow replay c
 
 - 修改 bundle metadata、wrapper generation 或 binding shape 时，runtime 和 control 应一起滚。
 - 如果 scheduler/workflows 依赖新的 `:8088` internal path 或 dispatch body，runtime 必须先滚。
-- Runtime 不为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 会注入 `__WdlAbort__`；当前 bundled workerd baseline 的 `abortIsolate()` 不需要该 flag。
+- Runtime 不为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 会注入 `__WdlAbort__`；当前 bundled workerd baseline 的 `abortIsolate()` 不需要该 flag，并且当前 upstream 实现只移除 loader cache identity，同时允许 outstanding call 自然 drain；升级 workerd 时必须重新核对该行为。
 - Control 会在 deploy 时拒绝上游 `$experimental` compatibility enable flags 和 WDL 显式禁止的 `allow_irrevocable_stub_storage`，runtime 也会拒绝包含任一类 flag 的 retained metadata；static host worker 同样不会启用不可撤销 stub flag。`no_*` 这类 disable-style flag 不属于 experimental mirror，除非上游把对应 enable flag 本身标为 experimental。
 - Python Workers modules 不受支持。Control 会拒绝新的 `py` module manifest，runtime/do-runtime 会拒绝 retained metadata 中的 `py` module，而不是让 workerd 之后抛 mixed JS/Python bundle error。
 - 从 WDL 的 2026-07-01 workerd pin 开始，runtime 进程使用进程级 `--experimental`，因为上游用它 gate `workerLoader` binding。不要给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
@@ -147,7 +147,8 @@ Runtime 为 loading、binding operation、`redis-proxy` call、workflow replay c
 ## 已知约束和非目标
 
 - Runtime 不在每个 hot request 上查 Redis 判断 version 是否 active。
-- Historical isolate 可能留到 eviction 或 container recycle。
+- Active-version cold-load eviction 是异步的，不会与 Gateway cache invalidation 协调。在 bundled workerd 中，`abortIsolate()` 会移除 historical loader cache entry，但不会中止 outstanding call。已经 admission 到前一个 immutable version 的 request 或 WebSocket 可以自然 drain，并让该 isolate 保留到调用结束或 container recycle。
+- Promote 的短暂 stale-route window 内，普通请求仍可能被 admission 到前一个 immutable version 并在那里完成。Gateway WebSocket lifecycle snapshot 会拒绝 stale initial upgrade，并在 backend loss 后避免重新加载已非 active 的 pinned version；它不会给普通 Runtime call 增加 active-version lookup。
 - Workflow replay cache 只是 advisory。
 - Runtime 不是 control-plane 授权边界。
 - 指向 pinned historical version 的 service-binding cold load 在 promote 后可能再次发生，因为这类版本有意不被 evict。非 route-churn 的 isolate leak 仍以 container recycle 作为 backstop。

@@ -6,7 +6,10 @@ import {
 import { createHttpRequestScope } from "shared-request-scope";
 import { discardResponseBody, prometheusResponse, rebuildResponseWithHeaders } from "shared-respond";
 import { boundedPositiveIntEnv } from "shared-owner-lease";
-import { parseVersion } from "shared-worker-contract";
+import {
+  DURABLE_OBJECT_ROLLOUT_PRESERVE,
+  parseVersion,
+} from "shared-worker-contract";
 import { formatWorkerId } from "shared-worker-id";
 import { WdlDoHostActor } from "do-runtime-actor";
 import { handleAlarmDispatch } from "do-runtime-alarm-dispatch";
@@ -77,7 +80,7 @@ const STORAGE_DELETE_REQUEST = {
  * @typedef {Record<string, unknown> & { LOG_LEVEL?: unknown, REDIS_ADDR?: string, DO_HOSTS: DurableObjectNamespace, DO_DRAIN_IN_FLIGHT_TIMEOUT_MS?: unknown, DO_RENEW_INTERVAL_MS?: unknown }} DoEnv
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  * @typedef {{ ownerKey: string, hostId?: string, className?: string, ns: string, worker: string, doStorageId: string, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} DoOwner
- * @typedef {{ requestId?: string | null, hopCount?: number, forwardPath?: string, localUrl?: string, request?: { method: string, url: string, headers: Array<[string, string]> } | null, metricKind?: string | null, acceptOwnerHint?: boolean }} DispatchOptions
+ * @typedef {{ requestId?: string | null, hopCount?: number, forwardPath?: string, localUrl?: string, request?: { method: string, url: string, headers: Array<[string, string]> } | null, metricKind?: string | null, acceptOwnerHint?: boolean, allowSupersededVersion?: boolean }} DispatchOptions
  * @typedef {{ ns?: unknown, worker?: unknown, version?: unknown, doStorageId?: unknown, members?: unknown }} StorageDeleteInput
  */
 
@@ -200,9 +203,10 @@ async function dispatchToOwner(
     request = null,
     metricKind = null,
     acceptOwnerHint = false,
+    allowSupersededVersion = false,
   } = {}
 ) {
-  const owner = await resolveDoOwner(env, invoke);
+  const owner = await resolveDoOwner(env, invoke, { allowSupersededVersion });
   const localTask = await resolveTaskIdentity(env);
   const dispatchPayload = withRequestOverride(invoke, request);
   if (owner.taskId !== localTask.taskId) {
@@ -231,6 +235,7 @@ async function dispatchStorageDelete(env, invoke, requestId = null, hopCount = 0
     forwardPath: "/internal/do/storage/delete",
     localUrl: "https://do-runtime.internal/delete-storage",
     request: STORAGE_DELETE_REQUEST,
+    allowSupersededVersion: true,
   });
 }
 
@@ -458,6 +463,8 @@ async function handleStorageDeleteWorker(env, request, requestId = null) {
           version,
           className: parsed.className,
         },
+        rolloutMode: DURABLE_OBJECT_ROLLOUT_PRESERVE,
+        restartSequence: 0,
         request: STORAGE_DELETE_REQUEST,
       };
       try {

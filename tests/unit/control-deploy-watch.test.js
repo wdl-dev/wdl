@@ -772,6 +772,95 @@ test("deploy handler persists workersDev=false for a routed worker", async () =>
   assert.equal(sessionCalls, 1);
 });
 
+test("deploy handler persists and acknowledges Durable Object restart rollout policy", async () => {
+  const session = makeSession();
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      return 1;
+    },
+    async hKeys() {
+      return [];
+    },
+    async hGetAll(/** @type {string} */ key) {
+      return await session.hGetAll(key);
+    },
+    async hGet(/** @type {string} */ key, /** @type {string} */ field) {
+      return await session.hGet(key, field);
+    },
+    async session(/** @type {(iso: any) => Promise<any>} */ fn) {
+      return await fn(session);
+    },
+  };
+
+  const response = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/chat/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export class Room {}" },
+        bindings: {
+          ROOM: { type: "do", className: "Room" },
+        },
+        durableObjectRollout: "restart",
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "chat",
+    requestId: "rid-do-rollout",
+  });
+
+  assert.equal(
+    (await readJsonResponse(response, 201)).durableObjectRollout,
+    "restart"
+  );
+  assert.equal(
+    /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.durableObjectRollout,
+    "restart"
+  );
+});
+
+test("deploy handler validates Durable Object restart rollout before allocating a version", async () => {
+  let incrCalls = 0;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+    async incr() {
+      incrCalls += 1;
+      return 1;
+    },
+  };
+
+  for (const body of [
+    {
+      mainModule: "worker.js",
+      modules: { "worker.js": "export default {}" },
+      durableObjectRollout: "replace",
+    },
+    {
+      mainModule: "worker.js",
+      modules: { "worker.js": "export default {}" },
+      durableObjectRollout: null,
+    },
+    {
+      mainModule: "worker.js",
+      modules: { "worker.js": "export default {}" },
+      durableObjectRollout: "restart",
+    },
+  ]) {
+    const response = await handle({
+      request: new Request("http://control/ns/tenant-a/workers/chat/deploy", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+      env: {},
+      ns: "tenant-a",
+      name: "chat",
+      requestId: "rid-do-rollout-invalid",
+    });
+    assert.equal((await readJsonResponse(response, 400)).error, "invalid_request");
+  }
+  assert.equal(incrCalls, 0);
+});
+
 test("deploy handler validates workersDev before allocating a version", async () => {
   let incrCalls = 0;
   /** @type {any} */ (globalThis).__controlDeployTestState.redis = {

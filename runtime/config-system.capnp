@@ -296,7 +296,6 @@ const controlWorker :Workerd.Worker = (
     (name = "SECRET_ENVELOPE_KID",    fromEnvironment = "SECRET_ENVELOPE_KID"),
     (name = "TAIL_WORKER",            service = "tail-worker"),
     (name = "D1_BACKEND",             service = "d1-runtime"),
-    (name = "DO_BACKEND",             service = "do-runtime"),
     (name = "WORKFLOWS_BACKEND",      service = "workflows"),
     (name = "D1_QUERY_TIMEOUT_MS",    fromEnvironment = "D1_QUERY_TIMEOUT_MS"),
     (name = "R2_S3_ENDPOINT",         fromEnvironment = "R2_S3_ENDPOINT"),

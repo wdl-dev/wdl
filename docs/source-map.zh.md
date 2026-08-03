@@ -15,8 +15,8 @@
 | `gateway/config-local.capnp` | 为 Docker Compose 编译的本地 Gateway workerd config，使用 Envoy-backed private service routes。 |
 | `gateway/index.js` | Gateway worker dispatch 分支：admin-host short-circuit、subdomain routing、pattern routing 和 routed WebSocket proxy setup。 |
 | `gateway/dispatch.js` | 纯 gateway dispatch decision tree 和 route target selection。 |
-| `gateway/websocket.js` | 本地 `WebSocketPair` 终结、reconnect forwarding 和 `101` upgrade preservation。 |
-| `gateway/runtime.js` | Gateway 静态 routing-option memoization、route/pattern caches、Redis subscriber invalidation、logging、metrics 和 health/metrics snapshots。 |
+| `gateway/websocket.js` | 本地 `WebSocketPair` 终结、reconnect forwarding、`101` upgrade preservation 和 rollout lifecycle closure。 |
+| `gateway/runtime.js` | Gateway 静态 routing-option memoization、route/pattern caches、Redis subscriber invalidation、进程内 WebSocket lifecycle registry/reconciliation、atomic route/rollout reads、logging、metrics 和 health/metrics snapshots。 |
 | `gateway/lib.js` | workerd 和 Node tests 共用的纯 routing helpers。 |
 | `runtime/config-user.capnp` | User runtime config：loader `:8081`、internal `:8088`、loaded-worker public-only outbound。 |
 | `runtime/config-system.capnp` | System runtime config：loader `:8081`、internal `:8088`、control `:8082`、auth worker、private+public outbound。 |
@@ -40,7 +40,7 @@
 | `control/bundle.js` | Bundle/module normalization、compatibility metadata、vars 和 emitted module manifest construction。 |
 | `control/bindings.js` | Service/platform binding parsers、ACL evaluation 和 linker helpers。 |
 | `control/topology.js` | Deploy metadata 中 routes、patterns、cron、queue consumer 和 workflow declaration parsing。 |
-| `control/routing.js`、`control/routing/route-plan.js` | Promote、secret bump/promote、host reconcile WATCH/MULTI loops，以及纯 route/pattern planning helpers。 |
+| `control/routing.js`、`control/routing/route-plan.js` | Promote、secret bump/promote、atomic DO rollout projection/allocation、host reconcile WATCH/MULTI loops，以及纯 route/pattern planning helpers。 |
 | `control/lifecycle-indexes.js` | Worker lifecycle、cron、queue consumer 和 referrer indexes 的 Redis mutation helpers。 |
 | `control/env-budget.js` | Deploy 和 secret mutation guard 使用的 workerd `workerLoader` env size 控制面估算。 |
 | `control/worker-code-budget.js` | Deploy guard 使用的最终 WorkerCode size 控制面估算，复用 runtime 与 do-runtime wrapper/module injection 规则。 |
@@ -69,7 +69,7 @@
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |
 | `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar 与 platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、module path、reserved object-key 和 reserved namespace grammars。 |
-| `shared/worker-contract.js` | Worker version grammar，以及 worker、route-plane、lifecycle、DO owner-scope key 与 route invalidation channel helpers。 |
+| `shared/worker-contract.js` | Worker version grammar，以及 worker、route-plane、lifecycle、DO owner/rollout keys 和 projection 与 route/rollout notification channel helpers。 |
 | `shared/workerd-compat-flags.js` | 上游 workerd experimental enable flags 的 pinned mirror，以及 WDL-owned dynamic-worker 日期、unsupported-flag 和 error-serialization policy。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
@@ -88,7 +88,7 @@
 | Path | 责任 |
 |---|---|
 | `d1-runtime/` | D1 workerd service。Supervisor 是 PID 1，spawns workerd、renews leases，并在 SIGTERM 时 drain。Router/actor/owner modules 实现 per-database ownership、forwarding、read cache 和 SQLite localDisk execution。 |
-| `do-runtime/` | Durable Object workerd service。Supervisor 是 PID 1，spawns workerd、renews owned shards、SIGTERM 时 drain，并在 drain 成功后 SIGKILL workerd 以避开 half-dead 504 window。Owner/actor/load/alarm modules 实现 owner scopes、native facet execution、SQLite storage、Workflows alarm client/shim/dispatch endpoint 和 WebSocket connect。 |
+| `do-runtime/` | Durable Object workerd service。Supervisor 是 PID 1，spawns workerd、renews owned shards、SIGTERM 时 drain，并在 drain 成功后 SIGKILL workerd 以避开 half-dead 504 window。Owner/actor/load/alarm modules 实现 owner scopes、native facet execution、projection-fenced lazy facet restart、SQLite storage、Workflows alarm client/shim/dispatch endpoint 和 WebSocket connect。 |
 | `do-runtime/config-local.capnp` | 为 Docker Compose 编译的本地 Durable Objects runtime workerd config，使用 Envoy-backed private service routes。 |
 
 ## Rust Workspace

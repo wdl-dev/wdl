@@ -75,9 +75,18 @@ routing cache:
   this with broad reserved-prefix matching.
 - Route and pattern caches are bounded per gateway isolate. They are performance caches
   only; Redis remains the current route source of truth.
-- `routes:invalidate`, `patterns:invalidate`, and `routes:flush` are non-durable pub/sub
-  hints. Gateway clears caches on subscriber connect/disconnect so missed messages
-  repair on the next lookup.
+- `routes:invalidate`, `patterns:invalidate`, `routes:flush`,
+  `do-rollout:restart`, and `worker:delete` are non-durable pub/sub hints. Route and
+  pattern events invalidate only their caches. Exact rollout/delete events request
+  worker-local WebSocket reconciliation, while subscriber reconnect reconciles every
+  process-local group from Redis authority.
+- Route invalidation has no cluster-wide acknowledgement barrier. After promotion, a
+  warm Gateway may therefore briefly admit an ordinary request against the previous
+  immutable version before it observes `routes:invalidate`. Runtime does not recheck
+  active state for that request, and the bundled workerd lets admitted calls drain after
+  sibling cache eviction. WebSocket lifecycle snapshots give initial upgrades and
+  backend reconnects their own active-state admission points; they do not linearize
+  ordinary HTTP routing.
 - Pattern-host ownership moves publish `patterns:invalidate`, but the hint is still
   non-durable. A gateway that misses the pub/sub message can serve the previous
   `patterns:<host>` projection from its bounded in-memory cache until subscriber
@@ -85,8 +94,13 @@ routing cache:
   durable authorization record.
 - WebSocket upgrades use the same route resolution as HTTP. Gateway terminates the
   public socket locally and proxies directly through the resolved runtime binding. The
-  proxy owns backend reconnect attempts and a bounded client-frame buffer; rolling
-  gateway or runtime can still drop the physical client connection.
+  proxy owns backend reconnect attempts and a bounded client-frame buffer. At WebSocket
+  lifecycle boundaries it atomically reads the active route and
+  `worker:do-rollout:<ns>:<worker>` projection. A healthy connection may keep draining
+  on its original immutable version. After abnormal backend loss, Gateway reconnects
+  that pinned version only while it remains active; an active-version change or a newer
+  sequence in the current DO `restart` projection closes the public connection with
+  `1012`. Rolling gateway or runtime can still drop the physical client connection.
 
 ## Redis / Storage Contracts
 
@@ -96,6 +110,8 @@ Gateway reads:
 namespaces               Set, active namespace gate
 declared-hosts           Set, custom/pattern hosts declared by any namespace
 routes:<ns>              Hash, worker name -> active version
+worker:do-rollout:<ns>:<worker>
+                         String, active DO rollout version/mode/sequence projection
 platform-domain-disabled:<ns>
                          Set, workers hidden from the platform-domain branch
 patterns:<host>          Hash, path slot -> v2 tab-separated projection
@@ -107,6 +123,8 @@ Gateway subscribes to:
 routes:invalidate        payload = namespace
 routes:flush             payload ignored
 patterns:invalidate      payload = host or "*"
+do-rollout:restart       payload = {ns,worker,version,restartSequence}
+worker:delete            payload = {ns,worker}
 ```
 
 Control writes Redis and publishes invalidations. Gateway never calls control to ask
@@ -119,6 +137,20 @@ whether a route changed.
   pub/sub messages are not durable.
 - Subscriber reconnects clear local caches, and the next request re-reads Redis; missed
   invalidations therefore degrade to bounded stale cache, not permanent drift.
+- Gateway also keeps a process-local registry of active public WebSocket sessions grouped
+  by namespace and worker. A `do-rollout:restart` event requests an authoritative
+  reconciliation only for that worker; `worker:delete` does the same for a successful
+  whole-worker delete. Neither event closes from its payload alone. Requests are
+  coalesced per group, and transport retries retain only failed groups. If delete
+  reconciliation observes the worker as inactive, its established sessions close with
+  `1012`. If same-name recreation completes before a successful authoritative read, the
+  latest projection wins and cannot prove the intervening deletion; eliminating that
+  accepted window would require a durable incarnation fence. The subscriber settles a
+  request-owned lifecycle signal; workerd resumes its continuation in that WebSocket's
+  IoContext before Gateway touches either peer. A later `preserve` projection supersedes
+  an unobserved restart at the same sequence. Transport failures leave healthy sessions
+  registered and retry with bounded backoff; malformed or regressed authoritative state
+  closes affected sessions with `1011`.
 - Membership-gate reads restart when that gate changes. Once the gate is warm, a cold
   route or pattern projection read is fenced by its namespace or host plus the global
   reset generation: invalidation of that key or a full reset discards the reply, while
@@ -133,6 +165,32 @@ whether a route changed.
 - Pattern branch leaves the request path unchanged; subdomain branch strips the leading
   worker segment.
 - WebSocket backend reconnect is bounded and owns a bounded client-frame buffer.
+- After route resolution, Gateway reads the route and DO rollout projection at one Redis
+  linearization point. An initial route mismatch fails with
+  `503 gateway_routing_unavailable` before the backend upgrade. This intentionally makes
+  the client retry the full upgrade after a stale route-cache hit instead of introducing
+  a second route-resolution path or admitting an inactive immutable version. A second
+  check after the upgrade establishes the backend's active-state admission point. After
+  abnormal backend loss, Gateway checks before retrying and validates a successful
+  replacement upgrade before attaching it. Pending initial and replacement backend
+  sockets remain request-owned while that check runs, so terminal lifecycle signals can
+  close them immediately. A `preserve` promotion committed after the final snapshot may
+  leave the just-admitted backend draining; Gateway does not add a cross-service barrier
+  or run lifecycle checks for every frame. A missing rollout projection beside an active
+  route means default `preserve`. A missing route and projection means an inactive
+  worker: initial admission returns `503`, while an established session closes with
+  `1012`.
+  Torn or malformed state fails closed with `1011` for established sessions.
+- Normal upstream closure propagates without another lifecycle read. After abnormal
+  loss, an unchanged active version permits transparent reconnect to the same pinned
+  worker id when the sequence is unchanged or the current projection is `preserve`. A
+  changed active version, or a newer sequence in the current `restart` projection, closes
+  the public and backend peers with `1012 service restart`.
+  Lifecycle commands have a socket-closing two-second deadline. Transport failures and
+  transient Redis reply codes (`BUSY`, `CLUSTERDOWN`, `LOADING`, `MASTERDOWN`,
+  `READONLY`, and `TRYAGAIN`) retry within the configured reconnect schedule. Malformed
+  persisted state, non-transient Redis reply errors, regressed sequence state, or
+  exhausted retries close both peers with `1011` instead of reconnecting stale state.
 - Gateway-owned WebSocket peers use `arraybuffer` binary delivery so text and binary
   messages can be forwarded without changing their frame type. Tenant WebSocket code
   retains workerd's normal `binaryType` contract.
@@ -183,6 +241,10 @@ readiness.
 
 ## Deployment / Rollout Notes
 
+- Deploy the Gateway, Workflows, and do-runtime rollout readers before Control can write
+  `durableObjectRollout=restart`. Roll system-runtime/Control last; keep Control
+  mutations paused while that tier rolls and allow API clients to send the new field
+  only after mutations resume.
 - Gateway can roll independently for route-cache or request-parsing changes that
   preserve forwarded headers.
 - Changes to runtime internal socket paths do not require gateway path filtering.
@@ -206,3 +268,7 @@ readiness.
 - Gateway is not the authorization layer for control APIs.
 - Gateway is not responsible for D1, DO, queues, cron, or workflows routing after a
   worker has been loaded.
+- WebSocket lifecycle checks are not per-frame owner fences. `preserve` lets a healthy
+  old-version connection drain, but it does not reload that version after the active
+  route changes and its backend detaches. `restart` additionally closes older public
+  sessions immediately; stale DO facets converge lazily on their next dispatch.

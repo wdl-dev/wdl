@@ -10,7 +10,8 @@ import { errorMessage } from "./errors.js";
  * @typedef {{ command: string, duration_ms: number, ok: boolean, count?: number, error_message?: string }} RedisCommandEvent
  * @typedef {{ readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, close?: () => void }} RedisSocket
  * @typedef {(address: string) => RedisSocket} RedisSocketFactory
- * @typedef {{ db?: string | number, onCommand?: ((event: RedisCommandEvent) => void) | null, connect?: RedisSocketFactory }} RedisClientOptions
+ * @typedef {{ db?: string | number, onCommand?: ((event: RedisCommandEvent) => void) | null, connect?: RedisSocketFactory }} RedisConnectionOptions
+ * @typedef {RedisConnectionOptions & { commandTimeoutMs?: number }} RedisClientOptions
  * @typedef {{ ttl?: number, exat?: number, nx?: boolean, xx?: boolean, ifeq?: RedisArg }} RedisSetOptions
  * @typedef {{ maxlen?: number }} RedisXAddOptions
  * @typedef {{ limit?: [number, number] }} RedisZRangeByScoreOptions
@@ -151,6 +152,8 @@ export class RedisReplyError extends Error {
   constructor(message) {
     super(`Redis error: ${message}`);
     this.name = "RedisReplyError";
+    const separator = message.indexOf(" ");
+    this.code = (separator === -1 ? message : message.slice(0, separator)).toUpperCase();
   }
 }
 

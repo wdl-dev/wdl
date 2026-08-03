@@ -26,10 +26,12 @@ export async function handle({ request, env, ns, name, requestId }) {
   if (parseVersion(body.version) == null) {
     return jsonError(400, "invalid_request", `Invalid version "${body.version}" (expected "v<int>")`);
   }
-
   try {
     const platformDomain = platformDomainFromEnv(env);
-    const result = await promoteWithRoutes(redis, ns, name, body.version, { log, requestId });
+    const result = await promoteWithRoutes(redis, ns, name, body.version, {
+      log,
+      requestId,
+    });
     log("info", "worker_promoted", {
       request_id: requestId,
       namespace: ns,
@@ -37,6 +39,8 @@ export async function handle({ request, env, ns, name, requestId }) {
       version: body.version,
       affected_hosts: result.affectedHosts.length,
       workers_dev: result.workersDev,
+      durable_object_rollout: result.durableObjectRollout,
+      restart_sequence: result.restartSequence,
     });
     return jsonResponse(200, {
       namespace: ns,
@@ -46,6 +50,8 @@ export async function handle({ request, env, ns, name, requestId }) {
       affectedHosts: result.affectedHosts,
       platformDomain,
       workersDev: result.workersDev,
+      durableObjectRollout: result.durableObjectRollout,
+      restartSequence: result.restartSequence,
       urls: {
         ...(result.workersDev
           ? { platform: `https://${ns}.${platformDomain}/${name}/` }

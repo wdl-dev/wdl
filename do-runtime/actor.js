@@ -34,13 +34,14 @@ import { rebuildResponseWithHeaders } from "shared-respond";
  * @typedef {{ fetch(request: Request): Promise<Response> }} DoFacet
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  * @typedef {{ ownerKey: string, hostId?: string, className?: string, ns: string, worker: string, doStorageId: string, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} DoOwner
+ * @typedef {{ restartSequence: number }} FacetRegistration
  */
 
 export class WdlDoHostActor extends DurableObject {
   /** @type {Map<string, DoWorkerStub>} */
   workers;
-  /** @type {Set<string>} */
-  facetNames;
+  /** @type {Map<string, FacetRegistration>} facet name -> registration */
+  facetWorkers;
   /** @type {number} */
   facetHighWater;
   /** @type {Set<string>} */
@@ -52,8 +53,11 @@ export class WdlDoHostActor extends DurableObject {
    */
   constructor(ctx, env) {
     super(ctx, env);
+    // workerLoader owns isolate residency. This actor-local map only memoizes
+    // stubs; deleting entries during a facet rollout would not evict a loader
+    // identity and must not add an all-facet scan to the dispatch path.
     this.workers = new Map();
-    this.facetNames = new Set();
+    this.facetWorkers = new Map();
     this.facetHighWater = 0;
     this.registeredObjectMembers = new Set();
   }
@@ -80,12 +84,40 @@ export class WdlDoHostActor extends DurableObject {
   /** @param {DoInvoke} invoke */
   rememberFacet(invoke) {
     const facetName = buildFacetName(invoke);
-    const before = this.facetNames.size;
-    this.facetNames.add(facetName);
-    if (this.facetNames.size !== before) {
-      metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetNames.size);
-      if (this.facetNames.size > this.facetHighWater) {
-        this.facetHighWater = this.facetNames.size;
+    const existing = this.facetWorkers.get(facetName);
+    if (existing && invoke.restartSequence < existing.restartSequence) {
+      throw new DoRuntimeError(
+        503,
+        "do_rollout_version_stale",
+        `Durable Object restart ${invoke.restartSequence} was superseded by ${existing.restartSequence}`
+      );
+    }
+    const advanceFacet = existing && invoke.restartSequence > existing.restartSequence;
+    const restartFacet = advanceFacet && invoke.rolloutMode === "restart";
+    if (restartFacet) {
+      this.ctx.facets.abort(
+        facetName,
+        new Error(`Durable Object restarted for ${invoke.workerId}`)
+      );
+      this.facetWorkers.delete(facetName);
+      log("info", "do_rollout_restart_facet_on_dispatch", {
+        namespace: invoke.ns,
+        worker: invoke.worker,
+        version: invoke.version,
+        restart_sequence: invoke.restartSequence,
+        facet_name: facetName,
+      });
+    }
+    if (existing && advanceFacet && !restartFacet) {
+      existing.restartSequence = invoke.restartSequence;
+    }
+    if (!this.facetWorkers.has(facetName)) {
+      this.facetWorkers.set(facetName, {
+        restartSequence: invoke.restartSequence,
+      });
+      metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetWorkers.size);
+      if (this.facetWorkers.size > this.facetHighWater) {
+        this.facetHighWater = this.facetWorkers.size;
         metrics.setGauge("do_host_actor_facet_high_water", { service: SERVICE }, this.facetHighWater);
       }
     }
@@ -127,10 +159,11 @@ export class WdlDoHostActor extends DurableObject {
         }
         return await this.dispatchWithFence(invoke, async () => {
           const requestId = request.headers.get("x-request-id") || null;
+          const facetName = this.rememberFacet(invoke);
           const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
             props: invoke.props,
           });
-          const facet = this.ctx.facets.get(this.rememberFacet(invoke), () => ({
+          const facet = this.ctx.facets.get(facetName, () => ({
             class: cls,
             id: invoke.objectName,
           }));
@@ -142,19 +175,20 @@ export class WdlDoHostActor extends DurableObject {
         await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
         const facetName = buildFacetName(invoke);
         this.ctx.facets.delete(facetName);
-        this.facetNames.delete(facetName);
+        this.facetWorkers.delete(facetName);
         this.registeredObjectMembers.delete(objectRegistryMember(invoke));
-        metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetNames.size);
+        metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetWorkers.size);
         metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
         return Response.json({ ok: true });
       }
       const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request));
       return await this.dispatchWithFence(invoke, async () => {
         const requestId = request.headers.get("x-request-id") || null;
+        const facetName = this.rememberFacet(invoke);
         const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
           props: invoke.props,
         });
-        const facet = this.ctx.facets.get(this.rememberFacet(invoke), () => ({
+        const facet = this.ctx.facets.get(facetName, () => ({
           class: cls,
           id: invoke.objectName,
         }));
@@ -180,9 +214,15 @@ export class WdlDoHostActor extends DurableObject {
       throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
     }
     try {
-      let fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
+      let fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, {
+        rolloutInvoke: invoke,
+        storageScope: invoke,
+      });
       if (await this.rememberObject(invoke)) {
-        fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
+        fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, {
+          rolloutInvoke: invoke,
+          storageScope: invoke,
+        });
       }
       const { owner, leaseRemainingMs } = fenced;
       return withoutOwnershipErrorControlHeader(

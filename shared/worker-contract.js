@@ -94,6 +94,8 @@ export const DECLARED_HOSTS_REVISION_KEY = "declared-hosts:revision";
 export const ROUTES_CHANNEL = "routes:invalidate";
 export const ROUTES_FLUSH_CHANNEL = "routes:flush";
 export const PATTERNS_CHANNEL = "patterns:invalidate";
+export const DURABLE_OBJECT_ROLLOUT_CHANNEL = "do-rollout:restart";
+export const WORKER_DELETE_CHANNEL = "worker:delete";
 const HOSTS_PREFIX = "hosts:";
 const NS_HOSTS_PREFIX = "ns-hosts:";
 const HOST_DECLARATIONS_PREFIX = "host-declarations:";
@@ -131,6 +133,188 @@ export function workerVersionsKey(ns, worker) {
 /** @param {string} ns @param {string} worker */
 export function doStorageIdKey(ns, worker) {
   return `worker:do-storage:${ns}:${worker}`;
+}
+
+export const DURABLE_OBJECT_ROLLOUT_PRESERVE = "preserve";
+export const DURABLE_OBJECT_ROLLOUT_RESTART = "restart";
+
+/** @param {unknown} value */
+export function isDurableObjectRolloutMode(value) {
+  return value === DURABLE_OBJECT_ROLLOUT_PRESERVE ||
+    value === DURABLE_OBJECT_ROLLOUT_RESTART;
+}
+
+/**
+ * @param {unknown} version
+ * @param {unknown} mode
+ * @param {unknown} restartSequence
+ */
+function isValidDurableObjectRollout(version, mode, restartSequence) {
+  return parseVersion(version) != null &&
+    isDurableObjectRolloutMode(mode) &&
+    Number.isSafeInteger(restartSequence) &&
+    /** @type {number} */ (restartSequence) >= 0 &&
+    (
+      mode !== DURABLE_OBJECT_ROLLOUT_RESTART ||
+      restartSequence !== 0
+    );
+}
+
+// Active DO rollout projection. Control writes it in the same transaction as
+// routes:<ns>; Gateway and do-runtime read it at lifecycle/fence boundaries.
+/** @param {string} ns @param {string} worker */
+export function durableObjectRolloutKey(ns, worker) {
+  return `worker:do-rollout:${ns}:${worker}`;
+}
+
+// Permanent restart-event allocator. It survives whole-worker deletion so a
+// stale Gateway session can never confuse a recreated worker with an old event.
+/** @param {string} ns @param {string} worker */
+export function durableObjectRolloutSequenceKey(ns, worker) {
+  return `worker:do-rollout-seq:${ns}:${worker}`;
+}
+
+/**
+ * @param {{ version: string, mode: "preserve" | "restart", restartSequence: number }} projection
+ */
+export function encodeDurableObjectRolloutProjection(projection) {
+  if (!isValidDurableObjectRollout(
+    projection.version,
+    projection.mode,
+    projection.restartSequence
+  )) {
+    throw new TypeError("invalid Durable Object rollout projection");
+  }
+  return JSON.stringify({
+    version: projection.version,
+    mode: projection.mode,
+    restartSequence: projection.restartSequence,
+  });
+}
+
+/**
+ * @param {{ ns: string, worker: string, version: string, restartSequence: number }} event
+ */
+export function encodeDurableObjectRolloutEvent(event) {
+  if (
+    typeof event.ns !== "string" ||
+    !event.ns ||
+    typeof event.worker !== "string" ||
+    !event.worker ||
+    !isValidDurableObjectRollout(
+      event.version,
+      DURABLE_OBJECT_ROLLOUT_RESTART,
+      event.restartSequence
+    )
+  ) {
+    throw new TypeError("invalid Durable Object rollout event");
+  }
+  return JSON.stringify({
+    ns: event.ns,
+    worker: event.worker,
+    version: event.version,
+    restartSequence: event.restartSequence,
+  });
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {{ ns: string, worker: string, version: string, restartSequence: number }}
+ */
+export function parseDurableObjectRolloutEvent(raw) {
+  let value;
+  try {
+    value = typeof raw === "string" ? JSON.parse(raw) : null;
+  } catch {
+    value = null;
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof value.ns !== "string" ||
+    !value.ns ||
+    typeof value.worker !== "string" ||
+    !value.worker ||
+    !isValidDurableObjectRollout(
+      value.version,
+      DURABLE_OBJECT_ROLLOUT_RESTART,
+      value.restartSequence
+    )
+  ) {
+    throw new TypeError("invalid Durable Object rollout event");
+  }
+  return {
+    ns: value.ns,
+    worker: value.worker,
+    version: value.version,
+    restartSequence: value.restartSequence,
+  };
+}
+
+/** @param {{ ns: string, worker: string }} event */
+export function encodeWorkerDeleteEvent(event) {
+  if (
+    typeof event.ns !== "string" ||
+    !event.ns ||
+    typeof event.worker !== "string" ||
+    !event.worker
+  ) {
+    throw new TypeError("invalid worker delete event");
+  }
+  return JSON.stringify({ ns: event.ns, worker: event.worker });
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {{ ns: string, worker: string }}
+ */
+export function parseWorkerDeleteEvent(raw) {
+  let value;
+  try {
+    value = typeof raw === "string" ? JSON.parse(raw) : null;
+  } catch {
+    value = null;
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof value.ns !== "string" ||
+    !value.ns ||
+    typeof value.worker !== "string" ||
+    !value.worker
+  ) {
+    throw new TypeError("invalid worker delete event");
+  }
+  return { ns: value.ns, worker: value.worker };
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {{ version: string, mode: "preserve" | "restart", restartSequence: number } | null}
+ */
+export function parseDurableObjectRolloutProjection(raw) {
+  if (raw == null) return null;
+  let value;
+  try {
+    value = typeof raw === "string" ? JSON.parse(raw) : null;
+  } catch {
+    value = null;
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !isValidDurableObjectRollout(value.version, value.mode, value.restartSequence)
+  ) {
+    throw new TypeError("invalid Durable Object rollout projection");
+  }
+  return {
+    version: value.version,
+    mode: value.mode,
+    restartSequence: value.restartSequence,
+  };
 }
 
 // DO runtime owns the records; Control uses the storage-scoped pattern during

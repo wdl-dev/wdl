@@ -5,7 +5,9 @@ use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::time::now_ms;
 use wdl_rust_common::worker_contract::{
-    do_storage_id_key, parse_version_tag, routes_key, worker_versions_key,
+    DurableObjectRolloutMode, DurableObjectRolloutProjection, do_storage_id_key,
+    durable_object_rollout_key, parse_durable_object_rollout_projection, parse_version_tag,
+    routes_key, worker_versions_key,
 };
 
 use crate::{
@@ -19,7 +21,8 @@ use super::super::{
 };
 use super::model::{DoAlarmJob, job_from_state, map_hgetall};
 use super::scripts::{
-    CLAIM_DO_ALARM, DISCARD_CORRUPT_DO_ALARM, FINALIZE_DO_ALARM, MOVE_DUE_DO_ALARM, RETRY_DO_ALARM,
+    CLAIM_DO_ALARM, DISCARD_CORRUPT_DO_ALARM, FINALIZE_DO_ALARM, MOVE_DUE_DO_ALARM,
+    READ_DO_ALARM_TARGET, RETRY_DO_ALARM,
 };
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
@@ -87,9 +90,22 @@ fn alarm_dispatch_version_decision(
     current_storage_id: Option<&str>,
     active_version: Option<&str>,
     retained_score: Option<f64>,
+    rollout: Option<&DurableObjectRolloutProjection>,
 ) -> WorkflowResult<AlarmDispatchVersionDecision> {
     if current_storage_id != Some(job_storage_id) {
         return Ok(AlarmDispatchVersionDecision::Discard);
+    }
+    if let Some(rollout) = rollout {
+        if active_version != Some(rollout.version.as_str()) {
+            return Err(WorkflowError::invalid_state(
+                "Active worker route and Durable Object rollout projection disagree",
+            ));
+        }
+        if rollout.mode == DurableObjectRolloutMode::Restart && rollout.version != job_version {
+            return Ok(AlarmDispatchVersionDecision::Retarget(
+                rollout.version.clone(),
+            ));
+        }
     }
     if active_version == Some(job_version) || retained_score.is_some() {
         return Ok(AlarmDispatchVersionDecision::Original);
@@ -262,28 +278,37 @@ async fn resolve_alarm_dispatch_version(
     job: &DoAlarmJob,
 ) -> WorkflowResult<Option<String>> {
     let storage_key = do_storage_id_key(&job.ns, &job.worker);
-    let (current_storage_id, active_version, retained_score): (
+    let routes = routes_key(&job.ns);
+    let versions = worker_versions_key(&job.ns, &job.worker);
+    let rollout_key = durable_object_rollout_key(&job.ns, &job.worker);
+    let (current_storage_id, active_version, retained_score, raw_rollout): (
         Option<String>,
         Option<String>,
         Option<f64>,
+        Option<String>,
     ) = app
         .control_redis
         .with_conn(async |mut conn| {
-            let mut pipe = redis::pipe();
-            pipe.cmd("GET").arg(storage_key);
-            pipe.cmd("HGET").arg(routes_key(&job.ns)).arg(&job.worker);
-            pipe.cmd("ZSCORE")
-                .arg(worker_versions_key(&job.ns, &job.worker))
-                .arg(&job.version);
-            pipe.query_async(&mut conn).await
+            READ_DO_ALARM_TARGET
+                .prepare_invoke(
+                    &[&storage_key, &routes, &versions, &rollout_key],
+                    &[&job.worker, &job.version],
+                )
+                .invoke_async(&mut conn)
+                .await
         })
         .await?;
+    let rollout =
+        parse_durable_object_rollout_projection(raw_rollout.as_deref()).map_err(|_| {
+            WorkflowError::invalid_state("Durable Object rollout projection is invalid")
+        })?;
     match alarm_dispatch_version_decision(
         &job.do_storage_id,
         &job.version,
         current_storage_id.as_deref(),
         active_version.as_deref(),
         retained_score,
+        rollout.as_ref(),
     )? {
         AlarmDispatchVersionDecision::Original => Ok(Some(job.version.clone())),
         AlarmDispatchVersionDecision::Retarget(active_version) => {
@@ -639,6 +664,9 @@ mod tests {
         alarm_dispatch_version_decision, do_alarm_ready_admission_config,
         retry_delay_ms_from_parts, saturating_i64_ms,
     };
+    use wdl_rust_common::worker_contract::{
+        DurableObjectRolloutMode, DurableObjectRolloutProjection,
+    };
 
     #[test]
     fn alarm_dispatch_version_decision_preserves_fences_and_retargets() {
@@ -688,6 +716,7 @@ mod tests {
                     storage,
                     active,
                     retained_score,
+                    None,
                 )
                 .expect(label),
                 expected,
@@ -704,8 +733,67 @@ mod tests {
             Some("storage-a"),
             Some("bad/version"),
             None,
+            None,
         )
         .expect_err("invalid active version must fail closed");
+
+        assert_eq!(err.code, "workflow_invalid_state");
+    }
+
+    #[test]
+    fn latest_preserve_projection_supersedes_unobserved_alarm_restart() {
+        let restart = DurableObjectRolloutProjection {
+            version: "v2".to_string(),
+            mode: DurableObjectRolloutMode::Restart,
+            restart_sequence: 3,
+        };
+        assert_eq!(
+            alarm_dispatch_version_decision(
+                "storage-a",
+                "v1",
+                Some("storage-a"),
+                Some("v2"),
+                Some(1.0),
+                Some(&restart),
+            )
+            .unwrap(),
+            AlarmDispatchVersionDecision::Retarget("v2".to_string()),
+        );
+
+        let preserve = DurableObjectRolloutProjection {
+            mode: DurableObjectRolloutMode::Preserve,
+            ..restart
+        };
+        assert_eq!(
+            alarm_dispatch_version_decision(
+                "storage-a",
+                "v1",
+                Some("storage-a"),
+                Some("v2"),
+                Some(1.0),
+                Some(&preserve),
+            )
+            .unwrap(),
+            AlarmDispatchVersionDecision::Original,
+        );
+    }
+
+    #[test]
+    fn alarm_dispatch_rejects_torn_route_and_rollout_projection() {
+        let rollout = DurableObjectRolloutProjection {
+            version: "v3".to_string(),
+            mode: DurableObjectRolloutMode::Restart,
+            restart_sequence: 4,
+        };
+        let err = alarm_dispatch_version_decision(
+            "storage-a",
+            "v1",
+            Some("storage-a"),
+            Some("v2"),
+            Some(1.0),
+            Some(&rollout),
+        )
+        .expect_err("route and rollout projection must share one active version");
 
         assert_eq!(err.code, "workflow_invalid_state");
     }

@@ -11,6 +11,8 @@ import { deleteGatewayInternalHeaders } from "gateway-lib";
  * @typedef {{
  *   maxBufferedClientMessages?: number,
  *   reconnectDelaysMs?: number[],
+ *   checkLifecycle?: () => Promise<"continue" | "restart" | "retry">,
+ *   registerLifecycle?: (handlers: { restart: () => void, fail: () => void }) => () => void,
  * }} GatewayWebSocketOptions
  * @typedef {{
  *   recordEvent?: (level: string, event: string, fields?: Record<string, unknown>) => void,
@@ -202,6 +204,8 @@ export function proxyGatewayWebSocket(
   const downstream = pair[1];
   /** @type {WebSocket | null} */
   let upstream = null;
+  /** @type {WebSocket | null} */
+  let pendingUpstream = /** @type {WebSocket} */ (initialResponse.webSocket);
   /** @type {Promise<WebSocket | null> | null} */
   let upstreamConnecting = null;
   /** @type {Promise<WebSocket | null> | null} */
@@ -213,6 +217,10 @@ export function proxyGatewayWebSocket(
   let activeRecorded = false;
   let detachedRecorded = false;
   let sessionLifetimeRecorded = false;
+  /** @type {(() => void) | null} */
+  let unregisterLifecycle = null;
+  /** @type {Promise<"continue" | "restart" | "error"> | null} */
+  let lifecycleGate = null;
   const sessionStartedAt = Date.now();
 
   acceptProxyWebSocket(downstream);
@@ -287,6 +295,8 @@ export function proxyGatewayWebSocket(
   function markDownstreamClosed(outcome) {
     if (downstreamClosed) return;
     downstreamClosed = true;
+    unregisterLifecycle?.();
+    unregisterLifecycle = null;
     recordSessionLifetime(outcome);
     if (activeRecorded) {
       activeRecorded = false;
@@ -313,13 +323,124 @@ export function proxyGatewayWebSocket(
    */
   function closeDownstreamAndUpstream(code, reason, outcome) {
     const currentUpstream = upstream;
+    const candidateUpstream = pendingUpstream;
     upstream = null;
+    pendingUpstream = null;
     closeDownstream(code, reason, outcome);
     if (currentUpstream) closeWebSocket(currentUpstream, code, reason);
+    if (candidateUpstream) {
+      acceptProxyWebSocket(candidateUpstream);
+      closeWebSocket(candidateUpstream, code, reason);
+    }
+  }
+
+  /** @param {WebSocket} socket @param {number} code @param {string} reason */
+  function closePendingUpstream(socket, code, reason) {
+    if (pendingUpstream !== socket) return;
+    pendingUpstream = null;
+    acceptProxyWebSocket(socket);
+    closeWebSocket(socket, code, reason);
+  }
+
+  function closeForLifecycleRestart() {
+    if (downstreamClosed) return;
+    record("lifecycle_restart");
+    recordEvent("info", "websocket_lifecycle_restart");
+    closeDownstreamAndUpstream(1012, "service restart", "lifecycle_restart");
+  }
+
+  function closeForLifecycleFailure() {
+    if (downstreamClosed) return;
+    record("lifecycle_check_failed");
+    recordEvent("warn", "websocket_lifecycle_check_failed");
+    closeDownstreamAndUpstream(1011, "lifecycle check failed", "lifecycle_check_failed");
+  }
+
+  function beginLifecycleCheck() {
+    if (lifecycleGate) return lifecycleGate;
+    const checkLifecycle = options.checkLifecycle;
+    if (typeof checkLifecycle !== "function") {
+      lifecycleGate = Promise.resolve("continue");
+      return lifecycleGate;
+    }
+    lifecycleGate = (async () => {
+      for (let attempt = 0; attempt < reconnectDelaysMs.length; attempt += 1) {
+        const delayMs = reconnectDelaysMs[attempt];
+        if (attempt > 0 && delayMs > 0) await sleep(delayMs);
+        if (downstreamClosed) return "error";
+        const decision = await checkLifecycle();
+        if (decision !== "retry") return decision;
+      }
+      return "error";
+    })().catch(() => "error");
+    return lifecycleGate;
+  }
+
+  /**
+   * @param {Promise<"continue" | "restart" | "error">} gate
+   */
+  async function requireLifecycleContinuation(gate) {
+    const disposition = await gate;
+    if (lifecycleGate === gate && disposition === "continue") lifecycleGate = null;
+    if (disposition === "continue") return;
+    if (downstreamClosed) {
+      throw new Error("WebSocket closed before lifecycle check completed");
+    }
+    if (disposition === "restart") {
+      closeForLifecycleRestart();
+      throw new Error("WebSocket closed for service restart");
+    }
+    closeForLifecycleFailure();
+    throw new Error("WebSocket lifecycle check failed");
+  }
+
+  async function requireReconnectAllowed() {
+    if (lifecycleGate) await requireLifecycleContinuation(lifecycleGate);
+  }
+
+  /**
+   * @param {WebSocket} attachedUpstream
+   */
+  async function handleUpstreamFailure(attachedUpstream) {
+    if (upstream !== attachedUpstream) return;
+    upstream = null;
+    if (downstreamClosed) return;
+    setDetached(true);
+    const gate = beginLifecycleCheck();
+    try {
+      await requireLifecycleContinuation(gate);
+    } catch {
+      return;
+    }
+    if (downstreamClosed) return;
+    scheduleReconnect();
+  }
+
+  /**
+   * @param {WebSocket} attachedUpstream
+   * @param {{ code: number, reason: string }} evt
+   * @param {boolean} normal
+   */
+  async function handleUpstreamClose(attachedUpstream, evt, normal) {
+    if (upstream !== attachedUpstream) return;
+    if (normal) {
+      upstream = null;
+      if (!downstreamClosed) {
+        closeDownstream(evt.code, evt.reason, "upstream_normal_close");
+      }
+      return;
+    }
+    record("upstream_abnormal_close");
+    recordEvent("warn", "websocket_upstream_abnormal_close", {
+      code: evt.code,
+      reason: evt.reason,
+    });
+    await handleUpstreamFailure(attachedUpstream);
   }
 
   /** @param {WebSocket} nextUpstream */
   function attachUpstream(nextUpstream) {
+    if (pendingUpstream === nextUpstream) pendingUpstream = null;
     const attachedUpstream = nextUpstream;
     upstream = attachedUpstream;
     setDetached(false);
@@ -334,35 +455,25 @@ export function proxyGatewayWebSocket(
       }
     });
     attachedUpstream.addEventListener("close", (evt) => {
-      if (upstream !== attachedUpstream) return;
-      upstream = null;
-      if (downstreamClosed) return;
-      if (websocketClosedNormally(evt)) {
-        closeDownstream(evt.code, evt.reason, "upstream_normal_close");
-        return;
-      }
-      record("upstream_abnormal_close");
-      recordEvent("warn", "websocket_upstream_abnormal_close", {
-        code: evt.code,
-        reason: evt.reason,
-      });
-      setDetached(true);
-      scheduleReconnect();
+      void handleUpstreamClose(attachedUpstream, evt, websocketClosedNormally(evt));
     });
     attachedUpstream.addEventListener("error", () => {
       if (upstream !== attachedUpstream) return;
-      upstream = null;
-      if (!downstreamClosed) {
-        record("upstream_error");
-        recordEvent("warn", "websocket_upstream_error");
-        setDetached(true);
-        scheduleReconnect();
-      }
+      record("upstream_error");
+      recordEvent("warn", "websocket_upstream_error");
+      void handleUpstreamFailure(attachedUpstream);
     });
+  }
+
+  function attachInitialUpstream() {
+    const initialUpstream = pendingUpstream;
+    if (!initialUpstream || downstreamClosed) return;
+    attachUpstream(initialUpstream);
   }
 
   async function ensureUpstream() {
     if (downstreamClosed) throw new Error("WebSocket client is closed");
+    await requireReconnectAllowed();
     if (upstream) return upstream;
     if (!upstreamConnecting) {
       upstreamConnecting = connectUpstream().then(async (response) => {
@@ -370,12 +481,26 @@ export function proxyGatewayWebSocket(
           await discardResponseBody(response);
           throw new Error(`WebSocket reconnect failed with status ${response.status}`);
         }
+        const candidateUpstream = response.webSocket;
+        pendingUpstream = candidateUpstream;
         if (downstreamClosed) {
-          acceptProxyWebSocket(response.webSocket);
-          closeWebSocket(response.webSocket, 1001, "client closed");
+          closePendingUpstream(candidateUpstream, 1001, "client closed");
           throw new Error("WebSocket reconnect completed after client close");
         }
-        attachUpstream(response.webSocket);
+        if (typeof options.checkLifecycle === "function") {
+          const gate = beginLifecycleCheck();
+          try {
+            await requireLifecycleContinuation(gate);
+          } catch (err) {
+            closePendingUpstream(candidateUpstream, 1001, "client closed");
+            throw err;
+          }
+        }
+        if (downstreamClosed) {
+          closePendingUpstream(candidateUpstream, 1001, "client closed");
+          throw new Error("WebSocket closed while reconnect was being fenced");
+        }
+        attachUpstream(candidateUpstream);
         record("reconnected");
         return upstream;
       }).finally(() => {
@@ -424,6 +549,7 @@ export function proxyGatewayWebSocket(
 
   /** @param {string | ArrayBuffer} data */
   async function sendClientMessage(data) {
+    await requireReconnectAllowed();
     const current = upstream || await reconnectWithBudget();
     if (!current) throw new Error("WebSocket upstream unavailable");
     try {
@@ -432,6 +558,8 @@ export function proxyGatewayWebSocket(
       if (upstream === current) upstream = null;
       closeWebSocket(current, 1011, "upstream send failed");
       setDetached(true);
+      const gate = beginLifecycleCheck();
+      await requireLifecycleContinuation(gate);
       const reconnected = await reconnectWithBudget();
       if (!reconnected) throw new Error("WebSocket upstream unavailable");
       // A second send failure is terminal for this client frame; the caller
@@ -441,7 +569,21 @@ export function proxyGatewayWebSocket(
     }
   }
 
-  attachUpstream(initialResponse.webSocket);
+  if (typeof options.registerLifecycle === "function") {
+    unregisterLifecycle = options.registerLifecycle({
+      restart: closeForLifecycleRestart,
+      fail: closeForLifecycleFailure,
+    });
+  }
+  if (typeof options.checkLifecycle === "function") {
+    const gate = beginLifecycleCheck();
+    void requireLifecycleContinuation(gate).then(
+      attachInitialUpstream,
+      () => {}
+    );
+  } else {
+    attachInitialUpstream();
+  }
 
   downstream.addEventListener("message", (evt) => {
     if (queuedClientMessages >= maxBufferedClientMessages) {

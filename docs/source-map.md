@@ -18,8 +18,8 @@ are outside this map unless they own runtime or deployable service behavior.
 | `gateway/config-local.capnp` | Local gateway workerd config compiled for Docker Compose with Envoy-backed private service routes. |
 | `gateway/index.js` | Gateway worker dispatch branches: admin-host short-circuit, subdomain routing, pattern routing, and routed WebSocket proxy setup. |
 | `gateway/dispatch.js` | Pure gateway dispatch decision tree and route target selection. |
-| `gateway/websocket.js` | Local `WebSocketPair` termination, reconnect forwarding, and `101` upgrade preservation. |
-| `gateway/runtime.js` | Gateway static routing-option memoization, route/pattern caches, Redis subscriber invalidation, logging, metrics, and health/metrics snapshots. |
+| `gateway/websocket.js` | Local `WebSocketPair` termination, reconnect forwarding, `101` upgrade preservation, and rollout lifecycle closure. |
+| `gateway/runtime.js` | Gateway static routing-option memoization, route/pattern caches, Redis subscriber invalidation, process-local WebSocket lifecycle registry/reconciliation, atomic route/rollout reads, logging, metrics, and health/metrics snapshots. |
 | `gateway/lib.js` | Pure routing helpers used by workerd and Node tests. |
 | `runtime/config-user.capnp` | User runtime config: loader `:8081`, internal `:8088`, public-only loaded-worker outbound. |
 | `runtime/config-system.capnp` | System runtime config: loader `:8081`, internal `:8088`, control `:8082`, auth worker, private+public outbound. |
@@ -43,7 +43,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `control/bundle.js` | Bundle/module normalization, compatibility metadata, vars, and emitted module manifest construction. |
 | `control/bindings.js` | Service/platform binding parsers, ACL evaluation, and linker helpers. |
 | `control/topology.js` | Route, pattern, cron, queue consumer, and workflow declaration parsing for deploy metadata. |
-| `control/routing.js`, `control/routing/route-plan.js` | Promote, secret bump/promote, host reconcile WATCH/MULTI loops, and pure route/pattern planning helpers. |
+| `control/routing.js`, `control/routing/route-plan.js` | Promote, secret bump/promote, atomic DO rollout projection/allocation, host reconcile WATCH/MULTI loops, and pure route/pattern planning helpers. |
 | `control/lifecycle-indexes.js` | Redis mutation helpers for worker lifecycle, cron, queue consumer, and referrer indexes. |
 | `control/env-budget.js` | Control-plane estimate of workerd `workerLoader` env size for deploy and secret mutation guards. |
 | `control/worker-code-budget.js` | Control-plane final WorkerCode size estimate for deploy guards, sharing runtime and do-runtime wrapper/module injection rules. |
@@ -72,7 +72,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar and platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, module path, reserved object-key, and reserved namespace grammars. |
-| `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner-scope key, and route-invalidation channel helpers. |
+| `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner/rollout keys and projection, and route/rollout notification channel helpers. |
 | `shared/workerd-compat-flags.js` | Pinned upstream mirror of experimental enable flags plus WDL-owned dynamic-worker date, unsupported-flag, and error-serialization policy. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |
@@ -91,7 +91,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | Path | Responsibility |
 |---|---|
 | `d1-runtime/` | D1 workerd service. Supervisor is PID 1, spawns workerd, renews leases, and drains on SIGTERM. Router/actor/owner modules implement per-database ownership, forwarding, read cache, and SQLite localDisk execution. |
-| `do-runtime/` | Durable Object workerd service. Supervisor is PID 1, spawns workerd, renews owned shards, drains on SIGTERM, and SIGKILLs workerd after successful drain to avoid the half-dead 504 window. Owner/actor/load/alarm modules implement owner scopes, native facet execution, SQLite storage, Workflows alarm client/shim/dispatch endpoint, and WebSocket connect. |
+| `do-runtime/` | Durable Object workerd service. Supervisor is PID 1, spawns workerd, renews owned shards, drains on SIGTERM, and SIGKILLs workerd after successful drain to avoid the half-dead 504 window. Owner/actor/load/alarm modules implement owner scopes, native facet execution, projection-fenced lazy facet restart, SQLite storage, Workflows alarm client/shim/dispatch endpoint, and WebSocket connect. |
 | `do-runtime/config-local.capnp` | Local Durable Objects runtime workerd config compiled for Docker Compose with Envoy-backed private service routes. |
 
 ## Rust Workspace

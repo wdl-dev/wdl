@@ -21,9 +21,15 @@ namespaces                      Set, 至少有一个 active worker 的 namespace
 workers:<ns>                    Set, 有 worker-owned lifecycle state 的 worker name
 worker:<ns>:<name>:next_version String, 单调 version counter，delete 后保留
 cron:seq:<ns>:<name>            String, 永久 Cron generation 高水位
+worker:do-rollout:<ns>:<name>   String, active DO rollout projection
+worker:do-rollout-seq:<ns>:<name>
+                                String, 永久单调 DO restart event 序号分配器
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes + __meta__
 worker-delete-lock:<ns>:<name>  String EX 30, 每个 worker 的 delete critical-section lock；value 是 whole:<token> 或 version:<token>；DO first-owner claim 会 WATCH，且只有 whole 阻止 ownership
+do:owner:scope:<encoded scope>  String EX, authoritative DO owner lease
+do:owner:scope:<encoded scope>:generation
+                                String, 单调 DO owner generation counter
 worker-version-referrers:<ns>:<name>:<version>
                                 Set, canonical JSON 的 version-pinned caller ref
 hosts:<ns>                      Set, operator 声明的 host intent
@@ -44,9 +50,17 @@ secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
 
 `cron:seq:<ns>:<name>` 是 Control 持有的永久 Cron generation allocator。它在 Cron projection 清空和 whole-worker delete 后仍保留，确保旧 `cron-slot:*` ref 不会匹配重建的 entry。Allocator 从 generation `1024` 开始分配，更低的值属于保留范围，永久 allocator 不会发放。
 
+`worker:do-rollout:<ns>:<name>` 是 Control 持有的 active `{version,mode,restartSequence}` JSON projection。Promote 在更新 `routes:<ns>` 的同一个 transaction 中写入它。Gateway 在 WebSocket lifecycle boundary 原子读取这两个值；do-runtime 在 owner resolution 中读取 projection，并在 host actor 的 pipeline owner/storage dispatch snapshot 中再次读取。Sequence 是由这些 Redis read 得到的 owner-local state，不在 invoke/connect wire payload 中传递。Workflows 为 DO alarm 选择 dispatch version 时，会在一个 snapshot 中同时读取 projection、route、storage pointer 和 retained-version score。最新 active projection 是权威状态：后续 `preserve` projection 会在现有 sequence 上覆盖尚未观察到的 lazy restart，但不能撤销已经发生的连接关闭或 facet abort。Whole-worker delete 会删除 active projection。状态缺失表示默认 `preserve`，状态畸形则 fail closed。
+
+`worker:do-rollout-seq:<ns>:<name>` 是 Control 持有的 opt-in DO restart event 永久单调序号分配器。它在 whole-worker delete 后仍保留，确保重建后的下一次 restart 不会复用 stale Gateway session 已观察过的 sequence。Control 是唯一 writer；Gateway、do-runtime 和 Workflows 只读取 active projection。
+
+`do-rollout:restart` 是新 restart sequence 的非持久 Gateway notification channel。Control 在 route/projection update 的同一个 transaction 中 publish `{ns,worker,version,restartSequence}`。Gateway 只用它及时触发本进程公开 WebSocket session 的权威 reconciliation；initial/reconnect lifecycle read 和 subscriber reconciliation 始终根据最新 projection 决定动作。
+
+`worker:delete` 是成功 whole-worker delete 的非持久 Gateway notification channel。Normal delete 在删除 active route 和 rollout projection 的同一个 transaction 中 publish `{ns,worker}`；仍有 worker-owned state 需要清理的 residual delete 会重新 publish。Gateway 只用它请求对应 worker 的权威 reconciliation；如果同名 worker 在权威读取观察到 inactive 前已经完成重建，最新 projection 生效，因为 hint 不含 durable incarnation fence。Route invalidation 仍只清 cache，subscriber reconnect 只能在 deleted state 仍可观察时修复漏掉的通知。
+
 `namespaces` 是 active worker gate。有 active worker route 时会加入，最后一个 active worker 删除时可能移除。Namespace-level secrets 和 data-plane state 等资源可以比这个 set membership 活得更久。Auth 在 delegated token issue 时只把它作为 generated-namespace collision 的 best-effort 信号读取，而不是永久 namespace registry。
 
-`routes:<ns>` 和 `worker-versions:<ns>:<name>` 只能通过 `shared/worker-contract.js#routesKey` / `#workerVersionsKey`（以及它们的 Rust 镜像 `rust/common/src/worker_contract.rs#routes_key` / `#worker_versions_key`）构造。Control 是唯一 writer；sanctioned reader 是 gateway（route resolution）和 workflows。workflows 有两条读取路径：workflow create / verify 时的 active-export resolution，以及 fired alarm 的 scheduled version 已不再 retained 时的 internal DO alarm retarget。改 key 语法时必须同时更新 JS helper、Rust helper 和所有 reader。
+`routes:<ns>` 和 `worker-versions:<ns>:<name>` 只能通过 `shared/worker-contract.js#routesKey` / `#workerVersionsKey`（以及它们的 Rust 镜像 `rust/common/src/worker_contract.rs#routes_key` / `#worker_versions_key`）构造。Control 是唯一 writer；sanctioned reader 是 gateway（route resolution）和 workflows。workflows 有两条读取路径：workflow create / verify 时的 active-export resolution，以及 fired alarm 的 scheduled version 已不再 retained 或 active rollout projection 为 `restart` 时的 internal DO alarm retarget。改 key 语法时必须同时更新 JS helper、Rust helper 和所有 reader。
 
 `workers:<ns>` 表示这个 worker 有 worker-owned lifecycle state：retained bundle、active projection、worker-level secrets 或 workflow definitions。Secret-only 和 definitions-only worker 会被有意列出，并可以 whole-delete。
 
@@ -78,9 +92,11 @@ Pattern `slot` 是原始 wrangler pattern，例如 `/mcp` 或 `/mcp/*`；它也�
 }
 ```
 
+示例省略了 `durableObjectRollout`；Control 只为非默认的 `restart` policy 持久化该字段，字段缺失表示 `preserve`。
+
 Control 把 `__meta__` 写为 JSON object。Control-plane consumer 通过 `control/lib.js::parseBundleMeta()` 解析必需的 bundle metadata；malformed JSON、array 和 scalar 值都会以 `corrupt_meta` fail closed。Bundle 缺失的语义仍由具体 use site 持有：当 projection 变更、唯一性证明、lifecycle cleanup、workflow view 或 environment budget 必须消费 metadata 才能产生正确结果时，只要权威 route 或 index 仍指向该 bundle，缺失就 fail closed。Deploy discovery/link preflight 不把缺失归类为 `corrupt_meta`；watched commit 仍是权威检查，并以 `target_drift` 拒绝缺失的 pinned service target。
 
-Routes、platform-domain exposure、crons、queue consumers、bindings、vars、exports、workflow definitions 和 asset prefixes 都是 version metadata。`workersDev: false` 表示显式关闭 platform-domain exposure；字段缺失表示启用。Rollback 本质上是 promote 一个旧的 immutable version。
+Routes、platform-domain exposure、crons、queue consumers、Durable Object rollout mode、bindings、vars、exports、workflow definitions 和 asset prefixes 都是 version metadata。`workersDev: false` 表示显式关闭 platform-domain exposure；字段缺失表示启用。Rollback 本质上是 promote 一个旧的 immutable version。
 
 ## Feature Key Families
 

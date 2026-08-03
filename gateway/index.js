@@ -30,6 +30,7 @@ import {
   GatewayRoutingUnavailableError,
   adjustGatewayWebSocketProxyBufferedMessages,
   adjustGatewayWebSocketProxyConnections,
+  createGatewayLifecycleRedis,
   createGatewayRedis,
   ensureGatewaySubscriber,
   gatewayHealthSnapshot,
@@ -37,6 +38,8 @@ import {
   log,
   metrics,
   prepareGatewayMetrics,
+  readWebSocketLifecycleSnapshot,
+  registerGatewayWebSocketLifecycle,
   recordGatewayWebSocketProxy,
   recordGatewayWebSocketSessionLifetime,
   recordRuntimeForwardDuration,
@@ -184,14 +187,32 @@ export default {
       }
       forwardRequest.headers.set("x-request-id", scope.requestId);
 
-      const forwardStartedAt = Date.now();
+      /** @type {number | null} */
+      let forwardStartedAt = null;
       try {
         let response;
         if (isWebSocketUpgrade(request) && dispatch.bindingName !== "CONTROL") {
+          const lifecycleRedis = createGatewayLifecycleRedis(env.REDIS_ADDR);
+          const runtimeNamespace = dispatch.namespace;
+          const runtimeWorker = dispatch.worker;
+          const runtimeVersion = dispatch.version;
+          const initialLifecycle = await readWebSocketLifecycleSnapshot(
+            lifecycleRedis,
+            runtimeNamespace,
+            runtimeWorker
+          );
+          if (
+            initialLifecycle.kind === "inactive" ||
+            initialLifecycle.version !== runtimeVersion
+          ) {
+            throw new GatewayRoutingUnavailableError();
+          }
+          let observedLifecycle = initialLifecycle;
           const upstreamFetch = createGatewayWebSocketUpstreamFetch(
             forwardRequest,
             env[dispatch.bindingName]
           );
+          forwardStartedAt = Date.now();
           const initial = await upstreamFetch();
           response = initial.status === 101 && initial.webSocket
             ? proxyGatewayWebSocket(
@@ -200,15 +221,47 @@ export default {
               recordGatewayWebSocketProxy,
               gatewayWebSocketObservability(
                 scope.requestId,
-                namespace,
-                worker,
-                version,
+                runtimeNamespace,
+                runtimeWorker,
+                runtimeVersion,
                 dispatch.bindingName
               ),
-              webSocketProxyOptionsFromEnv(env)
+              {
+                ...webSocketProxyOptionsFromEnv(env),
+                registerLifecycle: (handlers) => registerGatewayWebSocketLifecycle(
+                  runtimeNamespace,
+                  runtimeWorker,
+                  initialLifecycle,
+                  handlers
+                ),
+                checkLifecycle: async () => {
+                  let current;
+                  try {
+                    current = await readWebSocketLifecycleSnapshot(
+                      lifecycleRedis,
+                      runtimeNamespace,
+                      runtimeWorker
+                    );
+                  } catch (err) {
+                    if (err instanceof GatewayRoutingUnavailableError) throw err;
+                    return "retry";
+                  }
+                  if (current.kind === "inactive") return "restart";
+                  if (current.restartSequence < observedLifecycle.restartSequence) {
+                    throw new GatewayRoutingUnavailableError();
+                  }
+                  if (current.version !== runtimeVersion) return "restart";
+                  if (current.restartSequence > observedLifecycle.restartSequence) {
+                    if (current.mode === "restart") return "restart";
+                    observedLifecycle = current;
+                  }
+                  return "continue";
+                },
+              }
             )
             : initial;
         } else {
+          forwardStartedAt = Date.now();
           response = await env[dispatch.bindingName].fetch(forwardRequest);
         }
         recordRuntimeForwardDuration(
@@ -218,7 +271,9 @@ export default {
         );
         return scope.respond(response);
       } catch (err) {
-        recordRuntimeForwardDuration(Date.now() - forwardStartedAt, dispatch.bindingName, "exception");
+        if (forwardStartedAt !== null) {
+          recordRuntimeForwardDuration(Date.now() - forwardStartedAt, dispatch.bindingName, "exception");
+        }
         if (isWebSocketUpgrade(request)) recordGatewayWebSocketProxy("exception");
         throw err;
       }

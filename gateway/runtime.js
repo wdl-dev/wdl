@@ -3,7 +3,13 @@
 // invalidation, and gateway-local metrics/logs; gateway/index.js owns request
 // dispatch and forwarding decisions.
 
-import { RedisClient, RedisSubscriber } from "shared-redis";
+import {
+  decodeBulk,
+  defaultBackoff,
+  RedisClient,
+  RedisReplyError,
+  RedisSubscriber,
+} from "shared-redis";
 import { decodePatternProjection } from "shared-route-projection";
 import {
   MetricsRegistry,
@@ -11,13 +17,27 @@ import {
   formatError,
   recordRedisCommand,
 } from "shared-observability";
-import { isValidRouteNs, platformDomainFromEnv } from "shared-ns-pattern";
+import {
+  isValidRouteNs,
+  isValidRuntimeLoadNs,
+  isValidWorkerName,
+  platformDomainFromEnv,
+} from "shared-ns-pattern";
 import {
   DECLARED_HOSTS_KEY,
+  DURABLE_OBJECT_ROLLOUT_CHANNEL,
   NAMESPACES_KEY,
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   ROUTES_FLUSH_CHANNEL,
+  WORKER_DELETE_CHANNEL,
+  DURABLE_OBJECT_ROLLOUT_PRESERVE,
+  DURABLE_OBJECT_ROLLOUT_RESTART,
+  durableObjectRolloutKey,
+  parseDurableObjectRolloutEvent,
+  parseDurableObjectRolloutProjection,
+  parseWorkerDeleteEvent,
+  parseVersion,
   patternsKey,
   platformDomainDisabledKey,
   routesKey,
@@ -36,6 +56,12 @@ import {
  * @typedef {{ state: InFlightReadState, epoch: number }} InFlightRead
  * @typedef {{ PLATFORM_DOMAIN?: string, ADMIN_HOST?: string, [key: string]: unknown }} GatewayRoutingEnv
  * @typedef {{ platformDomain: string, normalizedAdminHost: string }} GatewayRoutingOptions
+ * @typedef {{ kind: "active", version: string, mode: "preserve" | "restart", restartSequence: number }} ActiveWebSocketLifecycleSnapshot
+ * @typedef {{ kind: "inactive" } | ActiveWebSocketLifecycleSnapshot} WebSocketLifecycleSnapshot
+ * @typedef {{ restart: () => void, fail: () => void }} WebSocketLifecycleHandlers
+ * @typedef {"restart" | "fail" | null} WebSocketLifecycleDisposition
+ * @typedef {{ restartSequence: number, notify: (disposition: WebSocketLifecycleDisposition) => void }} WebSocketLifecycleSession
+ * @typedef {{ ns: string, worker: string, sessions: Set<WebSocketLifecycleSession> }} WebSocketLifecycleGroup
  */
 
 /** @type {WeakMap<GatewayRoutingEnv, GatewayRoutingOptions>} */
@@ -62,10 +88,37 @@ let subscriberConnected = 0;
 let websocketProxyActiveConnections = 0;
 let websocketProxyDetachedConnections = 0;
 let websocketProxyBufferedMessages = 0;
+/** @type {Map<string, WebSocketLifecycleGroup>} */
+const webSocketLifecycleGroups = new Map();
+/** @type {Set<WebSocketLifecycleGroup>} */
+const webSocketLifecycleReconcilePending = new Set();
+/** @type {Set<WebSocketLifecycleGroup>} */
+const webSocketLifecycleReconcileRetryGroups = new Set();
+/** @type {Promise<void> | null} */
+let webSocketLifecycleReconcile = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let webSocketLifecycleReconcileRetryTimer = null;
+let webSocketLifecycleReconcileRetryAttempt = 0;
 const MAX_ROUTE_CACHE_ENTRIES = 10_000;
 const MAX_PATTERN_CACHE_ENTRIES = 10_000;
 const MAX_ROUTING_SNAPSHOT_ATTEMPTS = 5;
+const WEBSOCKET_LIFECYCLE_RECONCILE_CONCURRENCY = 8;
+const GATEWAY_REDIS_COMMAND_TIMEOUT_MS = 2_000;
+const TRANSIENT_REDIS_REPLY_CODES = new Set([
+  "BUSY",
+  "CLUSTERDOWN",
+  "LOADING",
+  "MASTERDOWN",
+  "READONLY",
+  "TRYAGAIN",
+]);
 const utf8Decoder = new TextDecoder();
+const READ_WEBSOCKET_LIFECYCLE_SNAPSHOT_SCRIPT = `
+return {
+  redis.call("HGET", KEYS[1], ARGV[1]),
+  redis.call("GET", KEYS[2])
+}
+`;
 
 export const metrics = new MetricsRegistry();
 export const log = createLogger("gateway");
@@ -149,6 +202,316 @@ function onRedisCommand(event) {
 /** @param {string} redisAddr */
 export function createGatewayRedis(redisAddr) {
   return new RedisClient(redisAddr, { onCommand: onRedisCommand });
+}
+
+/** @param {string} redisAddr */
+export function createGatewayLifecycleRedis(redisAddr) {
+  return new RedisClient(redisAddr, {
+    commandTimeoutMs: GATEWAY_REDIS_COMMAND_TIMEOUT_MS,
+    onCommand: onRedisCommand,
+  });
+}
+
+/** @param {unknown} err */
+function isTransientRedisReplyError(err) {
+  return err instanceof RedisReplyError && TRANSIENT_REDIS_REPLY_CODES.has(err.code);
+}
+
+/**
+ * Read the active route and DO rollout projection at one Redis linearization
+ * point. Gateway calls this only at WebSocket lifecycle and subscriber-recovery
+ * boundaries.
+ *
+ * @param {RedisClient} redis
+ * @param {string} ns
+ * @param {string} worker
+ * @returns {Promise<WebSocketLifecycleSnapshot>}
+ */
+export async function readWebSocketLifecycleSnapshot(redis, ns, worker) {
+  let reply;
+  try {
+    reply = await redis.eval(
+      READ_WEBSOCKET_LIFECYCLE_SNAPSHOT_SCRIPT,
+      [routesKey(ns), durableObjectRolloutKey(ns, worker)],
+      [worker]
+    );
+  } catch (err) {
+    if (err instanceof RedisReplyError && !isTransientRedisReplyError(err)) {
+      throw new GatewayRoutingUnavailableError();
+    }
+    throw err;
+  }
+  if (!Array.isArray(reply) || reply.length !== 2) {
+    throw new GatewayRoutingUnavailableError();
+  }
+  const version = decodeBulk(reply[0]);
+  const rawProjection = decodeBulk(reply[1]);
+  if (version == null && rawProjection == null) return { kind: "inactive" };
+  if (version == null || parseVersion(version) == null) {
+    throw new GatewayRoutingUnavailableError();
+  }
+  if (rawProjection == null) {
+    return {
+      kind: "active",
+      version,
+      mode: DURABLE_OBJECT_ROLLOUT_PRESERVE,
+      restartSequence: 0,
+    };
+  }
+  let projection;
+  try {
+    projection = parseDurableObjectRolloutProjection(rawProjection);
+  } catch {
+    throw new GatewayRoutingUnavailableError();
+  }
+  if (!projection || projection.version !== version) {
+    throw new GatewayRoutingUnavailableError();
+  }
+  return { kind: "active", ...projection };
+}
+
+/** @param {string} ns @param {string} worker */
+function webSocketLifecycleKey(ns, worker) {
+  return `${ns}:${worker}`;
+}
+
+/**
+ * Register one live public WebSocket against the rollout generation observed
+ * before its backend upgrade. The registration is process-local and exists
+ * only for the lifetime of that connection.
+ *
+ * @param {string} ns
+ * @param {string} worker
+ * @param {{ restartSequence: number }} snapshot
+ * @param {WebSocketLifecycleHandlers} handlers
+ */
+export function registerGatewayWebSocketLifecycle(ns, worker, snapshot, handlers) {
+  const key = webSocketLifecycleKey(ns, worker);
+  let group = webSocketLifecycleGroups.get(key);
+  if (!group) {
+    group = { ns, worker, sessions: new Set() };
+    webSocketLifecycleGroups.set(key, group);
+  }
+  const { promise, resolve } = Promise.withResolvers();
+  // Pub/sub runs in the subscriber request's IoContext. Settling this promise
+  // schedules its continuation back on the WebSocket request's IoContext;
+  // Gateway's compatibility date enables workerd's cross-request settlement.
+  void promise.then((disposition) => {
+    if (disposition === "restart") handlers.restart();
+    if (disposition === "fail") handlers.fail();
+  }).catch((err) => {
+    log("error", "websocket_lifecycle_signal_failed", formatError(err));
+  });
+  const session = { restartSequence: snapshot.restartSequence, notify: resolve };
+  group.sessions.add(session);
+  return () => {
+    const current = webSocketLifecycleGroups.get(key);
+    if (current) {
+      current.sessions.delete(session);
+      if (current.sessions.size === 0) webSocketLifecycleGroups.delete(key);
+    }
+    resolve(null);
+  };
+}
+
+/**
+ * Remove before notifying so repeated pub/sub or reconciliation passes cannot
+ * deliver the same lifecycle transition twice.
+ *
+ * @param {WebSocketLifecycleGroup} group
+ * @param {WebSocketLifecycleSession} session
+ * @param {Exclude<WebSocketLifecycleDisposition, null>} disposition
+ */
+function notifyWebSocketLifecycleSession(group, session, disposition) {
+  if (!group.sessions.delete(session)) return;
+  const key = webSocketLifecycleKey(group.ns, group.worker);
+  if (group.sessions.size === 0 && webSocketLifecycleGroups.get(key) === group) {
+    webSocketLifecycleGroups.delete(key);
+  }
+  session.notify(disposition);
+}
+
+/** @param {string} raw */
+function parseWebSocketRolloutEvent(raw) {
+  let event;
+  try {
+    event = parseDurableObjectRolloutEvent(raw);
+  } catch {
+    return null;
+  }
+  if (
+    !isValidRuntimeLoadNs(event.ns) ||
+    !isValidWorkerName(event.worker)
+  ) return null;
+  return event;
+}
+
+/** @param {string} raw */
+function parseWebSocketDeleteEvent(raw) {
+  let event;
+  try {
+    event = parseWorkerDeleteEvent(raw);
+  } catch {
+    return null;
+  }
+  if (!isValidRuntimeLoadNs(event.ns) || !isValidWorkerName(event.worker)) return null;
+  return event;
+}
+
+/** @param {{ ns: string, worker: string, restartSequence: number }} event */
+function webSocketLifecycleGroupForRolloutEvent(event) {
+  const group = webSocketLifecycleGroups.get(webSocketLifecycleKey(event.ns, event.worker));
+  if (!group) return null;
+  for (const session of group.sessions) {
+    if (event.restartSequence > session.restartSequence) return group;
+  }
+  return null;
+}
+
+/**
+ * @param {string} redisAddr
+ * @param {WebSocketLifecycleGroup[]} groups
+ * @returns {Promise<WebSocketLifecycleGroup[]>} groups deferred by transport failures
+ */
+async function reconcileGatewayWebSocketLifecycles(redisAddr, groups) {
+  if (groups.length === 0) return [];
+  const redis = createGatewayLifecycleRedis(redisAddr);
+  let nextGroup = 0;
+  /** @type {WebSocketLifecycleGroup[]} */
+  const deferredGroups = [];
+  let firstTransportError = null;
+  async function reconcileNextGroup() {
+    while (true) {
+      const index = nextGroup++;
+      if (index >= groups.length) return;
+      const group = groups[index];
+      // Bind this Redis result only to sessions that existed when the read
+      // started; newer sessions may already have observed a later sequence.
+      const sessions = [...group.sessions];
+      let current;
+      try {
+        current = await readWebSocketLifecycleSnapshot(redis, group.ns, group.worker);
+      } catch (err) {
+        if (err instanceof GatewayRoutingUnavailableError) {
+          for (const session of sessions) {
+            notifyWebSocketLifecycleSession(group, session, "fail");
+          }
+        } else {
+          deferredGroups.push(group);
+          firstTransportError ??= err;
+        }
+        continue;
+      }
+      if (current.kind === "inactive") {
+        for (const session of sessions) {
+          notifyWebSocketLifecycleSession(group, session, "restart");
+        }
+        continue;
+      }
+      for (const session of sessions) {
+        if (current.restartSequence < session.restartSequence) {
+          notifyWebSocketLifecycleSession(group, session, "fail");
+        } else if (current.restartSequence > session.restartSequence) {
+          if (current.mode === DURABLE_OBJECT_ROLLOUT_RESTART) {
+            notifyWebSocketLifecycleSession(group, session, "restart");
+          } else {
+            session.restartSequence = current.restartSequence;
+          }
+        }
+      }
+    }
+  }
+  await Promise.all(
+    Array.from(
+      { length: Math.min(WEBSOCKET_LIFECYCLE_RECONCILE_CONCURRENCY, groups.length) },
+      () => reconcileNextGroup()
+    )
+  );
+  if (deferredGroups.length > 0) {
+    log("warn", "websocket_lifecycle_reconcile_deferred", {
+      deferred_groups: deferredGroups.length,
+      ...(firstTransportError == null ? {} : formatError(firstTransportError)),
+    });
+  }
+  return deferredGroups;
+}
+
+function cancelWebSocketLifecycleReconcileRetry() {
+  if (webSocketLifecycleReconcileRetryTimer !== null) {
+    clearTimeout(webSocketLifecycleReconcileRetryTimer);
+    webSocketLifecycleReconcileRetryTimer = null;
+  }
+  webSocketLifecycleReconcileRetryGroups.clear();
+  webSocketLifecycleReconcileRetryAttempt = 0;
+}
+
+/** @param {string} redisAddr */
+function deferWebSocketLifecycleReconcile(redisAddr) {
+  if (
+    webSocketLifecycleReconcileRetryTimer !== null ||
+    subscriberConnected === 0 ||
+    webSocketLifecycleReconcileRetryGroups.size === 0
+  ) return;
+  const delayMs = defaultBackoff(webSocketLifecycleReconcileRetryAttempt++);
+  webSocketLifecycleReconcileRetryTimer = setTimeout(() => {
+    webSocketLifecycleReconcileRetryTimer = null;
+    for (const group of webSocketLifecycleReconcileRetryGroups) {
+      const key = webSocketLifecycleKey(group.ns, group.worker);
+      if (group.sessions.size > 0 && webSocketLifecycleGroups.get(key) === group) {
+        webSocketLifecycleReconcilePending.add(group);
+      }
+    }
+    webSocketLifecycleReconcileRetryGroups.clear();
+    scheduleWebSocketLifecycleReconcile(redisAddr, []);
+  }, delayMs);
+}
+
+/**
+ * @param {string} redisAddr
+ * @param {Iterable<WebSocketLifecycleGroup>} [groups]
+ */
+function scheduleWebSocketLifecycleReconcile(
+  redisAddr,
+  groups = webSocketLifecycleGroups.values()
+) {
+  for (const group of groups) {
+    const key = webSocketLifecycleKey(group.ns, group.worker);
+    if (group.sessions.size > 0 && webSocketLifecycleGroups.get(key) === group) {
+      webSocketLifecycleReconcilePending.add(group);
+    }
+  }
+  if (webSocketLifecycleReconcilePending.size === 0) {
+    if (!webSocketLifecycleReconcile && webSocketLifecycleReconcileRetryGroups.size === 0) {
+      cancelWebSocketLifecycleReconcileRetry();
+    }
+    return;
+  }
+  if (webSocketLifecycleReconcile) return;
+  /** @type {WebSocketLifecycleGroup[]} */
+  let activeGroups = [];
+  webSocketLifecycleReconcile = (async () => {
+    while (webSocketLifecycleReconcilePending.size > 0) {
+      activeGroups = [...webSocketLifecycleReconcilePending];
+      webSocketLifecycleReconcilePending.clear();
+      for (const group of activeGroups) webSocketLifecycleReconcileRetryGroups.delete(group);
+      const deferred = await reconcileGatewayWebSocketLifecycles(redisAddr, activeGroups);
+      for (const group of deferred) webSocketLifecycleReconcileRetryGroups.add(group);
+    }
+  })()
+    .catch((err) => {
+      for (const group of activeGroups) webSocketLifecycleReconcileRetryGroups.add(group);
+      log("error", "websocket_lifecycle_reconcile_failed", formatError(err));
+    })
+    .finally(() => {
+      webSocketLifecycleReconcile = null;
+      if (webSocketLifecycleReconcilePending.size > 0) {
+        scheduleWebSocketLifecycleReconcile(redisAddr, []);
+      } else if (webSocketLifecycleReconcileRetryGroups.size > 0) {
+        deferWebSocketLifecycleReconcile(redisAddr);
+      } else {
+        cancelWebSocketLifecycleReconcileRetry();
+      }
+    });
 }
 
 /**
@@ -337,7 +700,13 @@ export function ensureGatewaySubscriber(redisAddr) {
   if (subscriber) return null;
   subscriber = new RedisSubscriber(
     redisAddr,
-    [ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, PATTERNS_CHANNEL],
+    [
+      ROUTES_CHANNEL,
+      ROUTES_FLUSH_CHANNEL,
+      PATTERNS_CHANNEL,
+      DURABLE_OBJECT_ROLLOUT_CHANNEL,
+      WORKER_DELETE_CHANNEL,
+    ],
     {
       onConnect: () => {
         subscriberConnected = 1;
@@ -347,10 +716,13 @@ export function ensureGatewaySubscriber(redisAddr) {
         clearPatternState();
         metrics.increment("subscriber_connects", { service: "gateway" });
         log("info", "subscriber_connected", {});
+        cancelWebSocketLifecycleReconcileRetry();
+        scheduleWebSocketLifecycleReconcile(redisAddr);
       },
       onDisconnect: () => {
         if (subscriberConnected === 0) return;
         subscriberConnected = 0;
+        cancelWebSocketLifecycleReconcileRetry();
         clearRouteState();
         clearPatternState();
         metrics.increment("subscriber_disconnects", { service: "gateway" });
@@ -361,6 +733,55 @@ export function ensureGatewaySubscriber(redisAddr) {
       },
       onMessage: (channel, payload) => {
         const value = utf8Decoder.decode(payload);
+        if (channel === DURABLE_OBJECT_ROLLOUT_CHANNEL) {
+          const event = parseWebSocketRolloutEvent(value);
+          if (!event) {
+            log("warn", "websocket_rollout_invalidation_ignored", {
+              reason: "invalid_payload",
+              payload: value.slice(0, 128),
+            });
+            return;
+          }
+          const group = webSocketLifecycleGroupForRolloutEvent(event);
+          const reconciliationRequested = group !== null;
+          if (group) scheduleWebSocketLifecycleReconcile(redisAddr, [group]);
+          metrics.increment("subscriber_invalidations", {
+            service: "gateway",
+            scope: "do_rollout",
+          });
+          log("info", "websocket_rollout_invalidated", {
+            namespace: event.ns,
+            worker: event.worker,
+            version: event.version,
+            restart_sequence: event.restartSequence,
+            reconciliation_requested: reconciliationRequested,
+          });
+          return;
+        }
+        if (channel === WORKER_DELETE_CHANNEL) {
+          const event = parseWebSocketDeleteEvent(value);
+          if (!event) {
+            log("warn", "worker_delete_invalidation_ignored", {
+              reason: "invalid_payload",
+              payload: value.slice(0, 128),
+            });
+            return;
+          }
+          const group = webSocketLifecycleGroups.get(
+            webSocketLifecycleKey(event.ns, event.worker)
+          );
+          if (group) scheduleWebSocketLifecycleReconcile(redisAddr, [group]);
+          metrics.increment("subscriber_invalidations", {
+            service: "gateway",
+            scope: "worker_delete",
+          });
+          log("info", "worker_delete_invalidated", {
+            namespace: event.ns,
+            worker: event.worker,
+            reconciliation_requested: group !== undefined,
+          });
+          return;
+        }
         if (channel === PATTERNS_CHANNEL) {
           if (value === "*") {
             clearPatternState();

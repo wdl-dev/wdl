@@ -12,7 +12,7 @@ import {
   buildS3CleanupTaskId, recordCleanupIntentOrWarn,
   ControlAbort, codedErrorLogFields, controlAbortResponse,
   withOptimisticRetries,
-  ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, PATTERNS_CHANNEL,
+  ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, PATTERNS_CHANNEL, WORKER_DELETE_CHANNEL,
 } from "control-shared";
 import {
   referrersKey,
@@ -28,8 +28,10 @@ import {
   WHOLE_DELETE_LOCK_KIND,
   bundleKey,
   deleteLockKey,
+  durableObjectRolloutKey,
   doOwnerScopeScanPatternForStorage,
   doStorageIdKey,
+  encodeWorkerDeleteEvent,
   hostsKey,
   patternsKey,
   routesKey,
@@ -501,6 +503,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
   await redis.session(async (iso) => {
     const lockKey = deleteLockKey(collected.ns, collected.name);
     const storageKey = doStorageIdKey(collected.ns, collected.name);
+    const rolloutKey = durableObjectRolloutKey(collected.ns, collected.name);
     await iso.watch(
       lockKey,
       routesKey(collected.ns),
@@ -508,6 +511,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
       workerSecretsKey(collected.ns, collected.name),
       workflowDefsKey(collected.ns, collected.name),
       storageKey,
+      rolloutKey,
       ...collected.doOwnerKeys,
     );
 
@@ -517,9 +521,10 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
     }
     const activeVersion = await iso.hGet(routesKey(collected.ns), collected.name);
     const retainedVersions = await iso.zRange(workerVersionsKey(collected.ns, collected.name), 0, -1);
-    const [hasWorkerSecrets, hasWorkflowDefs] = await iso.existsMany([
+    const [hasWorkerSecrets, hasWorkflowDefs, hasRolloutProjection] = await iso.existsMany([
       workerSecretsKey(collected.ns, collected.name),
       workflowDefsKey(collected.ns, collected.name),
+      rolloutKey,
     ]);
     if (activeVersion || retainedVersions.length > 0 || hasWorkerSecrets || hasWorkflowDefs) {
       await iso.unwatch();
@@ -535,13 +540,22 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
       throw new DriftSignal("DO owner keys changed during residual cleanup");
     }
 
-    if (!collected.doStorageId && collected.doOwnerKeys.length === 0) {
+    if (
+      !collected.doStorageId &&
+      collected.doOwnerKeys.length === 0 &&
+      !hasRolloutProjection
+    ) {
       await iso.unwatch();
       return;
     }
     const multi = iso.multi();
     if (collected.doOwnerKeys.length) multi.del(...collected.doOwnerKeys);
     if (collected.doStorageId) multi.del(storageKey);
+    if (hasRolloutProjection) multi.del(rolloutKey);
+    multi.publish(
+      WORKER_DELETE_CHANNEL,
+      encodeWorkerDeleteEvent({ ns: collected.ns, worker: collected.name })
+    );
     await multi.exec();
   });
 }
@@ -837,6 +851,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       routesKey(ns),
       hostsKey(ns),
       deleteLockKey(ns, name),
+      durableObjectRolloutKey(ns, name),
       doStorageIdKey(ns, name),
       workerVersionsKey(ns, name),
       workerSecretsKey(ns, name),
@@ -988,6 +1003,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
         routes: ROUTES_CHANNEL,
         routesFlush: ROUTES_FLUSH_CHANNEL,
         patterns: PATTERNS_CHANNEL,
+        workerDelete: WORKER_DELETE_CHANNEL,
       },
     });
 

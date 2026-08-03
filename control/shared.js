@@ -19,6 +19,7 @@ import {
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   ROUTES_FLUSH_CHANNEL,
+  WORKER_DELETE_CHANNEL,
   deleteLockKey,
   formatDeleteLockToken,
   hostDeclarationsKey,
@@ -59,7 +60,7 @@ import {
   renewTokenLock,
 } from "shared-redis-lock";
 
-export { PATTERNS_CHANNEL, ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL };
+export { PATTERNS_CHANNEL, ROUTES_CHANNEL, ROUTES_FLUSH_CHANNEL, WORKER_DELETE_CHANNEL };
 
 /**
  * @typedef {import("shared-observability").RedisCommandEvent} RedisCommandEvent

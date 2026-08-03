@@ -8,7 +8,13 @@ import {
 import { loadControlRouting } from "../helpers/load-control-routing.js";
 import { loadControlLib } from "../helpers/load-control-lib.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
-import { bundleKey as productionBundleKey } from "../../shared/worker-contract.js";
+import {
+  bundleKey as productionBundleKey,
+  DURABLE_OBJECT_ROLLOUT_CHANNEL,
+  durableObjectRolloutKey,
+  durableObjectRolloutSequenceKey,
+  parseDurableObjectRolloutProjection,
+} from "../../shared/worker-contract.js";
 
 const { promoteWithRoutes, bumpActiveAndPromote, reconcileHosts } =
   await loadControlRouting();
@@ -17,6 +23,21 @@ const { encodeReferrerMember } = controlLib;
 const CRON_ID = /** @type {{ cron: { cronId: string } }} */ (
   readRepositoryJson("tests/fixtures/scheduler-projection-contract.json")
 ).cron.cronId;
+const DO_STORAGE_ID = "do_0123456789abcdef0123456789abcdef";
+
+/** @param {"preserve" | "restart"} [durableObjectRollout] */
+function doMeta(durableObjectRollout = "preserve") {
+  return {
+    ...(durableObjectRollout === "restart" ? { durableObjectRollout } : {}),
+    bindings: {
+      ROOM: {
+        type: "do",
+        className: "Room",
+        doStorageId: DO_STORAGE_ID,
+      },
+    },
+  };
+}
 
 function makeRedis() {
   return createFakeRedis();
@@ -196,6 +217,25 @@ test("promoteWithRoutes rejects invalid persisted workersDev metadata", async ()
     );
     assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
   }
+});
+
+test("promoteWithRoutes rejects invalid persisted Durable Object rollout metadata", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    ...doMeta(),
+    durableObjectRollout: "replace",
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_meta");
+      assert.equal(/** @type {{ details?: any }} */ (err).details?.field, "durableObjectRollout");
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+  assert.equal(redis.state.strings.has(durableObjectRolloutKey("demo", "worker")), false);
 });
 
 for (const [label, rawMeta] of [
@@ -444,6 +484,141 @@ test("promoteWithRoutes rejects non-object cron metadata", async () => {
   );
 });
 
+test("promoteWithRoutes persists the default DO preserve projection without allocating a restart", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", doMeta());
+
+  const result = await promoteWithRoutes(redis, "demo", "worker", "v1");
+
+  assert.equal(result.durableObjectRollout, "preserve");
+  assert.equal(result.restartSequence, 0);
+  assert.deepEqual(
+    parseDurableObjectRolloutProjection(
+      redis.state.strings.get(durableObjectRolloutKey("demo", "worker"))
+    ),
+    { version: "v1", mode: "preserve", restartSequence: 0 }
+  );
+  assert.equal(
+    redis.state.strings.has(durableObjectRolloutSequenceKey("demo", "worker")),
+    false
+  );
+  assert.equal(
+    redis.state.ops.some(
+      ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+    ),
+    false
+  );
+});
+
+test("promoteWithRoutes allocates and publishes each restart event once", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", doMeta("restart"));
+  seedBundle(redis, "v2", doMeta("preserve"));
+  seedBundle(redis, "v3", doMeta("restart"));
+
+  const first = await promoteWithRoutes(redis, "demo", "worker", "v1");
+  const retried = await promoteWithRoutes(redis, "demo", "worker", "v1");
+  const preserved = await promoteWithRoutes(redis, "demo", "worker", "v2");
+  const next = await promoteWithRoutes(redis, "demo", "worker", "v3");
+
+  assert.deepEqual(
+    [first.restartSequence, retried.restartSequence, preserved.restartSequence, next.restartSequence],
+    [1, 1, 1, 2]
+  );
+  assert.equal(
+    redis.state.strings.get(durableObjectRolloutSequenceKey("demo", "worker")),
+    "2"
+  );
+  assert.deepEqual(
+    parseDurableObjectRolloutProjection(
+      redis.state.strings.get(durableObjectRolloutKey("demo", "worker"))
+    ),
+    { version: "v3", mode: "restart", restartSequence: 2 }
+  );
+  assert.deepEqual(
+    redis.state.ops
+      .filter(
+        ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+      )
+      .map(([, channel, payload]) => [channel, JSON.parse(String(payload))]),
+    [
+      [DURABLE_OBJECT_ROLLOUT_CHANNEL, {
+        ns: "demo",
+        worker: "worker",
+        version: "v1",
+        restartSequence: 1,
+      }],
+      [DURABLE_OBJECT_ROLLOUT_CHANNEL, {
+        ns: "demo",
+        worker: "worker",
+        version: "v3",
+        restartSequence: 2,
+      }],
+    ]
+  );
+});
+
+test("promoteWithRoutes fails closed on malformed DO rollout allocator state", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v2", doMeta("restart"));
+  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "broken");
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v2"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_do_rollout_sequence");
+      assert.match(
+        /** @type {Error} */ (err).message,
+        /worker:do-rollout-seq:demo:worker/
+      );
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+});
+
+test("promoteWithRoutes fails closed when the DO rollout projection is not for the active route", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", doMeta("restart"));
+  seedBundle(redis, "v2", doMeta("restart"));
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "1");
+  redis.state.strings.set(
+    durableObjectRolloutKey("demo", "worker"),
+    JSON.stringify({ version: "v0", mode: "restart", restartSequence: 1 })
+  );
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v2"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_do_rollout_projection");
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+});
+
+test("promoteWithRoutes fails closed when the DO rollout projection trails its allocator", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", doMeta("restart"));
+  seedBundle(redis, "v2", doMeta("restart"));
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "2");
+  redis.state.strings.set(
+    durableObjectRolloutKey("demo", "worker"),
+    JSON.stringify({ version: "v1", mode: "restart", restartSequence: 1 })
+  );
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v2"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_do_rollout_sequence");
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
+});
+
 test("promoteWithRoutes allocates cron generations from the permanent epoch", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {
@@ -684,10 +859,16 @@ test("promoteWithRoutes reads its initial watched state in one snapshot", async 
         "hosts:demo",
         "crons:demo:worker",
         "cron:seq:demo:worker",
+        "worker:do-rollout:demo:worker",
+        "worker:do-rollout-seq:demo:worker",
         "worker-delete-lock:demo:worker",
         productionBundleKey("demo", "worker", "v1"),
       ],
-      ["worker-delete-lock:demo:worker"],
+      [
+        "worker-delete-lock:demo:worker",
+        "worker:do-rollout-seq:demo:worker",
+        "worker:do-rollout:demo:worker",
+      ],
       [
         [productionBundleKey("demo", "worker", "v1"), "__meta__"],
         ["routes:demo", "worker"],
@@ -852,6 +1033,41 @@ test("bumpActiveAndPromote also rewrites full queue consumer projection", async 
   assert.equal(redis.state.hashes.has("crons:demo:worker"), false);
   assert.equal(redis.state.strings.has("cron:seq:demo:worker"), false);
   assert.equal(redis.state.sets.get("cron:index:workers")?.size ?? 0, 0);
+});
+
+test("bumpActiveAndPromote allocates a new restart event for the copied active bundle", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", doMeta("restart"));
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "4");
+  redis.state.strings.set(
+    durableObjectRolloutKey("demo", "worker"),
+    JSON.stringify({ version: "v1", mode: "restart", restartSequence: 4 })
+  );
+
+  const result = await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.equal(result.version, "v2");
+  assert.equal(result.durableObjectRollout, "restart");
+  assert.equal(result.restartSequence, 5);
+  assert.equal(
+    redis.state.strings.get(durableObjectRolloutSequenceKey("demo", "worker")),
+    "5"
+  );
+  assert.deepEqual(
+    redis.state.ops
+      .filter(
+        ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+      )
+      .map(([, channel, payload]) => [channel, JSON.parse(String(payload))]),
+    [[DURABLE_OBJECT_ROLLOUT_CHANNEL, {
+      ns: "demo",
+      worker: "worker",
+      version: "v2",
+      restartSequence: 5,
+    }]]
+  );
 });
 
 test("bumpActiveAndPromote batches pattern projection reads across hosts", async () => {

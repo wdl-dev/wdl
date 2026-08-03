@@ -32,6 +32,15 @@ export class RedisClient extends RedisCommandSurface {
     this.db = normalizeRedisDb(opts.db);
     this.onCommand = opts.onCommand || null;
     this._connect = opts.connect || connect;
+    if (
+      opts.commandTimeoutMs !== undefined &&
+      (!Number.isSafeInteger(opts.commandTimeoutMs) || opts.commandTimeoutMs <= 0)
+    ) {
+      throw new RangeError("Redis command timeout must be a positive safe integer");
+    }
+    // This deadline owns socket-per-call commands only. session() fails fast
+    // instead of silently opening a held connection without that guarantee.
+    this.commandTimeoutMs = opts.commandTimeoutMs ?? null;
   }
 
   // Socket-per-call by design: workerd's `cloudflare:sockets` I/O objects
@@ -43,14 +52,30 @@ export class RedisClient extends RedisCommandSurface {
     const socket = this._connect(this.address);
     const writer = socket.writable.getWriter();
     const reader = socket.readable.getReader();
+    const commandTimeoutMs = this.commandTimeoutMs;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let timeout = null;
     try {
       const parser = new RespReader(reader);
-      if (this.db > 0) {
-        await writer.write(encodeCommand(["SELECT", String(this.db)]));
-        await parser.parseOne();
-        parser.compact();
-      }
-      const result = await fn(writer, reader, parser);
+      const operation = (async () => {
+        if (this.db > 0) {
+          await writer.write(encodeCommand(["SELECT", String(this.db)]));
+          await parser.parseOne();
+          parser.compact();
+        }
+        return await fn(writer, reader, parser);
+      })();
+      const result = commandTimeoutMs == null
+        ? await operation
+        : await Promise.race([
+            operation,
+            new Promise((_, reject) => {
+              timeout = setTimeout(() => {
+                try { socket.close?.(); } catch { /* timeout still rejects */ }
+                reject(new RedisCommandTimeoutError(command, commandTimeoutMs));
+              }, commandTimeoutMs);
+            }),
+          ]);
       this._emitCommand({ command, duration_ms: Date.now() - startedAt, ok: true });
       return result;
     } catch (err) {
@@ -62,9 +87,10 @@ export class RedisClient extends RedisCommandSurface {
       });
       throw err;
     } finally {
-      writer.close();
+      if (timeout !== null) clearTimeout(timeout);
+      try { void Promise.resolve(writer.close()).catch(() => {}); } catch { /* already closed */ }
       try { reader.releaseLock(); } catch { /* already released */ }
-      socket.close?.();
+      try { socket.close?.(); } catch { /* already closed */ }
     }
   }
 
@@ -221,6 +247,9 @@ export class RedisClient extends RedisCommandSurface {
 
   /** @template T @param {(session: RedisSession) => Promise<T>} fn @returns {Promise<T>} */
   async session(fn) {
+    if (this.commandTimeoutMs !== null) {
+      throw new Error("RedisClient.session() does not support commandTimeoutMs");
+    }
     const session = new RedisSession(this.address, {
       db: this.db,
       onCommand: this.onCommand,
@@ -232,5 +261,15 @@ export class RedisClient extends RedisCommandSurface {
     } finally {
       await session.close();
     }
+  }
+}
+
+export class RedisCommandTimeoutError extends Error {
+  /** @param {string} command @param {number} timeoutMs */
+  constructor(command, timeoutMs) {
+    super(`Redis ${command} command timed out after ${timeoutMs}ms`);
+    this.name = "RedisCommandTimeoutError";
+    this.command = command;
+    this.timeoutMs = timeoutMs;
   }
 }

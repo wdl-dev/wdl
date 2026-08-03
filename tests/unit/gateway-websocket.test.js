@@ -221,6 +221,380 @@ test("gateway websocket proxy relays upstream server-pushed frames", () => {
   assert.deepEqual(outcomes, ["established"]);
 });
 
+test("gateway websocket proxy closes when a restart races the initial handshake", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {},
+    {
+      async checkLifecycle() {
+        return "restart";
+      },
+    }
+  );
+
+  await waitFor(() => responseWebSocket(response).closed !== null);
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(upstream.closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(outcomes, ["established", "lifecycle_restart"]);
+});
+
+test("gateway websocket proxy does not expose server push before initial lifecycle admission", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  const { promise: finalDecision, resolve: resolveFinalDecision } = Promise.withResolvers();
+  let checks = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    null,
+    {},
+    {
+      reconnectDelaysMs: [0, 0],
+      async checkLifecycle() {
+        checks += 1;
+        return checks === 1 ? "retry" : await finalDecision;
+      },
+    }
+  );
+
+  await waitFor(() => checks === 2);
+  upstream.dispatch("message", { data: "stale-push" });
+  assert.deepEqual(responseWebSocket(response).sent, []);
+  assert.deepEqual(upstream.acceptCalls, []);
+
+  resolveFinalDecision("restart");
+  await waitFor(() => responseWebSocket(response).closed !== null);
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(responseWebSocket(response).sent, []);
+  assert.deepEqual(upstream.closed, { code: 1012, reason: "service restart" });
+});
+
+test("gateway websocket proxy exposes and releases its rollout lifecycle registration", () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {{ restart(): void, fail(): void } | undefined} */
+  let handlers;
+  let unregisterCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    null,
+    {},
+    {
+      registerLifecycle(/** @type {{ restart(): void, fail(): void }} */ nextHandlers) {
+        handlers = nextHandlers;
+        return () => {
+          unregisterCalls += 1;
+        };
+      },
+    }
+  );
+
+  assert.ok(handlers);
+  handlers.restart();
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(upstream.closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.equal(unregisterCalls, 1);
+});
+
+test("gateway websocket proxy ignores a rollout result after the client closes", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  const { promise: lifecycle, resolve: resolveLifecycle } = Promise.withResolvers();
+  /** @type {string[]} */
+  const outcomes = [];
+  proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {},
+    {
+      async checkLifecycle() {
+        return await lifecycle;
+      },
+    }
+  );
+
+  /** @type {any} */ (lastPair)[1].dispatch("close", { code: 1000, reason: "done" });
+  resolveLifecycle("restart");
+  await delay(0);
+
+  assert.deepEqual(outcomes, ["established"]);
+  assert.deepEqual(upstream.closed, { code: 1000, reason: "done" });
+});
+
+test("gateway websocket proxy checks rollout before reconnecting an aborted upstream", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  let reconnectCalls = 0;
+  let lifecycleChecks = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {},
+    {
+      async checkLifecycle() {
+        lifecycleChecks += 1;
+        return lifecycleChecks === 1 ? "continue" : "restart";
+      },
+    }
+  );
+
+  await waitFor(() => upstream.accepted);
+  upstream.dispatch("close", { code: 1006, reason: "facet aborted" });
+  await waitFor(() => responseWebSocket(response).closed !== null);
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.equal(lifecycleChecks, 2);
+  assert.deepEqual(outcomes, [
+    "established",
+    "upstream_abnormal_close",
+    "lifecycle_restart",
+  ]);
+});
+
+test("gateway websocket proxy rechecks rollout after a reconnect upgrade", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  /** @type {string[]} */
+  const outcomes = [];
+  let lifecycleChecks = 0;
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => {
+      reconnectCalls += 1;
+      return websocketResponse(upstream2);
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {},
+    {
+      async checkLifecycle() {
+        lifecycleChecks += 1;
+        return lifecycleChecks === 3 ? "restart" : "continue";
+      },
+    }
+  );
+
+  await waitFor(() => upstream1.accepted);
+  upstream1.dispatch("close", { code: 1006, reason: "runtime restart" });
+  await waitFor(() => responseWebSocket(response).closed !== null);
+
+  assert.equal(reconnectCalls, 1);
+  assert.equal(lifecycleChecks, 3);
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(upstream2.closed, { code: 1012, reason: "service restart" });
+  assert.deepEqual(outcomes, [
+    "established",
+    "upstream_abnormal_close",
+    "lifecycle_restart",
+  ]);
+});
+
+test("gateway websocket proxy owns a replacement while its lifecycle fence is pending", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  const finalFence = Promise.withResolvers();
+  let lifecycleChecks = 0;
+  /** @type {PromiseWithResolvers<{ restart(): void, fail(): void }>} */
+  const lifecycleRegistration = Promise.withResolvers();
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => websocketResponse(upstream2),
+    null,
+    {},
+    {
+      async checkLifecycle() {
+        lifecycleChecks += 1;
+        return lifecycleChecks < 3 ? "continue" : await finalFence.promise;
+      },
+      registerLifecycle(/** @type {{ restart(): void, fail(): void }} */ handlers) {
+        lifecycleRegistration.resolve(handlers);
+        return () => {};
+      },
+    }
+  );
+
+  await waitFor(() => upstream1.accepted);
+  upstream1.dispatch("close", { code: 1006, reason: "runtime restart" });
+  await waitFor(() => lifecycleChecks === 3);
+  assert.equal(upstream2.accepted, false, "the candidate must remain detached while fenced");
+  const lifecycleHandlers = await lifecycleRegistration.promise;
+  lifecycleHandlers.restart();
+  await waitFor(() => upstream2.closed !== null);
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(upstream2.closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  finalFence.resolve("restart");
+});
+
+test("gateway websocket proxy fails closed when a lifecycle check is invalid", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  let lifecycleChecks = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("must not reconnect");
+    },
+    null,
+    {},
+    {
+      async checkLifecycle() {
+        lifecycleChecks += 1;
+        if (lifecycleChecks === 1) return "continue";
+        throw new Error("invalid rollout state");
+      },
+    }
+  );
+
+  await waitFor(() => upstream.accepted);
+  upstream.dispatch("close", { code: 1006, reason: "facet aborted" });
+  await waitFor(() => responseWebSocket(response).closed !== null);
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1011,
+    reason: "lifecycle check failed",
+  });
+});
+
+test("gateway websocket proxy retries transient lifecycle checks within the reconnect budget", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  let checks = 0;
+  let connects = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => {
+      connects += 1;
+      return websocketResponse(upstream2);
+    },
+    null,
+    {},
+    {
+      reconnectDelaysMs: [0, 0, 0],
+      async checkLifecycle() {
+        checks += 1;
+        if (checks === 1) return "continue";
+        return checks < 4 ? "retry" : "continue";
+      },
+    }
+  );
+
+  await waitFor(() => upstream1.accepted);
+  upstream1.dispatch("close", { code: 1006, reason: "runtime restart" });
+  // Two retries clear the pre-reconnect gate; the successful replacement
+  // upgrade is then admitted against one final fresh snapshot.
+  await waitFor(() => checks === 5 && connects === 1);
+  assert.equal(responseWebSocket(response).closed, null);
+  assert.equal(upstream2.closed, null);
+});
+
+test("gateway websocket proxy closes after transient lifecycle retries are exhausted", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  let checks = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      throw new Error("not used");
+    },
+    null,
+    {},
+    {
+      reconnectDelaysMs: [0, 0],
+      async checkLifecycle() {
+        checks += 1;
+        return checks === 1 ? "continue" : "retry";
+      },
+    }
+  );
+
+  await waitFor(() => upstream.accepted);
+  upstream.dispatch("close", { code: 1006, reason: "runtime restart" });
+  await waitFor(() => checks === 3);
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1011,
+    reason: "lifecycle check failed",
+  });
+});
+
+test("gateway websocket proxy checks rollout after an upstream send failure", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  upstream.sendError = new Error("write failed");
+  /** @type {string[]} */
+  const outcomes = [];
+  let reconnectCalls = 0;
+  let lifecycleChecks = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {},
+    {
+      async checkLifecycle() {
+        lifecycleChecks += 1;
+        return lifecycleChecks === 1 ? "continue" : "restart";
+      },
+    }
+  );
+
+  await waitFor(() => upstream.accepted);
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "after-rollout" });
+  await waitFor(() => responseWebSocket(response).closed !== null);
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, ["established", "lifecycle_restart"]);
+});
+
 test("gateway websocket proxy relays binary frames in both directions", async () => {
   const upstream = new FakeWebSocket("upstream");
   const response = proxyGatewayWebSocket(
@@ -301,6 +675,38 @@ test("gateway websocket proxy proactively reconnects after abnormal upstream clo
     level: "warn",
     event: "websocket_upstream_abnormal_close",
     fields: { code: 1011, reason: "runtime restart" },
+  }]);
+});
+
+test("gateway websocket proxy records one outcome for an upstream error", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  /** @type {string[]} */
+  const outcomes = [];
+  /** @type {Array<{ level: string, event: string, fields: any }>} */
+  const events = [];
+  let connects = 0;
+
+  proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => {
+      connects += 1;
+      return websocketResponse(upstream2);
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {
+      recordEvent: (/** @type {string} */ level, /** @type {string} */ event, /** @type {any} */ fields) => events.push({ level, event, fields }),
+    }
+  );
+
+  upstream1.dispatch("error");
+  await waitFor(() => connects === 1);
+
+  assert.deepEqual(outcomes, ["established", "upstream_error", "reconnected"]);
+  assert.deepEqual(events, [{
+    level: "warn",
+    event: "websocket_upstream_error",
+    fields: {},
   }]);
 });
 
@@ -722,15 +1128,20 @@ test("gateway websocket proxy closes a late reconnect socket after client close"
   const upstream2 = new FakeWebSocket("upstream2");
   /** @type {string[]} */
   const outcomes = [];
+  let reconnectCalls = 0;
   const { promise: reconnecting, resolve: resolveReconnect } = Promise.withResolvers();
 
   proxyGatewayWebSocket(
     websocketResponse(upstream1),
-    async () => await reconnecting,
+    async () => {
+      reconnectCalls += 1;
+      return await reconnecting;
+    },
     (/** @type {string} */ outcome) => outcomes.push(outcome)
   );
 
   upstream1.dispatch("close", { code: 1011, reason: "runtime restart" });
+  await waitFor(() => reconnectCalls === 1);
   /** @type {any} */ (lastPair)[1].dispatch("message", { data: "queued" });
   /** @type {any} */ (lastPair)[1].dispatch("close", { code: 1000, reason: "client done" });
   resolveReconnect(websocketResponse(upstream2));
@@ -896,12 +1307,13 @@ test("gateway websocket proxy reports downstream error session lifetime", () => 
   }]);
 });
 
-test("gateway websocket proxy propagates normal upstream close", () => {
+test("gateway websocket proxy propagates normal upstream close", async () => {
   const upstream = new FakeWebSocket("upstream");
   /** @type {Array<unknown[]>} */
   const adjustments = [];
   /** @type {Array<[number, string]>} */
   const sessions = [];
+  let lifecycleChecks = 0;
   const response = proxyGatewayWebSocket(
     websocketResponse(upstream),
     async () => {
@@ -911,9 +1323,16 @@ test("gateway websocket proxy propagates normal upstream close", () => {
     {
       adjustConnections: (/** @type {string} */ state, /** @type {number} */ delta) => adjustments.push(["connection", state, delta]),
       recordSessionLifetime: (/** @type {number} */ durationMs, /** @type {string} */ outcome) => sessions.push([durationMs, outcome]),
+    },
+    {
+      async checkLifecycle() {
+        lifecycleChecks += 1;
+        return "continue";
+      },
     }
   );
 
+  await waitFor(() => upstream.accepted);
   upstream.dispatch("close", { code: 1000, reason: "done" });
 
   assert.deepEqual(upstream.closed, { code: 1000, reason: "done" });
@@ -925,6 +1344,7 @@ test("gateway websocket proxy propagates normal upstream close", () => {
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0][1], "upstream_normal_close");
   assert.ok(sessions[0][0] >= 0);
+  assert.equal(lifecycleChecks, 1);
 });
 
 test("gateway websocket proxy propagates an upstream close without a status code", () => {

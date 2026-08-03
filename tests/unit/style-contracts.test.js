@@ -350,6 +350,12 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
     if (/`worker:do-storage:\$\{/.test(source)) {
       offenders.push(`${file}: inline worker:do-storage: — use doStorageIdKey(ns, worker)`);
     }
+    if (/`worker:do-rollout:\$\{/.test(source)) {
+      offenders.push(`${file}: inline worker:do-rollout: — use durableObjectRolloutKey(ns, worker)`);
+    }
+    if (/`worker:do-rollout-seq:\$\{/.test(source)) {
+      offenders.push(`${file}: inline worker:do-rollout-seq: — use durableObjectRolloutSequenceKey(ns, worker)`);
+    }
     if (/`hosts:\$\{/.test(source)) offenders.push(`${file}: inline hosts:<ns> — use hostsKey(ns)`);
     if (/`ns-hosts:\$\{/.test(source)) offenders.push(`${file}: inline ns-hosts:<ns> — use nsHostsKey(ns)`);
     if (/`worker:\$\{[^`]*:next_version`/.test(source)) {
@@ -368,7 +374,7 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
   }
   // Rust services are production readers too; rust/common/worker_contract.rs holds the
   // only literals (mirror of shared/worker-contract.js), every other crate must call
-  // routes_key()/worker_versions_key()/do_storage_id_key().
+  // the corresponding shared key helper.
   const rustOffenderFiles = rustFiles("rust").filter(
     (file) => file !== "rust/common/src/worker_contract.rs"
   );
@@ -380,6 +386,9 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
     }
     if (/format!\("worker:do-storage:/.test(source)) {
       offenders.push(`${file}: inline worker:do-storage: — use do_storage_id_key(ns, worker)`);
+    }
+    if (/format!\("worker:do-rollout:/.test(source)) {
+      offenders.push(`${file}: inline worker:do-rollout: — use durable_object_rollout_key(ns, worker)`);
     }
   }
   assert.deepEqual(offenders, [], `worker contract key literals must use shared helpers:\n${offenders.join("\n")}`);

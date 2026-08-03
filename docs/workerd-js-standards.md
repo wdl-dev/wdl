@@ -161,7 +161,17 @@ Workerd I/O objects are tied to their `IoContext`. Keep the shared `RedisClient`
 socket-per-call model, and batch related commands inside one typed operation instead of
 retaining a socket or request-created promise across invocations. Use `RedisSession`
 only when one invocation or one long-lived owning task intentionally holds the
-connection for a WATCH/transaction or subscription lifecycle.
+connection for a WATCH/transaction or subscription lifecycle. `RedisClient`'s
+`commandTimeoutMs` applies only to its socket-per-call operations; `session()` rejects a
+client configured with that option rather than silently dropping the deadline.
+
+A process-local registry may retain a resolver and settle its request-created Promise
+across invocations only under a strict signaling boundary. The non-owning invocation
+may settle the resolver with an I/O-free value, but must not call request-owned handlers
+or touch request-owned I/O. The Promise and every continuation that touches I/O must be
+created by the owning request; workerd's cross-request settlement must resume those
+reactions in that request's `IoContext`. The owning module must document and test this
+boundary.
 
 Transport-independent command construction and reply decoding belong to the shared
 typed command surface. `RedisClient` and `RedisSession` own their distinct connection

@@ -165,9 +165,31 @@ test("normalizes do invoke request", () => {
     className: "ChatRoom",
   });
   assert.equal("workerCode" in invoke ? invoke.workerCode : undefined, undefined);
+  assert.equal(invoke.rolloutMode, "preserve");
+  assert.equal(invoke.restartSequence, 0);
   assert.ok("request" in invoke);
   assert.deepEqual(invoke.request.headers, [["content-type", "text/plain"]]);
   assert.equal(buildFacetName(invoke), "ChatRoom:room-a");
+});
+
+test("keeps the Durable Object restart sequence out of the invoke wire protocol", async () => {
+  const encoded = encodeDoInvokeRequest({
+    ...normalizeDoInvokeRequest(BASE_BODY),
+    rolloutMode: "restart",
+    restartSequence: 4,
+  });
+  const decoded = await readDoInvokeRequest(new Request("http://do-runtime/internal/do/invoke", {
+    method: "POST",
+    headers: { "content-type": DO_INVOKE_CONTENT_TYPE },
+    body: encoded,
+  }));
+  assert.equal(decoded.rolloutMode, "preserve");
+  assert.equal(decoded.restartSequence, 0);
+  assert.equal(
+    normalizeDoInvokeRequest({ ...BASE_BODY, rolloutMode: "restart" }).rolloutMode,
+    "preserve"
+  );
+  assert.equal(normalizeDoInvokeRequest({ ...BASE_BODY, restartSequence: -1 }).restartSequence, 0);
 });
 
 test("DO invoke version ingress matches the shared JS/Rust fixture", () => {
@@ -411,6 +433,8 @@ test("normalizes DO connect without exposing internal auth to tenant code", () =
   }));
 
   assert.equal(invoke.kind, "fetch");
+  assert.equal(invoke.rolloutMode, "preserve");
+  assert.equal(invoke.restartSequence, 0);
   assert.ok("request" in invoke);
   assert.deepEqual(invoke.request.headers, [["x-tenant-visible", "ok"]]);
 });

@@ -37,7 +37,7 @@ const clientMod = await importRepositoryModule("shared/redis-command-client.js",
 ]);
 const respMod = await import(redisRespUrl);
 const sessionMod = await import(redisSessionUrl);
-const { RedisClient } = clientMod;
+const { RedisClient, RedisCommandTimeoutError } = clientMod;
 const { RedisSession } = sessionMod;
 const { RespReader, WatchError, decodeBulk } = respMod;
 
@@ -1208,6 +1208,55 @@ test("RedisClient ordinary commands use per-call sockets under workerd", async (
   assert.equal(await client.hGet("k", "g"), null);
   assert.equal(turn, 2, "ordinary commands must not reuse sockets across calls");
   assert.ok(socketA.closed && socketB.closed);
+});
+
+test("RedisClient command timeout closes sockets stalled on write or reply", async () => {
+  for (const stage of ["write", "reply"]) {
+    const socket = makeFakeSocket([]);
+    if (stage === "write") socket._writer.write = () => new Promise(() => {});
+    if (stage === "reply") socket._reader.read = () => new Promise(() => {});
+    const { connect } = scriptedConnect(socket);
+    const client = new RedisClient("x", { connect, commandTimeoutMs: 20 });
+
+    await assert.rejects(
+      () => client.get("key"),
+      (err) => {
+        assert.ok(err instanceof RedisCommandTimeoutError, stage);
+        const timeoutError = /** @type {InstanceType<typeof RedisCommandTimeoutError>} */ (err);
+        assert.equal(timeoutError.command, "GET", stage);
+        assert.equal(timeoutError.timeoutMs, 20, stage);
+        return true;
+      }
+    );
+    assert.equal(socket.closed, true, stage);
+    assert.equal(socket._reader.released, true, stage);
+  }
+});
+
+test("RedisClient rejects malformed command deadlines before opening IO", () => {
+  for (const commandTimeoutMs of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => new RedisClient("x", { commandTimeoutMs }),
+      /Redis command timeout must be a positive safe integer/
+    );
+  }
+});
+
+test("RedisClient command deadlines reject held sessions before opening IO", async () => {
+  let connectCalls = 0;
+  const client = new RedisClient("x", {
+    commandTimeoutMs: 20,
+    connect: () => {
+      connectCalls += 1;
+      throw new Error("unexpected Redis connection");
+    },
+  });
+
+  await assert.rejects(
+    client.session(async () => {}),
+    /RedisClient\.session\(\) does not support commandTimeoutMs/
+  );
+  assert.equal(connectCalls, 0);
 });
 
 test("RedisClient selects configured DB before ordinary commands", async () => {

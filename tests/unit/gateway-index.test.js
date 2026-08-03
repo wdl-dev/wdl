@@ -37,12 +37,32 @@ const GATEWAY_INDEX_TEST_STATE = {
   websocketOptionCalls: /** @type {object[]} */ ([]),
   websocketProxyCalls: /** @type {any[]} */ ([]),
   websocketUpstreamCalls: /** @type {any[]} */ ([]),
+  rolloutSnapshotCalls: /** @type {Array<{ namespace: string, worker: string }>} */ ([]),
+  rolloutSnapshots: /** @type {Array<{
+    kind: "active",
+    version: string,
+    mode: "preserve" | "restart",
+    restartSequence: number,
+  } | { kind: "inactive" } | Error>} */ ([]),
+  lifecycleRegistrations: /** @type {any[]} */ ([]),
+  runtimeForwardCalls: /** @type {unknown[][]} */ ([]),
+  timingEvents: /** @type {string[]} */ ([]),
   routingUnavailable: false,
 };
 
 /** @type {typeof globalThis & { __gatewayIndexTestState?: typeof GATEWAY_INDEX_TEST_STATE }} */
 const gatewayIndexGlobal = globalThis;
 gatewayIndexGlobal.__gatewayIndexTestState = GATEWAY_INDEX_TEST_STATE;
+
+/**
+ * @param {string} version
+ * @param {"preserve" | "restart"} [mode]
+ * @param {number} [restartSequence]
+ * @returns {{ kind: "active", version: string, mode: "preserve" | "restart", restartSequence: number }}
+ */
+function activeLifecycle(version, mode = "preserve", restartSequence = 0) {
+  return { kind: "active", version, mode, restartSequence };
+}
 
 const runtimeUrl = moduleDataUrl(`
 export class GatewayRoutingUnavailableError extends Error {
@@ -53,6 +73,7 @@ export class GatewayRoutingUnavailableError extends Error {
     this.publicMessage = "Gateway routing temporarily unavailable";
   }
 }
+export function createGatewayLifecycleRedis() { return {}; }
 export function createGatewayRedis() { return {}; }
 export function ensureGatewaySubscriber() { return null; }
 export function gatewayHealthSnapshot() { return {}; }
@@ -62,6 +83,23 @@ export function gatewayRoutingOptionsFromEnv(env) {
     platformDomain: "workers.example",
     normalizedAdminHost: "",
   };
+}
+export async function readWebSocketLifecycleSnapshot(_redis, namespace, worker) {
+  const state = globalThis.__gatewayIndexTestState;
+  state.timingEvents.push("lifecycle");
+  state.rolloutSnapshotCalls.push({ namespace, worker });
+  const snapshot = state.rolloutSnapshots.shift();
+  if (snapshot instanceof Error) throw snapshot;
+  return snapshot || { kind: "active", version: "v1", mode: "preserve", restartSequence: 0 };
+}
+export function registerGatewayWebSocketLifecycle(namespace, worker, snapshot, handlers) {
+  globalThis.__gatewayIndexTestState.lifecycleRegistrations.push({
+    namespace,
+    worker,
+    snapshot,
+    handlers,
+  });
+  return () => {};
 }
 export const log = (...args) => globalThis.__gatewayIndexTestState.websocketEvents.push(args);
 export const metrics = {};
@@ -76,7 +114,9 @@ export function recordGatewayWebSocketProxy() {}
 export function recordGatewayWebSocketSessionLifetime(...args) {
   globalThis.__gatewayIndexTestState.websocketAdjustments.push(["lifetime", ...args]);
 }
-export function recordRuntimeForwardDuration() {}
+export function recordRuntimeForwardDuration(...args) {
+  globalThis.__gatewayIndexTestState.runtimeForwardCalls.push(args);
+}
 export function runtimeForwardOutcome() { return "error"; }
 `);
 
@@ -177,6 +217,11 @@ beforeEach(() => {
   GATEWAY_INDEX_TEST_STATE.websocketOptionCalls.length = 0;
   GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length = 0;
   GATEWAY_INDEX_TEST_STATE.websocketUpstreamCalls.length = 0;
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshotCalls.length = 0;
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.length = 0;
+  GATEWAY_INDEX_TEST_STATE.lifecycleRegistrations.length = 0;
+  GATEWAY_INDEX_TEST_STATE.runtimeForwardCalls.length = 0;
+  GATEWAY_INDEX_TEST_STATE.timingEvents.length = 0;
   GATEWAY_INDEX_TEST_STATE.routingUnavailable = false;
 });
 
@@ -336,6 +381,10 @@ test("gateway proxies websocket upgrades through the routed runtime binding", as
     REDIS_ADDR: "redis:6379",
     RUNTIME_USER: runtimeBinding,
   };
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+    activeLifecycle("v1", "restart", 4),
+    activeLifecycle("v2", "restart", 5)
+  );
 
   const response = await gatewayIndex.fetch(
     new Request("https://custom.example/same", {
@@ -360,7 +409,21 @@ test("gateway proxies websocket upgrades through the routed runtime binding", as
   assert.equal(GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length, 1);
   const proxyCall = GATEWAY_INDEX_TEST_STATE.websocketProxyCalls[0];
   assert.equal(proxyCall.initial, accepted);
-  assert.deepEqual(proxyCall.options, { maxBufferedClientMessages: 7 });
+  assert.equal(proxyCall.options.maxBufferedClientMessages, 7);
+  assert.equal(typeof proxyCall.options.checkLifecycle, "function");
+  const lifecycleHandlers = { restart() {}, fail() {} };
+  proxyCall.options.registerLifecycle(lifecycleHandlers);
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.lifecycleRegistrations, [{
+    namespace: "demo",
+    worker: "worker",
+    snapshot: activeLifecycle("v1", "restart", 4),
+    handlers: lifecycleHandlers,
+  }]);
+  assert.equal(await proxyCall.options.checkLifecycle(), "restart");
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.rolloutSnapshotCalls, [
+    { namespace: "demo", worker: "worker" },
+    { namespace: "demo", worker: "worker" },
+  ]);
   proxyCall.observability.recordEvent("warn", "ws_retry", { detail: "again" });
   assert.deepEqual(GATEWAY_INDEX_TEST_STATE.websocketEvents, [[
     "warn",
@@ -373,6 +436,269 @@ test("gateway proxies websocket upgrades through the routed runtime binding", as
       binding: "RUNTIME_USER",
       detail: "again",
     },
+  ]]);
+});
+
+test("gateway fails closed when a websocket rollout sequence regresses", async () => {
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+    activeLifecycle("v1", "restart", 4),
+    activeLifecycle("v1", "preserve", 3)
+  );
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          return { status: 101, webSocket: {} };
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  assert.equal(response.status, 200);
+  const options = GATEWAY_INDEX_TEST_STATE.websocketProxyCalls[0].options;
+  await assert.rejects(options.checkLifecycle(), /routing unavailable/);
+});
+
+test("gateway rejects websocket handshakes superseded by a restart rollout", async () => {
+  let upstreamCalled = false;
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(activeLifecycle("v2", "restart", 5));
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          upstreamCalled = true;
+          return new Response("unexpected");
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  await assertJsonResponse(response, 503, {
+    error: "gateway_routing_unavailable",
+    message: "Gateway routing temporarily unavailable",
+    request_id: "rid-gateway-index",
+  });
+  assert.equal(upstreamCalled, false);
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length, 0);
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.runtimeForwardCalls, []);
+});
+
+test("gateway rejects websocket handshakes superseded by a preserve rollout", async () => {
+  let upstreamCalled = false;
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(activeLifecycle("v2", "preserve", 4));
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          upstreamCalled = true;
+          return new Response("unexpected");
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  await assertJsonResponse(response, 503, {
+    error: "gateway_routing_unavailable",
+    message: "Gateway routing temporarily unavailable",
+    request_id: "rid-gateway-index",
+  });
+  assert.equal(upstreamCalled, false);
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length, 0);
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.runtimeForwardCalls, []);
+});
+
+test("gateway does not reconnect an old websocket worker after a preserve promotion", async () => {
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+    activeLifecycle("v1"),
+    activeLifecycle("v1"),
+    activeLifecycle("v2")
+  );
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          return { status: 101, webSocket: {} };
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  assert.equal(response.status, 200);
+  const options = GATEWAY_INDEX_TEST_STATE.websocketProxyCalls[0].options;
+  assert.equal(await options.checkLifecycle(), "continue");
+  assert.equal(await options.checkLifecycle(), "restart");
+});
+
+test("gateway acknowledges a superseded restart when the latest projection preserves", async () => {
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+    activeLifecycle("v1", "preserve", 0),
+    activeLifecycle("v1", "preserve", 1),
+    activeLifecycle("v1", "restart", 2)
+  );
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          return { status: 101, webSocket: {} };
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  assert.equal(response.status, 200);
+  const options = GATEWAY_INDEX_TEST_STATE.websocketProxyCalls[0].options;
+  assert.equal(await options.checkLifecycle(), "continue");
+  assert.equal(await options.checkLifecycle(), "restart");
+});
+
+test("gateway treats a deleted worker as a service restart after admission", async () => {
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+    activeLifecycle("v1"),
+    { kind: "inactive" }
+  );
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          return { status: 101, webSocket: {} };
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    await GATEWAY_INDEX_TEST_STATE.websocketProxyCalls[0].options.checkLifecycle(),
+    "restart"
+  );
+});
+
+test("gateway rejects a stale websocket handshake after whole-worker delete", async () => {
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push({ kind: "inactive" });
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          throw new Error("inactive workers must not reach runtime");
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  await assertJsonResponse(response, 503, {
+    error: "gateway_routing_unavailable",
+    message: "Gateway routing temporarily unavailable",
+    request_id: "rid-gateway-index",
+  });
+  assert.equal(GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length, 0);
+});
+
+test("gateway distinguishes transient websocket lifecycle read failures", async () => {
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+    activeLifecycle("v1"),
+    new Error("redis failover"),
+    activeLifecycle("v1")
+  );
+
+  const response = await gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          return { status: 101, webSocket: {} };
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  );
+
+  assert.equal(response.status, 200);
+  const options = GATEWAY_INDEX_TEST_STATE.websocketProxyCalls[0].options;
+  assert.equal(await options.checkLifecycle(), "retry");
+  assert.equal(await options.checkLifecycle(), "continue");
+});
+
+test("gateway starts runtime forward timing after websocket lifecycle admission", async () => {
+  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(activeLifecycle("v1"));
+  let now = 100;
+
+  const response = await withMockedPropertyDescriptor(Date, "now", {
+    configurable: true,
+    value() {
+      GATEWAY_INDEX_TEST_STATE.timingEvents.push("clock");
+      now += 10;
+      return now;
+    },
+  }, () => gatewayIndex.fetch(
+    new Request("https://custom.example/same", {
+      headers: { Upgrade: "websocket" },
+    }),
+    /** @type {any} */ ({
+      REDIS_ADDR: "redis:6379",
+      RUNTIME_USER: {
+        async fetch() {
+          return { status: 101, webSocket: {} };
+        },
+      },
+    }),
+    /** @type {any} */ ({ waitUntil() {} })
+  ));
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.timingEvents, [
+    "lifecycle",
+    "clock",
+    "clock",
+  ]);
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.runtimeForwardCalls, [[
+    10,
+    "RUNTIME_USER",
+    "error",
   ]]);
 });
 

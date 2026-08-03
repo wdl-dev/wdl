@@ -7,6 +7,7 @@
 // - `RedisSubscriber` long-lived SUBSCRIBE loop with reconnect.
 
 export {
+  RedisReplyError,
   WatchError,
   RespReader,
   decodeBulk,
@@ -15,7 +16,7 @@ export {
   normalizeRedisDb,
   redisDbFromEnv,
 } from "shared-redis-resp";
-export { RedisClient } from "shared-redis-command-client";
+export { RedisClient, RedisCommandTimeoutError } from "shared-redis-command-client";
 export { RedisSession, RedisMulti } from "shared-redis-session";
 export { RedisSubscriber, defaultBackoff } from "shared-redis-subscriber";
 

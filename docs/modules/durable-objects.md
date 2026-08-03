@@ -102,6 +102,8 @@ Key families:
 | Key | Type | Owner | Authority | Cleanup/delete semantics |
 |---|---|---|---|---|
 | `worker:do-storage:<ns>:<worker>` | String | Control | Authoritative pointer from logical worker to current `doStorageId`. | Whole-worker delete removes the pointer; redeploy without the pointer allocates a new storage id. |
+| `worker:do-rollout:<ns>:<worker>` | String | Control | Active JSON projection `{version,mode,restartSequence}` committed with the route flip. | Whole-worker delete removes it; a missing projection means default `preserve`. |
+| `worker:do-rollout-seq:<ns>:<worker>` | String | Control | Permanent monotonic allocator for restart rollout events. | Survives whole-worker delete so the next restart after recreation cannot reuse a sequence observed by an old Gateway session. |
 | `do:objects:<doStorageId>` | Set | do-runtime | Best-effort registry/tombstone of objects observed under a storage id. | Preserved after whole-worker delete for future platform cleanup; object SQLite state remains in localDisk/EFS. |
 | `do:owner:scope:<encoded scope>` | String EX | do-runtime | Authoritative owner lease for `doStorageId:className:shard<N>`. | Redis server `TIME` drives lease expiry; stale owners must not commit. |
 | `do:owner:scope:<encoded scope>:generation` | String | do-runtime | Monotonic generation counter for the owner scope. | Never decremented; stale generations are rejected. |
@@ -127,10 +129,12 @@ tenant SQL and should be treated as upgrade debris, not application tables.
 
 `getAlarm()` performs alarm-scoped read repair: if SQLite has a pending alarm row but
 the Workflows DB 2 due index is missing, it idempotently rewrites the backend due index
-without adding Redis IO to ordinary DO fetches. Active and retained alarms keep their
-scheduled worker version; after an old version is deleted, alarm dispatch retargets to
-the current active version only when the `doStorageId` still matches. Alarms self-clean
-when the logical worker is gone or now points at a different `doStorageId`.
+without adding Redis IO to ordinary DO fetches. Under `preserve`, active and retained
+alarms keep their scheduled worker version. A `restart` rollout retargets a superseded
+alarm to the active version even while the old version remains retained; deleting a
+retained version does the same. Both transitions require the `doStorageId` to remain
+unchanged. Alarms self-clean when the logical worker is gone or now points at a
+different `doStorageId`.
 
 ## Ownership / Concurrency / Failure Semantics
 
@@ -139,26 +143,55 @@ when the logical worker is gone or now points at a different `doStorageId`.
 - `do-runtime/protocol.js` owns the DO ownership error vocabulary. The injected runtime
   transport keeps its retry and stale-hint subsets private and pins them through
   response-classification tests.
-- Facet identity is `className:objectName` inside stable `doStorageId`, so worker
-  promotion preserves object state.
-- Existing native facets keep the constructed class version until host actor restart or
-  facet deletion. Promotion changes future loads and routing metadata, not an already
-  constructed facet in the current host actor.
+- Facet identity is `className:objectName` inside stable `doStorageId`, so every rollout
+  mode preserves SQLite object state.
+- Bundle metadata owns `durableObjectRollout`. Missing metadata and explicit
+  `preserve` keep the existing behavior: a constructed native facet keeps its class
+  version until host actor restart or facet deletion. `restart` is opt-in and requires
+  at least one DO binding.
+- Promote commits the active route and `{version,mode,restartSequence}` projection in
+  one Redis transaction. A true `restart` promotion allocates a permanent monotonic
+  sequence; repeating the same promotion reuses that sequence. Uploading an immutable
+  version without promoting it does not trigger a rollout.
+- The route/projection commit is the rollout linearization point. A new `restart`
+  sequence is published on `do-rollout:restart` in that same transaction. Gateway uses
+  the event only as a fast hint to reconcile older public WebSocket sessions; the latest
+  Redis projection decides whether they close with `1012`. Subscriber reconnect uses
+  the same authoritative reconciliation.
+- The latest active projection wins. A later `preserve` promotion keeps the allocated
+  sequence but supersedes a lazy restart that Gateway, Workflows, or a host actor has not
+  yet observed. It cannot undo a `1012` close or facet abort that already occurred.
+- do-runtime does not enumerate every owner or facet at promotion time. Owner resolution
+  and owner-side dispatch read the active projection with the owner/storage snapshot.
+  The restart sequence and current mode are owner-local state derived from those Redis
+  reads, not invoke/connect wire fields. A current `restart` projection rejects
+  superseded immutable versions. The first host-actor dispatch with a higher sequence
+  aborts only that stale facet through `facets.abort()` before recreating it; it never
+  calls `facets.delete()`, so SQLite storage remains. A delayed lower-sequence dispatch
+  cannot replace a newer facet.
+- Storage cleanup is scoped to stable `doStorageId`, not an immutable worker version. It
+  may dispatch through an owner while its requested version is superseded, but still
+  enforces whole-worker delete exclusion, the active storage pointer, owner generation,
+  and lease fences before the actor's storage-delete branch runs.
+- Existing non-Gateway facets and already-running calls are not synchronously enumerated
+  or interrupted by the promotion. They converge when the facet is next dispatched;
+  public Gateway sessions receive a prompt reconciliation hint and close only when the
+  authoritative state still requires it. A later `preserve` can supersede restart work
+  not yet observed. Repeating the same promotion reuses its sequence and does not create
+  another rollout event.
 - Whole-worker delete assigns a new `doStorageId` on redeploy; old native storage is
   tombstoned for cleanup rather than immediately purged.
 - WebSocket upgrades must complete on the owner endpoint. Owner-hinted WebSocket direct
   retry cannot fall back to a router-established 101.
-- WDL intentionally keeps the client-facing WebSocket at the gateway when possible,
-  including backend reconnect after user-runtime or do-runtime restart. This is stronger
-  connection continuity than Cloudflare's shutdown behavior, which may terminate
-  WebSocket connections so a new Durable Object instance can take over. The current
-  backend facet is still owner-scoped: after the initial `101`, WebSocket message and
-  close events are not re-fenced against the Redis owner generation on every frame.
-  Future tightening should preserve the client connection where possible while
-  rebinding or rejecting stale backend owner facets; it should not rely on client
-  disconnect as the primary safety mechanism.
-  Client messages queued under an older backend reconnect epoch may be discarded
-  without per-frame ack/nack when the gateway resets that epoch.
+- In `preserve` mode WDL keeps the client-facing WebSocket at the gateway when possible.
+  A healthy old-version backend may drain, and backend reconnect after user-runtime or
+  do-runtime restart remains transparent only while that immutable version is still
+  active. If the active version changed, or in `restart` mode the session sequence was
+  superseded, Gateway closes the public connection with code `1012`; the client must
+  reconnect and repeat its application handshake. Gateway reads the atomic route/rollout
+  snapshot only at initial connection races and abnormal backend loss, not for every
+  frame. Client messages queued under an older backend reconnect epoch may be discarded
+  without per-frame ack/nack when that epoch resets.
 - Ordinary fetch/RPC can perform one router rediscovery after a trusted owner-hint or an
   explicit pre-dispatch stale-owner/owner-race response carrying do-runtime's private
   ownership-error control header, including for non-idempotent methods and RPC. Tenant
@@ -202,14 +235,16 @@ when the logical worker is gone or now points at a different `doStorageId`.
 Owner resolution is the single-writer protocol:
 
 1. do-runtime derives an owner scope from `doStorageId`, class name, and shard.
-2. Owner resolution WATCHes the owner record, generation key, worker delete lock, and
-   active worker storage pointer. A `whole` delete lock rejects ownership; a `version`
-   lock remains part of the watched snapshot but does not interrupt active storage. The
-   WATCH prevents a claim from committing after whole-worker delete starts. Renewal
-   takes a pipelined owner/storage snapshot, then uses a Lua CAS to atomically compare
-   the exact owner bytes and active storage pointer before refreshing the TTL. Its
-   generation fence is carried by the owner record rather than a second generation-key
-   read.
+2. Owner resolution WATCHes the owner record, generation key, worker delete lock,
+   active worker storage pointer, and active rollout projection. A `whole` delete lock
+   rejects ownership; a `version` lock remains part of the watched snapshot but does
+   not interrupt active storage. A `restart` projection rejects an older immutable
+   version and supplies owner-local sequence state to target-version dispatch. The WATCH
+   prevents a claim from committing after whole-worker delete or rollout state changes.
+   Renewal takes a pipelined owner/storage snapshot, then uses a Lua CAS to atomically
+   compare the exact owner bytes and active storage pointer before refreshing the TTL.
+   Its generation fence is carried by the owner record rather than a second
+   generation-key read.
 3. If a live owner exists on another task, the router returns that owner or an
    owner-hint header; the runtime facade may retry directly, but the owner task still
    rechecks the fence.
@@ -281,14 +316,20 @@ interrupt.
 
 ## Observability
 
-do-runtime emits structured logs around owner resolution, dispatch, alarm execution,
-drain, renew, and WebSocket handling. Workflows emits backend alarm
-delivery/retry/discard/in-flight-unknown outcomes through `do_alarm_dispatches`;
-do-runtime metrics cover runtime operations. Gateway request logs do not measure the
-lifetime of backend WebSocket recovery after the initial 101.
+do-runtime emits structured logs around owner resolution, rollout fences, lazy facet
+restart, dispatch, alarm execution, drain, renew, and WebSocket handling. Workflows
+emits backend alarm delivery/retry/discard/in-flight-unknown outcomes through
+`do_alarm_dispatches`; do-runtime metrics cover runtime operations. Gateway request logs
+do not measure the lifetime of backend WebSocket recovery after the initial 101.
 
 ## Deployment / Rollout Notes
 
+- Roll out Gateway, Workflows, and do-runtime projection readers before
+  system-runtime/Control writers. Pause Control mutations while system-runtime rolls so
+  old and new Control writers cannot commit different route/projection shapes; resume
+  them only after that tier stabilizes, and only then allow API clients to send
+  `durableObjectRollout`. Do not enable `restart` while an older Gateway, Workflows, or
+  do-runtime tier is still serving.
 - do-runtime should roll with user/system runtime when DO binding transport shape
   changes.
 - Drain should run before workerd process termination so owned shards release or fail
@@ -346,7 +387,14 @@ lifetime of backend WebSocket recovery after the initial 101.
   fails, so the tombstone set may be incomplete; future cleanup must tolerate missing
   members and treat the active storage pointer plus owner/alarm state as the stronger
   lifecycle signals.
-- Gateway-proxied WebSocket recovery is best-effort for client connection continuity.
+- Gateway-proxied WebSocket recovery is best-effort for client connection continuity in
+  `preserve` mode while the pinned immutable version remains active. A detached inactive
+  version is not reloaded. Exact rollout and whole-worker-delete hints request an
+  authoritative check for that worker; a current `restart` projection or inactive worker
+  closes old public Gateway sessions with `1012`, and restart lazily aborts each stale DO
+  facet when that facet is next dispatched. If same-name recreation completes before the
+  delete hint obtains an inactive snapshot, the latest projection wins; the non-durable
+  hint has no incarnation fence with which to identify pre-delete sessions.
   Backend DO facets are not re-fenced per message after the initial `101`; owner handoff
   safety relies on reconnect/rebind behavior and the owner-side dispatch fences that run
   before a backend facet is created. Client messages queued under an older backend

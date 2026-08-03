@@ -6,9 +6,10 @@
 //! Redis state fails closed instead of silently normalizing to another worker version.
 //!
 //! `routes_key` / `worker_versions_key` / `worker_delete_lock_key` /
-//! `do_storage_id_key` mirror `shared/worker-contract.js`'s lifecycle key builders.
-//! Control owns these keys; Rust readers must build them here so a future
-//! key-grammar change updates JS and Rust together.
+//! `do_storage_id_key` / `durable_object_rollout_key` mirror
+//! `shared/worker-contract.js`'s lifecycle key builders. Control owns these keys; Rust
+//! readers must build them here so a future key-grammar change updates JS and Rust
+//! together.
 
 use std::fmt;
 
@@ -64,6 +65,84 @@ pub fn worker_delete_lock_key(ns: &str, worker: &str) -> String {
 /// runtime and workflows read it for owner/storage fencing.
 pub fn do_storage_id_key(ns: &str, worker: &str) -> String {
     format!("worker:do-storage:{ns}:{worker}")
+}
+
+/// Active Durable Object rollout projection committed with the route flip.
+pub fn durable_object_rollout_key(ns: &str, worker: &str) -> String {
+    format!("worker:do-rollout:{ns}:{worker}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableObjectRolloutMode {
+    Preserve,
+    Restart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableObjectRolloutProjection {
+    pub version: String,
+    pub mode: DurableObjectRolloutMode,
+    pub restart_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidDurableObjectRolloutProjection;
+
+impl fmt::Display for InvalidDurableObjectRolloutProjection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid Durable Object rollout projection")
+    }
+}
+
+impl std::error::Error for InvalidDurableObjectRolloutProjection {}
+
+pub fn parse_durable_object_rollout_projection(
+    raw: Option<&str>,
+) -> Result<Option<DurableObjectRolloutProjection>, InvalidDurableObjectRolloutProjection> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| InvalidDurableObjectRolloutProjection)?;
+    let object = value
+        .as_object()
+        .ok_or(InvalidDurableObjectRolloutProjection)?;
+    let version = object
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(InvalidDurableObjectRolloutProjection)?;
+    parse_version_tag(version).map_err(|_| InvalidDurableObjectRolloutProjection)?;
+    let mode = match object.get("mode").and_then(serde_json::Value::as_str) {
+        Some("preserve") => DurableObjectRolloutMode::Preserve,
+        Some("restart") => DurableObjectRolloutMode::Restart,
+        _ => return Err(InvalidDurableObjectRolloutProjection),
+    };
+    let restart_sequence = object
+        .get("restartSequence")
+        .and_then(json_safe_integer)
+        .ok_or(InvalidDurableObjectRolloutProjection)?;
+    if mode == DurableObjectRolloutMode::Restart && restart_sequence == 0 {
+        return Err(InvalidDurableObjectRolloutProjection);
+    }
+    Ok(Some(DurableObjectRolloutProjection {
+        version: version.to_string(),
+        mode,
+        restart_sequence,
+    }))
+}
+
+fn json_safe_integer(value: &serde_json::Value) -> Option<u64> {
+    const JS_SAFE_INTEGER_EXCLUSIVE_UPPER_BOUND: f64 = 9_007_199_254_740_992.0;
+
+    if let Some(integer) = value.as_u64() {
+        return (integer <= crate::JS_MAX_SAFE_INTEGER).then_some(integer);
+    }
+    let number = value.as_f64()?;
+    (number.is_finite()
+        && number >= 0.0
+        && number.fract() == 0.0
+        && number < JS_SAFE_INTEGER_EXCLUSIVE_UPPER_BOUND)
+        .then_some(number as u64)
 }
 
 #[cfg(test)]
@@ -125,5 +204,48 @@ mod tests {
             do_storage_id_key("tenant", "worker"),
             "worker:do-storage:tenant:worker"
         );
+        assert_eq!(
+            durable_object_rollout_key("tenant", "worker"),
+            "worker:do-rollout:tenant:worker"
+        );
+    }
+
+    #[test]
+    fn durable_object_rollout_projection_matches_cross_language_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/do-rollout-projections.json"
+        ))
+        .expect("DO rollout fixture parses");
+        for case in fixture["cases"]
+            .as_array()
+            .expect("DO rollout fixture cases is an array")
+        {
+            let raw = serde_json::to_string(&case["projection"])
+                .expect("DO rollout projection serializes");
+            let parsed = parse_durable_object_rollout_projection(Some(&raw));
+            if case["valid"].as_bool().unwrap() {
+                let projection = parsed
+                    .expect("valid DO rollout projection parses")
+                    .expect("fixture projection is present");
+                let expected_mode = match case["projection"]["mode"].as_str().unwrap() {
+                    "preserve" => DurableObjectRolloutMode::Preserve,
+                    "restart" => DurableObjectRolloutMode::Restart,
+                    mode => panic!("unexpected valid rollout mode {mode}"),
+                };
+                assert_eq!(
+                    projection,
+                    DurableObjectRolloutProjection {
+                        version: case["projection"]["version"].as_str().unwrap().to_string(),
+                        mode: expected_mode,
+                        restart_sequence: json_safe_integer(&case["projection"]["restartSequence"])
+                            .expect("valid restart sequence"),
+                    },
+                    "{raw}"
+                );
+            } else {
+                assert!(parsed.is_err(), "{raw}");
+            }
+        }
+        assert_eq!(parse_durable_object_rollout_projection(None), Ok(None));
     }
 }

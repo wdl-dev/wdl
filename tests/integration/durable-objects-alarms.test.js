@@ -668,6 +668,48 @@ test("alarms scheduled by deleted retained versions retarget to the active worke
   assert.equal(statusJson.alarms, 1);
 });
 
+test("restart rollout retargets alarms scheduled by retained worker versions", async () => {
+  const ns = uniqueNs("do-alarm-rollout-retarget");
+  const v1 = await deployAndPromote(ns, "alarms", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_ALARM_WORKER },
+    bindings: {
+      ALARMS: { type: "do", className: "AlarmCounter" },
+    },
+  });
+  const v2 = await withServiceStopped("scheduler", async () => {
+    const scheduled = await gatewayFetch(ns, "/alarms/schedule-soon?name=rollout-retarget");
+    const scheduledText = await scheduled.text();
+    assert.equal(scheduled.status, 200, scheduledText);
+    assert.deepEqual(responseJson({ body: scheduledText }), { pending: true });
+    const job = await waitForDoAlarmJob(ns, "alarms", "AlarmCounter", "rollout-retarget");
+    assert.equal(job.scheduledVersion, v1);
+
+    return await deployAndPromote(ns, "alarms", {
+      mainModule: "worker.js",
+      modules: { "worker.js": DO_ALARM_WORKER },
+      bindings: {
+        ALARMS: { type: "do", className: "AlarmCounter" },
+      },
+      durableObjectRollout: "restart",
+    });
+  });
+  assert.notEqual(v2, v1);
+
+  const statusJson = await waitForJson(
+    "restart-retargeted DO alarm",
+    async () => {
+      const status = await gatewayFetch(ns, "/alarms/status?name=rollout-retarget");
+      const statusText = await status.text();
+      assert.equal(status.status, 200, statusText);
+      return responseJson({ body: statusText });
+    },
+    (json) => json.alarms === 1 && json.pending === null,
+    20_000
+  );
+  assert.equal(statusJson.alarms, 1);
+});
+
 test("failing DO alarm handlers retry with backoff then discard at max tries", async () => {
   const ns = uniqueNs("do-alarm-failure");
   await deployAndPromote(ns, "alarms", {

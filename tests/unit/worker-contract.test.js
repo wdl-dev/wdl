@@ -5,12 +5,14 @@ import {
   DECLARED_HOSTS_KEY,
   DECLARED_HOSTS_REVISION_KEY,
   DO_OWNER_SCOPE_PREFIX,
+  DURABLE_OBJECT_ROLLOUT_CHANNEL,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
   NAMESPACES_KEY,
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   ROUTES_FLUSH_CHANNEL,
+  WORKER_DELETE_CHANNEL,
   VERSION_DELETE_LOCK_KIND,
   WHOLE_DELETE_LOCK_KIND,
   bundleKey,
@@ -18,7 +20,12 @@ import {
   cronSequenceKey,
   deleteLockKey,
   doOwnerScopeScanPatternForStorage,
+  durableObjectRolloutKey,
+  durableObjectRolloutSequenceKey,
   doStorageIdKey,
+  encodeDurableObjectRolloutEvent,
+  encodeDurableObjectRolloutProjection,
+  encodeWorkerDeleteEvent,
   formatDeleteLockToken,
   formatVersion,
   hostDeclarationsKey,
@@ -27,12 +34,16 @@ import {
   nextVersionKey,
   nsHostsKey,
   parseDeleteLockKind,
+  parseDurableObjectRolloutEvent,
+  parseDurableObjectRolloutProjection,
+  parseWorkerDeleteEvent,
   parseVersion,
   platformDomainDisabledKey,
   workerVersionsKey,
 } from "../../shared/worker-contract.js";
 
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
+const doRolloutFixture = readRepositoryJson("tests/fixtures/do-rollout-projections.json");
 
 test("formatVersion: integer → v<int>", () => {
   assert.equal(formatVersion(1), "v1");
@@ -111,12 +122,92 @@ test("cronSequenceKey composes the permanent cron generation counter", () => {
 test("worker lifecycle key helpers compose canonical keys", () => {
   assert.equal(workerVersionsKey("demo", "hello"), "worker-versions:demo:hello");
   assert.equal(doStorageIdKey("demo", "hello"), "worker:do-storage:demo:hello");
+  assert.equal(durableObjectRolloutKey("demo", "hello"), "worker:do-rollout:demo:hello");
+  assert.equal(durableObjectRolloutSequenceKey("demo", "hello"), "worker:do-rollout-seq:demo:hello");
   assert.equal(DO_OWNER_SCOPE_PREFIX, "do:owner:scope:");
   assert.equal(
     doOwnerScopeScanPatternForStorage("do_abc"),
     "do:owner:scope:do_abc%3A*"
   );
   assert.equal(deleteLockKey("demo", "hello"), "worker-delete-lock:demo:hello");
+});
+
+test("Durable Object restart events use the dedicated rollout channel", () => {
+  assert.equal(DURABLE_OBJECT_ROLLOUT_CHANNEL, "do-rollout:restart");
+  const event = {
+    ns: "demo",
+    worker: "hello",
+    version: "v7",
+    restartSequence: 3,
+  };
+  const encoded = encodeDurableObjectRolloutEvent(event);
+  assert.deepEqual(
+    parseDurableObjectRolloutEvent(encoded),
+    event
+  );
+  assert.throws(
+    () => encodeDurableObjectRolloutEvent({
+      ns: "demo",
+      worker: "hello",
+      version: "v7",
+      restartSequence: 0,
+    }),
+    /invalid Durable Object rollout event/
+  );
+  for (const raw of ["", "{}", JSON.stringify({ ...event, ns: "" })]) {
+    assert.throws(
+      () => parseDurableObjectRolloutEvent(raw),
+      /invalid Durable Object rollout event/
+    );
+  }
+});
+
+test("worker delete events use the dedicated lifecycle channel", () => {
+  assert.equal(WORKER_DELETE_CHANNEL, "worker:delete");
+  const event = { ns: "demo", worker: "hello" };
+  assert.deepEqual(
+    parseWorkerDeleteEvent(encodeWorkerDeleteEvent(event)),
+    event
+  );
+  for (const invalid of [{ ns: "", worker: "hello" }, { ns: "demo", worker: "" }]) {
+    assert.throws(() => encodeWorkerDeleteEvent(invalid), /invalid worker delete event/);
+  }
+  for (const raw of ["", "{}", JSON.stringify({ ...event, worker: "" })]) {
+    assert.throws(() => parseWorkerDeleteEvent(raw), /invalid worker delete event/);
+  }
+});
+
+test("Durable Object rollout projections round-trip and reject malformed state", () => {
+  const projection = {
+    version: "v7",
+    mode: /** @type {const} */ ("restart"),
+    restartSequence: 3,
+  };
+  const encoded = encodeDurableObjectRolloutProjection(projection);
+  assert.deepEqual(parseDurableObjectRolloutProjection(encoded), projection);
+  assert.deepEqual(
+    parseDurableObjectRolloutProjection(JSON.stringify({
+      version: "v1",
+      mode: "preserve",
+      restartSequence: 0,
+    })),
+    { version: "v1", mode: "preserve", restartSequence: 0 }
+  );
+  assert.equal(parseDurableObjectRolloutProjection(null), null);
+
+  for (const entry of doRolloutFixture.cases) {
+    const raw = JSON.stringify(entry.projection);
+    if (entry.valid) {
+      assert.deepEqual(parseDurableObjectRolloutProjection(raw), entry.projection);
+    } else {
+      assert.throws(
+        () => parseDurableObjectRolloutProjection(raw),
+        /invalid Durable Object rollout projection/
+      );
+    }
+  }
+  assert.throws(() => parseDurableObjectRolloutProjection(""), /invalid Durable Object rollout projection/);
+  assert.throws(() => parseDurableObjectRolloutProjection("{}"), /invalid Durable Object rollout projection/);
 });
 
 test("worker delete lock tokens carry the operation kind", () => {

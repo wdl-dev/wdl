@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  adminFetch,
   composeStart,
   composeRecreate,
   composeRestart,
@@ -17,6 +18,7 @@ import {
   frameJson,
   readJsonServerFrame,
   readOneServerBinaryFrame,
+  readOneServerCloseFrame,
   readOneServerTextFrame,
   serviceInternalGet,
   serviceInternalPost,
@@ -206,6 +208,92 @@ test("gateway-proxied Durable Object WebSocket reconnects backend after do-runti
   }
 });
 
+test("restart rollout closes an existing Durable Object WebSocket and preserves storage", async () => {
+  const ns = uniqueNs("do-ws-rollout-restart");
+  await deployAndPromote(ns, "chat", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WS_WORKER },
+    bindings: {
+      ROOM: { type: "do", className: "Room" },
+    },
+  });
+
+  const first = await wsHandshake(ns, "/chat?name=rollout");
+  try {
+    assert.equal(first.status, 101);
+    first.socket.write(encodeClientTextFrame("before"));
+    assert.deepEqual(await readJsonServerFrame(first.socket), {
+      objectId: "rollout",
+      memory: 1,
+      storage: 1,
+      text: "before",
+    });
+
+    const closeFrame = readOneServerCloseFrame(first.socket, { timeoutMs: 15_000 });
+    await deployAndPromote(ns, "chat", {
+      mainModule: "worker.js",
+      modules: { "worker.js": DO_WS_WORKER },
+      bindings: {
+        ROOM: { type: "do", className: "Room" },
+      },
+      durableObjectRollout: "restart",
+    });
+    assert.deepEqual(await closeFrame, {
+      code: 1012,
+      reason: "service restart",
+    });
+  } finally {
+    first.socket.destroy();
+  }
+
+  const second = await wsHandshake(ns, "/chat?name=rollout");
+  try {
+    assert.equal(second.status, 101);
+    second.socket.write(encodeClientTextFrame("after"));
+    assert.deepEqual(await readJsonServerFrame(second.socket), {
+      objectId: "rollout",
+      memory: 1,
+      storage: 2,
+      text: "after",
+    });
+  } finally {
+    second.socket.destroy();
+  }
+});
+
+test("whole-worker delete closes an existing Durable Object WebSocket", async () => {
+  const ns = uniqueNs("do-ws-worker-delete");
+  await deployAndPromote(ns, "chat", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WS_WORKER },
+    bindings: {
+      ROOM: { type: "do", className: "Room" },
+    },
+  });
+
+  const connection = await wsHandshake(ns, "/chat?name=delete");
+  try {
+    assert.equal(connection.status, 101);
+    connection.socket.write(encodeClientTextFrame("before"));
+    assert.deepEqual(await readJsonServerFrame(connection.socket), {
+      objectId: "delete",
+      memory: 1,
+      storage: 1,
+      text: "before",
+    });
+
+    const closeFrame = readOneServerCloseFrame(connection.socket, { timeoutMs: 15_000 });
+    const deleted = await adminFetch(`/ns/${ns}/worker/chat/delete`, { method: "POST" });
+    assertStatus(deleted, 200, "whole-worker delete");
+    assert.deepEqual(await closeFrame, {
+      code: 1012,
+      reason: "service restart",
+    });
+  } finally {
+    connection.socket.destroy();
+  }
+});
+
 test("gateway-proxied Durable Object WebSocket proactively reconnects backend for server-pushed frames", async () => {
   const ns = uniqueNs("do-ws-push-reconnect");
   await deployAndPromote(ns, "chat", {
@@ -287,6 +375,62 @@ test("Durable Object hibernation WebSocket API round-trips through the gateway p
     assert.deepEqual(await binaryReceived, binary);
   } finally {
     socket.destroy();
+  }
+});
+
+test("restart rollout closes a hibernating Durable Object WebSocket", async () => {
+  const ns = uniqueNs("do-ws-hibernate-rollout");
+  await deployAndPromote(ns, "chat", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WS_HIBERNATION_WORKER },
+    bindings: {
+      ROOM: { type: "do", className: "Room" },
+    },
+  });
+
+  const first = await wsHandshake(ns, "/chat?name=hibernating-rollout");
+  try {
+    assert.equal(first.status, 101);
+    first.socket.write(encodeClientTextFrame("bump"));
+    assert.deepEqual(await readJsonServerFrame(first.socket), {
+      id: "hibernating-rollout",
+      seen: 1,
+      tags: ["room"],
+    });
+
+    const closeFrame = readOneServerCloseFrame(first.socket, { timeoutMs: 15_000 });
+    await deployAndPromote(ns, "chat", {
+      mainModule: "worker.js",
+      modules: { "worker.js": DO_WS_HIBERNATION_WORKER },
+      bindings: {
+        ROOM: { type: "do", className: "Room" },
+      },
+      durableObjectRollout: "restart",
+    });
+    assert.deepEqual(await closeFrame, {
+      code: 1012,
+      reason: "service restart",
+    });
+  } finally {
+    first.socket.destroy();
+  }
+
+  const second = await wsHandshake(ns, "/chat?name=hibernating-rollout");
+  try {
+    assert.equal(second.status, 101);
+    second.socket.write(encodeClientTextFrame("after"));
+    assert.deepEqual(await readJsonServerFrame(second.socket), {
+      id: "hibernating-rollout",
+      joinedAt: 123,
+      seen: 0,
+      tags: ["room"],
+      roomSockets: 1,
+      vipSockets: 0,
+      allSockets: 1,
+      text: "after",
+    });
+  } finally {
+    second.socket.destroy();
   }
 });
 

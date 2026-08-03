@@ -26,7 +26,7 @@ import { errorMessage } from "./errors.js";
  * @typedef {import("shared-redis-resp").RedisXAddOptions} RedisXAddOptions
  * @typedef {import("shared-redis-resp").RedisCopyOptions} RedisCopyOptions
  * @typedef {import("shared-redis-resp").RedisSocket} RedisSocket
- * @typedef {import("shared-redis-resp").RedisClientOptions} RedisClientOptions
+ * @typedef {import("shared-redis-resp").RedisConnectionOptions} RedisConnectionOptions
  * @typedef {{ writer: WritableStreamDefaultWriter<Uint8Array>, parser: RespReader }} RedisSessionIo
  */
 
@@ -41,7 +41,7 @@ function requireSessionIo(session) {
 // lowercase methods on fresh sockets instead.
 /** @extends {RedisCommandSurface<string | null | undefined>} */
 export class RedisSession extends RedisCommandSurface {
-  /** @param {string} address @param {RedisClientOptions} [opts] */
+  /** @param {string} address @param {RedisConnectionOptions} [opts] */
   constructor(address, opts = {}) {
     super();
     this.address = address;

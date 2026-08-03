@@ -20,6 +20,8 @@ const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 /** @type {any} */ (globalThis).__doIndexHostResponse = null;
 /** @type {any} */ (globalThis).__doIndexOwner = null;
 /** @type {any} */ (globalThis).__doIndexOwnerError = null;
+/** @type {any} */ (globalThis).__doIndexOwnerOptions = null;
+/** @type {any} */ (globalThis).__doIndexRestartSequence = null;
 /** @type {any} */ (globalThis).__doIndexProbeOwner = null;
 /** @type {any} */ (globalThis).__doIndexRenewResult = null;
 /** @type {any} */ (globalThis).__doIndexHostFetches = null;
@@ -98,8 +100,11 @@ export async function readOwner() { return /** @type {any} */ (globalThis).__doI
 export async function renewOwnedScopes() {
   return /** @type {any} */ (globalThis).__doIndexRenewResult || { draining: false, owned: 0, renewed: 0, lost: 0, errors: [] };
 }
-export async function resolveDoOwner(_env, invoke) {
+export async function resolveDoOwner(_env, invoke, options) {
+  /** @type {any} */ (globalThis).__doIndexOwnerOptions = options;
   if (/** @type {any} */ (globalThis).__doIndexOwnerError) throw /** @type {any} */ (globalThis).__doIndexOwnerError;
+  const restartSequence = /** @type {any} */ (globalThis).__doIndexRestartSequence;
+  if (restartSequence != null) invoke.restartSequence = restartSequence;
   if (/** @type {any} */ (globalThis).__doIndexOwner) return /** @type {any} */ (globalThis).__doIndexOwner;
   return { ownerKey: invoke.hostId, taskId: "task-a", generation: 1, endpoint: "do-runtime-a:8788" };
 }
@@ -153,6 +158,8 @@ beforeEach(() => {
   /** @type {any} */ (globalThis).__doIndexHostResponse = null;
   /** @type {any} */ (globalThis).__doIndexOwner = null;
   /** @type {any} */ (globalThis).__doIndexOwnerError = null;
+  /** @type {any} */ (globalThis).__doIndexOwnerOptions = null;
+  /** @type {any} */ (globalThis).__doIndexRestartSequence = null;
   /** @type {any} */ (globalThis).__doIndexProbeOwner = null;
   /** @type {any} */ (globalThis).__doIndexRenewResult = null;
   /** @type {any} */ (globalThis).__doIndexHostFetches = [];
@@ -536,6 +543,7 @@ test("do-runtime returns owner hints instead of forwarding when caller accepts t
 });
 
 test("do-runtime connect strips tenant owner hint control markers", async () => {
+  /** @type {any} */ (globalThis).__doIndexRestartSequence = 7;
   /** @type {any} */ (globalThis).__doIndexHostResponse = new Response("maintenance", {
     status: 503,
     headers: {
@@ -567,6 +575,10 @@ test("do-runtime connect strips tenant owner hint control markers", async () => 
   assert.equal(response.headers.get("x-wdl-do-owner-task-id"), "task-a");
   assert.equal(response.headers.get("x-wdl-do-owner-endpoint"), "do-runtime-a:8788");
   assert.equal(response.headers.get("x-wdl-do-owner-generation"), "1");
+  const [{ init }] = /** @type {any[]} */ (
+    /** @type {any} */ (globalThis).__doIndexHostFetches
+  );
+  assert.equal(new Headers(init.headers).get("x-wdl-do-restart-sequence"), null);
   assert.equal(await response.text(), "maintenance");
 });
 
@@ -639,6 +651,10 @@ test("do-runtime storage-delete-worker preserves stable member error codes from 
       status: 503,
     }],
   });
+  assert.deepEqual(
+    /** @type {any} */ (globalThis).__doIndexOwnerOptions,
+    { allowSupersededVersion: true }
+  );
 });
 
 test("do-runtime storage-delete-worker maps thrown member failures to stable generic errors", async () => {

@@ -144,12 +144,18 @@ Key families:
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
   `/internal/workflows/tick` endpoint; scheduler never reads or writes DO alarm state
   directly.
-- Workflows rejects non-canonical DO alarm identity before persisting jobs, revalidates
-  persisted alarm identity before dispatch, and validates an active route
-  version before using it as a retarget. Namespace, worker, and version checks reuse
-  `wdl-rust-common`; do-runtime protocol grammar and identity helpers own the canonical
-  alarm-specific fields and aggregate 512-byte DO host-id contract. Workflows mirrors
-  and revalidates that contract before persistence and dispatch.
+- Workflows rejects non-canonical DO alarm identity before persisting jobs and
+  revalidates persisted alarm identity before dispatch. One Control-DB Lua snapshot
+  reads the current storage pointer, active route, retained-version score, and active DO
+  rollout projection. A current `restart` projection retargets a superseded alarm to the
+  active version even while its scheduled version remains retained; a later `preserve`
+  projection supersedes an unobserved restart and keeps a retained alarm on its scheduled
+  version. Malformed rollout projections, route/projection disagreement, and malformed
+  active versions needed for retargeting fail closed. Namespace, worker, and version
+  checks reuse `wdl-rust-common`; do-runtime protocol grammar and identity
+  helpers own the canonical alarm-specific fields and aggregate 512-byte DO host-id
+  contract. Workflows mirrors and revalidates that contract before persistence and
+  dispatch.
   Runtime run dispatch and progress callbacks share one system-vs-user runtime endpoint
   selector inside the workflows crate.
 - 32 scheduling shards partition ready/due work. A tick interleaves candidates from
@@ -392,6 +398,9 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 ## Deployment / Rollout Notes
 
 - Workflows rollout spans control, runtime, do-runtime, scheduler, and workflows.
+- Deploy Gateway, Workflows, and do-runtime rollout projection readers before
+  system-runtime/Control can persist `durableObjectRollout`; pause Control mutations
+  while that writer tier rolls.
 - Runtime must support workflow internal dispatch paths before workflows dispatches runs
   to it.
 - do-runtime may roll only after workflows when it calls a new workflows API shape,

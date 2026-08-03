@@ -40,6 +40,7 @@ function invoke() {
     hostId: OWNER_KEY,
     className: "Room",
     objectName: "room-a",
+    restartSequence: 7,
     request: { method: "GET", url: "https://demo.workers.example/", headers: [] },
   };
 }
@@ -87,6 +88,7 @@ test("DO owner client forwards invoke requests with owner fence and hop headers"
     taskId: "task-b",
     generation: 4,
   });
+  assert.equal(body.restartSequence, undefined);
   assert.deepEqual(DO_OWNER_CLIENT_TEST_STATE.metrics.at(-1), {
     name: "do_forwards",
     labels: { service: "do-runtime", outcome: "ok" },
@@ -175,6 +177,7 @@ test("DO owner client forwards WebSocket connect requests with owner headers", a
   assert.equal(call.init.headers.get("x-wdl-do-owner-key"), OWNER_KEY);
   assert.equal(call.init.headers.get("x-wdl-do-owner-task-id"), "task-b");
   assert.equal(call.init.headers.get("x-wdl-do-owner-generation"), "4");
+  assert.equal(call.init.headers.get("x-wdl-do-restart-sequence"), null);
   assert.deepEqual(DO_OWNER_CLIENT_TEST_STATE.metrics.at(-1), {
     name: "do_forwards",
     labels: { service: "do-runtime", outcome: "ok" },

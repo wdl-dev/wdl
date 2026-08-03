@@ -44,9 +44,13 @@ import {
 } from "shared-owner-protocol";
 import {
   DO_OWNER_SCOPE_PREFIX,
+  DURABLE_OBJECT_ROLLOUT_PRESERVE,
+  DURABLE_OBJECT_ROLLOUT_RESTART,
   VERSION_DELETE_LOCK_KIND,
   deleteLockKey,
+  durableObjectRolloutKey,
   doStorageIdKey,
+  parseDurableObjectRolloutProjection,
   parseDeleteLockKind,
 } from "shared-worker-contract";
 
@@ -203,6 +207,37 @@ export function parseOwner(raw, expectedOwnerKey, expectedBundleScope = null) {
 }
 
 /**
+ * Attach the active rollout generation and reject an old immutable version
+ * only while a restart promotion is active. Preserve promotions intentionally
+ * keep serving their loaded facet.
+ *
+ * @param {unknown} raw
+ * @param {DoInvoke} invoke
+ * @param {boolean} [allowSupersededVersion]
+ */
+function applyRolloutFence(raw, invoke, allowSupersededVersion = false) {
+  let rollout;
+  try {
+    rollout = parseDurableObjectRolloutProjection(decodeBulk(raw));
+  } catch {
+    throw new DoRuntimeError(503, "do_rollout_state_invalid", "Durable Object rollout state is invalid");
+  }
+  invoke.rolloutMode = rollout?.mode ?? DURABLE_OBJECT_ROLLOUT_PRESERVE;
+  invoke.restartSequence = rollout?.restartSequence ?? 0;
+  if (
+    !allowSupersededVersion &&
+    rollout?.mode === DURABLE_OBJECT_ROLLOUT_RESTART &&
+    rollout.version !== invoke.version
+  ) {
+    throw new DoRuntimeError(
+      503,
+      "do_rollout_version_stale",
+      `Durable Object version ${invoke.version} was superseded by restart rollout ${rollout.version}`
+    );
+  }
+}
+
+/**
  * @param {DoEnv} env
  * @param {DoInvoke} invoke
  * @param {LocalTask} localTask
@@ -341,9 +376,10 @@ async function withWatchRetries(operation, exhaustedCode, exhaustedMessage) {
 /**
  * @param {DoEnv} env
  * @param {DoInvoke} invoke
+ * @param {{ allowSupersededVersion?: boolean }} [options]
  * @returns {Promise<DoOwner>}
  */
-export async function resolveDoOwner(env, invoke) {
+export async function resolveDoOwner(env, invoke, options = {}) {
   const localTask = await resolveTaskIdentity(env);
   const client = redisClient(env);
   const scope = requireInvokeScope(invoke);
@@ -352,14 +388,16 @@ export async function resolveDoOwner(env, invoke) {
   const generationKey = ownerGenerationKeyOf(ownerKey);
   const workerDeleteLockKey = deleteLockKey(scope.ns, scope.worker);
   const storagePointerKey = doStorageIdKey(scope.ns, scope.worker);
+  const rolloutKey = durableObjectRolloutKey(scope.ns, scope.worker);
 
   const { owner: snapshotOwner, relatedValues, nowMs: snapshotNowMs } = await readOwnerSnapshotWithRedisTime(
     client,
     key,
-    [generationKey, workerDeleteLockKey, storagePointerKey],
+    [generationKey, workerDeleteLockKey, storagePointerKey, rolloutKey],
     (raw) => parseOwner(raw, ownerKey, scope)
   );
-  const [generationRaw, deleteLockRaw, storagePointerRaw] = relatedValues;
+  const [generationRaw, deleteLockRaw, storagePointerRaw, rolloutRaw] = relatedValues;
+  applyRolloutFence(rolloutRaw, invoke, options.allowSupersededVersion);
   const deleteLockToken = decodeBulk(deleteLockRaw);
   if (
     deleteLockToken != null &&
@@ -405,14 +443,15 @@ export async function resolveDoOwner(env, invoke) {
   }
 
   return await withWatchRetries(async () => client.session(async (session) => {
-    await session.watch(key, generationKey, workerDeleteLockKey, storagePointerKey);
+    await session.watch(key, generationKey, workerDeleteLockKey, storagePointerKey, rolloutKey);
     const { owner: current, relatedValues, nowMs } = await readOwnerSnapshotWithRedisTime(
       session,
       key,
-      [generationKey, workerDeleteLockKey, storagePointerKey],
+      [generationKey, workerDeleteLockKey, storagePointerKey, rolloutKey],
       (raw) => parseOwner(raw, ownerKey, scope)
     );
-    const [generationRaw, deleteLockRaw, storagePointerRaw] = relatedValues;
+    const [generationRaw, deleteLockRaw, storagePointerRaw, rolloutRaw] = relatedValues;
+    applyRolloutFence(rolloutRaw, invoke, options.allowSupersededVersion);
     const deleteLockToken = decodeBulk(deleteLockRaw);
     if (
       deleteLockToken != null &&
@@ -481,7 +520,12 @@ export async function resolveDoOwner(env, invoke) {
       current?.generation
     );
     const owner = ownerRecordFor(env, invoke, localTask, generation, nowMs);
-    await stageOwnerClaim(session.multi(), { ownerKey: key, generationKey }, owner, ownerTtlSeconds(env)).exec();
+    await stageOwnerClaim(
+      session.multi(),
+      { ownerKey: key, generationKey },
+      owner,
+      ownerTtlSeconds(env)
+    ).exec();
     rememberOwner(owner);
     recordOwnerResolution(current ? "takeover" : "claimed");
     log(current ? "warn" : "info", current ? "do_owner_takeover" : "do_owner_claimed", {
@@ -499,7 +543,7 @@ export async function resolveDoOwner(env, invoke) {
 /**
  * @param {DoEnv} env
  * @param {OwnerFence | null | undefined} owner
- * @param {{ renewNearExpiry?: boolean, storageScope: StorageScope }} options
+ * @param {{ renewNearExpiry?: boolean, storageScope: StorageScope, rolloutInvoke?: DoInvoke }} options
  * @returns {Promise<{ owner: DoOwner, leaseRemainingMs: number }>}
  */
 export async function assertCurrentOwnerWithLeaseBudget(env, owner, options) {
@@ -511,10 +555,15 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options) {
   if (!isValidStorageScope(storageScope)) {
     throw new Error("DO owner assertion requires a valid storage scope");
   }
+  const rolloutInvoke = options.rolloutInvoke;
+  const relatedKeys = [doStorageIdKey(storageScope.ns, storageScope.worker)];
+  if (rolloutInvoke) {
+    relatedKeys.push(durableObjectRolloutKey(storageScope.ns, storageScope.worker));
+  }
   const snapshot = await readOwnerSnapshotWithRedisTime(
     client,
     ownerKeyOf(owner.ownerKey),
-    [doStorageIdKey(storageScope.ns, storageScope.worker)],
+    relatedKeys,
     (raw) => parseOwner(raw, owner.ownerKey, storageScope)
   );
   const current = snapshot.owner;
@@ -533,6 +582,9 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options) {
   if (!storagePointerCurrent) {
     forgetOwnedScope(owner.ownerKey);
     throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE, `DO scope ${owner.ownerKey} no longer matches active worker storage`);
+  }
+  if (rolloutInvoke) {
+    applyRolloutFence(snapshot.relatedValues[1], rolloutInvoke);
   }
   const leaseRemainingMs = Number(current.leaseExpiresAt ?? 0) - nowMs;
   if (leaseRemainingMs < ownerLeaseGuardMs(env)) {

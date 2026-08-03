@@ -28,13 +28,24 @@ import { parseVersion } from "shared-worker-contract";
  * @typedef {{
  *   kind: "forward",
  *   route: string,
- *   bindingName: "CONTROL" | "RUNTIME_SYSTEM" | "RUNTIME_USER",
+ *   bindingName: "CONTROL",
  *   forwardPath: string,
  *   prefix: string,
- *   namespace: string | null,
- *   worker: string | null,
- *   version: string | null,
- * }} GatewayForwardDispatch
+ *   namespace: null,
+ *   worker: null,
+ *   version: null,
+ * }} GatewayControlDispatch
+ * @typedef {{
+ *   kind: "forward",
+ *   route: string,
+ *   bindingName: "RUNTIME_SYSTEM" | "RUNTIME_USER",
+ *   forwardPath: string,
+ *   prefix: string,
+ *   namespace: string,
+ *   worker: string,
+ *   version: string,
+ * }} GatewayRuntimeDispatch
+ * @typedef {GatewayControlDispatch | GatewayRuntimeDispatch} GatewayForwardDispatch
  * @typedef {GatewayNotFoundDispatch | GatewayForwardDispatch} GatewayDispatch
  */
 

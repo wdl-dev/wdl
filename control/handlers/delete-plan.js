@@ -14,7 +14,9 @@ import {
 import {
   NAMESPACES_KEY,
   bundleKey,
+  durableObjectRolloutKey,
   doStorageIdKey,
+  encodeWorkerDeleteEvent,
   nsHostsKey,
   patternsKey,
   platformDomainDisabledKey,
@@ -45,7 +47,7 @@ import { workerSecretsKey } from "shared-secret-keys";
  *   hasWorkflowDefs: boolean,
  * }} DeleteInputs
  * @typedef {import("control-lifecycle-indexes").RedisMulti} RedisMulti
- * @typedef {{ routes: string, routesFlush: string, patterns: string }} DeleteChannels
+ * @typedef {{ routes: string, routesFlush: string, patterns: string, workerDelete: string }} DeleteChannels
  * @typedef {{ taskId: string, prefixes: string[], source: Record<string, unknown> }} CleanupIntent
  */
 
@@ -112,6 +114,7 @@ export function stageWorkerDelete(multi, { collected, channels }) {
     multi.del(workerSecretsKey(ns, name));
   }
   multi.del(workflowDefsKey(ns, name));
+  multi.del(durableObjectRolloutKey(ns, name));
   if (collected.doOwnerKeys.length) {
     multi.del(...collected.doOwnerKeys);
   }
@@ -133,7 +136,8 @@ export function stageWorkerDelete(multi, { collected, channels }) {
 
   // Permanent allocators are deliberately NOT DEL'd. next_version prevents
   // workerLoader id reuse; cron:seq prevents stale slot refs from matching a
-  // recreated Cron entry.
+  // recreated Cron entry; the DO rollout sequence prevents stale Gateway
+  // sessions from missing a restart event after recreation.
   stageWorkerHidden(multi, ns, name);
 
   if (collected.namespaceStillActive) {
@@ -141,6 +145,7 @@ export function stageWorkerDelete(multi, { collected, channels }) {
   } else {
     multi.publish(channels.routesFlush, "");
   }
+  multi.publish(channels.workerDelete, encodeWorkerDeleteEvent({ ns, worker: name }));
   for (const h of collected.affectedHosts) {
     multi.publish(channels.patterns, h);
   }

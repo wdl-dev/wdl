@@ -32,8 +32,15 @@ function actor(env = {}) {
 
 function invoke(overrides = {}) {
   return {
+    ns: "tenant",
+    worker: "chat",
+    version: "v1",
+    workerId: "tenant:chat:v1",
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
     className: "Room",
     objectName: "alice",
+    rolloutMode: "preserve",
+    restartSequence: 0,
     owner: {
       ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
       taskId: "task-a",
@@ -41,6 +48,16 @@ function invoke(overrides = {}) {
     },
     ...overrides,
   };
+}
+
+/** @param {any} host @param {string} facetName @param {number} [restartSequence] */
+function registerFacet(host, facetName, restartSequence = 0) {
+  host.facetWorkers.set(facetName, { restartSequence });
+}
+
+/** @param {any} host */
+function markObjectRegistered(host) {
+  host.registeredObjectMembers.add("Room:alice");
 }
 
 test("DO host actor: RPC dispatch passes request id through the internal wrapper boundary", async () => {
@@ -82,6 +99,7 @@ test("DO host actor: RPC dispatch passes request id through the internal wrapper
 
 test("DO host actor: lease budget aborts a facet when the owner fence stops renewing", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  markObjectRegistered(host);
   const owner = {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
@@ -111,6 +129,7 @@ test("DO host actor: lease budget aborts a facet when the owner fence stops rene
 
 test("DO host actor: lease budget uses Redis-time remaining budget, not local wall time", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  markObjectRegistered(host);
   const owner = {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
@@ -138,6 +157,7 @@ test("DO host actor: lease budget uses Redis-time remaining budget, not local wa
 
 test("DO host actor: expired initial lease aborts before tenant dispatch", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  markObjectRegistered(host);
   const owner = {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
@@ -191,6 +211,10 @@ test("DO host actor: stale initial owner fence does not write the object registr
     /** @type {{ storageScope?: unknown }} */ (harness.assertArguments[0].options).storageScope,
     request
   );
+  assert.equal(
+    /** @type {{ rolloutInvoke?: unknown }} */ (harness.assertArguments[0].options).rolloutInvoke,
+    request
+  );
   assert.equal(registryStarted, false);
   assert.deepEqual(harness.remembered, []);
 });
@@ -209,8 +233,8 @@ test("DO host actor: delete-storage validates owner and active storage in one sc
   };
   harness.actorInvokes = [request];
   harness.assertResponses = [owner];
-  host.facetNames.add("Room:alice");
-  host.registeredObjectMembers.add("Room:alice");
+  registerFacet(host, "Room:alice");
+  markObjectRegistered(host);
 
   const response = await host.fetch(new Request("http://actor.test/delete-storage", {
     method: "POST",
@@ -223,8 +247,75 @@ test("DO host actor: delete-storage validates owner and active storage in one sc
     request
   );
   assert.deepEqual(harness.deletedFacets, ["Room:alice"]);
-  assert.equal(host.facetNames.has("Room:alice"), false);
+  assert.equal(host.facetWorkers.has("Room:alice"), false);
   assert.equal(host.registeredObjectMembers.has("Room:alice"), false);
+});
+
+test("DO host actor: preserve rollout keeps an existing facet on its loaded version", () => {
+  const host = actor();
+  registerFacet(host, "Room:alice");
+
+  const facetName = host.rememberFacet(invoke({
+    version: "v2",
+    workerId: "tenant:chat:v2",
+  }));
+
+  assert.equal(facetName, "Room:alice");
+  assert.equal(host.facetWorkers.get(facetName)?.restartSequence, 0);
+  assert.deepEqual(harness.aborts, []);
+});
+
+test("DO host actor: restart rollout lazily replaces a stale facet without deleting storage", () => {
+  const host = actor();
+  registerFacet(host, "Room:alice");
+
+  const facetName = host.rememberFacet(invoke({
+    version: "v2",
+    workerId: "tenant:chat:v2",
+    rolloutMode: "restart",
+    restartSequence: 4,
+  }));
+
+  assert.equal(host.facetWorkers.get(facetName)?.restartSequence, 4);
+  assert.deepEqual(harness.aborts.map(({ name }) => name), ["Room:alice"]);
+  assert.deepEqual(harness.deletedFacets, []);
+  assert.equal(harness.logs.at(-1).event, "do_rollout_restart_facet_on_dispatch");
+});
+
+test("DO host actor: later preserve projection supersedes an unobserved restart", () => {
+  const host = actor();
+  registerFacet(host, "Room:alice");
+
+  const facetName = host.rememberFacet(invoke({
+    version: "v3",
+    workerId: "tenant:chat:v3",
+    restartSequence: 4,
+  }));
+
+  assert.equal(host.facetWorkers.get(facetName)?.restartSequence, 4);
+  assert.deepEqual(harness.aborts, []);
+  assert.throws(
+    () => host.rememberFacet(invoke({ restartSequence: 3 })),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "do_rollout_version_stale");
+      return true;
+    }
+  );
+});
+
+test("DO host actor: a stale delayed dispatch cannot replace a newer restart", () => {
+  const host = actor();
+  registerFacet(host, "Room:alice", 5);
+
+  assert.throws(
+    () => host.rememberFacet(invoke({ restartSequence: 4 })),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "do_rollout_version_stale");
+      return true;
+    }
+  );
+  assert.equal(host.facetWorkers.get("Room:alice")?.restartSequence, 5);
+  assert.deepEqual(harness.aborts, []);
 });
 
 test("DO host actor: registry delay is re-fenced before tenant dispatch", async () => {
@@ -269,6 +360,7 @@ test("DO host actor: registry delay is re-fenced before tenant dispatch", async 
 
 test("DO host actor: lease budget reschedules when renew extended the owner fence", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  markObjectRegistered(host);
   const owner = {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
@@ -294,6 +386,7 @@ test("DO host actor: lease budget reschedules when renew extended the owner fenc
 
 test("DO host actor: completed dispatch does not reschedule after an in-flight owner check", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  markObjectRegistered(host);
   const owner = {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
@@ -328,6 +421,7 @@ test("DO host actor: completed dispatch does not reschedule after an in-flight o
 
 test("DO host actor: lease guard rejects near-expiry dispatch before tenant code runs", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 1000 });
+  markObjectRegistered(host);
   const owner = {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
@@ -380,6 +474,7 @@ test("DO host actor: registry remember failure is best-effort and does not fail 
 
 test("DO host actor strips tenant-supplied ownership error control markers", async () => {
   const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  markObjectRegistered(host);
   harness.assertResponses = [{
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",

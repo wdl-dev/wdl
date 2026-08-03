@@ -37,6 +37,29 @@ const TRACKED_WEBSOCKET_WORKER = readFileSync(
   new URL("../../test-workers/ws-lifecycle/src/index.js", import.meta.url),
   "utf8"
 );
+
+/** @param {string} version */
+function versionedWebSocketWorker(version) {
+  return `
+    const version = ${JSON.stringify(version)};
+    export default {
+      async fetch(request) {
+        if (request.headers.get("Upgrade") !== "websocket") {
+          return new Response(version);
+        }
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const server = pair[1];
+        server.accept();
+        server.addEventListener("message", (evt) => {
+          server.send(version + ":" + evt.data);
+        });
+        return new Response(null, { status: 101, webSocket: client });
+      },
+    };
+  `;
+}
+
 /**
  * @typedef {{
  *   active: number,
@@ -561,6 +584,68 @@ test("gateway-proxied ws reconnects backend after user-runtime restart", async (
     );
   } finally {
     socket.destroy();
+  }
+});
+
+test("gateway drains an old websocket but does not reconnect its inactive version", async () => {
+  const ns = uniqueNs("ws-active-version");
+  const name = "echo";
+  await deployAndPromote(ns, name, { code: versionedWebSocketWorker("v1") });
+
+  const first = await wsHandshake(ns, `/${name}`);
+  try {
+    assert.equal(first.status, 101);
+    first.socket.write(encodeClientTextFrame("before"));
+    assert.equal(await readOneServerTextFrame(first.socket), "v1:before");
+
+    await deployAndPromote(ns, name, { code: versionedWebSocketWorker("v2") });
+    await waitUntil("gateway serves the promoted websocket worker", async () => {
+      const response = await gatewayFetch(ns, `/${name}`);
+      return response.status === 200 && await response.text() === "v2";
+    }, { timeoutMs: 10_000, intervalMs: 100 });
+
+    first.socket.write(encodeClientTextFrame("drain"));
+    assert.equal(
+      await readOneServerTextFrame(first.socket),
+      "v1:drain",
+      "the admitted v1 websocket should drain after v2 cold-load eviction"
+    );
+
+    const beforeRestart = await gatewayWebSocketProxyCount("lifecycle_restart");
+    const beforeReconnect = await gatewayWebSocketProxyCount("reconnected");
+    const closeFrame = readOneServerCloseFrame(first.socket, { timeoutMs: 30_000 });
+    composeRecreate("user-runtime");
+    await waitUntil(
+      "gateway rejects reconnect to the inactive websocket version",
+      async () => await gatewayWebSocketProxyCount("lifecycle_restart") > beforeRestart,
+      { timeoutMs: 15_000, intervalMs: 100 }
+    );
+    assert.equal(
+      await gatewayWebSocketProxyCount("reconnected"),
+      beforeReconnect,
+      "gateway must not reconnect the inactive v1 backend"
+    );
+    assert.deepEqual(await closeFrame, { code: 1012, reason: "service restart" });
+    if (!first.socket.destroyed) {
+      first.socket.write(encodeClientCloseFrame(1012, "service restart"));
+    }
+    await waitForSocketClose(first.socket);
+  } finally {
+    first.socket.destroy();
+  }
+
+  await waitUntil("recreated user-runtime serves the active websocket worker", async () => {
+    const response = await gatewayFetch(ns, `/${name}`);
+    return response.status === 200 && await response.text() === "v2";
+  }, { timeoutMs: 15_000, intervalMs: 100 });
+
+  const second = await wsHandshake(ns, `/${name}`);
+  try {
+    assert.equal(second.status, 101);
+    second.socket.write(encodeClientTextFrame("after"));
+    assert.equal(await readOneServerTextFrame(second.socket), "v2:after");
+  } finally {
+    second.socket.destroy();
   }
 });
 

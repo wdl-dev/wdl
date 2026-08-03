@@ -52,8 +52,8 @@ Worker lifecycle:
 |---|---|---|
 | `GET` | `/ns/<ns>/workers` | Lists workers with namespace-owned state, including deploy-only, active, secret-only, and workflow-definitions-only workers. Each result reports `hasSecrets` and `hasWorkflowDefs`. |
 | `GET` | `/ns/<ns>/worker/<name>/versions` | Lists retained versions and active status. |
-| `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, `workersDev`, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata, and the 201 response echoes the resolved `workersDev`. Route hosts are normalized to canonical ASCII DNS hostnames and reject URL-authority delimiters or non-canonical IPv4 spellings before commit. Python modules and upstream experimental compatibility flags are rejected before commit. |
-| `POST` | `/ns/<ns>/worker/<name>/promote` | Promotes `{"version":"vN"}` through the WATCH/MULTI routing path. The success response preserves `platformDomain` and `workersDev`, and reports canonical URL hints as `urls.platform` when enabled plus one hint per active pattern in `urls.routes[]`, each built from the operator's original pattern so prefix routes keep their trailing `*`. Host declaration failures are 403; live pattern conflicts are 409; exhausted transaction contention is 503. |
+| `POST` | `/ns/<ns>/worker/<name>/deploy` | Creates a new immutable version from shorthand code or full module manifest; routes, `workersDev`, `durableObjectRollout`, crons, queue consumers, service refs, platform refs, assets, vars, bindings, and `exports` are version metadata, and the 201 response echoes the resolved routing/rollout policy. DO rollout accepts `preserve` or `restart`, defaults to `preserve`, and `restart` requires a DO binding. Route hosts are normalized to canonical ASCII DNS hostnames and reject URL-authority delimiters or non-canonical IPv4 spellings before commit. Python modules and upstream experimental compatibility flags are rejected before commit. |
+| `POST` | `/ns/<ns>/worker/<name>/promote` | Promotes `{"version":"vN"}` through the WATCH/MULTI routing path. The success response preserves `platformDomain`, `workersDev`, and DO rollout state, and reports canonical URL hints as `urls.platform` when enabled plus one hint per active pattern in `urls.routes[]`, each built from the operator's original pattern so prefix routes keep their trailing `*`. The route, active rollout projection, permanent restart sequence, and restart publication commit atomically. Host declaration failures are 403; live pattern conflicts are 409; exhausted transaction contention is 503. |
 | `DELETE` | `/ns/<ns>/worker/<name>/versions/<version>` | Deletes one retained non-active version after active-route, service-ref, lifecycle, and delete-lock blockers pass. Referrer redaction is principal-aware. |
 | `POST` | `/ns/<ns>/worker/<name>/delete` | Whole-worker delete. `?dry_run=1` returns computed impact and blockers without writing. Redaction matches single-version delete. |
 
@@ -95,7 +95,10 @@ Control lifecycle operations are split so each critical transition has one autho
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
   cron/queue projections, lifecycle indexes, and invalidation publications as one
-  reviewed transition.
+  reviewed transition. It also commits the active DO rollout projection with the route.
+  A new `restart` sequence and its `do-rollout:restart` publication are part of the same
+  transaction; there is no post-commit owner fanout, Control-to-DO backend binding, or
+  committed-partial response.
 - Secret update/delete stages the secret-store mutation inside
   `bumpActiveAndPromote()` when an active route exists, so the budget check, secret
   hash write, bundle copy, and route flip share one WATCH/MULTI transaction. If no
@@ -118,7 +121,9 @@ Control lifecycle operations are split so each critical transition has one autho
 - Version delete and whole-worker delete are fail-closed. They collect blockers from
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.
-  S3 object cleanup is enqueued only after Redis commit succeeds.
+  A successful whole-worker delete publishes the exact non-durable `worker:delete`
+  Gateway hint inside that commit; Gateway rereads Redis before closing matching public
+  WebSockets. S3 object cleanup is enqueued only after Redis commit succeeds.
 - Worker delete lock values are a `whole:` or `version:` operation kind followed by a
   server-generated random token; `s3cleanup:<id>` task ids are also server-generated.
   `x-request-id` is diagnostic only and may be reused by clients or retries; it must not
@@ -192,6 +197,8 @@ Key families:
 | `worker:<ns>:<worker>:v:<n>` | Hash | Control | Immutable bundle/version metadata and modules. | Retained until version/worker delete. |
 | `worker:<ns>:<worker>:next_version` | String counter | Control | Monotonic next version number for a logical worker name. | Survives whole-worker delete so worker ids never recycle. |
 | `cron:seq:<ns>:<worker>` | String counter | Control | Permanent Cron generation high-water mark. | Survives empty Cron projections and whole-worker delete so stale slot refs never match recreated entries. |
+| `worker:do-rollout:<ns>:<worker>` | String | Control | Active DO rollout `{version,mode,restartSequence}` projection committed with the route flip. | Whole-worker delete removes it; missing state defaults to `preserve`. |
+| `worker:do-rollout-seq:<ns>:<worker>` | String counter | Control | Permanent monotonic DO restart-event allocator. | Survives whole-worker delete so the next restart after recreation cannot reuse a sequence observed by stale Gateway sessions. |
 | `routes:<ns>` | Hash | Control | Active worker -> version route map. | Promote/delete updates and publishes route invalidation. |
 | `hosts:<ns>` | Set | Control | Declared host allow-list for a namespace. | Promote checks membership; host reconcile updates the declared set. |
 | `declared-hosts` | Set | Control | Global gateway gate for hosts declared by at least one namespace. | Host reconcile owns ordinary writes; `/reload` repairs it from `hosts:<ns>`. |
@@ -364,6 +371,10 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 
 ## Deployment / Rollout Notes
 
+- For DO restart rollout support, deploy Gateway, Workflows, and do-runtime projection
+  readers before system-runtime/Control writers. Pause Control mutations while
+  system-runtime rolls, resume after the tier stabilizes, and only then allow API clients
+  to send the new bundle policy.
 - Control and runtime should roll together when bundle metadata shape changes.
 - Control and gateway must keep route invalidation channel names aligned.
 - Auth role changes should be reviewed as security boundary changes and tested against

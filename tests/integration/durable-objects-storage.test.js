@@ -52,7 +52,7 @@ test("Durable Object SQLite storage survives do-runtime restart while memory res
   });
 });
 
-test("existing Durable Object facets keep their loaded class until host actor restart", async () => {
+test("default Durable Object rollout preserves the loaded class until host actor restart", async () => {
   const ns = uniqueNs("do-version");
   await deployAndPromote(ns, "versioned", {
     mainModule: "worker.js",
@@ -85,6 +85,36 @@ test("existing Durable Object facets keep their loaded class until host actor re
   const afterRestartText = await afterRestart.text();
   assert.equal(afterRestart.status, 200, afterRestartText);
   assert.deepEqual(responseJson({ body: afterRestartText }), { label: "v2", memory: 1, storage: 3 });
+});
+
+test("restart rollout replaces the loaded Durable Object class and preserves SQLite", async () => {
+  const ns = uniqueNs("do-rollout-restart");
+  await deployAndPromote(ns, "versioned", {
+    mainModule: "worker.js",
+    modules: { "worker.js": doVersionWorker("v1") },
+    bindings: {
+      VERSIONED: { type: "do", className: "Versioned" },
+    },
+  });
+
+  const first = await gatewayFetch(ns, "/versioned");
+  const firstText = await first.text();
+  assert.equal(first.status, 200, firstText);
+  assert.deepEqual(responseJson({ body: firstText }), { label: "v1", memory: 1, storage: 1 });
+
+  await deployAndPromote(ns, "versioned", {
+    mainModule: "worker.js",
+    modules: { "worker.js": doVersionWorker("v2") },
+    bindings: {
+      VERSIONED: { type: "do", className: "Versioned" },
+    },
+    durableObjectRollout: "restart",
+  });
+
+  const restarted = await gatewayFetch(ns, "/versioned");
+  const restartedText = await restarted.text();
+  assert.equal(restarted.status, 200, restartedText);
+  assert.deepEqual(responseJson({ body: restartedText }), { label: "v2", memory: 1, storage: 2 });
 });
 
 test("worker delete soft-deletes registered Durable Object SQLite storage", async () => {

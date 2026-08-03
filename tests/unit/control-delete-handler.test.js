@@ -22,6 +22,7 @@ export {
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   ROUTES_FLUSH_CHANNEL,
+  WORKER_DELETE_CHANNEL,
 } from ${JSON.stringify(workerContractUrl)};
 export async function acquireDeleteLock(_redis, _ns, _worker, kind) {
   /** @type {any} */ (globalThis).__deleteHandlerState.lockKinds.push(kind);
@@ -187,6 +188,7 @@ const { handle: handleVersions } = await importControlHandler("control/handlers/
  *   siblingVersionBeforeFirstWatch?: string | null,
  *   patternRecords?: Record<string, Record<string, string>>,
  *   patternRecordsDuringExec?: Record<string, Record<string, string>>,
+ *   rolloutProjection?: string | null,
  * }} [opts]
  */
 function resetDeleteHandlerState({
@@ -213,6 +215,7 @@ function resetDeleteHandlerState({
   siblingVersionBeforeFirstWatch = null,
   patternRecords = {},
   patternRecordsDuringExec = patternRecords,
+  rolloutProjection = null,
 } = {}) {
   const referrers = /** @type {Record<string, string[]>} */ (referrersByVersion);
   const meta = bundleMetaRaw === undefined
@@ -329,6 +332,7 @@ function resetDeleteHandlerState({
       return keys.map((key) => {
         if (key === "secrets:demo:api") return hasWorkerSecrets;
         if (key === "wf:defs:demo:api") return hasWorkflowDefs;
+        if (key === "worker:do-rollout:demo:api") return rolloutProjection != null;
         return false;
       });
     },
@@ -481,6 +485,7 @@ function resetDeleteHandlerState({
       return keys.map((key) => {
         if (key === "secrets:demo:api") return hasWorkerSecrets;
         if (key === "wf:defs:demo:api") return hasWorkflowDefs;
+        if (key === "worker:do-rollout:demo:api") return rolloutProjection != null;
         return false;
       });
     },
@@ -726,10 +731,30 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
     call[0] === "DEL" &&
     call.includes("wf:defs:demo:api")
   ));
+  assert.ok(testState.watchBatches.some((keys) =>
+    keys.includes("worker:do-rollout:demo:api")
+  ));
+  assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
+    call[0] === "DEL" &&
+    call.includes("worker:do-rollout:demo:api")
+  ));
+  assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
+    call[0] === "DEL" &&
+    call.includes("worker:do-storage:demo:api")
+  ));
+  assert.equal(testState.multiCalls.some((/** @type {any} */ call) =>
+    call[0] === "DEL" &&
+    call.includes("worker:do-rollout-seq:demo:api")
+  ), false);
   assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
     call[0] === "HDEL" &&
     call[1] === "routes:demo" &&
     call[2] === "api"
+  ));
+  assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
+    call[0] === "PUBLISH" &&
+    call[1] === "worker:delete" &&
+    call[2] === JSON.stringify({ ns: "demo", worker: "api" })
   ));
   assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
     call[0] === "SREM" &&
@@ -1605,8 +1630,47 @@ test("worker delete retry compensates DO alarm cleanup when stale storage pointe
   }]);
   assert.deepEqual(testState.multiCalls, [
     ["DEL", "worker:do-storage:demo:api"],
+    ["PUBLISH", "worker:delete", JSON.stringify({ ns: "demo", worker: "api" })],
     ["EXEC"],
   ]);
+});
+
+test("worker delete noop removes a residual rollout projection but retains its sequence", async () => {
+  const testState = resetDeleteHandlerState({
+    activeVersion: null,
+    assetPrefix: null,
+    doStorageId: null,
+    queueConsumerWorker: null,
+    retainedVersions: [],
+    rolloutProjection: JSON.stringify({
+      version: "v1",
+      mode: "restart",
+      restartSequence: 1,
+    }),
+  });
+
+  const response = await handle({
+    request: new Request("http://control/ns/demo/worker/api/delete", { method: "POST" }),
+    url: new URL("http://control/ns/demo/worker/api/delete"),
+    ns: "demo",
+    name: "api",
+    principal: { kind: "ops" },
+    requestId: "rid-delete-noop-rollout-projection",
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.deleted, false);
+  assert.ok(testState.watchBatches.some((keys) =>
+    keys.includes("worker:do-rollout:demo:api")
+  ));
+  assert.deepEqual(testState.multiCalls, [
+    ["DEL", "worker:do-rollout:demo:api"],
+    ["PUBLISH", "worker:delete", JSON.stringify({ ns: "demo", worker: "api" })],
+    ["EXEC"],
+  ]);
+  assert.equal(testState.multiCalls.some((call) =>
+    call.includes("worker:do-rollout-seq:demo:api")
+  ), false);
 });
 
 test("worker delete noop cannot clean residual state after its lock is replaced", async () => {

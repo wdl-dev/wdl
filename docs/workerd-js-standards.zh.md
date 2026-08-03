@@ -98,7 +98,9 @@ Request id 传播前必须 sanitize 并限制长度。不要把原始错误文�
 
 WATCH/MULTI 行为应由一个 owner 负责。不要把 preflight read 和 commit-time revalidation 拆散，除非测试能证明 watched key set。
 
-Workerd I/O object 与创建它的 `IoContext` 绑定。共享 `RedisClient` 应保持 socket-per-call；相关命令应在一个 typed operation 内批处理，不要跨 invocation 保留 socket 或 request 创建的 Promise。只有当单个 invocation 或单个 long-lived owning task 明确需要在 WATCH/transaction 或 subscription lifecycle 内持有连接时，才使用 `RedisSession`。
+Workerd I/O object 与创建它的 `IoContext` 绑定。共享 `RedisClient` 应保持 socket-per-call；相关命令应在一个 typed operation 内批处理，不要跨 invocation 保留 socket 或 request 创建的 Promise。只有当单个 invocation 或单个 long-lived owning task 明确需要在 WATCH/transaction 或 subscription lifecycle 内持有连接时，才使用 `RedisSession`。`RedisClient` 的 `commandTimeoutMs` 只作用于 socket-per-call operation；配置该选项的 client 调用 `session()` 时会明确拒绝，而不是静默丢失 deadline。
+
+进程内 registry 可以跨 invocation 保留 resolver 并 settle 由 request 创建的 Promise，但必须遵守严格的 signaling 边界：非 owning invocation 只能使用不携带 I/O object 的值 settle resolver，不得直接调用 request-owned handler 或操作 request-owned I/O；Promise 及任何操作 I/O 的 continuation 必须由 owning request 创建，并由 workerd 的 cross-request settlement 恢复到该 request 的 `IoContext` 后执行。owning module 必须记录并测试这条边界。
 
 与 transport 无关的命令构造和 reply 解码属于共享 typed command surface。`RedisClient` 与 `RedisSession` 各自拥有不同的 connection lifecycle，仅在该 lifecycle 确有需要时暴露额外操作。
 

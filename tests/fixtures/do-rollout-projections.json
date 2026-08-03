@@ -1,0 +1,52 @@
+{
+  "cases": [
+    {
+      "projection": { "version": "v7", "mode": "restart", "restartSequence": 3 },
+      "valid": true
+    },
+    {
+      "projection": { "version": "v1", "mode": "preserve", "restartSequence": 0 },
+      "valid": true
+    },
+    {
+      "projection": { "version": "v2", "mode": "preserve", "restartSequence": 3 },
+      "valid": true
+    },
+    {
+      "projection": { "version": "v2", "mode": "preserve", "restartSequence": 3.0 },
+      "valid": true
+    },
+    {
+      "projection": { "version": "latest", "mode": "restart", "restartSequence": 3 },
+      "valid": false
+    },
+    {
+      "projection": { "version": "v7", "mode": "replace", "restartSequence": 3 },
+      "valid": false
+    },
+    {
+      "projection": { "version": "v7", "mode": "restart", "restartSequence": 0 },
+      "valid": false
+    },
+    {
+      "projection": { "version": "v7", "mode": "restart", "restartSequence": -1 },
+      "valid": false
+    },
+    {
+      "projection": { "version": "v7", "mode": "restart", "restartSequence": 9007199254740992 },
+      "valid": false
+    },
+    {
+      "projection": { "version": "v7", "mode": "restart", "restartSequence": 9007199254740992.0 },
+      "valid": false
+    },
+    {
+      "projection": { "version": "v7", "mode": "restart", "restartSequence": 9.007199254740992e15 },
+      "valid": false
+    },
+    {
+      "projection": { "version": "v7", "mode": "restart", "restartSequence": "3" },
+      "valid": false
+    }
+  ]
+}
