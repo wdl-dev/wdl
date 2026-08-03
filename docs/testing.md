@@ -336,7 +336,7 @@ The helper directories are deliberately not catch-alls. Keep code inline in
 the test file when:
 
 - it is a single-caller utility specific to that file's domain;
-- it is a Redis write whose payload is a literal shell-escaped string;
+- it is a Redis write whose payload is a literal argv value;
 - it is a one-off Redis mock command that is not shared by another test file;
 - it is a stream-protocol command on DB 1 / DB 2 (e.g. `XADD`, `XPENDING`,
   `XREADGROUP`) that the typed Redis helper does not expose yet;

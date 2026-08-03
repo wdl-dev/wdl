@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import {
   ROOT,
-  composeNoBuildFlag,
+  composeNoBuildArgs,
   resolveWdlCliBin,
 } from "../../scripts/integration-environment.js";
 import {
@@ -28,9 +28,9 @@ const composeHelper = await importRepositoryModule(
   })
 );
 
-test("compose no-build flag follows the integration environment", () => {
-  assert.equal(composeNoBuildFlag({ WDL_INTEGRATION_NO_BUILD: "1" }), " --no-build");
-  assert.equal(composeNoBuildFlag({}), "");
+test("compose no-build args follow the integration environment", () => {
+  assert.deepEqual(composeNoBuildArgs({ WDL_INTEGRATION_NO_BUILD: "1" }), ["--no-build"]);
+  assert.deepEqual(composeNoBuildArgs({}), []);
 });
 
 test("compose helpers consume the shared preflight no-build flag", async () => {

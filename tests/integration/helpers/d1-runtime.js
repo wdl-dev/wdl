@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { adminPost, deployAndPromote } from "./admin-http.js";
-import { composeUp, composeUpNoBuildArgs } from "./compose.js";
+import { composeProfileUp, composeUp } from "./compose.js";
 import { ensureD1SingleRuntime, recreateD1MultiRuntimes } from "./runtimes.js";
 import { gatewayFetch } from "./gateway-http.js";
 import {
@@ -202,18 +202,10 @@ export function restoreD1MultiTasks() {
 }
 
 export function startD1EnvoyOwnerPair() {
-  return sh(
-    [
-      "docker",
-      "compose",
-      "up",
-      "-d",
-      ...composeUpNoBuildArgs(),
-      "--force-recreate",
-      "--wait",
-      "d1-runtime-a",
-    ],
-    { stdio: "pipe", env: { COMPOSE_PROFILES: "d1-multi" } }
+  return composeProfileUp(
+    "d1-multi",
+    ["--force-recreate", "--wait", "d1-runtime-a"],
+    { stdio: "pipe" }
   );
 }
 

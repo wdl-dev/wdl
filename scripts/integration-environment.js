@@ -57,8 +57,8 @@ export function shouldPrepareIntegrationArtifacts(env = process.env) {
 }
 
 /** @param {NodeJS.ProcessEnv} [env] */
-export function composeNoBuildFlag(env = process.env) {
-  return env.WDL_INTEGRATION_NO_BUILD === "1" ? " --no-build" : "";
+export function composeNoBuildArgs(env = process.env) {
+  return env.WDL_INTEGRATION_NO_BUILD === "1" ? ["--no-build"] : [];
 }
 
 /** @param {NodeJS.ProcessEnv} [env] */

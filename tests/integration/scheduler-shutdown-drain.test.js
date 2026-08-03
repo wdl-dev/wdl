@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   adminPost,
   assertStatus,
-  composeUpNoBuildArgs,
+  composeUp,
   deployAndPromote,
   gatewayWorkerId,
   runtimeInternalPost,
@@ -116,8 +116,6 @@ test("scheduler: SIGTERM mid-dispatch drains in-flight queue handler before exit
   } finally {
     // Must restore even if asserts threw — otherwise queues/crons/s3-cleanup
     // suites cascade-fail. --wait blocks on the healthcheck, not on Redis.
-    sh(["docker", "compose", "up", "-d", ...composeUpNoBuildArgs(), "--wait", "scheduler"], {
-      stdio: "pipe",
-    });
+    composeUp(["--wait", "scheduler"], { stdio: "pipe" });
   }
 });

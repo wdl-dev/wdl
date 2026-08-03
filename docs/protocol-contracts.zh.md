@@ -27,7 +27,7 @@
 | Route 和 pattern projection | `shared/route-projection.js`、`control/routing.js`、`gateway/` |
 | D1 query/facade protocol | `docs/modules/d1.zh.md`、`shared/d1-*`、`d1-runtime/`、runtime D1 binding |
 | Durable Object invoke/connect protocol | `docs/modules/durable-objects.zh.md`、`runtime/_wdl-do-transport.js`、`do-runtime/protocol.js` |
-| Durable Object rollout projection 和 lifecycle notification | `docs/modules/durable-objects.zh.md`、`shared/worker-contract.js`、`control/routing.js`、`control/handlers/delete-plan.js`、`gateway/runtime.js`、`do-runtime/owner-registry.js`、`rust/workflows/src/api/do_alarms/dispatch.rs` |
+| Durable Object rollout projection 和 lifecycle notification | `docs/modules/durable-objects.zh.md`、`shared/worker-contract.js`、`control/routing.js`、`control/handlers/delete-plan.js`、`gateway/runtime.js`、`gateway/websocket-lifecycle.js`、`do-runtime/owner-registry.js`、`rust/workflows/src/api/do_alarms/dispatch.rs` |
 | Queue、cron、delayed queue record | `docs/modules/queues-cron.zh.md`、`shared/queue-keys.js`、scheduler/proxy Rust modules |
 | Workflow definition 和 instance state | `docs/modules/workflows.zh.md`、`rust/workflows/`、runtime workflow dispatch |
 | Observability event 和 metric shape | `docs/modules/log-tail-observability.zh.md`、`shared/observability.js`、`wdl-rust-common` |

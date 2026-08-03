@@ -1,19 +1,15 @@
 import { spawn } from "node:child_process";
 
-import { composeNoBuildFlag } from "../../../scripts/integration-environment.js";
+import { composeNoBuildArgs } from "../../../scripts/integration-environment.js";
 import { ROOT } from "./env.js";
 import { sh } from "./cli.js";
-
-export function composeUpNoBuildArgs() {
-  return composeNoBuildFlag() ? ["--no-build"] : [];
-}
 
 /**
  * @param {string[]} args
  * @param {{ stdio?: any }} [opts]
  */
 export function composeUp(args, opts = {}) {
-  return sh(["docker", "compose", "up", "-d", ...composeUpNoBuildArgs(), ...args], opts);
+  return sh(["docker", "compose", "up", "-d", ...composeNoBuildArgs(), ...args], opts);
 }
 
 /**
@@ -23,7 +19,7 @@ export function composeUp(args, opts = {}) {
  */
 export function composeProfileUp(profile, args, opts = {}) {
   return sh(
-    ["docker", "compose", "up", "-d", ...composeUpNoBuildArgs(), ...args],
+    ["docker", "compose", "up", "-d", ...composeNoBuildArgs(), ...args],
     { ...opts, env: { ...opts.env, COMPOSE_PROFILES: profile } }
   );
 }

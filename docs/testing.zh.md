@@ -191,7 +191,7 @@ npm install -g @wdl-dev/cli@1.6.1
 两棵 helper 树**有意不当抽屉**。以下情况留在测试文件内：
 
 - 该文件域内的单 caller 工具；
-- 带字面 shell-escape 字符串载荷的 Redis 写操作；
+- 带字面 argv 载荷的 Redis 写操作；
 - 另一个测试文件不共享的一次性 Redis mock command；
 - DB 1 / DB 2 上 typed Redis helper 尚未暴露的 stream 协议命令（如 `XADD`、`XPENDING`、`XREADGROUP`）；
 - 跨两个 caller 但实现语义分叉（如不同 header、不同 request shape）。

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   adminFetch,
-  composeUpNoBuildArgs,
+  composeProfileUp,
   composeScale,
   delay,
   deployAndPromote,
@@ -1130,10 +1130,7 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
         15000
       );
     } finally {
-      sh(
-        ["docker", "compose", "up", "-d", ...composeUpNoBuildArgs(), "--wait", killedTask],
-        { stdio: "pipe", env: { COMPOSE_PROFILES: "do-multi" } }
-      );
+      composeProfileUp("do-multi", ["--wait", killedTask], { stdio: "pipe" });
     }
   });
 });

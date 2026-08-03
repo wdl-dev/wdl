@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import {
   composeStart,
   composeStop,
-  composeUpNoBuildArgs,
+  composeUp,
   deployAndPromote,
   ensureStackUp,
   encodeClientTextFrame,
@@ -79,15 +79,7 @@ test(
       if (backendStopped) {
         try {
           composeStart("user-runtime");
-          sh([
-            "docker",
-            "compose",
-            "up",
-            "-d",
-            ...composeUpNoBuildArgs(),
-            "--wait",
-            "user-runtime",
-          ]);
+          composeUp(["--wait", "user-runtime"]);
         } catch (err) {
           console.error("failed to restart user-runtime:", err);
         }
