@@ -7,7 +7,6 @@ import {
   AuthPolicyError,
   BOOTSTRAP_TOKEN_ID,
   assertTenantNs,
-  createDelegatedIssueTemplateMap,
   evaluateAccess,
   generatePlaintextToken,
   generateTokenId,
@@ -395,9 +394,8 @@ export default class Auth extends WorkerEntrypoint {
       ({ kind, ns } = validateIssueInput({ kind: input?.kind, ns: input?.ns }));
       if (kind === "token-issuer") {
         issueTemplates = validateIssueTemplatesInput(input?.issueTemplates);
-        const configured = createDelegatedIssueTemplateMap();
         for (const templateId of issueTemplates) {
-          resolveDelegatedIssueTemplate(templateId, configured);
+          resolveDelegatedIssueTemplate(templateId);
         }
       } else if (input?.issueTemplates !== undefined) {
         throw new AuthPolicyError(400, "invalid_template_request",

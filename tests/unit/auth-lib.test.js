@@ -19,7 +19,6 @@ const {
   DELEGATED_ISSUE_TEMPLATES,
   MAX_TOKEN_HEADER_BYTES,
   assertTenantNs,
-  createDelegatedIssueTemplateMap,
   isValidTenantNs,
   evaluateAccess,
   validateIssueInput,
@@ -552,83 +551,58 @@ test("validateIssueInput: bogus boundNsKind triggers invalid_role_config (defaul
 });
 
 test("delegated issue templates are code-defined and render labels", () => {
-  const templates = createDelegatedIssueTemplateMap();
-  const chat = templates.get("wdl-chat-ns-pool");
-  const cli = templates.get("wdl-cli-integration");
-  assert.ok(chat);
-  assert.ok(cli);
+  const chat = resolveDelegatedIssueTemplate("wdl-chat-ns-pool");
+  const cli = resolveDelegatedIssueTemplate("wdl-cli-integration");
   assert.deepEqual(
     DELEGATED_ISSUE_TEMPLATES.map((/** @type {{ id: string }} */ t) => t.id),
     ["wdl-chat-ns-pool", "wdl-cli-integration"]
   );
   assert.equal(chat.version, "1");
-  assert.equal(chat.disabled, false);
   assert.equal(renderDelegatedIssueLabel(chat, "tmp-00112233"), "workshop-pool tmp-00112233");
-  assert.equal(resolveDelegatedIssueTemplate("wdl-chat-ns-pool", templates), chat);
   assert.equal(cli.version, "1");
-  assert.equal(cli.disabled, false);
   assert.equal(cli.ttlSeconds, 60 * 60);
   assert.equal(cli.activeQuota, 50);
   assert.deepEqual(cli.nsGenerator, { prefix: "cli-it-", randomHexBytes: 4 });
   assert.equal(renderDelegatedIssueLabel(cli, "cli-it-00112233"), "cli live integration cli-it-00112233");
-  assert.equal(resolveDelegatedIssueTemplate("wdl-cli-integration", templates), cli);
 });
 
-test("delegated issue template resolver rejects missing and disabled templates consistently", () => {
-  const disabled = createDelegatedIssueTemplateMap([{
-    id: "disabled-template",
-    targetKind: "ns",
-    nsGenerator: { prefix: "tmp-", randomHexBytes: 4 },
-    labelTemplate: "pool {ns}",
-    ttlSeconds: 60,
-    activeQuota: 1,
-    disabled: true,
-  }]);
+test("delegated issue template resolver rejects missing templates", () => {
   assert.throws(
-    () => resolveDelegatedIssueTemplate("missing-template", disabled),
+    () => resolveDelegatedIssueTemplate("missing-template"),
     (err) => err instanceof AuthPolicyError &&
       /** @type {any} */ (err).status === 400 &&
       /** @type {any} */ (err).reason === "invalid_template"
   );
-  assert.throws(
-    () => resolveDelegatedIssueTemplate("disabled-template", disabled),
-    (err) => err instanceof AuthPolicyError &&
-      /** @type {any} */ (err).status === 400 &&
-      /** @type {any} */ (err).reason === "template_disabled"
-  );
 });
 
-test("delegated issue template code-shape failures are server misconfiguration", () => {
-  for (const templates of [
-    null,
-    "",
-    {},
-    [],
-    [{ id: "Bad", targetKind: "ns" }],
-    [{
-      id: "bad-target",
-      targetKind: "token-issuer",
-      nsGenerator: { prefix: "tmp-", randomHexBytes: 4 },
-      labelTemplate: "pool {ns}",
-      ttlSeconds: 60,
-      activeQuota: 1,
-    }],
-    [{
-      id: "long-label",
-      targetKind: "ns",
-      nsGenerator: { prefix: "tmp-", randomHexBytes: 4 },
-      labelTemplate: "{ns} ".repeat(12),
-      ttlSeconds: 60,
-      activeQuota: 1,
-    }],
-  ]) {
-    assert.throws(
-      () => createDelegatedIssueTemplateMap(templates),
-      (err) => err instanceof AuthPolicyError &&
-        /** @type {any} */ (err).status === 503 &&
-        /** @type {any} */ (err).reason === "delegated_issue_misconfigured",
-      `expected config failure for ${String(templates)}`
-    );
+test("delegated issue template constants satisfy their static contract", () => {
+  assert.ok(Object.isFrozen(DELEGATED_ISSUE_TEMPLATES));
+  assert.ok(DELEGATED_ISSUE_TEMPLATES.length > 0);
+  const ids = new Set();
+  for (const template of DELEGATED_ISSUE_TEMPLATES) {
+    assert.ok(Object.isFrozen(template), `${template.id} must be frozen`);
+    assert.ok(Object.isFrozen(template.nsGenerator), `${template.id} generator must be frozen`);
+    assert.match(template.id, /^[a-z][a-z0-9-]{0,63}$/);
+    assert.ok(!ids.has(template.id), `duplicate template ${template.id}`);
+    ids.add(template.id);
+
+    assert.ok(Object.hasOwn(ROLES, template.targetKind), `${template.id} target role exists`);
+    assert.equal(ROLES[template.targetKind].boundNsKind, "tenant");
+
+    const { prefix, randomHexBytes } = template.nsGenerator;
+    assert.ok(prefix.length > 0, `${template.id} generator prefix must be non-empty`);
+    assert.ok(Number.isInteger(randomHexBytes) && randomHexBytes >= 1 && randomHexBytes <= 16);
+    const sampleNs = prefix + "0".repeat(randomHexBytes * 2);
+    assert.ok(isValidTenantNs(sampleNs), `${template.id} must generate valid tenant namespaces`);
+
+    assert.ok(template.labelTemplate.includes("{ns}"));
+    assert.ok(template.labelTemplate.length <= 128);
+    assert.ok(renderDelegatedIssueLabel(template, sampleNs).length <= 128);
+    assert.ok(Number.isInteger(template.ttlSeconds));
+    assert.ok(template.ttlSeconds >= 1 && template.ttlSeconds <= 30 * 24 * 60 * 60);
+    assert.ok(Number.isInteger(template.activeQuota));
+    assert.ok(template.activeQuota >= 1 && template.activeQuota <= 10_000);
+    assert.match(template.version, /^[A-Za-z0-9._:-]{1,64}$/);
   }
 });
 

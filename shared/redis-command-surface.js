@@ -1,6 +1,4 @@
 import {
-  buildHGetExArgs,
-  buildHSetExArgs,
   buildHSetArgs,
   buildSetArgs,
   decodeBulk,
@@ -69,7 +67,7 @@ export class RedisCommandSurface {
 
   /** @param {string} channel @param {RedisArg} message */
   async publish(channel, message) {
-    return this._exec("PUBLISH", channel, message);
+    return /** @type {number} */ (await this._exec("PUBLISH", channel, message));
   }
 
   /** @param {string} cursor @param {string} match @param {number} [count] @returns {Promise<[string, string[]]>} */
@@ -98,15 +96,6 @@ export class RedisCommandSurface {
   async hMGet(key, fields) {
     if (fields.length === 0) return [];
     const arr = /** @type {unknown[] | null} */ (await this._exec("HMGET", key, ...fields));
-    return arr ? arr.map(decodeBulk) : [];
-  }
-
-  /** @param {string} key @param {number} ttlSeconds @param {string[]} fields */
-  async hGetEx(key, ttlSeconds, fields) {
-    if (fields.length === 0) return [];
-    const arr = /** @type {unknown[] | null} */ (
-      await this._exec(...buildHGetExArgs(key, ttlSeconds, fields))
-    );
     return arr ? arr.map(decodeBulk) : [];
   }
 
@@ -243,11 +232,6 @@ export class RedisCommandSurface {
     return /** @type {number} */ (await this._exec(...buildHSetArgs(key, rest)));
   }
 
-  /** @param {string} key @param {number} ttlSeconds @param {Record<string, RedisArg>} fields */
-  async hSetEx(key, ttlSeconds, fields) {
-    return /** @type {number} */ (await this._exec(...buildHSetExArgs(key, ttlSeconds, fields)));
-  }
-
   /** @param {string} key @param {...string} fields */
   async hDel(key, ...fields) {
     return /** @type {number} */ (await this._exec("HDEL", key, ...fields));
@@ -259,23 +243,9 @@ export class RedisCommandSurface {
     return decodeStringArray(arr);
   }
 
-  /** @param {string} key */
-  async hLen(key) {
-    return /** @type {number} */ (await this._exec("HLEN", key));
-  }
-
   /** @param {string} key @param {string} field */
   async hExists(key, field) {
     return (await this._exec("HEXISTS", key, field)) === 1;
-  }
-
-  /** @param {string[]} keys @param {string} field */
-  async hExistsMany(keys, field) {
-    const replies = /** @type {number[]} */ (await this._execPipeline(
-      "HEXISTS_PIPELINE",
-      keys.map((key) => ["HEXISTS", key, field])
-    ));
-    return replies.map((value) => value === 1);
   }
 
   /** @param {Array<[string, string]>} pairs */

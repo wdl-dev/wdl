@@ -525,6 +525,20 @@ test("local actor requests reject legacy JSON metadata", async () => {
   );
 });
 
+test("local actor envelope decode errors retain local protocol wording", async () => {
+  await assert.rejects(
+    readLocalActorInvokeRequest(new Request("https://do-runtime.internal/invoke", {
+      method: "POST",
+      headers: { "x-wdl-do-local-envelope": "binary" },
+      body: new Uint8Array([0, 0, 0]),
+    })),
+    (err) => err instanceof DoRuntimeError &&
+      err.status === 400 &&
+      err.code === "invalid_request" &&
+      err.message === "local actor envelope is truncated"
+  );
+});
+
 test("normalizes do websocket connect request from internal headers", () => {
   const request = new Request("http://do-runtime/internal/do/connect", {
     method: "GET",

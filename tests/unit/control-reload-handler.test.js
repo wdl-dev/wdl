@@ -130,3 +130,27 @@ test("reload handler preserves publish failure status with camelCase duration", 
     },
   });
 });
+
+test("reload handler does not invent publish results when declaration repair fails", async () => {
+  resetReloadHandlerState({
+    ok: false,
+    declarations: {
+      ok: false,
+      error: "declared host repair failed",
+      duration_ms: 4,
+    },
+  });
+
+  const response = await handle({ requestId: "rid-reload-repair-fail" });
+
+  await assertJsonResponse(response, 502, {
+    reload: {
+      ok: false,
+      declarations: {
+        ok: false,
+        durationMs: 4,
+        error: "declared host repair failed",
+      },
+    },
+  });
+});

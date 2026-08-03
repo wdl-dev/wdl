@@ -5,25 +5,21 @@ export const DEFAULT_JSON_BODY_MAX_BYTES = 1024 * 1024;
 
 /**
  * @param {Request} request
- * @param {{ requireObject?: boolean, allowEmpty?: boolean, maxBytes?: number }} [opts]
+ * @param {{ requireObject?: boolean, maxBytes?: number }} [opts]
  */
 export async function readJsonBody(
   request,
-  { requireObject = false, allowEmpty = false, maxBytes = DEFAULT_JSON_BODY_MAX_BYTES } = {},
+  { requireObject = false, maxBytes = DEFAULT_JSON_BODY_MAX_BYTES } = {},
 ) {
   let body;
   try {
     const text = await readBoundedText(request, maxBytes);
     if (text === "") {
-      if (!allowEmpty) {
-        return {
-          response: jsonError(400, "invalid_json", "Body must be valid JSON"),
-        };
-      }
-      body = {};
-    } else {
-      body = JSON.parse(text);
+      return {
+        response: jsonError(400, "invalid_json", "Body must be valid JSON"),
+      };
     }
+    body = JSON.parse(text);
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       return {

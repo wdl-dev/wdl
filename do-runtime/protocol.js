@@ -675,43 +675,21 @@ export async function readLocalActorInvokeRequest(request) {
   if (request.headers.get(LOCAL_ACTOR_ENVELOPE_HEADER) !== LOCAL_ACTOR_ENVELOPE_MARKER) {
     throw new DoRuntimeError(415, "unsupported_media_type", "DO host actor requests require the local envelope");
   }
-  const bytes = await readBoundedBytes(request, MAX_INVOKE_ENVELOPE_BYTES);
-  if (bytes.length < 4) {
-    throw new DoRuntimeError(400, "invalid_request", "local actor envelope is truncated");
-  }
-  const metadataLength = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, false);
-  if (metadataLength === 0 || 4 + metadataLength > bytes.length) {
-    throw new DoRuntimeError(400, "invalid_request", "local actor envelope metadata is invalid");
-  }
-  let metadata;
-  try {
-    metadata = JSON.parse(utf8Decoder.decode(bytes.subarray(4, 4 + metadataLength)));
-  } catch {
-    throw new DoRuntimeError(400, "invalid_json", "Request body must be valid JSON");
-  }
-  const invoke = normalizeDoInvokeRequest(metadata);
-  const bodyBytes = bytes.subarray(4 + metadataLength);
-  if (bodyBytes.length === 0) return invoke;
-  if (!("request" in invoke)) {
-    throw new DoRuntimeError(400, "invalid_request", "local actor envelope body is only valid for fetch requests");
-  }
-  return {
-    ...invoke,
-    request: {
-      ...invoke.request,
-      bodyBytes,
-    },
-  };
+  const { metadata, bodyBytes } = decodeInvokeEnvelope(
+    await readBoundedBytes(request, MAX_INVOKE_ENVELOPE_BYTES),
+    "local actor envelope",
+  );
+  return invokeWithEnvelopeBody(metadata, bodyBytes, "local actor envelope");
 }
 
-/** @param {Uint8Array} bytes */
-function decodeInvokeEnvelope(bytes) {
+/** @param {Uint8Array} bytes @param {string} [envelopeName] */
+function decodeInvokeEnvelope(bytes, envelopeName = "DO invoke envelope") {
   if (bytes.length < 4) {
-    throw new DoRuntimeError(400, "invalid_request", "DO invoke envelope is truncated");
+    throw new DoRuntimeError(400, "invalid_request", `${envelopeName} is truncated`);
   }
   const metadataLength = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, false);
   if (metadataLength === 0 || 4 + metadataLength > bytes.length) {
-    throw new DoRuntimeError(400, "invalid_request", "DO invoke envelope metadata is invalid");
+    throw new DoRuntimeError(400, "invalid_request", `${envelopeName} metadata is invalid`);
   }
   let metadata;
   try {
@@ -725,12 +703,13 @@ function decodeInvokeEnvelope(bytes) {
 /**
  * @param {unknown} metadata
  * @param {Uint8Array} bodyBytes
+ * @param {string} [envelopeName]
  */
-function invokeWithEnvelopeBody(metadata, bodyBytes) {
+function invokeWithEnvelopeBody(metadata, bodyBytes, envelopeName = "DO invoke envelope") {
   const invoke = normalizeDoInvokeRequest(metadata);
   if (bodyBytes.length === 0) return invoke;
   if (!("request" in invoke)) {
-    throw new DoRuntimeError(400, "invalid_request", "DO invoke envelope body is only valid for fetch requests");
+    throw new DoRuntimeError(400, "invalid_request", `${envelopeName} body is only valid for fetch requests`);
   }
   return {
     ...invoke,

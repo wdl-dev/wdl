@@ -14,7 +14,6 @@ import { errorMessage } from "./errors.js";
  * @typedef {RedisConnectionOptions & { commandTimeoutMs?: number }} RedisClientOptions
  * @typedef {{ ttl?: number, exat?: number, nx?: boolean, xx?: boolean, ifeq?: RedisArg }} RedisSetOptions
  * @typedef {{ maxlen?: number }} RedisXAddOptions
- * @typedef {{ limit?: [number, number] }} RedisZRangeByScoreOptions
  * @typedef {{ REPLACE?: boolean, replace?: boolean }} RedisCopyOptions
  * @typedef {{ onMessage?: ((channel: string, message: Uint8Array) => void) | null, onConnect?: (() => void) | null, onDisconnect?: (() => void) | null, onError?: ((err: unknown) => void) | null, backoff?: (attempt: number) => number, sleep?: (ms: number) => Promise<void>, connect?: RedisSocketFactory }} RedisSubscriberOptions
  */
@@ -507,29 +506,6 @@ export function buildHSetArgs(key, rest) {
   } else {
     throw new Error("hSet requires (key, field, value) or (key, object)");
   }
-  return args;
-}
-
-/** @param {string} key @param {number} ttlSeconds @param {string[]} fields @returns {RedisCommand} */
-export function buildHGetExArgs(key, ttlSeconds, fields) {
-  return [
-    "HGETEX",
-    key,
-    "EX",
-    String(ttlSeconds),
-    "FIELDS",
-    String(fields.length),
-    ...fields,
-  ];
-}
-
-/** @param {string} key @param {number} ttlSeconds @param {Record<string, RedisArg>} fields @returns {RedisCommand} */
-export function buildHSetExArgs(key, ttlSeconds, fields) {
-  /** @type {RedisCommand} */
-  const args = ["HSETEX", key, "EX", String(ttlSeconds), "FIELDS"];
-  const entries = Object.entries(fields);
-  args.push(String(entries.length));
-  for (const [field, value] of entries) args.push(field, value);
   return args;
 }
 

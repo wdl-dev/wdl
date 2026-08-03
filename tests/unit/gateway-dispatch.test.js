@@ -466,25 +466,3 @@ test("resolveGatewayDispatch routes allowed __system__ pattern hits to system ru
     version: "v2",
   });
 });
-
-test("resolveGatewayDispatch rejects disallowed reserved pattern hits", async () => {
-  const ctx = dispatch("https://custom.workers.example/platform", {
-    knownPatternHosts: new Set(["custom.workers.example"]),
-    patterns: [{
-      slot: "/platform",
-      kind: "exact",
-      value: "/platform",
-      ns: "__platform__",
-      worker: "p",
-      version: "v1",
-    }],
-  });
-
-  assert.deepEqual(await ctx.result, {
-    kind: "not_found",
-    route: "worker_fetch_pattern",
-    namespace: "__platform__",
-    worker: "p",
-    version: "v1",
-  });
-});

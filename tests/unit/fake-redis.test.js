@@ -138,18 +138,11 @@ test("fake redis mirrors combined hash and string snapshots", async () => {
       hash: {},
       value: null,
     });
-    redis.sets.set("refs:a", new Set(["worker", "version"]));
-    assert.deepEqual(await session.hGetAllGetSMembers("hash:a", "alias:a", "refs:a"), {
-      hash: { one: "1" },
-      value: "target-a",
-      members: ["worker", "version"],
-    });
   });
   assert.deepEqual(redis.commands, [
     ["hGetAllAndGet", "hash:a", "alias:a"],
     ["sMembersAndHGetAll", "members:a", "hash:a"],
     ["hGetAllAndGet", "hash:missing", "alias:missing"],
-    ["hGetAllGetSMembers", "hash:a", "alias:a", "refs:a"],
   ]);
 
   const rawRedis = createFakeRedis(undefined, { encodeGet: true });

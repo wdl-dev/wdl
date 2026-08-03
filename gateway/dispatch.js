@@ -3,7 +3,6 @@ import {
   WORKER_NAME_RE,
   isReservedNs,
   RESERVED_TENANT_NS,
-  ROUTES_ALLOWED_RESERVED_NS,
 } from "shared-ns-pattern";
 import {
   classifyHost,
@@ -170,14 +169,6 @@ export async function resolveGatewayDispatch({
     if (!hit) return notFoundDispatch(route);
 
     namespace = hit.ns;
-    if ((isReservedNs(namespace) && !ROUTES_ALLOWED_RESERVED_NS.has(namespace)) ||
-        RESERVED_TENANT_NS.has(namespace)) {
-      return notFoundDispatch(route, {
-        namespace,
-        worker: hit.worker,
-        version: hit.version,
-      });
-    }
     worker = hit.worker;
     if (!WORKER_NAME_RE.test(worker)) {
       return notFoundDispatch(route, { namespace, worker, version: hit.version });

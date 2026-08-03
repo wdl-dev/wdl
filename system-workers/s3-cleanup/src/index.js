@@ -37,7 +37,6 @@ const MAX_ATTEMPTS = 10;
 const BACKOFF_MAX_MS = 30 * 60_000;
 const BACKOFF_BASE_MS = 60_000;
 const CRON_BATCH = 100;
-const MAX_DELETE_PAGES_PER_RUN = 1;
 const MAX_LIST_PAGES = 1000;
 const PROCESSING_LEASE_MS = 30 * 60_000;
 const DB_BINDING = "S3_CLEANUP_DB";
@@ -445,14 +444,14 @@ export async function processTask(db, s3, taskOrId) {
   try {
     const prefixes = /** @type {string[]} */ (task.prefixes);
     let prefixIndex = task.checkpoint?.prefixIndex ?? 0;
-    let continuationToken = task.checkpoint?.continuationToken ?? null;
-    let pageCount = task.checkpoint?.pageCount ?? 0;
+    const continuationToken = task.checkpoint?.continuationToken ?? null;
+    const pageCount = task.checkpoint?.pageCount ?? 0;
     if (prefixIndex > prefixes.length) {
       throw new Error(
         `s3 cleanup checkpoint prefixIndex ${prefixIndex} exceeds prefix count ${prefixes.length}`
       );
     }
-    for (let page = 0; page < MAX_DELETE_PAGES_PER_RUN && prefixIndex < prefixes.length; page += 1) {
+    if (prefixIndex < prefixes.length) {
       const prefix = prefixes[prefixIndex];
       const r = await deletePrefixPage(s3, prefix, continuationToken);
       // If checkpoint persistence fails after this delete, retry may re-delete
@@ -478,8 +477,6 @@ export async function processTask(db, s3, taskOrId) {
         return S3_CLEANUP_OUTCOME.RETRY;
       }
       prefixIndex += 1;
-      continuationToken = null;
-      pageCount = 0;
     }
     if (prefixIndex < prefixes.length) {
       await saveProgress(db, task.id, {

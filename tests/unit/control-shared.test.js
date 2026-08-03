@@ -959,28 +959,12 @@ test("readJsonBody: invalid JSON returns machine-code error plus message", async
   });
 });
 
-test("readJsonBody: empty body is invalid unless explicitly allowed", async () => {
+test("readJsonBody: empty body is invalid", async () => {
   const rejected = await readJsonBody(new Request("http://x", {
     method: "POST",
   }));
   assert.ok(rejected.response);
   assert.deepEqual(await rejected.response.json(), {
-    error: "invalid_json",
-    message: "Body must be valid JSON",
-  });
-
-  const allowed = await readJsonBody(new Request("http://x", {
-    method: "POST",
-  }), { allowEmpty: true });
-  assert.deepEqual(allowed, { body: {} });
-
-  const malformedWithAllowEmpty = await readJsonBody(new Request("http://x", {
-    method: "POST",
-    body: "{",
-  }), { allowEmpty: true });
-  assert.ok(malformedWithAllowEmpty.response);
-  assert.equal(malformedWithAllowEmpty.response.status, 400);
-  assert.deepEqual(await malformedWithAllowEmpty.response.json(), {
     error: "invalid_json",
     message: "Body must be valid JSON",
   });

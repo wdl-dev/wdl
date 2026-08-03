@@ -23,7 +23,6 @@ import { errorMessage } from "./errors.js";
  * @typedef {import("shared-redis-resp").RedisCommandEvent} RedisCommandEvent
  * @typedef {import("shared-redis-resp").RedisHSetArg} RedisHSetArg
  * @typedef {import("shared-redis-resp").RedisSetOptions} RedisSetOptions
- * @typedef {import("shared-redis-resp").RedisXAddOptions} RedisXAddOptions
  * @typedef {import("shared-redis-resp").RedisCopyOptions} RedisCopyOptions
  * @typedef {import("shared-redis-resp").RedisSocket} RedisSocket
  * @typedef {import("shared-redis-resp").RedisConnectionOptions} RedisConnectionOptions
@@ -291,23 +290,6 @@ export class RedisSession extends RedisCommandSurface {
     };
   }
 
-  /** @param {string} hashKey @param {string} stringKey @param {string} setKey */
-  async hGetAllGetSMembers(hashKey, stringKey, setKey) {
-    const [hashReply, valueReply, membersReply] = await this._execPipeline(
-      "HGETALL_GET_SMEMBERS_PIPELINE",
-      [
-        ["HGETALL", hashKey],
-        ["GET", stringKey],
-        ["SMEMBERS", setKey],
-      ]
-    );
-    return {
-      hash: decodeHashObject(/** @type {unknown[] | null} */ (hashReply)),
-      value: decodeBulk(valueReply),
-      members: decodeStringArray(/** @type {unknown[] | null} */ (membersReply)),
-    };
-  }
-
   /**
    * @param {string[]} watchKeys
    * @param {string} hashKey
@@ -483,16 +465,6 @@ export class RedisMulti {
   /** @param {string} key @param {number|string} score @param {string} member */
   zAdd(key, score, member) {
     this._commands.push(["ZADD", key, String(score), member]);
-    return this;
-  }
-  /** @param {string} key @param {Record<string, RedisArg>} fields @param {RedisXAddOptions} [opts] */
-  xAdd(key, fields, opts = {}) {
-    /** @type {RedisCommand} */
-    const args = ["XADD", key];
-    if (opts.maxlen) args.push("MAXLEN", "~", String(opts.maxlen));
-    args.push("*");
-    for (const [field, value] of Object.entries(fields)) args.push(field, value);
-    this._commands.push(args);
     return this;
   }
   /** @param {string} key @param {string|string[]} members */

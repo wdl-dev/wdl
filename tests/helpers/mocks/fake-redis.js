@@ -787,18 +787,6 @@ export function createFakeRedisSession(state, options = {}) {
         value: state.strings.get(stringKey) ?? null,
       };
     },
-    /** @param {string} hashKey @param {string} stringKey @param {string} setKey */
-    async hGetAllGetSMembers(hashKey, stringKey, setKey) {
-      expireIfNeeded(state, hashKey, options);
-      expireIfNeeded(state, stringKey, options);
-      expireIfNeeded(state, setKey, options);
-      state.commands.push(["hGetAllGetSMembers", hashKey, stringKey, setKey]);
-      return {
-        hash: { ...(state.hashes.get(hashKey) || {}) },
-        value: state.strings.get(stringKey) ?? null,
-        members: [...(state.sets.get(setKey) || new Set())],
-      };
-    },
     /**
      * @param {string[]} watchKeys
      * @param {string} hashKey

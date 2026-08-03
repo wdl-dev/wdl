@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   deleteGatewayInternalHeaders,
-  escapeRegex,
   classifyHost,
   isPatternInvalidationKey,
   normalizeRequestHost,
@@ -39,14 +38,6 @@ test("deleteGatewayInternalHeaders removes fixed and prefixed private headers", 
 function matchPattern(sorted, pathname, search = "") {
   return matchPatternWithStats(sorted, pathname, search).entry;
 }
-
-test("escapeRegex produces regex-safe literals", () => {
-  for (const value of ["a.b", "a*b+c?", "[a](b){c}|d", "^start$", "back\\slash", "foo-bar", "a b"]) {
-    const re = new RegExp(`^${escapeRegex(value)}$`);
-    assert.equal(re.test(value), true, value);
-    assert.equal(re.test(`${value}x`), false, value);
-  }
-});
 
 test("classifyHost: subdomain match", () => {
   const r = classifyHost("demo.workers.local", "workers.local", NS_PATTERN);

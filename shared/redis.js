@@ -31,7 +31,6 @@ export { RedisSubscriber, defaultBackoff } from "shared-redis-subscriber";
  * @typedef {import("shared-redis-resp").RedisClientOptions} RedisClientOptions
  * @typedef {import("shared-redis-resp").RedisSetOptions} RedisSetOptions
  * @typedef {import("shared-redis-resp").RedisXAddOptions} RedisXAddOptions
- * @typedef {import("shared-redis-resp").RedisZRangeByScoreOptions} RedisZRangeByScoreOptions
  * @typedef {import("shared-redis-resp").RedisCopyOptions} RedisCopyOptions
  * @typedef {import("shared-redis-resp").RedisSubscriberOptions} RedisSubscriberOptions
  */

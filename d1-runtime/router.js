@@ -197,11 +197,14 @@ function recordQueryComplete({ requestId, query, startedAt, status, code, outcom
  * @param {Request} request
  * @param {D1Env} env
  * @param {string | null} [requestId]
- * @param {{ normalize?: (body: unknown) => D1Query, read?: (request: Request) => Promise<unknown> } | ((body: unknown) => D1Query)} [options]
+ * @param {{ normalize?: (body: unknown) => D1Query, read?: (request: Request) => Promise<unknown> }} [options]
  */
-export async function handleQuery(request, env, requestId = null, options = {}) {
-  const normalize = typeof options === "function" ? options : options.normalize || normalizeQueryRequest;
-  const read = typeof options === "function" ? readD1QueryRequest : options.read || readD1QueryRequest;
+export async function handleQuery(
+  request,
+  env,
+  requestId = null,
+  { normalize = normalizeQueryRequest, read = readD1QueryRequest } = {},
+) {
   const startedAt = Date.now();
   requestId = requestId || ensureRequestId(request.headers);
   // Forwarding is not an authorization signal. It only suppresses duplicate

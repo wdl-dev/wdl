@@ -4,7 +4,6 @@ import { RedisSession } from "shared-redis-session";
 import { errorMessage } from "./errors.js";
 import {
   decodeRedisTimeMs,
-  decodeStringArray,
   encodeCommand,
   writeRedisCommands,
   normalizeRedisDb,
@@ -19,7 +18,6 @@ import {
  * @typedef {import("shared-redis-resp").RedisReply} RedisReply
  * @typedef {import("shared-redis-resp").RedisCommandEvent} RedisCommandEvent
  * @typedef {import("shared-redis-resp").RedisXAddOptions} RedisXAddOptions
- * @typedef {import("shared-redis-resp").RedisZRangeByScoreOptions} RedisZRangeByScoreOptions
  * @typedef {import("shared-redis-resp").RedisClientOptions} RedisClientOptions
  */
 
@@ -129,32 +127,6 @@ export class RedisClient extends RedisCommandSurface {
     }
   }
 
-  // SMEMBERS returns a Set of strings: members are always plain text.
-  /** @param {string} key */
-  async smembers(key) {
-    const arr = /** @type {Uint8Array[] | null} */ (await this._exec("SMEMBERS", key));
-    return decodeStringArray(arr);
-  }
-
-  /** @param {string} key @param {string} member */
-  async sismember(key, member) {
-    return (await this._exec("SISMEMBER", key, member)) === 1;
-  }
-
-  // HGETALL returns { fieldName (string) -> valueBytes (Uint8Array) }.
-  // Field names are UTF-8 decoded; values stay as bytes so binary modules
-  // round-trip without loss.
-  /** @param {string} key */
-  async hgetall(key) {
-    const arr = /** @type {Uint8Array[] | null} */ (await this._exec("HGETALL", key));
-    /** @type {Record<string, Uint8Array>} */
-    const obj = {};
-    if (arr) {
-      for (let i = 0; i < arr.length; i += 2) obj[utf8Decoder.decode(arr[i])] = arr[i + 1];
-    }
-    return obj;
-  }
-
   /** @param {string} key */
   async get(key) {
     return /** @type {Uint8Array | null} */ (await this._exec("GET", key));
@@ -217,20 +189,6 @@ export class RedisClient extends RedisCommandSurface {
     for (const [field, value] of Object.entries(fields)) args.push(field, value);
     const result = await this._exec(...args);
     return utf8Decoder.decode(/** @type {Uint8Array} */ (result));
-  }
-
-  /** @param {string} key @param {number|string} min @param {number|string} max @param {RedisZRangeByScoreOptions} [opts] */
-  async zrangebyscore(key, min, max, opts = {}) {
-    const args = ["ZRANGEBYSCORE", key, String(min), String(max)];
-    if (opts.limit) args.push("LIMIT", String(opts.limit[0]), String(opts.limit[1]));
-    const result = /** @type {Uint8Array[] | null} */ (await this._exec(...args));
-    if (!result) return [];
-    return decodeStringArray(result);
-  }
-
-  /** @param {string} key @param {...string} members */
-  async zrem(key, ...members) {
-    return this._exec("ZREM", key, ...members);
   }
 
   /** @param {string} key @param {string} start @param {string} end @param {number} count */

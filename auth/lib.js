@@ -123,9 +123,6 @@ const STRICT_ISO_UTC_RE =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const ISSUE_TEMPLATE_ID_RE = /^[a-z][a-z0-9-]{0,63}$/;
-const ISSUE_TEMPLATE_VERSION_RE = /^[A-Za-z0-9._:-]{1,64}$/;
-export const MAX_DELEGATED_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
-export const MAX_DELEGATED_TOKEN_ACTIVE_QUOTA = 10_000;
 
 /**
  * @typedef {{
@@ -136,7 +133,6 @@ export const MAX_DELEGATED_TOKEN_ACTIVE_QUOTA = 10_000;
  *   ttlSeconds: number,
  *   activeQuota: number,
  *   version: string,
- *   disabled: boolean,
  * }} DelegatedIssueTemplate
  */
 
@@ -152,7 +148,6 @@ export const DELEGATED_ISSUE_TEMPLATES = Object.freeze([
     ttlSeconds: 6 * 60 * 60,
     activeQuota: 100,
     version: "1",
-    disabled: false,
   }),
   Object.freeze({
     id: "wdl-cli-integration",
@@ -165,9 +160,13 @@ export const DELEGATED_ISSUE_TEMPLATES = Object.freeze([
     ttlSeconds: 60 * 60,
     activeQuota: 50,
     version: "1",
-    disabled: false,
   }),
 ]);
+
+/** @type {Map<string, DelegatedIssueTemplate>} */
+const delegatedIssueTemplatesById = new Map(
+  DELEGATED_ISSUE_TEMPLATES.map((template) => [template.id, template]),
+);
 
 const STORED_TIMESTAMP_FIELDS = Object.freeze([
   "created_at",
@@ -229,11 +228,6 @@ export function validateExpiresAt(value, now = Date.now()) {
     throw new AuthPolicyError(400, "expired_at_in_past", "expiresAt must be in the future");
   }
   return d.toISOString();
-}
-
-/** @param {unknown} value */
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 /** @param {unknown} id */
@@ -298,126 +292,12 @@ export function parseStoredIssueTemplates(stored) {
   }
 }
 
-/**
- * @param {unknown} templates
- * @returns {Map<string, DelegatedIssueTemplate>}
- */
-export function createDelegatedIssueTemplateMap(templates = DELEGATED_ISSUE_TEMPLATES) {
-  if (!Array.isArray(templates) || templates.length === 0) {
-    throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-      "delegated issue templates must be a non-empty array");
-  }
-  /** @type {Map<string, DelegatedIssueTemplate>} */
-  const out = new Map();
-  for (const item of templates) {
-    if (!isPlainObject(item)) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        "delegated issue templates must be objects");
-    }
-    const template = /** @type {Record<string, unknown>} */ (item);
-    if (!isIssueTemplateId(template.id)) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        "delegated issue template id is invalid");
-    }
-    const id = /** @type {string} */ (template.id);
-    if (out.has(id)) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `duplicate delegated issue template "${id}"`);
-    }
-    if (typeof template.targetKind !== "string" ||
-        !Object.hasOwn(ROLES, template.targetKind) ||
-        template.targetKind === "ops" ||
-        template.targetKind === "ops-observer" ||
-        template.targetKind === "token-issuer" ||
-        ROLES[template.targetKind].boundNsKind !== "tenant") {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" has invalid targetKind`);
-    }
-    if (!isPlainObject(template.nsGenerator)) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" must define nsGenerator`);
-    }
-    const generator = /** @type {Record<string, unknown>} */ (template.nsGenerator);
-    if (typeof generator.prefix !== "string" || !generator.prefix) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" nsGenerator.prefix must be non-empty`);
-    }
-    const randomHexBytes = generator.randomHexBytes;
-    if (typeof randomHexBytes !== "number" ||
-        !Number.isInteger(randomHexBytes) ||
-        randomHexBytes < 1 ||
-        randomHexBytes > 16) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" nsGenerator.randomHexBytes must be 1..16`);
-    }
-    const sampleNs = generator.prefix + "0".repeat(randomHexBytes * 2);
-    if (!isValidTenantNs(sampleNs)) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" generated namespace shape is invalid`);
-    }
-    if (typeof template.labelTemplate !== "string" ||
-        !template.labelTemplate ||
-        template.labelTemplate.length > 128 ||
-        !template.labelTemplate.includes("{ns}")) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" labelTemplate must include {ns}`);
-    }
-    const maxLabel = template.labelTemplate.replaceAll("{ns}", sampleNs);
-    if (maxLabel.length > 128) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" labelTemplate renders over 128 chars`);
-    }
-    const ttlSeconds = template.ttlSeconds;
-    if (typeof ttlSeconds !== "number" ||
-        !Number.isInteger(ttlSeconds) ||
-        ttlSeconds < 1 ||
-        ttlSeconds > MAX_DELEGATED_TOKEN_TTL_SECONDS) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" ttlSeconds is outside the server limit`);
-    }
-    const activeQuota = template.activeQuota;
-    if (typeof activeQuota !== "number" ||
-        !Number.isInteger(activeQuota) ||
-        activeQuota < 1 ||
-        activeQuota > MAX_DELEGATED_TOKEN_ACTIVE_QUOTA) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" activeQuota is outside the server limit`);
-    }
-    const version = template.version === undefined ? "1" : template.version;
-    if (typeof version !== "string" || !ISSUE_TEMPLATE_VERSION_RE.test(version)) {
-      throw new AuthPolicyError(503, "delegated_issue_misconfigured",
-        `template "${id}" version is invalid`);
-    }
-    out.set(id, {
-      id,
-      targetKind: template.targetKind,
-      nsGenerator: {
-        prefix: generator.prefix,
-        randomHexBytes,
-      },
-      labelTemplate: template.labelTemplate,
-      ttlSeconds,
-      activeQuota,
-      version,
-      disabled: template.disabled === true,
-    });
-  }
-  return out;
-}
-
-/**
- * @param {string} templateId
- * @param {Map<string, DelegatedIssueTemplate>} [configured]
- */
-export function resolveDelegatedIssueTemplate(templateId, configured = createDelegatedIssueTemplateMap()) {
-  const template = configured.get(templateId);
+/** @param {string} templateId */
+export function resolveDelegatedIssueTemplate(templateId) {
+  const template = delegatedIssueTemplatesById.get(templateId);
   if (!template) {
     throw new AuthPolicyError(400, "invalid_template",
       `template "${templateId}" does not exist`);
-  }
-  if (template.disabled) {
-    throw new AuthPolicyError(400, "template_disabled",
-      `template "${templateId}" is disabled`);
   }
   return template;
 }

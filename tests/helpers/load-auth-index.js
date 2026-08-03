@@ -368,11 +368,11 @@ function patchTemplate(template) {
 export const DELEGATED_ISSUE_TEMPLATES = Object.freeze(
   base.DELEGATED_ISSUE_TEMPLATES.map((template) => Object.freeze(patchTemplate(template)))
 );
-export function createDelegatedIssueTemplateMap(templates = DELEGATED_ISSUE_TEMPLATES) {
-  return base.createDelegatedIssueTemplateMap(templates);
-}
-export function resolveDelegatedIssueTemplate(templateId, configured = createDelegatedIssueTemplateMap()) {
-  return base.resolveDelegatedIssueTemplate(templateId, configured);
+const templatesById = new Map(
+  DELEGATED_ISSUE_TEMPLATES.map((template) => [template.id, template])
+);
+export function resolveDelegatedIssueTemplate(templateId) {
+  return templatesById.get(templateId) ?? base.resolveDelegatedIssueTemplate(templateId);
 }
 `)
     : authLibBaseUrl;

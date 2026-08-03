@@ -215,46 +215,6 @@ test("RedisClient.hMGet returns decoded values and null misses", async () => {
   assert.ok(socket._reader.released, "per-call reader lock released after command");
 });
 
-test("RedisClient.hGetEx refreshes hash field TTLs while reading values", async () => {
-  const socket = makeFakeSocket([bytes("*3\r\n$1\r\na\r\n$-1\r\n$1\r\nc\r\n")]);
-  const { connect } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const values = await client.hGetEx("h", 30, ["a", "b", "c"]);
-
-  assert.deepEqual(values, ["a", null, "c"]);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*9\r\n$6\r\nHGETEX\r\n$1\r\nh\r\n$2\r\nEX\r\n$2\r\n30\r\n$6\r\nFIELDS\r\n$1\r\n3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n"
-  );
-  assert.ok(socket._reader.released, "per-call reader lock released after command");
-});
-
-test("RedisSession carries hash field TTL heartbeats on its held socket", async () => {
-  const socket = makeFakeSocket([
-    bytes("*2\r\n$1\r\n1\r\n$-1\r\n:9999\r\n:1\r\n"),
-  ]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const result = await client.session(async (/** @type {any} */ session) => {
-    const active = await session.hGetEx("logs:tail:active", 30, ["demo:a", "demo:b"]);
-    const count = await session.hLen("logs:tail:active");
-    const written = await session.hSetEx("logs:tail:active", 30, { "demo:b": "1" });
-    return { active, count, written };
-  });
-
-  assert.deepEqual(result, { active: ["1", null], count: 9999, written: 1 });
-  assert.equal(state.count, 1, "heartbeat commands must reuse one Redis socket");
-  assert.equal(
-    decode(socket._writes[0]),
-    "*8\r\n$6\r\nHGETEX\r\n$16\r\nlogs:tail:active\r\n$2\r\nEX\r\n$2\r\n30\r\n$6\r\nFIELDS\r\n$1\r\n2\r\n$6\r\ndemo:a\r\n$6\r\ndemo:b\r\n"
-  );
-  assert.equal(decode(socket._writes[1]), "*2\r\n$4\r\nHLEN\r\n$16\r\nlogs:tail:active\r\n");
-  assert.equal(
-    decode(socket._writes[2]),
-    "*8\r\n$6\r\nHSETEX\r\n$16\r\nlogs:tail:active\r\n$2\r\nEX\r\n$2\r\n30\r\n$6\r\nFIELDS\r\n$1\r\n1\r\n$6\r\ndemo:b\r\n$1\r\n1\r\n"
-  );
-});
-
 test("RedisSession.open fails explicitly after close", async () => {
   const socket = makeFakeSocket([]);
   const { connect } = scriptedConnect(socket);
@@ -638,30 +598,6 @@ test("RedisSession.getManyAndHGetMany reads locks and hash fields in one write",
       "*2\r\n$3\r\nGET\r\n$6\r\nlock:b\r\n" +
       "*3\r\n$4\r\nHGET\r\n$11\r\nroutes:demo\r\n$1\r\na\r\n" +
       "*3\r\n$4\r\nHGET\r\n$11\r\nbundle:demo\r\n$8\r\n__meta__\r\n"
-  );
-});
-
-test("RedisSession.hGetAllGetSMembers reads a delete snapshot in one write", async () => {
-  const socket = makeFakeSocket([
-    bytes("*2\r\n$5\r\nstate\r\n$5\r\nready\r\n$7\r\nd1_main\r\n*2\r\n$6\r\nworker\r\n$7\r\nversion\r\n"),
-  ]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-
-  const snapshot = await client.session((/** @type {any} */ session) =>
-    session.hGetAllGetSMembers("database", "alias", "referrers"));
-
-  assert.deepEqual(snapshot, {
-    hash: { state: "ready" },
-    value: "d1_main",
-    members: ["worker", "version"],
-  });
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$7\r\nHGETALL\r\n$8\r\ndatabase\r\n" +
-      "*2\r\n$3\r\nGET\r\n$5\r\nalias\r\n" +
-      "*2\r\n$8\r\nSMEMBERS\r\n$9\r\nreferrers\r\n"
   );
 });
 
@@ -1176,24 +1112,6 @@ test("RedisClient.existsAndXRange batches a stream resume snapshot", async () =>
     decode(socket._writes[0]),
     "*2\r\n$6\r\nEXISTS\r\n$18\r\nlogs:demo:worker:s\r\n" +
       "*6\r\n$6\r\nXRANGE\r\n$18\r\nlogs:demo:worker:s\r\n$1\r\n-\r\n$1\r\n+\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n"
-  );
-});
-
-test("RedisClient batches independent HEXISTS checks on one socket", async () => {
-  const socket = makeFakeSocket([bytes(":1\r\n:0\r\n")]);
-  const { connect, state } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-
-  assert.deepEqual(
-    await client.hExistsMany(["worker:demo:api:v1", "worker:demo:api:v2"], "__meta__"),
-    [true, false]
-  );
-
-  assert.equal(state.count, 1);
-  assert.equal(
-    decode(socket._writes[0]),
-    "*3\r\n$7\r\nHEXISTS\r\n$18\r\nworker:demo:api:v1\r\n$8\r\n__meta__\r\n" +
-      "*3\r\n$7\r\nHEXISTS\r\n$18\r\nworker:demo:api:v2\r\n$8\r\n__meta__\r\n"
   );
 });
 

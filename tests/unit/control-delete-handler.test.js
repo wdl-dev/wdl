@@ -642,9 +642,6 @@ function resetVersionListHandlerState() {
     async get() {
       throw new Error("versions GET must not read next_version");
     },
-    async hExistsMany() {
-      throw new Error("versions GET must not scan historical bundle keys");
-    },
   };
   return installControlHandlerState("__versionDeleteHandlerState", {
     cleanupIntents: [],
