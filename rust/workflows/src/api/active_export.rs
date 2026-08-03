@@ -90,22 +90,17 @@ pub(super) async fn request_with_active_version(
     Ok(req)
 }
 
-pub(super) async fn verify_workflow_def_values(
+pub(super) async fn verify_workflow_def(
     state: &AppState,
-    ns: &str,
-    worker: &str,
-    workflow_name: &str,
-    workflow_key: &str,
-    _class_name: &str,
+    req: &WorkflowRequest,
 ) -> WorkflowResult<()> {
-    let key = workflow_defs_key(ns, worker);
-    let field = workflow_name.to_string();
+    let key = workflow_defs_key(&req.ns, &req.worker);
     let raw: Option<String> = state
         .control_redis
         .with_conn(async |mut conn| {
             redis::cmd("HGET")
                 .arg(key)
-                .arg(field)
+                .arg(&req.workflow_name)
                 .query_async(&mut conn)
                 .await
         })
@@ -116,7 +111,7 @@ pub(super) async fn verify_workflow_def_values(
     let def: WorkflowDef = serde_json::from_str(&raw).map_err(|err| {
         WorkflowError::invalid_state(format!("Workflow definition is corrupt: {err}"))
     })?;
-    if def.workflow_key != workflow_key {
+    if def.workflow_key != req.workflow_key {
         return Err(WorkflowError::invalid_state(
             "Workflow definition does not match runtime metadata",
         ));
@@ -165,19 +160,4 @@ pub(super) async fn ensure_worker_not_deleting(
         ));
     }
     Ok(())
-}
-
-pub(super) async fn verify_workflow_def(
-    state: &AppState,
-    req: &WorkflowRequest,
-) -> WorkflowResult<()> {
-    verify_workflow_def_values(
-        state,
-        &req.ns,
-        &req.worker,
-        &req.workflow_name,
-        &req.workflow_key,
-        &req.class_name,
-    )
-    .await
 }

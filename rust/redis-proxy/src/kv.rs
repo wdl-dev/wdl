@@ -345,6 +345,7 @@ async fn query_grouped_hmget_with_raw_byte_budget(
     conn: &mut ConnectionManager,
     remaining: usize,
     commands: &[GroupedHmgetCommand],
+    expected_values: usize,
 ) -> AppResult<(usize, Vec<Option<Vec<u8>>>)> {
     if commands.is_empty() {
         return Ok((0, Vec::new()));
@@ -358,19 +359,12 @@ async fn query_grouped_hmget_with_raw_byte_budget(
         .iter()
         .map(|(redis_key, _, _)| redis_key.as_str())
         .collect::<Vec<_>>();
-    let mut args = Vec::with_capacity(
-        1 + field_counts.len()
-            + commands
-                .iter()
-                .map(|(_, _, fields)| fields.len())
-                .sum::<usize>(),
-    );
+    let mut args = Vec::with_capacity(1 + field_counts.len() + expected_values);
     args.push(remaining_arg.as_str());
     for ((_, _, fields), field_count) in commands.iter().zip(&field_counts) {
         args.push(field_count.as_str());
         args.extend(fields.iter().map(String::as_str));
     }
-    let expected_values = commands.iter().map(|(_, _, fields)| fields.len()).sum();
     let reply = HMGET_WITH_RAW_BYTE_BUDGET
         .prepare_invoke(&keys, &args)
         .invoke_async(conn)
@@ -407,10 +401,10 @@ fn apply_grouped_hmget_response(
     output: &mut [Option<Vec<u8>>],
     budget: &mut RawByteBudget,
     commands: &[GroupedHmgetCommand],
+    expected_values: usize,
     preflight_bytes: usize,
     values: Vec<Option<Vec<u8>>>,
 ) -> AppResult<()> {
-    let expected_values = validate_grouped_hmget_plan(commands, output.len())?;
     if values.len() != expected_values {
         return Err(AppError::internal_error("invalid grouped KV HMGET reply"));
     }
@@ -418,6 +412,8 @@ fn apply_grouped_hmget_response(
     let mut values = values.into_iter();
     for (_, indices, _) in commands {
         for index in indices {
+            // load_grouped_fields_with_raw_byte_budget validated plan cardinality
+            // and every output index before issuing the Redis script.
             let value = values
                 .next()
                 .ok_or_else(|| AppError::internal_error("invalid grouped KV HMGET reply"))?;
@@ -435,13 +431,25 @@ async fn load_grouped_fields_with_raw_byte_budget(
     budget: &mut RawByteBudget,
 ) -> AppResult<Vec<Option<Vec<u8>>>> {
     let mut output = vec![None; output_len];
-    validate_grouped_hmget_plan(&commands, output_len)?;
+    let expected_values = validate_grouped_hmget_plan(&commands, output_len)?;
     // All HSTRLEN calls across every hash precede the first HMGET, so an
     // over-budget payload never leaves Valkey. Actual bytes are rechecked before
     // response encoding as a defense against malformed script replies.
-    let (preflight_bytes, values) =
-        query_grouped_hmget_with_raw_byte_budget(conn, budget.remaining()?, &commands).await?;
-    apply_grouped_hmget_response(&mut output, budget, &commands, preflight_bytes, values)?;
+    let (preflight_bytes, values) = query_grouped_hmget_with_raw_byte_budget(
+        conn,
+        budget.remaining()?,
+        &commands,
+        expected_values,
+    )
+    .await?;
+    apply_grouped_hmget_response(
+        &mut output,
+        budget,
+        &commands,
+        expected_values,
+        preflight_bytes,
+        values,
+    )?;
     Ok(output)
 }
 
@@ -1185,6 +1193,7 @@ mod tests {
             &mut output,
             &mut budget,
             &commands,
+            3,
             3,
             vec![
                 Some(b"ccc".to_vec()),

@@ -46,18 +46,9 @@ fn workflow_tick_summary(body: &JsonValue) -> WorkflowTickSummary {
 }
 
 pub(crate) async fn workflows_tick(state: AppState) -> SchedulerResult<WorkflowTickSummary> {
-    let Some(host) = state.config.workflows_host.clone() else {
+    let Some(response) = crate::post_workflow_tick(&state).await? else {
         return Ok(WorkflowTickSummary::default());
     };
-    let response = crate::post_remote_tick(
-        &state,
-        &host,
-        state.config.workflows_port,
-        "/internal/workflows/tick",
-        "workflow-tick",
-        "Workflow tick failed",
-    )
-    .await?;
     let status = response.status;
     let body = response.body;
     let duration_ms = now_ms() - response.started_at_ms;

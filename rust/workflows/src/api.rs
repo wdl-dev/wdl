@@ -87,9 +87,8 @@ use routing::{
     workflow_referrer_member,
 };
 use sharded_dispatch::{
-    DuePromotionConfig, DuePromotionMember, ReadyAdmissionConfig, ReadyAdmissionOutcome,
-    ReadyAdmissionResult, admit_ready_members, due_shards_with_due_members, promote_due_members,
-    remove_ready_member_if_state_missing,
+    ReadyAdmissionConfig, ReadyAdmissionOutcome, ReadyAdmissionResult, admit_ready_members,
+    due_shards_with_due_members, remove_ready_member_if_state_missing,
 };
 pub(crate) use status::{get_instance, list_instances, status_instance};
 use status::{

@@ -49,31 +49,32 @@ async fn read_remote_tick_text(
     })
 }
 
-pub(crate) async fn post_remote_tick(
+pub(crate) async fn post_workflow_tick(
     state: &AppState,
-    host: &str,
-    port: u16,
-    path: &str,
-    request_id_prefix: &str,
-    failure_message: &str,
-) -> SchedulerResult<RemoteTickResponse> {
-    let url = format!("http://{host}:{port}{path}");
-    let request_id = format!("{request_id_prefix}-{}-{}", state.instance_id, now_ms());
+) -> SchedulerResult<Option<RemoteTickResponse>> {
+    let Some(host) = state.config.workflows_host.as_deref() else {
+        return Ok(None);
+    };
+    let url = format!(
+        "http://{}:{}/internal/workflows/tick",
+        host, state.config.workflows_port
+    );
+    let request_id = format!("workflow-tick-{}-{}", state.instance_id, now_ms());
     let started_at_ms = now_ms();
     let response = workflow_tick_request(&state.http, &state.config, &url, &request_id)
         .send()
         .await
-        .map_err(|err| SchedulerError::internal_error(format!("{failure_message}: {err}")))?;
+        .map_err(|err| SchedulerError::internal_error(format!("Workflow tick failed: {err}")))?;
     let status = response.status();
-    let text = read_remote_tick_text(response, failure_message).await?;
+    let text = read_remote_tick_text(response, "Workflow tick failed").await?;
     let body = serde_json::from_str::<JsonValue>(&text).unwrap_or_else(|_| json!({}));
-    Ok(RemoteTickResponse {
+    Ok(Some(RemoteTickResponse {
         request_id,
         started_at_ms,
         status,
         text,
         body,
-    })
+    }))
 }
 
 #[cfg(test)]

@@ -3,7 +3,6 @@ use std::future::Future;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use wdl_rust_common::redis_eval::StaticRedisScript;
-use wdl_rust_common::time::now_ms;
 
 use crate::{AppState, ShardQueueKeys, WorkflowError, WorkflowResult};
 
@@ -13,18 +12,6 @@ pub(crate) struct ReadyAdmissionConfig {
     pub(crate) batch_size: usize,
     pub(crate) concurrency: usize,
     pub(crate) prune_on_error: bool,
-}
-
-pub(crate) struct DuePromotionConfig {
-    pub(crate) total_limit: usize,
-    pub(crate) per_shard_limit: usize,
-    pub(crate) scan_overfetch_factor: usize,
-}
-
-pub(crate) struct DuePromotionMember {
-    pub(crate) member: String,
-    pub(crate) extra_keys: Vec<String>,
-    pub(crate) extra_args: Vec<String>,
 }
 
 pub(crate) struct ReadyAdmissionOutcome<C> {
@@ -228,114 +215,6 @@ pub(crate) async fn remove_ready_member_if_state_missing(
     )
     .await?;
     Ok(removed == 1)
-}
-
-pub(crate) async fn promote_due_members<F>(
-    app: &AppState,
-    keys: ShardQueueKeys,
-    config: DuePromotionConfig,
-    promote_script: &StaticRedisScript,
-    prepare_member: F,
-) -> WorkflowResult<usize>
-where
-    F: Fn(&str) -> Option<DuePromotionMember> + Copy,
-{
-    if config.total_limit == 0 || config.per_shard_limit == 0 {
-        return Ok(0);
-    }
-    let now = now_ms();
-    let mut moved = 0;
-    for shard in due_shards_with_due_members(app, keys, now).await? {
-        if moved >= config.total_limit {
-            break;
-        }
-        let due = keys.due(shard);
-        let ready = keys.ready(shard);
-        let remaining = config.total_limit - moved;
-        let scan_count = remaining
-            .min(config.per_shard_limit)
-            .saturating_mul(config.scan_overfetch_factor.max(1));
-        let members: Vec<String> = app
-            .redis
-            .with_conn(async |mut conn| {
-                redis::cmd("ZRANGEBYSCORE")
-                    .arg(&due)
-                    .arg("-inf")
-                    .arg(now)
-                    .arg("LIMIT")
-                    .arg(0)
-                    .arg(scan_count)
-                    .query_async(&mut conn)
-                    .await
-            })
-            .await?;
-        if members.is_empty() {
-            continue;
-        }
-
-        let mut candidates = Vec::new();
-        let mut malformed = Vec::new();
-        for member in members {
-            match prepare_member(&member) {
-                Some(candidate) => candidates.push(candidate),
-                None => malformed.push(member),
-            }
-        }
-        if !malformed.is_empty() {
-            app.redis
-                .with_conn({
-                    let due = due.clone();
-                    async move |mut conn| {
-                        redis::cmd("ZREM")
-                            .arg(due)
-                            .arg(malformed)
-                            .query_async::<()>(&mut conn)
-                            .await
-                    }
-                })
-                .await?;
-        }
-        if candidates.is_empty() {
-            continue;
-        }
-
-        let shard_arg = shard.to_string();
-        let now_arg = now.to_string();
-        let mut offset = 0;
-        let mut shard_moved = 0;
-        while moved < config.total_limit
-            && shard_moved < config.per_shard_limit
-            && offset < candidates.len()
-        {
-            let remaining = (config.total_limit - moved).min(config.per_shard_limit - shard_moved);
-            let end = (offset + remaining).min(candidates.len());
-            let results: Vec<i64> = app
-                .redis
-                .with_conn(async |mut conn| {
-                    let mut pipe = redis::pipe();
-                    let script = promote_script.prepare_pipeline(&mut pipe, end - offset);
-                    for candidate in &candidates[offset..end] {
-                        let mut script_keys =
-                            vec![due.as_str(), ready.as_str(), keys.ready_active()];
-                        script_keys.extend(candidate.extra_keys.iter().map(String::as_str));
-                        let mut script_args = vec![
-                            candidate.member.as_str(),
-                            now_arg.as_str(),
-                            shard_arg.as_str(),
-                        ];
-                        script_args.extend(candidate.extra_args.iter().map(String::as_str));
-                        script.append(&mut pipe, &script_keys, &script_args);
-                    }
-                    pipe.query_async(&mut conn).await
-                })
-                .await?;
-            let moved_now = results.into_iter().filter(|value| *value == 1).count();
-            moved += moved_now;
-            shard_moved += moved_now;
-            offset = end;
-        }
-    }
-    Ok(moved)
 }
 
 pub(crate) async fn due_shards_with_due_members(

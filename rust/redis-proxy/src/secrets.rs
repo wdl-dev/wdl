@@ -23,6 +23,9 @@ const SECRET_ENVELOPE_KID_ENV: &str = "SECRET_ENVELOPE_KID";
 const AES_256_KEY_BYTES: usize = 32;
 const AES_GCM_IV_BYTES: usize = 12;
 const AES_GCM_TAG_BYTES: usize = 16;
+// Local AES unwraps do not materially benefit from caching. Keep this cache
+// bounded so a future remote KMS provider can avoid per-read unwrap I/O without
+// changing the secret-envelope read path.
 const DEK_CACHE_LIMIT: usize = 512;
 const DEK_CACHE_SHARDS: usize = 16;
 const DEK_CACHE_SHARD_LIMIT: usize = DEK_CACHE_LIMIT / DEK_CACHE_SHARDS;

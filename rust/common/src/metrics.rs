@@ -255,7 +255,8 @@ pub fn labels_map(labels: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-pub fn metric_key(name: &str, labels: &BTreeMap<String, String>) -> String {
+#[cfg(test)]
+fn metric_key(name: &str, labels: &BTreeMap<String, String>) -> String {
     let suffix = labels
         .iter()
         .map(|(key, value)| format!("{key}={value}"))

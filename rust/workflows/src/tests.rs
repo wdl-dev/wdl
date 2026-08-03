@@ -702,7 +702,7 @@ fn workflow_step_execution_fences_stay_inside_db2_lua() {
         "step execution must not keep a separate preflight verifier outside the Redis script fence"
     );
     assert!(
-        !source.contains("verify_workflow_def_values"),
+        !source.contains("verify_workflow_def("),
         "step execution must not read DB0 workflow definitions per mutation"
     );
     assert!(

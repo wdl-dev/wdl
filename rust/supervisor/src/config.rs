@@ -94,21 +94,10 @@ pub(crate) fn positive_int_env(prefix: &str, name: &str, fallback: u64) -> u64 {
     positive_or(std::env::var(&key).ok(), fallback)
 }
 
-pub(crate) fn positive_int_env_chained(prefix: &str, names: &[&str], fallback: u64) -> u64 {
-    for name in names {
-        let key = format!("{prefix}{name}");
-        let value = positive_or(std::env::var(&key).ok(), 0);
-        if value > 0 {
-            return value;
-        }
-    }
-    fallback
-}
-
 pub(crate) fn shutdown_timeout_ms(config: &SupervisorConfig) -> u64 {
-    positive_int_env_chained(
+    positive_int_env(
         config.env_prefix,
-        &["SHUTDOWN_TIMEOUT_MS", "WORKERD_STOP_TIMEOUT_MS"],
+        "SHUTDOWN_TIMEOUT_MS",
         DEFAULT_SHUTDOWN_TIMEOUT_MS,
     )
 }

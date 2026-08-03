@@ -3,9 +3,10 @@ use crate::{
     workflow_shard_queue_keys,
 };
 use wdl_rust_common::redis_eval::StaticRedisScript;
+use wdl_rust_common::time::now_ms;
 
 use super::super::{
-    DuePromotionConfig, DuePromotionMember, eval_script, parse_ready_token, promote_due_members,
+    due_shards_with_due_members, eval_script, parse_ready_token,
     remove_ready_member_if_state_missing,
 };
 pub(super) const REMOVE_READY_TOKEN_IF_TERMINAL_SCRIPT: &str = r#"
@@ -68,24 +69,89 @@ pub(super) struct ReadyTokenIdentity {
 }
 
 pub(super) async fn move_due_tokens(app: &AppState) -> WorkflowResult<usize> {
-    promote_due_members(
-        app,
-        workflow_shard_queue_keys(),
-        DuePromotionConfig {
-            total_limit: WORKFLOW_READY_BATCH_SIZE,
-            per_shard_limit: WORKFLOW_READY_BATCH_SIZE,
-            scan_overfetch_factor: DUE_SCAN_OVERFETCH_FACTOR,
-        },
-        &MOVE_DUE_TOKEN,
-        |token| {
-            parse_ready_token(token).map(|(ns, workflow_key, instance_id)| DuePromotionMember {
-                member: token.to_string(),
-                extra_keys: vec![instance_state_key(&ns, &workflow_key, &instance_id)],
-                extra_args: Vec::new(),
+    let keys = workflow_shard_queue_keys();
+    let now = now_ms();
+    let mut moved = 0;
+    for shard in due_shards_with_due_members(app, keys, now).await? {
+        if moved >= WORKFLOW_READY_BATCH_SIZE {
+            break;
+        }
+        let due = keys.due(shard);
+        let ready = keys.ready(shard);
+        let remaining = WORKFLOW_READY_BATCH_SIZE - moved;
+        let scan_count = remaining.saturating_mul(DUE_SCAN_OVERFETCH_FACTOR);
+        let members: Vec<String> = app
+            .redis
+            .with_conn(async |mut conn| {
+                redis::cmd("ZRANGEBYSCORE")
+                    .arg(&due)
+                    .arg("-inf")
+                    .arg(now)
+                    .arg("LIMIT")
+                    .arg(0)
+                    .arg(scan_count)
+                    .query_async(&mut conn)
+                    .await
             })
-        },
-    )
-    .await
+            .await?;
+        if members.is_empty() {
+            continue;
+        }
+
+        let mut candidates = Vec::new();
+        let mut malformed = Vec::new();
+        for token in members {
+            match parse_ready_token(&token) {
+                Some((ns, workflow_key, instance_id)) => {
+                    candidates.push((token, instance_state_key(&ns, &workflow_key, &instance_id)))
+                }
+                None => malformed.push(token),
+            }
+        }
+        if !malformed.is_empty() {
+            app.redis
+                .with_conn({
+                    let due = due.clone();
+                    async move |mut conn| {
+                        redis::cmd("ZREM")
+                            .arg(due)
+                            .arg(malformed)
+                            .query_async::<()>(&mut conn)
+                            .await
+                    }
+                })
+                .await?;
+        }
+        if candidates.is_empty() {
+            continue;
+        }
+
+        let shard_arg = shard.to_string();
+        let now_arg = now.to_string();
+        let mut offset = 0;
+        while moved < WORKFLOW_READY_BATCH_SIZE && offset < candidates.len() {
+            let remaining = WORKFLOW_READY_BATCH_SIZE - moved;
+            let end = (offset + remaining).min(candidates.len());
+            let results: Vec<i64> = app
+                .redis
+                .with_conn(async |mut conn| {
+                    let mut pipe = redis::pipe();
+                    let script = MOVE_DUE_TOKEN.prepare_pipeline(&mut pipe, end - offset);
+                    for (token, state_key) in &candidates[offset..end] {
+                        script.append(
+                            &mut pipe,
+                            &[due.as_str(), ready.as_str(), keys.ready_active(), state_key],
+                            &[token, now_arg.as_str(), shard_arg.as_str()],
+                        );
+                    }
+                    pipe.query_async(&mut conn).await
+                })
+                .await?;
+            moved += results.into_iter().filter(|value| *value == 1).count();
+            offset = end;
+        }
+    }
+    Ok(moved)
 }
 
 pub(super) async fn remove_ready_token(
@@ -172,12 +238,10 @@ mod tests {
         let source = include_str!("ready.rs");
         let shared_source = include_str!("../sharded_dispatch.rs");
         assert!(source.contains("DUE_SCAN_OVERFETCH_FACTOR"));
-        assert!(source.contains("promote_due_members"));
-        assert!(source.contains("total_limit: WORKFLOW_READY_BATCH_SIZE"));
-        assert!(source.contains("per_shard_limit: WORKFLOW_READY_BATCH_SIZE"));
+        assert!(source.contains("let remaining = WORKFLOW_READY_BATCH_SIZE - moved"));
+        assert!(source.contains("remaining.saturating_mul(DUE_SCAN_OVERFETCH_FACTOR)"));
+        assert!(source.contains("while moved < WORKFLOW_READY_BATCH_SIZE"));
         assert!(shared_source.contains("fn due_shards_with_due_members"));
         assert!(shared_source.contains(r#".cmd("ZRANGEBYSCORE")"#));
-        assert!(shared_source.contains("config.scan_overfetch_factor"));
-        assert!(shared_source.contains("while moved < config.total_limit"));
     }
 }
