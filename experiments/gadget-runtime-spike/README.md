@@ -97,6 +97,31 @@ address any gadget within its own namespace, and nothing outside it. The tenant
 reads its own session id from `ctx.props`, which *is* per-facet and therefore
 trustworthy on that side.
 
+### Storage is durable, code is not, and nothing binds them
+
+Three separate facts, measured by killing workerd with SIGKILL and restarting it
+against the same `state/` directory:
+
+- **Facet identity and SQLite are durable.** Each facet gets its own file
+  (`<actor>.1.sqlite`), and the actor's `.facets` index literally contains
+  `gadget:tmp-demo/chat-worker:persist/g1`. The counter continued 3 → 4 → 5
+  across the restart. In WDL this is do-runtime's EFS localDisk.
+- **Code is never persisted.** `ctx.facets.get(name, callback)` re-invokes the
+  callback on every cold start to re-supply the class. Whoever owns a facet must
+  be able to reproduce its exact code on demand, forever, or the facet's storage
+  is unopenable.
+- **The loader key is not a content hash.** Editing the gadget source and
+  restarting under the *same* key `.../v1` produced `version: 99, count: 6` — new
+  code, silently attached to the old SQLite, with nothing checking that the code
+  matches what created that storage.
+
+Together these close the question of whether gadget code could live purely in the
+owning DO's memory: it cannot. Code must be durably stored *and* explicitly bound
+to the storage it opens — which is what an immutable version id already is. WDL's
+`<ns>:<worker>:<version>` invariant is not bookkeeping here; it is precisely the
+thing that keeps persisted facet storage reopenable and prevents new code from
+inheriting state it was never written against.
+
 ### T-J: teardown does not cascade
 
 Aborting *and* hard-deleting the session facet left gadget storage fully intact

@@ -98,3 +98,14 @@ if [ "${1:-}" = "--cpu" ]; then
 fi
 
 say "done -- see README.md for what each result means"
+
+# Not part of the matrix above: persistence is verified by hand, because it
+# needs a SIGKILL and a restart against a *preserved* state/ directory, while
+# start() deliberately wipes it.
+#
+#   nohup ./node_modules/.bin/workerd serve workerd.capnp --experimental &
+#   curl ".../tenant/gadget?session=persist&gadget=g1&gv=1"   # x3 -> count 3
+#   pkill -9 -x workerd && nohup ./node_modules/.bin/workerd serve ... &
+#   curl ".../tenant/gadget?session=persist&gadget=g1&gv=1"   # -> count 4, durable
+#   sed -i 's/version: 1/version: 99/' gadget-v1.js           # edit, restart, hit again
+#   #                                  -> version 99, count 6: new code, old storage
