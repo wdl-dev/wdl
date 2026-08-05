@@ -51,7 +51,7 @@ level deeper than anything WDL does today. That is precisely what is under test.
 | — | Does per-session state survive in the loader env? | **No** — loader memoization freezes it, see below |
 | T-J | Does session-facet teardown cascade to gadget facets? | **No** — orphaned, see below |
 | T-K | Cold start (fresh session + fresh gadget) | **25–50 ms**; warm 3–4 ms |
-| T-L | Does `limits: { cpuMs: 200 }` stop a runaway gadget? | **No** — see below |
+| T-L | Does `limits: { cpuMs: 200 }` stop a runaway gadget? | **No** — open-source workerd has no CPU isolation |
 | T-M | Control: same runaway in ordinary tenant code | **Same outcome** — not gadget-specific |
 
 ### T-A/T-B force the architecture
@@ -106,22 +106,41 @@ dies with the VM. A gadget runtime needs explicit cascading GC keyed on session
 close, or it inherits and widens wdl-chat's existing "closed sessions are not
 reaped" limitation.
 
-### T-L/T-M: `limits.cpuMs` did not save us
+### T-L/T-M: there is no CPU isolation to have
 
-`limits: { cpuMs: 200 }` was accepted by the loader and **did not interrupt a
-synchronous infinite loop**. The process stayed pegged, stopped serving
-*unrelated* sessions in *other* actors, and ignored SIGTERM — it needed SIGKILL,
-because a wedged JS loop never reaches the signal handler.
+**Open-source workerd does not implement CPU isolation.** `limits: { cpuMs }` is
+accepted by the loader and enforced by Cloudflare's production supervisor
+infrastructure, not by the runtime — so on a self-hosted build it is an inert
+field. The measurement matches: with `cpuMs: 200`, a synchronous infinite loop
+ran unbounded, pegged the process, starved *unrelated* sessions in *other*
+actors, and ignored SIGTERM. It needed SIGKILL, because a wedged JS loop never
+reaches the signal handler.
 
-T-M is the control and matters for how this is read: ordinary tenant code with
-the same loop does exactly the same thing. **This is a standalone-workerd
-property, not something gadgets introduce.** WDL passes no `limits` to
-`workerLoader` today and `docs/` does not discuss CPU starvation at all, so this
-is a pre-existing gap worth its own look regardless of the gadget question.
+T-M is the control: ordinary tenant code with the same loop behaves identically.
+Gadgets introduce no new mechanism here. What they change is exposure — today
+reaching this state requires a deploy, which is gated, versioned and attributable
+to a namespace; with gadgets, unreviewed LLM-written code reaches the same
+runtime with no deploy step.
 
-What gadgets change is exposure, not mechanism: today reaching this state
-requires a deploy — gated, versioned, attributable to a namespace. With gadgets,
-unreviewed LLM-written code reaches the same runtime with no deploy step.
+Because the runtime cannot supply this, it has to come from the process boundary,
+which makes **blast radius the design variable**: how many tenants share one
+workerd process *is* the isolation policy. Current in-tree shape:
+
+- `user-runtime` runs `workerd` as PID 1 with no supervisor, and is a shared
+  multi-tenant pool. One wedged tenant starves every co-tenant on that task until
+  ECS health checks and `stopTimeout` replace it.
+- `d1-runtime` / `do-runtime` run a Rust supervisor as PID 1, and `DO_CONFIG`
+  already sets `kill_on_drain_success: KillSignal::Kill` — WDL has independently
+  found that workerd needs SIGKILL rather than SIGTERM.
+- But no tier has a **steady-state liveness watchdog**. The supervisor's kill
+  paths are drain- and shutdown-driven; nothing probes a running child and kills
+  it for being wedged.
+
+A gadget runtime should therefore take the supervisor shape rather than
+user-runtime's bare-workerd shape, and add the watchdog none of the tiers have:
+probe the child's health socket on an interval, SIGKILL and restart after N
+consecutive timeouts. That is a containment policy, not isolation — it bounds how
+long a wedge lasts, never who it affects.
 
 ### T-I hardening note
 
@@ -137,7 +156,25 @@ tenant component before this becomes load-bearing.
 
 The gadget model runs on WDL's exact workerd pin, boots ~100× faster than a
 MicroVM, isolates storage per gadget, blocks egress completely, and hot-swaps
-AI-edited code without a redeploy. It cannot be built inside chat-worker. It is
-a platform tier — a `gadget-runtime` alongside `d1-runtime` and `do-runtime` —
-and it needs two things this spike shows WDL does not have: cascading facet GC
-on session close, and a real answer for runaway CPU.
+AI-edited code without a redeploy. It cannot be built inside chat-worker: it is a
+platform tier, a `gadget-runtime` alongside `d1-runtime` and `do-runtime`.
+
+It is not, however, a drop-in replacement for wdl-chat's MicroVM, and the spike
+makes two reasons concrete.
+
+**It is a different product shape.** A gadget is plain ES modules handed to
+`workerLoader` — no shell, no package manager, no bundler. That is why
+`cloudflare-os` gadgets are dependency-free `.js` files pulled straight out of a
+Yjs doc. wdl-chat's VM exists to run `wdl init`, `pnpm`, and wrangler bundling;
+none of that survives the move. Preview hosting, which already runs on the real
+control plane rather than in the VM, is the part gadgets genuinely subsume.
+
+**It trades away CPU isolation.** Firecracker gives wdl-chat real CPU isolation
+per session. Open-source workerd gives none, and this spike shows there is no
+in-runtime substitute — only blast-radius policy and a watchdog. Adopting gadgets
+for the AI-authored-code path means accepting that one runaway gadget starves
+every co-tenant on its task until something kills the process.
+
+So the open questions are not "does it work" — it does — but how small the blast
+radius has to be, and whether a build-step-free authoring model is the product
+wdl-chat wants.
