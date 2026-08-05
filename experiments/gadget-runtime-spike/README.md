@@ -122,14 +122,21 @@ to the storage it opens — which is what an immutable version id already is. WD
 thing that keeps persisted facet storage reopenable and prevents new code from
 inheriting state it was never written against.
 
-### T-J: teardown does not cascade
+### T-J: teardown does not cascade *in this harness*
 
 Aborting *and* hard-deleting the session facet left gadget storage fully intact
-(the counter kept climbing 3 → 4). Because gadget facets live in a different
-host actor, nothing cascades. The MicroVM model gets this for free — `/workspace`
-dies with the VM. A gadget runtime needs explicit cascading GC keyed on session
-close, or it inherits and widens wdl-chat's existing "closed sessions are not
-reaped" limitation.
+(the counter kept climbing). This is a property of the harness's layout, not of
+the gadget model: gadget facets had to go in a separate host actor because
+routing them back through the session actor would re-enter a Durable Object
+already blocked on the tenant facet, and facets only cascade within one actor.
+
+`cloudflare-os` does not have this problem, because it does not have the tenant
+worker layer at all — gadget facets hang directly off `OverseerDurableObject`,
+so `deleteGadget()` cascades with a plain `this.ctx.facets.delete(facetName)`.
+
+The finding that survives is narrower and is about WDL specifically: the moment
+a tenant tier sits between the facet host and the gadget, cascading teardown
+stops being free and has to be built.
 
 ### T-L/T-M: there is no CPU isolation to have
 
