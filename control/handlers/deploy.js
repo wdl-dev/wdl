@@ -364,7 +364,7 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
     mergedBindings.ASSETS = { type: "assets" };
   }
   if (body.durableObjectRollout !== undefined) {
-    throw invalidDeployRequest("'durableObjectRollout' was renamed to 'sessionPolicy'");
+    throw invalidDeployRequest("Session policy must be declared through 'sessionPolicy'");
   }
   const sessionPolicy = body.sessionPolicy === undefined
     ? SESSION_POLICY_PRESERVE

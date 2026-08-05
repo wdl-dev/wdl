@@ -839,7 +839,7 @@ test("deploy handler accepts a restart session policy without a Durable Object b
   );
 });
 
-test("deploy handler validates the session policy before allocating a version", async () => {
+test("deploy handler validates session policy input before allocating a version", async () => {
   let incrCalls = 0;
   /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
     async incr() {
