@@ -23,7 +23,7 @@ import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 import { isValidRuntimeLoadNs, WORKER_NAME_RE } from "shared-ns-pattern";
 import { utf8ByteLength } from "shared-utf8";
 import {
-  DURABLE_OBJECT_ROLLOUT_PRESERVE,
+  SESSION_POLICY_PRESERVE,
   parseVersion,
 } from "shared-worker-contract";
 
@@ -114,10 +114,10 @@ const LOCAL_ACTOR_ENVELOPE_MARKER = "binary";
  * @typedef {{ method: string, url: string, headers: Array<[string, string]>, bodyBytes?: Uint8Array, bodyBase64?: undefined, bodyText?: undefined }} RequestSpec
  * @typedef {{ retryCount: number, isRetry: boolean, token?: string }} AlarmInfo
  * @typedef {{ method: string, args: unknown[] }} RpcInfo
- * @typedef {{ rolloutMode: "preserve" | "restart", restartSequence: number }} RolloutFence
- * @typedef {BundleSource & RolloutFence & { kind: "fetch", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, request: RequestSpec }} FetchInvoke
- * @typedef {BundleSource & RolloutFence & { kind: "alarm", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, alarm: AlarmInfo }} AlarmInvoke
- * @typedef {BundleSource & RolloutFence & { kind: "rpc", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, rpc: RpcInfo }} RpcInvoke
+ * @typedef {{ sessionPolicy: "preserve" | "restart", restartSequence: number }} SessionPolicyFence
+ * @typedef {BundleSource & SessionPolicyFence & { kind: "fetch", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, request: RequestSpec }} FetchInvoke
+ * @typedef {BundleSource & SessionPolicyFence & { kind: "alarm", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, alarm: AlarmInfo }} AlarmInvoke
+ * @typedef {BundleSource & SessionPolicyFence & { kind: "rpc", hostId: string, className: string, objectName: string, props: Record<string, unknown>, owner?: OwnerFence | null, rpc: RpcInfo }} RpcInvoke
  * @typedef {FetchInvoke | AlarmInvoke | RpcInvoke} DoInvoke
  * @typedef {Record<string, unknown> & { request?: Record<string, unknown> & { bodyBytes?: Uint8Array } }} EnvelopeInvoke
  */
@@ -535,7 +535,7 @@ export function normalizeDoInvokeRequest(value) {
     ...(input.owner == null ? {} : { owner: /** @type {OwnerFence} */ (normalizeOwnerFence(input.owner)) }),
     // Owner resolution and the host actor refresh these owner-local fields
     // from Redis. They are deliberately not accepted from the invoke wire.
-    rolloutMode: DURABLE_OBJECT_ROLLOUT_PRESERVE,
+    sessionPolicy: SESSION_POLICY_PRESERVE,
     restartSequence: 0,
     ...source,
   };
@@ -611,7 +611,7 @@ export function buildForwardRequest(spec) {
  */
 function invokeWithoutBodyBytes(invoke) {
   const {
-    rolloutMode: _rolloutMode,
+    sessionPolicy: _sessionPolicy,
     restartSequence: _restartSequence,
     ...metadata
   } = invoke;

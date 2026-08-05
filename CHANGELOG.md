@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Renamed the Durable Object rollout control to the worker session policy: the Control API deploy field is now `sessionPolicy`, promote responses return it, and Redis state moved to `worker:session-policy:*`, `worker:session-policy-seq:*`, and the `session-policy:restart` channel. Bundle metadata persisted under the retired `durableObjectRollout` field is dual-read; requests and responses accept only the new name.
+- Allowed `sessionPolicy: "restart"` without a Durable Object binding. The policy governs established sessions only — open WebSockets close with `1012` at promotion and stale DO facets abort on their next dispatch — so a pure WebSocket worker can now opt into Cloudflare-style deploy disconnects; new requests reach the newly promoted version under either policy.
+- For this upgrade, pause Control mutations before the first reader replica rolls and resume them only after system-runtime/Control finishes rolling: deploy Gateway, Workflows, and do-runtime first, then system-runtime/Control. A promote written by old Control is invisible to upgraded readers, so a `restart` issued inside that window would never close its sessions. Rolling Gateway drops public WebSocket sessions, so the session registry re-forms under the new keys without a stale-sequence window. A worker whose last promotion was `restart` behaves as `preserve` until its next promotion rewrites the projection under the new keys; leftover `worker:do-rollout:*` and `worker:do-rollout-seq:*` keys are inert and may be removed as repair-only cleanup.
+
 ## wdl.20260804.1 - 2026-08-04
 
 - Added opt-in Durable Object restart rollouts through the Control API's `durableObjectRollout: "restart"`, defaulting to `preserve`. Promotion commits the active projection and permanent restart sequence atomically, and do-runtime aborts superseded facets on their next dispatch without deleting SQLite state.

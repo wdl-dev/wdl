@@ -10,10 +10,10 @@ import { loadControlLib } from "../helpers/load-control-lib.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   bundleKey as productionBundleKey,
-  DURABLE_OBJECT_ROLLOUT_CHANNEL,
-  durableObjectRolloutKey,
-  durableObjectRolloutSequenceKey,
-  parseDurableObjectRolloutProjection,
+  SESSION_POLICY_CHANNEL,
+  sessionPolicyKey,
+  sessionPolicySequenceKey,
+  parseSessionPolicyProjection,
 } from "../../shared/worker-contract.js";
 
 const { promoteWithRoutes, bumpActiveAndPromote, reconcileHosts } =
@@ -25,10 +25,10 @@ const CRON_ID = /** @type {{ cron: { cronId: string } }} */ (
 ).cron.cronId;
 const DO_STORAGE_ID = "do_0123456789abcdef0123456789abcdef";
 
-/** @param {"preserve" | "restart"} [durableObjectRollout] */
-function doMeta(durableObjectRollout = "preserve") {
+/** @param {"preserve" | "restart"} [sessionPolicy] */
+function doMeta(sessionPolicy = "preserve") {
   return {
-    ...(durableObjectRollout === "restart" ? { durableObjectRollout } : {}),
+    ...(sessionPolicy === "restart" ? { sessionPolicy } : {}),
     bindings: {
       ROOM: {
         type: "do",
@@ -219,25 +219,6 @@ test("promoteWithRoutes rejects invalid persisted workersDev metadata", async ()
   }
 });
 
-test("promoteWithRoutes rejects invalid persisted Durable Object rollout metadata", async () => {
-  const redis = makeRedis();
-  seedBundle(redis, "v1", {
-    ...doMeta(),
-    durableObjectRollout: "replace",
-  });
-
-  await assert.rejects(
-    promoteWithRoutes(redis, "demo", "worker", "v1"),
-    (err) => {
-      assertRoutingErrorShape(err, 500, "corrupt_meta");
-      assert.equal(/** @type {{ details?: any }} */ (err).details?.field, "durableObjectRollout");
-      return true;
-    }
-  );
-  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
-  assert.equal(redis.state.strings.has(durableObjectRolloutKey("demo", "worker")), false);
-});
-
 test("promoteWithRoutes rejects a Durable Object binding without storage identity", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {
@@ -281,10 +262,68 @@ test("promoteWithRoutes rejects Durable Object bindings with different storage i
   assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
 });
 
-test("promoteWithRoutes rejects restart rollout metadata without a Durable Object binding", async () => {
+test("promoteWithRoutes rejects invalid persisted session policy metadata", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", {
+    ...doMeta(),
+    sessionPolicy: "replace",
+  });
+
+  await assert.rejects(
+    promoteWithRoutes(redis, "demo", "worker", "v1"),
+    (err) => {
+      assertRoutingErrorShape(err, 500, "corrupt_meta");
+      assert.equal(/** @type {{ details?: any }} */ (err).details?.field, "sessionPolicy");
+      return true;
+    }
+  );
+  assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+  assert.equal(redis.state.strings.has(sessionPolicyKey("demo", "worker")), false);
+});
+
+test("promoteWithRoutes dual-reads the retired durableObjectRollout meta field", async () => {
+  const redis = makeRedis();
+  // A bundle persisted by a pre-rename control writer carries only the old
+  // meta field.
+  seedBundle(redis, "v1", {
     durableObjectRollout: "restart",
+    bindings: {},
+  });
+
+  const result = await promoteWithRoutes(redis, "demo", "worker", "v1");
+  assert.equal(result.sessionPolicy, "restart");
+  assert.equal(result.restartSequence, 1);
+});
+
+test("promoteWithRoutes prefers sessionPolicy over the retired durableObjectRollout field", async () => {
+  const redis = makeRedis();
+  // Both fields can coexist only through manual repair writes.
+  seedBundle(redis, "v1", {
+    sessionPolicy: "preserve",
+    durableObjectRollout: "restart",
+    bindings: {},
+  });
+
+  const result = await promoteWithRoutes(redis, "demo", "worker", "v1");
+  assert.equal(result.sessionPolicy, "preserve");
+  assert.equal(result.restartSequence, 0);
+  assert.equal(
+    redis.state.strings.get(sessionPolicyKey("demo", "worker")),
+    JSON.stringify({ version: "v1", mode: "preserve", restartSequence: 0 })
+  );
+  assert.equal(redis.state.strings.has(sessionPolicySequenceKey("demo", "worker")), false);
+  assert.equal(
+    redis.state.ops.filter(
+      ([command, channel]) => command === "publish" && channel === SESSION_POLICY_CHANNEL
+    ).length,
+    0
+  );
+});
+
+test("promoteWithRoutes rejects an invalid retired durableObjectRollout meta field", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    durableObjectRollout: "replace",
     bindings: {},
   });
 
@@ -292,11 +331,28 @@ test("promoteWithRoutes rejects restart rollout metadata without a Durable Objec
     promoteWithRoutes(redis, "demo", "worker", "v1"),
     (err) => {
       assertRoutingErrorShape(err, 500, "corrupt_meta");
-      assert.match(/** @type {Error} */ (err).message, /has no Durable Object binding/);
+      assert.equal(/** @type {{ details?: any }} */ (err).details?.field, "durableObjectRollout");
       return true;
     }
   );
   assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
+  assert.equal(redis.state.strings.has(sessionPolicyKey("demo", "worker")), false);
+});
+
+test("promoteWithRoutes accepts a restart session policy without a Durable Object binding", async () => {
+  const redis = makeRedis();
+  seedBundle(redis, "v1", {
+    sessionPolicy: "restart",
+    bindings: {},
+  });
+
+  const result = await promoteWithRoutes(redis, "demo", "worker", "v1");
+  assert.equal(result.sessionPolicy, "restart");
+  assert.equal(result.restartSequence, 1);
+  assert.equal(
+    redis.state.strings.get("worker:session-policy:demo:worker"),
+    JSON.stringify({ version: "v1", mode: "restart", restartSequence: 1 })
+  );
 });
 
 for (const [label, rawMeta] of [
@@ -551,21 +607,21 @@ test("promoteWithRoutes persists the default DO preserve projection without allo
 
   const result = await promoteWithRoutes(redis, "demo", "worker", "v1");
 
-  assert.equal(result.durableObjectRollout, "preserve");
+  assert.equal(result.sessionPolicy, "preserve");
   assert.equal(result.restartSequence, 0);
   assert.deepEqual(
-    parseDurableObjectRolloutProjection(
-      redis.state.strings.get(durableObjectRolloutKey("demo", "worker"))
+    parseSessionPolicyProjection(
+      redis.state.strings.get(sessionPolicyKey("demo", "worker"))
     ),
     { version: "v1", mode: "preserve", restartSequence: 0 }
   );
   assert.equal(
-    redis.state.strings.has(durableObjectRolloutSequenceKey("demo", "worker")),
+    redis.state.strings.has(sessionPolicySequenceKey("demo", "worker")),
     false
   );
   assert.equal(
     redis.state.ops.some(
-      ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+      ([command, channel]) => command === "publish" && channel === SESSION_POLICY_CHANNEL
     ),
     false
   );
@@ -587,29 +643,29 @@ test("promoteWithRoutes allocates and publishes each restart event once", async 
     [1, 1, 1, 2]
   );
   assert.equal(
-    redis.state.strings.get(durableObjectRolloutSequenceKey("demo", "worker")),
+    redis.state.strings.get(sessionPolicySequenceKey("demo", "worker")),
     "2"
   );
   assert.deepEqual(
-    parseDurableObjectRolloutProjection(
-      redis.state.strings.get(durableObjectRolloutKey("demo", "worker"))
+    parseSessionPolicyProjection(
+      redis.state.strings.get(sessionPolicyKey("demo", "worker"))
     ),
     { version: "v3", mode: "restart", restartSequence: 2 }
   );
   assert.deepEqual(
     redis.state.ops
       .filter(
-        ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+        ([command, channel]) => command === "publish" && channel === SESSION_POLICY_CHANNEL
       )
       .map(([, channel, payload]) => [channel, JSON.parse(String(payload))]),
     [
-      [DURABLE_OBJECT_ROLLOUT_CHANNEL, {
+      [SESSION_POLICY_CHANNEL, {
         ns: "demo",
         worker: "worker",
         version: "v1",
         restartSequence: 1,
       }],
-      [DURABLE_OBJECT_ROLLOUT_CHANNEL, {
+      [SESSION_POLICY_CHANNEL, {
         ns: "demo",
         worker: "worker",
         version: "v3",
@@ -622,43 +678,43 @@ test("promoteWithRoutes allocates and publishes each restart event once", async 
 test("promoteWithRoutes continues the restart sequence after worker recreation", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", doMeta("restart"));
-  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "7");
+  redis.state.strings.set(sessionPolicySequenceKey("demo", "worker"), "7");
 
   const result = await promoteWithRoutes(redis, "demo", "worker", "v1");
 
   assert.equal(result.restartSequence, 8);
   assert.equal(
-    redis.state.strings.get(durableObjectRolloutSequenceKey("demo", "worker")),
+    redis.state.strings.get(sessionPolicySequenceKey("demo", "worker")),
     "8"
   );
   assert.deepEqual(
-    parseDurableObjectRolloutProjection(
-      redis.state.strings.get(durableObjectRolloutKey("demo", "worker"))
+    parseSessionPolicyProjection(
+      redis.state.strings.get(sessionPolicyKey("demo", "worker"))
     ),
     { version: "v1", mode: "restart", restartSequence: 8 }
   );
   assert.deepEqual(
     redis.state.ops
       .filter(
-        ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+        ([command, channel]) => command === "publish" && channel === SESSION_POLICY_CHANNEL
       )
       .map(([, , payload]) => JSON.parse(String(payload))),
     [{ ns: "demo", worker: "worker", version: "v1", restartSequence: 8 }]
   );
 });
 
-test("promoteWithRoutes fails closed on malformed DO rollout allocator state", async () => {
+test("promoteWithRoutes fails closed on malformed session policy allocator state", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v2", doMeta("restart"));
-  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "broken");
+  redis.state.strings.set(sessionPolicySequenceKey("demo", "worker"), "broken");
 
   await assert.rejects(
     promoteWithRoutes(redis, "demo", "worker", "v2"),
     (err) => {
-      assertRoutingErrorShape(err, 500, "corrupt_do_rollout_sequence");
+      assertRoutingErrorShape(err, 500, "corrupt_session_policy_sequence");
       assert.match(
         /** @type {Error} */ (err).message,
-        /worker:do-rollout-seq:demo:worker/
+        /worker:session-policy-seq:demo:worker/
       );
       return true;
     }
@@ -666,42 +722,42 @@ test("promoteWithRoutes fails closed on malformed DO rollout allocator state", a
   assert.equal(redis.state.hashes.get("routes:demo")?.worker, undefined);
 });
 
-test("promoteWithRoutes fails closed when the DO rollout projection is not for the active route", async () => {
+test("promoteWithRoutes fails closed when the session policy projection is not for the active route", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", doMeta("restart"));
   seedBundle(redis, "v2", doMeta("restart"));
   redis.state.hashes.set("routes:demo", { worker: "v1" });
-  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "1");
+  redis.state.strings.set(sessionPolicySequenceKey("demo", "worker"), "1");
   redis.state.strings.set(
-    durableObjectRolloutKey("demo", "worker"),
+    sessionPolicyKey("demo", "worker"),
     JSON.stringify({ version: "v3", mode: "restart", restartSequence: 1 })
   );
 
   await assert.rejects(
     promoteWithRoutes(redis, "demo", "worker", "v2"),
     (err) => {
-      assertRoutingErrorShape(err, 500, "corrupt_do_rollout_projection");
+      assertRoutingErrorShape(err, 500, "corrupt_session_policy_projection");
       return true;
     }
   );
   assert.equal(redis.state.hashes.get("routes:demo")?.worker, "v1");
 });
 
-test("promoteWithRoutes fails closed when the DO rollout projection trails its allocator", async () => {
+test("promoteWithRoutes fails closed when the session policy projection trails its allocator", async () => {
   const redis = makeRedis();
   seedBundle(redis, "v1", doMeta("restart"));
   seedBundle(redis, "v2", doMeta("restart"));
   redis.state.hashes.set("routes:demo", { worker: "v1" });
-  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "2");
+  redis.state.strings.set(sessionPolicySequenceKey("demo", "worker"), "2");
   redis.state.strings.set(
-    durableObjectRolloutKey("demo", "worker"),
+    sessionPolicyKey("demo", "worker"),
     JSON.stringify({ version: "v1", mode: "restart", restartSequence: 1 })
   );
 
   await assert.rejects(
     promoteWithRoutes(redis, "demo", "worker", "v2"),
     (err) => {
-      assertRoutingErrorShape(err, 500, "corrupt_do_rollout_sequence");
+      assertRoutingErrorShape(err, 500, "corrupt_session_policy_sequence");
       return true;
     }
   );
@@ -948,15 +1004,15 @@ test("promoteWithRoutes reads its initial watched state in one snapshot", async 
         "hosts:demo",
         "crons:demo:worker",
         "cron:seq:demo:worker",
-        "worker:do-rollout:demo:worker",
-        "worker:do-rollout-seq:demo:worker",
+        "worker:session-policy:demo:worker",
+        "worker:session-policy-seq:demo:worker",
         "worker-delete-lock:demo:worker",
         productionBundleKey("demo", "worker", "v1"),
       ],
       [
         "worker-delete-lock:demo:worker",
-        "worker:do-rollout-seq:demo:worker",
-        "worker:do-rollout:demo:worker",
+        "worker:session-policy-seq:demo:worker",
+        "worker:session-policy:demo:worker",
       ],
       [
         [productionBundleKey("demo", "worker", "v1"), "__meta__"],
@@ -1129,32 +1185,64 @@ test("bumpActiveAndPromote allocates a new restart event for the copied active b
   seedBundle(redis, "v1", doMeta("restart"));
   redis.state.hashes.set("routes:demo", { worker: "v1" });
   redis.state.strings.set("worker:demo:worker:next_version", "1");
-  redis.state.strings.set(durableObjectRolloutSequenceKey("demo", "worker"), "4");
+  redis.state.strings.set(sessionPolicySequenceKey("demo", "worker"), "4");
   redis.state.strings.set(
-    durableObjectRolloutKey("demo", "worker"),
+    sessionPolicyKey("demo", "worker"),
     JSON.stringify({ version: "v1", mode: "restart", restartSequence: 4 })
   );
 
   const result = await bumpActiveAndPromote(redis, "demo", "worker");
 
   assert.equal(result.version, "v2");
-  assert.equal(result.durableObjectRollout, "restart");
+  assert.equal(result.sessionPolicy, "restart");
   assert.equal(result.restartSequence, 5);
   assert.equal(
-    redis.state.strings.get(durableObjectRolloutSequenceKey("demo", "worker")),
+    redis.state.strings.get(sessionPolicySequenceKey("demo", "worker")),
     "5"
   );
   assert.deepEqual(
     redis.state.ops
       .filter(
-        ([command, channel]) => command === "publish" && channel === DURABLE_OBJECT_ROLLOUT_CHANNEL
+        ([command, channel]) => command === "publish" && channel === SESSION_POLICY_CHANNEL
       )
       .map(([, channel, payload]) => [channel, JSON.parse(String(payload))]),
-    [[DURABLE_OBJECT_ROLLOUT_CHANNEL, {
+    [[SESSION_POLICY_CHANNEL, {
       ns: "demo",
       worker: "worker",
       version: "v2",
       restartSequence: 5,
+    }]]
+  );
+});
+
+test("bumpActiveAndPromote dual-reads the retired durableObjectRollout meta field", async () => {
+  const redis = makeRedis();
+  // Upgrade case: the copied active bundle predates the session-policy rename,
+  // so the bump dual-reads the retired field and allocates under the new keys.
+  seedBundle(redis, "v1", { durableObjectRollout: "restart", bindings: {} });
+  redis.state.hashes.set("routes:demo", { worker: "v1" });
+  redis.state.strings.set("worker:demo:worker:next_version", "1");
+
+  const result = await bumpActiveAndPromote(redis, "demo", "worker");
+
+  assert.equal(result.version, "v2");
+  assert.equal(result.sessionPolicy, "restart");
+  assert.equal(result.restartSequence, 1);
+  assert.equal(
+    redis.state.strings.get(sessionPolicySequenceKey("demo", "worker")),
+    "1"
+  );
+  assert.deepEqual(
+    redis.state.ops
+      .filter(
+        ([command, channel]) => command === "publish" && channel === SESSION_POLICY_CHANNEL
+      )
+      .map(([, channel, payload]) => [channel, JSON.parse(String(payload))]),
+    [[SESSION_POLICY_CHANNEL, {
+      ns: "demo",
+      worker: "worker",
+      version: "v2",
+      restartSequence: 1,
     }]]
   );
 });

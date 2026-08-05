@@ -37,10 +37,10 @@ Gateway 没有控制面权威。它只是把 Redis route state 投影成一个�
 - Pattern routing 先检查 `declared-hosts`，再读取 `patterns:<host>` 并选择最长匹配的 path slot。这个 gate 只回答“这个 host 是否被任意 namespace 声明过”，不分配 host owner。Ownership 和 conflict check 仍由 active `patterns:<host>` projection 编码。
 - Runtime pool selection 是精确匹配：只有字面量 `__system__` route 使用 `RUNTIME_SYSTEM`。未来如果有新的 reserved namespace 要进入 system-runtime，必须显式 opt in；不要改成泛化的 reserved-prefix 匹配。
 - Route 和 pattern cache 是每个 gateway isolate 内的有界性能 cache。它们不是事实来源；Redis 才是当前 route source of truth。
-- `routes:invalidate`、`patterns:invalidate`、`routes:flush`、`do-rollout:restart` 和 `worker:delete` 是非持久 pub/sub hint。Route/pattern event 只清对应 cache；精确 rollout/delete event 只请求对应 worker group 的权威 reconciliation，subscriber reconnect 才 reconcile 全部本地 group。请求按 group 合并，瞬态失败也只重试失败 group。Gateway 在 subscriber connect/disconnect 时清 routing cache。
+- `routes:invalidate`、`patterns:invalidate`、`routes:flush`、`session-policy:restart` 和 `worker:delete` 是非持久 pub/sub hint。Route/pattern event 只清对应 cache；精确 restart/delete event 只请求对应 worker group 的权威 reconciliation，subscriber reconnect 才 reconcile 全部本地 group。请求按 group 合并，瞬态失败也只重试失败 group。Gateway 在 subscriber connect/disconnect 时清 routing cache。
 - Route invalidation 没有 cluster-wide acknowledgement barrier。Promote 后，warm Gateway 在观察到 `routes:invalidate` 前可能短暂把普通请求 admission 到前一个 immutable version；Runtime 不会为该请求重新检查 active state，bundled workerd 也允许已 admission 的调用在 sibling cache eviction 后自然 drain。WebSocket lifecycle snapshot 为 initial upgrade 和 backend reconnect 提供各自的 active-state admission point，但不会把普通 HTTP routing 线性化。
 - Pattern host ownership 移动会 publish `patterns:invalidate`，但这个 hint 仍然非持久。Gateway 如果错过 pub/sub message，可能继续从有界内存 cache 提供旧的 `patterns:<host>` projection，直到 subscriber reconnect 或 process restart 清空 cache；这是已接受的 stale-cache window，不是持久授权记录。
-- WebSocket upgrade 使用和 HTTP 相同的 route resolution。Gateway 在本地终结公开 socket，并直接通过解析出的 runtime binding 代理。Proxy 负责 backend reconnect 尝试和有界 client-frame buffer，并在 WebSocket lifecycle boundary 原子读取 active route 和 `worker:do-rollout:<ns>:<worker>` projection。健康连接可以继续在原 immutable version 上 drain；异常 backend loss 后，只有该 version 仍 active 时才会透明重连。Active version 变化，或当前 DO `restart` projection 出现更高 sequence 时，公开连接会以 `1012` 关闭。Rolling gateway 或 runtime 仍可能断开物理 client connection。
+- WebSocket upgrade 使用和 HTTP 相同的 route resolution。Gateway 在本地终结公开 socket，并直接通过解析出的 runtime binding 代理。Proxy 负责 backend reconnect 尝试和有界 client-frame buffer，并在 WebSocket lifecycle boundary 原子读取 active route 和 `worker:session-policy:<ns>:<worker>` projection。健康连接可以继续在原 immutable version 上 drain；异常 backend loss 后，只有该 version 仍 active 时才会透明重连。Active version 变化，或当前 `restart` projection 出现更高 sequence 时，公开连接会以 `1012` 关闭。Rolling gateway 或 runtime 仍可能断开物理 client connection。
 
 ## Redis / Storage 合同
 
@@ -50,8 +50,8 @@ Gateway 读取：
 namespaces               Set, active namespace gate
 declared-hosts           Set, 任意 namespace 声明过的 custom/pattern host
 routes:<ns>              Hash, worker name -> active version
-worker:do-rollout:<ns>:<worker>
-                         String, active DO rollout version/mode/sequence projection
+worker:session-policy:<ns>:<worker>
+                         String, active session policy version/mode/sequence projection
 platform-domain-disabled:<ns>
                          Set, 不经 platform-domain 分支公开的 worker
 patterns:<host>          Hash, path slot -> v2 tab-separated projection
@@ -63,7 +63,7 @@ Gateway 订阅：
 routes:invalidate        payload = namespace
 routes:flush             payload ignored
 patterns:invalidate      payload = host or "*"
-do-rollout:restart       payload = {ns,worker,version,restartSequence}
+session-policy:restart   payload = {ns,worker,version,restartSequence}
 worker:delete            payload = {ns,worker}
 ```
 
@@ -74,14 +74,15 @@ Control 写 Redis 并 publish invalidation。Gateway 不反向调用 control 查
 - Route cache 是 pull-triggered，并且能自愈。
 - Gateway 在 subscriber connect 和 disconnect 时清 route/pattern cache，因为 pub/sub 消息不持久。
 - Subscriber reconnect 会清本地 cache，下一次请求重新读 Redis；漏掉 invalidation 最多导致有界 stale cache，不会永久漂移。
-- Gateway 还会按 namespace/worker 维护本进程 active public WebSocket session registry。`do-rollout:restart` 只为 restart sequence 较旧的 session 请求一次对应 worker 的权威 reconciliation，`worker:delete` 对成功 whole-worker delete 做同样处理；两者都不会仅凭 event 内容关闭连接。Delete reconciliation 读取到 worker inactive 时，已建立 session 会以 `1012` 关闭；如果同名 worker 在一次成功的权威读取前已经完成重建，最新 projection 生效，当前状态无法证明中间发生过删除。完全消除这个已接受窗口需要 durable incarnation fence。Subscriber 只 settle 在 WebSocket request 中创建的 lifecycle signal，workerd 会先把 continuation 恢复到该 WebSocket 的 IoContext，再由 Gateway 操作两端 peer。Subscriber reconnect 时，Gateway 以有界并发重读全部本地 group；后续 `preserve` projection 会在同一 sequence 上覆盖尚未观察到的 restart。传输失败会保留健康 session，并按有界退避仅重试失败 group；只有畸形或回退的权威状态才会以 `1011` 关闭受影响 session。
+- Gateway 还会按 namespace/worker 维护本进程 active public WebSocket session registry。`session-policy:restart` 只为 restart sequence 较旧的 session 请求一次对应 worker 的权威 reconciliation，`worker:delete` 对成功 whole-worker delete 做同样处理；两者都不会仅凭 event 内容关闭连接。Delete reconciliation 读取到 worker inactive 时，已建立 session 会以 `1012` 关闭；如果同名 worker 在一次成功的权威读取前已经完成重建，最新 projection 生效，当前状态无法证明中间发生过删除。完全消除这个已接受窗口需要 durable incarnation fence。Subscriber 只 settle 在 WebSocket request 中创建的 lifecycle signal，workerd 会先把 continuation 恢复到该 WebSocket 的 IoContext，再由 Gateway 操作两端 peer。Subscriber reconnect 时，Gateway 以有界并发重读全部本地 group；后续 `preserve` projection 会在同一 sequence 上覆盖尚未观察到的 restart。传输失败会保留健康 session，并按有界退避仅重试失败 group；只有畸形或回退的权威状态才会以 `1011` 关闭受影响 session。
 - Membership gate 读取会在该 gate 变化时重新开始。Gate 已就绪后，冷 route 或 pattern projection 读取由对应 namespace/host 与全量 reset generation 共同保护：同 key invalidation 或全量 reset 会丢弃回复，无关 key invalidation 不会。Per-key generation 只在读取进行期间存在。Gateway 最多尝试五个 snapshot，之后返回 `503 gateway_routing_unavailable`。
 - Namespace 之间的 pattern-host 重分配也有同样的非持久 hint window：普通 control writer 会 publish invalidation，但只有 gateway 丢弃或刷新本地 cache 后，Redis 权威状态才会生效。
 - 数据面 route lookup 遇到 Redis outage 会表现为 gateway failure；admin-host forwarding 不依赖 route Redis 状态。
 - Pattern 分支保持原始 path；subdomain 分支会去掉最前面的 worker segment。
 - WebSocket backend reconnect 有上限，并且 client-frame buffer 有上限。
-- Route 解析后，Gateway 会在同一个 Redis linearization point 读取 route 和 DO rollout projection。Initial route mismatch 会在 backend upgrade 前返回 `503 gateway_routing_unavailable`；这是有意让 client 在 stale route-cache hit 后重试完整 upgrade，而不是引入第二条 route-resolution path 或 admission 已失效的 immutable version。Upgrade 后的第二次检查构成该 backend 的 active-state admission point。异常 backend loss 后，Gateway 会在 retry 前检查，并在挂接 replacement backend 前再次验证成功的 upgrade；initial/replacement backend socket 在检查期间仍由该 request 持有，因此 terminal lifecycle signal 可以立即关闭它。如果 `preserve` promotion 在这次最终 snapshot 之后才提交，刚 admission 的 backend 仍可继续 drain。Gateway 不会增加跨服务 barrier，也不会逐 frame 执行 lifecycle check。Active route 旁缺失 rollout projection 表示 default `preserve`；route 和 projection 同时缺失表示 worker inactive，initial admission 返回 `503`，已建立 session 以 `1012` 关闭；malformed 或 torn state 会让已建立 session 以 `1011` fail closed。
+- Route 解析后，Gateway 会在同一个 Redis linearization point 读取 route 和 session policy projection。Initial route mismatch 会在 backend upgrade 前返回 `503 gateway_routing_unavailable`；这是有意让 client 在 stale route-cache hit 后重试完整 upgrade，而不是引入第二条 route-resolution path 或 admission 已失效的 immutable version。Upgrade 后的第二次检查构成该 backend 的 active-state admission point。异常 backend loss 后，Gateway 会在 retry 前检查，并在挂接 replacement backend 前再次验证成功的 upgrade；initial/replacement backend socket 在检查期间仍由该 request 持有，因此 terminal lifecycle signal 可以立即关闭它。如果 `preserve` promotion 在这次最终 snapshot 之后才提交，刚 admission 的 backend 仍可继续 drain。Gateway 不会增加跨服务 barrier，也不会逐 frame 执行 lifecycle check。Active route 旁缺失 session policy projection 表示 default `preserve`；route 和 projection 同时缺失表示 worker inactive，initial admission 返回 `503`，已建立 session 以 `1012` 关闭；malformed 或 torn state 会让已建立 session 以 `1011` fail closed。
 - 正常 upstream close 会直接传播，不再读取 lifecycle state。异常 loss 后，只要 active version 未变化，并且 sequence 未变化或当前 projection 为 `preserve`，Gateway 就会透明重连同一个 pinned worker id；active version 变化，或当前 projection 为 `restart` 且 sequence 增长时，Gateway 会以 `1012 service restart` 关闭 public/backend peers。Lifecycle command 带主动关闭 socket 的两秒 deadline。Redis transport failure 和 transient reply code（`BUSY`、`CLUSTERDOWN`、`LOADING`、`MASTERDOWN`、`READONLY`、`TRYAGAIN`）会在配置的 reconnect schedule 内重试；malformed persisted state、非 transient Redis reply error、sequence 回退或 retry 耗尽时，Gateway 才会以 `1011` 关闭两端，不会重连 stale state。
+- `1012` 关闭会结束应用会话；client 需要重连并重新执行应用握手。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
 - Gateway 自有 WebSocket peer 使用 `arraybuffer` 接收二进制消息，使文本帧和二进制帧都能保持原类型转发；tenant WebSocket 代码仍遵循 workerd 的常规 `binaryType` 合同。
 - Client close 和 error event 会同时终止公开 WebSocket pair 与当前 backend socket。Backend Close frame 使用 workerd 默认的 reciprocal Close 处理，不会在正常关闭或重连时留下半开旧 backend socket。无状态码 Close frame 仍保持无状态码；不能出现在 wire 上的异常 close code 会按 `1011` 转发，转发 reason 遵守 WebSocket 的 123-byte UTF-8 上限。
 
@@ -103,7 +104,7 @@ Gateway 输出包含 request id、route context 和 outcome 的 request log。Me
 
 ## 部署 / Rollout 注意事项
 
-- Control 可以写 `durableObjectRollout=restart` 之前，必须先部署 Gateway、Workflows 和 do-runtime rollout reader，最后再部署 system-runtime/Control；system-runtime rolling 期间保持 Control mutations 暂停，并且只能在恢复 mutation 后允许 API client 发送新字段。
+- Control 可以写 `sessionPolicy=restart` 之前，必须先部署 Gateway、Workflows 和 do-runtime session-policy projection reader，最后再部署 system-runtime/Control；system-runtime rolling 期间保持 Control mutations 暂停，并且只能在恢复 mutation 后允许 API client 发送新字段。
 - 不改变 forwarded header 合同时，gateway 的 route-cache 或 request-parsing 改动可以独立 rolling。
 - runtime internal socket path 的变化不应通过 gateway path filtering 实现。
 - Route invalidation channel 改动必须与 control 对齐；style-contract 测试会保护这些字面量。

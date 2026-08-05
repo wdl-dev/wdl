@@ -286,7 +286,7 @@ test("gateway websocket proxy does not expose server push before initial lifecyc
   assert.deepEqual(upstream.closed, { code: 1012, reason: "service restart" });
 });
 
-test("gateway websocket proxy exposes and releases its rollout lifecycle registration", () => {
+test("gateway websocket proxy exposes and releases its session-policy lifecycle registration", () => {
   const upstream = new FakeWebSocket("upstream");
   /** @type {{ restart(): void, fail(): void } | undefined} */
   let handlers;
@@ -358,7 +358,7 @@ test("gateway websocket proxy maps a registered lifecycle failure to 1011", () =
   assert.equal(unregisterCalls, 1);
 });
 
-test("gateway websocket proxy ignores a rollout result after the client closes", async () => {
+test("gateway websocket proxy ignores a session policy result after the client closes", async () => {
   const upstream = new FakeWebSocket("upstream");
   const { promise: lifecycle, resolve: resolveLifecycle } = Promise.withResolvers();
   /** @type {string[]} */
@@ -385,7 +385,7 @@ test("gateway websocket proxy ignores a rollout result after the client closes",
   assert.deepEqual(upstream.closed, { code: 1000, reason: "done" });
 });
 
-test("gateway websocket proxy checks rollout before reconnecting an aborted upstream", async () => {
+test("gateway websocket proxy checks the session policy before reconnecting an aborted upstream", async () => {
   const upstream = new FakeWebSocket("upstream");
   /** @type {string[]} */
   const outcomes = [];
@@ -424,7 +424,7 @@ test("gateway websocket proxy checks rollout before reconnecting an aborted upst
   ]);
 });
 
-test("gateway websocket proxy rechecks rollout after a reconnect upgrade", async () => {
+test("gateway websocket proxy rechecks the session policy after a reconnect upgrade", async () => {
   const upstream1 = new FakeWebSocket("upstream1");
   const upstream2 = new FakeWebSocket("upstream2");
   /** @type {string[]} */
@@ -522,7 +522,7 @@ test("gateway websocket proxy fails closed when a lifecycle check is invalid", a
       async checkLifecycle() {
         lifecycleChecks += 1;
         if (lifecycleChecks === 1) return "continue";
-        throw new Error("invalid rollout state");
+        throw new Error("invalid session policy state");
       },
     }
   );
@@ -596,7 +596,7 @@ test("gateway websocket proxy closes after transient lifecycle retries are exhau
   });
 });
 
-test("gateway websocket proxy checks rollout after an upstream send failure", async () => {
+test("gateway websocket proxy checks the session policy after an upstream send failure", async () => {
   const upstream = new FakeWebSocket("upstream");
   upstream.sendError = new Error("write failed");
   /** @type {string[]} */
@@ -620,7 +620,7 @@ test("gateway websocket proxy checks rollout after an upstream send failure", as
   );
 
   await waitFor(() => upstream.accepted);
-  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "after-rollout" });
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "after-restart" });
   await waitFor(() => responseWebSocket(response).closed !== null);
 
   assert.deepEqual(responseWebSocket(response).closed, {

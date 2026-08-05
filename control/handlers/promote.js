@@ -39,7 +39,7 @@ export async function handle({ request, env, ns, name, requestId }) {
       version: body.version,
       affected_hosts: result.affectedHosts.length,
       workers_dev: result.workersDev,
-      durable_object_rollout: result.durableObjectRollout,
+      session_policy: result.sessionPolicy,
       restart_sequence: result.restartSequence,
     });
     return jsonResponse(200, {
@@ -50,7 +50,7 @@ export async function handle({ request, env, ns, name, requestId }) {
       affectedHosts: result.affectedHosts,
       platformDomain,
       workersDev: result.workersDev,
-      durableObjectRollout: result.durableObjectRollout,
+      sessionPolicy: result.sessionPolicy,
       restartSequence: result.restartSequence,
       urls: {
         ...(result.workersDev

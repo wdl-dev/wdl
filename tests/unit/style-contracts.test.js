@@ -350,11 +350,11 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
     if (/`worker:do-storage:\$\{/.test(source)) {
       offenders.push(`${file}: inline worker:do-storage: — use doStorageIdKey(ns, worker)`);
     }
-    if (/`worker:do-rollout:\$\{/.test(source)) {
-      offenders.push(`${file}: inline worker:do-rollout: — use durableObjectRolloutKey(ns, worker)`);
+    if (/`worker:session-policy:\$\{/.test(source)) {
+      offenders.push(`${file}: inline worker:session-policy: — use sessionPolicyKey(ns, worker)`);
     }
-    if (/`worker:do-rollout-seq:\$\{/.test(source)) {
-      offenders.push(`${file}: inline worker:do-rollout-seq: — use durableObjectRolloutSequenceKey(ns, worker)`);
+    if (/`worker:session-policy-seq:\$\{/.test(source)) {
+      offenders.push(`${file}: inline worker:session-policy-seq: — use sessionPolicySequenceKey(ns, worker)`);
     }
     if (/`hosts:\$\{/.test(source)) offenders.push(`${file}: inline hosts:<ns> — use hostsKey(ns)`);
     if (/`ns-hosts:\$\{/.test(source)) offenders.push(`${file}: inline ns-hosts:<ns> — use nsHostsKey(ns)`);
@@ -387,8 +387,8 @@ test("worker control-plane registry keys go through shared/worker-contract.js he
     if (/format!\("worker:do-storage:/.test(source)) {
       offenders.push(`${file}: inline worker:do-storage: — use do_storage_id_key(ns, worker)`);
     }
-    if (/format!\("worker:do-rollout:/.test(source)) {
-      offenders.push(`${file}: inline worker:do-rollout: — use durable_object_rollout_key(ns, worker)`);
+    if (/format!\("worker:session-policy:/.test(source)) {
+      offenders.push(`${file}: inline worker:session-policy: — use session_policy_key(ns, worker)`);
     }
   }
   assert.deepEqual(offenders, [], `worker contract key literals must use shared helpers:\n${offenders.join("\n")}`);

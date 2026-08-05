@@ -188,7 +188,7 @@ const { handle: handleVersions } = await importControlHandler("control/handlers/
  *   siblingVersionBeforeFirstWatch?: string | null,
  *   patternRecords?: Record<string, Record<string, string>>,
  *   patternRecordsDuringExec?: Record<string, Record<string, string>>,
- *   rolloutProjection?: string | null,
+ *   policyProjection?: string | null,
  * }} [opts]
  */
 function resetDeleteHandlerState({
@@ -215,7 +215,7 @@ function resetDeleteHandlerState({
   siblingVersionBeforeFirstWatch = null,
   patternRecords = {},
   patternRecordsDuringExec = patternRecords,
-  rolloutProjection = null,
+  policyProjection = null,
 } = {}) {
   const referrers = /** @type {Record<string, string[]>} */ (referrersByVersion);
   const meta = bundleMetaRaw === undefined
@@ -332,7 +332,7 @@ function resetDeleteHandlerState({
       return keys.map((key) => {
         if (key === "secrets:demo:api") return hasWorkerSecrets;
         if (key === "wf:defs:demo:api") return hasWorkflowDefs;
-        if (key === "worker:do-rollout:demo:api") return rolloutProjection != null;
+        if (key === "worker:session-policy:demo:api") return policyProjection != null;
         return false;
       });
     },
@@ -485,7 +485,7 @@ function resetDeleteHandlerState({
       return keys.map((key) => {
         if (key === "secrets:demo:api") return hasWorkerSecrets;
         if (key === "wf:defs:demo:api") return hasWorkflowDefs;
-        if (key === "worker:do-rollout:demo:api") return rolloutProjection != null;
+        if (key === "worker:session-policy:demo:api") return policyProjection != null;
         return false;
       });
     },
@@ -729,11 +729,11 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
     call.includes("wf:defs:demo:api")
   ));
   assert.ok(testState.watchBatches.some((keys) =>
-    keys.includes("worker:do-rollout:demo:api")
+    keys.includes("worker:session-policy:demo:api")
   ));
   assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
     call[0] === "DEL" &&
-    call.includes("worker:do-rollout:demo:api")
+    call.includes("worker:session-policy:demo:api")
   ));
   assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
     call[0] === "DEL" &&
@@ -741,7 +741,7 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
   ));
   assert.equal(testState.multiCalls.some((/** @type {any} */ call) =>
     call[0] === "DEL" &&
-    call.includes("worker:do-rollout-seq:demo:api")
+    call.includes("worker:session-policy-seq:demo:api")
   ), false);
   assert.ok(testState.multiCalls.some((/** @type {any} */ call) =>
     call[0] === "HDEL" &&
@@ -1632,14 +1632,14 @@ test("worker delete retry compensates DO alarm cleanup when stale storage pointe
   ]);
 });
 
-test("worker delete noop removes a residual rollout projection but retains its sequence", async () => {
+test("worker delete noop removes a residual session policy projection but retains its sequence", async () => {
   const testState = resetDeleteHandlerState({
     activeVersion: null,
     assetPrefix: null,
     doStorageId: null,
     queueConsumerWorker: null,
     retainedVersions: [],
-    rolloutProjection: JSON.stringify({
+    policyProjection: JSON.stringify({
       version: "v1",
       mode: "restart",
       restartSequence: 1,
@@ -1652,21 +1652,21 @@ test("worker delete noop removes a residual rollout projection but retains its s
     ns: "demo",
     name: "api",
     principal: { kind: "ops" },
-    requestId: "rid-delete-noop-rollout-projection",
+    requestId: "rid-delete-noop-policy-projection",
   });
 
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, false);
   assert.ok(testState.watchBatches.some((keys) =>
-    keys.includes("worker:do-rollout:demo:api")
+    keys.includes("worker:session-policy:demo:api")
   ));
   assert.deepEqual(testState.multiCalls, [
-    ["DEL", "worker:do-rollout:demo:api"],
+    ["DEL", "worker:session-policy:demo:api"],
     ["PUBLISH", "worker:delete", JSON.stringify({ ns: "demo", worker: "api" })],
     ["EXEC"],
   ]);
   assert.equal(testState.multiCalls.some((call) =>
-    call.includes("worker:do-rollout-seq:demo:api")
+    call.includes("worker:session-policy-seq:demo:api")
   ), false);
 });
 

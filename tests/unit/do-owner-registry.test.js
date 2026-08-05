@@ -17,8 +17,8 @@ import {
 } from "../helpers/load-do-owner-registry.js";
 import { parseStoredJson } from "../helpers/json-payload.js";
 import {
-  durableObjectRolloutKey,
-  encodeDurableObjectRolloutProjection,
+  sessionPolicyKey,
+  encodeSessionPolicyProjection,
 } from "../../shared/worker-contract.js";
 
 // Simulated Redis clock advancement between owner check and renew-time reads.
@@ -37,7 +37,7 @@ const DO_STORAGE_ID = "do_0123456789abcdef0123456789abcdef";
 const OWNER_KEY = `${DO_STORAGE_ID}:Room:shard0`;
 const STORAGE_POINTER_KEY = "worker:do-storage:tenant:chat";
 const DELETE_LOCK_KEY = "worker-delete-lock:tenant:chat";
-const ROLLOUT_KEY = durableObjectRolloutKey("tenant", "chat");
+const POLICY_KEY = sessionPolicyKey("tenant", "chat");
 
 function ownerSnapshotKeys() {
   return [
@@ -45,13 +45,13 @@ function ownerSnapshotKeys() {
     ownerGenerationKeyOf(OWNER_KEY),
     DELETE_LOCK_KEY,
     STORAGE_POINTER_KEY,
-    ROLLOUT_KEY,
+    POLICY_KEY,
   ];
 }
 
 beforeEach(resetDoOwnerRegistryTestState);
 
-/** @returns {{ ns: string, worker: string, version: string, doStorageId: string, hostId: string, className: string, rolloutMode?: "preserve" | "restart", restartSequence?: number }} */
+/** @returns {{ ns: string, worker: string, version: string, doStorageId: string, hostId: string, className: string, sessionPolicy?: "preserve" | "restart", restartSequence?: number }} */
 function invoke() {
   return {
     ns: "tenant",
@@ -83,10 +83,10 @@ function setStoragePointer(value = DO_STORAGE_ID) {
  * @param {"preserve" | "restart"} mode
  * @param {number} restartSequence
  */
-function setRollout(version, mode, restartSequence) {
+function setPolicy(version, mode, restartSequence) {
   DO_OWNER_REGISTRY_TEST_STATE.store.set(
-    ROLLOUT_KEY,
-    encodeDurableObjectRolloutProjection({ version, mode, restartSequence })
+    POLICY_KEY,
+    encodeSessionPolicyProjection({ version, mode, restartSequence })
   );
 }
 
@@ -138,35 +138,35 @@ test("DO owner registry: keys encode owner scope and generation separately", () 
   );
 });
 
-test("DO owner registry: missing rollout projection preserves existing version behavior", async () => {
+test("DO owner registry: missing session policy projection preserves existing version behavior", async () => {
   setStoragePointer();
   const request = invoke();
 
   await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, request);
 
-  assert.equal(request.rolloutMode, "preserve");
+  assert.equal(request.sessionPolicy, "preserve");
   assert.equal(request.restartSequence, 0);
 });
 
 test("DO owner registry: matching restart projection forwards its sequence to the actor", async () => {
   setStoragePointer();
-  setRollout("v1", "restart", 7);
+  setPolicy("v1", "restart", 7);
   const request = invoke();
 
   await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, request);
 
-  assert.equal(request.rolloutMode, "restart");
+  assert.equal(request.sessionPolicy, "restart");
   assert.equal(request.restartSequence, 7);
 });
 
 test("DO owner registry: restart projection rejects stale versions before owner mutation", async () => {
   setStoragePointer();
-  setRollout("v2", "restart", 7);
+  setPolicy("v2", "restart", 7);
 
   await assert.rejects(
     resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
     (err) => {
-      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "do_rollout_version_stale");
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_version_stale");
       return true;
     }
   );
@@ -177,7 +177,7 @@ test("DO owner registry: restart projection rejects stale versions before owner 
 
 test("DO owner registry: storage cleanup permits a superseded immutable version", async () => {
   setStoragePointer();
-  setRollout("v2", "restart", 7);
+  setPolicy("v2", "restart", 7);
   const request = invoke();
 
   await resolveDoOwner(
@@ -186,25 +186,25 @@ test("DO owner registry: storage cleanup permits a superseded immutable version"
     { allowSupersededVersion: true }
   );
 
-  assert.equal(request.rolloutMode, "restart");
+  assert.equal(request.sessionPolicy, "restart");
   assert.equal(request.restartSequence, 7);
 });
 
-test("DO owner registry: actor dispatch rechecks rollout after owner resolution", async () => {
+test("DO owner registry: actor dispatch rechecks the session policy after owner resolution", async () => {
   const request = invoke();
   const owner = ownerRecord();
   setStoragePointer();
-  setRollout("v2", "restart", 8);
+  setPolicy("v2", "restart", 8);
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), JSON.stringify(owner));
 
   await assert.rejects(
     assertCurrentOwnerWithLeaseBudget(
       { REDIS_ADDR: "redis:6379" },
       { ownerKey: OWNER_KEY, taskId: owner.taskId, generation: owner.generation },
-      { rolloutInvoke: request, storageScope: request }
+      { sessionPolicyInvoke: request, storageScope: request }
     ),
     (err) => {
-      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "do_rollout_version_stale");
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_version_stale");
       return true;
     }
   );
@@ -214,38 +214,38 @@ test("DO owner registry: actor dispatch refreshes the active restart sequence", 
   const request = invoke();
   const owner = ownerRecord();
   setStoragePointer();
-  setRollout("v1", "restart", 8);
+  setPolicy("v1", "restart", 8);
   DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), JSON.stringify(owner));
 
   await assertCurrentOwnerWithLeaseBudget(
     { REDIS_ADDR: "redis:6379" },
     { ownerKey: OWNER_KEY, taskId: owner.taskId, generation: owner.generation },
-    { rolloutInvoke: request, storageScope: request }
+    { sessionPolicyInvoke: request, storageScope: request }
   );
 
-  assert.equal(request.rolloutMode, "restart");
+  assert.equal(request.sessionPolicy, "restart");
   assert.equal(request.restartSequence, 8);
 });
 
 test("DO owner registry: preserve projection allows an older loaded version", async () => {
   setStoragePointer();
-  setRollout("v2", "preserve", 7);
+  setPolicy("v2", "preserve", 7);
   const request = invoke();
 
   await resolveDoOwner({ REDIS_ADDR: "redis:6379" }, request);
 
-  assert.equal(request.rolloutMode, "preserve");
+  assert.equal(request.sessionPolicy, "preserve");
   assert.equal(request.restartSequence, 7);
 });
 
-test("DO owner registry: malformed rollout projection fails closed before owner mutation", async () => {
+test("DO owner registry: malformed session policy projection fails closed before owner mutation", async () => {
   setStoragePointer();
-  DO_OWNER_REGISTRY_TEST_STATE.store.set(ROLLOUT_KEY, "{\"version\":\"v1\"}");
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(POLICY_KEY, "{\"version\":\"v1\"}");
 
   await assert.rejects(
     resolveDoOwner({ REDIS_ADDR: "redis:6379" }, invoke()),
     (err) => {
-      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "do_rollout_state_invalid");
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_state_invalid");
       return true;
     }
   );

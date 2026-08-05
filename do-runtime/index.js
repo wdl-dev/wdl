@@ -7,7 +7,7 @@ import { createHttpRequestScope } from "shared-request-scope";
 import { discardResponseBody, prometheusResponse, rebuildResponseWithHeaders } from "shared-respond";
 import { boundedPositiveIntEnv } from "shared-owner-lease";
 import {
-  DURABLE_OBJECT_ROLLOUT_PRESERVE,
+  SESSION_POLICY_PRESERVE,
   parseVersion,
 } from "shared-worker-contract";
 import { formatWorkerId } from "shared-worker-id";
@@ -463,7 +463,7 @@ async function handleStorageDeleteWorker(env, request, requestId = null) {
           version,
           className: parsed.className,
         },
-        rolloutMode: DURABLE_OBJECT_ROLLOUT_PRESERVE,
+        sessionPolicy: SESSION_POLICY_PRESERVE,
         restartSequence: 0,
         request: STORAGE_DELETE_REQUEST,
       };

@@ -146,13 +146,14 @@ Key families:
   directly.
 - Workflows rejects non-canonical DO alarm identity before persisting jobs and
   revalidates persisted alarm identity before dispatch. One Control-DB Lua snapshot
-  reads the current storage pointer, active route, retained-version score, and active DO
-  rollout projection. A current `restart` projection retargets a superseded alarm to the
-  active version even while its scheduled version remains retained; a later `preserve`
+  reads the current storage pointer, active route, retained-version score, and the
+  active session policy projection. A current `restart` projection retargets a
+  superseded alarm to the active version even while its scheduled version remains
+  retained; a later `preserve`
   projection supersedes an unobserved restart and keeps a retained alarm on its scheduled
-  version. Malformed rollout projections, route/projection disagreement, and malformed
-  active versions needed for retargeting fail closed. Namespace, worker, and version
-  checks reuse `wdl-rust-common`; do-runtime protocol grammar and identity
+  version. Malformed session policy projections, route/projection disagreement, and
+  malformed active versions needed for retargeting fail closed. Namespace, worker,
+  and version checks reuse `wdl-rust-common`; do-runtime protocol grammar and identity
   helpers own the canonical alarm-specific fields and aggregate 512-byte DO host-id
   contract. Workflows mirrors and revalidates that contract before persistence and
   dispatch.
@@ -398,8 +399,8 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 ## Deployment / Rollout Notes
 
 - Workflows rollout spans control, runtime, do-runtime, scheduler, and workflows.
-- Deploy Gateway, Workflows, and do-runtime rollout projection readers before
-  system-runtime/Control can persist `durableObjectRollout`; pause Control mutations
+- Deploy Gateway, Workflows, and do-runtime session-policy projection readers before
+  system-runtime/Control can persist `sessionPolicy`; pause Control mutations
   while that writer tier rolls.
 - Runtime must support workflow internal dispatch paths before workflows dispatches runs
   to it.

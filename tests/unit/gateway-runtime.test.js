@@ -164,7 +164,7 @@ test("only Gateway lifecycle Redis commands receive the socket deadline", async 
   delete gatewayTestGlobal.__gatewayRuntimeRedisClientOptions;
 });
 
-test("readWebSocketLifecycleSnapshot reads route and rollout at one linearization point", async () => {
+test("readWebSocketLifecycleSnapshot reads route and session policy at one linearization point", async () => {
   const { readWebSocketLifecycleSnapshot } = await loadGatewayRuntime();
   /** @type {unknown[][]} */
   const calls = [];
@@ -184,7 +184,7 @@ test("readWebSocketLifecycleSnapshot reads route and rollout at one linearizatio
     activeLifecycle("v2", "restart", 4)
   );
   assert.deepEqual(calls[0].slice(1), [
-    ["routes:demo", "worker:do-rollout:demo:chat"],
+    ["routes:demo", "worker:session-policy:demo:chat"],
     ["chat"],
   ]);
 });
@@ -260,7 +260,7 @@ test("readWebSocketLifecycleSnapshot distinguishes Redis reply errors from trans
   );
 });
 
-test("route invalidation stays cache-only before an exact rollout reconciliation", async () => {
+test("route invalidation stays cache-only before an exact session-policy reconciliation", async () => {
   const {
     ensureGatewaySubscriber,
     registerGatewayWebSocketLifecycle,
@@ -304,7 +304,7 @@ test("route invalidation stays cache-only before an exact rollout reconciliation
     await delay(0);
     assert.deepEqual(reads, []);
 
-    handlers.onMessage("do-rollout:restart", utf8Encoder.encode(JSON.stringify({
+    handlers.onMessage("session-policy:restart", utf8Encoder.encode(JSON.stringify({
       ns: "demo",
       worker: "chat",
       version: "v2",
@@ -386,7 +386,7 @@ test("subscriber reconciliation retries only transport-failed groups", async () 
   }
 });
 
-test("subscriber reconciliation fails closed on authoritative rollout corruption", async () => {
+test("subscriber reconciliation fails closed on authoritative session policy corruption", async () => {
   const {
     ensureGatewaySubscriber,
     registerGatewayWebSocketLifecycle,
@@ -587,7 +587,7 @@ test("a later preserve projection supersedes an unobserved restart sequence", as
       activeLifecycle("v1", "preserve", 3),
       { restart: () => { restarted += 1; }, fail: () => { failed += 1; } }
     );
-    handlers.onMessage("do-rollout:restart", utf8Encoder.encode(JSON.stringify({
+    handlers.onMessage("session-policy:restart", utf8Encoder.encode(JSON.stringify({
       ns: "demo",
       worker: "chat",
       version: "v2",
@@ -598,7 +598,7 @@ test("a later preserve projection supersedes an unobserved restart sequence", as
     assert.equal(failed, 0);
 
     projection = { version: "v4", mode: "restart", restartSequence: 5 };
-    handlers.onMessage("do-rollout:restart", utf8Encoder.encode(JSON.stringify({
+    handlers.onMessage("session-policy:restart", utf8Encoder.encode(JSON.stringify({
       ns: "demo",
       worker: "chat",
       version: "v4",
@@ -735,7 +735,7 @@ test("subscriber reconciliation does not apply an old snapshot to newly register
     assert.equal(newFailed, 0);
     assert.equal(newRestarted, 0);
 
-    handlers.onMessage("do-rollout:restart", utf8Encoder.encode(JSON.stringify({
+    handlers.onMessage("session-policy:restart", utf8Encoder.encode(JSON.stringify({
       ns: "demo",
       worker: "chat",
       version: "v4",

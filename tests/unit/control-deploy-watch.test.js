@@ -723,16 +723,9 @@ test("deploy handler resolves cross-namespace service-binding meta from the targ
   }
 });
 
-test("deploy handler persists workersDev=false for a routed worker", async () => {
-  /** @type {any} */ (globalThis).__controlDeployTestState.parsedRoutes = [{
-    host: "app.example",
-    slot: "/*",
-    kind: "prefix",
-    value: "/",
-  }];
-  const session = makeSession();
-  let sessionCalls = 0;
-  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
+/** @param {ReturnType<typeof makeSession>} session @param {() => void} [onSession] */
+function makeDeployRedis(session, onSession) {
+  return {
     async incr() {
       return 1;
     },
@@ -746,10 +739,23 @@ test("deploy handler persists workersDev=false for a routed worker", async () =>
       return await session.hGet(key, field);
     },
     async session(/** @type {(iso: any) => Promise<any>} */ fn) {
-      sessionCalls += 1;
+      onSession?.();
       return await fn(session);
     },
   };
+}
+
+test("deploy handler persists workersDev=false for a routed worker", async () => {
+  /** @type {any} */ (globalThis).__controlDeployTestState.parsedRoutes = [{
+    host: "app.example",
+    slot: "/*",
+    kind: "prefix",
+    value: "/",
+  }];
+  const session = makeSession();
+  let sessionCalls = 0;
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis =
+    makeDeployRedis(session, () => { sessionCalls += 1; });
 
   const response = await handle({
     request: new Request("http://control/ns/tenant-a/workers/routed/deploy", {
@@ -772,25 +778,9 @@ test("deploy handler persists workersDev=false for a routed worker", async () =>
   assert.equal(sessionCalls, 1);
 });
 
-test("deploy handler persists and acknowledges Durable Object restart rollout policy", async () => {
+test("deploy handler persists and acknowledges a restart session policy", async () => {
   const session = makeSession();
-  /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
-    async incr() {
-      return 1;
-    },
-    async hKeys() {
-      return [];
-    },
-    async hGetAll(/** @type {string} */ key) {
-      return await session.hGetAll(key);
-    },
-    async hGet(/** @type {string} */ key, /** @type {string} */ field) {
-      return await session.hGet(key, field);
-    },
-    async session(/** @type {(iso: any) => Promise<any>} */ fn) {
-      return await fn(session);
-    },
-  };
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = makeDeployRedis(session);
 
   const response = await handle({
     request: new Request("http://control/ns/tenant-a/workers/chat/deploy", {
@@ -801,26 +791,55 @@ test("deploy handler persists and acknowledges Durable Object restart rollout po
         bindings: {
           ROOM: { type: "do", className: "Room" },
         },
-        durableObjectRollout: "restart",
+        sessionPolicy: "restart",
       }),
     }),
     env: {},
     ns: "tenant-a",
     name: "chat",
-    requestId: "rid-do-rollout",
+    requestId: "rid-session-policy",
   });
 
   assert.equal(
-    (await readJsonResponse(response, 201)).durableObjectRollout,
+    (await readJsonResponse(response, 201)).sessionPolicy,
     "restart"
   );
   assert.equal(
-    /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.durableObjectRollout,
+    /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.sessionPolicy,
     "restart"
   );
 });
 
-test("deploy handler validates Durable Object restart rollout before allocating a version", async () => {
+test("deploy handler accepts a restart session policy without a Durable Object binding", async () => {
+  const session = makeSession();
+  /** @type {any} */ (globalThis).__controlDeployTestState.redis = makeDeployRedis(session);
+
+  const response = await handle({
+    request: new Request("http://control/ns/tenant-a/workers/chat/deploy", {
+      method: "POST",
+      body: JSON.stringify({
+        mainModule: "worker.js",
+        modules: { "worker.js": "export default {}" },
+        sessionPolicy: "restart",
+      }),
+    }),
+    env: {},
+    ns: "tenant-a",
+    name: "chat",
+    requestId: "rid-session-policy-no-do",
+  });
+
+  assert.equal(
+    (await readJsonResponse(response, 201)).sessionPolicy,
+    "restart"
+  );
+  assert.equal(
+    /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.sessionPolicy,
+    "restart"
+  );
+});
+
+test("deploy handler validates the session policy before allocating a version", async () => {
   let incrCalls = 0;
   /** @type {any} */ (globalThis).__controlDeployTestState.redis = {
     async incr() {
@@ -833,12 +852,12 @@ test("deploy handler validates Durable Object restart rollout before allocating 
     {
       mainModule: "worker.js",
       modules: { "worker.js": "export default {}" },
-      durableObjectRollout: "replace",
+      sessionPolicy: "replace",
     },
     {
       mainModule: "worker.js",
       modules: { "worker.js": "export default {}" },
-      durableObjectRollout: null,
+      sessionPolicy: null,
     },
     {
       mainModule: "worker.js",
@@ -854,7 +873,7 @@ test("deploy handler validates Durable Object restart rollout before allocating 
       env: {},
       ns: "tenant-a",
       name: "chat",
-      requestId: "rid-do-rollout-invalid",
+      requestId: "rid-session-policy-invalid",
     });
     assert.equal((await readJsonResponse(response, 400)).error, "invalid_request");
   }

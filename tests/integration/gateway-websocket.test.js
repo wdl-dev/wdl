@@ -659,6 +659,44 @@ test("gateway drains an old websocket but does not reconnect its inactive versio
   }
 });
 
+test("a restart session policy closes a pure websocket worker at promotion", async () => {
+  const ns = uniqueNs("ws-policy-restart");
+  const name = "echo";
+  await deployAndPromote(ns, name, {
+    code: versionedWebSocketWorker("v1"),
+    sessionPolicy: "restart",
+  });
+
+  const first = await wsHandshake(ns, `/${name}`);
+  try {
+    assert.equal(first.status, 101);
+    first.socket.write(encodeClientTextFrame("before"));
+    assert.equal(await readOneServerTextFrame(first.socket), "v1:before");
+
+    const closeFrame = readOneServerCloseFrame(first.socket, { timeoutMs: 15_000 });
+    await deployAndPromote(ns, name, {
+      code: versionedWebSocketWorker("v2"),
+      sessionPolicy: "restart",
+    });
+    assert.deepEqual(await closeFrame, { code: 1012, reason: "service restart" });
+    if (!first.socket.destroyed) {
+      first.socket.write(encodeClientCloseFrame(1012, "service restart"));
+    }
+    await waitForSocketClose(first.socket);
+  } finally {
+    first.socket.destroy();
+  }
+
+  const second = await wsHandshake(ns, `/${name}`);
+  try {
+    assert.equal(second.status, 101);
+    second.socket.write(encodeClientTextFrame("after"));
+    assert.equal(await readOneServerTextFrame(second.socket), "v2:after");
+  } finally {
+    second.socket.destroy();
+  }
+});
+
 test("gateway-proxied pattern-routed ws reconnects backend after user-runtime restart", async () => {
   const ns = uniqueNs("ws-pattern-reconnect");
   const name = "echo";

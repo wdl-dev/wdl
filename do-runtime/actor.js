@@ -54,7 +54,7 @@ export class WdlDoHostActor extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     // workerLoader owns isolate residency. This actor-local map only memoizes
-    // stubs; deleting entries during a facet rollout would not evict a loader
+    // stubs; deleting entries during a facet restart would not evict a loader
     // identity and must not add an all-facet scan to the dispatch path.
     this.workers = new Map();
     this.facetWorkers = new Map();
@@ -88,19 +88,19 @@ export class WdlDoHostActor extends DurableObject {
     if (existing && invoke.restartSequence < existing.restartSequence) {
       throw new DoRuntimeError(
         503,
-        "do_rollout_version_stale",
+        "session_policy_version_stale",
         `Durable Object restart ${invoke.restartSequence} was superseded by ${existing.restartSequence}`
       );
     }
     const advanceFacet = existing && invoke.restartSequence > existing.restartSequence;
-    const restartFacet = advanceFacet && invoke.rolloutMode === "restart";
+    const restartFacet = advanceFacet && invoke.sessionPolicy === "restart";
     if (restartFacet) {
       this.ctx.facets.abort(
         facetName,
         new Error(`Durable Object restarted for ${invoke.workerId}`)
       );
       this.facetWorkers.delete(facetName);
-      log("info", "do_rollout_restart_facet_on_dispatch", {
+      log("info", "session_policy_restart_facet_on_dispatch", {
         namespace: invoke.ns,
         worker: invoke.worker,
         version: invoke.version,
@@ -215,12 +215,12 @@ export class WdlDoHostActor extends DurableObject {
     }
     try {
       let fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, {
-        rolloutInvoke: invoke,
+        sessionPolicyInvoke: invoke,
         storageScope: invoke,
       });
       if (await this.rememberObject(invoke)) {
         fenced = await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, {
-          rolloutInvoke: invoke,
+          sessionPolicyInvoke: invoke,
           storageScope: invoke,
         });
       }

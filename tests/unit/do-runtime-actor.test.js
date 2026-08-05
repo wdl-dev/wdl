@@ -39,7 +39,7 @@ function invoke(overrides = {}) {
     doStorageId: "do_0123456789abcdef0123456789abcdef",
     className: "Room",
     objectName: "alice",
-    rolloutMode: "preserve",
+    sessionPolicy: "preserve",
     restartSequence: 0,
     owner: {
       ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
@@ -212,7 +212,7 @@ test("DO host actor: stale initial owner fence does not write the object registr
     request
   );
   assert.equal(
-    /** @type {{ rolloutInvoke?: unknown }} */ (harness.assertArguments[0].options).rolloutInvoke,
+    /** @type {{ sessionPolicyInvoke?: unknown }} */ (harness.assertArguments[0].options).sessionPolicyInvoke,
     request
   );
   assert.equal(registryStarted, false);
@@ -251,7 +251,7 @@ test("DO host actor: delete-storage validates owner and active storage in one sc
   assert.equal(host.registeredObjectMembers.has("Room:alice"), false);
 });
 
-test("DO host actor: preserve rollout keeps an existing facet on its loaded version", () => {
+test("DO host actor: a preserve session policy keeps an existing facet on its loaded version", () => {
   const host = actor();
   registerFacet(host, "Room:alice");
 
@@ -265,21 +265,21 @@ test("DO host actor: preserve rollout keeps an existing facet on its loaded vers
   assert.deepEqual(harness.aborts, []);
 });
 
-test("DO host actor: restart rollout lazily replaces a stale facet without deleting storage", () => {
+test("DO host actor: a restart session policy lazily replaces a stale facet without deleting storage", () => {
   const host = actor();
   registerFacet(host, "Room:alice");
 
   const facetName = host.rememberFacet(invoke({
     version: "v2",
     workerId: "tenant:chat:v2",
-    rolloutMode: "restart",
+    sessionPolicy: "restart",
     restartSequence: 4,
   }));
 
   assert.equal(host.facetWorkers.get(facetName)?.restartSequence, 4);
   assert.deepEqual(harness.aborts.map(({ name }) => name), ["Room:alice"]);
   assert.deepEqual(harness.deletedFacets, []);
-  assert.equal(harness.logs.at(-1).event, "do_rollout_restart_facet_on_dispatch");
+  assert.equal(harness.logs.at(-1).event, "session_policy_restart_facet_on_dispatch");
 });
 
 test("DO host actor: later preserve projection supersedes an unobserved restart", () => {
@@ -297,7 +297,7 @@ test("DO host actor: later preserve projection supersedes an unobserved restart"
   assert.throws(
     () => host.rememberFacet(invoke({ restartSequence: 3 })),
     (err) => {
-      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "do_rollout_version_stale");
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_version_stale");
       return true;
     }
   );
@@ -310,7 +310,7 @@ test("DO host actor: a stale delayed dispatch cannot replace a newer restart", (
   assert.throws(
     () => host.rememberFacet(invoke({ restartSequence: 4 })),
     (err) => {
-      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "do_rollout_version_stale");
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_version_stale");
       return true;
     }
   );

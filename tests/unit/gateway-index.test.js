@@ -37,8 +37,8 @@ const GATEWAY_INDEX_TEST_STATE = {
   websocketOptionCalls: /** @type {object[]} */ ([]),
   websocketProxyCalls: /** @type {any[]} */ ([]),
   websocketUpstreamCalls: /** @type {any[]} */ ([]),
-  rolloutSnapshotCalls: /** @type {Array<{ namespace: string, worker: string }>} */ ([]),
-  rolloutSnapshots: /** @type {Array<{
+  policySnapshotCalls: /** @type {Array<{ namespace: string, worker: string }>} */ ([]),
+  policySnapshots: /** @type {Array<{
     kind: "active",
     version: string,
     mode: "preserve" | "restart",
@@ -87,8 +87,8 @@ export function gatewayRoutingOptionsFromEnv(env) {
 export async function readWebSocketLifecycleSnapshot(_redis, namespace, worker) {
   const state = globalThis.__gatewayIndexTestState;
   state.timingEvents.push("lifecycle");
-  state.rolloutSnapshotCalls.push({ namespace, worker });
-  const snapshot = state.rolloutSnapshots.shift();
+  state.policySnapshotCalls.push({ namespace, worker });
+  const snapshot = state.policySnapshots.shift();
   if (snapshot instanceof Error) throw snapshot;
   return snapshot || { kind: "active", version: "v1", mode: "preserve", restartSequence: 0 };
 }
@@ -217,8 +217,8 @@ beforeEach(() => {
   GATEWAY_INDEX_TEST_STATE.websocketOptionCalls.length = 0;
   GATEWAY_INDEX_TEST_STATE.websocketProxyCalls.length = 0;
   GATEWAY_INDEX_TEST_STATE.websocketUpstreamCalls.length = 0;
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshotCalls.length = 0;
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.length = 0;
+  GATEWAY_INDEX_TEST_STATE.policySnapshotCalls.length = 0;
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.length = 0;
   GATEWAY_INDEX_TEST_STATE.lifecycleRegistrations.length = 0;
   GATEWAY_INDEX_TEST_STATE.runtimeForwardCalls.length = 0;
   GATEWAY_INDEX_TEST_STATE.timingEvents.length = 0;
@@ -381,7 +381,7 @@ test("gateway proxies websocket upgrades through the routed runtime binding", as
     REDIS_ADDR: "redis:6379",
     RUNTIME_USER: runtimeBinding,
   };
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(
     activeLifecycle("v1", "restart", 4),
     activeLifecycle("v2", "restart", 5)
   );
@@ -420,7 +420,7 @@ test("gateway proxies websocket upgrades through the routed runtime binding", as
     handlers: lifecycleHandlers,
   }]);
   assert.equal(await proxyCall.options.checkLifecycle(), "restart");
-  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.rolloutSnapshotCalls, [
+  assert.deepEqual(GATEWAY_INDEX_TEST_STATE.policySnapshotCalls, [
     { namespace: "demo", worker: "worker" },
     { namespace: "demo", worker: "worker" },
   ]);
@@ -439,8 +439,8 @@ test("gateway proxies websocket upgrades through the routed runtime binding", as
   ]]);
 });
 
-test("gateway fails closed when a websocket rollout sequence regresses", async () => {
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+test("gateway fails closed when a websocket session policy sequence regresses", async () => {
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(
     activeLifecycle("v1", "restart", 4),
     activeLifecycle("v1", "preserve", 3)
   );
@@ -465,9 +465,9 @@ test("gateway fails closed when a websocket rollout sequence regresses", async (
   await assert.rejects(options.checkLifecycle(), /routing unavailable/);
 });
 
-test("gateway rejects websocket handshakes superseded by a restart rollout", async () => {
+test("gateway rejects websocket handshakes superseded by a restart session policy", async () => {
   let upstreamCalled = false;
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(activeLifecycle("v2", "restart", 5));
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(activeLifecycle("v2", "restart", 5));
 
   const response = await gatewayIndex.fetch(
     new Request("https://custom.example/same", {
@@ -495,9 +495,9 @@ test("gateway rejects websocket handshakes superseded by a restart rollout", asy
   assert.deepEqual(GATEWAY_INDEX_TEST_STATE.runtimeForwardCalls, []);
 });
 
-test("gateway rejects websocket handshakes superseded by a preserve rollout", async () => {
+test("gateway rejects websocket handshakes superseded by a preserve session policy", async () => {
   let upstreamCalled = false;
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(activeLifecycle("v2", "preserve", 4));
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(activeLifecycle("v2", "preserve", 4));
 
   const response = await gatewayIndex.fetch(
     new Request("https://custom.example/same", {
@@ -526,7 +526,7 @@ test("gateway rejects websocket handshakes superseded by a preserve rollout", as
 });
 
 test("gateway does not reconnect an old websocket worker after a preserve promotion", async () => {
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(
     activeLifecycle("v1"),
     activeLifecycle("v1"),
     activeLifecycle("v2")
@@ -554,7 +554,7 @@ test("gateway does not reconnect an old websocket worker after a preserve promot
 });
 
 test("gateway acknowledges a superseded restart when the latest projection preserves", async () => {
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(
     activeLifecycle("v1", "preserve", 0),
     activeLifecycle("v1", "preserve", 1),
     activeLifecycle("v1", "restart", 2)
@@ -582,7 +582,7 @@ test("gateway acknowledges a superseded restart when the latest projection prese
 });
 
 test("gateway treats a deleted worker as a service restart after admission", async () => {
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(
     activeLifecycle("v1"),
     { kind: "inactive" }
   );
@@ -610,7 +610,7 @@ test("gateway treats a deleted worker as a service restart after admission", asy
 });
 
 test("gateway rejects a stale websocket handshake after whole-worker delete", async () => {
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push({ kind: "inactive" });
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push({ kind: "inactive" });
 
   const response = await gatewayIndex.fetch(
     new Request("https://custom.example/same", {
@@ -636,7 +636,7 @@ test("gateway rejects a stale websocket handshake after whole-worker delete", as
 });
 
 test("gateway distinguishes transient websocket lifecycle read failures", async () => {
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(
     activeLifecycle("v1"),
     new Error("redis failover"),
     activeLifecycle("v1")
@@ -664,7 +664,7 @@ test("gateway distinguishes transient websocket lifecycle read failures", async 
 });
 
 test("gateway starts runtime forward timing after websocket lifecycle admission", async () => {
-  GATEWAY_INDEX_TEST_STATE.rolloutSnapshots.push(activeLifecycle("v1"));
+  GATEWAY_INDEX_TEST_STATE.policySnapshots.push(activeLifecycle("v1"));
   let now = 100;
 
   const response = await withMockedPropertyDescriptor(Date, "now", {

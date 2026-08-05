@@ -208,8 +208,8 @@ test("gateway-proxied Durable Object WebSocket reconnects backend after do-runti
   }
 });
 
-test("restart rollout closes an existing Durable Object WebSocket and preserves storage", async () => {
-  const ns = uniqueNs("do-ws-rollout-restart");
+test("a restart session policy closes an existing Durable Object WebSocket and preserves storage", async () => {
+  const ns = uniqueNs("do-ws-policy-restart");
   await deployAndPromote(ns, "chat", {
     mainModule: "worker.js",
     modules: { "worker.js": DO_WS_WORKER },
@@ -218,12 +218,12 @@ test("restart rollout closes an existing Durable Object WebSocket and preserves 
     },
   });
 
-  const first = await wsHandshake(ns, "/chat?name=rollout");
+  const first = await wsHandshake(ns, "/chat?name=policy");
   try {
     assert.equal(first.status, 101);
     first.socket.write(encodeClientTextFrame("before"));
     assert.deepEqual(await readJsonServerFrame(first.socket), {
-      objectId: "rollout",
+      objectId: "policy",
       memory: 1,
       storage: 1,
       text: "before",
@@ -236,7 +236,7 @@ test("restart rollout closes an existing Durable Object WebSocket and preserves 
       bindings: {
         ROOM: { type: "do", className: "Room" },
       },
-      durableObjectRollout: "restart",
+      sessionPolicy: "restart",
     });
     assert.deepEqual(await closeFrame, {
       code: 1012,
@@ -246,12 +246,12 @@ test("restart rollout closes an existing Durable Object WebSocket and preserves 
     first.socket.destroy();
   }
 
-  const second = await wsHandshake(ns, "/chat?name=rollout");
+  const second = await wsHandshake(ns, "/chat?name=policy");
   try {
     assert.equal(second.status, 101);
     second.socket.write(encodeClientTextFrame("after"));
     assert.deepEqual(await readJsonServerFrame(second.socket), {
-      objectId: "rollout",
+      objectId: "policy",
       memory: 1,
       storage: 2,
       text: "after",
@@ -378,8 +378,8 @@ test("Durable Object hibernation WebSocket API round-trips through the gateway p
   }
 });
 
-test("restart rollout closes a hibernating Durable Object WebSocket", async () => {
-  const ns = uniqueNs("do-ws-hibernate-rollout");
+test("a restart session policy closes a hibernating Durable Object WebSocket", async () => {
+  const ns = uniqueNs("do-ws-hibernate-policy");
   await deployAndPromote(ns, "chat", {
     mainModule: "worker.js",
     modules: { "worker.js": DO_WS_HIBERNATION_WORKER },
@@ -388,12 +388,12 @@ test("restart rollout closes a hibernating Durable Object WebSocket", async () =
     },
   });
 
-  const first = await wsHandshake(ns, "/chat?name=hibernating-rollout");
+  const first = await wsHandshake(ns, "/chat?name=hibernating-policy");
   try {
     assert.equal(first.status, 101);
     first.socket.write(encodeClientTextFrame("bump"));
     assert.deepEqual(await readJsonServerFrame(first.socket), {
-      id: "hibernating-rollout",
+      id: "hibernating-policy",
       seen: 1,
       tags: ["room"],
     });
@@ -405,7 +405,7 @@ test("restart rollout closes a hibernating Durable Object WebSocket", async () =
       bindings: {
         ROOM: { type: "do", className: "Room" },
       },
-      durableObjectRollout: "restart",
+      sessionPolicy: "restart",
     });
     assert.deepEqual(await closeFrame, {
       code: 1012,
@@ -415,12 +415,12 @@ test("restart rollout closes a hibernating Durable Object WebSocket", async () =
     first.socket.destroy();
   }
 
-  const second = await wsHandshake(ns, "/chat?name=hibernating-rollout");
+  const second = await wsHandshake(ns, "/chat?name=hibernating-policy");
   try {
     assert.equal(second.status, 101);
     second.socket.write(encodeClientTextFrame("after"));
     assert.deepEqual(await readJsonServerFrame(second.socket), {
-      id: "hibernating-rollout",
+      id: "hibernating-policy",
       joinedAt: 123,
       seen: 0,
       tags: ["room"],

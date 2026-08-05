@@ -37,7 +37,7 @@ const { handle } = await importControlHandler("control/handlers/promote.js", {
   },
 });
 
-test("promote response exposes the committed Durable Object rollout state", async () => {
+test("promote response exposes the committed session policy state", async () => {
   const state = installControlHandlerState(GLOBAL_NAME, {
     ...createControlHandlerState(),
     promoteCalls: [],
@@ -46,7 +46,7 @@ test("promote response exposes the committed Durable Object rollout state", asyn
       affectedHosts: ["api.example"],
       workersDev: true,
       routeUrls: ["https://api.example/v1/*"],
-      durableObjectRollout: "restart",
+      sessionPolicy: "restart",
       restartSequence: 8,
     },
   });
@@ -71,7 +71,7 @@ test("promote response exposes the committed Durable Object rollout state", asyn
     affectedHosts: ["api.example"],
     platformDomain: "edge.wdl.example",
     workersDev: true,
-    durableObjectRollout: "restart",
+    sessionPolicy: "restart",
     restartSequence: 8,
     urls: {
       platform: "https://demo.edge.wdl.example/worker/",

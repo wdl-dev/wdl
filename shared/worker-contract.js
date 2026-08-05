@@ -94,7 +94,7 @@ export const DECLARED_HOSTS_REVISION_KEY = "declared-hosts:revision";
 export const ROUTES_CHANNEL = "routes:invalidate";
 export const ROUTES_FLUSH_CHANNEL = "routes:flush";
 export const PATTERNS_CHANNEL = "patterns:invalidate";
-export const DURABLE_OBJECT_ROLLOUT_CHANNEL = "do-rollout:restart";
+export const SESSION_POLICY_CHANNEL = "session-policy:restart";
 export const WORKER_DELETE_CHANNEL = "worker:delete";
 const HOSTS_PREFIX = "hosts:";
 const NS_HOSTS_PREFIX = "ns-hosts:";
@@ -135,13 +135,13 @@ export function doStorageIdKey(ns, worker) {
   return `worker:do-storage:${ns}:${worker}`;
 }
 
-export const DURABLE_OBJECT_ROLLOUT_PRESERVE = "preserve";
-export const DURABLE_OBJECT_ROLLOUT_RESTART = "restart";
+export const SESSION_POLICY_PRESERVE = "preserve";
+export const SESSION_POLICY_RESTART = "restart";
 
 /** @param {unknown} value */
-export function isDurableObjectRolloutMode(value) {
-  return value === DURABLE_OBJECT_ROLLOUT_PRESERVE ||
-    value === DURABLE_OBJECT_ROLLOUT_RESTART;
+export function isSessionPolicyMode(value) {
+  return value === SESSION_POLICY_PRESERVE ||
+    value === SESSION_POLICY_RESTART;
 }
 
 /**
@@ -149,41 +149,41 @@ export function isDurableObjectRolloutMode(value) {
  * @param {unknown} mode
  * @param {unknown} restartSequence
  */
-function isValidDurableObjectRollout(version, mode, restartSequence) {
+function isValidSessionPolicy(version, mode, restartSequence) {
   return parseVersion(version) != null &&
-    isDurableObjectRolloutMode(mode) &&
+    isSessionPolicyMode(mode) &&
     Number.isSafeInteger(restartSequence) &&
     /** @type {number} */ (restartSequence) >= 0 &&
     (
-      mode !== DURABLE_OBJECT_ROLLOUT_RESTART ||
+      mode !== SESSION_POLICY_RESTART ||
       restartSequence !== 0
     );
 }
 
-// Active DO rollout projection. Control writes it in the same transaction as
+// Active session policy projection. Control writes it in the same transaction as
 // routes:<ns>; Gateway and do-runtime read it at lifecycle/fence boundaries.
 /** @param {string} ns @param {string} worker */
-export function durableObjectRolloutKey(ns, worker) {
-  return `worker:do-rollout:${ns}:${worker}`;
+export function sessionPolicyKey(ns, worker) {
+  return `worker:session-policy:${ns}:${worker}`;
 }
 
 // Permanent restart-event allocator. It survives whole-worker deletion so a
 // stale Gateway session can never confuse a recreated worker with an old event.
 /** @param {string} ns @param {string} worker */
-export function durableObjectRolloutSequenceKey(ns, worker) {
-  return `worker:do-rollout-seq:${ns}:${worker}`;
+export function sessionPolicySequenceKey(ns, worker) {
+  return `worker:session-policy-seq:${ns}:${worker}`;
 }
 
 /**
  * @param {{ version: string, mode: "preserve" | "restart", restartSequence: number }} projection
  */
-export function encodeDurableObjectRolloutProjection(projection) {
-  if (!isValidDurableObjectRollout(
+export function encodeSessionPolicyProjection(projection) {
+  if (!isValidSessionPolicy(
     projection.version,
     projection.mode,
     projection.restartSequence
   )) {
-    throw new TypeError("invalid Durable Object rollout projection");
+    throw new TypeError("invalid session policy projection");
   }
   return JSON.stringify({
     version: projection.version,
@@ -195,19 +195,19 @@ export function encodeDurableObjectRolloutProjection(projection) {
 /**
  * @param {{ ns: string, worker: string, version: string, restartSequence: number }} event
  */
-export function encodeDurableObjectRolloutEvent(event) {
+export function encodeSessionPolicyEvent(event) {
   if (
     typeof event.ns !== "string" ||
     !event.ns ||
     typeof event.worker !== "string" ||
     !event.worker ||
-    !isValidDurableObjectRollout(
+    !isValidSessionPolicy(
       event.version,
-      DURABLE_OBJECT_ROLLOUT_RESTART,
+      SESSION_POLICY_RESTART,
       event.restartSequence
     )
   ) {
-    throw new TypeError("invalid Durable Object rollout event");
+    throw new TypeError("invalid session policy event");
   }
   return JSON.stringify({
     ns: event.ns,
@@ -221,7 +221,7 @@ export function encodeDurableObjectRolloutEvent(event) {
  * @param {unknown} raw
  * @returns {{ ns: string, worker: string, version: string, restartSequence: number }}
  */
-export function parseDurableObjectRolloutEvent(raw) {
+export function parseSessionPolicyEvent(raw) {
   let value;
   try {
     value = typeof raw === "string" ? JSON.parse(raw) : null;
@@ -236,13 +236,13 @@ export function parseDurableObjectRolloutEvent(raw) {
     !value.ns ||
     typeof value.worker !== "string" ||
     !value.worker ||
-    !isValidDurableObjectRollout(
+    !isValidSessionPolicy(
       value.version,
-      DURABLE_OBJECT_ROLLOUT_RESTART,
+      SESSION_POLICY_RESTART,
       value.restartSequence
     )
   ) {
-    throw new TypeError("invalid Durable Object rollout event");
+    throw new TypeError("invalid session policy event");
   }
   return {
     ns: value.ns,
@@ -294,7 +294,7 @@ export function parseWorkerDeleteEvent(raw) {
  * @param {unknown} raw
  * @returns {{ version: string, mode: "preserve" | "restart", restartSequence: number } | null}
  */
-export function parseDurableObjectRolloutProjection(raw) {
+export function parseSessionPolicyProjection(raw) {
   if (raw == null) return null;
   let value;
   try {
@@ -306,9 +306,9 @@ export function parseDurableObjectRolloutProjection(raw) {
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    !isValidDurableObjectRollout(value.version, value.mode, value.restartSequence)
+    !isValidSessionPolicy(value.version, value.mode, value.restartSequence)
   ) {
-    throw new TypeError("invalid Durable Object rollout projection");
+    throw new TypeError("invalid session policy projection");
   }
   return {
     version: value.version,

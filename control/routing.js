@@ -26,26 +26,26 @@ import {
   CRON_GENERATION_EPOCH,
   DECLARED_HOSTS_KEY,
   DECLARED_HOSTS_REVISION_KEY,
-  DURABLE_OBJECT_ROLLOUT_CHANNEL,
-  DURABLE_OBJECT_ROLLOUT_PRESERVE,
-  DURABLE_OBJECT_ROLLOUT_RESTART,
+  SESSION_POLICY_CHANNEL,
+  SESSION_POLICY_PRESERVE,
+  SESSION_POLICY_RESTART,
   NAMESPACES_KEY,
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
   bundleKey,
   cronSequenceKey,
   deleteLockKey,
-  durableObjectRolloutKey,
-  durableObjectRolloutSequenceKey,
-  encodeDurableObjectRolloutEvent,
-  encodeDurableObjectRolloutProjection,
+  sessionPolicyKey,
+  sessionPolicySequenceKey,
+  encodeSessionPolicyEvent,
+  encodeSessionPolicyProjection,
   formatVersion,
   hostDeclarationsKey,
   hostsKey,
-  isDurableObjectRolloutMode,
+  isSessionPolicyMode,
   nextVersionKey,
   nsHostsKey,
-  parseDurableObjectRolloutProjection,
+  parseSessionPolicyProjection,
   parseVersion,
   patternsKey,
   platformDomainDisabledKey,
@@ -80,14 +80,15 @@ const DEPENDENCY_READ_BATCH_SIZE = 64;
  * @typedef {{ version?: string | null, seq?: unknown }} CronMeta
  * @typedef {{ cronSeq: number, persistSequence: boolean, addedWithPlacement: Array<CronSpec & { id: string, gen: number, slot: number }>, removed: Array<{ id: string, gen: string | number }> }} CronPlan
  * @typedef {{ newQueueConsumers: QueueConsumer[], removedQueueConsumers: QueueConsumer[] }} QueuePlan
- * @typedef {{ newRoutes: RoutePattern[], workersDev: boolean, durableObjectRollout: "preserve" | "restart", rawRolloutSequence: unknown, rawRolloutProjection: unknown, newCrons: CronSpec[], newQueueConsumers: QueueConsumer[], newExports: ExportSpec[], d1Refs: D1Ref[], outgoingRefs: OutgoingRef[] }} PromoteSnapshotInputs
+ * @typedef {{ mode: "preserve" | "restart", restartSequence: number, persistSequence: boolean }} SessionPolicyPlan
+ * @typedef {{ newRoutes: RoutePattern[], workersDev: boolean, sessionPolicy: "preserve" | "restart", rawSessionPolicySequence: unknown, rawSessionPolicyProjection: unknown, newCrons: CronSpec[], newQueueConsumers: QueueConsumer[], newExports: ExportSpec[], d1Refs: D1Ref[], outgoingRefs: OutgoingRef[] }} PromoteSnapshotInputs
  * @typedef {{ currentVersion: string | null | undefined, inputs: PromoteSnapshotInputs }} PromoteInitialSnapshot
  * @typedef {{ oldRoutes: RoutePattern[], oldQueueConsumers: QueueConsumer[], affectedHosts: Set<string>, hostState: HostState }} PromoteObservedState
- * @typedef {{ newRouteKeys: Set<string>, nsHostsAdd: string[], nsHostsRem: string[], cronKey: string, cronHash: Record<string, string>, cronPlan: CronPlan, queuePlan: QueuePlan, doRollout: { mode: "preserve" | "restart", restartSequence: number, persistSequence: boolean } }} PromoteStagePlan
+ * @typedef {{ newRouteKeys: Set<string>, nsHostsAdd: string[], nsHostsRem: string[], cronKey: string, cronHash: Record<string, string>, cronPlan: CronPlan, queuePlan: QueuePlan, sessionPolicyPlan: SessionPolicyPlan }} PromoteStagePlan
  * @typedef {{ log?: (level: string, event: string, fields: Record<string, unknown>) => void, requestId?: string, ns?: string, workerName?: string }} LogContext
  * @typedef {{ iso: RedisIso, multi: RedisMulti, currentVersion: string, newVersion: string, sourceMeta: BundleMeta }} BumpStageContext
  * @typedef {LogContext & { stageBeforeCopy?: (context: BumpStageContext) => void | Promise<void> }} BumpOptions
- * @typedef {{ routes?: RoutePattern[], workersDev?: boolean, durableObjectRollout?: unknown, crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
+ * @typedef {{ routes?: RoutePattern[], workersDev?: boolean, sessionPolicy?: unknown, durableObjectRollout?: unknown, crons?: CronSpec[], queueConsumers?: QueueConsumer[], exports?: ExportSpec[], bindings?: unknown }} BundleMeta
  * @typedef {Record<string, Record<string, string | null | undefined>>} HostState
  * @typedef {import("shared-redis").RedisMulti} RedisMulti
  * @typedef {import("shared-redis").RedisSession} RedisIso
@@ -280,16 +281,15 @@ function routingBundleMeta(ns, workerName, version, raw) {
       { field: "workersDev" }
     );
   }
-  if (
-    meta.durableObjectRollout !== undefined &&
-    !isDurableObjectRolloutMode(meta.durableObjectRollout)
-  ) {
-    throw new RoutingError(
-      500,
-      "corrupt_meta",
-      `Corrupt __meta__ for ${ns}/${workerName}/${version}`,
-      { field: "durableObjectRollout" }
-    );
+  for (const field of ["sessionPolicy", "durableObjectRollout"]) {
+    if (meta[field] !== undefined && !isSessionPolicyMode(meta[field])) {
+      throw new RoutingError(
+        500,
+        "corrupt_meta",
+        `Corrupt __meta__ for ${ns}/${workerName}/${version}`,
+        { field }
+      );
+    }
   }
   return /** @type {BundleMeta} */ (meta);
 }
@@ -310,16 +310,21 @@ function assertRoutableWorkersDev(meta, routes) {
 }
 
 /** @param {BundleMeta} meta @returns {"preserve" | "restart"} */
-function durableObjectRolloutMode(meta) {
-  return isDurableObjectRolloutMode(meta.durableObjectRollout)
-    ? meta.durableObjectRollout
-    : DURABLE_OBJECT_ROLLOUT_PRESERVE;
+function sessionPolicyModeFromMeta(meta) {
+  // Dual-read: bundles persisted before the session-policy rename carry the
+  // retired durableObjectRollout meta field.
+  if (isSessionPolicyMode(meta.sessionPolicy)) return meta.sessionPolicy;
+  if (isSessionPolicyMode(meta.durableObjectRollout)) return meta.durableObjectRollout;
+  return SESSION_POLICY_PRESERVE;
 }
 
+// Fail closed before the route flips: a DO binding without a storage id, or
+// bindings that disagree on it, could otherwise activate and then fail every
+// cold load and owner resolution.
 /** @param {BundleMeta} meta */
-function durableObjectStorageId(meta) {
+function assertDoStorageIdCoherent(meta) {
   if (!meta.bindings || typeof meta.bindings !== "object" || Array.isArray(meta.bindings)) {
-    return null;
+    return;
   }
   let storageId = null;
   for (const binding of Object.values(meta.bindings)) {
@@ -332,27 +337,6 @@ function durableObjectStorageId(meta) {
     }
     storageId = binding.doStorageId;
   }
-  return storageId;
-}
-
-/**
- * @param {BundleMeta} meta
- * @param {string} ns
- * @param {string} worker
- * @param {string} version
- * @returns {"preserve" | "restart"}
- */
-function durableObjectRolloutModeForActivation(meta, ns, worker, version) {
-  const mode = durableObjectRolloutMode(meta);
-  const storageId = durableObjectStorageId(meta);
-  if (mode === DURABLE_OBJECT_ROLLOUT_RESTART && storageId === null) {
-    throw new RoutingError(
-      500,
-      "corrupt_meta",
-      `Durable Object restart rollout for ${ns}/${worker}/${version} has no Durable Object binding`
-    );
-  }
-  return mode;
 }
 
 /**
@@ -360,15 +344,15 @@ function durableObjectRolloutModeForActivation(meta, ns, worker, version) {
  * @param {string} ns
  * @param {string} worker
  * @param {string} version
- * @param {{ mode: "preserve" | "restart", restartSequence: number, persistSequence: boolean }} plan
+ * @param {SessionPolicyPlan} plan
  */
-function stageDurableObjectRollout(multi, ns, worker, version, plan) {
+function stageSessionPolicy(multi, ns, worker, version, plan) {
   if (plan.persistSequence) {
-    multi.set(durableObjectRolloutSequenceKey(ns, worker), String(plan.restartSequence));
+    multi.set(sessionPolicySequenceKey(ns, worker), String(plan.restartSequence));
   }
   multi.set(
-    durableObjectRolloutKey(ns, worker),
-    encodeDurableObjectRolloutProjection({
+    sessionPolicyKey(ns, worker),
+    encodeSessionPolicyProjection({
       version,
       mode: plan.mode,
       restartSequence: plan.restartSequence,
@@ -376,8 +360,8 @@ function stageDurableObjectRollout(multi, ns, worker, version, plan) {
   );
   if (plan.persistSequence) {
     multi.publish(
-      DURABLE_OBJECT_ROLLOUT_CHANNEL,
-      encodeDurableObjectRolloutEvent({
+      SESSION_POLICY_CHANNEL,
+      encodeSessionPolicyEvent({
         ns,
         worker,
         version,
@@ -388,14 +372,14 @@ function stageDurableObjectRollout(multi, ns, worker, version, plan) {
 }
 
 /** @param {unknown} raw @param {string} key */
-function parseDoRolloutSequence(raw, key) {
+function parseSessionPolicySequence(raw, key) {
   if (raw == null) return 0;
   if (typeof raw !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(raw)) {
-    throw new RoutingError(500, "corrupt_do_rollout_sequence", `Invalid Durable Object rollout sequence at ${key}`);
+    throw new RoutingError(500, "corrupt_session_policy_sequence", `Invalid session policy sequence at ${key}`);
   }
   const parsed = Number(raw);
   if (!Number.isSafeInteger(parsed)) {
-    throw new RoutingError(500, "corrupt_do_rollout_sequence", `Invalid Durable Object rollout sequence at ${key}`);
+    throw new RoutingError(500, "corrupt_session_policy_sequence", `Invalid session policy sequence at ${key}`);
   }
   return parsed;
 }
@@ -410,7 +394,7 @@ function parseDoRolloutSequence(raw, key) {
  *   sequenceKey: string,
  * }} options
  */
-function computeDoRolloutPlan({
+function computeSessionPolicyPlan({
   currentVersion,
   newVersion,
   mode,
@@ -418,31 +402,31 @@ function computeDoRolloutPlan({
   rawProjection,
   sequenceKey,
 }) {
-  const allocated = parseDoRolloutSequence(rawSequence, sequenceKey);
+  const allocated = parseSessionPolicySequence(rawSequence, sequenceKey);
   let current;
   try {
-    current = parseDurableObjectRolloutProjection(rawProjection);
+    current = parseSessionPolicyProjection(rawProjection);
   } catch {
-    throw new RoutingError(500, "corrupt_do_rollout_projection", "Active Durable Object rollout projection is invalid");
+    throw new RoutingError(500, "corrupt_session_policy_projection", "Active session policy projection is invalid");
   }
   if (current && current.version !== currentVersion) {
     throw new RoutingError(
       500,
-      "corrupt_do_rollout_projection",
-      "Active Durable Object rollout projection does not match the active route"
+      "corrupt_session_policy_projection",
+      "Active session policy projection does not match the active route"
     );
   }
   if (current && current.restartSequence !== allocated) {
     throw new RoutingError(
       500,
-      "corrupt_do_rollout_sequence",
-      "Active Durable Object rollout projection does not match its sequence"
+      "corrupt_session_policy_sequence",
+      "Active session policy projection does not match its sequence"
     );
   }
   if (
-    mode === DURABLE_OBJECT_ROLLOUT_RESTART &&
+    mode === SESSION_POLICY_RESTART &&
     current?.version === newVersion &&
-    current.mode === DURABLE_OBJECT_ROLLOUT_RESTART
+    current.mode === SESSION_POLICY_RESTART
   ) {
     return {
       mode,
@@ -450,16 +434,16 @@ function computeDoRolloutPlan({
       persistSequence: false,
     };
   }
-  const restartSequence = mode === DURABLE_OBJECT_ROLLOUT_RESTART
+  const restartSequence = mode === SESSION_POLICY_RESTART
     ? allocated + 1
     : allocated;
   if (!Number.isSafeInteger(restartSequence)) {
-    throw new RoutingError(500, "do_rollout_sequence_exhausted", "Durable Object rollout sequence exhausted");
+    throw new RoutingError(500, "session_policy_sequence_exhausted", "Session policy sequence exhausted");
   }
   return {
     mode,
     restartSequence,
-    persistSequence: mode === DURABLE_OBJECT_ROLLOUT_RESTART,
+    persistSequence: mode === SESSION_POLICY_RESTART,
   };
 }
 
@@ -862,17 +846,17 @@ async function assertPlatformAsAvailable(iso, ns, workerName, newExports) {
 async function readPromoteInitialSnapshot(iso, ns, workerName, newVersion, watchKeys) {
   const lockKey = deleteLockKey(ns, workerName);
   const candidateKey = bundleKey(ns, workerName, newVersion);
-  const rolloutKey = durableObjectRolloutKey(ns, workerName);
-  const restartSequenceKey = durableObjectRolloutSequenceKey(ns, workerName);
+  const policyKey = sessionPolicyKey(ns, workerName);
+  const restartSequenceKey = sessionPolicySequenceKey(ns, workerName);
   const snapshot = await iso.watchAndGetManyAndHGetMany(
     watchKeys,
-    [lockKey, restartSequenceKey, rolloutKey],
+    [lockKey, restartSequenceKey, policyKey],
     [
       [candidateKey, "__meta__"],
       [routesKey(ns), workerName],
     ]
   );
-  const [callerLock, rawRolloutSequence, rawRolloutProjection] = snapshot.values;
+  const [callerLock, rawSessionPolicySequence, rawSessionPolicyProjection] = snapshot.values;
   if (callerLock) {
     throw new RoutingError(
       409,
@@ -894,12 +878,8 @@ async function readPromoteInitialSnapshot(iso, ns, workerName, newVersion, watch
   const newCrons = Array.isArray(meta.crons) ? meta.crons : [];
   const newQueueConsumers = Array.isArray(meta.queueConsumers) ? meta.queueConsumers : [];
   const newExports = Array.isArray(meta.exports) ? meta.exports : [];
-  const durableObjectRollout = durableObjectRolloutModeForActivation(
-    meta,
-    ns,
-    workerName,
-    newVersion
-  );
+  assertDoStorageIdCoherent(meta);
+  const sessionPolicy = sessionPolicyModeFromMeta(meta);
 
   // Reserved-ns allow-list: deploy-side gate is not the last line of
   // defense — bundles written out-of-band could skip it.
@@ -917,14 +897,14 @@ async function readPromoteInitialSnapshot(iso, ns, workerName, newVersion, watch
     inputs: {
       newRoutes,
       workersDev,
-      durableObjectRollout,
+      sessionPolicy,
       newCrons,
       newQueueConsumers,
       newExports,
       d1Refs: extractD1Refs(meta.bindings),
       outgoingRefs: extractOutgoingRefs(meta.bindings, ns),
-      rawRolloutSequence,
-      rawRolloutProjection,
+      rawSessionPolicySequence,
+      rawSessionPolicyProjection,
     },
   };
 }
@@ -1028,13 +1008,13 @@ async function buildPromoteStagePlan(
     observed.oldQueueConsumers,
     inputs.newQueueConsumers
   );
-  const doRollout = computeDoRolloutPlan({
+  const sessionPolicyPlan = computeSessionPolicyPlan({
     currentVersion,
     newVersion,
-    mode: inputs.durableObjectRollout,
-    rawSequence: inputs.rawRolloutSequence,
-    rawProjection: inputs.rawRolloutProjection,
-    sequenceKey: durableObjectRolloutSequenceKey(ns, workerName),
+    mode: inputs.sessionPolicy,
+    rawSequence: inputs.rawSessionPolicySequence,
+    rawProjection: inputs.rawSessionPolicyProjection,
+    sequenceKey: sessionPolicySequenceKey(ns, workerName),
   });
 
   return {
@@ -1045,7 +1025,7 @@ async function buildPromoteStagePlan(
     cronHash,
     cronPlan,
     queuePlan,
-    doRollout,
+    sessionPolicyPlan,
   };
 }
 
@@ -1073,7 +1053,7 @@ function stagePromoteWithRoutes(multi, ns, workerName, newVersion, inputs, obser
     inputs.workersDev,
     observed.affectedHosts
   );
-  stageDurableObjectRollout(multi, ns, workerName, newVersion, plan.doRollout);
+  stageSessionPolicy(multi, ns, workerName, newVersion, plan.sessionPolicyPlan);
   // In the same MULTI as the route flip — closes the half-state where
   // routes:<ns> is set but the gateway's knownNs gate still 404s.
   multi.sAdd(NAMESPACES_KEY, ns);
@@ -1098,7 +1078,7 @@ function stagePromoteWithRoutes(multi, ns, workerName, newVersion, inputs, obser
 // Meta is re-read inside the session under WATCH so a racing hard-delete
 // can't flip `routes:<ns>` onto a bundle about to vanish.
 // Throws RoutingError(400|403|404|409|503). Returns
-// version, route, and active rollout details.
+// version, route, and active session policy details.
 /** @param {RedisClient} redis @param {string} ns @param {string} workerName @param {string} newVersion @param {LogContext} [options] */
 export async function promoteWithRoutes(redis, ns, workerName, newVersion, options = {}) {
   const logContext = { ...options, ns, workerName };
@@ -1120,8 +1100,8 @@ export async function promoteWithRoutes(redis, ns, workerName, newVersion, optio
       hostsKey(ns),
       cronKey,
       cronSequenceKey(ns, workerName),
-      durableObjectRolloutKey(ns, workerName),
-      durableObjectRolloutSequenceKey(ns, workerName),
+      sessionPolicyKey(ns, workerName),
+      sessionPolicySequenceKey(ns, workerName),
       deleteLockKey(ns, workerName),
       bundleKey(ns, workerName, newVersion),
     ];
@@ -1162,8 +1142,8 @@ export async function promoteWithRoutes(redis, ns, workerName, newVersion, optio
       // `slot` is the operator's original wrangler pattern; `value` drops the
       // trailing wildcard, so a prefix route would report an exact-looking URL.
       routeUrls: inputs.newRoutes.map((route) => `https://${route.host}${route.slot}`),
-      durableObjectRollout: plan.doRollout.mode,
-      restartSequence: plan.doRollout.restartSequence,
+      sessionPolicy: plan.sessionPolicyPlan.mode,
+      restartSequence: plan.sessionPolicyPlan.restartSequence,
     };
   });
 }
@@ -1202,20 +1182,20 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     const initialWatchKeys = [
       routesKey(ns),
       hostsKey(ns),
-      durableObjectRolloutKey(ns, workerName),
-      durableObjectRolloutSequenceKey(ns, workerName),
+      sessionPolicyKey(ns, workerName),
+      sessionPolicySequenceKey(ns, workerName),
       deleteLockKey(ns, workerName),
     ];
     const initialSnapshot = await iso.watchAndGetManyAndHGetMany(
       initialWatchKeys,
       [
         deleteLockKey(ns, workerName),
-        durableObjectRolloutSequenceKey(ns, workerName),
-        durableObjectRolloutKey(ns, workerName),
+        sessionPolicySequenceKey(ns, workerName),
+        sessionPolicyKey(ns, workerName),
       ],
       [[routesKey(ns), workerName]]
     );
-    const [callerLock, rawRolloutSequence, rawRolloutProjection] = initialSnapshot.values;
+    const [callerLock, rawSessionPolicySequence, rawSessionPolicyProjection] = initialSnapshot.values;
     if (callerLock) {
       throw new RoutingError(
         409,
@@ -1253,19 +1233,15 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
 
     const routes = srcMeta && Array.isArray(srcMeta.routes) ? srcMeta.routes : [];
     const workersDev = assertRoutableWorkersDev(srcMeta, routes);
-    const durableObjectRollout = durableObjectRolloutModeForActivation(
-      srcMeta,
-      ns,
-      workerName,
-      currentVersion
-    );
-    const doRollout = computeDoRolloutPlan({
+    assertDoStorageIdCoherent(srcMeta);
+    const sessionPolicy = sessionPolicyModeFromMeta(srcMeta);
+    const sessionPolicyPlan = computeSessionPolicyPlan({
       currentVersion,
       newVersion,
-      mode: durableObjectRollout,
-      rawSequence: rawRolloutSequence,
-      rawProjection: rawRolloutProjection,
-      sequenceKey: durableObjectRolloutSequenceKey(ns, workerName),
+      mode: sessionPolicy,
+      rawSequence: rawSessionPolicySequence,
+      rawProjection: rawSessionPolicyProjection,
+      sequenceKey: sessionPolicySequenceKey(ns, workerName),
     });
     const queueConsumers = srcMeta && Array.isArray(srcMeta.queueConsumers) ? srcMeta.queueConsumers : [];
     const outgoingRefs = extractOutgoingRefs(srcMeta && srcMeta.bindings, ns);
@@ -1337,7 +1313,7 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
     }
     multi.copy(srcKey, dstKey, { REPLACE: true });
     stageVersionFlip(multi, ns, workerName, newVersion, routes, workersDev, affectedHosts);
-    stageDurableObjectRollout(multi, ns, workerName, newVersion, doRollout);
+    stageSessionPolicy(multi, ns, workerName, newVersion, sessionPolicyPlan);
     // Idempotent — also heals namespaces drift (manual SREM, recovery scripts).
     multi.sAdd(NAMESPACES_KEY, ns);
 
@@ -1372,8 +1348,8 @@ export async function bumpActiveAndPromote(redis, ns, workerName, options = {}) 
       version: newVersion,
       previousVersion: currentVersion,
       affectedHosts: [...affectedHosts],
-      durableObjectRollout: doRollout.mode,
-      restartSequence: doRollout.restartSequence,
+      sessionPolicy: sessionPolicyPlan.mode,
+      restartSequence: sessionPolicyPlan.restartSequence,
     };
   });
 }

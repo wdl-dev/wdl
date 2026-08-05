@@ -5,9 +5,8 @@ use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::time::now_ms;
 use wdl_rust_common::worker_contract::{
-    DurableObjectRolloutMode, DurableObjectRolloutProjection, do_storage_id_key,
-    durable_object_rollout_key, parse_durable_object_rollout_projection, parse_version_tag,
-    routes_key, worker_versions_key,
+    SessionPolicyMode, SessionPolicyProjection, do_storage_id_key, parse_session_policy_projection,
+    parse_version_tag, routes_key, session_policy_key, worker_versions_key,
 };
 
 use crate::{
@@ -90,20 +89,20 @@ fn alarm_dispatch_version_decision(
     current_storage_id: Option<&str>,
     active_version: Option<&str>,
     retained_score: Option<f64>,
-    rollout: Option<&DurableObjectRolloutProjection>,
+    policy: Option<&SessionPolicyProjection>,
 ) -> WorkflowResult<AlarmDispatchVersionDecision> {
     if current_storage_id != Some(job_storage_id) {
         return Ok(AlarmDispatchVersionDecision::Discard);
     }
-    if let Some(rollout) = rollout {
-        if active_version != Some(rollout.version.as_str()) {
+    if let Some(policy) = policy {
+        if active_version != Some(policy.version.as_str()) {
             return Err(WorkflowError::invalid_state(
-                "Active worker route and Durable Object rollout projection disagree",
+                "Active worker route and session policy projection disagree",
             ));
         }
-        if rollout.mode == DurableObjectRolloutMode::Restart && rollout.version != job_version {
+        if policy.mode == SessionPolicyMode::Restart && policy.version != job_version {
             return Ok(AlarmDispatchVersionDecision::Retarget(
-                rollout.version.clone(),
+                policy.version.clone(),
             ));
         }
     }
@@ -280,8 +279,8 @@ async fn resolve_alarm_dispatch_version(
     let storage_key = do_storage_id_key(&job.ns, &job.worker);
     let routes = routes_key(&job.ns);
     let versions = worker_versions_key(&job.ns, &job.worker);
-    let rollout_key = durable_object_rollout_key(&job.ns, &job.worker);
-    let (current_storage_id, active_version, retained_score, raw_rollout): (
+    let policy_key = session_policy_key(&job.ns, &job.worker);
+    let (current_storage_id, active_version, retained_score, raw_policy): (
         Option<String>,
         Option<String>,
         Option<f64>,
@@ -291,24 +290,22 @@ async fn resolve_alarm_dispatch_version(
         .with_conn(async |mut conn| {
             READ_DO_ALARM_TARGET
                 .prepare_invoke(
-                    &[&storage_key, &routes, &versions, &rollout_key],
+                    &[&storage_key, &routes, &versions, &policy_key],
                     &[&job.worker, &job.version],
                 )
                 .invoke_async(&mut conn)
                 .await
         })
         .await?;
-    let rollout =
-        parse_durable_object_rollout_projection(raw_rollout.as_deref()).map_err(|_| {
-            WorkflowError::invalid_state("Durable Object rollout projection is invalid")
-        })?;
+    let policy = parse_session_policy_projection(raw_policy.as_deref())
+        .map_err(|_| WorkflowError::invalid_state("session policy projection is invalid"))?;
     match alarm_dispatch_version_decision(
         &job.do_storage_id,
         &job.version,
         current_storage_id.as_deref(),
         active_version.as_deref(),
         retained_score,
-        rollout.as_ref(),
+        policy.as_ref(),
     )? {
         AlarmDispatchVersionDecision::Original => Ok(Some(job.version.clone())),
         AlarmDispatchVersionDecision::Retarget(active_version) => {
@@ -664,9 +661,7 @@ mod tests {
         alarm_dispatch_version_decision, do_alarm_ready_admission_config,
         retry_delay_ms_from_parts, saturating_i64_ms,
     };
-    use wdl_rust_common::worker_contract::{
-        DurableObjectRolloutMode, DurableObjectRolloutProjection,
-    };
+    use wdl_rust_common::worker_contract::{SessionPolicyMode, SessionPolicyProjection};
 
     #[test]
     fn alarm_dispatch_version_decision_preserves_fences_and_retargets() {
@@ -742,9 +737,9 @@ mod tests {
 
     #[test]
     fn latest_preserve_projection_supersedes_unobserved_alarm_restart() {
-        let restart = DurableObjectRolloutProjection {
+        let restart = SessionPolicyProjection {
             version: "v2".to_string(),
-            mode: DurableObjectRolloutMode::Restart,
+            mode: SessionPolicyMode::Restart,
             restart_sequence: 3,
         };
         assert_eq!(
@@ -760,8 +755,8 @@ mod tests {
             AlarmDispatchVersionDecision::Retarget("v2".to_string()),
         );
 
-        let preserve = DurableObjectRolloutProjection {
-            mode: DurableObjectRolloutMode::Preserve,
+        let preserve = SessionPolicyProjection {
+            mode: SessionPolicyMode::Preserve,
             ..restart
         };
         assert_eq!(
@@ -779,10 +774,10 @@ mod tests {
     }
 
     #[test]
-    fn alarm_dispatch_rejects_torn_route_and_rollout_projection() {
-        let rollout = DurableObjectRolloutProjection {
+    fn alarm_dispatch_rejects_torn_route_and_policy_projection() {
+        let policy = SessionPolicyProjection {
             version: "v3".to_string(),
-            mode: DurableObjectRolloutMode::Restart,
+            mode: SessionPolicyMode::Restart,
             restart_sequence: 4,
         };
         let err = alarm_dispatch_version_decision(
@@ -791,9 +786,9 @@ mod tests {
             Some("storage-a"),
             Some("v2"),
             Some(1.0),
-            Some(&rollout),
+            Some(&policy),
         )
-        .expect_err("route and rollout projection must share one active version");
+        .expect_err("route and policy projection must share one active version");
 
         assert_eq!(err.code, "workflow_invalid_state");
     }

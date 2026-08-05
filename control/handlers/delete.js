@@ -28,7 +28,7 @@ import {
   WHOLE_DELETE_LOCK_KIND,
   bundleKey,
   deleteLockKey,
-  durableObjectRolloutKey,
+  sessionPolicyKey,
   doOwnerScopeScanPatternForStorage,
   doStorageIdKey,
   encodeWorkerDeleteEvent,
@@ -503,7 +503,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
   await redis.session(async (iso) => {
     const lockKey = deleteLockKey(collected.ns, collected.name);
     const storageKey = doStorageIdKey(collected.ns, collected.name);
-    const rolloutKey = durableObjectRolloutKey(collected.ns, collected.name);
+    const policyKey = sessionPolicyKey(collected.ns, collected.name);
     await iso.watch(
       lockKey,
       routesKey(collected.ns),
@@ -511,7 +511,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
       workerSecretsKey(collected.ns, collected.name),
       workflowDefsKey(collected.ns, collected.name),
       storageKey,
-      rolloutKey,
+      policyKey,
       ...collected.doOwnerKeys,
     );
 
@@ -521,10 +521,10 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
     }
     const activeVersion = await iso.hGet(routesKey(collected.ns), collected.name);
     const retainedVersions = await iso.zRange(workerVersionsKey(collected.ns, collected.name), 0, -1);
-    const [hasWorkerSecrets, hasWorkflowDefs, hasRolloutProjection] = await iso.existsMany([
+    const [hasWorkerSecrets, hasWorkflowDefs, hasPolicyProjection] = await iso.existsMany([
       workerSecretsKey(collected.ns, collected.name),
       workflowDefsKey(collected.ns, collected.name),
-      rolloutKey,
+      policyKey,
     ]);
     if (activeVersion || retainedVersions.length > 0 || hasWorkerSecrets || hasWorkflowDefs) {
       await iso.unwatch();
@@ -543,7 +543,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
     if (
       !collected.doStorageId &&
       collected.doOwnerKeys.length === 0 &&
-      !hasRolloutProjection
+      !hasPolicyProjection
     ) {
       await iso.unwatch();
       return;
@@ -551,7 +551,7 @@ async function deleteResidualDoRedis(redis, collected, lockToken) {
     const multi = iso.multi();
     if (collected.doOwnerKeys.length) multi.del(...collected.doOwnerKeys);
     if (collected.doStorageId) multi.del(storageKey);
-    if (hasRolloutProjection) multi.del(rolloutKey);
+    if (hasPolicyProjection) multi.del(policyKey);
     multi.publish(
       WORKER_DELETE_CHANNEL,
       encodeWorkerDeleteEvent({ ns: collected.ns, worker: collected.name })
@@ -851,7 +851,7 @@ async function runSessionEXEC({ redis, ns, name, principal, requestId, collected
       routesKey(ns),
       hostsKey(ns),
       deleteLockKey(ns, name),
-      durableObjectRolloutKey(ns, name),
+      sessionPolicyKey(ns, name),
       doStorageIdKey(ns, name),
       workerVersionsKey(ns, name),
       workerSecretsKey(ns, name),

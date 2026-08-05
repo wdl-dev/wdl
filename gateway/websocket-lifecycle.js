@@ -1,5 +1,5 @@
 // Process-local WebSocket lifecycle admission and reconciliation. The Gateway
-// subscriber supplies hints; Redis route/rollout state remains authoritative.
+// subscriber supplies hints; Redis route/session-policy state remains authoritative.
 
 import {
   decodeBulk,
@@ -14,11 +14,11 @@ import {
 } from "shared-ns-pattern";
 import { GatewayRoutingUnavailableError } from "gateway-lib";
 import {
-  DURABLE_OBJECT_ROLLOUT_PRESERVE,
-  DURABLE_OBJECT_ROLLOUT_RESTART,
-  durableObjectRolloutKey,
-  parseDurableObjectRolloutEvent,
-  parseDurableObjectRolloutProjection,
+  SESSION_POLICY_PRESERVE,
+  SESSION_POLICY_RESTART,
+  sessionPolicyKey,
+  parseSessionPolicyEvent,
+  parseSessionPolicyProjection,
   parseWorkerDeleteEvent,
   parseVersion,
   routesKey,
@@ -63,10 +63,10 @@ function webSocketLifecycleKey(ns, worker) {
 }
 
 /** @param {string} raw */
-function parseWebSocketRolloutEvent(raw) {
+function parseWebSocketSessionPolicyEvent(raw) {
   let event;
   try {
-    event = parseDurableObjectRolloutEvent(raw);
+    event = parseSessionPolicyEvent(raw);
   } catch {
     return null;
   }
@@ -116,7 +116,7 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
   }
 
   /**
-   * Read the active route and DO rollout projection at one Redis linearization
+   * Read the active route and session policy projection at one Redis linearization
    * point. Gateway calls this only at WebSocket lifecycle and subscriber-recovery
    * boundaries.
    *
@@ -130,7 +130,7 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
     try {
       reply = await redis.eval(
         READ_WEBSOCKET_LIFECYCLE_SNAPSHOT_SCRIPT,
-        [routesKey(ns), durableObjectRolloutKey(ns, worker)],
+        [routesKey(ns), sessionPolicyKey(ns, worker)],
         [worker]
       );
     } catch (err) {
@@ -152,13 +152,13 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
       return {
         kind: "active",
         version,
-        mode: DURABLE_OBJECT_ROLLOUT_PRESERVE,
+        mode: SESSION_POLICY_PRESERVE,
         restartSequence: 0,
       };
     }
     let projection;
     try {
-      projection = parseDurableObjectRolloutProjection(rawProjection);
+      projection = parseSessionPolicyProjection(rawProjection);
     } catch {
       throw new GatewayRoutingUnavailableError();
     }
@@ -169,7 +169,7 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
   }
 
   /**
-   * Register one live public WebSocket against the rollout generation observed
+   * Register one live public WebSocket against the session-policy generation observed
    * before its backend upgrade. The registration is process-local and exists
    * only for the lifetime of that connection.
    *
@@ -223,7 +223,7 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
   }
 
   /** @param {{ ns: string, worker: string, restartSequence: number }} event */
-  function groupForRolloutEvent(event) {
+  function groupForSessionPolicyEvent(event) {
     const group = groups.get(webSocketLifecycleKey(event.ns, event.worker));
     if (!group) return null;
     for (const session of group.sessions) {
@@ -272,7 +272,7 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
           if (current.restartSequence < session.restartSequence) {
             notify(group, session, "fail");
           } else if (current.restartSequence > session.restartSequence) {
-            if (current.mode === DURABLE_OBJECT_ROLLOUT_RESTART) {
+            if (current.mode === SESSION_POLICY_RESTART) {
               notify(group, session, "restart");
             } else {
               session.restartSequence = current.restartSequence;
@@ -381,22 +381,22 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
   }
 
   /** @param {string} redisAddr @param {string} raw */
-  function onRolloutEvent(redisAddr, raw) {
-    const event = parseWebSocketRolloutEvent(raw);
+  function onSessionPolicyEvent(redisAddr, raw) {
+    const event = parseWebSocketSessionPolicyEvent(raw);
     if (!event) {
-      log("warn", "websocket_rollout_invalidation_ignored", {
+      log("warn", "websocket_session_policy_invalidation_ignored", {
         reason: "invalid_payload",
         payload: raw.slice(0, 128),
       });
       return;
     }
-    const group = groupForRolloutEvent(event);
+    const group = groupForSessionPolicyEvent(event);
     if (group) scheduleReconcile(redisAddr, [group]);
     metrics.increment("subscriber_invalidations", {
       service: "gateway",
-      scope: "do_rollout",
+      scope: "session_policy",
     });
-    log("info", "websocket_rollout_invalidated", {
+    log("info", "websocket_session_policy_invalidated", {
       namespace: event.ns,
       worker: event.worker,
       version: event.version,
@@ -430,7 +430,7 @@ export function createGatewayWebSocketLifecycleManager({ metrics, log, onRedisCo
 
   return {
     createRedis,
-    onRolloutEvent,
+    onSessionPolicyEvent,
     onSubscriberConnect,
     onSubscriberDisconnect,
     onWorkerDeleteEvent,

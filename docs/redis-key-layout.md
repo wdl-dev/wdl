@@ -36,9 +36,10 @@ namespaces                      Set, namespaces with at least one active worker
 workers:<ns>                    Set, worker names with worker-owned lifecycle state
 worker:<ns>:<name>:next_version String, monotonic version counter, survives delete
 cron:seq:<ns>:<name>            String, permanent Cron generation high-water mark
-worker:do-rollout:<ns>:<name>   String, active DO rollout projection
-worker:do-rollout-seq:<ns>:<name>
-                                String, permanent monotonic DO restart-event allocator
+worker:session-policy:<ns>:<name>
+                                String, active session policy projection
+worker:session-policy-seq:<ns>:<name>
+                                String, permanent monotonic restart-event allocator
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes plus __meta__
 worker-delete-lock:<ns>:<name>  String EX 30, per-worker delete critical-section lock;
@@ -72,7 +73,7 @@ an empty Cron projection and whole-worker deletion so stale `cron-slot:*` refs c
 match a recreated entry. Allocations start at generation `1024`; lower values are
 reserved and never issued by the permanent allocator.
 
-`worker:do-rollout:<ns>:<name>` is Control's active
+`worker:session-policy:<ns>:<name>` is Control's active
 `{version,mode,restartSequence}` JSON projection. Promote writes it in the same
 transaction as `routes:<ns>`. Gateway reads the two values atomically at WebSocket
 lifecycle boundaries. do-runtime reads the projection inside owner resolution and
@@ -85,12 +86,12 @@ supersedes an unobserved lazy restart at the existing sequence, but cannot undo 
 connection close or facet abort that already occurred. Whole-worker delete removes the
 active projection. Missing state means default `preserve`; malformed state fails closed.
 
-`worker:do-rollout-seq:<ns>:<name>` is Control's permanent monotonic allocator for
-opt-in DO restart events. It survives whole-worker deletion so the next restart after
+`worker:session-policy-seq:<ns>:<name>` is Control's permanent monotonic allocator for
+opt-in restart events. It survives whole-worker deletion so the next restart after
 recreation cannot reuse a sequence observed by a stale Gateway session. Control is the
 sole writer; Gateway, do-runtime, and Workflows read only the active projection.
 
-`do-rollout:restart` is the non-durable Gateway notification channel for a newly
+`session-policy:restart` is the non-durable Gateway notification channel for a newly
 allocated restart sequence. Control publishes `{ns,worker,version,restartSequence}` in
 the same transaction as the route/projection update. Gateway uses it only to promptly
 request authoritative reconciliation of process-local public WebSocket sessions;
@@ -99,12 +100,13 @@ latest projection.
 
 `worker:delete` is the non-durable Gateway notification channel for a successful
 whole-worker delete. Normal deletion publishes `{ns,worker}` in the transaction that
-removes the active route and rollout projection; residual cleanup republishes it when
-worker-owned state still needs removal. Gateway uses it only to request authoritative
-reconciliation for that worker. If same-name recreation completes before an authoritative
-read observes the worker as inactive, the latest projection wins because the hint carries
-no durable incarnation fence. Route invalidations remain cache-only, and subscriber
-reconnect repairs a missed notification only while the deleted state remains observable.
+removes the active route and session policy projection; residual cleanup republishes it
+when worker-owned state still needs removal. Gateway uses it only to request
+authoritative reconciliation for that worker. If same-name recreation completes before
+an authoritative read observes the worker as inactive, the latest projection wins
+because the hint carries no durable incarnation fence. Route invalidations remain
+cache-only, and subscriber reconnect repairs a missed notification only while the
+deleted state remains observable.
 
 `namespaces` is an active worker gate. It is populated when a namespace has an active
 worker route and may be removed when the last active worker is deleted.
@@ -118,7 +120,7 @@ generated-namespace collision signal, not as a permanent namespace registry.
 sole writer; sanctioned readers are gateway and workflows. Gateway reads it for
 route resolution. Workflows reads it for active export resolution during workflow
 create / verify, and for internal DO alarm retargeting when a fired alarm's scheduled
-version is no longer retained or the active rollout projection is `restart`. A
+version is no longer retained or the active session policy projection is `restart`. A
 key-grammar change must update the JS helper, the Rust helper, and every reader together.
 
 `workers:<ns>` means the worker has worker-owned lifecycle state: retained bundle,
@@ -175,8 +177,13 @@ not base64. Typical fields include:
 }
 ```
 
-The example omits `durableObjectRollout`; Control stores it only for the non-default
-`restart` policy, while absence means `preserve`.
+The example omits `sessionPolicy`; Control stores it only for the non-default
+`restart` policy, while absence means `preserve`. Bundles persisted before the
+session-policy rename may instead carry the retired `durableObjectRollout` field;
+routing reads it as the same mode enum, and new deploys write `sessionPolicy` only.
+Secret bumps copy the source bundle's `__meta__` verbatim, so the retired field can
+propagate into versions allocated after the rename; the dual-read is a permanent
+contract, not a transitional one.
 
 Control writes `__meta__` as a JSON object. Control-plane consumers parse required
 bundle metadata through `control/lib.js::parseBundleMeta()`; malformed JSON, arrays,
@@ -187,7 +194,7 @@ authoritative route or index still names the bundle. Deploy discovery/link prefl
 does not classify absence as `corrupt_meta`; the watched commit remains authoritative
 and rejects a missing pinned service target as `target_drift`.
 
-Routes, platform-domain exposure, crons, queue consumers, Durable Object rollout mode,
+Routes, platform-domain exposure, crons, queue consumers, session policy mode,
 bindings, vars, exports, workflow definitions, and asset prefixes are version metadata.
 `workersDev: false` records an explicit platform-domain opt-out; absence means enabled.
 Rollback is a promote of an older immutable version.

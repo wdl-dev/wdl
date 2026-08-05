@@ -38,13 +38,13 @@ import {
   parseQueueConsumers,
 } from "control-topology";
 import {
-  DURABLE_OBJECT_ROLLOUT_PRESERVE,
-  DURABLE_OBJECT_ROLLOUT_RESTART,
+  SESSION_POLICY_PRESERVE,
+  SESSION_POLICY_RESTART,
   bundleKey,
   deleteLockKey,
   doStorageIdKey,
   formatVersion,
-  isDurableObjectRolloutMode,
+  isSessionPolicyMode,
   nextVersionKey,
   parseVersion,
   routesKey,
@@ -148,7 +148,7 @@ function deployAbortLogContext(details) {
  *   assetsToUpload: Array<[string, Uint8Array]> | null,
  *   routes: RoutePattern[],
  *   workersDev: boolean,
- *   durableObjectRollout: "preserve" | "restart",
+ *   sessionPolicy: "preserve" | "restart",
  *   exportsList: ExportEntry[],
  *   platformBindingsList: PlatformBindingRequest[],
  *   crons: CronSpec[],
@@ -363,20 +363,15 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
   if (assetsToUpload && !mergedBindings.ASSETS) {
     mergedBindings.ASSETS = { type: "assets" };
   }
-  const durableObjectRollout = body.durableObjectRollout === undefined
-    ? DURABLE_OBJECT_ROLLOUT_PRESERVE
-    : body.durableObjectRollout;
-  if (!isDurableObjectRolloutMode(durableObjectRollout)) {
-    throw invalidDeployRequest(
-      `'durableObjectRollout' must be '${DURABLE_OBJECT_ROLLOUT_PRESERVE}' or '${DURABLE_OBJECT_ROLLOUT_RESTART}'`
-    );
+  if (body.durableObjectRollout !== undefined) {
+    throw invalidDeployRequest("'durableObjectRollout' was renamed to 'sessionPolicy'");
   }
-  if (
-    durableObjectRollout === DURABLE_OBJECT_ROLLOUT_RESTART &&
-    !hasDurableObjectBinding(mergedBindings)
-  ) {
+  const sessionPolicy = body.sessionPolicy === undefined
+    ? SESSION_POLICY_PRESERVE
+    : body.sessionPolicy;
+  if (!isSessionPolicyMode(sessionPolicy)) {
     throw invalidDeployRequest(
-      "'durableObjectRollout' set to 'restart' requires at least one Durable Object binding"
+      `'sessionPolicy' must be '${SESSION_POLICY_PRESERVE}' or '${SESSION_POLICY_RESTART}'`
     );
   }
 
@@ -386,7 +381,7 @@ function prepareDeployRequest({ body, ns, platformDomain }) {
     assetsToUpload: /** @type {Array<[string, Uint8Array]> | null} */ (assetsToUpload),
     routes,
     workersDev,
-    durableObjectRollout,
+    sessionPolicy,
     exportsList,
     platformBindingsList,
     crons,
@@ -575,8 +570,8 @@ function prepareCommittedBundle({ deployRequest, ns, name, bindings }) {
     })));
     if (deployRequest.routes.length) prepared.meta.routes = deployRequest.routes;
     if (!deployRequest.workersDev) prepared.meta.workersDev = false;
-    if (deployRequest.durableObjectRollout !== DURABLE_OBJECT_ROLLOUT_PRESERVE) {
-      prepared.meta.durableObjectRollout = deployRequest.durableObjectRollout;
+    if (deployRequest.sessionPolicy !== SESSION_POLICY_PRESERVE) {
+      prepared.meta.sessionPolicy = deployRequest.sessionPolicy;
     }
     if (deployRequest.crons.length) prepared.meta.crons = deployRequest.crons;
     if (deployRequest.queueConsumers.length) {
@@ -999,7 +994,7 @@ export async function handle({ request, env, ns, name, requestId }) {
     version,
     active: false,
     workersDev: parsed.deployRequest.workersDev,
-    durableObjectRollout: parsed.deployRequest.durableObjectRollout,
+    sessionPolicy: parsed.deployRequest.sessionPolicy,
     ...(warnings.length ? { warnings } : {}),
   });
 }

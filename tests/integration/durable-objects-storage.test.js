@@ -52,7 +52,7 @@ test("Durable Object SQLite storage survives do-runtime restart while memory res
   });
 });
 
-test("default Durable Object rollout preserves the loaded class until host actor restart", async () => {
+test("default session policy preserves the loaded class until host actor restart", async () => {
   const ns = uniqueNs("do-version");
   await deployAndPromote(ns, "versioned", {
     mainModule: "worker.js",
@@ -87,8 +87,8 @@ test("default Durable Object rollout preserves the loaded class until host actor
   assert.deepEqual(responseJson({ body: afterRestartText }), { label: "v2", memory: 1, storage: 3 });
 });
 
-test("restart rollout replaces the loaded Durable Object class and preserves SQLite", async () => {
-  const ns = uniqueNs("do-rollout-restart");
+test("a restart session policy replaces the loaded Durable Object class and preserves SQLite", async () => {
+  const ns = uniqueNs("do-session-restart");
   await deployAndPromote(ns, "versioned", {
     mainModule: "worker.js",
     modules: { "worker.js": doVersionWorker("v1") },
@@ -108,7 +108,7 @@ test("restart rollout replaces the loaded Durable Object class and preserves SQL
     bindings: {
       VERSIONED: { type: "do", className: "Versioned" },
     },
-    durableObjectRollout: "restart",
+    sessionPolicy: "restart",
   });
 
   const restarted = await gatewayFetch(ns, "/versioned");

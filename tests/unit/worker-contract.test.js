@@ -5,7 +5,7 @@ import {
   DECLARED_HOSTS_KEY,
   DECLARED_HOSTS_REVISION_KEY,
   DO_OWNER_SCOPE_PREFIX,
-  DURABLE_OBJECT_ROLLOUT_CHANNEL,
+  SESSION_POLICY_CHANNEL,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
   NAMESPACES_KEY,
@@ -20,11 +20,11 @@ import {
   cronSequenceKey,
   deleteLockKey,
   doOwnerScopeScanPatternForStorage,
-  durableObjectRolloutKey,
-  durableObjectRolloutSequenceKey,
+  sessionPolicyKey,
+  sessionPolicySequenceKey,
   doStorageIdKey,
-  encodeDurableObjectRolloutEvent,
-  encodeDurableObjectRolloutProjection,
+  encodeSessionPolicyEvent,
+  encodeSessionPolicyProjection,
   encodeWorkerDeleteEvent,
   formatDeleteLockToken,
   formatVersion,
@@ -34,8 +34,8 @@ import {
   nextVersionKey,
   nsHostsKey,
   parseDeleteLockKind,
-  parseDurableObjectRolloutEvent,
-  parseDurableObjectRolloutProjection,
+  parseSessionPolicyEvent,
+  parseSessionPolicyProjection,
   parseWorkerDeleteEvent,
   parseVersion,
   platformDomainDisabledKey,
@@ -43,7 +43,7 @@ import {
 } from "../../shared/worker-contract.js";
 
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
-const doRolloutFixture = readRepositoryJson("tests/fixtures/do-rollout-projections.json");
+const sessionPolicyFixture = readRepositoryJson("tests/fixtures/session-policy-projections.json");
 
 test("formatVersion: integer → v<int>", () => {
   assert.equal(formatVersion(1), "v1");
@@ -122,8 +122,8 @@ test("cronSequenceKey composes the permanent cron generation counter", () => {
 test("worker lifecycle key helpers compose canonical keys", () => {
   assert.equal(workerVersionsKey("demo", "hello"), "worker-versions:demo:hello");
   assert.equal(doStorageIdKey("demo", "hello"), "worker:do-storage:demo:hello");
-  assert.equal(durableObjectRolloutKey("demo", "hello"), "worker:do-rollout:demo:hello");
-  assert.equal(durableObjectRolloutSequenceKey("demo", "hello"), "worker:do-rollout-seq:demo:hello");
+  assert.equal(sessionPolicyKey("demo", "hello"), "worker:session-policy:demo:hello");
+  assert.equal(sessionPolicySequenceKey("demo", "hello"), "worker:session-policy-seq:demo:hello");
   assert.equal(DO_OWNER_SCOPE_PREFIX, "do:owner:scope:");
   assert.equal(
     doOwnerScopeScanPatternForStorage("do_abc"),
@@ -132,32 +132,32 @@ test("worker lifecycle key helpers compose canonical keys", () => {
   assert.equal(deleteLockKey("demo", "hello"), "worker-delete-lock:demo:hello");
 });
 
-test("Durable Object restart events use the dedicated rollout channel", () => {
-  assert.equal(DURABLE_OBJECT_ROLLOUT_CHANNEL, "do-rollout:restart");
+test("session policy restart events use the dedicated channel", () => {
+  assert.equal(SESSION_POLICY_CHANNEL, "session-policy:restart");
   const event = {
     ns: "demo",
     worker: "hello",
     version: "v7",
     restartSequence: 3,
   };
-  const encoded = encodeDurableObjectRolloutEvent(event);
+  const encoded = encodeSessionPolicyEvent(event);
   assert.deepEqual(
-    parseDurableObjectRolloutEvent(encoded),
+    parseSessionPolicyEvent(encoded),
     event
   );
   assert.throws(
-    () => encodeDurableObjectRolloutEvent({
+    () => encodeSessionPolicyEvent({
       ns: "demo",
       worker: "hello",
       version: "v7",
       restartSequence: 0,
     }),
-    /invalid Durable Object rollout event/
+    /invalid session policy event/
   );
   for (const raw of ["", "{}", JSON.stringify({ ...event, ns: "" })]) {
     assert.throws(
-      () => parseDurableObjectRolloutEvent(raw),
-      /invalid Durable Object rollout event/
+      () => parseSessionPolicyEvent(raw),
+      /invalid session policy event/
     );
   }
 });
@@ -177,37 +177,37 @@ test("worker delete events use the dedicated lifecycle channel", () => {
   }
 });
 
-test("Durable Object rollout projections round-trip and reject malformed state", () => {
+test("session policy projections round-trip and reject malformed state", () => {
   const projection = {
     version: "v7",
     mode: /** @type {const} */ ("restart"),
     restartSequence: 3,
   };
-  const encoded = encodeDurableObjectRolloutProjection(projection);
-  assert.deepEqual(parseDurableObjectRolloutProjection(encoded), projection);
+  const encoded = encodeSessionPolicyProjection(projection);
+  assert.deepEqual(parseSessionPolicyProjection(encoded), projection);
   assert.deepEqual(
-    parseDurableObjectRolloutProjection(JSON.stringify({
+    parseSessionPolicyProjection(JSON.stringify({
       version: "v1",
       mode: "preserve",
       restartSequence: 0,
     })),
     { version: "v1", mode: "preserve", restartSequence: 0 }
   );
-  assert.equal(parseDurableObjectRolloutProjection(null), null);
+  assert.equal(parseSessionPolicyProjection(null), null);
 
-  for (const entry of doRolloutFixture.cases) {
+  for (const entry of sessionPolicyFixture.cases) {
     const raw = JSON.stringify(entry.projection);
     if (entry.valid) {
-      assert.deepEqual(parseDurableObjectRolloutProjection(raw), entry.projection);
+      assert.deepEqual(parseSessionPolicyProjection(raw), entry.projection);
     } else {
       assert.throws(
-        () => parseDurableObjectRolloutProjection(raw),
-        /invalid Durable Object rollout projection/
+        () => parseSessionPolicyProjection(raw),
+        /invalid session policy projection/
       );
     }
   }
-  assert.throws(() => parseDurableObjectRolloutProjection(""), /invalid Durable Object rollout projection/);
-  assert.throws(() => parseDurableObjectRolloutProjection("{}"), /invalid Durable Object rollout projection/);
+  assert.throws(() => parseSessionPolicyProjection(""), /invalid session policy projection/);
+  assert.throws(() => parseSessionPolicyProjection("{}"), /invalid session policy projection/);
 });
 
 test("worker delete lock tokens carry the operation kind", () => {

@@ -20,7 +20,7 @@ import {
 } from "shared-ns-pattern";
 import {
   DECLARED_HOSTS_KEY,
-  DURABLE_OBJECT_ROLLOUT_CHANNEL,
+  SESSION_POLICY_CHANNEL,
   NAMESPACES_KEY,
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
@@ -375,7 +375,7 @@ export function ensureGatewaySubscriber(redisAddr) {
       ROUTES_CHANNEL,
       ROUTES_FLUSH_CHANNEL,
       PATTERNS_CHANNEL,
-      DURABLE_OBJECT_ROLLOUT_CHANNEL,
+      SESSION_POLICY_CHANNEL,
       WORKER_DELETE_CHANNEL,
     ],
     {
@@ -403,8 +403,8 @@ export function ensureGatewaySubscriber(redisAddr) {
       },
       onMessage: (channel, payload) => {
         const value = utf8Decoder.decode(payload);
-        if (channel === DURABLE_OBJECT_ROLLOUT_CHANNEL) {
-          webSocketLifecycle.onRolloutEvent(redisAddr, value);
+        if (channel === SESSION_POLICY_CHANNEL) {
+          webSocketLifecycle.onSessionPolicyEvent(redisAddr, value);
           return;
         }
         if (channel === WORKER_DELETE_CHANNEL) {

@@ -14,7 +14,7 @@ import {
 import {
   NAMESPACES_KEY,
   bundleKey,
-  durableObjectRolloutKey,
+  sessionPolicyKey,
   doStorageIdKey,
   encodeWorkerDeleteEvent,
   nsHostsKey,
@@ -114,7 +114,7 @@ export function stageWorkerDelete(multi, { collected, channels }) {
     multi.del(workerSecretsKey(ns, name));
   }
   multi.del(workflowDefsKey(ns, name));
-  multi.del(durableObjectRolloutKey(ns, name));
+  multi.del(sessionPolicyKey(ns, name));
   if (collected.doOwnerKeys.length) {
     multi.del(...collected.doOwnerKeys);
   }
@@ -136,7 +136,7 @@ export function stageWorkerDelete(multi, { collected, channels }) {
 
   // Permanent allocators are deliberately NOT DEL'd. next_version prevents
   // workerLoader id reuse; cron:seq prevents stale slot refs from matching a
-  // recreated Cron entry; the DO rollout sequence prevents stale Gateway
+  // recreated Cron entry; the session policy sequence prevents stale Gateway
   // sessions from missing a restart event after recreation.
   stageWorkerHidden(multi, ns, name);
 

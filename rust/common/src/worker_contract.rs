@@ -6,7 +6,7 @@
 //! Redis state fails closed instead of silently normalizing to another worker version.
 //!
 //! `routes_key` / `worker_versions_key` / `worker_delete_lock_key` /
-//! `do_storage_id_key` / `durable_object_rollout_key` mirror
+//! `do_storage_id_key` / `session_policy_key` mirror
 //! `shared/worker-contract.js`'s lifecycle key builders. Control owns these keys; Rust
 //! readers must build them here so a future key-grammar change updates JS and Rust
 //! together.
@@ -67,64 +67,62 @@ pub fn do_storage_id_key(ns: &str, worker: &str) -> String {
     format!("worker:do-storage:{ns}:{worker}")
 }
 
-/// Active Durable Object rollout projection committed with the route flip.
-pub fn durable_object_rollout_key(ns: &str, worker: &str) -> String {
-    format!("worker:do-rollout:{ns}:{worker}")
+/// Active session policy projection committed with the route flip.
+pub fn session_policy_key(ns: &str, worker: &str) -> String {
+    format!("worker:session-policy:{ns}:{worker}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DurableObjectRolloutMode {
+pub enum SessionPolicyMode {
     Preserve,
     Restart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DurableObjectRolloutProjection {
+pub struct SessionPolicyProjection {
     pub version: String,
-    pub mode: DurableObjectRolloutMode,
+    pub mode: SessionPolicyMode,
     pub restart_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidDurableObjectRolloutProjection;
+pub struct InvalidSessionPolicyProjection;
 
-impl fmt::Display for InvalidDurableObjectRolloutProjection {
+impl fmt::Display for InvalidSessionPolicyProjection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("invalid Durable Object rollout projection")
+        f.write_str("invalid session policy projection")
     }
 }
 
-impl std::error::Error for InvalidDurableObjectRolloutProjection {}
+impl std::error::Error for InvalidSessionPolicyProjection {}
 
-pub fn parse_durable_object_rollout_projection(
+pub fn parse_session_policy_projection(
     raw: Option<&str>,
-) -> Result<Option<DurableObjectRolloutProjection>, InvalidDurableObjectRolloutProjection> {
+) -> Result<Option<SessionPolicyProjection>, InvalidSessionPolicyProjection> {
     let Some(raw) = raw else {
         return Ok(None);
     };
     let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|_| InvalidDurableObjectRolloutProjection)?;
-    let object = value
-        .as_object()
-        .ok_or(InvalidDurableObjectRolloutProjection)?;
+        serde_json::from_str(raw).map_err(|_| InvalidSessionPolicyProjection)?;
+    let object = value.as_object().ok_or(InvalidSessionPolicyProjection)?;
     let version = object
         .get("version")
         .and_then(serde_json::Value::as_str)
-        .ok_or(InvalidDurableObjectRolloutProjection)?;
-    parse_version_tag(version).map_err(|_| InvalidDurableObjectRolloutProjection)?;
+        .ok_or(InvalidSessionPolicyProjection)?;
+    parse_version_tag(version).map_err(|_| InvalidSessionPolicyProjection)?;
     let mode = match object.get("mode").and_then(serde_json::Value::as_str) {
-        Some("preserve") => DurableObjectRolloutMode::Preserve,
-        Some("restart") => DurableObjectRolloutMode::Restart,
-        _ => return Err(InvalidDurableObjectRolloutProjection),
+        Some("preserve") => SessionPolicyMode::Preserve,
+        Some("restart") => SessionPolicyMode::Restart,
+        _ => return Err(InvalidSessionPolicyProjection),
     };
     let restart_sequence = object
         .get("restartSequence")
         .and_then(json_safe_integer)
-        .ok_or(InvalidDurableObjectRolloutProjection)?;
-    if mode == DurableObjectRolloutMode::Restart && restart_sequence == 0 {
-        return Err(InvalidDurableObjectRolloutProjection);
+        .ok_or(InvalidSessionPolicyProjection)?;
+    if mode == SessionPolicyMode::Restart && restart_sequence == 0 {
+        return Err(InvalidSessionPolicyProjection);
     }
-    Ok(Some(DurableObjectRolloutProjection {
+    Ok(Some(SessionPolicyProjection {
         version: version.to_string(),
         mode,
         restart_sequence,
@@ -205,36 +203,36 @@ mod tests {
             "worker:do-storage:tenant:worker"
         );
         assert_eq!(
-            durable_object_rollout_key("tenant", "worker"),
-            "worker:do-rollout:tenant:worker"
+            session_policy_key("tenant", "worker"),
+            "worker:session-policy:tenant:worker"
         );
     }
 
     #[test]
-    fn durable_object_rollout_projection_matches_cross_language_fixture() {
+    fn session_policy_projection_matches_cross_language_fixture() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/do-rollout-projections.json"
+            "../../../tests/fixtures/session-policy-projections.json"
         ))
-        .expect("DO rollout fixture parses");
+        .expect("session policy fixture parses");
         for case in fixture["cases"]
             .as_array()
-            .expect("DO rollout fixture cases is an array")
+            .expect("session policy fixture cases is an array")
         {
             let raw = serde_json::to_string(&case["projection"])
-                .expect("DO rollout projection serializes");
-            let parsed = parse_durable_object_rollout_projection(Some(&raw));
+                .expect("session policy projection serializes");
+            let parsed = parse_session_policy_projection(Some(&raw));
             if case["valid"].as_bool().unwrap() {
                 let projection = parsed
-                    .expect("valid DO rollout projection parses")
+                    .expect("valid session policy projection parses")
                     .expect("fixture projection is present");
                 let expected_mode = match case["projection"]["mode"].as_str().unwrap() {
-                    "preserve" => DurableObjectRolloutMode::Preserve,
-                    "restart" => DurableObjectRolloutMode::Restart,
-                    mode => panic!("unexpected valid rollout mode {mode}"),
+                    "preserve" => SessionPolicyMode::Preserve,
+                    "restart" => SessionPolicyMode::Restart,
+                    mode => panic!("unexpected valid session policy mode {mode}"),
                 };
                 assert_eq!(
                     projection,
-                    DurableObjectRolloutProjection {
+                    SessionPolicyProjection {
                         version: case["projection"]["version"].as_str().unwrap().to_string(),
                         mode: expected_mode,
                         restart_sequence: json_safe_integer(&case["projection"]["restartSequence"])
@@ -246,6 +244,6 @@ mod tests {
                 assert!(parsed.is_err(), "{raw}");
             }
         }
-        assert_eq!(parse_durable_object_rollout_projection(None), Ok(None));
+        assert_eq!(parse_session_policy_projection(None), Ok(None));
     }
 }
