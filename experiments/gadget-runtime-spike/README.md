@@ -60,6 +60,33 @@ Both tenant-side variants are closed by the runtime, not by policy. workerd's
 own error message states the remedy: *"have the parent Worker expose an
 entrypoint which constructs the dynamic worker and forwards to it."*
 
+The two are not the same kind of closure, and the workerd source (read at
+`1.20260804.1`) separates them cleanly:
+
+- **T-B is principled.** `throwDynamicEntrypointTransferError()`
+  (`src/workerd/server/server.c++:167`) is reached only from
+  `requireAllowsTransfer()` / `getTokenMaybeSync()`. Crossing a worker boundary
+  requires encoding a **channel token** so the receiver can rebuild the channel;
+  a static service has a durable identity in config, a dynamic worker has none.
+  `api/tests/worker-loader-test.js` states the rule from the other side: a
+  *static* worker's `ctx.exports.X({props})` loopback stub **can** be transferred
+  into a dynamic worker; a dynamic worker's entrypoint cannot.
+- **T-A is just unimplemented.** `WorkerLoader` (`api/worker-loader.h:53`) is a
+  plain `jsg::Object` with no serialization hook, so the generic structured-clone
+  path rejects it. There is no nesting check anywhere — "nested" and "recursive
+  loader" do not appear in `worker-loader.*` or `server.c++` at all. And
+  `WorkerCode` already carries typed capability slots outside `env`
+  (`globalOutbound`, `tails`, plus a live `// TODO(someday): cache API
+  outbound?`), so a loader slot would be the same existing pattern rather than a
+  new principle.
+
+This also corrects a natural misreading: **`cloudflare-os` is not nesting.**
+`workshop-backend` is a statically deployed Worker, so it is
+static(0) → gadget(1). WDL is user-runtime(0) → tenant worker(1) → gadget(2),
+because WDL spends its one dynamic-loading level on *being a multi-tenant
+platform* — the capability Cloudflare's own closed platform provides natively.
+Not special treatment; the same runtime, a different starting depth.
+
 So gadget hosting **cannot be tenant-side in WDL**. It has to be a platform
 tier that owns the loader and the facet, handing tenant code only a forwarding
 RPC stub — the same shape as `runtime/bindings/kv.js`, and the same reason
