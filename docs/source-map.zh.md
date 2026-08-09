@@ -83,6 +83,8 @@
 | `shared/cron-time.js` | Control 侧 cron parsing 和 slot-alignment helpers；scheduler advancement 使用 Rust `croner`。 |
 | `shared/vendor/` | `npm run build:vendor` 重新生成的预打包第三方依赖。 |
 | `types/workerd-embedded.d.ts` | workerd-embedded module specifier 的 ambient TypeScript declarations，例如 embedded runtime bundle 使用的 `*-source` aliases。 |
+| `types/workerd-node-compat.d.ts`、`types/workerd-node-modules.d.ts` | workerd 产品代码实际使用的 Node-compatible globals 和 imported Node module surface 的窄类型边界。 |
+| `types/node-typecheck-contracts.ts` | Node-only ambient type tripwire，防止 Workers declarations 泄漏进 scripts/tests checker。 |
 
 ## Stateful Workerd Tiers
 

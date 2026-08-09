@@ -37,6 +37,7 @@ jobs:
       - run: npm run lint:unused
       - run: npm run typecheck
       - run: npm run typecheck:strict
+      - run: npm run typecheck:node
       - run: npm run compile:workerd
       - run: npm run test:unit
 

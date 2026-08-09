@@ -9,20 +9,23 @@ they exercise, and which runner flags are supported.
 | Layer | Command | Scope |
 | --- | --- | --- |
 | Lint | `npm run lint` | ESLint flat-config checks for JavaScript source and tests. |
-| Typecheck | `npm run typecheck` | `tsc --noEmit` with `allowJs` / `checkJs` over the broad JavaScript surface. |
-| Strict typecheck | `npm run typecheck:strict` | Stricter JSDoc gate for workerd and server-side JavaScript tiers that have been brought under strict coverage. |
+| Typecheck | `npm run typecheck` | `tsc --noEmit` with Workers declarations over the broad workerd product surface. |
+| Strict typecheck | `npm run typecheck:strict` | Stricter JSDoc gate over the same workerd product tiers. |
+| Node typecheck | `npm run typecheck:node` | Strict Node-only check for scripts, tests, and the production source reached through their imports. |
 | Unit tests | `npm run test:unit` | Pure Node tests for helpers, protocol contracts, style contracts, and local harnesses. No Docker stack is required. |
 | Integration tests | `npm run test:integration` | Docker Compose end-to-end tests against compiled workerd configs and prebuilt local images. |
 | CLI integration subset | `npm run test:integration:cli` | Tests marked with `// @wdl-cli-integration`, run through the same pool runner on a separate port range. |
 | Full local gate | `npm run test:all` | Fast checks plus integration tests. |
 
-`npm run test` is the fast pre-push gate: lint, typecheck, strict typecheck, and unit
-tests. It intentionally does not run Docker integration tests.
+`npm run test` is the fast pre-push gate: lint, both workerd typechecks, the Node-only
+typecheck, and unit tests. It intentionally does not run Docker integration tests.
 
-Strict typecheck covers the runtime/control JavaScript tiers, the JavaScript-like
-test sources under `tests/` (`.js`, `.cjs`, and `.mjs`), and maintenance scripts
-under `scripts/` (`.js` and `.mjs`). Non-JS fixtures such as JSON payloads,
-Markdown, and Cap'n Proto fixture files stay outside TypeScript.
+The workerd typechecks cover runtime/control JavaScript tiers with Workers ambient
+declarations only. The Node-only typecheck covers JavaScript-like test sources under
+`tests/` (`.js`, `.cjs`, and `.mjs`) and maintenance scripts under `scripts/` (`.js`
+and `.mjs`); normal module resolution also checks the production source they import.
+Non-JS fixtures such as JSON payloads, Markdown, and Cap'n Proto fixture files stay
+outside TypeScript.
 
 ## Artifact Model
 

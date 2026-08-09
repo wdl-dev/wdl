@@ -325,8 +325,9 @@ function parseLogLevel(name) {
   return typeof v === "number" ? v : null;
 }
 
+const nodeProcess = /** @type {{ process?: WdlNodeProcess }} */ (globalThis).process;
 let currentLogLevel =
-  parseLogLevel(typeof process !== "undefined" ? process?.env?.LOG_LEVEL : null) ??
+  parseLogLevel(nodeProcess?.env?.LOG_LEVEL) ??
   LOG_LEVELS.info;
 
 /**

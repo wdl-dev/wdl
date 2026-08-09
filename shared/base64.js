@@ -7,6 +7,7 @@ const BASE64_ALPHABET_RE = /^[A-Za-z0-9+/]*$/;
 const BASE64_WHITESPACE_RE = /[\t\n\f\r ]/;
 const BASE64_WHITESPACE_GLOBAL_RE = /[\t\n\f\r ]/g;
 const utf8Encoder = new TextEncoder();
+const nodeBuffer = /** @type {{ Buffer?: WdlNodeBufferConstructor }} */ (globalThis).Buffer;
 
 // Buffer.from(..., "base64") skips invalid bytes and accepts base64url.
 // Validate with the same forgiving-base64 grammar as atob first so the
@@ -28,7 +29,7 @@ function validatedBufferBase64(value) {
 
 /** @param {Uint8Array} bytes @returns {string} */
 export function bytesToBase64(bytes) {
-  if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("base64");
+  if (nodeBuffer) return nodeBuffer.from(bytes).toString("base64");
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += CHUNK_SIZE) {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK_SIZE));
@@ -38,8 +39,8 @@ export function bytesToBase64(bytes) {
 
 /** @param {string} value @returns {Uint8Array} */
 export function base64ToBytes(value) {
-  if (typeof Buffer !== "undefined") {
-    return new Uint8Array(Buffer.from(validatedBufferBase64(value), "base64"));
+  if (nodeBuffer) {
+    return new Uint8Array(nodeBuffer.from(validatedBufferBase64(value), "base64"));
   }
   const binary = atob(value);
   const out = new Uint8Array(binary.length);

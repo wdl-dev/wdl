@@ -7,16 +7,17 @@
 | 层级 | 命令 | 范围 |
 | --- | --- | --- |
 | Lint | `npm run lint` | JavaScript 源码和测试的 ESLint flat-config 检查。 |
-| Typecheck | `npm run typecheck` | `tsc --noEmit`，对较宽的 JavaScript surface 启用 `allowJs` / `checkJs`。 |
-| Strict typecheck | `npm run typecheck:strict` | 已纳入 strict 覆盖的 workerd 和 server-side JavaScript tier 的 JSDoc gate。 |
+| Typecheck | `npm run typecheck` | 使用 Workers declarations 对宽泛 workerd 产品 surface 执行 `tsc --noEmit`。 |
+| Strict typecheck | `npm run typecheck:strict` | 对相同 workerd 产品 tier 执行更严格的 JSDoc gate。 |
+| Node typecheck | `npm run typecheck:node` | 使用纯 Node declarations 严格检查脚本、测试及其真实 import 到的生产源码。 |
 | Unit tests | `npm run test:unit` | helper、protocol contract、style contract 和本地 harness 的纯 Node 测试。不需要 Docker stack。 |
 | Integration tests | `npm run test:integration` | 基于 Docker Compose 的端到端测试，使用已编译 workerd config 和预构建本地镜像。 |
 | CLI integration subset | `npm run test:integration:cli` | 带 `// @wdl-cli-integration` 标记的测试子集，使用同一个 pool runner 和错开的端口段。 |
 | Full local gate | `npm run test:all` | 快速检查加 integration tests。 |
 
-`npm run test` 是快速 pre-push gate：lint、typecheck、strict typecheck 和 unit tests。它不跑 Docker integration tests。
+`npm run test` 是快速 pre-push gate：lint、两层 workerd typecheck、Node-only typecheck 和 unit tests。它不跑 Docker integration tests。
 
-Strict typecheck 覆盖 runtime/control JavaScript tier、`tests/` 下的 JavaScript-like 测试源码（`.js`、`.cjs` 和 `.mjs`），以及 `scripts/` 下的维护脚本（`.js` 和 `.mjs`）。JSON payload、Markdown、Cap'n Proto fixture 文件等非 JS fixture 不进入 TypeScript。
+两层 workerd typecheck 只使用 Workers ambient declarations 覆盖 runtime/control JavaScript tier。Node-only typecheck 覆盖 `tests/` 下的 JavaScript-like 测试源码（`.js`、`.cjs` 和 `.mjs`）以及 `scripts/` 下的维护脚本（`.js` 和 `.mjs`），并通过正常 module resolution 继续检查它们实际 import 的生产源码。JSON payload、Markdown、Cap'n Proto fixture 文件等非 JS fixture 不进入 TypeScript。
 
 ## Artifact 模型
 

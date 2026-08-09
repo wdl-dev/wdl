@@ -17,13 +17,13 @@
 
 这些 tier 当前使用 JavaScript，不使用 TypeScript。如果以后引入 TS，也应保留相同的 ownership、contract 和测试规则。
 
-TypeScript 仍作为 JavaScript checker 使用。`tsconfig.json` 是覆盖整棵 JS 树的宽松 `allowJs` / `checkJs` 基线。`tsconfig.strict.json` 是 workerd 和 server-side tier 的严格 JSDoc gate，覆盖 `auth`、`control`、`gateway`、`runtime`、`d1-runtime`、`do-runtime`、`shared`、选定脚本、测试和 system worker 代码。下游 CLI 拆分维护自己的 JavaScript 标准和兼容面。
+TypeScript 仍作为 JavaScript checker 使用。`tsconfig.json` 是 workerd 产品代码的宽松 `allowJs` / `checkJs` 基线，`tsconfig.strict.json` 是对应的严格 JSDoc gate。`tsconfig.node.json` 独立检查 Node 脚本和测试，并沿真实 import 继续检查它们实际加载的生产源码。下游 CLI 拆分维护自己的 JavaScript 标准和兼容面。
 
-如果某个 declaration release 会削弱这套 Node/workerd 混合 checker，workerd runtime package 与 `@cloudflare/workers-types` 不必同步推进。Workers types `5.20260808.1` 会无条件声明 `Buffer`、`process` 和 `global`；与 `@types/node` 合并后，整个仓库中的 Node `Buffer` 会退化成 `any`。因此 WDL 运行 workerd `1.20260809.1`，但暂时保留 Workers types `5.20260804.1`。在不损失 imported production source 覆盖的前提下拆分 Node/workerd checking 之前，应保留这项有意的版本差；不要用 helper 改写或宽泛 ambient declaration 掩盖它。`types/typecheck-contracts.ts` 会在未来 declaration bump 再次把 Node `Buffer` 变成 `any` 时让 strict checker 失败。
+workerd 与 `@cloudflare/workers-types` 同步推进。当前 Workers declarations 会有意暴露宽泛的 `Buffer`、`process` 和 `global` 兼容全局；它们不能与 `@types/node` 进入同一个 TypeScript program，否则 declaration merging 可能抹掉 Node 检查或使 Node global shape 失效。产品代码不得直接消费这些 ambient globals。运行在 Node-compatible workerd 下的代码使用 `types/workerd-node-compat.d.ts` 中的窄结构合同，`types/workerd-node-modules.d.ts` 只声明产品实际消费的 Node module surface。ESLint 禁止新增裸 `Buffer`、`process` 或 `global` 引用；`types/node-typecheck-contracts.ts` 会在 Workers ambient declarations 被误加回 Node-only checker 时让门禁失败。
 
 ## 语言基线
 
-仓库里的脚本和测试以 Node `>=24` 为基线。运行时代码以支持同等 JavaScript 基线的 workerd 版本为目标。基线变化时，`tsconfig.json`、`tsconfig.strict.json`、`eslint.config.js`、`package.json#engines` 和 vendor build target 必须同步。
+仓库里的脚本和测试以 Node `>=24` 为基线。运行时代码以支持同等 JavaScript 基线的 workerd 版本为目标。基线变化时，`tsconfig.json`、`tsconfig.strict.json`、`tsconfig.node.json`、`eslint.config.js`、`package.json#engines` 和 vendor build target 必须同步。
 
 现代标准库应优先用于减少本地 helper 或 mutation 风险：
 
@@ -35,7 +35,7 @@ TypeScript 仍作为 JavaScript checker 使用。`tsconfig.json` 是覆盖整棵
 
 不要为了显得现代而引入新 API。callback wrapper 的 `new Promise(...)`、parser stack、queue mutation 和性能敏感的本地算法，应保留更清楚的写法。`||` 默认值属于正确性审查，不是机械语法清理：只有确认 `0`、`false` 或 `""` 是必须保留的合法值时，才替换成 `??`。
 
-`npm run typecheck:strict` 是合同门禁，不只是格式检查。公开边界 typedef 应描述实际会访问的最小 shape。优先使用 `unknown` 加本地 narrow，不要用只给未检查值改名的 `@typedef {any}` alias。总是抛错的函数应标 `@returns {never}`，让 strict 检查能在调用方正确收窄。
+`npm run typecheck:strict` 和 `npm run typecheck:node` 是合同门禁，不只是格式检查。公开边界 typedef 应描述实际会访问的最小 shape。优先使用 `unknown` 加本地 narrow，不要用只给未检查值改名的 `@typedef {any}` alias。总是抛错的函数应标 `@returns {never}`，让 strict 检查能在调用方正确收窄。
 
 implementation 的 no-`any` 标准覆盖 `auth/`、`control/`、`gateway/`、`runtime/`、`d1-runtime/`、`do-runtime/`、`shared/` 和 `system-workers/` 下的生产 JS，生成产物和 vendor bundle 除外。测试可以在动态 fixture、global stub 和 thrown-error 探针里保留窄范围 `any` cast，但这个例外不能回流到实现代码。
 

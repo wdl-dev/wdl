@@ -161,6 +161,7 @@ npm run lint
 npm run lint:unused
 npm run typecheck
 npm run typecheck:strict
+npm run typecheck:node
 npm run compile:workerd
 npm run test:unit
 npm run test:integration

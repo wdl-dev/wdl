@@ -21,27 +21,27 @@ The repository currently uses JavaScript for these tiers, not TypeScript. If TS 
 introduced later, it should keep the same ownership, contract, and test rules.
 
 TypeScript is still used as a JavaScript checker. `tsconfig.json` is the broad `allowJs`
-/ `checkJs` baseline for the whole JS tree. `tsconfig.strict.json` is the stricter JSDoc
-gate for workerd and server-side tiers (`auth`, `control`, `gateway`, `runtime`,
-`d1-runtime`, `do-runtime`, `shared`, selected scripts, tests, and system worker code).
-The downstream CLI split keeps its own JavaScript standard and compatibility surface.
+/ `checkJs` baseline for workerd product code, and `tsconfig.strict.json` is its strict
+JSDoc gate. `tsconfig.node.json` separately checks Node scripts and tests, following
+their real imports into production source where applicable. The downstream CLI split
+keeps its own JavaScript standard and compatibility surface.
 
-The workerd runtime package and `@cloudflare/workers-types` declaration package do not
-have to advance in lockstep when a declaration release weakens this mixed Node/workerd
-checker. In particular, Workers types `5.20260808.1` declare `Buffer`, `process`, and
-`global` unconditionally; combining them with `@types/node` turns Node's `Buffer` into
-`any` across the repository. WDL therefore runs workerd `1.20260809.1` while retaining
-Workers types `5.20260804.1`. Keep this deliberate lag until Node and workerd checking
-are split without losing imported-production-source coverage; do not mask it with
-helper rewrites or broad ambient declarations. `types/typecheck-contracts.ts` makes
-the strict checker fail if a future declaration bump turns Node's `Buffer` into `any`.
+Workerd and `@cloudflare/workers-types` advance together. Current Workers declarations
+intentionally expose broad `Buffer`, `process`, and `global` compatibility globals;
+they must not share a TypeScript program with `@types/node`, because declaration merging
+can erase or invalidate Node global checks. Product code must not consume those ambient
+globals directly. Node-compatible workerd code uses the narrow structural contracts in
+`types/workerd-node-compat.d.ts`, while `types/workerd-node-modules.d.ts` declares only
+the imported Node module surface that product code consumes. ESLint prevents new bare
+`Buffer`, `process`, or `global` references. `types/node-typecheck-contracts.ts` makes
+the Node-only checker fail if Workers ambient declarations are accidentally added back.
 
 ## Language Baseline
 
 The repository targets Node `>=24` for scripts and tests. Runtime code targets workerd
 releases that support the same JavaScript baseline. Keep
-`tsconfig.json`, `tsconfig.strict.json`, `eslint.config.js`, `package.json#engines`, and
-vendor build targets aligned when the baseline changes.
+`tsconfig.json`, `tsconfig.strict.json`, `tsconfig.node.json`, `eslint.config.js`,
+`package.json#engines`, and vendor build targets aligned when the baseline changes.
 
 Use the modern standard library where it reduces local helper code or mutation risk:
 
@@ -58,7 +58,8 @@ in their clearer form. Treat `||` defaulting as a correctness review, not a mech
 syntax cleanup: replace it with `??` only after confirming that `0`, `false`, or `""`
 are valid values that must be preserved.
 
-`npm run typecheck:strict` is a contract gate, not just a formatter. Public boundary
+`npm run typecheck:strict` and `npm run typecheck:node` are contract gates, not just
+formatters. Public boundary
 typedefs should describe the smallest real shape being accessed. Prefer `unknown` plus
 local narrowing over `any`; avoid `@typedef {any}` aliases that only rename an unchecked
 value. Functions that always throw should say `@returns {never}` so strict checking can

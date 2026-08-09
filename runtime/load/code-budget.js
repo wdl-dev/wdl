@@ -16,13 +16,16 @@ import {
   generateHostBindingWrapperModule,
 } from "runtime-load-wrapper-generate";
 
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
 // Mirrors workerd v1.20260718.1
 // src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_CODE_SIZE.
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
 const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
 const WORKFLOWS_IMPORT_MARKER = "cloudflare:workflows";
-const WORKFLOWS_IMPORT_MARKER_BYTES = Buffer.from(WORKFLOWS_IMPORT_MARKER, "utf8");
+const WORKFLOWS_IMPORT_MARKER_BYTES = nodeBuffer.from(WORKFLOWS_IMPORT_MARKER, "utf8");
 const utf8Decoder = new TextDecoder();
 
 /**
@@ -68,12 +71,12 @@ const utf8Decoder = new TextDecoder();
 
 /** @param {string | Uint8Array} body */
 function moduleBodyByteLength(body) {
-  return typeof body === "string" ? Buffer.byteLength(body, "utf8") : body.byteLength;
+  return typeof body === "string" ? nodeBuffer.byteLength(body, "utf8") : body.byteLength;
 }
 
 /** @param {NormalizedModuleBody} body */
 function decodedTextModuleByteLength(body) {
-  if (typeof body === "string") return Buffer.byteLength(body, "utf8");
+  if (typeof body === "string") return nodeBuffer.byteLength(body, "utf8");
   const hasUtf8Bom = (
     body.byteLength >= 3 &&
     body[0] === 0xef &&
@@ -86,7 +89,7 @@ function decodedTextModuleByteLength(body) {
 /** @param {NormalizedModuleBody} body */
 function containsWorkflowsImportMarker(body) {
   if (typeof body === "string") return body.includes(WORKFLOWS_IMPORT_MARKER);
-  const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  const bytes = nodeBuffer.from(body.buffer, body.byteOffset, body.byteLength);
   return bytes.indexOf(WORKFLOWS_IMPORT_MARKER_BYTES) !== -1;
 }
 
@@ -406,7 +409,7 @@ export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
     jsModules[name] = typeof body === "string" ? body : utf8Decoder.decode(body);
   }
   rewriteCloudflareWorkflowsImports({ modules: jsModules });
-  for (const source of Object.values(jsModules)) total += Buffer.byteLength(source, "utf8");
+  for (const source of Object.values(jsModules)) total += nodeBuffer.byteLength(source, "utf8");
   return total;
 }
 
@@ -436,7 +439,7 @@ export function estimateFinalWorkerLoaderCodeBytes({
     analyzeRuntimeMeta(meta),
     workerIdentity
   )) {
-    total += Buffer.byteLength(source, "utf8");
+    total += nodeBuffer.byteLength(source, "utf8");
   }
   return total;
 }

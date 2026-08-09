@@ -31,6 +31,9 @@ export class BundleConfigError extends Error {
   }
 }
 
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
 const COMPATIBILITY_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** @param {string} source */
@@ -105,11 +108,11 @@ export function validateCompatibilityDate(value, today = new Date()) {
 // rejects the non-canonical variants both atob and Buffer silently accept.
 /** @param {string} value @param {string} fieldName */
 function decodeBase64Strict(value, fieldName) {
-  if (value === "") return Buffer.alloc(0);
+  if (value === "") return nodeBuffer.alloc(0);
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
     throw new Error(`Invalid base64 in ${fieldName}`);
   }
-  const bytes = Buffer.from(value, "base64");
+  const bytes = nodeBuffer.from(value, "base64");
   if (bytes.toString("base64") !== value) {
     throw new Error(`Invalid base64 in ${fieldName}`);
   }
@@ -119,7 +122,7 @@ function decodeBase64Strict(value, fieldName) {
 /** @param {unknown} value */
 export function normalizeModule(value) {
   if (typeof value === "string") {
-    return { type: "module", bytes: Buffer.from(value, "utf8") };
+    return { type: "module", bytes: nodeBuffer.from(value, "utf8") };
   }
   if (value && typeof value === "object") {
     const record = /** @type {Record<string, unknown>} */ (value);
@@ -128,11 +131,11 @@ export function normalizeModule(value) {
     if (typeof record.wasm_b64 === "string")
       return { type: "wasm", bytes: decodeBase64Strict(record.wasm_b64, "wasm_b64") };
     if (typeof record.text === "string")
-      return { type: "text", bytes: Buffer.from(record.text, "utf8") };
+      return { type: "text", bytes: nodeBuffer.from(record.text, "utf8") };
     if (record.json !== undefined)
-      return { type: "json", bytes: Buffer.from(JSON.stringify(record.json), "utf8") };
+      return { type: "json", bytes: nodeBuffer.from(JSON.stringify(record.json), "utf8") };
     if (typeof record.cjs === "string")
-      return { type: "cjs", bytes: Buffer.from(record.cjs, "utf8") };
+      return { type: "cjs", bytes: nodeBuffer.from(record.cjs, "utf8") };
     if (typeof record.py === "string") {
       throw new BundleConfigError(
         400,

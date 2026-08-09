@@ -6,6 +6,9 @@ import { WatchError } from "shared-redis";
 
 export { BundleMetaError };
 
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
 const DO_ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const ESTIMATED_ASSETS_CDN_BASE = "https://assets.invalid";
 const WORKER_ENV_META_READ_BATCH_SIZE = 32;
@@ -172,7 +175,7 @@ const NON_LATIN1_RE = /[\u0100-\uffff]/;
 /** @param {string} value */
 function v8TwoByteStringPenalty(value) {
   if (!NON_LATIN1_RE.test(value)) return 0;
-  return Math.max(0, (2 * value.length) - Buffer.byteLength(value, "utf8"));
+  return Math.max(0, (2 * value.length) - nodeBuffer.byteLength(value, "utf8"));
 }
 
 /** @param {unknown} value */
@@ -190,7 +193,7 @@ function v8StringPenalty(value) {
 /** @param {unknown} value */
 export function estimatedWorkerLoaderEnvBytes(value) {
   const json = JSON.stringify(value) ?? "null";
-  return Buffer.byteLength(json, "utf8") + v8StringPenalty(value);
+  return nodeBuffer.byteLength(json, "utf8") + v8StringPenalty(value);
 }
 
 /**

@@ -262,6 +262,7 @@ npm test
 npm run lint
 npm run typecheck
 npm run typecheck:strict
+npm run typecheck:node
 npm run test:unit
 
 # Integration suite
