@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- Pinned Quick Start and CLI integration to `@wdl-dev/cli@1.7.1`, adding `[wdl] session_policy = "restart"` deploy support, Wrangler 4.120.0, and fail-fast rejection of unsupported `triggers.events` subscriptions.
-- Updated bundled workerd to `1.20260809.1`, raised the maximum tenant `compatibilityDate` to `2026-08-16`, moved tenant isolates to V8 15.1, and inherited upstream WorkerLoader, deferred-proxy, WebSocket, stream, and isolate-abort reliability fixes. Tenant module evaluation now observes production-style zero wall-clock values from `Date.now()`, zero-argument `new Date()`, and `performance.now()` outside requests, while request execution exposes stateless `ctx.abort(reason?)` and the expanded tracing span API.
-- Reflected workerd's `2026-08-04` default enablement of both `nodejs_compat` and `nodejs_compat_v2`; workers opting out must disable both flags. `python_workers_20260610` graduated from upstream's experimental set, while WDL continues to reject Python modules, and the new D1 JSRPC, Workflows RPC, TypeScript streams, and draining-reader experimental flags remain deploy-time rejected. Workers types now advance to `5.20260809.1`; workerd product code and Node scripts/tests are checked in separate TypeScript programs so upstream compatibility globals cannot erase Node coverage. Workflow identity metadata now remains private to generated host wrappers instead of being mirrored through Node-compatible `process.env`; for this upgrade, complete user-runtime and do-runtime rollout before system-runtime/Control, keep Control mutations paused while system-runtime rolls, and resume only after its old tasks exit.
-- Enabled SQLite R*Tree virtual tables in D1 and Durable Object storage and preserved workerd's positional console `Error` metadata as bounded `error_info` in structured logs and live tail. Native workerd Workflow instance/batch deletion remains outside WDL's custom Workflows facade and is documented as unsupported.
+## wdl.20260809.1 - 2026-08-10
+
+- Updated the bundled workerd and Workers types pins to `1.20260809.1` and `5.20260809.1`, raised the maximum tenant compatibility date to `2026-08-16`, moved isolates to V8 15.1, and adopted upstream reliability fixes, zero module clocks, stateless `ctx.abort(reason?)`, expanded tracing spans, SQLite R*Tree support, and bounded console `Error` metadata.
+- Reflected workerd's `2026-08-04` default enablement of `nodejs_compat` and `nodejs_compat_v2` (full opt-out requires both `no_nodejs_compat` and `no_nodejs_compat_v2`), split workerd and Node type-check programs, and continued rejecting Python modules and unsupported experimental flags.
+- Kept Workflow identity out of `process.env`, reserved wrapper budgets across immutable version bumps, and documented native Workflow instance and batch deletion as unsupported by WDL's custom facade. Roll out user-runtime and do-runtime before system-runtime/Control, pausing Control mutations while the writer tier rolls.
+- Pinned Quick Start and CLI integration to `@wdl-dev/cli@1.7.1`, including session-policy deploy support and fail-fast rejection of unsupported event subscriptions.
 
 ## wdl.20260804.2 - 2026-08-05
 
