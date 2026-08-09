@@ -3,7 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { sessionPolicyKey } from "../../shared/worker-contract.js";
 import { withTempDir } from "../helpers/temp-dir.js";
+import { redisGetJson } from "./helpers/redis.js";
 import {
   adminGetFresh,
   assertOk,
@@ -83,6 +85,47 @@ test("wdl CLI exercises deploy, workers, secrets, and delete lifecycle", async (
   const workersAfterDelete = runWdlCli(["workers", "--ns", ns]);
   assertOk(workersAfterDelete);
   assert.match(workersAfterDelete.stdout, /^\(no workers\)$/m);
+});
+
+test("wdl CLI carries restart session policy through promotion", async () => {
+  const ns = uniqueNs("wdl-session-policy");
+
+  await withTempDir("wdl-session-policy-cli-", async (project) => {
+    mkdirSync(path.join(project, "src"), { recursive: true });
+    writeFileSync(
+      path.join(project, "wrangler.toml"),
+      [
+        'name = "session-policy-cli"',
+        'main = "src/index.js"',
+        'compatibility_date = "2026-04-24"',
+        "",
+        "[wdl]",
+        'session_policy = "restart"',
+        "",
+      ].join("\n")
+    );
+    writeFileSync(
+      path.join(project, "src", "index.js"),
+      'export default { fetch() { return new Response("ok"); } };\n'
+    );
+
+    const deploy = runWdlCli(["deploy", project, "--ns", ns]);
+    assertOk(deploy);
+    assert.match(
+      deploy.stdout,
+      new RegExp(`${RegExp.escape(ns)}/session-policy-cli@v1 live`)
+    );
+    assert.deepEqual(redisGetJson(sessionPolicyKey(ns, "session-policy-cli")), {
+      version: "v1",
+      mode: "restart",
+      restartSequence: 1,
+    });
+
+    const deleted = runWdlCli([
+      "delete", "worker", "--ns", ns, "session-policy-cli", "--yes",
+    ]);
+    assertOk(deleted);
+  });
 });
 
 test("wdl CLI exercises D1 create, migrations, execute, deploy, and delete", async () => {
