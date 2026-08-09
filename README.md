@@ -169,7 +169,7 @@ compose bind-mounts `./dist` over the image's built configs.
 ```bash
 git clone https://github.com/wdl-dev/wdl.git
 cd wdl
-npm install -g @wdl-dev/cli@1.6.1
+npm install -g @wdl-dev/cli@1.7.1
 npm ci
 npm install --ignore-scripts --prefix test-workers/hello-jsonc
 npm run compile:workerd:local
@@ -262,6 +262,7 @@ npm test
 npm run lint
 npm run typecheck
 npm run typecheck:strict
+npm run typecheck:node
 npm run test:unit
 
 # Integration suite

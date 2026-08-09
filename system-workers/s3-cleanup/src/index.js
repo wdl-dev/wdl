@@ -524,7 +524,7 @@ export default {
   /**
    * @param {unknown} _controller
    * @param {S3CleanupEnv} env
-   * @param {ExecutionContext} ctx
+   * @param {import("@cloudflare/workers-types").ExecutionContext} ctx
    */
   async scheduled(_controller, env, ctx) {
     bindLogLevel(env);
@@ -548,7 +548,7 @@ export default {
   },
 
   /**
-   * @param {MessageBatch<unknown>} batch
+   * @param {import("@cloudflare/workers-types").MessageBatch<unknown>} batch
    * @param {S3CleanupEnv} env
    */
   async queue(batch, env) {

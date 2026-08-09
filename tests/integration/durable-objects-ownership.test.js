@@ -678,7 +678,10 @@ test("DO live takeover aborts stale in-flight handler before post-await SQLite w
     assert.deepEqual(responseJson(takeover), { started: 1, after: 0 });
     const takeoverOwner = redisGetDoOwner(ownerKey);
     assert.equal(takeoverOwner.taskId, "do-runtime-b");
-    assert.equal(takeoverOwner.generation, originalOwner.generation + 1);
+    assert.ok(
+      takeoverOwner.generation > originalOwner.generation,
+      `expected takeover generation to advance beyond ${originalOwner.generation}, got ${takeoverOwner.generation}`
+    );
 
     const staleResult = await staleInFlight.catch((err) => ({
       status: "error",

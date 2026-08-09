@@ -77,9 +77,13 @@ export class AuthPolicyError extends Error {
   }
 }
 
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
+
 /** @param {Uint8Array} bytes */
 function base64urlEncode(bytes) {
-  return Buffer.from(bytes).toString("base64")
+  return nodeBuffer.from(bytes).toString("base64")
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/, "");

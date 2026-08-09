@@ -266,6 +266,9 @@ export function buildWorkerEnv(
   const doOwnerNetwork = options?.doOwnerNetwork ?? null;
   let hasDoBinding = false;
   let hasWorkflowBinding = false;
+  // JSON-compatible workerLoader env values are mirrored into process.env
+  // under Node compatibility. The generated wrapper owns Workflow metadata
+  // and materializes the tenant facade without placing it in raw env.
   for (const workflow of options.workflows || (Array.isArray(meta.workflows) ? meta.workflows : [])) {
     const { binding, name, className, workflowKey } = workflow || {};
     if (
@@ -286,15 +289,6 @@ export function buildWorkerEnv(
       throw new Error(`Workflow binding "${binding}" targets reserved runtime entrypoint "${className}" (redeploy ${ns}/${worker})`);
     }
     hasWorkflowBinding = true;
-    env[binding] = {
-      ns,
-      worker,
-      version,
-      name,
-      binding,
-      className,
-      workflowKey,
-    };
   }
   for (const [name, spec] of options.bindingEntries || Object.entries(meta.bindings || {})) {
     if (!BINDING_NAME_RE.test(name) || WDL_RESERVED_BINDING_RE.test(name) || RESERVED_OBJECT_KEYS.has(name)) {

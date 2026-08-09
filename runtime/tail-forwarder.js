@@ -169,6 +169,21 @@ export function tailEventByteLength(json) {
 }
 
 /** @param {unknown} payload */
+function stringifyTailPayload(payload) {
+  try {
+    const json = JSON.stringify(payload);
+    return typeof json === "string" ? json : null;
+  } catch {
+    return null;
+  }
+}
+
+/** @param {string | null} json */
+function tailPayloadFits(json) {
+  return json !== null && tailEventByteLength(json) <= TAIL_EVENT_MAX_BYTES;
+}
+
+/** @param {unknown} payload */
 export function tailEventTooLargePayload(payload) {
   /** @type {Record<string, unknown>} */
   const out = {
@@ -190,13 +205,28 @@ export function tailEventTooLargePayload(payload) {
 
 /** @param {unknown} payload */
 export function serializeTailPayload(payload) {
-  let json;
-  try {
-    json = JSON.stringify(payload);
-  } catch {
-    json = JSON.stringify(tailEventTooLargePayload(payload));
+  let json = stringifyTailPayload(payload);
+  if (tailPayloadFits(json)) return /** @type {string} */ (json);
+
+  const record = /** @type {Record<string, unknown> | null} */ (
+    payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null
+  );
+  let reduced = record;
+  if (record && Object.hasOwn(record, "error_info")) {
+    reduced = { ...record };
+    delete reduced.error_info;
+    reduced.error_info_omitted = true;
+    json = stringifyTailPayload(reduced);
+    if (tailPayloadFits(json)) return /** @type {string} */ (json);
   }
-  if (tailEventByteLength(json) <= TAIL_EVENT_MAX_BYTES) return json;
+
+  if (reduced?.error_info_omitted === true) {
+    if (reduced === record) reduced = { ...record };
+    delete reduced.error_info_omitted;
+    json = stringifyTailPayload(reduced);
+    if (tailPayloadFits(json)) return /** @type {string} */ (json);
+  }
+
   const warning = JSON.stringify(tailEventTooLargePayload(payload));
   if (tailEventByteLength(warning) <= TAIL_EVENT_MAX_BYTES) return warning;
   return JSON.stringify({

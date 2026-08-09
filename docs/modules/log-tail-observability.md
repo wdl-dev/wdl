@@ -84,8 +84,8 @@ pipe, not durable log storage.
 ## Ownership / Concurrency / Failure Semantics
 
 - Structured stdout is the source of truth for durable platform logging.
-- No active tailer means runtime still logs stdout but skips tail-envelope payload and
-  stream-append work after local active-set miss caching.
+- No active tailer means runtime still logs stdout but skips exact tail-envelope
+  serialization and stream-append work after local active-set miss caching.
 - Active tail sessions are time-bounded authorization leases and must reconnect through
   normal auth. `LOG_TAIL_MAX_SESSION_MS` sets the control-side maximum; invalid or
   empty values fall back to 15 minutes.
@@ -221,6 +221,13 @@ Tail identity rules:
 
 - `worker_console` identity for fetch requests comes from forwarded request headers
   because workerd reports `scriptName=none` for `workerLoader`-loaded workers.
+- `worker_console.message` preserves the positional console arguments. When workerd
+  supplies positional `Error` metadata, Runtime emits the parallel bounded
+  `error_info` array with `name`, `message`, and optional `stack`. Structured stdout marks
+  metadata omitted by the clone budget with `error_info_omitted: true`. Live-tail exact
+  serialization prioritizes the base console event: it tries the metadata, then the
+  omitted marker, then the unchanged base message; only an oversized base event becomes
+  `tail_warning`.
 - `scheduled()` and `queue()` console events are JSRPC events without a request shape, so
   their console tail events omit `worker_id` and `request_id` instead of inventing
   `"unknown"` sentinels.

@@ -372,11 +372,8 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 
 ## Deployment / Rollout Notes
 
-- For session policy support, deploy Gateway, Workflows, and do-runtime projection
-  readers before system-runtime/Control writers. Pause Control mutations while
-  system-runtime rolls, resume after the tier stabilizes, and only then allow API clients
-  to send the new bundle policy.
-- Control and runtime should roll together when bundle metadata shape changes.
+- Cross-tier Control shape changes follow the reader-before-writer procedure in the
+  [infra rollout notes](infra.md#deployment--rollout-notes).
 - Control and gateway must keep route invalidation channel names aligned.
 - Auth role changes should be reviewed as security boundary changes and tested against
   reserved namespace behavior.

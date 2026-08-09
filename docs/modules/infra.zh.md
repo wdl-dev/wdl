@@ -104,18 +104,13 @@ Stateful storage：
 
 ## 部署 / Rollout 注意事项
 
-runtime internal protocol 变化时的常见顺序：
+跨 tier protocol 变化使用一套依赖驱动流程，而不是维护永久 service 列表：
 
-1. 按需滚 workerd pools：gateway、user-runtime、system-runtime。
-2. 如果 scheduler 调用新的 runtime internal path，再滚 scheduler。
-3. 如果 workflow runtime protocol 改变，再滚 workflows。
-4. 只有 D1/DO transport/config 改变时才滚 D1/DO。
+1. 先滚同时接受当前与下一 shape 的 reader/receiver。
+2. 如果新旧 writer 混部可能提交不兼容状态，在 rolling writer tier 前暂停受影响 mutation surface。
+3. 再滚会发出新 shape 的 writer/caller，等待旧 writer 完全 drain 后恢复暂停的 surface。
 
-方向很重要：
-
-- 如果 workflows 会 dispatch 新的 runtime internal path 或 body shape，先滚 runtime，再滚 workflows。
-- 如果 runtime/control/do-runtime 会调用新的 workflows API shape，先滚 workflows，再滚调用方。
-- 如果 workflows 和 runtime 同时改变协议，先部署新增 endpoint 或 body shape 的一侧，再部署调用它的一侧。
+每个版本涉及的具体 service 与额外 gate 写在该版本 CHANGELOG 中；合同没有变化的 service 不会因此获得固定 rollout 顺序。
 
 Internal auth 轮换采用双读单写，但它不是 rolling-safe 协议：caller 始终只发送 `WDL_INTERNAL_AUTH_TOKEN`，receiver 接受当前值和可选 previous 值。应在维护窗口内轮换，或先暂停 scheduler/workflows traffic。把旧值配置为 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`、新值配置为 `WDL_INTERNAL_AUTH_TOKEN`，一起重启/滚动所有 private service；确认全量收敛后，再清空 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN` 并第二次滚动。
 

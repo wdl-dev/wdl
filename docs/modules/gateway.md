@@ -245,11 +245,6 @@ readiness.
 
 ## Deployment / Rollout Notes
 
-- Deploy the Gateway, Workflows, and do-runtime session-policy projection readers
-  before Control can write
-  `sessionPolicy=restart`. Roll system-runtime/Control last; keep Control
-  mutations paused while that tier rolls and allow API clients to send the new field
-  only after mutations resume.
 - Gateway can roll independently for route-cache or request-parsing changes that
   preserve forwarded headers.
 - Changes to runtime internal socket paths do not require gateway path filtering.

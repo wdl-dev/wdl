@@ -398,16 +398,9 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 
 ## Deployment / Rollout Notes
 
-- Workflows rollout spans control, runtime, do-runtime, scheduler, and workflows.
-- Deploy Gateway, Workflows, and do-runtime session-policy projection readers before
-  system-runtime/Control can persist `sessionPolicy`; pause Control mutations
-  while that writer tier rolls.
-- Runtime must support workflow internal dispatch paths before workflows dispatches runs
-  to it.
-- do-runtime may roll only after workflows when it calls a new workflows API shape,
-  including the internal Durable Object alarm mutation endpoints.
-- Scheduler may roll after workflows because its only Workflows dependency is the tick
-  endpoint; its cron and queue loops are independent.
+- Cross-tier Workflow protocol changes follow the reader-before-writer procedure in the
+  [infra rollout notes](infra.md#deployment--rollout-notes). The release changelog names
+  the affected services.
 - DB 2 is the workflow instance state boundary; do not add direct DB 2 writes from
   control/runtime/scheduler.
 - Workflows persists `wf:schema_version` in DB 2. Schema `2` stores DAG dependency edges
@@ -442,6 +435,9 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 
 - V2 is not full Cloudflare Workflows compatibility.
 - No cross-worker or `script_name` workflows.
+- WDL's custom binding facade does not expose native workerd
+  `WorkflowInstance.delete()` or `Workflow.deleteBatch()`; instance lifecycle remains
+  owned by the documented WDL APIs and retention engine.
 - No platform-managed large payload spill to object storage.
 - No tenant Durable Object storage as workflow backend.
 - Runtime replay does not skip directly to continuations; user JS replays through

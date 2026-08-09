@@ -7,6 +7,9 @@ import {
 import { validateSecretKey } from "control-lib";
 import { encryptSecretValue } from "shared-secret-envelope";
 
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
 const SECRET_PUT_JSON_BODY_MAX_BYTES = 128 * 1024;
 
 /**
@@ -41,7 +44,7 @@ export async function readEncryptedSecretPutValue({ request, env, hashKey, field
   if (typeof body.value !== "string") {
     return { response: jsonError(400, "invalid_request", "Body must be { value: string }") };
   }
-  if (Buffer.byteLength(body.value, "utf8") > 64 * 1024) {
+  if (nodeBuffer.byteLength(body.value, "utf8") > 64 * 1024) {
     return { response: jsonError(400, "invalid_request", "secret value too large (max 64 KiB utf-8)") };
   }
   return {

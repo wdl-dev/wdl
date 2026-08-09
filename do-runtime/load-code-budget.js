@@ -1,3 +1,7 @@
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
+
 export const DO_RUNTIME_RESERVED_MODULE = "_wdl-do-runtime-wrapper.js";
 export const DO_ALARM_SHIM_MODULE = "_wdl-do-alarm-shim.js";
 
@@ -73,7 +77,7 @@ export function doRuntimeInjectedModuleSources(mainModule, meta, alarmShimSource
 export function estimateDoRuntimeInjectedCodeBytes(mainModule, meta, alarmShimSource) {
   let total = 0;
   for (const [, source] of doRuntimeInjectedModuleSources(mainModule, meta, alarmShimSource)) {
-    total += Buffer.byteLength(source, "utf8");
+    total += nodeBuffer.byteLength(source, "utf8");
   }
   return total;
 }

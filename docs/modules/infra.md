@@ -185,21 +185,17 @@ Stateful storage:
 
 ## Deployment / Rollout Notes
 
-Common ordering when runtime internal protocol changes:
+Cross-tier protocol changes use one dependency-driven procedure rather than a permanent
+service list:
 
-1. Roll workerd pools: gateway, user-runtime, system-runtime as needed.
-2. Roll scheduler if it calls new runtime internal paths.
-3. Roll workflows if workflow runtime protocol changed.
-4. Roll D1/DO only when their transport/config changes.
+1. Roll readers or receivers that accept both the current and next shape.
+2. Before rolling a writer tier, pause the affected mutation surface when mixed writer
+   versions could commit incompatible state.
+3. Roll writers or callers that emit the new shape, wait for old writers to drain, then
+   resume the paused surface.
 
-Direction matters:
-
-- If workflows dispatches a new runtime internal path or body shape, roll runtime first,
-  then workflows.
-- If runtime/control/do-runtime calls a new workflows API shape, roll workflows first,
-  then the callers.
-- If workflows and runtime both change protocol at the same time, deploy the side that
-  adds the new endpoint or body shape first, then deploy the side that calls it.
+The release changelog names the concrete services and any additional gate for each
+version. Services whose contracts are unchanged do not acquire an ordering requirement.
 
 Internal auth rotation is dual-read / single-write, but it is not rolling-safe:
 callers always send `WDL_INTERNAL_AUTH_TOKEN`, and receivers accept current plus

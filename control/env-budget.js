@@ -1,18 +1,21 @@
 import { decryptSecretValue } from "shared-secret-envelope";
 import { BundleMetaError, parseBundleMeta } from "control-lib";
 import { buildWorkerEnv, doAlarmBindingProps } from "runtime-load-env-build";
-import { bundleKey } from "shared-worker-contract";
+import { bundleKey, MAX_WORKER_VERSION_TAG } from "shared-worker-contract";
 import { WatchError } from "shared-redis";
 
 export { BundleMetaError };
 
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
 const DO_ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const ESTIMATED_ASSETS_CDN_BASE = "https://assets.invalid";
 const WORKER_ENV_META_READ_BATCH_SIZE = 32;
 // Pessimistic placeholder for version strings that will be allocated after a
 // secret mutation. Redis INCR results are parsed as JS numbers today, so this
 // uses the longest safe integer-shaped `v<int>` tag.
-export const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = "v9007199254740991";
+export const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = MAX_WORKER_VERSION_TAG;
 const ESTIMATED_DO_BACKEND = Object.freeze({ __wdlBinding: "internal", name: "DO_BACKEND" });
 const ESTIMATED_DO_OWNER_NETWORK = Object.freeze({
   __wdlBinding: "internal",
@@ -172,7 +175,7 @@ const NON_LATIN1_RE = /[\u0100-\uffff]/;
 /** @param {string} value */
 function v8TwoByteStringPenalty(value) {
   if (!NON_LATIN1_RE.test(value)) return 0;
-  return Math.max(0, (2 * value.length) - Buffer.byteLength(value, "utf8"));
+  return Math.max(0, (2 * value.length) - nodeBuffer.byteLength(value, "utf8"));
 }
 
 /** @param {unknown} value */
@@ -190,7 +193,7 @@ function v8StringPenalty(value) {
 /** @param {unknown} value */
 export function estimatedWorkerLoaderEnvBytes(value) {
   const json = JSON.stringify(value) ?? "null";
-  return Buffer.byteLength(json, "utf8") + v8StringPenalty(value);
+  return nodeBuffer.byteLength(json, "utf8") + v8StringPenalty(value);
 }
 
 /**
@@ -218,7 +221,7 @@ export function assertWorkerLoaderUserEnvBudget({
   assetsCdnBase = ESTIMATED_ASSETS_CDN_BASE,
 }) {
   // workerd enforces the full workerLoader env as a Frankenvalue estimate. Control
-  // mirrors the user strings plus runtime-injected binding/workflow env shapes as
+  // mirrors the user strings plus runtime-injected binding env shapes as
   // JSON, then accounts for V8's two-byte representation of non-Latin-1 strings.
   const bytes = estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
     ns,

@@ -79,6 +79,11 @@ test("D1 binding shares one database across same-namespace loaded workers", asyn
     row: { id: "m1", body: "hello" },
     bookmark: null,
   });
+
+  assert.deepEqual(await call(ns, "reader", { op: "rtree" }), {
+    rows: [["id"], [1]],
+    check: "ok",
+  });
 });
 
 test("D1 binding reaches router through Envoy before using learned owner endpoint", async () => {

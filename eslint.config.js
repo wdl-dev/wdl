@@ -43,4 +43,24 @@ export default [
       globals: { ...globals.node },
     },
   },
+  {
+    files: [
+      "auth/**/*.js",
+      "control/**/*.js",
+      "gateway/**/*.js",
+      "runtime/**/*.js",
+      "d1-runtime/**/*.js",
+      "do-runtime/**/*.js",
+      "shared/**/*.js",
+      "system-workers/**/*.js",
+    ],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        { name: "Buffer", message: "Use Web APIs or an explicit typed globalThis boundary." },
+        { name: "process", message: "Use an explicit typed globalThis boundary." },
+        { name: "global", message: "Use globalThis through an explicit typed boundary." },
+      ],
+    },
+  },
 ];

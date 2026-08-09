@@ -1,5 +1,5 @@
 /*
- * The experimental flags mirror workerd v1.20260804.1
+ * The experimental flags mirror workerd v1.20260809.1
  * src/workerd/io/compatibility-date.capnp. Refresh them on every workerd pin
  * bump from an upstream source checkout:
  *
@@ -11,7 +11,7 @@
  * mirror data.
  */
 
-export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260804.1";
+export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260809.1";
 
 // WDL supports one forward-only dynamic-worker compatibility surface. Static
 // platform workers keep their independently pinned workerd service dates.
@@ -32,6 +32,7 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "auto_grpc_convert",
   "cache_reload_enabled",
   "connect_pass_through",
+  "d1_binding_jsrpc",
   "durable_object_get_existing",
   "durable_object_rename",
   "enable_abortsignal_rpc",
@@ -41,13 +42,13 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "enable_version_api",
   "enable_web_file_system",
   "experimental",
+  "expose_draining_reader",
   "increase_websocket_message_size",
   "js_rpc",
   "kv_direct_binding",
   "memory_cache_delete",
   "new_module_registry",
   "precise_timers",
-  "python_workers_20260610",
   "python_workers_development",
   "python_workers_durable_objects",
   "replica_routing",
@@ -57,10 +58,12 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "streaming_tail_worker",
   "streams_no_default_auto_allocate_chunk_size",
   "tail_worker_user_spans",
+  "typescript_implemented_streams",
   "typescript_strip_types",
   "unsafe_module",
   "unsupported_process_actual_platform",
   "webgpu",
+  "workflows_bindings_rpc",
   "workflows_step_rollback",
 ]);
 

@@ -16,13 +16,16 @@ import {
   generateHostBindingWrapperModule,
 } from "runtime-load-wrapper-generate";
 
+const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
+  /** @type {unknown} */ (globalThis)
+).Buffer;
 // Mirrors workerd v1.20260718.1
 // src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_CODE_SIZE.
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
 const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
 const WORKFLOWS_IMPORT_MARKER = "cloudflare:workflows";
-const WORKFLOWS_IMPORT_MARKER_BYTES = Buffer.from(WORKFLOWS_IMPORT_MARKER, "utf8");
+const WORKFLOWS_IMPORT_MARKER_BYTES = nodeBuffer.from(WORKFLOWS_IMPORT_MARKER, "utf8");
 const utf8Decoder = new TextDecoder();
 
 /**
@@ -32,6 +35,7 @@ const utf8Decoder = new TextDecoder();
  * @typedef {{ modules: Record<string, WorkerModuleValue>, mainModule: string, [key: string]: unknown }} WorkerCodeShape
  * @typedef {Record<string, unknown> & { type?: string, className?: unknown }} RuntimeBindingSpec
  * @typedef {{ binding?: unknown, className?: unknown }} RuntimeWorkflowSpec
+ * @typedef {{ ns: string, worker: string, version: string }} RuntimeWorkerIdentity
  * @typedef {{ entrypoint?: unknown }} RuntimeExportSpec
  * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null }} RuntimeBundleMeta
  * @typedef {{
@@ -67,12 +71,12 @@ const utf8Decoder = new TextDecoder();
 
 /** @param {string | Uint8Array} body */
 function moduleBodyByteLength(body) {
-  return typeof body === "string" ? Buffer.byteLength(body, "utf8") : body.byteLength;
+  return typeof body === "string" ? nodeBuffer.byteLength(body, "utf8") : body.byteLength;
 }
 
 /** @param {NormalizedModuleBody} body */
 function decodedTextModuleByteLength(body) {
-  if (typeof body === "string") return Buffer.byteLength(body, "utf8");
+  if (typeof body === "string") return nodeBuffer.byteLength(body, "utf8");
   const hasUtf8Bom = (
     body.byteLength >= 3 &&
     body[0] === 0xef &&
@@ -85,7 +89,7 @@ function decodedTextModuleByteLength(body) {
 /** @param {NormalizedModuleBody} body */
 function containsWorkflowsImportMarker(body) {
   if (typeof body === "string") return body.includes(WORKFLOWS_IMPORT_MARKER);
-  const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  const bytes = nodeBuffer.from(body.buffer, body.byteOffset, body.byteLength);
   return bytes.indexOf(WORKFLOWS_IMPORT_MARKER_BYTES) !== -1;
 }
 
@@ -294,8 +298,15 @@ export function analyzeRuntimeMeta(meta) {
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
  * @param {RuntimeMetaPlan} [plan]
+ * @param {RuntimeWorkerIdentity | null} [workerIdentity]
  */
-function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = analyzeRuntimeMeta(meta)) {
+function runtimeInjectedModuleSources(
+  mainModule,
+  meta,
+  runtimeSources,
+  plan = analyzeRuntimeMeta(meta),
+  workerIdentity = null
+) {
   const injections = runtimeModuleInjections(runtimeSources);
   /** @type {Map<string, string>} */
   const out = new Map();
@@ -324,7 +335,8 @@ function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = a
           plan.r2Bindings,
           plan.doBindings,
           plan.workflowBindings,
-          plan.hostWrappedClassNames
+          plan.hostWrappedClassNames,
+          workerIdentity
         )
       : generateAbortShimWrapperModule(mainModule)
   );
@@ -335,14 +347,15 @@ function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = a
  * @param {WorkerCodeShape} workerCode
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
- * @param {RuntimeMetaPlan} [plan]
+ * @param {{ plan?: RuntimeMetaPlan, workerIdentity?: RuntimeWorkerIdentity | null }} [options]
  */
 export function injectRuntimeModulesForHostBindings(
   workerCode,
   meta,
   runtimeSources,
-  plan = analyzeRuntimeMeta(meta)
+  options = {}
 ) {
+  const plan = options.plan || analyzeRuntimeMeta(meta);
   const originalMain = workerCode.mainModule;
   if (typeof originalMain !== "string" || !originalMain) {
     throw new Error("Host binding wrapper requires a string mainModule");
@@ -356,7 +369,13 @@ export function injectRuntimeModulesForHostBindings(
       `Host binding wrapper requires reserved module names ${HOST_BINDING_RESERVED_MODULE_NAMES.join(", ")}`
     );
   }
-  for (const [name, source] of runtimeInjectedModuleSources(originalMain, meta, runtimeSources, plan)) {
+  for (const [name, source] of runtimeInjectedModuleSources(
+    originalMain,
+    meta,
+    runtimeSources,
+    plan,
+    options.workerIdentity || null
+  )) {
     workerCode.modules[name] = source;
   }
   workerCode.mainModule = "_wdl-wrapper.js";
@@ -390,7 +409,7 @@ export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
     jsModules[name] = typeof body === "string" ? body : utf8Decoder.decode(body);
   }
   rewriteCloudflareWorkflowsImports({ modules: jsModules });
-  for (const source of Object.values(jsModules)) total += Buffer.byteLength(source, "utf8");
+  for (const source of Object.values(jsModules)) total += nodeBuffer.byteLength(source, "utf8");
   return total;
 }
 
@@ -400,6 +419,7 @@ export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
  *   normalized: NormalizedModule[],
  *   meta: RuntimeBundleMeta,
  *   runtimeSources: RuntimeInjectionSources,
+ *   workerIdentity?: RuntimeWorkerIdentity | null,
  *   userCodeBytes?: number,
  * }} args
  */
@@ -408,11 +428,18 @@ export function estimateFinalWorkerLoaderCodeBytes({
   normalized,
   meta,
   runtimeSources,
+  workerIdentity = null,
   userCodeBytes = estimateWorkerLoaderUserCodeBytes({ normalized, meta }),
 }) {
   let total = userCodeBytes;
-  for (const [, source] of runtimeInjectedModuleSources(mainModule, meta, runtimeSources)) {
-    total += Buffer.byteLength(source, "utf8");
+  for (const [, source] of runtimeInjectedModuleSources(
+    mainModule,
+    meta,
+    runtimeSources,
+    analyzeRuntimeMeta(meta),
+    workerIdentity
+  )) {
+    total += nodeBuffer.byteLength(source, "utf8");
   }
   return total;
 }

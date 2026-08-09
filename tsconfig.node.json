@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.strict.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": [
+    "scripts/**/*.js",
+    "scripts/**/*.mjs",
+    "tests/**/*.js",
+    "tests/**/*.cjs",
+    "tests/**/*.mjs",
+    "types/workerd-embedded.d.ts",
+    "types/workerd-node-compat.d.ts",
+    "types/node-typecheck-contracts.ts"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/.deploy-dist",
+    "shared/vendor/**"
+  ]
+}

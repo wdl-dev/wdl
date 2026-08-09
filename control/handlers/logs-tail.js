@@ -423,10 +423,15 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     });
   }
 
-  const expiryTimer = setTimeout(() => expireSession(streamController), maxSessionMs);
-  if (typeof expiryTimer === "object" && typeof expiryTimer.unref === "function") {
-    expiryTimer.unref();
+  /** @param {unknown} timer */
+  function unrefNodeTimer(timer) {
+    if (!timer || typeof timer !== "object") return;
+    const unref = /** @type {{ unref?: unknown }} */ (timer).unref;
+    if (typeof unref === "function") unref.call(timer);
   }
+
+  const expiryTimer = setTimeout(() => expireSession(streamController), maxSessionMs);
+  unrefNodeTimer(expiryTimer);
   /** @type {ReturnType<typeof setTimeout> | null} */
   let idleTimer = null;
   function scheduleIdleWatchdog() {
@@ -439,9 +444,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
       }
       scheduleIdleWatchdog();
     }, delayMs);
-    if (typeof idleTimer === "object" && typeof idleTimer.unref === "function") {
-      idleTimer.unref();
-    }
+    unrefNodeTimer(idleTimer);
   }
   scheduleIdleWatchdog();
 

@@ -170,8 +170,7 @@ Verify outcome 记录为 success、reject 或 error；5xx outcome 是 error log�
 
 ## 部署 / Rollout 注意事项
 
-- 支持 session policy 时，先部署 Gateway、Workflows 和 do-runtime projection reader，再部署 system-runtime/Control writer。system-runtime 滚动期间暂停 Control mutations，待该 tier 稳定后再恢复，并且只能在此后允许 API client 发送新 bundle policy。
-- 修改 bundle metadata shape 时，control 和 runtime 应一起滚。
+- 跨 tier Control shape 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程。
 - Control 和 gateway 必须保持 route invalidation channel 名称一致。
 - Auth role 改动属于安全边界变更，应重点测试 reserved namespace 行为。
 

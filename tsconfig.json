@@ -10,7 +10,7 @@
     "noImplicitAny": false,
     "skipLibCheck": true,
     "lib": ["ES2025", "DOM", "DOM.Iterable"],
-    "types": ["node", "@cloudflare/workers-types"],
+    "types": ["@cloudflare/workers-types"],
     "paths": {
       "shared-*": ["./shared/*.js"],
       "gateway-*": ["./gateway/*.js"],
@@ -37,11 +37,9 @@
     "control/**/*.js",
     "gateway/**/*.js",
     "runtime/**/*.js",
-    "scripts/**/*.js",
     "shared/**/*.js",
     "do-runtime/**/*.js",
     "d1-runtime/**/*.js",
-    "tests/**/*.js",
     "system-workers/s3-cleanup/src/**/*.js",
     "types/**/*.d.ts"
   ],

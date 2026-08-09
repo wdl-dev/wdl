@@ -134,14 +134,7 @@ Transport failure 和 user-code failure 要区分。除非协议明确要求，r
 
 ## Rollout 顺序
 
-谁新增 endpoint 或先兼容新 body shape，谁先部署；调用方后部署。常见情况：
-
-- Runtime internal `:8088` route 变化：先滚 runtime，再让 scheduler 或 workflows 调新 route。
-- Runtime/control 调 workflows 的 API shape 变化：先滚 workflows，再滚调用方。
-- Binding facade protocol 变化：runtime 与对应 stateful runtime 或 Rust service 一起滚。
-- Redis key ownership 变化：writer、reader 和 style-contract test 在同一个 deployable boundary 中更新。
-
-环境级 rollout 规则见 [Infra 和 deployment](modules/infra.zh.md)。
+跨 tier 变化应先部署能接受新 shape 的 reader/receiver，再部署会发出新 shape 的 writer/caller。如果新旧 writer 混部可能提交不兼容状态，应暂停受影响 mutation，直到旧 writer 完全 drain。Canonical 运维流程见 [Infra 和 deployment](modules/infra.zh.md)；具体版本涉及的 service 顺序只写入该版本 CHANGELOG。
 
 ## 开发标准
 

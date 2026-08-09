@@ -104,7 +104,8 @@ test("DO host actor: lease budget aborts a facet when the owner fence stops rene
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
     generation: 7,
-    leaseExpiresAt: Date.now() + 5,
+    leaseExpiresAt: Date.now() + 60_000,
+    leaseRemainingMs: 5,
   };
   const stale = Object.assign(new Error("owner generation is stale"), {
     status: 503,
@@ -365,11 +366,13 @@ test("DO host actor: lease budget reschedules when renew extended the owner fenc
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
     generation: 7,
-    leaseExpiresAt: Date.now() + 5,
+    leaseExpiresAt: Date.now() + 60_000,
+    leaseRemainingMs: 5,
   };
   const renewed = {
     ...owner,
     leaseExpiresAt: Date.now() + 60_000,
+    leaseRemainingMs: 60_000,
   };
   harness.assertResponses = [owner, renewed];
 
@@ -391,9 +394,10 @@ test("DO host actor: completed dispatch does not reschedule after an in-flight o
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-a",
     generation: 7,
-    leaseExpiresAt: Date.now() + 5,
+    leaseExpiresAt: Date.now() + 60_000,
+    leaseRemainingMs: 5,
   };
-  /** @type {PromiseWithResolvers<{ ownerKey: string, taskId: string, generation: number, leaseExpiresAt: number }>} */
+  /** @type {PromiseWithResolvers<{ ownerKey: string, taskId: string, generation: number, leaseExpiresAt: number, leaseRemainingMs: number }>} */
   const renewalControl = Promise.withResolvers();
   const renewal = renewalControl.promise;
   const resolveRenewal = renewalControl.resolve;
@@ -408,7 +412,8 @@ test("DO host actor: completed dispatch does not reschedule after an in-flight o
 
   resolveRenewal({
     ...owner,
-    leaseExpiresAt: Date.now() + 5,
+    leaseExpiresAt: Date.now() + 60_000,
+    leaseRemainingMs: 5,
   });
   await delay(20);
 

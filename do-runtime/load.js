@@ -234,7 +234,13 @@ export async function loadDoWorkerCode(env, ctx, invoke, requestId = null) {
     // _wdl-wrapper.js so DO classes get host-binding facades first; the
     // do-runtime wrapper then imports that module and layers only the alarm
     // storage proxy on top.
-    wrapWorkerCodeForHostBindings(workerCode, meta);
+    wrapWorkerCodeForHostBindings(workerCode, meta, {
+      workerIdentity: {
+        ns: invoke.ns,
+        worker: invoke.worker,
+        version: invoke.version,
+      },
+    });
     // The shim owns DO alarm semantics. Keep native SQLite deleteAll() away
     // from workerd's alarm scheduler, which is not valid for facet-backed DOs.
     forceNativeDeleteAllPreservesAlarm(workerCode);

@@ -114,7 +114,7 @@ test("control dispatcher returns 405 for ops wrong-method /reload", async () => 
   const response = await controlIndex.fetch(
     new Request("https://ctl.example/reload", { method: "GET" }),
     {},
-    /** @type {ExecutionContext} */ ({})
+    /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
   );
 
   await assertJsonResponse(response, 405, {
@@ -139,7 +139,7 @@ test("control dispatcher sends delegated auth route to auth token handler", asyn
       headers: { "content-type": "application/json" },
     }),
     {},
-    /** @type {ExecutionContext} */ ({})
+    /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
   );
 
   assert.equal(response.status, 200);
@@ -161,7 +161,7 @@ test("control whoami uses sanitized forwarded proto for public URL hints", async
       headers: { "x-forwarded-proto": "https" },
     }),
     { PLATFORM_DOMAIN: "workers.example" },
-    /** @type {ExecutionContext} */ ({})
+    /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
   );
 
   const body = await readJsonResponse(response, 200);
@@ -179,7 +179,7 @@ test("control whoami omits namespace URL when no public platform domain is confi
   const response = await controlIndex.fetch(
     new Request("http://control.example/whoami"),
     {},
-    /** @type {ExecutionContext} */ ({})
+    /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
   );
 
   const body = await readJsonResponse(response, 200);
@@ -194,7 +194,7 @@ test("control whoami ignores malformed forwarded proto values", async () => {
       headers: { "x-forwarded-proto": "https,http" },
     }),
     {},
-    /** @type {ExecutionContext} */ ({})
+    /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
   );
 
   const body = await readJsonResponse(response, 200);
@@ -210,7 +210,7 @@ test("control namespace routes include grammar details for invalid namespaces", 
   const response = await controlIndex.fetch(
     new Request("https://ctl.example/ns/Bad_NS/workers"),
     {},
-    /** @type {ExecutionContext} */ ({})
+    /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
   );
 
   const body = await readJsonResponse(response, 400);

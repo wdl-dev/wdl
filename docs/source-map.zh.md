@@ -29,7 +29,7 @@
 | `runtime/dispatch.js` 和 `runtime/dispatch/*` | Fetch、scheduled、queue、workflow dispatch、workflow step facade、replay cache 和 deterministic workflow JSON helpers。 |
 | `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation、runtime 注入源码 ownership 和 hidden binding stripping。 |
 | `runtime/bindings/` | KV、D1、R2、Durable Objects、ASSETS、service 和 queue 的 host-side binding adapters。 |
-| `runtime/workflows-client.js`、`runtime/dispatch/workflow-*.js`、`runtime/load/env-build.js` | Workflow binding materialization、backend client、dispatch facade、replay cache 和 step semantics。 |
+| `runtime/workflows-client.js`、`runtime/dispatch/workflow-*.js`、`runtime/load/wrapper-generate.js` | Workflow binding materialization、identity injection、backend client、dispatch facade、replay cache 和 step semantics。 |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture 和 `wdl tail` 的 activation-gated append path。 |
 | `runtime/lib.js` | 纯 runtime helpers，例如 bundle-to-worker-code、byte normalization 和 dispatch body normalization。 |
 | `control/index.js` | system-runtime `:8082` 上的薄 HTTP dispatcher；auth 后交给 handlers。 |
@@ -83,6 +83,8 @@
 | `shared/cron-time.js` | Control 侧 cron parsing 和 slot-alignment helpers；scheduler advancement 使用 Rust `croner`。 |
 | `shared/vendor/` | `npm run build:vendor` 重新生成的预打包第三方依赖。 |
 | `types/workerd-embedded.d.ts` | workerd-embedded module specifier 的 ambient TypeScript declarations，例如 embedded runtime bundle 使用的 `*-source` aliases。 |
+| `types/workerd-node-compat.d.ts`、`types/workerd-node-modules.d.ts` | workerd 产品代码实际使用的 Node-compatible globals 和 imported Node module surface 的窄类型边界。 |
+| `types/node-typecheck-contracts.ts` | Node-only ambient type tripwire，防止 Workers declarations 泄漏进 scripts/tests checker。 |
 
 ## Stateful Workerd Tiers
 

@@ -194,19 +194,11 @@ become scheduler transport retries unless the transport contract says so.
 
 ## Rollout Order
 
-Roll the side that adds a new endpoint or accepts a new body shape before the side that
-calls it. Common cases:
-
-- Runtime internal `:8088` route changes: roll runtime before scheduler or workflows
-  starts calling the new route.
-- Workflows API shape changes called by runtime/control: roll workflows first, then
-  callers.
-- Binding facade protocol changes: roll runtime with the affected stateful runtime or
-  Rust service.
-- Redis key ownership changes: update writers, readers, and style-contract tests in the
-  same deployable boundary.
-
-Use [Infra and deployment](modules/infra.md) for environment-specific rollout rules.
+Cross-tier changes deploy accepting readers or receivers before emitting writers or
+callers. If mixed writer versions can commit incompatible state, pause the affected
+mutation surface until old writers have drained. The canonical operational procedure is
+in [Infra and deployment](modules/infra.md); version-specific service order belongs in
+the release changelog.
 
 ## Development Standards
 

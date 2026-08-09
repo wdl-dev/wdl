@@ -77,6 +77,24 @@ function safeMessage(value, budget = { remaining: TAIL_EVENT_MAX_BYTES }, seen =
 /**
  * @param {unknown} value
  * @param {{ remaining: number }} budget
+ * @returns {{ value?: unknown[], omitted: boolean }}
+ */
+function safeErrorInfo(value, budget) {
+  if (!Array.isArray(value)) return { omitted: false };
+  const remaining = budget.remaining;
+  try {
+    const cloned = safeMessage(value, budget);
+    if (Array.isArray(cloned)) return { value: cloned, omitted: false };
+  } catch (err) {
+    if (!(err instanceof TailEventTooLarge)) throw err;
+  }
+  budget.remaining = remaining;
+  return { omitted: true };
+}
+
+/**
+ * @param {unknown} value
+ * @param {{ remaining: number }} budget
  * @param {WeakSet<object>} seen
  * @param {number} depth
  * @returns {unknown}
@@ -225,7 +243,7 @@ export default {
       const { workerId, requestId } = readHeaders(event);
       const nsName = parseNsName(workerId);
 
-      const tailEvent = /** @type {{ logs?: Array<{ level?: unknown, message?: unknown }>, exceptions?: Array<{ message?: unknown, stack?: unknown, name?: unknown }> }} */ (
+      const tailEvent = /** @type {{ logs?: Array<{ level?: unknown, message?: unknown, errorInfo?: unknown }>, exceptions?: Array<{ message?: unknown, stack?: unknown, name?: unknown }> }} */ (
         event && typeof event === "object" ? event : {}
       );
       for (const entry of tailEvent.logs || []) {
@@ -233,7 +251,11 @@ export default {
         /** @type {Record<string, unknown>} */
         const fields = { console_level: consoleLevel };
         try {
-          fields.message = safeMessage(entry.message);
+          const budget = { remaining: TAIL_EVENT_MAX_BYTES };
+          fields.message = safeMessage(entry.message, budget);
+          const errorInfo = safeErrorInfo(entry.errorInfo, budget);
+          if (errorInfo.value !== undefined) fields.error_info = errorInfo.value;
+          if (errorInfo.omitted) fields.error_info_omitted = true;
         } catch (err) {
           if (!(err instanceof TailEventTooLarge)) throw err;
           const dropped = droppedFields({
@@ -250,17 +272,20 @@ export default {
         if (requestId) fields.request_id = requestId;
         log(loggerLevel(consoleLevel), "worker_console", fields);
         if (nsName) {
+          const payload = {
+            event: "worker_console",
+            console_level: consoleLevel,
+            message: fields.message,
+            ...(Object.hasOwn(fields, "error_info") ? { error_info: fields.error_info } : {}),
+            ...(fields.error_info_omitted === true ? { error_info_omitted: true } : {}),
+            ts: nowMs,
+            ...(workerId ? { worker_id: workerId } : {}),
+            ...(requestId ? { request_id: requestId } : {}),
+          };
           forwardEntries.push({
             ns: nsName.ns,
             worker: nsName.name,
-            payload: {
-              event: "worker_console",
-              console_level: consoleLevel,
-              message: fields.message,
-              ts: nowMs,
-              ...(workerId ? { worker_id: workerId } : {}),
-              ...(requestId ? { request_id: requestId } : {}),
-            },
+            payload,
           });
         }
       }

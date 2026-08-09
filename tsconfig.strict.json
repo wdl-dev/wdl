@@ -13,11 +13,6 @@
     "runtime/**/*.js",
     "gateway/**/*.js",
     "system-workers/s3-cleanup/src/**/*.js",
-    "tests/**/*.js",
-    "tests/**/*.cjs",
-    "tests/**/*.mjs",
-    "scripts/**/*.js",
-    "scripts/**/*.mjs",
     "types/**/*.d.ts"
   ]
 }

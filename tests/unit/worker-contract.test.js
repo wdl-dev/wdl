@@ -8,6 +8,7 @@ import {
   SESSION_POLICY_CHANNEL,
   HOST_DECLARATIONS_SCAN_PATTERN,
   HOSTS_SCAN_PATTERN,
+  MAX_WORKER_VERSION_TAG,
   NAMESPACES_KEY,
   PATTERNS_CHANNEL,
   ROUTES_CHANNEL,
@@ -48,6 +49,7 @@ const sessionPolicyFixture = readRepositoryJson("tests/fixtures/session-policy-p
 test("formatVersion: integer → v<int>", () => {
   assert.equal(formatVersion(1), "v1");
   assert.equal(formatVersion(42), "v42");
+  assert.equal(MAX_WORKER_VERSION_TAG, "v9007199254740991");
 });
 
 test("formatVersion: rejects non-positive / non-integer", () => {

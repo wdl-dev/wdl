@@ -40,6 +40,8 @@ from a synchronous transaction callback.
 ## Interfaces
 
 - Tenant binding: Durable Object namespace facade in loaded worker env.
+- Native `ctx.storage.sql` supports SQLite R*Tree virtual tables (`rtree`, `rtree_i32`)
+  and `rtreecheck()` under the same facet storage and ownership boundaries.
 - Runtime -> do-runtime fetch/RPC: `/internal/do/invoke`
 - Runtime -> do-runtime WebSocket: `/internal/do/connect`
 - do-runtime -> workflows alarm writes: `/internal/workflows/do-alarms/set`,
@@ -307,14 +309,8 @@ do not measure the lifetime of backend WebSocket recovery after the initial 101.
 
 ## Deployment / Rollout Notes
 
-- Roll out Gateway, Workflows, and do-runtime projection readers before
-  system-runtime/Control writers. Pause Control mutations while system-runtime rolls so
-  old and new Control writers cannot commit different route/projection shapes; resume
-  them only after that tier stabilizes, and only then allow API clients to send
-  `sessionPolicy`. Do not enable `restart` while an older Gateway, Workflows, or
-  do-runtime tier is still serving.
-- do-runtime should roll with user/system runtime when DO binding transport shape
-  changes.
+- Cross-tier DO protocol changes follow the reader-before-writer procedure in the
+  [infra rollout notes](infra.md#deployment--rollout-notes).
 - Drain should run before workerd process termination so owned shards release or fail
   over by lease expiry.
 - EFS shared storage is safe only because owner lease + generation fence keep one writer

@@ -63,7 +63,7 @@ Tail streams 使用有界 `MAXLEN ~ 500`，并在写入时刷新 TTL。它们是
 ## Ownership / 并发 / 失败语义
 
 - 结构化 stdout 是持久平台日志的事实来源。
-- 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过 tail-envelope payload 和 stream-append work。
+- 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过精确 tail-envelope serialization 和 stream-append work。
 - Active tail session 是有时限的授权租约，必须通过正常 auth reconnect。`LOG_TAIL_MAX_SESSION_MS` 设置 control-side 最大时长；非法值或空值会回退到 15 分钟。
 - 当前 stock workerd 的行为（上游 issue [#6832](https://github.com/cloudflare/workerd/issues/6832) 跟踪）不会可靠地在 client disconnect 时触发 async response-body `ReadableStream.cancel()`。WDL 把它当作永久兼容边界处理：Control 的独立 watchdog 不是等待上游修复的临时 workaround。max-session watchdog 负责 reauthorization 上界，idle-pull watchdog 在 SSE body 连续三个 keepalive 周期没有被 pull 时关闭 session。活跃客户端会因为每次 heartbeat 腾出 queue 空间而自然按 keepalive 粒度继续 pull；遗弃客户端会停止 pull，因此不需要等完整 session lifetime 才清理。TCP 连接还在但应用层长时间不读的客户端可能被关闭，应自行 reconnect。
 - 与 activation race 的 tail event 可以丢失。
@@ -119,6 +119,7 @@ Tail event families：
 Tail identity 规则：
 
 - fetch 请求的 `worker_console` identity 来自转发请求头，因为 workerd 对 `workerLoader` loaded worker 报告的 `scriptName=none`。
+- `worker_console.message` 保留 console argument 的位置。workerd 提供位置对应的 `Error` metadata 时，Runtime 会输出平行且有界的 `error_info` array，字段为 `name`、`message` 和可选 `stack`。结构化 stdout 在 metadata 超过 clone budget 时输出 `error_info_omitted: true`；live-tail 的精确序列化依次尝试 metadata、omitted marker 和不变的基础 message，只有基础 event 本身超限时才输出 `tail_warning`。
 - `scheduled()` 和 `queue()` 的 console event 是没有 request shape 的 JSRPC event，因此 console tail event 会省略 `worker_id` 和 `request_id`，而不是伪造 `"unknown"`。
 - Runtime 会在 invocation 边界输出显式的 `worker_fetch`、`worker_scheduled` 和 `worker_queue` start/finish event。`worker_fetch` 包含 method、worker-visible pathname、status/outcome 和 duration，不包含 host/query。
 - Control 生成的 `tail_warning` SSE event 没有 Redis stream id，因此不会污染单 worker resume cursor。

@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  WDL_CLI_PACKAGE: "@wdl-dev/cli@1.6.1"
+  WDL_CLI_PACKAGE: "@wdl-dev/cli@1.7.1"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -37,6 +37,7 @@ jobs:
       - run: npm run lint:unused
       - run: npm run typecheck
       - run: npm run typecheck:strict
+      - run: npm run typecheck:node
       - run: npm run compile:workerd
       - run: npm run test:unit
 
