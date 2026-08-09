@@ -10,6 +10,30 @@ export class __WdlAbort__ extends WorkerEntrypoint {
 const DEFAULT_EXPORT_SOURCE_SNIPPET = "const source = Function.prototype.toString.call(raw);";
 const DEFAULT_EXPORT_CLASS_TEST_SOURCE = "/^\\s*class\\b/.test(source)";
 
+/**
+ * @typedef {{ ns: string, worker: string, version: string }} RuntimeWorkerIdentity
+ */
+
+/**
+ * @param {Record<string, unknown>} workflowBindings
+ * @param {RuntimeWorkerIdentity | null | undefined} workerIdentity
+ */
+function identifiedWorkflowBindings(workflowBindings, workerIdentity) {
+  const entries = Object.entries(workflowBindings);
+  if (entries.length === 0) return workflowBindings;
+  const { ns, worker, version } = workerIdentity || {};
+  if (typeof ns !== "string" || !ns || typeof worker !== "string" || !worker ||
+      typeof version !== "string" || !version) {
+    throw new Error("Workflow binding wrapper requires worker identity");
+  }
+  return Object.fromEntries(entries.map(([binding, metadata]) => {
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+      throw new Error(`Workflow binding "${binding}" requires metadata`);
+    }
+    return [binding, { ...metadata, ns, worker, version }];
+  }));
+}
+
 export const HOST_BINDING_RUNTIME_MODULE_NAME = "_wdl-host-wrapper-runtime.js";
 export const HOST_BINDING_RUNTIME_SOURCE = `
 import { sanitizeRequestId } from "./_wdl-request-id.js";
@@ -140,13 +164,16 @@ export default wrappedDefault;
  * @param {string[]} doBindings
  * @param {Record<string, unknown>} workflowBindings
  * @param {string[]} entrypointNames
+ * @param {RuntimeWorkerIdentity | null | undefined} [workerIdentity]
  */
-export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, r2Bindings, doBindings, workflowBindings, entrypointNames) {
+export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, r2Bindings, doBindings, workflowBindings, entrypointNames, workerIdentity = null) {
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
   const d1BindingJson = JSON.stringify(d1Bindings);
   const r2BindingJson = JSON.stringify(r2Bindings);
   const doBindingJson = JSON.stringify(doBindings);
-  const workflowBindingJson = JSON.stringify(workflowBindings);
+  const workflowBindingJson = JSON.stringify(
+    identifiedWorkflowBindings(workflowBindings, workerIdentity)
+  );
   // Host facade helper modules are only added to workerCode when bindings
   // exist; importing them unconditionally would 404 the resolver.
   const d1Import = d1Bindings.length ? `import { D1Database } from "./_wdl-d1-client.js";` : "";
@@ -295,9 +322,7 @@ function wrapEnv(env, requestIdOrContext = null) {
     }
   });
   __WdlHostRuntime__.forEachObjectEntry(WORKFLOW_BINDINGS, (name, metadata) => {
-    if (out[name] !== undefined) {
-      out[name] = new Workflow(out[name] || metadata, workflowOptions(requestIdOrContext, workflowsBackend));
-    }
+    out[name] = new Workflow(metadata, workflowOptions(requestIdOrContext, workflowsBackend));
   });
   __WdlHostRuntime__.defineProperty(out, HOST_BINDINGS_WRAPPED, { value: true });
   return out;

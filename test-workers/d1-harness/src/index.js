@@ -50,6 +50,16 @@ export default {
       const row = await session.prepare("select * from messages where id = ?").bind(id).first();
       return Response.json({ row, bookmark: session.getBookmark() });
     }
+    if (op === "rtree") {
+      await env.DB.exec("create virtual table if not exists spatial_index using rtree(id, min_x, max_x, min_y, max_y)");
+      await env.DB.exec("delete from spatial_index");
+      await env.DB.exec("insert into spatial_index values (1, -1, 1, -1, 1), (2, 10, 12, 10, 12)");
+      const rows = await env.DB.prepare(
+        "select id from spatial_index where min_x <= 2 and max_x >= -2 and min_y <= 2 and max_y >= -2 order by id"
+      ).raw({ columnNames: true });
+      const check = await env.DB.prepare("select rtreecheck('spatial_index') as result").first("result");
+      return Response.json({ rows, check });
+    }
     return new Response("bad op", { status: 400 });
   }
 };

@@ -66,6 +66,16 @@ function doWebSocketUpgradeOk(service) {
   });
 }
 
+async function waitForDoRouterAfterRecreate() {
+  await waitUntil("Envoy do_router after do-runtime recreate", () => {
+    try {
+      return serviceInternalGet("envoy", 18788, "/healthz").status === 200;
+    } catch {
+      return false;
+    }
+  }, { timeoutMs: 10_000, intervalMs: 100 });
+}
+
 /** @param {string} outcome */
 async function gatewayWebSocketProxyCount(outcome) {
   const metrics = await (await fetch(gatewayUrl("/_metrics"))).text();
@@ -175,6 +185,7 @@ test("gateway-proxied Durable Object WebSocket reconnects backend after do-runti
     });
 
     composeRecreate("do-runtime");
+    await waitForDoRouterAfterRecreate();
 
     const second = readOneServerTextFrame(socket, { timeoutMs: 10_000 });
     socket.write(encodeClientTextFrame("after-1"));
@@ -317,6 +328,7 @@ test("gateway-proxied Durable Object WebSocket proactively reconnects backend fo
     });
 
     composeRecreate("do-runtime");
+    await waitForDoRouterAfterRecreate();
 
     assert.deepEqual(await readJsonServerFrame(socket, { timeoutMs: 15_000 }), {
       objectId: "push",
@@ -515,6 +527,7 @@ test("gateway-proxied Durable Object hibernation WebSocket reconnects backend af
     });
 
     composeRecreate("do-runtime");
+    await waitForDoRouterAfterRecreate();
 
     socket.write(encodeClientTextFrame("after"));
     assert.deepEqual(await readJsonServerFrame(socket, { timeoutMs: 10_000 }), {

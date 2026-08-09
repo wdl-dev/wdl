@@ -12,6 +12,7 @@ import {
   DO_BINARY_BODY_WORKER,
   DO_BINDINGS_WORKER,
   DO_RPC_WORKER,
+  DO_RTREE_WORKER,
   DO_WORKER,
 } from "./helpers/durable-objects.js";
 import { redisDel, redisSetEx } from "./helpers/redis.js";
@@ -62,6 +63,22 @@ test("worker Durable Object binding routes through do-runtime and preserves obje
     storage: 1,
     body: "from-worker",
   });
+});
+
+test("Durable Object SQLite supports R*Tree indexes", async () => {
+  const ns = uniqueNs("do-rtree");
+  await deployAndPromote(ns, "spatial", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_RTREE_WORKER },
+    bindings: {
+      SPATIAL: { type: "do", className: "SpatialIndex" },
+    },
+  });
+
+  const response = await gatewayFetch(ns, "/spatial");
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  assert.deepEqual(responseJson({ body: text }), { ids: [1], check: "ok" });
 });
 
 test("version-delete lock does not interrupt active Durable Object traffic", async () => {

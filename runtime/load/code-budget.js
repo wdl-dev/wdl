@@ -32,6 +32,7 @@ const utf8Decoder = new TextDecoder();
  * @typedef {{ modules: Record<string, WorkerModuleValue>, mainModule: string, [key: string]: unknown }} WorkerCodeShape
  * @typedef {Record<string, unknown> & { type?: string, className?: unknown }} RuntimeBindingSpec
  * @typedef {{ binding?: unknown, className?: unknown }} RuntimeWorkflowSpec
+ * @typedef {{ ns: string, worker: string, version: string }} RuntimeWorkerIdentity
  * @typedef {{ entrypoint?: unknown }} RuntimeExportSpec
  * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null }} RuntimeBundleMeta
  * @typedef {{
@@ -294,8 +295,15 @@ export function analyzeRuntimeMeta(meta) {
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
  * @param {RuntimeMetaPlan} [plan]
+ * @param {RuntimeWorkerIdentity | null} [workerIdentity]
  */
-function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = analyzeRuntimeMeta(meta)) {
+function runtimeInjectedModuleSources(
+  mainModule,
+  meta,
+  runtimeSources,
+  plan = analyzeRuntimeMeta(meta),
+  workerIdentity = null
+) {
   const injections = runtimeModuleInjections(runtimeSources);
   /** @type {Map<string, string>} */
   const out = new Map();
@@ -324,7 +332,8 @@ function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = a
           plan.r2Bindings,
           plan.doBindings,
           plan.workflowBindings,
-          plan.hostWrappedClassNames
+          plan.hostWrappedClassNames,
+          workerIdentity
         )
       : generateAbortShimWrapperModule(mainModule)
   );
@@ -335,14 +344,15 @@ function runtimeInjectedModuleSources(mainModule, meta, runtimeSources, plan = a
  * @param {WorkerCodeShape} workerCode
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
- * @param {RuntimeMetaPlan} [plan]
+ * @param {{ plan?: RuntimeMetaPlan, workerIdentity?: RuntimeWorkerIdentity | null }} [options]
  */
 export function injectRuntimeModulesForHostBindings(
   workerCode,
   meta,
   runtimeSources,
-  plan = analyzeRuntimeMeta(meta)
+  options = {}
 ) {
+  const plan = options.plan || analyzeRuntimeMeta(meta);
   const originalMain = workerCode.mainModule;
   if (typeof originalMain !== "string" || !originalMain) {
     throw new Error("Host binding wrapper requires a string mainModule");
@@ -356,7 +366,13 @@ export function injectRuntimeModulesForHostBindings(
       `Host binding wrapper requires reserved module names ${HOST_BINDING_RESERVED_MODULE_NAMES.join(", ")}`
     );
   }
-  for (const [name, source] of runtimeInjectedModuleSources(originalMain, meta, runtimeSources, plan)) {
+  for (const [name, source] of runtimeInjectedModuleSources(
+    originalMain,
+    meta,
+    runtimeSources,
+    plan,
+    options.workerIdentity || null
+  )) {
     workerCode.modules[name] = source;
   }
   workerCode.mainModule = "_wdl-wrapper.js";
@@ -400,6 +416,7 @@ export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
  *   normalized: NormalizedModule[],
  *   meta: RuntimeBundleMeta,
  *   runtimeSources: RuntimeInjectionSources,
+ *   workerIdentity?: RuntimeWorkerIdentity | null,
  *   userCodeBytes?: number,
  * }} args
  */
@@ -408,10 +425,17 @@ export function estimateFinalWorkerLoaderCodeBytes({
   normalized,
   meta,
   runtimeSources,
+  workerIdentity = null,
   userCodeBytes = estimateWorkerLoaderUserCodeBytes({ normalized, meta }),
 }) {
   let total = userCodeBytes;
-  for (const [, source] of runtimeInjectedModuleSources(mainModule, meta, runtimeSources)) {
+  for (const [, source] of runtimeInjectedModuleSources(
+    mainModule,
+    meta,
+    runtimeSources,
+    analyzeRuntimeMeta(meta),
+    workerIdentity
+  )) {
     total += Buffer.byteLength(source, "utf8");
   }
   return total;

@@ -23,6 +23,7 @@ WDL 会 shim `ctx.storage.setAlarm()`、`getAlarm()` 和 `deleteAlarm()`，因�
 ## 接口
 
 - Tenant binding：loaded worker env 中的 Durable Object namespace facade。
+- Native `ctx.storage.sql` 支持 SQLite R*Tree virtual table（`rtree`、`rtree_i32`）和 `rtreecheck()`，并沿用同一套 facet storage 与 ownership 边界。
 - Runtime -> do-runtime fetch/RPC：`/internal/do/invoke`
 - Runtime -> do-runtime WebSocket：`/internal/do/connect`
 - do-runtime -> workflows alarm 写入：`/internal/workflows/do-alarms/set`、`/internal/workflows/do-alarms/delete`
@@ -129,8 +130,7 @@ do-runtime 围绕 owner resolution、session-policy fence、lazy facet restart�
 
 ## 部署 / Rollout 注意事项
 
-- 先部署 Gateway、Workflows 和 do-runtime projection reader，再部署 system-runtime/Control writer。system-runtime rolling 期间暂停 Control mutation，待该 tier 稳定后再恢复，并且只能在此后允许 API client 发送 `sessionPolicy`。旧 Gateway、Workflows 或 do-runtime tier 仍在服务时不得启用 `restart`。
-- DO binding transport shape 改变时，do-runtime 应与 user/system runtime 一起滚。
+- 跨 tier DO protocol 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程。
 - workerd 进程终止前应先 drain，让 owned shard 释放，或通过 lease expiry failover。
 - EFS shared storage 只有在 owner lease + generation fence 保证每个 owner scope 单 writer 时才安全。
 - Best-effort 尝试把 localDisk volume 从 workerd 2026-07-03 或更高版本降回 2026-07-01 时，应执行 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 scheduler metadata cleanup。

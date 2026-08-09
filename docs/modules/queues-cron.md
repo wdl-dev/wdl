@@ -334,9 +334,8 @@ for loaded worker execution.
 
 ## Deployment / Rollout Notes
 
-- Deploy control/runtime/scheduler together when changing queue or cron wire shape.
-- Runtime `:8088` must be deployed before scheduler uses internal dispatch paths that do
-  not exist on the older runtime.
+- Cross-tier queue and cron contract changes follow the reader-before-writer procedure
+  in the [infra rollout notes](infra.md#deployment--rollout-notes).
 - Cron discovery index has a one-time backfill path. After
   `cron:index:workers:backfilled` exists, control writers own the discovery projection.
 - Queue indexes are non-authoritative and repairable. New writers that create queue

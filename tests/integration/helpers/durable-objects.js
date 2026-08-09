@@ -294,6 +294,11 @@ export const DO_RPC_WORKER = readFileSync(
   "utf8"
 );
 
+export const DO_RTREE_WORKER = readFileSync(
+  new URL("../../../test-workers/do-rtree/src/index.js", import.meta.url),
+  "utf8"
+);
+
 /** @param {string} label */
 export function doVersionWorker(label) {
   return `

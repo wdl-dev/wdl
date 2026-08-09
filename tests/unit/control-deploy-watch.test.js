@@ -301,6 +301,7 @@ const controlWorkerCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
     "runtime-load-module-rewrite": repositoryFileUrl("runtime/load/module-rewrite.js"),
     "do-runtime-load-code-budget": repositoryFileUrl("do-runtime/load-code-budget.js"),
     "shared-errors": repositoryFileUrl("shared/errors.js"),
+    "shared-worker-contract": workerContractUrl,
     "do-runtime-alarm-shim-source": repositoryFileUrl("do-runtime/alarm-shim-source.js"),
   })
 ));
@@ -310,11 +311,15 @@ const {
   assertWorkerLoaderCodeBudget,
 } = await import(controlWorkerCodeBudgetUrl);
 
-/** @param {{ meta: Record<string, unknown>, normalized: Array<[string, string | Uint8Array]> }} bundle */
-function assertTestWorkerCodeBytes({ meta, normalized }) {
+/**
+ * @param {{ meta: Record<string, unknown>, normalized: Array<[string, string | Uint8Array]> }} bundle
+ * @param {{ version?: string }} [context]
+ */
+function assertTestWorkerCodeBytes({ meta, normalized }, context = {}) {
   return assertWorkerLoaderCodeBudget({
     ns: "tenant-a",
     worker: "unit",
+    version: context.version,
     meta,
     normalized,
   }).bytes;
@@ -1925,6 +1930,27 @@ test("commitWithWatch checks code budget after workflow keys are materialized", 
     (err) => /** @type {{ code?: string }} */ (err).code === "worker_code_too_large"
   );
   assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta, null);
+});
+
+test("worker code budget reserves the longest Workflow identity version", () => {
+  /** @type {{ meta: Record<string, unknown>, normalized: Array<[string, string | Uint8Array]> }} */
+  const bundle = {
+    meta: {
+      mainModule: "worker.js",
+      modules: { "worker.js": { type: "module" } },
+      workflows: [{
+        name: "flow",
+        binding: "FLOW",
+        className: "Flow",
+        workflowKey: "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }],
+    },
+    normalized: [["worker.js", "export default {}"]],
+  };
+
+  const reservedBytes = assertTestWorkerCodeBytes(bundle);
+  assert.equal(assertTestWorkerCodeBytes(bundle, { version: "v9" }), reservedBytes);
+  assert.equal(assertTestWorkerCodeBytes(bundle, { version: "v10" }), reservedBytes);
 });
 
 test("commitWithWatch reads workflow defs with own-property discipline", async () => {

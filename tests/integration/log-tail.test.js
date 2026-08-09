@@ -44,6 +44,9 @@ const TAIL_WORKER_CODE = `
       const url = new URL(request.url);
       const tag = url.searchParams.get("tag") || "default";
       console.log("hello tag=" + tag);
+      if (url.searchParams.get("error") === "1") {
+        console.error("typed context", new TypeError("typed " + tag));
+      }
       if (url.searchParams.get("throw") === "1") throw new Error("boom " + tag);
       return new Response("ok " + tag + "\\n");
     },
@@ -234,6 +237,8 @@ test("wdl tail: console.* + uncaught exception flow end-to-end", async () => {
     const res = await gatewayFetch(ns, `/tail-target/?tag=${tag}`);
     assert.equal(res.status, 200);
   }
+  const typedError = await gatewayFetch(ns, "/tail-target/?tag=metadata&error=1");
+  assert.equal(typedError.status, 200);
   const failRes = await gatewayFetch(ns, `/tail-target/?tag=oops&throw=1`);
   assert.equal(failRes.status, 502);
 
@@ -251,7 +256,16 @@ test("wdl tail: console.* + uncaught exception flow end-to-end", async () => {
   });
   assert.ok(tags.includes("one"), `expected tag "one" in ${JSON.stringify(tags)}`);
   assert.ok(tags.includes("two"), `expected tag "two" in ${JSON.stringify(tags)}`);
+  assert.ok(tags.includes("metadata"), `expected tag "metadata" in ${JSON.stringify(tags)}`);
   assert.ok(tags.includes("oops"), `expected tag "oops" in ${JSON.stringify(tags)}`);
+
+  const typedConsole = consoleEvents.find((event) => Array.isArray(event.error_info));
+  assert.ok(typedConsole, `expected structured Error metadata in ${JSON.stringify(consoleEvents)}`);
+  assert.equal(typedConsole.error_info.length, 2);
+  assert.equal(typedConsole.error_info[0], null);
+  assert.equal(typedConsole.error_info[1].name, "TypeError");
+  assert.equal(typedConsole.error_info[1].message, "typed metadata");
+  assert.match(typedConsole.error_info[1].stack, /at /);
 
   // `>= 1` (not `=== 1`) future-proofs against workerd starting to
   // surface unhandled rejections via event.exceptions; the content

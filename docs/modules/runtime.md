@@ -88,9 +88,9 @@ services. Runtime therefore treats bindings as adapters:
   secret, which wins over a var. Control enforces a headroomed estimate of workerd's
   `workerLoader` serialized env budget during deploys and secret mutations. That
   estimate calls the same `buildWorkerEnv()` materializer as cold-load with shape-only
-  factories, then measures user vars/secrets plus runtime-injected binding/workflow env
-  values, including required caller secret copies in platform/service binding props, so
-  an over-large env fails in the control plane instead of during runtime cold-load.
+  factories, then measures user vars/secrets plus runtime-injected binding env values,
+  including required caller secret copies in platform/service binding props, so an
+  over-large env fails in the control plane instead of during runtime cold-load.
 - Stateful bindings such as D1, Durable Objects, and Workflows call dedicated backend
   services. The hidden backend Fetchers stay in runtime and are removed before tenant
   code observes `env`.
@@ -197,7 +197,9 @@ Data-plane bindings use their own storage:
   facade set at construction and reuse it; only their diagnostic context is refreshed
   per invocation as described below.
 - KV and queue producers use DB 1 through `redis-proxy`.
-- Workflow bindings call `workflows`; runtime does not read DB 2 directly.
+- Workflow bindings call `workflows`; runtime does not read DB 2 directly. Frozen
+  Workflow identity is embedded in the generated private wrapper rather than placed in
+  raw worker env, so Node-compatible `process.env` cannot expose the metadata object.
 - D1 and DO bindings call their dedicated runtime services.
 - R2/ASSETS use S3-compatible object storage.
 
@@ -268,23 +270,32 @@ when a matching active tail session exists.
 
 ## Deployment / Rollout Notes
 
-- Runtime and control should roll together when bundle metadata, wrapper generation, or
-  binding shape changes.
-- Runtime must roll before scheduler/workflows if they depend on a new `:8088` internal
-  path or dispatch body.
+- Runtime/Control contract changes follow the reader-before-writer procedure in the
+  [infra rollout notes](infra.md#deployment--rollout-notes); do not rely on an
+  uncoordinated simultaneous roll.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
   Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
   available without that flag in the bundled workerd baseline. The current upstream
   implementation removes the loader cache identity while allowing outstanding calls to
   drain; workerd upgrades must reverify that behavior.
+- Bundled workerd returns `0` from `Date.now()`, zero-argument `new Date()`, and
+  `performance.now()` outside an active request, including dynamic module evaluation.
+  Generated wrappers pass through the request-owned
+  `ExecutionContext`, so `ctx.abort(reason?)`, `ctx.tracing.startSpan()`, and span
+  attribute setters are available without a WDL shim. `ctx.abort()` terminates only the
+  current stateless invocation; it is unrelated to host-only `abortIsolate()` eviction.
+- At compatibility date `2026-08-04` or later, workerd enables both `nodejs_compat` and
+  `nodejs_compat_v2` by default. A tenant that needs neither surface must specify both
+  `no_nodejs_compat` and `no_nodejs_compat_v2`.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
   `allow_irrevocable_stub_storage` deny policy at deploy; runtime rejects retained
   metadata containing either class. Static host workers also omit the irrevocable-stub
   flag. Disable-style flags such as `no_*` are not part of the experimental mirror unless
   upstream marks the enable flag itself experimental.
-- Python Workers modules are not supported. Control rejects new `py` module manifests,
-  and runtime/do-runtime reject retained metadata that contains them instead of letting
-  workerd fail later with a mixed JS/Python bundle error.
+- Python Workers modules are not supported. Upstream's `python_workers_20260610` flag is
+  no longer experimental, but Control still rejects new `py` module manifests and
+  runtime/do-runtime reject retained metadata that contains them instead of letting
+  workerd bootstrap Pyodide during cold load.
 - Since WDL's 2026-07-01 workerd pin, runtime processes have used process-level
   `--experimental` because upstream gates `workerLoader` bindings on that switch.
   Do not add the `experimental` compatibility flag or `allowExperimental` to loaded
@@ -294,9 +305,12 @@ when a matching active tail session exists.
   before version allocation and again after commit metadata materialization, including
   runtime/do-runtime-injected
   wrapper/client modules, workflow import rewrites, and generated workflow keys. Vars,
-  namespace/worker secrets, and runtime-injected binding/workflow env values are checked
-  against a headroomed `workerLoader` env budget in watched commit and secret-mutation
-  paths. Deploy and namespace-secret mutations use the version they can load; worker
+  namespace/worker secrets, and runtime-injected binding env values are checked against
+  a headroomed `workerLoader` env budget in watched commit and secret-mutation paths.
+  Workflow identity is generated wrapper code and is covered by the code budget instead.
+  That wrapper estimate reserves the longest valid immutable version tag, so later
+  secret-driven version bumps cannot grow accepted code past the workerd cap.
+  Deploy and namespace-secret mutations use the version they can load; worker
   secret mutations also recheck the forced bump inside the WATCH/COPY transaction so
   the allocated bump version is covered before routing flips. The estimate starts from
   JSON bytes and adds V8 two-byte string overhead for non-Latin-1 strings, so mixed

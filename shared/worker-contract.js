@@ -12,6 +12,8 @@ export function formatVersion(n) {
   return `v${n}`;
 }
 
+export const MAX_WORKER_VERSION_TAG = formatVersion(Number.MAX_SAFE_INTEGER);
+
 // Returns the integer or null — never throws, callers decide on 400 vs skip.
 /**
  * @param {unknown} tag

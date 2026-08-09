@@ -186,13 +186,14 @@ const {
   estimatedWorkerLoaderEnvBytes,
 } = await import(envBudgetUrl());
 
-const WORKFLOW_BUDGET_META = Object.freeze({
-  workflows: Object.freeze([{
-    binding: "FLOW",
-    name: "flow",
-    className: "Flow",
-    workflowKey: "wf_0123456789abcdef0123456789abcdef",
-  }]),
+const VERSIONED_BINDING_BUDGET_META = Object.freeze({
+  bindings: Object.freeze({
+    ROOM: Object.freeze({
+      type: "do",
+      className: "Room",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+    }),
+  }),
 });
 
 /**
@@ -203,7 +204,7 @@ const WORKFLOW_BUDGET_META = Object.freeze({
  *   workerSecrets?: Record<string, string> | null,
  * }} args
  */
-function workflowBudgetEnvBytes({ padLength, version, nsSecrets = null, workerSecrets = null }) {
+function versionedBindingBudgetEnvBytes({ padLength, version, nsSecrets = null, workerSecrets = null }) {
   return estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({
     ns: "demo",
     worker: "api",
@@ -211,14 +212,14 @@ function workflowBudgetEnvBytes({ padLength, version, nsSecrets = null, workerSe
     vars: { PAD: "x".repeat(padLength) },
     nsSecrets,
     workerSecrets,
-    meta: WORKFLOW_BUDGET_META,
+    meta: VERSIONED_BINDING_BUDGET_META,
   }));
 }
 
 /** @param {number} padLength */
-function workflowBudgetMetaWithPad(padLength) {
+function versionedBindingBudgetMetaWithPad(padLength) {
   return {
-    ...WORKFLOW_BUDGET_META,
+    ...VERSIONED_BINDING_BUDGET_META,
     vars: { PAD: "x".repeat(padLength) },
   };
 }
@@ -227,12 +228,12 @@ function workflowBudgetMetaWithPad(padLength) {
  * @param {string} version
  * @param {{ nsSecrets?: Record<string, string> | null, workerSecrets?: Record<string, string> | null }} [secrets]
  */
-function maxWorkflowBudgetPadFor(version, secrets = {}) {
+function maxVersionedBindingBudgetPadFor(version, secrets = {}) {
   let lo = 0;
   let hi = WORKER_LOADER_ENV_MAX_BYTES;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (workflowBudgetEnvBytes({ padLength: mid, version, ...secrets }) <= WORKER_LOADER_ENV_MAX_BYTES) {
+    if (versionedBindingBudgetEnvBytes({ padLength: mid, version, ...secrets }) <= WORKER_LOADER_ENV_MAX_BYTES) {
       lo = mid;
     } else {
       hi = mid - 1;
@@ -516,15 +517,15 @@ test("namespace secret PUT returns corrupt_meta for invalid retained bundle meta
 test("namespace secret PUT budgets active worker versions with their real active version", async () => {
   const nsSecrets = { TOKEN: "plain-secret" };
   const padLength = WORKER_LOADER_ENV_MAX_BYTES -
-    workflowBudgetEnvBytes({
+    versionedBindingBudgetEnvBytes({
       padLength: 0,
       version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
       nsSecrets,
     }) +
     1;
-  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v1", nsSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(versionedBindingBudgetEnvBytes({ padLength, version: "v1", nsSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
   assert.ok(
-    workflowBudgetEnvBytes({ padLength, version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER, nsSecrets }) >
+    versionedBindingBudgetEnvBytes({ padLength, version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER, nsSecrets }) >
       WORKER_LOADER_ENV_MAX_BYTES
   );
 
@@ -532,7 +533,7 @@ test("namespace secret PUT budgets active worker versions with their real active
     seedWorkerSecretActive(redis, "v1");
     redis.sets.set("workers:demo", new Set(["api"]));
     redis.hashes.set("worker:demo:api:v:1", {
-      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
+      __meta__: JSON.stringify(versionedBindingBudgetMetaWithPad(padLength)),
     });
   }, async (redis) => {
     const response = await handle({
@@ -1290,21 +1291,21 @@ test("worker secret PUT budgets the active bump with its allocated version", asy
   const state = workerSecretState;
   const workerSecrets = { TOKEN: "plain-secret" };
   const padLength = WORKER_LOADER_ENV_MAX_BYTES -
-    workflowBudgetEnvBytes({
+    versionedBindingBudgetEnvBytes({
       padLength: 0,
       version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
       workerSecrets,
     }) +
     1;
-  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v1", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
-  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v2", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(versionedBindingBudgetEnvBytes({ padLength, version: "v1", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(versionedBindingBudgetEnvBytes({ padLength, version: "v2", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
   assert.ok(
-    workflowBudgetEnvBytes({ padLength, version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER, workerSecrets }) >
+    versionedBindingBudgetEnvBytes({ padLength, version: WORKER_LOADER_ENV_VERSION_PLACEHOLDER, workerSecrets }) >
       WORKER_LOADER_ENV_MAX_BYTES
   );
   await withWorkerSecretRedis(state, (redis) => {
     redis.hashes.set("worker:demo:api:v:1", {
-      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
+      __meta__: JSON.stringify(versionedBindingBudgetMetaWithPad(padLength)),
     });
   }, async (redis) => {
     const response = await workerHandle({
@@ -1340,14 +1341,14 @@ test("worker secret PUT rejects overbudget bump source before writing secret", a
   const state = workerSecretState;
   const workerSecrets = { TOKEN: "plain-secret" };
   const newVersion = "v1000000000";
-  const padLength = maxWorkflowBudgetPadFor("v2", { workerSecrets });
-  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v2", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
-  assert.ok(workflowBudgetEnvBytes({ padLength, version: newVersion, workerSecrets }) > WORKER_LOADER_ENV_MAX_BYTES);
+  const padLength = maxVersionedBindingBudgetPadFor("v2", { workerSecrets });
+  assert.ok(versionedBindingBudgetEnvBytes({ padLength, version: "v2", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(versionedBindingBudgetEnvBytes({ padLength, version: newVersion, workerSecrets }) > WORKER_LOADER_ENV_MAX_BYTES);
   await withWorkerSecretRedis(state, (redis) => {
     seedWorkerSecretActive(redis, "v2");
     redis.strings.set("worker:demo:api:next_version", "999999999");
     redis.hashes.set("worker:demo:api:v:2", {
-      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
+      __meta__: JSON.stringify(versionedBindingBudgetMetaWithPad(padLength)),
     });
   }, async (redis, calls) => {
     const response = await workerHandle({
@@ -1373,14 +1374,14 @@ test("worker secret PUT rejects overbudget bump source before writing secret", a
 test("worker secret PUT checks retry source under its retained version", async () => {
   const state = workerSecretState;
   const workerSecrets = { TOKEN: "plain-secret" };
-  const padLength = maxWorkflowBudgetPadFor("v999", { workerSecrets });
-  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v999", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
-  assert.ok(workflowBudgetEnvBytes({ padLength, version: "v1000", workerSecrets }) > WORKER_LOADER_ENV_MAX_BYTES);
+  const padLength = maxVersionedBindingBudgetPadFor("v999", { workerSecrets });
+  assert.ok(versionedBindingBudgetEnvBytes({ padLength, version: "v999", workerSecrets }) <= WORKER_LOADER_ENV_MAX_BYTES);
+  assert.ok(versionedBindingBudgetEnvBytes({ padLength, version: "v1000", workerSecrets }) > WORKER_LOADER_ENV_MAX_BYTES);
   await withWorkerSecretRedis(state, (redis) => {
     seedWorkerSecretActive(redis, "v1000");
     redis.strings.set("worker:demo:api:next_version", "998");
     redis.hashes.set("worker:demo:api:v:1000", {
-      __meta__: JSON.stringify(workflowBudgetMetaWithPad(padLength)),
+      __meta__: JSON.stringify(versionedBindingBudgetMetaWithPad(padLength)),
     });
     seedWorkerSecretVersions(redis, ["v1000"]);
   }, async (redis) => {

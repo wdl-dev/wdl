@@ -26,6 +26,16 @@ gate for workerd and server-side tiers (`auth`, `control`, `gateway`, `runtime`,
 `d1-runtime`, `do-runtime`, `shared`, selected scripts, tests, and system worker code).
 The downstream CLI split keeps its own JavaScript standard and compatibility surface.
 
+The workerd runtime package and `@cloudflare/workers-types` declaration package do not
+have to advance in lockstep when a declaration release weakens this mixed Node/workerd
+checker. In particular, Workers types `5.20260808.1` declare `Buffer`, `process`, and
+`global` unconditionally; combining them with `@types/node` turns Node's `Buffer` into
+`any` across the repository. WDL therefore runs workerd `1.20260809.1` while retaining
+Workers types `5.20260804.1`. Keep this deliberate lag until Node and workerd checking
+are split without losing imported-production-source coverage; do not mask it with
+helper rewrites or broad ambient declarations. `types/typecheck-contracts.ts` makes
+the strict checker fail if a future declaration bump turns Node's `Buffer` into `any`.
+
 ## Language Baseline
 
 The repository targets Node `>=24` for scripts and tests. Runtime code targets workerd

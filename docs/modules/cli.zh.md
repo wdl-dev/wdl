@@ -92,7 +92,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 | 字段 | WDL 行为 |
 |---|---|
 | `name`、`main`、`compatibility_date`、`compatibility_flags` | 存入 immutable bundle metadata。Control 会拒绝早于 `2026-04-01` 的显式 `compatibility_date`，并在 commit 前拒绝格式错误、未来日期或当前 bundled workerd 不支持的值；包含 runtime/do-runtime 注入模块和生成 workflow keys 后的最终 WorkerCode 必须落在 workerd 64 MiB `workerLoader` code limit 内。 |
-| `[vars]` | 接受 string、number、boolean，并 stringified 进 `env`；vars、namespace/worker secrets、runtime 注入的 binding/workflow env value 必须落在 WDL 留有 headroom 的 workerd 1 MiB `workerLoader` env budget 内。 |
+| `[vars]` | 接受 string、number、boolean，并 stringified 进 `env`；vars、namespace/worker secrets、runtime 注入的 binding env value 必须落在 WDL 留有 headroom 的 workerd 1 MiB `workerLoader` env budget 内。Workflow identity 留在生成的 wrapper code 中，并由 WorkerCode budget 计数。 |
 | `[[kv_namespaces]]` | `id` 是 platform-local KV namespace id，不是 Cloudflare UUID。 |
 | `[[r2_buckets]]` | `binding` 加 `bucket_name` 映射为平台 S3 bucket 下的 namespace-scoped virtual R2 bucket。 |
 | `[assets]` | `directory` 内容上传到 S3-compatible assets storage，并 auto-inject `ASSETS`。 |

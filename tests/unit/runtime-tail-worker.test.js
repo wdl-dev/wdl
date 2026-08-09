@@ -6,6 +6,7 @@ import {
   readRepositoryFile,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 import { installMockFetch, makeRecordingFetch } from "../helpers/mock-fetch.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { runtimeProxyBindingStubUrl, sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
@@ -142,6 +143,65 @@ test("tail-worker: reads worker_id + request_id from headers and maps the consol
       fields: { console_level: "error", message: "boom", worker_id: "demo:hello:v3", request_id: "rid-42" },
     },
   ]);
+});
+
+test("tail-worker: preserves bounded workerd errorInfo beside the console message", () => {
+  handler.tail([
+    fetchEvent({
+      workerId: "demo:hello:v3",
+      requestId: "rid-error",
+      logs: [{
+        level: "error",
+        message: ["context", {}],
+        errorInfo: [null, {
+          name: "TypeError",
+          message: "boom",
+          stack: "at worker.js:1:1",
+        }],
+      }],
+    }),
+  ], TAIL_ENV);
+
+  assert.deepEqual(/** @type {any} */ (globalThis).__runtimeTailLogs, [{
+    service: "runtime-tail",
+    level: "error",
+    event: "worker_console",
+    fields: {
+      console_level: "error",
+      message: ["context", {}],
+      error_info: [null, {
+        name: "TypeError",
+        message: "boom",
+        stack: "at worker.js:1:1",
+      }],
+      worker_id: "demo:hello:v3",
+      request_id: "rid-error",
+    },
+  }]);
+});
+
+test("tail-worker: keeps the console event when errorInfo exceeds the WDL tail budget", () => {
+  handler.tail([
+    fetchEvent({
+      workerId: "demo:hello:v3",
+      requestId: "rid-large-error",
+      logs: [{
+        level: "error",
+        message: ["still-visible", {}],
+        errorInfo: [null, {
+          name: "Error",
+          message: "large stack",
+          stack: "x".repeat(6 * 1024),
+        }],
+      }],
+    }),
+  ], TAIL_ENV);
+
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs.length, 1);
+  const fields = /** @type {any} */ (globalThis).__runtimeTailLogs[0].fields;
+  assert.deepEqual(fields.message, ["still-visible", {}]);
+  assert.equal(fields.error_info, undefined);
+  assert.equal(fields.error_info_omitted, true);
 });
 
 test("tail-worker: binds LOG_LEVEL through shared observability", () => {
@@ -315,6 +375,27 @@ async function freshTailHandler(tag) {
   return m.default;
 }
 
+/**
+ * @param {() => Promise<void>} callback
+ */
+async function countTailPayloadStringifies(callback) {
+  const stringify = JSON.stringify;
+  let count = 0;
+  await withMockedProperty(
+    JSON,
+    "stringify",
+    /** @type {typeof JSON.stringify} */ (function (value, replacer, space) {
+      if (value && typeof value === "object" &&
+          /** @type {{ event?: unknown }} */ (value).event === "worker_console") {
+        count += 1;
+      }
+      return Reflect.apply(stringify, JSON, [value, replacer, space]);
+    }),
+    callback
+  );
+  return count;
+}
+
 function keepEventLoopAlive(intervalMs = 25) {
   const keepAliveTimer = setInterval(() => {}, intervalMs);
   return () => clearInterval(keepAliveTimer);
@@ -332,6 +413,110 @@ function tailAppendPayload(call) {
   assert.equal(typeof json, "string", "tail append body.json must be a string");
   return parseJsonObjectRequestBody({ body: json }, "tail append payload");
 }
+
+test("tail-worker: forwards workerd errorInfo through the active live-tail stream", async () => {
+  const calls = makeFetchSpy({ activeSequence: [["demo:x"]] });
+  const ctx = fakeCtx();
+  const activeHandler = await freshTailHandler("error-info-forward");
+
+  const payloadStringifies = await countTailPayloadStringifies(async () => {
+    await activeHandler.tail([
+      fetchEvent({
+        workerId: "demo:x:v1",
+        requestId: "rid-error-forward",
+        logs: [{
+          level: "error",
+          message: ["context", {}],
+          errorInfo: [null, { name: "RangeError", message: "out of range" }],
+        }],
+      }),
+    ], TAIL_PROXY_ENV, ctx);
+    await Promise.all(ctx.tasks);
+  });
+
+  const append = calls.find((call) => call.url.endsWith("/logs/tail/append"));
+  assert.ok(append, "active tailer should receive the console event");
+  assert.equal(payloadStringifies, 1, "active payload must be serialized once");
+  const payload = tailAppendPayload(append);
+  assert.equal(typeof payload.ts, "number");
+  delete payload.ts;
+  assert.deepEqual(payload, {
+    event: "worker_console",
+    console_level: "error",
+    message: ["context", {}],
+    error_info: [null, { name: "RangeError", message: "out of range" }],
+    worker_id: "demo:x:v1",
+    request_id: "rid-error-forward",
+  });
+});
+
+test("tail-worker: live tail drops errorInfo before a base console event at the byte cap", async () => {
+  const calls = makeFetchSpy({ activeSequence: [["demo:x"]] });
+  const ctx = fakeCtx();
+  const activeHandler = await freshTailHandler("error-info-byte-cap");
+  const message = ["x".repeat(4_800)];
+
+  await activeHandler.tail([
+    fetchEvent({
+      workerId: "demo:x:v1",
+      requestId: "rid-error-forward",
+      logs: [{
+        level: "error",
+        message,
+        errorInfo: [null, {
+          name: "Error",
+          message: "metadata",
+          stack: "s".repeat(120),
+        }],
+      }],
+    }),
+  ], TAIL_PROXY_ENV, ctx);
+  await Promise.all(ctx.tasks);
+
+  const append = calls.find((call) => call.url.endsWith("/logs/tail/append"));
+  assert.ok(append, "active tailer should receive the base console event");
+  const body = tailAppendBody(append);
+  const payload = tailAppendPayload(append);
+  assert.equal(payload.event, "worker_console");
+  assert.deepEqual(payload.message, message);
+  assert.equal(payload.error_info, undefined);
+  assert.equal(payload.error_info_omitted, true);
+  assert.ok(new TextEncoder().encode(/** @type {string} */ (body.json)).byteLength <= 5 * 1024);
+});
+
+test("tail-worker: live tail keeps the base message when the omitted marker crosses the byte cap", async () => {
+  const calls = makeFetchSpy({ activeSequence: [["demo:x"]] });
+  const ctx = fakeCtx();
+  const activeHandler = await freshTailHandler("error-info-marker-byte-cap");
+  const message = ["x".repeat(4_954)];
+
+  await activeHandler.tail([
+    fetchEvent({
+      workerId: "demo:x:v1",
+      requestId: "rid-error-forward",
+      logs: [{
+        level: "error",
+        message,
+        errorInfo: [null, {
+          name: "Error",
+          message: "large stack",
+          stack: "s".repeat(6 * 1024),
+        }],
+      }],
+    }),
+  ], TAIL_PROXY_ENV, ctx);
+  await Promise.all(ctx.tasks);
+
+  const append = calls.find((call) => call.url.endsWith("/logs/tail/append"));
+  assert.ok(append, "active tailer should receive the base console event");
+  const body = tailAppendBody(append);
+  const payload = tailAppendPayload(append);
+  assert.equal(payload.event, "worker_console");
+  assert.deepEqual(payload.message, message);
+  assert.equal(payload.error_info, undefined);
+  assert.equal(payload.error_info_omitted, undefined);
+  assert.ok(new TextEncoder().encode(/** @type {string} */ (body.json)).byteLength <= 5 * 1024);
+});
 
 test("tail-worker: 50 unsubscribed events in one batch → exactly one /logs/tail/active fetch + zero /logs/tail/append", async () => {
   /** @type {any} */ (globalThis).__runtimeTailLogs.length = 0;
@@ -351,6 +536,34 @@ test("tail-worker: 50 unsubscribed events in one batch → exactly one /logs/tai
   assert.equal(activeFetches.length, 1, `expected 1 active fetch, got ${activeFetches.length}`);
   assert.equal(appendFetches.length, 0, "no subscriber → no /logs/tail/append");
   await Promise.all(ctx.tasks);
+});
+
+test("tail-worker: inactive error metadata skips live-tail payload serialization", async () => {
+  const calls = makeFetchSpy({ activeSequence: [[]] });
+  const ctx = fakeCtx();
+  const inactiveHandler = await freshTailHandler("inactive-error-info-serialization");
+
+  const payloadStringifies = await countTailPayloadStringifies(async () => {
+    await inactiveHandler.tail([
+      fetchEvent({
+        workerId: "demo:x:v1",
+        requestId: "rid-inactive-error",
+        logs: [{
+          level: "error",
+          message: ["context", {}],
+          errorInfo: [null, {
+            name: "Error",
+            message: "not subscribed",
+            stack: "s".repeat(1024),
+          }],
+        }],
+      }),
+    ], TAIL_PROXY_ENV, ctx);
+    await Promise.all(ctx.tasks);
+  });
+
+  assert.equal(payloadStringifies, 0);
+  assert.equal(calls.filter((call) => call.url.endsWith("/logs/tail/append")).length, 0);
 });
 
 test("tail-worker: oversized console events are dropped whole with a metadata warning", async () => {

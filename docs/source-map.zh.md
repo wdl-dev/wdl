@@ -29,7 +29,7 @@
 | `runtime/dispatch.js` 和 `runtime/dispatch/*` | Fetch、scheduled、queue、workflow dispatch、workflow step facade、replay cache 和 deterministic workflow JSON helpers。 |
 | `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation、runtime 注入源码 ownership 和 hidden binding stripping。 |
 | `runtime/bindings/` | KV、D1、R2、Durable Objects、ASSETS、service 和 queue 的 host-side binding adapters。 |
-| `runtime/workflows-client.js`、`runtime/dispatch/workflow-*.js`、`runtime/load/env-build.js` | Workflow binding materialization、backend client、dispatch facade、replay cache 和 step semantics。 |
+| `runtime/workflows-client.js`、`runtime/dispatch/workflow-*.js`、`runtime/load/wrapper-generate.js` | Workflow binding materialization、identity injection、backend client、dispatch facade、replay cache 和 step semantics。 |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture 和 `wdl tail` 的 activation-gated append path。 |
 | `runtime/lib.js` | 纯 runtime helpers，例如 bundle-to-worker-code、byte normalization 和 dispatch body normalization。 |
 | `control/index.js` | system-runtime `:8082` 上的薄 HTTP dispatcher；auth 后交给 handlers。 |

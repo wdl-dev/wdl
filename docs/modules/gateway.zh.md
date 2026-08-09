@@ -104,7 +104,6 @@ Gateway 输出包含 request id、route context 和 outcome 的 request log。Me
 
 ## 部署 / Rollout 注意事项
 
-- Control 可以写 `sessionPolicy=restart` 之前，必须先部署 Gateway、Workflows 和 do-runtime session-policy projection reader，最后再部署 system-runtime/Control；system-runtime rolling 期间保持 Control mutations 暂停，并且只能在恢复 mutation 后允许 API client 发送新字段。
 - 不改变 forwarded header 合同时，gateway 的 route-cache 或 request-parsing 改动可以独立 rolling。
 - runtime internal socket path 的变化不应通过 gateway path filtering 实现。
 - Route invalidation channel 改动必须与 control 对齐；style-contract 测试会保护这些字面量。

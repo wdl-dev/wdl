@@ -19,6 +19,8 @@
 
 TypeScript 仍作为 JavaScript checker 使用。`tsconfig.json` 是覆盖整棵 JS 树的宽松 `allowJs` / `checkJs` 基线。`tsconfig.strict.json` 是 workerd 和 server-side tier 的严格 JSDoc gate，覆盖 `auth`、`control`、`gateway`、`runtime`、`d1-runtime`、`do-runtime`、`shared`、选定脚本、测试和 system worker 代码。下游 CLI 拆分维护自己的 JavaScript 标准和兼容面。
 
+如果某个 declaration release 会削弱这套 Node/workerd 混合 checker，workerd runtime package 与 `@cloudflare/workers-types` 不必同步推进。Workers types `5.20260808.1` 会无条件声明 `Buffer`、`process` 和 `global`；与 `@types/node` 合并后，整个仓库中的 Node `Buffer` 会退化成 `any`。因此 WDL 运行 workerd `1.20260809.1`，但暂时保留 Workers types `5.20260804.1`。在不损失 imported production source 覆盖的前提下拆分 Node/workerd checking 之前，应保留这项有意的版本差；不要用 helper 改写或宽泛 ambient declaration 掩盖它。`types/typecheck-contracts.ts` 会在未来 declaration bump 再次把 Node `Buffer` 变成 `any` 时让 strict checker 失败。
+
 ## 语言基线
 
 仓库里的脚本和测试以 Node `>=24` 为基线。运行时代码以支持同等 JavaScript 基线的 workerd 版本为目标。基线变化时，`tsconfig.json`、`tsconfig.strict.json`、`eslint.config.js`、`package.json#engines` 和 vendor build target 必须同步。

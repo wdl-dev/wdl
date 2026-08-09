@@ -466,12 +466,13 @@ test("worker env budget checks retained-version binding env injections", async (
 test("worker env budget estimates a source bundle under a future version string", async () => {
   const baseMeta = {
     vars: { PAD: "" },
-    workflows: [{
-      binding: "FLOW",
-      name: "flow",
-      className: "Flow",
-      workflowKey: "wf_0123456789abcdef0123456789abcdef",
-    }],
+    bindings: {
+      ROOM: {
+        type: "do",
+        className: "Room",
+        doStorageId: "do_0123456789abcdef0123456789abcdef",
+      },
+    },
   };
   /** @param {number} padLength @param {string} version */
   const bytesWithPad = (padLength, version) => estimatedWorkerLoaderEnvBytes(estimatedWorkerLoaderEnv({

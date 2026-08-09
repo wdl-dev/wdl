@@ -158,11 +158,7 @@ workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/
 
 ## 部署 / Rollout 注意事项
 
-- Workflows rollout 跨 control、runtime、do-runtime、scheduler 和 workflows。
-- system-runtime/Control 可以持久化 `sessionPolicy` 前，必须先部署 Gateway、Workflows 和 do-runtime session-policy projection reader；writer tier rolling 期间暂停 Control mutation。
-- workflows dispatch run 到 runtime 前，runtime 必须先支持 workflow internal dispatch path。
-- 当 do-runtime 会调用新的 workflows API shape 时，必须先滚 workflows，再滚 do-runtime；internal Durable Object alarm mutation endpoints 也属于这个顺序。
-- Scheduler 可在 workflows 部署后 rolling，因为它对 Workflows 的唯一依赖是 tick endpoint；cron 和 queue loop 与此独立。
+- 跨 tier Workflow protocol 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程；受影响的具体 service 写入该版本 CHANGELOG。
 - DB 2 是 workflow instance state 边界；不要从 control/runtime/scheduler 直接写 DB 2。
 - workflows 在 DB 2 中持久化 `wf:schema_version`。Schema `2` 会在 step record 和 summary 中存储 DAG dependency edges。当前部署按该 schema 的 greenfield state 处理；没有新的设计前，不要为 in-flight legacy workflow instance 添加原地迁移路径。
 - 如果开发或维护环境启动时 workflows DB 2 中已有未带版本的 `wf:*` runtime key，应先停止 workflows，清理该 DB 2 runtime state 后再启动。WDL workflow definitions 位于 DB 0 的 `wf:defs:*`，不属于 DB 2 runtime-state cleanup 范围。
@@ -190,6 +186,7 @@ workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/
 
 - V2 不宣称完整 Cloudflare Workflows compatibility。
 - 不支持 cross-worker 或 `script_name` workflows。
+- WDL 自有 binding facade 不暴露原生 workerd 的 `WorkflowInstance.delete()` 或 `Workflow.deleteBatch()`；instance lifecycle 仍由本文记录的 WDL API 和 retention engine 持有。
 - 不提供平台托管的大 payload object-storage spill。
 - 不使用 tenant Durable Object storage 作为 workflow backend。
 - Runtime replay 不直接跳到 continuation；用户 JS 按 deterministic step ordinal replay，也包括并发 `step.do` 分配到的 ordinal。

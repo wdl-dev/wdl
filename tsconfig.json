@@ -43,7 +43,8 @@
     "d1-runtime/**/*.js",
     "tests/**/*.js",
     "system-workers/s3-cleanup/src/**/*.js",
-    "types/**/*.d.ts"
+    "types/**/*.d.ts",
+    "types/**/*.ts"
   ],
   "exclude": [
     "**/node_modules",

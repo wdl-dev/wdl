@@ -150,6 +150,7 @@ const {
 
 const RUNTIME_LOAD_MAGIC = "WDLLOAD!";
 const RUNTIME_LOAD_CONTENT_TYPE = "application/vnd.wdl.runtime-load";
+const TEST_WORKER_IDENTITY = { ns: "demo", worker: "app", version: "v1" };
 
 /** @param {{ bundle: Record<string, any>, ns_secrets?: Record<string, unknown>, worker_secrets?: Record<string, unknown> }} args */
 function encodeRuntimeLoadPayload({ bundle, ns_secrets = {}, worker_secrets = {} }) {
@@ -472,7 +473,7 @@ test("buildWorkerEnv: materializes DO metadata with internal direct backend", ()
   assert.equal(Object.hasOwn(env, "__WDL_INTERNAL_AUTH_TOKEN__"), false);
 });
 
-test("buildWorkerEnv: materializes Workflow metadata with internal backend", () => {
+test("buildWorkerEnv: keeps Workflow metadata out of raw env", () => {
   const backend = { fetch() {} };
   const env = buildWorkerEnv(
     {
@@ -496,15 +497,7 @@ test("buildWorkerEnv: materializes Workflow metadata with internal backend", () 
     { workflowsBackend: backend }
   );
 
-  assert.deepEqual(env.ORDERS, {
-    ns: "demo",
-    worker: "shop",
-    version: "v4",
-    name: "orders",
-    binding: "ORDERS",
-    className: "OrderWorkflow",
-    workflowKey: "wf_0123456789abcdef0123456789abcdef",
-  });
+  assert.equal(Object.hasOwn(env, "ORDERS"), false);
   assert.equal(env.__WDL_WORKFLOWS_BACKEND__, backend);
   assert.equal(Object.hasOwn(env, "__WDL_INTERNAL_AUTH_TOKEN__"), false);
 });
@@ -1632,7 +1625,9 @@ test("workerLoader code estimator matches runtime wrapper injection exactly", ()
     modules: { "src/worker.js": source },
   };
 
-  injectRuntimeModulesForHostBindings(workerCode, meta, STUB_RUNTIME_INJECTION_SOURCES);
+  injectRuntimeModulesForHostBindings(workerCode, meta, STUB_RUNTIME_INJECTION_SOURCES, {
+    workerIdentity: TEST_WORKER_IDENTITY,
+  });
 
   assert.equal(
     estimateFinalWorkerLoaderCodeBytes({
@@ -1640,6 +1635,7 @@ test("workerLoader code estimator matches runtime wrapper injection exactly", ()
       normalized: [["src/worker.js", Buffer.from(source)]],
       meta,
       runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+      workerIdentity: TEST_WORKER_IDENTITY,
     }),
     workerCodeModuleBytes(workerCode)
   );
@@ -1729,7 +1725,9 @@ test("workerLoader code estimator does not rewrite CommonJS workflow strings", (
     mainModule: meta.mainModule,
     modules: { [meta.mainModule]: { cjs: source } },
   };
-  injectRuntimeModulesForHostBindings(injectedWorkerCode, meta, STUB_RUNTIME_INJECTION_SOURCES);
+  injectRuntimeModulesForHostBindings(injectedWorkerCode, meta, STUB_RUNTIME_INJECTION_SOURCES, {
+    workerIdentity: TEST_WORKER_IDENTITY,
+  });
   assert.deepEqual(injectedWorkerCode.modules[meta.mainModule], { cjs: source });
   const injectedBytes = workerCodeModuleBytes(injectedWorkerCode) - Buffer.byteLength(source, "utf8");
 
@@ -1739,6 +1737,7 @@ test("workerLoader code estimator does not rewrite CommonJS workflow strings", (
       normalized: [["src/worker.cjs", Buffer.from(source)]],
       meta,
       runtimeSources: STUB_RUNTIME_INJECTION_SOURCES,
+      workerIdentity: TEST_WORKER_IDENTITY,
     }),
     Buffer.byteLength(source, "utf8") + injectedBytes
   );
@@ -2145,7 +2144,7 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
         workflowKey: "wf_0123456789abcdef0123456789abcdef",
       },
     ],
-  });
+  }, { workerIdentity: TEST_WORKER_IDENTITY });
   assert.equal(workerCode.mainModule, "_wdl-wrapper.js");
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["worker.js"], /import"cloudflare:workflows"/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["worker.js"], /import\/\*side-effect\*\/"cloudflare:workflows"/);
@@ -2159,7 +2158,8 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /this\.name = "NonRetryableError"/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \{ Workflow \}/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const WORKFLOW_BINDINGS = \{"ORDERS":/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(out\[name\] \|\| metadata, workflowOptions\(requestIdOrContext, workflowsBackend\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(metadata, workflowOptions\(requestIdOrContext, workflowsBackend\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /"ns":"demo","worker":"app","version":"v1"/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback\(request, wrapEnv\(this\.env, requestIdFromEventArg\(request\)\)\)/);
@@ -2314,7 +2314,7 @@ test("wrapWorkerCodeForHostBindings: rewrites workflow module imports relative t
         workflowKey: "wf_0123456789abcdef0123456789abcdef",
       },
     ],
-  });
+  }, { workerIdentity: TEST_WORKER_IDENTITY });
   assert.match(/** @type {any} */ (workerCode.modules)["src/index.js"], /from "\.\.\/_wdl-cloudflare-workflows\.js"/);
   assert.ok(/** @type {any} */ (workerCode.modules)["src/index.js"].includes("import { \"cloudflare:workflows\" as wfName } from \"./other.js\";"));
   assert.ok(/** @type {any} */ (workerCode.modules)["src/index.js"].includes("import { from as importedFrom, \"cloudflare:workflows\" as quotedName } from \"./other.js\";"));
@@ -2462,6 +2462,7 @@ test("wrapWorkerCodeForHostBindings: workflow wrappers hide internal backend fro
           fetch(_request, env) {
             return Response.json({
               workflowsBackend: Object.hasOwn(env, "__WDL_WORKFLOWS_BACKEND__"),
+              workflowMetadata: env.ORDERS.metadata,
             });
           },
         };
@@ -2475,7 +2476,7 @@ test("wrapWorkerCodeForHostBindings: workflow wrappers hide internal backend fro
       className: "OrderWorkflow",
       workflowKey: "wf_test",
     }],
-  });
+  }, { workerIdentity: TEST_WORKER_IDENTITY });
 
   await withTempDir("wdl-workflow-wrapper-", async (dir) => {
     const cwStub = path.join(dir, "_cf_workers_stub.js");
@@ -2502,18 +2503,19 @@ test("wrapWorkerCodeForHostBindings: workflow wrappers hide internal backend fro
     const response = await wrapped.default.fetch(
       new Request("https://demo.workers.example/"),
       {
-        ORDERS: {
-          name: "orders",
-          binding: "ORDERS",
-          className: "OrderWorkflow",
-          workflowKey: "wf_test",
-        },
         __WDL_WORKFLOWS_BACKEND__: { fetch() {} },
       },
       {}
     );
     await assertJsonResponse(response, 200, {
       workflowsBackend: false,
+      workflowMetadata: {
+        name: "orders",
+        binding: "ORDERS",
+        className: "OrderWorkflow",
+        workflowKey: "wf_test",
+        ...TEST_WORKER_IDENTITY,
+      },
     });
   });
 });

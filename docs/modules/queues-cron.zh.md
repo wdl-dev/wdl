@@ -181,8 +181,7 @@ Runtime tail logs 也会为 loaded worker 执行输出 `worker_scheduled` 和 `w
 
 ## 部署 / Rollout 注意事项
 
-- 修改 queue 或 cron wire shape 时，control/runtime/scheduler 应一起部署。
-- Runtime `:8088` 必须先于依赖新 internal dispatch path 的 scheduler 部署。
+- 跨 tier queue 和 cron 合同变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程。
 - Cron discovery index 有一次性 backfill 路径。`cron:index:workers:backfilled` 存在后，control writer 负责维护 discovery projection。
 - Queue index 是非权威、可修复的。任何创建 queue stream、delayed queue 或 consumer projection 的新 writer，都必须添加对应 index member。
 - Scheduler 有独立的 cron 和 queue dispatch semaphore：`SCHEDULER_CRON_MAX_CONCURRENCY` 和 `SCHEDULER_QUEUE_MAX_CONCURRENCY`，默认都继承 `SCHEDULER_MAX_CONCURRENCY`。

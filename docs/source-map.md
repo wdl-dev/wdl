@@ -32,7 +32,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `runtime/dispatch.js` and `runtime/dispatch/*` | Fetch, scheduled, queue, workflow dispatch, workflow step facade, replay cache, and deterministic workflow JSON helpers. |
 | `runtime/load.js` and `runtime/load/*` | Bundle decode, module rewrite, env construction, wrapper generation, injected runtime source ownership, and hidden binding stripping. |
 | `runtime/bindings/` | Host-side binding adapters for KV, D1, R2, Durable Objects, ASSETS, service, and queue. |
-| `runtime/workflows-client.js`, `runtime/dispatch/workflow-*.js`, `runtime/load/env-build.js` | Workflow binding materialization, backend client, dispatch facade, replay cache, and step semantics. |
+| `runtime/workflows-client.js`, `runtime/dispatch/workflow-*.js`, `runtime/load/wrapper-generate.js` | Workflow binding materialization, identity injection, backend client, dispatch facade, replay cache, and step semantics. |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture plus activation-gated append path for `wdl tail`. |
 | `runtime/lib.js` | Pure runtime helpers such as bundle-to-worker-code, byte normalization, and dispatch body normalization. |
 | `control/index.js` | Thin HTTP dispatcher on system-runtime `:8082`; delegates to handlers after auth. |
