@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Added a strict `DO_PREVENT_EVICTION` deployment switch. An unset value or explicit `true` keeps do-runtime host actors resident; explicit `false` enables stock actor eviction for workloads that accept the current workerd limitation around in-flight hibernating WebSocket send, close, and auto-response operations. Per-task, per-facet session-policy fences persist across host actor reconstruction and owner movement, and permanent tests cover actor-local reset plus SQLite continuity after 15-second and 75-second idle windows and quiescent hibernating WebSocket continuity after 150 seconds.
-- Updated the bundled workerd and Workers types pins to `1.20260810.1` and `5.20260810.1`; upstream changes only advance release and maximum compatibility dates, raising the maximum tenant compatibility date to `2026-08-17`.
+## wdl.20260810.1 - 2026-08-10
+
+- Added strict `DO_PREVENT_EVICTION` configuration: actors remain resident by default, while explicit `false` enables stock workerd eviction for workloads that accept current in-flight hibernating WebSocket limitations. Task-scoped session-policy fences prevent stale native facet reuse across host reconstruction and owner movement while preserving SQLite and quiescent hibernating WebSocket continuity.
+- Updated the bundled workerd and Workers types pins to `1.20260810.1` and `5.20260810.1`, raising the maximum tenant compatibility date to `2026-08-17`.
 
 ## wdl.20260809.1 - 2026-08-10
 

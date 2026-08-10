@@ -34,7 +34,13 @@ const DO_EVICTION_WORKER = readFileSync(
 /** @param {boolean} preventEviction */
 async function waitForDoRuntimeReady(preventEviction) {
   await waitUntil("do-runtime residency config", () => {
-    const events = structuredServiceLogEvents("do-runtime", "do_actor_residency_configured");
+    // The supervisor emits this once at startup, while the suite may run after
+    // enough other files to exceed the bounded default log tail.
+    const events = structuredServiceLogEvents(
+      "do-runtime",
+      "do_actor_residency_configured",
+      { tail: "all" }
+    );
     return events.at(-1)?.prevent_eviction === preventEviction;
   });
 }

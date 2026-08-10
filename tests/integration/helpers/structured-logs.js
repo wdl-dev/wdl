@@ -4,7 +4,7 @@ import { parseJsonText } from "./json-payload.js";
 /**
  * @param {string} service
  * @param {string} event
- * @param {{ tail?: number }} [options]
+ * @param {{ tail?: number | "all" }} [options]
  * @returns {Record<string, unknown>[]}
  */
 export function structuredServiceLogEvents(service, event, options = {}) {
