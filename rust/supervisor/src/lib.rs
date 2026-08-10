@@ -12,10 +12,25 @@ pub async fn run_d1() -> ! {
 }
 
 pub async fn run_do() -> ! {
-    process::run(
-        &DO_CONFIG,
-        WORKERD,
-        workerd_args(pick_do_compiled_config(), true),
-    )
-    .await
+    let prevent_eviction = match do_prevent_eviction() {
+        Ok(value) => value,
+        Err(error_message) => {
+            log::error(
+                DO_CONFIG.service,
+                "do_prevent_eviction_config_error",
+                serde_json::json!({ "error_message": error_message }),
+            );
+            std::process::exit(1);
+        }
+    };
+    let compiled_config = pick_do_compiled_config(prevent_eviction);
+    log::info(
+        DO_CONFIG.service,
+        "do_actor_residency_configured",
+        serde_json::json!({
+            "prevent_eviction": prevent_eviction,
+            "workerd_config": compiled_config,
+        }),
+    );
+    process::run(&DO_CONFIG, WORKERD, workerd_args(compiled_config, true)).await
 }

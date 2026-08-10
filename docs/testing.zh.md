@@ -23,8 +23,9 @@
 
 所有 workerd 路径都由已编译的 `dist/workerd-configs/*.bin` 引导启动：
 
-- 本地 Docker Compose 和 integration tests 使用 `*-local.bin`，内部 service hop 走本地 Envoy mesh。
-- 生产形态 configs 使用无后缀 `.bin`，对应 Service Connect 风格路由。
+- 本地 Docker Compose 和 integration tests 使用 `gateway-local.bin`、`user-runtime-local.bin`、`system-runtime-local.bin`，DO 则使用 resident `do-runtime-local.bin` 或 evictable `do-runtime-local-evictable.bin`。这些变体通过本地 Envoy mesh 路由 private service hop。
+- Non-local/production-mesh 部署使用 `gateway.bin`、`user-runtime.bin`、`system-runtime.bin`，DO 则使用 resident `do-runtime.bin` 或 evictable `do-runtime-evictable.bin`。ECS Service Connect 和 Kubernetes service DNS 都使用这一制品族。
+- D1 没有 local-routing 变体，始终使用 `d1-runtime.bin`。
 - Source bind mounts 不是 runtime 合同。workerd-side JavaScript 和 Cap'n Proto 修改必须先编译进 `.bin` artifacts，stack 才会观察到。
 
 integration runner 在启动 shard 前统一准备这些 artifacts：
@@ -46,6 +47,7 @@ push PR 前仍建议先跑定向 local integration：
 | Deploy、promote、delete、lifecycle 或 S3 cleanup | 覆盖该路径的 deploy/delete/control lifecycle integration 文件 |
 | Runtime binding metadata 或 facade 行为 | 对应 binding 的 focused integration 文件，加 runtime/load 单测 |
 | D1 或 DO owner/state 行为 | focused D1/DO integration 文件；ownership 变化时包含 multi-runtime profile 测试 |
+| DO actor residency 或 workerd eviction 行为 | `tests/integration/durable-objects-eviction.test.js`；该测试会验证默认 `true` 与显式 `false` 的选择，测试 eviction 与多 runtime owner 往返，然后恢复 resident 默认值 |
 | Scheduler、queues、cron 或 workflows | focused queue/cron/workflows integration 文件，加触碰 Rust crate 的 tests |
 | Redis key 或 payload shape | 覆盖该 key family writer/reader pair 的所有 integration 文件 |
 

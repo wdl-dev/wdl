@@ -99,3 +99,4 @@ RUN ["/usr/local/bin/workerd", "--version"]
 #                    child workerd args include "--experimental" for workerLoader
 #                    stopTimeout >= 20s
 #                    env DO_OWNER_TTL_SECONDS=120 DO_DRAIN_IN_FLIGHT_TIMEOUT_MS=8000
+#                        DO_PREVENT_EVICTION=true|false (default true)

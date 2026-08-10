@@ -43,6 +43,7 @@ variable "gateway_desired_count" { type = number }
 variable "runtime_desired_count" { type = number }
 variable "d1_runtime_desired_count" { type = number }
 variable "do_runtime_desired_count" { type = number }
+variable "do_prevent_eviction" { type = bool }
 variable "d1_test_hooks_enabled" { type = bool }
 variable "scheduler_desired_count" { type = number }
 variable "workflows_desired_count" { type = number }

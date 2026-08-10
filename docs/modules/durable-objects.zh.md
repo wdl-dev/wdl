@@ -86,6 +86,8 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 - 字段缺失或显式 `preserve` 时保持既有 facet 行为：已构造的 native facet 会保留 class version，直到 host actor restart 或 facet deletion。`restart` 则改为 lazy 退役 stale facet。
 - 最新 active projection 生效。后续 `preserve` promotion 会保留已分配 sequence，并覆盖 Workflows 或 host actor 尚未观察到的 lazy restart；它不能撤销已经发生的 facet abort。
 - do-runtime 不会在 promotion 时枚举所有 owner 或 facet。Owner resolution 与 owner-side dispatch 会在 owner/storage snapshot 中读取 active projection。Restart sequence 和当前 mode 是由这些 Redis read 得到的 owner-local state，不属于 invoke/connect wire field。当前 `restart` projection 会拒绝 superseded immutable version；更高 sequence 的首次 host-actor dispatch 会在重建前仅通过 `facets.abort()` 中止对应 stale facet，绝不调用 `facets.delete()`，因此 SQLite storage 保留。延迟到达的低 sequence dispatch 不能替换更新 facet。
+- Native facet container 是 task-local，即使 host SQLite 由多个 task 共享也是如此。因此 host actor 会按 `(task_id, facet_name)` 保存已观察到的 restart sequence，并在 actor 重建后只读取当前 task 的记录。这样 lazy restart fence 可以跨 eviction 与 owner 转移保留，无需扫描全部 facet，不会让一个 task 代替另一个 task 确认其 stale native facet，也不会重复 abort 已经到达当前 sequence 的 facet；storage cleanup 会删除该 facet 的全部 task 记录。
+- ECS task identity 是每个 task 独有的 ARN，而 workerd 没有提供 native facet container 已永久退役的权威信号。因此 ledger 不使用 TTL 或 LRU 清理：无论采用哪种 residency mode，长期存活的 facet 都可能为每个曾经 dispatch 它的 task 保留一条小记录，直到 storage cleanup。平台明确接受这项按 task 增长的存储成本，以免删除仍存活 task 在后续 owner 返回时所需的 fence。
 - Storage cleanup 按 stable `doStorageId` 定位，而不是按 immutable worker version 定位。它可以在请求 version 已 superseded 时经 owner dispatch，但 actor 进入 storage-delete branch 前仍会检查 whole-worker delete exclusion、active storage pointer、owner generation 和 lease fence。
 - 已经运行的 call 和既有 facet 不会在 promotion 时被同步枚举或中断；它们会在下一次 dispatch 时收敛。
 - Whole-worker delete 后 redeploy 会分配新的 `doStorageId`；旧 native storage tombstone 给后续 cleanup，而不是立即物理删除。
@@ -112,6 +114,25 @@ Generation key 不是 cache，而是 fence。即使过期 Redis owner record 消
 
 Terraform 除了 Fargate task memory limit，还会给 do-runtime workerd container 设置显式 memory hard limit，并为同 task 的 redis-proxy sidecar 保留内存。这是 container failure boundary，不是 per-storage-call memory interrupt。
 
+## Actor 驻留与驱逐
+
+`DO_PREVENT_EVICTION` 是 do-runtime 的部署级配置。未设置或精确值 `true` 会选择设置 `preventEviction = true` 的 resident config；精确值 `false` 会选择其它配置完全相同、但省略 `preventEviction` 的 evictable config，允许 stock workerd 驱逐 idle actor。其它值属于配置错误，`do-supervisor` 会在启动 workerd 前退出。Terraform 的 `do_prevent_eviction` 变量、Compose 和本地 Kubernetes overlay 都默认使用 `true`。
+
+修改该设置需要 rollout do-runtime。它不会改变 host actor unique key、owner scope、object identity 或 localDisk path，也不会删除 SQLite。Supervisor 会通过 `do_actor_residency_configured` 结构化事件记录实际选择的模式。
+
+在该变量为 `false` 时，当前 bundled workerd 可能在 actor 空闲约 10 秒后 shutdown，并以约 70 秒的周期清理已断开 client 的 actor container。这些是上游当前实现时序，不是 WDL 的 latency 或 eviction SLA。WDL gate 会观察较长 idle 后的 actor 重建，但不声称直接观察内部 ActorContainer erase pass；该实现级测试由 workerd 拥有。Active request 和 non-hibernating WebSocket 可能继续让 actor 保持 active。通过 `ctx.acceptWebSocket()` 接受且处于静默状态的 socket 不同：workerd 可以保留 native socket、销毁 JavaScript actor，并在下一条消息到达时重建 actor。
+
+Actor 重建边界如下：
+
+- SQLite storage、object identity，以及静默 hibernatable WebSocket 的 attachment、tag 和 native socket 会保留。当前 workerd 的 legacy hibernation manager 存在已知 actor-eviction 竞态：在途 send 或 close 可能被静默丢弃，在途 auto-response 可能遗留 blocked send 并破坏重建后的 socket pump。Resident 默认值避免既有部署自动暴露于这些竞态。只有不依赖该 in-flight 边界且已通过 focused eviction gate 的 workload 才应设置 `DO_PREVENT_EVICTION=false`。
+- JavaScript instance field、actor 持有的 worker/class reference、in-memory cache 和 non-durable timer 不会保留；应用不能把它们当作持久状态，底层 workerLoader code cache 可以有独立生命周期。
+- Owner lease/generation renewal 与 JavaScript actor residency 相互独立。Renewal 既不会 pin actor heap，也不能替代重建后的 owner-side dispatch fence。
+- 驱逐后的第一次 dispatch 是 cold dispatch，紧接着的下一次 dispatch 会重新变 warm。显式 `false` 是以 first-dispatch latency 换取更低的 inactive-actor residency。
+
+用于资格确认的双 task ECS 对比执行了三组交错的 resident/evictable 测试。在该有界 fixture 中，evictable 模式让 75 秒时的 do-runtime memory 中位数下降 29%。该结果只确认 residency 取舍的方向，不是其它 workload 的 capacity 保证。
+
+把该变量设为 `false` 不是 process memory ceiling。V8、SQLite、allocator arena、loaded code、active request 和 non-hibernating socket 仍可能保留内存；已释放 heap 也不保证立刻归还操作系统。Container memory limit、owner transfer 和按 workload 执行的 capacity test 仍然必需。
+
 ## 安全边界
 
 - do-runtime internal endpoints 只在 private mesh 内可达，并要求共享的 `WDL_INTERNAL_AUTH_TOKEN` / `x-wdl-internal-auth` 内部认证 header。Health 和 metrics endpoint 例外。
@@ -126,7 +147,7 @@ Terraform 除了 Fargate task memory limit，还会给 do-runtime workerd contai
 
 ## 可观测性
 
-do-runtime 围绕 owner resolution、session-policy fence、lazy facet restart、dispatch、alarm execution、drain、renew 和 WebSocket 处理输出结构化日志。Workflows 通过 `do_alarm_dispatches` 输出 backend alarm delivery/retry/discard/in-flight-unknown outcome；do-runtime metrics 覆盖 runtime operation。Gateway request log 不衡量 initial 101 之后的 backend WebSocket recovery 生命周期。
+do-runtime 围绕 actor residency 选择、owner resolution、session-policy fence、lazy facet restart、dispatch、alarm execution、drain、renew 和 WebSocket 处理输出结构化日志。Workflows 通过 `do_alarm_dispatches` 输出 backend alarm delivery/retry/discard/in-flight-unknown outcome；do-runtime metrics 覆盖 runtime operation。Gateway request log 不衡量 initial 101 之后的 backend WebSocket recovery 生命周期。
 
 ## 部署 / Rollout 注意事项
 
@@ -136,6 +157,7 @@ do-runtime 围绕 owner resolution、session-policy fence、lazy facet restart�
 - Best-effort 尝试把 localDisk volume 从 workerd 2026-07-03 或更高版本降回 2026-07-01 时，应执行 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 scheduler metadata cleanup。
 - 这项 cleanup 只恢复进程启动。降回 workerd 2026-07-01 前，必须重写或删除通过 `ctx.storage.put()` 持久化的 `Blob`，因为该版本无法反序列化这些值。
 - Drain 和 renew 必须打本地 `127.0.0.1:8788` service。Service Connect 或 Kubernetes service alias 可能命中其他 task，不能表达 local-owner release semantics。
+- 修改 `DO_PREVENT_EVICTION` 需要 rollout do-runtime。使用 hibernatable WebSocket 或依赖 resident actor state 的 workload 应保持默认 `true`；只有接受文档中的 cold-dispatch 与 in-flight WebSocket 边界，并针对目标 workerd image 通过 focused eviction gate 后，才应设置为 `false`。
 
 ## 保护该模块的测试
 
@@ -143,6 +165,7 @@ do-runtime 围绕 owner resolution、session-policy fence、lazy facet restart�
 - `tests/integration/durable-objects-storage.test.js`
 - `tests/integration/durable-objects-ownership.test.js`
 - `tests/integration/durable-objects-alarms.test.js`
+- `tests/integration/durable-objects-eviction.test.js`
 - `tests/integration/durable-objects-websocket.test.js`
 - `tests/unit/do-alarm-client.test.js`
 - `tests/unit/do-alarm-shim.test.js`
@@ -157,6 +180,7 @@ do-runtime 围绕 owner resolution、session-policy fence、lazy facet restart�
 - `tests/unit/do-task-identity.test.js`
 - `tests/unit/runtime-do-client.test.js`
 - `rust/supervisor/src/drain.rs`
+- `rust/supervisor/src/config.rs`
 - `rust/supervisor/src/renew.rs`
 
 ## 已知约束和非目标

@@ -1,5 +1,17 @@
-import { composeProfileUp, composeUp } from "./compose.js";
+import { composeProfileUp, composeRestart, composeUp } from "./compose.js";
 import { sh } from "./cli.js";
+import { serviceInternalGet } from "./internal-http.js";
+import { waitUntil } from "../../helpers/timing.js";
+
+async function waitForDoRouter() {
+  await waitUntil("Envoy do_router upstream", () => {
+    try {
+      return serviceInternalGet("envoy", 18788, "/healthz").status === 200;
+    } catch {
+      return false;
+    }
+  }, { timeoutMs: 10_000, intervalMs: 100 });
+}
 
 export function stopD1MultiRuntimes() {
   sh(["docker", "compose", "rm", "-sf", "d1-runtime-a", "d1-runtime-b", "d1-runtime-c"], {
@@ -48,16 +60,37 @@ export function stopDoMultiRuntimes() {
   });
 }
 
-export function ensureDoSingleRuntime() {
+export async function ensureDoSingleRuntime() {
   const state = sh(["docker", "compose", "ps", "--format", "{{.Service}} {{.State}}"], {
     stdio: "pipe",
   });
   const multiRunning = /^do-runtime-[abc] +running/m.test(state);
   const singleHealthy = /^do-runtime +running/m.test(state);
-  if (!multiRunning && singleHealthy) return;
+  if (multiRunning || !singleHealthy) {
+    stopDoMultiRuntimes();
+    sh(["docker", "compose", "rm", "-sf", "do-runtime"], { stdio: "pipe" });
+    composeUp(["--force-recreate", "--wait", "do-runtime"], { stdio: "pipe" });
+  }
+  await waitForDoRouter();
+}
+
+export async function restartDoSingleRuntime() {
+  composeRestart("do-runtime");
+  await waitForDoRouter();
+}
+
+/** @param {{ preventEviction?: boolean }} [options] */
+export async function recreateDoSingleRuntime({ preventEviction } = {}) {
   stopDoMultiRuntimes();
   sh(["docker", "compose", "rm", "-sf", "do-runtime"], { stdio: "pipe" });
-  return composeUp(["--force-recreate", "--wait", "do-runtime"], { stdio: "pipe" });
+  composeUp(["--force-recreate", "--wait", "do-runtime"], {
+    stdio: "pipe",
+    env: {
+      ...process.env,
+      ...(preventEviction == null ? {} : { DO_PREVENT_EVICTION: String(preventEviction) }),
+    },
+  });
+  await waitForDoRouter();
 }
 
 /**
@@ -66,9 +99,10 @@ export function ensureDoSingleRuntime() {
  *   ownerLeaseGuardMs?: number,
  *   renewStartDelayMs?: number,
  *   renewIntervalMs?: number,
+ *   preventEviction?: boolean,
  * }} [options]
  */
-export function recreateDoMultiRuntimes({ ownerTtlSeconds, ownerLeaseGuardMs, renewStartDelayMs, renewIntervalMs } = {}) {
+export async function recreateDoMultiRuntimes({ ownerTtlSeconds, ownerLeaseGuardMs, renewStartDelayMs, renewIntervalMs, preventEviction } = {}) {
   sh(["docker", "compose", "stop", "do-runtime"], { stdio: "pipe" });
   const opts = {
     stdio: "pipe",
@@ -78,11 +112,13 @@ export function recreateDoMultiRuntimes({ ownerTtlSeconds, ownerLeaseGuardMs, re
       ...(ownerLeaseGuardMs == null ? {} : { DO_OWNER_LEASE_GUARD_MS: String(ownerLeaseGuardMs) }),
       ...(renewStartDelayMs == null ? {} : { DO_RENEW_START_DELAY_MS: String(renewStartDelayMs) }),
       ...(renewIntervalMs == null ? {} : { DO_RENEW_INTERVAL_MS: String(renewIntervalMs) }),
+      ...(preventEviction == null ? {} : { DO_PREVENT_EVICTION: String(preventEviction) }),
     },
   };
   composeProfileUp("do-multi", ["--force-recreate", "--wait", "do-runtime-a"], opts);
   composeProfileUp("do-multi", ["--force-recreate", "--wait", "do-runtime-b"], opts);
-  return composeProfileUp("do-multi", ["--force-recreate", "--wait", "do-runtime-c"], opts);
+  composeProfileUp("do-multi", ["--force-recreate", "--wait", "do-runtime-c"], opts);
+  await waitForDoRouter();
 }
 
 /**
@@ -92,14 +128,15 @@ export function recreateDoMultiRuntimes({ ownerTtlSeconds, ownerLeaseGuardMs, re
  *   ownerLeaseGuardMs?: number,
  *   renewStartDelayMs?: number,
  *   renewIntervalMs?: number,
+ *   preventEviction?: boolean,
  * }} [options]
  */
 export async function withDoMultiRuntimes(fn, options = {}) {
-  recreateDoMultiRuntimes(options);
+  await recreateDoMultiRuntimes(options);
   try {
     return await fn();
   } finally {
-    ensureDoSingleRuntime();
+    await ensureDoSingleRuntime();
   }
 }
 
@@ -144,6 +181,6 @@ export async function withDoOwnerTask(fn) {
     return await fn();
   } finally {
     stopDoOwnerTask();
-    ensureDoSingleRuntime();
+    await ensureDoSingleRuntime();
   }
 }

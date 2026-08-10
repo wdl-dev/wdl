@@ -399,6 +399,17 @@ natural cache misses. Old isolates remain resident until user-runtime or
 system-runtime tasks recycle. Use `aws ecs update-service --force-new-deployment`
 periodically if memory growth matters.
 
+### Durable Object Actor Residency
+
+`do_prevent_eviction` defaults to `true`, keeping do-runtime host actors resident.
+Current workerd can silently lose an in-flight hibernating WebSocket send or close and
+can strand an in-flight auto-response during actor eviction, so existing deployments do
+not enter the evictable mode implicitly. Set the variable to `false` only for a workload
+that accepts this boundary: SQLite and quiescent hibernating WebSocket state remain
+durable, actor-local JavaScript state is rebuilt, and the first request after eviction
+pays cold-dispatch cost. Validate the opt-in against the focused eviction gate in the
+[Durable Objects module contract](../docs/modules/durable-objects.md#actor-residency-and-eviction).
+
 ### Storage
 
 D1 and DO each mount a separate EFS file system root into the workerd `localDisk`

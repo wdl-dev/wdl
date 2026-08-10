@@ -31,10 +31,15 @@ outside TypeScript.
 
 All workerd paths boot from compiled `dist/workerd-configs/*.bin` artifacts:
 
-- Local Docker Compose and integration tests use `*-local.bin`, which routes internal
-  service hops through the local Envoy mesh.
-- Production-style configs use the unsuffixed `.bin` files for Service Connect style
-  routing.
+- Local Docker Compose and integration tests use `gateway-local.bin`,
+  `user-runtime-local.bin`, `system-runtime-local.bin`, and either resident
+  `do-runtime-local.bin` or evictable `do-runtime-local-evictable.bin`. These variants
+  route private service hops through the local Envoy mesh.
+- Non-local/production-mesh deployments use `gateway.bin`, `user-runtime.bin`,
+  `system-runtime.bin`, and either resident `do-runtime.bin` or evictable
+  `do-runtime-evictable.bin`. ECS Service Connect and Kubernetes service DNS both use
+  this artifact family.
+- D1 has no local-routing variant and always uses `d1-runtime.bin`.
 - Source bind mounts are not part of the runtime contract. Workerd-side JavaScript and
   Cap'n Proto changes must be compiled into `.bin` artifacts before the stack observes
   them.
@@ -63,6 +68,7 @@ Targeted local integration is still useful before pushing a PR:
 | Deploy, promote, delete, lifecycle, or S3 cleanup | deploy/delete/control lifecycle integration files that cover the changed path |
 | Runtime binding metadata or facade behavior | the binding's focused integration file plus runtime/load unit tests |
 | D1 or DO owner/state behavior | the focused D1/DO integration file, including multi-runtime profile tests when ownership changes |
+| DO actor residency or workerd eviction behavior | `tests/integration/durable-objects-eviction.test.js`; it verifies the default `true` and explicit `false` selections, exercises eviction and a multi-runtime owner round trip, then restores the resident default |
 | Scheduler, queues, cron, or workflows | the focused queue/cron/workflows integration file plus the touched Rust crate tests |
 | Redis key or payload shape | every integration file that exercises a writer/reader pair for that key family |
 

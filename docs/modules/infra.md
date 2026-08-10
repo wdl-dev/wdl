@@ -151,6 +151,10 @@ Stateful storage:
 - In addition to the Fargate task memory limit, D1 and DO workerd containers set
   explicit container memory hard limits. DO also reserves memory for its local
   redis-proxy sidecar.
+- do-runtime defaults `DO_PREVENT_EVICTION` to `true`, keeping host actors resident so
+  current workerd actor eviction cannot interrupt in-flight hibernatable WebSocket
+  operations. Explicit `false` enables eviction for validated workloads but is not a
+  replacement for the container memory hard limit.
 - Terraform Fargate services should use rolling replacement where the service can
   tolerate overlapping capacity. D1/DO use sequential replacement, while scheduler
   remains stop-before-start as a singleton control loop. D1/DO and scheduler disable
@@ -241,7 +245,11 @@ operations unless explicitly debugging.
 - Operator-driven checks: Terraform plan review and Kubernetes manifest review.
 - `npm run test:integration`
 - `tests/unit/style-contracts.test.js`: local compose Envoy mesh shape, D1/DO
-  test-hook IaC gates, and Fargate-only Terraform launch contracts.
+  test-hook IaC gates, DO residency defaults, and Fargate-only Terraform launch
+  contracts.
+- `tests/integration/durable-objects-eviction.test.js`: resident-default selection plus
+  explicit eviction, actor reconstruction, task-local session-policy fencing across an
+  owner round trip, SQLite continuity, and quiescent hibernating WebSocket continuity.
 - Smoke tests against the target deployed environment after rolling.
 
 ## Known Constraints And Non-Goals

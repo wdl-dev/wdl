@@ -16,6 +16,7 @@ const CONFIGS = [
   { name: "system-runtime", config: "runtime/config-system.capnp" },
   { name: "d1-runtime", config: "d1-runtime/config.capnp" },
   { name: "do-runtime", config: "do-runtime/config.capnp" },
+  { name: "do-runtime-evictable", config: "do-runtime/config-evictable.capnp" },
 ];
 
 if (includeLocalConfigs) {
@@ -23,7 +24,8 @@ if (includeLocalConfigs) {
     { name: "gateway-local", config: "gateway/config-local.capnp" },
     { name: "user-runtime-local", config: "runtime/config-user-local.capnp" },
     { name: "system-runtime-local", config: "runtime/config-system-local.capnp" },
-    { name: "do-runtime-local", config: "do-runtime/config-local.capnp" }
+    { name: "do-runtime-local", config: "do-runtime/config-local.capnp" },
+    { name: "do-runtime-local-evictable", config: "do-runtime/config-local-evictable.capnp" }
   );
 }
 

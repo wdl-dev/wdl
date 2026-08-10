@@ -3,6 +3,9 @@ import { DurableObject } from "cloudflare:workers";
 export class Room extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+    this.evictionBuildLabel = env.EVICTION_BUILD_LABEL || "fixture";
+    this.evictionHttpHits = 0;
+    this.evictionWebSocketMessages = 0;
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
 
@@ -26,6 +29,22 @@ export class Room extends DurableObject {
         attachmentId: row.attachment_id,
       } : null);
     }
+    if (url.pathname.endsWith("/eviction-counter")) {
+      this.evictionHttpHits += 1;
+      const sql = this.ctx.storage.sql;
+      sql.exec("CREATE TABLE IF NOT EXISTS eviction_counter (name TEXT PRIMARY KEY, hits INTEGER NOT NULL)");
+      sql.exec(
+        "INSERT INTO eviction_counter (name, hits) VALUES (?, 1) " +
+          "ON CONFLICT(name) DO UPDATE SET hits = hits + 1",
+        "http"
+      );
+      const row = [...sql.exec("SELECT hits FROM eviction_counter WHERE name = ?", "http")][0];
+      return Response.json({
+        buildLabel: this.evictionBuildLabel,
+        memoryHits: this.evictionHttpHits,
+        storageHits: row.hits,
+      });
+    }
     if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") {
       return new Response("need websocket", { status: 426 });
     }
@@ -48,6 +67,24 @@ export class Room extends DurableObject {
       return;
     }
     const attachment = ws.deserializeAttachment();
+    if (String(message) === "eviction-probe") {
+      this.evictionWebSocketMessages += 1;
+      const next = {
+        ...attachment,
+        seen: (attachment?.seen || 0) + 1,
+      };
+      ws.serializeAttachment(next);
+      ws.send(JSON.stringify({
+        buildLabel: this.evictionBuildLabel,
+        id: next.id,
+        joinedAt: next.joinedAt,
+        seen: next.seen,
+        tags: this.ctx.getTags(ws),
+        allSockets: this.ctx.getWebSockets().length,
+        memoryMessages: this.evictionWebSocketMessages,
+      }));
+      return;
+    }
     if (String(message) === "bump") {
       const next = {
         ...attachment,

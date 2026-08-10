@@ -114,22 +114,12 @@ const TYPED_TAG_RE = /@(typedef|param|returns?|type)\b/g;
 function moduleListBlocks(source) {
   /** @type {string[]} */
   const blocks = [];
-  let searchFrom = 0;
-  while (true) {
-    const marker = source.indexOf("modules", searchFrom);
-    if (marker < 0) return blocks;
-    const equals = source.indexOf("=", marker);
-    const open = source.indexOf("[", equals);
-    if (equals < 0 || open < 0) {
-      searchFrom = marker + "modules".length;
-      continue;
-    }
-    if (!/^\s*=/.test(source.slice(marker + "modules".length, open))) {
-      searchFrom = marker + "modules".length;
-      continue;
-    }
+  const moduleListStarts = source.matchAll(
+    /\bmodules\s*=\s*\[|:\s*List\(Workerd\.Worker\.Module\)\s*=\s*\[/g
+  );
+  for (const match of moduleListStarts) {
+    const open = match.index + match[0].lastIndexOf("[");
     let depth = 0;
-    let closed = false;
     for (let i = open; i < source.length; i += 1) {
       const ch = source[i];
       if (ch === "[") depth += 1;
@@ -137,14 +127,12 @@ function moduleListBlocks(source) {
         depth -= 1;
         if (depth === 0) {
           blocks.push(source.slice(open + 1, i));
-          searchFrom = i + 1;
-          closed = true;
           break;
         }
       }
     }
-    if (!closed) searchFrom = marker + "modules".length;
   }
+  return blocks;
 }
 
 /**
@@ -1208,6 +1196,18 @@ test("active docs and sources do not point at note paths", () => {
   assert.deepEqual(offenders.toSorted(), []);
 });
 
+test("DO runtime topology changes use readiness-owning integration helpers", () => {
+  const offenders = [];
+  const directDoRuntimeChange = /compose(?:Restart|Recreate)\(\s*["']do-runtime["']/;
+  for (const file of scannedTestFiles()) {
+    if (!file.startsWith("tests/integration/") || file === "tests/integration/helpers/runtimes.js") {
+      continue;
+    }
+    if (directDoRuntimeChange.test(readRepoFile(file))) offenders.push(file);
+  }
+  assert.deepEqual(offenders, []);
+});
+
 test("active bilingual docs stay paired", () => {
   const files = activeBilingualDocFiles();
   const fileSet = new Set(files);
@@ -1930,7 +1930,7 @@ test("workerd experimental process access stays limited to workerLoader tiers", 
   assert.match(terraformSystemRuntime, /system-runtime\.bin", "--experimental"/);
   assert.doesNotMatch(terraformGateway, /--experimental/);
   assert.match(supervisorLib, /workerd_args\(D1_COMPILED_CONFIG, false\)/);
-  assert.match(supervisorLib, /workerd_args\(pick_do_compiled_config\(\), true\)/);
+  assert.match(supervisorLib, /workerd_args\(compiled_config, true\)/);
   assert.match(supervisorConfig, /args\.push\("--experimental"\.into\(\)\)/);
 
   for (const file of [
@@ -1942,12 +1942,60 @@ test("workerd experimental process access stays limited to workerLoader tiers", 
     "runtime/config-system-local.capnp",
     "d1-runtime/config.capnp",
     "do-runtime/config.capnp",
+    "do-runtime/config-evictable.capnp",
     "do-runtime/config-local.capnp",
+    "do-runtime/config-local-evictable.capnp",
   ]) {
     const source = readRepoFile(file);
     assert.doesNotMatch(source, /compatibilityFlags\s*=\s*\[[^\]]*"experimental"/, file);
     assert.doesNotMatch(source, /allow_irrevocable_stub_storage/, file);
   }
+});
+
+test("DO host actors default resident with an explicit eviction deployment path", () => {
+  const config = withoutLineComments(readRepoFile("do-runtime/config.capnp"));
+  const compile = withoutLineComments(readRepoFile("scripts/compile-workerd-configs.js"));
+  const supervisor = withoutLineComments(readRepoFile("rust/supervisor/src/config.rs"));
+  const compose = withoutLineComments(readRepoFile("docker-compose.yml"));
+  const kube = withoutLineComments(readRepoFile("deploy/kubernetes/overlays/local/kustomization.yaml"));
+  const rootVars = withoutLineComments(readRepoFile("terraform/variables.tf"));
+  const terraformDo = withoutLineComments(readRepoFile("terraform/modules/compute/do_runtime_service.tf"));
+
+  const resident = config.match(
+    /const doRuntimeWorker :Workerd\.Worker = \(([\s\S]*?)\n\);\n\nconst doRuntimeEvictableWorker/
+  )?.[1];
+  const evictable = config.match(
+    /const doRuntimeEvictableWorker :Workerd\.Worker = \(([\s\S]*?)\n\);/
+  )?.[1];
+  assert.ok(resident, "resident do-runtime worker config must exist");
+  assert.ok(evictable, "evictable do-runtime worker config must exist");
+  assert.match(resident, /preventEviction = true/);
+  assert.doesNotMatch(evictable, /preventEviction/);
+  const normalizeResidency = (/** @type {string} */ worker) => worker
+    .replace(/^\s*#.*$/gm, "")
+    .replace(", preventEviction = true", "")
+    .replace(/\s+/g, " ")
+    .trim();
+  assert.equal(normalizeResidency(resident), normalizeResidency(evictable));
+
+  for (const artifact of [
+    "do-runtime-evictable",
+    "do-runtime-local-evictable",
+  ]) {
+    assert.match(compile, new RegExp(`name: "${artifact}"`));
+    assert.match(supervisor, new RegExp(`workerd-configs/${artifact}\\.bin`));
+  }
+  assert.match(supervisor, /NotPresent\) => Ok\(true\)/);
+  assert.match(compose, /DO_PREVENT_EVICTION: \$\{DO_PREVENT_EVICTION-true\}/);
+  assert.match(kube, /DO_PREVENT_EVICTION=true/);
+  assert.match(
+    rootVars,
+    /variable "do_prevent_eviction" \{[\s\S]*?default\s*=\s*true[\s\S]*?\n\}/
+  );
+  assert.match(
+    terraformDo,
+    /name = "DO_PREVENT_EVICTION", value = tostring\(var\.do_prevent_eviction\)/
+  );
 });
 
 test("S3 query encoding stays aligned between shared and injected runtime helpers", () => {

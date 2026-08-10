@@ -18,7 +18,7 @@ base 和本地 overlay 使用发布镜像契约：workerd 服务拉取 `docker.i
 
 所有 private WDL service 都从共享的 `wdl-secrets` Secret 读取 `WDL_INTERNAL_AUTH_TOKEN`，并在 internal mesh call 上以 `x-wdl-internal-auth` 发送。本地 overlay 会用 `local-internal-auth-token` 生成 `wdl-secrets`；生产 overlay 必须提供自己的值。轮换时使用可选的 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`，但协议不是 rolling-safe：caller 始终发送 current，receiver 接受 current 和可选 previous。应在维护窗口内轮换，或先暂停 scheduler/workflows traffic；设置 previous=旧值/current=新值后，一起重启 private fleet，收敛后清空 previous。
 
-workerd 镜像使用非 local 的编译后配置（`gateway.bin`、`user-runtime.bin`、`system-runtime.bin`、`do-runtime.bin`）。这些配置直接使用 Kubernetes Service DNS，因此这套栈不需要本地 Compose 的 Envoy sidecar。
+workerd 镜像使用 non-local/production-mesh 编译后配置（`gateway.bin`、`user-runtime.bin`、`system-runtime.bin`、`d1-runtime.bin`，DO 默认使用 resident `do-runtime.bin`）。设置 `DO_PREVENT_EVICTION=false` 时改用 `do-runtime-evictable.bin`。这些制品直接使用 Kubernetes Service DNS，因此这套栈不需要本地 Compose 的 Envoy sidecar。D1 没有 local config 变体。
 
 base 还会安装只限制 ingress 的 NetworkPolicy。Kubernetes ClusterIP Service 本身不是隔离边界：如果没有 NetworkPolicy，同 namespace 中的任意 Pod 通常都能访问 Valkey 和 runtime internal socket。因此 baseline 默认拒绝 ingress，并只打开预期 WDL 组件之间的端口。它暂时没有默认拒绝 egress，因为生产 overlay 必须自行决定 DNS、对象存储、托管 Valkey 和外部 admin access 如何访问。
 

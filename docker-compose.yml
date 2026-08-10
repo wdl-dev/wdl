@@ -73,11 +73,13 @@ x-do-runtime-env: &do-runtime-env
   REDIS_ADDR: redis:6379
   REDIS_PROXY_URL: http://redis-proxy-do:7070
   DO_OWNER_TTL_SECONDS: ${DO_OWNER_TTL_SECONDS:-120}
+  DO_PREVENT_EVICTION: ${DO_PREVENT_EVICTION-true}
   DO_OWNER_LEASE_GUARD_MS: ${DO_OWNER_LEASE_GUARD_MS:-1000}
   DO_RENEW_START_DELAY_MS: ${DO_RENEW_START_DELAY_MS:-1000}
   DO_RENEW_INTERVAL_MS: ${DO_RENEW_INTERVAL_MS:-1000}
-  # do-supervisor reads this to pick do-runtime-local.bin (Envoy mesh) over
-  # do-runtime.bin (Service Connect). Production leaves it unset.
+  # do-supervisor combines this Envoy-mesh selector with DO_PREVENT_EVICTION to
+  # choose the local resident or evictable artifact. Non-local/production-mesh
+  # deployments leave it unset and choose the corresponding non-local artifact.
   WDL_WORKERD_CONFIG_VARIANT: local
 
 x-do-runtime-service: &do-runtime-service

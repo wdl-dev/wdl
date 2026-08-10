@@ -2,10 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   adminFetch,
-  composeRecreate,
-  composeRestart,
   deployAndPromote,
   gatewayFetch,
+  recreateDoSingleRuntime,
+  restartDoSingleRuntime,
   uniqueNs,
   setupIntegrationSuite,
   responseJson,
@@ -39,7 +39,7 @@ test("Durable Object SQLite storage survives do-runtime restart while memory res
     body: "from-worker",
   });
 
-  composeRestart("do-runtime");
+  await restartDoSingleRuntime();
 
   const after = await gatewayFetch(ns, "/counter?name=alice");
   const afterText = await after.text();
@@ -80,7 +80,7 @@ test("default session policy preserves the loaded class until host actor restart
   assert.equal(stillLoaded.status, 200, stillLoadedText);
   assert.deepEqual(responseJson({ body: stillLoadedText }), { label: "v1", memory: 2, storage: 2 });
 
-  composeRecreate("do-runtime");
+  await recreateDoSingleRuntime();
   const afterRestart = await gatewayFetch(ns, "/versioned");
   const afterRestartText = await afterRestart.text();
   assert.equal(afterRestart.status, 200, afterRestartText);
@@ -151,7 +151,7 @@ test("worker delete soft-deletes registered Durable Object SQLite storage", asyn
   });
   assert.notDeepEqual(redisKeys(`do:objects:${firstStorageId}`), []);
 
-  composeRecreate("do-runtime");
+  await recreateDoSingleRuntime();
   await deployAndPromote(ns, "counter", {
     mainModule: "worker.js",
     modules: { "worker.js": DO_WORKER },

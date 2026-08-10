@@ -6,7 +6,7 @@ import { sh } from "./cli.js";
 
 /**
  * @param {string[]} args
- * @param {{ stdio?: any }} [opts]
+ * @param {{ stdio?: any, env?: NodeJS.ProcessEnv }} [opts]
  */
 export function composeUp(args, opts = {}) {
   return sh(["docker", "compose", "up", "-d", ...composeNoBuildArgs(), ...args], opts);

@@ -22,6 +22,10 @@ pub(crate) const D1_COMPILED_CONFIG: &str = "/app/dist/workerd-configs/d1-runtim
 // local-variant compiled bundle to match.
 pub(crate) const DO_COMPILED_CONFIG_PRODUCTION: &str = "/app/dist/workerd-configs/do-runtime.bin";
 pub(crate) const DO_COMPILED_CONFIG_LOCAL: &str = "/app/dist/workerd-configs/do-runtime-local.bin";
+pub(crate) const DO_COMPILED_CONFIG_EVICTABLE_PRODUCTION: &str =
+    "/app/dist/workerd-configs/do-runtime-evictable.bin";
+pub(crate) const DO_COMPILED_CONFIG_EVICTABLE_LOCAL: &str =
+    "/app/dist/workerd-configs/do-runtime-local-evictable.bin";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum KillSignal {
@@ -237,12 +241,29 @@ pub(crate) fn workerd_args(compiled_config: &str, experimental: bool) -> Vec<Str
     args
 }
 
-pub(crate) fn pick_do_compiled_config() -> &'static str {
-    if std::env::var("WDL_WORKERD_CONFIG_VARIANT").as_deref() == Ok("local") {
-        DO_COMPILED_CONFIG_LOCAL
-    } else {
-        DO_COMPILED_CONFIG_PRODUCTION
+pub(crate) fn do_prevent_eviction() -> Result<bool, String> {
+    match std::env::var("DO_PREVENT_EVICTION") {
+        Err(std::env::VarError::NotPresent) => Ok(true),
+        Ok(value) if value == "true" => Ok(true),
+        Ok(value) if value == "false" => Ok(false),
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            Err("DO_PREVENT_EVICTION must be true or false".to_string())
+        }
     }
+}
+
+pub(crate) fn do_compiled_config(local: bool, prevent_eviction: bool) -> &'static str {
+    match (local, prevent_eviction) {
+        (false, true) => DO_COMPILED_CONFIG_PRODUCTION,
+        (true, true) => DO_COMPILED_CONFIG_LOCAL,
+        (false, false) => DO_COMPILED_CONFIG_EVICTABLE_PRODUCTION,
+        (true, false) => DO_COMPILED_CONFIG_EVICTABLE_LOCAL,
+    }
+}
+
+pub(crate) fn pick_do_compiled_config(prevent_eviction: bool) -> &'static str {
+    let local = std::env::var("WDL_WORKERD_CONFIG_VARIANT").as_deref() == Ok("local");
+    do_compiled_config(local, prevent_eviction)
 }
 
 #[cfg(test)]
@@ -317,6 +338,44 @@ mod tests {
                 "/app/dist/workerd-configs/do-runtime.bin",
                 "--experimental"
             ]
+        );
+    }
+
+    #[test]
+    fn do_prevent_eviction_defaults_true_and_accepts_only_boolean_strings() {
+        with_temp_env("DO_PREVENT_EVICTION", None, || {
+            assert_eq!(do_prevent_eviction(), Ok(true));
+        });
+        with_temp_env("DO_PREVENT_EVICTION", Some("true"), || {
+            assert_eq!(do_prevent_eviction(), Ok(true));
+        });
+        with_temp_env("DO_PREVENT_EVICTION", Some("false"), || {
+            assert_eq!(do_prevent_eviction(), Ok(false));
+        });
+        for value in ["", "TRUE", "FALSE", "1", "0"] {
+            with_temp_env("DO_PREVENT_EVICTION", Some(value), || {
+                assert_eq!(
+                    do_prevent_eviction(),
+                    Err("DO_PREVENT_EVICTION must be true or false".to_string())
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn do_compiled_config_selects_residency_and_mesh_variants() {
+        assert_eq!(
+            do_compiled_config(false, true),
+            DO_COMPILED_CONFIG_PRODUCTION
+        );
+        assert_eq!(do_compiled_config(true, true), DO_COMPILED_CONFIG_LOCAL);
+        assert_eq!(
+            do_compiled_config(false, false),
+            DO_COMPILED_CONFIG_EVICTABLE_PRODUCTION
+        );
+        assert_eq!(
+            do_compiled_config(true, false),
+            DO_COMPILED_CONFIG_EVICTABLE_LOCAL
         );
     }
 

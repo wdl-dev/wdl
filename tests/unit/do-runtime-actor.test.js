@@ -11,12 +11,49 @@ import { delay } from "../helpers/timing.js";
 const { WdlDoHostActor, dispatchRpc } = await loadDoHostActor();
 const harness = doHostActorHarnessState();
 
+/** @param {string} taskId @param {string} facetName */
+function facetRegistrationKey(taskId, facetName) {
+  return `${taskId}\0${facetName}`;
+}
+
 beforeEach(() => {
   resetDoHostActorHarness();
 });
 
-function actor(env = {}) {
+/** @param {Map<string, number>} rows */
+function facetRegistrationSql(rows) {
+  return {
+    /** @param {string} statement @param {...unknown} values */
+    exec(statement, ...values) {
+      if (statement.startsWith("CREATE TABLE IF NOT EXISTS")) {
+        assert.match(statement, /PRIMARY KEY \(facet_name, task_id\)/);
+        return [];
+      }
+      if (statement.startsWith("SELECT restart_sequence")) {
+        const restartSequence = rows.get(facetRegistrationKey(String(values[0]), String(values[1])));
+        return restartSequence === undefined ? [] : [{ restart_sequence: restartSequence }];
+      }
+      if (statement.startsWith("INSERT INTO wdl_facet_session_policy")) {
+        assert.match(statement, /ON CONFLICT\(facet_name, task_id\)/);
+        rows.set(facetRegistrationKey(String(values[0]), String(values[1])), Number(values[2]));
+        return [];
+      }
+      if (statement.startsWith("DELETE FROM wdl_facet_session_policy")) {
+        const facetName = String(values[0]);
+        for (const key of rows.keys()) {
+          if (key.endsWith(`\0${facetName}`)) rows.delete(key);
+        }
+        return [];
+      }
+      throw new Error(`unexpected host actor SQL: ${statement}`);
+    },
+  };
+}
+
+/** @param {Record<string, unknown>} [env] @param {Map<string, number>} [facetRegistrations] */
+function actor(env = {}, facetRegistrations = new Map()) {
   const ctx = {
+    storage: { sql: facetRegistrationSql(facetRegistrations) },
     facets: {
       abort(/** @type {string} */ name, /** @type {unknown} */ reason) {
         harness.aborts.push({ name, reason });
@@ -52,7 +89,7 @@ function invoke(overrides = {}) {
 
 /** @param {any} host @param {string} facetName @param {number} [restartSequence] */
 function registerFacet(host, facetName, restartSequence = 0) {
-  host.facetWorkers.set(facetName, { restartSequence });
+  assert.equal(host.rememberFacet(invoke({ restartSequence }), "task-a"), facetName);
 }
 
 /** @param {any} host */
@@ -221,7 +258,8 @@ test("DO host actor: stale initial owner fence does not write the object registr
 });
 
 test("DO host actor: delete-storage validates owner and active storage in one scoped assertion", async () => {
-  const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  const facetRegistrations = new Map();
+  const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 }, facetRegistrations);
   const request = invoke({
     ns: "tenant",
     worker: "chat",
@@ -235,6 +273,8 @@ test("DO host actor: delete-storage validates owner and active storage in one sc
   harness.actorInvokes = [request];
   harness.assertResponses = [owner];
   registerFacet(host, "Room:alice");
+  facetRegistrations.set(facetRegistrationKey("task-b", "Room:alice"), 3);
+  facetRegistrations.set(facetRegistrationKey("task-b", "Room:bob"), 2);
   markObjectRegistered(host);
 
   const response = await host.fetch(new Request("http://actor.test/delete-storage", {
@@ -249,6 +289,9 @@ test("DO host actor: delete-storage validates owner and active storage in one sc
   );
   assert.deepEqual(harness.deletedFacets, ["Room:alice"]);
   assert.equal(host.facetWorkers.has("Room:alice"), false);
+  assert.equal(facetRegistrations.has(facetRegistrationKey("task-a", "Room:alice")), false);
+  assert.equal(facetRegistrations.has(facetRegistrationKey("task-b", "Room:alice")), false);
+  assert.equal(facetRegistrations.get(facetRegistrationKey("task-b", "Room:bob")), 2);
   assert.equal(host.registeredObjectMembers.has("Room:alice"), false);
 });
 
@@ -259,7 +302,7 @@ test("DO host actor: a preserve session policy keeps an existing facet on its lo
   const facetName = host.rememberFacet(invoke({
     version: "v2",
     workerId: "tenant:chat:v2",
-  }));
+  }), "task-a");
 
   assert.equal(facetName, "Room:alice");
   assert.equal(host.facetWorkers.get(facetName)?.restartSequence, 0);
@@ -275,12 +318,89 @@ test("DO host actor: a restart session policy lazily replaces a stale facet with
     workerId: "tenant:chat:v2",
     sessionPolicy: "restart",
     restartSequence: 4,
-  }));
+  }), "task-a");
 
   assert.equal(host.facetWorkers.get(facetName)?.restartSequence, 4);
   assert.deepEqual(harness.aborts.map(({ name }) => name), ["Room:alice"]);
   assert.deepEqual(harness.deletedFacets, []);
   assert.equal(harness.logs.at(-1).event, "session_policy_restart_facet_on_dispatch");
+});
+
+test("DO host actor: restart sequence survives host actor eviction without repeating the abort", () => {
+  const facetRegistrations = new Map();
+  registerFacet(actor({}, facetRegistrations), "Room:alice");
+
+  const restarted = actor({}, facetRegistrations);
+  restarted.rememberFacet(invoke({
+    version: "v2",
+    workerId: "tenant:chat:v2",
+    sessionPolicy: "restart",
+    restartSequence: 4,
+  }), "task-a");
+  assert.deepEqual(harness.aborts.map(({ name }) => name), ["Room:alice"]);
+  assert.equal(facetRegistrations.get(facetRegistrationKey("task-a", "Room:alice")), 4);
+
+  const reconstructed = actor({}, facetRegistrations);
+  reconstructed.rememberFacet(invoke({
+    version: "v2",
+    workerId: "tenant:chat:v2",
+    sessionPolicy: "restart",
+    restartSequence: 4,
+  }), "task-a");
+  assert.deepEqual(harness.aborts.map(({ name }) => name), ["Room:alice"]);
+  assert.equal(reconstructed.facetWorkers.get("Room:alice")?.restartSequence, 4);
+});
+
+test("DO host actor: restart sequence is scoped to each task's native facet container", () => {
+  const facetRegistrations = new Map();
+  registerFacet(actor({}, facetRegistrations), "Room:alice");
+
+  const onTaskB = actor({}, facetRegistrations);
+  onTaskB.rememberFacet(invoke({
+    version: "v2",
+    workerId: "tenant:chat:v2",
+    sessionPolicy: "restart",
+    restartSequence: 4,
+    owner: { ...invoke().owner, taskId: "task-b" },
+  }), "task-b");
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(facetRegistrations.get(facetRegistrationKey("task-a", "Room:alice")), 0);
+  assert.equal(facetRegistrations.get(facetRegistrationKey("task-b", "Room:alice")), 4);
+
+  const backOnTaskA = actor({}, facetRegistrations);
+  backOnTaskA.rememberFacet(invoke({
+    version: "v2",
+    workerId: "tenant:chat:v2",
+    sessionPolicy: "restart",
+    restartSequence: 4,
+  }), "task-a");
+  assert.deepEqual(harness.aborts.map(({ name }) => name), ["Room:alice"]);
+  assert.equal(facetRegistrations.get(facetRegistrationKey("task-a", "Room:alice")), 4);
+});
+
+test("DO host actor: preserve sequence advance survives host actor eviction", () => {
+  const facetRegistrations = new Map();
+  const host = actor({}, facetRegistrations);
+  registerFacet(host, "Room:alice");
+
+  host.rememberFacet(invoke({
+    version: "v2",
+    workerId: "tenant:chat:v2",
+    restartSequence: 4,
+  }), "task-a");
+  assert.equal(facetRegistrations.get(facetRegistrationKey("task-a", "Room:alice")), 4);
+  assert.deepEqual(harness.aborts, []);
+
+  const reconstructed = actor({}, facetRegistrations);
+  assert.throws(
+    () => reconstructed.rememberFacet(invoke({ restartSequence: 3 }), "task-a"),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_version_stale");
+      return true;
+    }
+  );
+  assert.equal(reconstructed.facetWorkers.get("Room:alice")?.restartSequence, 4);
+  assert.deepEqual(harness.aborts, []);
 });
 
 test("DO host actor: later preserve projection supersedes an unobserved restart", () => {
@@ -291,12 +411,12 @@ test("DO host actor: later preserve projection supersedes an unobserved restart"
     version: "v3",
     workerId: "tenant:chat:v3",
     restartSequence: 4,
-  }));
+  }), "task-a");
 
   assert.equal(host.facetWorkers.get(facetName)?.restartSequence, 4);
   assert.deepEqual(harness.aborts, []);
   assert.throws(
-    () => host.rememberFacet(invoke({ restartSequence: 3 })),
+    () => host.rememberFacet(invoke({ restartSequence: 3 }), "task-a"),
     (err) => {
       assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_version_stale");
       return true;
@@ -309,7 +429,7 @@ test("DO host actor: a stale delayed dispatch cannot replace a newer restart", (
   registerFacet(host, "Room:alice", 5);
 
   assert.throws(
-    () => host.rememberFacet(invoke({ restartSequence: 4 })),
+    () => host.rememberFacet(invoke({ restartSequence: 4 }), "task-a"),
     (err) => {
       assert.equal(/** @type {{ code?: unknown }} */ (err).code, "session_policy_version_stale");
       return true;

@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   adminFetch,
   composeStart,
-  composeRecreate,
   composeRestart,
   composeStop,
   assertStatus,
@@ -20,6 +19,7 @@ import {
   readOneServerBinaryFrame,
   readOneServerCloseFrame,
   readOneServerTextFrame,
+  recreateDoSingleRuntime,
   serviceInternalGet,
   serviceInternalPost,
   serviceWebSocketRoundTrip,
@@ -64,16 +64,6 @@ function doWebSocketUpgradeOk(service) {
     service: "do-runtime",
     outcome: "ok",
   });
-}
-
-async function waitForDoRouterAfterRecreate() {
-  await waitUntil("Envoy do_router after do-runtime recreate", () => {
-    try {
-      return serviceInternalGet("envoy", 18788, "/healthz").status === 200;
-    } catch {
-      return false;
-    }
-  }, { timeoutMs: 10_000, intervalMs: 100 });
 }
 
 /** @param {string} outcome */
@@ -184,8 +174,7 @@ test("gateway-proxied Durable Object WebSocket reconnects backend after do-runti
       text: "before",
     });
 
-    composeRecreate("do-runtime");
-    await waitForDoRouterAfterRecreate();
+    await recreateDoSingleRuntime();
 
     const second = readOneServerTextFrame(socket, { timeoutMs: 10_000 });
     socket.write(encodeClientTextFrame("after-1"));
@@ -327,8 +316,7 @@ test("gateway-proxied Durable Object WebSocket proactively reconnects backend fo
       text: "open",
     });
 
-    composeRecreate("do-runtime");
-    await waitForDoRouterAfterRecreate();
+    await recreateDoSingleRuntime();
 
     assert.deepEqual(await readJsonServerFrame(socket, { timeoutMs: 15_000 }), {
       objectId: "push",
@@ -526,8 +514,7 @@ test("gateway-proxied Durable Object hibernation WebSocket reconnects backend af
       text: "before",
     });
 
-    composeRecreate("do-runtime");
-    await waitForDoRouterAfterRecreate();
+    await recreateDoSingleRuntime();
 
     socket.write(encodeClientTextFrame("after"));
     assert.deepEqual(await readJsonServerFrame(socket, { timeoutMs: 10_000 }), {

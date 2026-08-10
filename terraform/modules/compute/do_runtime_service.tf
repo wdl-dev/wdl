@@ -78,6 +78,7 @@ resource "aws_ecs_task_definition" "do_runtime" {
         { name = "ASSETS_CDN_BASE", value = var.assets_cdn_base },
         { name = "DO_TASK_CONTAINER_NAME", value = "do-runtime" },
         { name = "DO_OWNER_TTL_SECONDS", value = "120" },
+        { name = "DO_PREVENT_EVICTION", value = tostring(var.do_prevent_eviction) },
         { name = "D1_QUERY_TIMEOUT_MS", value = "30000" },
       ], local.r2_s3_env)
 

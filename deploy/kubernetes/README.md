@@ -40,10 +40,12 @@ during a maintenance window or after pausing scheduler/workflows traffic. Set
 previous=old/current=new, restart the private fleet together, then clear previous
 after the fleet converges.
 
-The workerd image uses the non-local compiled configs (`gateway.bin`,
-`user-runtime.bin`, `system-runtime.bin`, `do-runtime.bin`). Those configs use
-Kubernetes service DNS directly, so this stack does not need the local Compose
-Envoy sidecar.
+The workerd image uses the non-local/production-mesh compiled configs (`gateway.bin`,
+`user-runtime.bin`, `system-runtime.bin`, `d1-runtime.bin`, and resident
+`do-runtime.bin` by default). Setting `DO_PREVENT_EVICTION=false` selects
+`do-runtime-evictable.bin` instead. These artifacts use Kubernetes service DNS
+directly, so this stack does not need the local Compose Envoy sidecar. D1 has no local
+config variant.
 
 The base also installs ingress-only NetworkPolicies. Kubernetes ClusterIP
 Services are not an isolation boundary by themselves: without NetworkPolicy, any

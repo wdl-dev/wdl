@@ -44,6 +44,7 @@ module "compute" {
   runtime_desired_count       = var.runtime_desired_count
   d1_runtime_desired_count    = var.d1_runtime_desired_count
   do_runtime_desired_count    = var.do_runtime_desired_count
+  do_prevent_eviction         = var.do_prevent_eviction
   d1_test_hooks_enabled       = var.d1_test_hooks_enabled
   scheduler_desired_count     = var.scheduler_desired_count
   workflows_desired_count     = var.workflows_desired_count

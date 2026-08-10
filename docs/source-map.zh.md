@@ -92,7 +92,8 @@
 |---|---|
 | `d1-runtime/` | D1 workerd service。Supervisor 是 PID 1，spawns workerd、renews leases，并在 SIGTERM 时 drain。Router/actor/owner modules 实现 per-database ownership、forwarding、read cache 和 SQLite localDisk execution。 |
 | `do-runtime/` | Durable Object workerd service。Supervisor 是 PID 1，spawns workerd、renews owned shards、SIGTERM 时 drain，并在 drain 成功后 SIGKILL workerd 以避开 half-dead 504 window。Owner/actor/load/alarm modules 实现 owner scopes、native facet execution、projection-fenced lazy facet restart、SQLite storage、Workflows alarm client/shim/dispatch endpoint 和 WebSocket connect。 |
-| `do-runtime/config-local.capnp` | 为 Docker Compose 编译的本地 Durable Objects runtime workerd config，使用 Envoy-backed private service routes。 |
+| `do-runtime/config.capnp`、`do-runtime/config-evictable.capnp` | Production mesh 的 Durable Objects runtime configs。Base 文件拥有共享 worker graph 以及 resident/evictable host-actor variants；evictable config 选择后者。 |
+| `do-runtime/config-local.capnp`、`do-runtime/config-local-evictable.capnp` | Resident/evictable Durable Objects runtime 的 Docker Compose variants，使用 Envoy-backed private service routes。 |
 
 ## Rust Workspace
 
@@ -101,7 +102,7 @@
 | `rust/redis-proxy/` | Runtime sidecar，提供 cold-load、secret decrypt、KV、queue producer 和 log-tail sidecar APIs。 |
 | `rust/scheduler/` | Cron、queue、delayed queue、orphan migration 和 workflow tick scheduler。 |
 | `rust/workflows/` | Workflows service、DB 2 state machine 和 internal DO alarm backend jobs。 |
-| `rust/supervisor/` | D1/DO supervisor binaries。 |
+| `rust/supervisor/` | D1/DO supervisor binaries，包括 workerd 启动前对 do-runtime actor-residency config 的严格选择。 |
 | `rust/common/` | worker-contract grammar 与 keys、time、logging、internal-auth matching、Redis connection primitives 和 metrics primitives 等共享 Rust utilities。 |
 
 ## System Workers、Fixtures 和 Examples

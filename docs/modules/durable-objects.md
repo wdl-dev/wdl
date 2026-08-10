@@ -166,6 +166,19 @@ different `doStorageId`.
   aborts only that stale facet through `facets.abort()` before recreating it; it never
   calls `facets.delete()`, so SQLite storage remains. A delayed lower-sequence dispatch
   cannot replace a newer facet.
+- Native facet containers are task-local even when host SQLite is shared. The host actor
+  therefore stores each observed restart sequence under `(task_id, facet_name)` and
+  reloads only its task's row after reconstruction. This keeps the lazy restart fence
+  intact across eviction and owner movement. It neither scans all facets nor lets one
+  task acknowledge another task's stale native facet, and it avoids repeatedly aborting
+  a facet that already reached the current sequence. Storage cleanup removes every task
+  row for the facet.
+- ECS task identity is a per-task ARN, and workerd exposes no authoritative signal that a
+  task's native facet container has been permanently retired. The ledger therefore has
+  no TTL or LRU retirement: under either residency mode, a long-lived facet can retain
+  one small row for every task that dispatched it until storage cleanup. This long-term
+  storage cost is accepted to avoid pruning a fence that a still-live task needs on a
+  later owner return.
 - Storage cleanup is scoped to stable `doStorageId`, not an immutable worker version. It
   may dispatch through an owner while its requested version is superseded, but still
   enforces whole-worker delete exclusion, the active storage pointer, owner generation,
@@ -266,6 +279,61 @@ addition to the Fargate task memory limit, and reserves memory for the colocated
 redis-proxy sidecar. That is a container failure boundary, not a per-storage-call memory
 interrupt.
 
+## Actor Residency And Eviction
+
+`DO_PREVENT_EVICTION` is a deployment-level do-runtime setting. An unset value or the
+exact value `true` selects the resident config with `preventEviction = true`. The exact
+value `false` selects the otherwise identical evictable config, which omits
+`preventEviction` and lets stock workerd evict idle actors. Other values are
+configuration errors and make `do-supervisor` exit before starting workerd. The
+Terraform `do_prevent_eviction` variable, Compose, and the local Kubernetes overlay all
+default to `true`.
+
+Changing the setting requires a do-runtime rollout. It does not change the host actor
+unique key, owner scope, object identity, or localDisk path, and it does not delete
+SQLite. The supervisor records the selected mode in the
+`do_actor_residency_configured` structured event.
+
+With the setting at `false`, the current bundled workerd may shut down an actor after
+about 10 seconds of inactivity and periodically cleans disconnected actor containers on
+an approximately 70-second loop. These are upstream implementation timings, not WDL
+latency or eviction SLAs. The WDL gate observes actor reconstruction after longer idle
+periods but does not claim to observe the internal ActorContainer erase pass; workerd
+owns that implementation-level test. Active requests and non-hibernating WebSockets may
+keep an actor active. A quiescent socket accepted through `ctx.acceptWebSocket()` is
+different: workerd can retain the native socket while discarding the JavaScript actor,
+then reconstruct the actor when a message arrives.
+
+Actor reconstruction has the following boundaries:
+
+- SQLite storage, object identity, and a quiescent hibernatable WebSocket's attachment,
+  tags, and native socket survive. Current workerd's legacy hibernation manager has known
+  actor-eviction races: an in-flight send or close can be silently lost, and an in-flight
+  auto-response can leave a blocked send that breaks the revived socket pump. The
+  resident default avoids exposing existing deployments to those races. Set
+  `DO_PREVENT_EVICTION=false` only for a workload that does not require this in-flight
+  boundary and has passed the focused eviction gate.
+- JavaScript instance fields, actor-held worker/class references, in-memory caches, and
+  non-durable timers do not survive. Applications must not treat them as persistent
+  state; an underlying workerLoader code cache may have a separate lifetime.
+- Owner lease and generation renewal are independent of JavaScript actor residency.
+  Renewal neither pins the actor heap nor replaces the owner-side dispatch fence after
+  reconstruction.
+- The first dispatch after eviction is a cold dispatch; an immediate following dispatch
+  is warm again. Explicit `false` trades that first-dispatch latency for lower
+  inactive-actor residency.
+
+The qualifying two-task ECS comparison ran three interleaved resident/evictable pairs. In
+that bounded fixture, the evictable mode reduced median 75-second do-runtime memory by
+29%. This establishes the direction of the residency tradeoff; it is not a capacity
+guarantee for other workloads.
+
+Setting the variable to `false` is not a process-memory ceiling. V8, SQLite, allocator
+arenas, loaded code, active requests, and non-hibernating sockets can still retain
+memory, and released heap does not have to return to the operating system immediately.
+Container memory limits, owner transfer, and workload-specific capacity tests remain
+required.
+
 ## Security Boundaries
 
 - do-runtime internal endpoints are private-mesh only and require the shared
@@ -301,11 +369,12 @@ interrupt.
 
 ## Observability
 
-do-runtime emits structured logs around owner resolution, session-policy fences, lazy
-facet restart, dispatch, alarm execution, drain, renew, and WebSocket handling. Workflows
-emits backend alarm delivery/retry/discard/in-flight-unknown outcomes through
-`do_alarm_dispatches`; do-runtime metrics cover runtime operations. Gateway request logs
-do not measure the lifetime of backend WebSocket recovery after the initial 101.
+do-runtime emits structured logs around actor residency selection, owner resolution,
+session-policy fences, lazy facet restart, dispatch, alarm execution, drain, renew, and
+WebSocket handling. Through `do_alarm_dispatches`, Workflows emits backend alarm
+delivery, retry, discard, and in-flight-unknown outcomes; do-runtime metrics cover
+runtime operations. Gateway request logs do not measure the lifetime of backend
+WebSocket recovery after the initial 101.
 
 ## Deployment / Rollout Notes
 
@@ -324,6 +393,10 @@ do not measure the lifetime of backend WebSocket recovery after the initial 101.
 - Drain and renew must target the local `127.0.0.1:8788` service. A Service Connect or
   Kubernetes service alias may hit a different task and cannot express local-owner
   release semantics.
+- Changing `DO_PREVENT_EVICTION` requires a do-runtime rollout. Keep the default `true`
+  for workloads that use hibernatable WebSockets or require resident actor state. Use
+  `false` only after accepting the documented cold-dispatch and in-flight WebSocket
+  boundaries and passing the focused eviction gate against the target workerd image.
 
 ## Tests That Protect This Module
 
@@ -331,6 +404,7 @@ do not measure the lifetime of backend WebSocket recovery after the initial 101.
 - `tests/integration/durable-objects-storage.test.js`
 - `tests/integration/durable-objects-ownership.test.js`
 - `tests/integration/durable-objects-alarms.test.js`
+- `tests/integration/durable-objects-eviction.test.js`
 - `tests/integration/durable-objects-websocket.test.js`
 - `tests/unit/do-alarm-client.test.js`
 - `tests/unit/do-alarm-shim.test.js`
@@ -345,6 +419,7 @@ do not measure the lifetime of backend WebSocket recovery after the initial 101.
 - `tests/unit/do-task-identity.test.js`
 - `tests/unit/runtime-do-client.test.js`
 - `rust/supervisor/src/drain.rs`
+- `rust/supervisor/src/config.rs`
 - `rust/supervisor/src/renew.rs`
 
 ## Known Constraints And Non-Goals

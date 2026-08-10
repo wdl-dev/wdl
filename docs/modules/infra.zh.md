@@ -85,6 +85,7 @@ Stateful storage：
 - 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
 - 除了 Fargate task memory limit，D1 和 DO 的 workerd container 还会设置显式 container memory hard limit。DO 还会给本地 redis-proxy sidecar 保留内存。
+- do-runtime 的 `DO_PREVENT_EVICTION` 默认是 `true`，会让 host actor resident，避免当前 workerd 的 actor eviction 中断在途 hibernatable WebSocket 操作。显式 `false` 会为已经验证的 workload 启用 eviction；它不能替代 container memory hard limit。
 - Terraform Fargate service 在服务能容忍 overlapping capacity 时应使用 rolling replacement。D1/DO 使用 sequential replacement；scheduler 作为 singleton control loop 保持 stop-before-start。D1/DO 和 scheduler 都关闭 Availability Zone rebalancing，让 replacement 遵循各自显式 deployment strategy。
 
 ## 安全边界
@@ -133,7 +134,8 @@ Terraform test 环境优先用 Terraform-managed change，不要用手动 rollin
 
 - Operator-driven checks：Terraform plan review 和 Kubernetes manifest review。
 - `npm run test:integration`
-- `tests/unit/style-contracts.test.js`：local compose Envoy mesh 形态、D1/DO test-hook IaC gate、Fargate-only Terraform launch contract。
+- `tests/unit/style-contracts.test.js`：local compose Envoy mesh 形态、D1/DO test-hook IaC gate、DO residency 默认值，以及 Fargate-only Terraform launch contract。
+- `tests/integration/durable-objects-eviction.test.js`：resident 默认值与显式 eviction 选择、actor 重建、owner 往返后的 task-local session-policy fence、SQLite 连续性，以及静默 hibernating WebSocket 连续性。
 - 目标 deployed environment rolling 后的 smoke tests。
 
 ## 已知约束和非目标

@@ -95,7 +95,8 @@ are outside this map unless they own runtime or deployable service behavior.
 |---|---|
 | `d1-runtime/` | D1 workerd service. Supervisor is PID 1, spawns workerd, renews leases, and drains on SIGTERM. Router/actor/owner modules implement per-database ownership, forwarding, read cache, and SQLite localDisk execution. |
 | `do-runtime/` | Durable Object workerd service. Supervisor is PID 1, spawns workerd, renews owned shards, drains on SIGTERM, and SIGKILLs workerd after successful drain to avoid the half-dead 504 window. Owner/actor/load/alarm modules implement owner scopes, native facet execution, projection-fenced lazy facet restart, SQLite storage, Workflows alarm client/shim/dispatch endpoint, and WebSocket connect. |
-| `do-runtime/config-local.capnp` | Local Durable Objects runtime workerd config compiled for Docker Compose with Envoy-backed private service routes. |
+| `do-runtime/config.capnp`, `do-runtime/config-evictable.capnp` | Production-mesh Durable Objects runtime configs. The base file owns the shared worker graph plus resident and evictable host-actor variants; the evictable config selects the latter. |
+| `do-runtime/config-local.capnp`, `do-runtime/config-local-evictable.capnp` | Docker Compose variants of the resident and evictable Durable Objects runtime configs, using Envoy-backed private service routes. |
 
 ## Rust Workspace
 
@@ -104,7 +105,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `rust/redis-proxy/` | Runtime sidecar for cold-load, secret decrypt, KV, queue producer, and log-tail sidecar APIs. |
 | `rust/scheduler/` | Cron, queue, delayed queue, orphan migration, and workflow tick scheduler. |
 | `rust/workflows/` | Workflows service, DB 2 state machine, and internal DO alarm backend jobs. |
-| `rust/supervisor/` | D1/DO supervisor binaries. |
+| `rust/supervisor/` | D1/DO supervisor binaries, including strict do-runtime actor-residency config selection before workerd starts. |
 | `rust/common/` | Shared Rust utilities such as worker-contract grammar and keys, time, logging, internal-auth matching, Redis connection primitives, and metrics primitives. |
 
 ## System Workers, Fixtures, And Examples

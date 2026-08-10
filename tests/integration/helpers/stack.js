@@ -63,7 +63,7 @@ export async function ensureStackUp() {
   composeUp(["--wait", "test-probe"], { stdio: "pipe" });
   if (process.env.WDL_INTEGRATION_SLOT_PREPPED === "1") {
     ensureD1SingleRuntime();
-    ensureDoSingleRuntime();
+    await ensureDoSingleRuntime();
     await waitForGateway();
     await waitForGatewaySubscriber();
     stackReady = true;
@@ -102,7 +102,7 @@ export async function ensureStackUp() {
     composeUp(["--force-recreate", "--wait", "scheduler"], { stdio: "pipe" });
   }
   ensureD1SingleRuntime();
-  ensureDoSingleRuntime();
+  await ensureDoSingleRuntime();
   await waitForGateway();
   // Subscriber must be attached before any PUBLISH — early ones are
   // lost (Pub/Sub is non-persistent).

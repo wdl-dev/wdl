@@ -23,8 +23,7 @@ const config :Workerd.Config = (
   ],
 );
 
-const doRuntimeWorker :Workerd.Worker = (
-  modules = [
+const doRuntimeModules :List(Workerd.Worker.Module) = [
     (name = "worker", esModule = embed "index.js"),
     (name = "do-runtime-actor", esModule = embed "actor.js"),
     (name = "do-runtime-alarm", esModule = embed "alarm.js"),
@@ -126,7 +125,41 @@ const doRuntimeWorker :Workerd.Worker = (
     (name = "ns-pattern.js", esModule = embed "../shared/ns-pattern.js"),
     (name = "worker-contract.js", esModule = embed "../shared/worker-contract.js"),
     (name = "@wdl-dev/aws-sigv4", esModule = embed "../shared/vendor/aws-sigv4.js"),
-  ],
+];
+
+const doRuntimeBindings :List(Workerd.Worker.Binding) = [
+  (name = "DO_HOSTS", durableObjectNamespace = "WdlDoHostActor"),
+  (name = "LOADER", workerLoader = (id = "wdl-do-runtime-loader")),
+  (name = "PUBLIC_NETWORK", service = "public-network"),
+  (name = "D1_BACKEND", service = "d1-runtime"),
+  (name = "DO_BACKEND", service = "do-runtime"),
+  (name = "WORKFLOWS_BACKEND", service = "workflows"),
+  (name = "SERVICE_NAME", text = "do-runtime"),
+  (name = "REDIS_ADDR", fromEnvironment = "REDIS_ADDR"),
+  (name = "WDL_INTERNAL_AUTH_TOKEN", fromEnvironment = "WDL_INTERNAL_AUTH_TOKEN"),
+  (name = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN", fromEnvironment = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN"),
+  (name = "REDIS_PROXY_URL", fromEnvironment = "REDIS_PROXY_URL"),
+  (name = "ASSETS_CDN_BASE", fromEnvironment = "ASSETS_CDN_BASE"),
+  (name = "D1_QUERY_TIMEOUT_MS", fromEnvironment = "D1_QUERY_TIMEOUT_MS"),
+  (name = "R2_S3_ENDPOINT", fromEnvironment = "R2_S3_ENDPOINT"),
+  (name = "R2_S3_BUCKET", fromEnvironment = "R2_S3_BUCKET"),
+  (name = "R2_S3_ACCESS_KEY_ID", fromEnvironment = "R2_S3_ACCESS_KEY_ID"),
+  (name = "R2_S3_SECRET_ACCESS_KEY", fromEnvironment = "R2_S3_SECRET_ACCESS_KEY"),
+  (name = "R2_S3_REGION", fromEnvironment = "R2_S3_REGION"),
+  (name = "DO_TASK_ID", fromEnvironment = "DO_TASK_ID"),
+  (name = "DO_TASK_ENDPOINT", fromEnvironment = "DO_TASK_ENDPOINT"),
+  (name = "DO_TASK_IDENTITY_TIMEOUT_MS", fromEnvironment = "DO_TASK_IDENTITY_TIMEOUT_MS"),
+  (name = "DO_TASK_CONTAINER_NAME", fromEnvironment = "DO_TASK_CONTAINER_NAME"),
+  (name = "ECS_CONTAINER_METADATA_URI_V4", fromEnvironment = "ECS_CONTAINER_METADATA_URI_V4"),
+  (name = "DO_OWNER_TTL_SECONDS", fromEnvironment = "DO_OWNER_TTL_SECONDS"),
+  (name = "DO_OWNER_LEASE_GUARD_MS", fromEnvironment = "DO_OWNER_LEASE_GUARD_MS"),
+  (name = "DO_RENEW_CONCURRENCY", fromEnvironment = "DO_RENEW_CONCURRENCY"),
+  (name = "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS", fromEnvironment = "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS"),
+  (name = "LOG_LEVEL", fromEnvironment = "LOG_LEVEL"),
+];
+
+const doRuntimeWorker :Workerd.Worker = (
+  modules = .doRuntimeModules,
   compatibilityDate = "2026-04-24",
   compatibilityFlags = ["nodejs_compat"],
   globalOutbound = "internal-network",
@@ -137,34 +170,17 @@ const doRuntimeWorker :Workerd.Worker = (
     (className = "WdlDoHostActor", uniqueKey = "wdl-do-host-v1", enableSql = true, preventEviction = true),
   ],
   durableObjectStorage = (localDisk = "do-storage"),
-  bindings = [
-    (name = "DO_HOSTS", durableObjectNamespace = "WdlDoHostActor"),
-    (name = "LOADER", workerLoader = (id = "wdl-do-runtime-loader")),
-    (name = "PUBLIC_NETWORK", service = "public-network"),
-    (name = "D1_BACKEND", service = "d1-runtime"),
-    (name = "DO_BACKEND", service = "do-runtime"),
-    (name = "WORKFLOWS_BACKEND", service = "workflows"),
-    (name = "SERVICE_NAME", text = "do-runtime"),
-    (name = "REDIS_ADDR", fromEnvironment = "REDIS_ADDR"),
-    (name = "WDL_INTERNAL_AUTH_TOKEN", fromEnvironment = "WDL_INTERNAL_AUTH_TOKEN"),
-    (name = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN", fromEnvironment = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN"),
-    (name = "REDIS_PROXY_URL", fromEnvironment = "REDIS_PROXY_URL"),
-    (name = "ASSETS_CDN_BASE", fromEnvironment = "ASSETS_CDN_BASE"),
-    (name = "D1_QUERY_TIMEOUT_MS", fromEnvironment = "D1_QUERY_TIMEOUT_MS"),
-    (name = "R2_S3_ENDPOINT", fromEnvironment = "R2_S3_ENDPOINT"),
-    (name = "R2_S3_BUCKET", fromEnvironment = "R2_S3_BUCKET"),
-    (name = "R2_S3_ACCESS_KEY_ID", fromEnvironment = "R2_S3_ACCESS_KEY_ID"),
-    (name = "R2_S3_SECRET_ACCESS_KEY", fromEnvironment = "R2_S3_SECRET_ACCESS_KEY"),
-    (name = "R2_S3_REGION", fromEnvironment = "R2_S3_REGION"),
-    (name = "DO_TASK_ID", fromEnvironment = "DO_TASK_ID"),
-    (name = "DO_TASK_ENDPOINT", fromEnvironment = "DO_TASK_ENDPOINT"),
-    (name = "DO_TASK_IDENTITY_TIMEOUT_MS", fromEnvironment = "DO_TASK_IDENTITY_TIMEOUT_MS"),
-    (name = "DO_TASK_CONTAINER_NAME", fromEnvironment = "DO_TASK_CONTAINER_NAME"),
-    (name = "ECS_CONTAINER_METADATA_URI_V4", fromEnvironment = "ECS_CONTAINER_METADATA_URI_V4"),
-    (name = "DO_OWNER_TTL_SECONDS", fromEnvironment = "DO_OWNER_TTL_SECONDS"),
-    (name = "DO_OWNER_LEASE_GUARD_MS", fromEnvironment = "DO_OWNER_LEASE_GUARD_MS"),
-    (name = "DO_RENEW_CONCURRENCY", fromEnvironment = "DO_RENEW_CONCURRENCY"),
-    (name = "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS", fromEnvironment = "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS"),
-    (name = "LOG_LEVEL", fromEnvironment = "LOG_LEVEL"),
+  bindings = .doRuntimeBindings,
+);
+
+const doRuntimeEvictableWorker :Workerd.Worker = (
+  modules = .doRuntimeModules,
+  compatibilityDate = "2026-04-24",
+  compatibilityFlags = ["nodejs_compat"],
+  globalOutbound = "internal-network",
+  durableObjectNamespaces = [
+    (className = "WdlDoHostActor", uniqueKey = "wdl-do-host-v1", enableSql = true),
   ],
+  durableObjectStorage = (localDisk = "do-storage"),
+  bindings = .doRuntimeBindings,
 );

@@ -159,6 +159,12 @@ variable "do_runtime_desired_count" {
   default = 2
 }
 
+variable "do_prevent_eviction" {
+  type        = bool
+  default     = true
+  description = "Prevent stock workerd from evicting idle do-runtime host actors. Keep true for reliable in-flight hibernatable WebSocket operations; set false only for workloads that accept the documented eviction boundary."
+}
+
 variable "d1_test_hooks_enabled" {
   type        = bool
   default     = false

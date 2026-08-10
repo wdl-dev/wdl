@@ -28,6 +28,14 @@ import {
 import { formatError } from "shared-observability";
 import { rebuildResponseWithHeaders } from "shared-respond";
 
+// Native facets are task-local while host SQLite is shared. Without an authoritative
+// native-container retirement signal, task rows cannot be TTL-pruned; facet_name leads
+// the key so storage cleanup can still delete every task row through the primary index.
+const CREATE_FACET_SESSION_POLICY_TABLE =
+  "CREATE TABLE IF NOT EXISTS wdl_facet_session_policy (" +
+  "task_id TEXT NOT NULL, facet_name TEXT NOT NULL, restart_sequence INTEGER NOT NULL, " +
+  "PRIMARY KEY (facet_name, task_id))";
+
 /**
  * @typedef {{ LOADER: { get(key: string, loader: () => Promise<unknown>): DoWorkerStub } }} DoEnv
  * @typedef {{ getDurableObjectClass(className: string, options: { props: Record<string, unknown> }): DurableObjectClass }} DoWorkerStub
@@ -46,6 +54,8 @@ export class WdlDoHostActor extends DurableObject {
   facetHighWater;
   /** @type {Set<string>} */
   registeredObjectMembers;
+  /** @type {boolean} */
+  facetSessionPolicyTableReady;
 
   /**
    * @param {DurableObjectState} ctx
@@ -60,6 +70,7 @@ export class WdlDoHostActor extends DurableObject {
     this.facetWorkers = new Map();
     this.facetHighWater = 0;
     this.registeredObjectMembers = new Set();
+    this.facetSessionPolicyTableReady = false;
   }
 
   /**
@@ -81,10 +92,71 @@ export class WdlDoHostActor extends DurableObject {
     return worker;
   }
 
-  /** @param {DoInvoke} invoke */
-  rememberFacet(invoke) {
+  ensureFacetSessionPolicyTable() {
+    if (this.facetSessionPolicyTableReady) return;
+    this.ctx.storage.sql.exec(CREATE_FACET_SESSION_POLICY_TABLE);
+    this.facetSessionPolicyTableReady = true;
+  }
+
+  /** @param {string} facetName @param {number} restartSequence */
+  cacheFacetRegistration(facetName, restartSequence) {
+    const registration = { restartSequence };
+    this.facetWorkers.set(facetName, registration);
+    metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetWorkers.size);
+    if (this.facetWorkers.size > this.facetHighWater) {
+      this.facetHighWater = this.facetWorkers.size;
+      metrics.setGauge("do_host_actor_facet_high_water", { service: SERVICE }, this.facetHighWater);
+    }
+    return registration;
+  }
+
+  /** @param {string} taskId @param {string} facetName */
+  readFacetRegistration(taskId, facetName) {
+    const cached = this.facetWorkers.get(facetName);
+    if (cached) return cached;
+    this.ensureFacetSessionPolicyTable();
+    const row = [...this.ctx.storage.sql.exec(
+      "SELECT restart_sequence FROM wdl_facet_session_policy WHERE task_id = ? AND facet_name = ?",
+      taskId,
+      facetName
+    )][0];
+    if (!row) return null;
+    const restartSequence = row.restart_sequence;
+    if (
+      typeof restartSequence !== "number" ||
+      !Number.isSafeInteger(restartSequence) ||
+      restartSequence < 0
+    ) {
+      throw new DoRuntimeError(503, "session_policy_state_invalid", "facet session policy state is invalid");
+    }
+    return this.cacheFacetRegistration(facetName, restartSequence);
+  }
+
+  /** @param {string} taskId @param {string} facetName @param {number} restartSequence */
+  writeFacetRegistration(taskId, facetName, restartSequence) {
+    this.ensureFacetSessionPolicyTable();
+    this.ctx.storage.sql.exec(
+      "INSERT INTO wdl_facet_session_policy (task_id, facet_name, restart_sequence) VALUES (?, ?, ?) " +
+        "ON CONFLICT(facet_name, task_id) DO UPDATE SET restart_sequence = excluded.restart_sequence",
+      taskId,
+      facetName,
+      restartSequence
+    );
+  }
+
+  /** @param {string} facetName */
+  deleteFacetRegistration(facetName) {
+    this.ensureFacetSessionPolicyTable();
+    this.ctx.storage.sql.exec(
+      "DELETE FROM wdl_facet_session_policy WHERE facet_name = ?",
+      facetName
+    );
+  }
+
+  /** @param {DoInvoke} invoke @param {string} taskId */
+  rememberFacet(invoke, taskId) {
     const facetName = buildFacetName(invoke);
-    const existing = this.facetWorkers.get(facetName);
+    const existing = this.readFacetRegistration(taskId, facetName);
     if (existing && invoke.restartSequence < existing.restartSequence) {
       throw new DoRuntimeError(
         503,
@@ -109,17 +181,12 @@ export class WdlDoHostActor extends DurableObject {
       });
     }
     if (existing && advanceFacet && !restartFacet) {
+      this.writeFacetRegistration(taskId, facetName, invoke.restartSequence);
       existing.restartSequence = invoke.restartSequence;
     }
     if (!this.facetWorkers.has(facetName)) {
-      this.facetWorkers.set(facetName, {
-        restartSequence: invoke.restartSequence,
-      });
-      metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetWorkers.size);
-      if (this.facetWorkers.size > this.facetHighWater) {
-        this.facetHighWater = this.facetWorkers.size;
-        metrics.setGauge("do_host_actor_facet_high_water", { service: SERVICE }, this.facetHighWater);
-      }
+      this.writeFacetRegistration(taskId, facetName, invoke.restartSequence);
+      this.cacheFacetRegistration(facetName, invoke.restartSequence);
     }
     return facetName;
   }
@@ -157,9 +224,9 @@ export class WdlDoHostActor extends DurableObject {
         if (!("request" in invoke)) {
           throw new Error("DO connect request did not normalize to a fetch invoke");
         }
-        return await this.dispatchWithFence(invoke, async () => {
+        return await this.dispatchWithFence(invoke, async (owner) => {
           const requestId = request.headers.get("x-request-id") || null;
-          const facetName = this.rememberFacet(invoke);
+          const facetName = this.rememberFacet(invoke, owner.taskId);
           const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
             props: invoke.props,
           });
@@ -176,15 +243,16 @@ export class WdlDoHostActor extends DurableObject {
         const facetName = buildFacetName(invoke);
         this.ctx.facets.delete(facetName);
         this.facetWorkers.delete(facetName);
+        this.deleteFacetRegistration(facetName);
         this.registeredObjectMembers.delete(objectRegistryMember(invoke));
         metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetWorkers.size);
         metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
         return Response.json({ ok: true });
       }
       const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request));
-      return await this.dispatchWithFence(invoke, async () => {
+      return await this.dispatchWithFence(invoke, async (owner) => {
         const requestId = request.headers.get("x-request-id") || null;
-        const facetName = this.rememberFacet(invoke);
+        const facetName = this.rememberFacet(invoke, owner.taskId);
         const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
           props: invoke.props,
         });
@@ -207,7 +275,7 @@ export class WdlDoHostActor extends DurableObject {
 
   /**
    * @param {DoInvoke} invoke
-   * @param {() => Promise<Response>} run
+   * @param {(owner: DoOwner) => Promise<Response>} run
    */
   async dispatchWithFence(invoke, run) {
     if (!beginInFlightDispatch()) {
@@ -237,7 +305,7 @@ export class WdlDoHostActor extends DurableObject {
    * @param {DoInvoke} invoke
    * @param {DoOwner} owner
    * @param {number} leaseRemainingMs
-   * @param {() => Promise<Response>} run
+   * @param {(owner: DoOwner) => Promise<Response>} run
    */
   async dispatchWithLeaseBudget(invoke, owner, leaseRemainingMs, run) {
     const facetName = buildFacetName(invoke);
@@ -297,7 +365,7 @@ export class WdlDoHostActor extends DurableObject {
       throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED, `DO scope ${owner.ownerKey} owner lease has expired`);
     }
     try {
-      return await run();
+      return await run(owner);
     } finally {
       done = true;
       if (timer) clearTimeout(timer);
