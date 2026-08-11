@@ -56,7 +56,10 @@ that starts with `xn--` but does not decode to a valid UTS #46 label is preserve
 lowercased instead of being rejected. WDL accepts such labels as literal route labels
 when they also satisfy its ASCII DNS grammar in `shared/ns-pattern.js`; numeric-host
 canonicalization remains in `control/topology.js`, and Unicode route names remain
-unsupported.
+unsupported. For compatibility dates on or after `2026-08-11`, workerd also enables
+`workflows_enable_fast_engine_creation`, changing how its native Workflow engine
+allocates instance IDs. WDL does not use that engine; its custom facade and DB 2-backed
+workflows service retain WDL-owned instance identity and lifecycle semantics.
 
 Bundled workerd permits `Fetcher` and Durable Object class stubs to cross JSRPC as
 opaque arguments without an experimental flag. WDL treats possession of such a stub

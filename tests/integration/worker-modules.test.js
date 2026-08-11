@@ -56,7 +56,6 @@ function pendingByobGatewayPost(ns, path, body) {
         reject(new Error("worker did not confirm a pending BYOB read before request body delivery"));
         return;
       }
-      request.end(body);
       /** @type {Buffer[]} */
       const chunks = [];
       response.on("data", (chunk) => chunks.push(chunk));
@@ -68,6 +67,13 @@ function pendingByobGatewayPost(ns, path, body) {
           text: () => text,
         }, "pending BYOB gateway response body"));
       });
+      response.on("error", reject);
+      response.on("close", () => {
+        if (!response.complete) {
+          reject(new Error("pending BYOB gateway response closed before completion"));
+        }
+      });
+      request.end(body);
     });
     request.on("error", reject);
     request.flushHeaders();
