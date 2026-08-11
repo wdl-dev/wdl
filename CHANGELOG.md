@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Updated the bundled workerd and Workers types pins to `1.20260811.1` and `5.20260811.1`, raising the maximum tenant compatibility date to `2026-08-18`.
-- Adopted workerd's live-view BYOB stream hardening and ada-url 4 URL behavior. New Module Registry-only `import.meta.dirname` and `import.meta.filename` remain unavailable because WDL continues to reject the experimental registry flag; the Workers declarations and experimental flag set are unchanged.
+## wdl.20260811.1 - 2026-08-11
+
+- Updated the bundled workerd and Workers types pins to `1.20260811.1` and `5.20260811.1`, raising the maximum tenant compatibility date to `2026-08-18`; BYOB reads now honor live buffer bounds after resize or transfer, and Control accepts ada-url 4-preserved literal `xn--` host labels while retaining potential-IPv4 rejection. New Module Registry-only APIs remain unavailable.
 
 ## wdl.20260810.1 - 2026-08-10
 
