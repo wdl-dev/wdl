@@ -49,6 +49,18 @@ ignored. Separately, workerd's `servername` / expected-certificate-hostname beha
 changed outside any compatibility flag, so certificate hostname validation follows the
 bundled workerd behavior for all dates.
 
+Starting with WDL's 2026-08-11 workerd pin, byte-stream BYOB reads use live
+`ArrayBufferView` bounds instead of cached offsets and lengths, including when buffers
+are resized or transferred. The same pin adopts ada-url 4: an ASCII hostname label
+that starts with `xn--` but does not decode to a valid UTS #46 label is preserved and
+lowercased instead of being rejected. WDL accepts such labels as literal route labels
+when they also satisfy its ASCII DNS grammar in `shared/ns-pattern.js`; numeric-host
+canonicalization remains in `control/topology.js`, and Unicode route names remain
+unsupported. For compatibility dates on or after `2026-08-11`, workerd also enables
+`workflows_enable_fast_engine_creation`, changing how its native Workflow engine
+allocates instance IDs. WDL does not use that engine; its custom facade and DB 2-backed
+workflows service retain WDL-owned instance identity and lifecycle semantics.
+
 Bundled workerd permits `Fetcher` and Durable Object class stubs to cross JSRPC as
 opaque arguments without an experimental flag. WDL treats possession of such a stub
 as capability delegation: the receiver can call the delegated target with the
@@ -96,7 +108,7 @@ docs:
 | R2 multipart upload, customer-provided encryption keys, and Cloudflare-specific checksum behavior | Not supported | The current R2 facade targets S3-compatible object operations needed by WDL workers/assets. Advanced Cloudflare R2 behaviors need explicit design before being documented as compatible. |
 | Queue `contentType = "v8"` and per-consumer `max_concurrency` | Not supported | Queue messages support the documented `json`, `text`, and `bytes` content types; only `v8` is rejected. Dispatch concurrency remains scheduler-owned, and `max_concurrency` is rejected instead of silently ignored. |
 | Incoming TCP `connect()` handlers and Socket RPC transfer | Not supported | The bundled workerd has an incoming `connect()` entrypoint and an autogated Socket RPC transfer path, but WDL configures no tenant raw-TCP ingress and does not enable that autogate. This does not affect the documented outbound `cloudflare:sockets` surface. |
-| Upstream experimental compatibility flags and irrevocable stub storage | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental`, plus WDL's explicit `allow_irrevocable_stub_storage` deny policy, are rejected at deploy and runtime decode. |
+| Upstream experimental compatibility flags and irrevocable stub storage | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental`, plus WDL's explicit `allow_irrevocable_stub_storage` deny policy, are rejected at deploy and runtime decode. This excludes New Module Registry-only surfaces such as `import.meta.dirname` and `import.meta.filename`. |
 | Python Workers | Not supported | WDL rejects Python module manifests instead of letting workerd fail at cold-load. |
 | Durable Object cross-script bindings and migration rename/delete semantics | Not supported | WDL DO classes are same-worker only. Storage identity, owner routing, and delete cleanup are WDL-managed rather than Cloudflare migration-compatible. |
 | Cloudflare account API parity | Not supported | WDL exposes its own CLI/control API. Cloudflare API compatibility is not a stated goal. |

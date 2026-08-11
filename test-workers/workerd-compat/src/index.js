@@ -4,9 +4,73 @@ const moduleClock = {
   performanceNow: performance.now(),
 };
 
+async function byobProbe() {
+  const stream = new ReadableStream({
+    type: "bytes",
+    start(controller) {
+      controller.enqueue(Uint8Array.of(1, 2, 3, 4));
+      controller.close();
+    },
+  });
+  const reader = stream.getReader({ mode: "byob" });
+  const first = await reader.read(new Uint8Array(8));
+  const final = await reader.read(new Uint8Array(8));
+  return {
+    firstDone: first.done,
+    firstBytes: Array.from(first.value),
+    finalDone: final.done,
+    finalBytes: Array.from(final.value),
+  };
+}
+
+function pendingInternalByobResponse(request, mode) {
+  if (!request.body) throw new TypeError("request body is required");
+  const reader = request.body.getReader({ mode: "byob" });
+  const buffer = new ArrayBuffer(16, { maxByteLength: 16 });
+  const view = new Uint8Array(buffer, 4, 8);
+  const pending = reader.read(view);
+  let transferredByteLength = null;
+  if (mode === "resize") {
+    buffer.resize(6);
+  } else if (mode === "transfer") {
+    const transferred = structuredClone(buffer, { transfer: [buffer] });
+    transferredByteLength = transferred.byteLength;
+  } else {
+    throw new TypeError("unsupported pending BYOB probe mode");
+  }
+  const body = new ReadableStream({
+    async start(controller) {
+      try {
+        const result = await pending;
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({
+          done: result.done,
+          bytes: Array.from(result.value),
+          resultByteOffset: result.value.byteOffset,
+          resultBufferByteLength: result.value.buffer.byteLength,
+          originalBufferByteLength: buffer.byteLength,
+          transferredByteLength,
+        })));
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+  });
+  return new Response(body, {
+    headers: {
+      "content-type": "application/json",
+      "x-byob-read-pending": "1",
+    },
+  });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const pendingByobMode = url.searchParams.get("pendingByob");
+    if (pendingByobMode) {
+      return pendingInternalByobResponse(request, pendingByobMode);
+    }
     if (url.searchParams.get("abort") === "1") {
       ctx.abort(new Error("workerd compatibility abort probe"));
       return new Response("unreachable");
@@ -30,11 +94,19 @@ export default {
         setAttributeChained,
         setAttributesChained,
       },
+      byob: await byobProbe(),
+      importMetaPathHelpers: {
+        dirname: typeof Reflect.get(import.meta, "dirname"),
+        filename: typeof Reflect.get(import.meta, "filename"),
+      },
       nodeGlobals: {
         Buffer: typeof Buffer,
         process: typeof process,
         global: typeof global,
         setImmediate: typeof setImmediate,
+      },
+      urlParsing: {
+        nonUts46XnLabel: new URL("https://XN--pokxncvks/").hostname,
       },
     });
   },

@@ -46,6 +46,15 @@ test("POST /ns/<ns>/hosts: additive, normalized, idempotent", async () => {
   assert.deepEqual(res.json.hosts, ["api.workers.example", "workers.example"]);
 });
 
+test("POST /ns/<ns>/hosts: preserves literal ASCII xn-- labels", async () => {
+  const ns = uniqueNs("hosts-alabel");
+  const res = await adminPost(`/ns/${ns}/hosts`, {
+    hosts: ["XN--pokxncvks.Example"],
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.json.hosts, ["xn--pokxncvks.example"]);
+});
+
 test("POST /ns/<ns>/hosts: full-set replacement (removes hosts not in body)", async () => {
   const ns = uniqueNs("hosts-replace");
   await adminPost(`/ns/${ns}/hosts`, { hosts: ["a.workers.example", "b.workers.example"] });

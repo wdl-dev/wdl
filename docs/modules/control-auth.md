@@ -78,6 +78,11 @@ Host, secret, data, and auth operations:
 | `POST` / `GET` / `DELETE` | `/auth/tokens[...]` | Ops-only token issue/list/revoke. `kind="ops"` is rejected because ops is bootstrap-only; token plaintext is returned once; `bootstrap` is protected and rotated by env update plus redeploy. |
 | `POST` | `/auth/delegated-tokens` | Narrow delegated token issue for `token-issuer` credentials. The request names a server-side template; Auth, not Control or the caller, computes the target `kind`, generated namespace, label, expiry, active quota, and response metadata. |
 
+Route metadata and declared hosts share one normalization contract. An ASCII label
+starting with `xn--` that ada-url 4 preserves despite an invalid UTS #46 payload is
+accepted as a literal lowercased DNS label when it satisfies WDL's ASCII DNS grammar.
+Potential-IPv4 host spellings and Unicode route names remain rejected.
+
 ## Control Operation Models
 
 Control lifecycle operations are split so each critical transition has one authority:

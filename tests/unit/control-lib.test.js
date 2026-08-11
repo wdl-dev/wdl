@@ -1335,6 +1335,20 @@ test("normalizeHost: rejects non-canonical DNS and URL authority shapes", () => 
   }
 });
 
+test("normalizeHost: follows workerd for preserved ASCII xn-- labels", () => {
+  assert.equal(
+    normalizeHost("XN--pokxncvks.Example"),
+    "xn--pokxncvks.example"
+  );
+  assert.equal(
+    normalizeHost("XN--pokxncvks.0xgg"),
+    "xn--pokxncvks.0xgg"
+  );
+  assert.throws(() => normalizeHost("xn--pokxncvks.0x"), /invalid host/);
+  assert.throws(() => normalizeHost("xn--pokxncvks.0X"), /invalid host/);
+  assert.throws(() => normalizeHost("xn--pokxncvks.999"), /invalid host/);
+});
+
 test("normalizeHost: idempotent", () => {
   const once = normalizeHost("API.Workers.example:443");
   assert.equal(normalizeHost(once), once);
