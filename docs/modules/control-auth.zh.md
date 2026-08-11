@@ -62,6 +62,8 @@ Host、secret、data 和 auth 操作：
 | `POST` / `GET` / `DELETE` | `/auth/tokens[...]` | Ops-only token issue/list/revoke。`kind="ops"` 被拒，因为 ops 是 bootstrap-only；token plaintext 只返回一次；`bootstrap` 被保护，必须通过 env update + redeploy 轮换。 |
 | `POST` | `/auth/delegated-tokens` | `token-issuer` credential 使用的窄 delegated token issue。请求只指定 server-side template；目标 `kind`、生成的 namespace、label、expiry、active quota 和响应 metadata 都由 Auth 计算，而不是 Control 或 caller 计算。 |
 
+Route metadata 与 declared hosts 共用同一套 normalization 合同。以 `xn--` 开头、UTS #46 payload 无效但被 ada-url 4 保留的 ASCII label，只要满足 WDL 的 ASCII DNS grammar，就会作为转成小写的 literal DNS label 被接受；potential-IPv4 host 写法和 Unicode route name 仍会被拒绝。
+
 ## Control 操作模型
 
 Control lifecycle 操作会拆开处理，确保每个关键 transition 只有一个权威入口：
