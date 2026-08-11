@@ -3,12 +3,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import http from "node:http";
 import {
+  GATEWAY_HOST,
+  GATEWAY_PORT,
   deployAndPromote,
   gatewayFetch,
   responseJson,
   setupIntegrationSuite,
   uniqueNs,
+  withResponseJsonAccessors,
 } from "./helpers/index.js";
 
 setupIntegrationSuite();
@@ -24,9 +28,51 @@ const WORKERD_COMPAT_WORKER = readFileSync(
  *   requestClock: { dateNow: number, dateValue: number, performanceNow: number },
  *   abortType: string,
  *   tracing: { startSpanType: string, setAttributeChained: boolean, setAttributesChained: boolean },
+ *   byob: { firstDone: boolean, firstBytes: number[], finalDone: boolean, finalBytes: number[] },
+ *   importMetaPathHelpers: { dirname: string, filename: string },
  *   nodeGlobals: Record<string, string>,
+ *   urlParsing: { nonUts46XnLabel: string },
  * }} WorkerdCompatResult
  */
+
+/** @param {string} ns @param {string} path @param {Buffer} body */
+function pendingByobGatewayPost(ns, path, body) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      host: GATEWAY_HOST,
+      port: GATEWAY_PORT,
+      method: "POST",
+      path,
+      headers: {
+        Host: `${ns}.workers.local`,
+        "content-type": "application/octet-stream",
+        "content-length": String(body.byteLength),
+      },
+      agent: false,
+    }, (response) => {
+      if (response.headers["x-byob-read-pending"] !== "1") {
+        response.resume();
+        request.destroy();
+        reject(new Error("worker did not confirm a pending BYOB read before request body delivery"));
+        return;
+      }
+      request.end(body);
+      /** @type {Buffer[]} */
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve(withResponseJsonAccessors({
+          status: response.statusCode,
+          body: text,
+          text: () => text,
+        }, "pending BYOB gateway response body"));
+      });
+    });
+    request.on("error", reject);
+    request.flushHeaders();
+  });
+}
 
 test("text + json + data bundled together", async () => {
   const pngBytes = [137, 80, 78, 71, 13, 10, 26, 10]; // PNG magic
@@ -95,6 +141,11 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       compatibilityDate: "2026-08-04",
       compatibilityFlags: ["no_nodejs_compat", "no_nodejs_compat_v2"],
     },
+    {
+      name: "byob-pending-read",
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags: ["streams_byob_reader_does_not_detach_buffer"],
+    },
   ];
 
   for (const variant of variants) {
@@ -129,6 +180,19 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       setAttributeChained: true,
       setAttributesChained: true,
     });
+    assert.deepEqual(result.byob, {
+      firstDone: false,
+      firstBytes: [1, 2, 3, 4],
+      finalDone: true,
+      finalBytes: [],
+    });
+    assert.deepEqual(result.importMetaPathHelpers, {
+      dirname: "undefined",
+      filename: "undefined",
+    });
+    assert.deepEqual(result.urlParsing, {
+      nonUts46XnLabel: "xn--pokxncvks",
+    });
   }
 
   const disabledGlobals = {
@@ -144,9 +208,40 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
     setImmediate: "function",
   };
   assert.deepEqual(results["before-node-default"].nodeGlobals, disabledGlobals);
+  assert.deepEqual(results["byob-pending-read"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["node-default"].nodeGlobals, enabledGlobals);
   assert.deepEqual(results["single-node-optout"].nodeGlobals, enabledGlobals);
   assert.deepEqual(results["full-node-optout"].nodeGlobals, disabledGlobals);
+
+  const resizeResponse = await pendingByobGatewayPost(
+    ns,
+    "/byob-pending-read?pendingByob=resize",
+    Buffer.from([1, 2])
+  );
+  assert.equal(resizeResponse.status, 200);
+  assert.deepEqual(await responseJson(resizeResponse), {
+    done: false,
+    bytes: [1, 2],
+    resultByteOffset: 4,
+    resultBufferByteLength: 6,
+    originalBufferByteLength: 6,
+    transferredByteLength: null,
+  });
+
+  const transferResponse = await pendingByobGatewayPost(
+    ns,
+    "/byob-pending-read?pendingByob=transfer",
+    Buffer.from([1, 2, 3, 4])
+  );
+  assert.equal(transferResponse.status, 200);
+  assert.deepEqual(await responseJson(transferResponse), {
+    done: false,
+    bytes: [],
+    resultByteOffset: 0,
+    resultBufferByteLength: 0,
+    originalBufferByteLength: 0,
+    transferredByteLength: 16,
+  });
 
   const aborted = await gatewayFetch(ns, "/node-default?abort=1");
   assert.equal(aborted.status, 502);

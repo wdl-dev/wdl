@@ -18,6 +18,17 @@ import { MAX_QUEUE_DELAY_SECONDS } from "control-lib";
  * @typedef {{ queue: string, maxBatchSize: number, maxBatchTimeoutMs: number, maxRetries: number, retryDelaySeconds?: number, deadLetterQueue?: string }} QueueConsumer
  */
 
+// ada-url 4 preserves ASCII xn-- labels without validating their Punycode
+// payload, while Node 24 still rejects them. Match workerd when running this
+// pure parser under Node, but retain URL's potential-IPv4 rejection.
+/** @param {string} host */
+function isPreservedAsciiXnLabelHost(host) {
+  const labels = host.split(".");
+  const finalLabel = labels.at(-1) || "";
+  return labels.some((label) => label.startsWith("xn--")) &&
+         !/^(?:[0-9]+|0x[0-9a-f]*)$/i.test(finalLabel);
+}
+
 // Lowercase + strip :port + strip trailing FQDN dots, then require canonical
 // ASCII DNS labels. Hosts are interpolated into URL authorities and routing
 // keys, so accepting delimiters such as "@" or "\\" would change URL parsing.
@@ -41,7 +52,10 @@ export function normalizeHost(raw) {
   try {
     canonicalHost = new URL(`https://${host}/`).host;
   } catch {
-    throw new Error(`invalid host ${JSON.stringify(raw)}`);
+    if (!isPreservedAsciiXnLabelHost(host)) {
+      throw new Error(`invalid host ${JSON.stringify(raw)}`);
+    }
+    canonicalHost = host;
   }
   if (canonicalHost !== host) {
     throw new Error(`invalid host ${JSON.stringify(raw)}`);

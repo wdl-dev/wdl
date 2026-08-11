@@ -33,6 +33,8 @@ WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary �
 
 Node.js TLS 行为跟随 bundled workerd binary。从 WDL 的 2026-07-01 workerd pin 开始，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此所有日期的证书 hostname 校验都跟随 bundled workerd 行为。
 
+从 WDL 的 2026-08-11 workerd pin 开始，byte-stream BYOB read 会使用实时 `ArrayBufferView` 边界，而不是缓存的 offset 和 length，包括 buffer resize 或 transfer 后的情况。同一 pin 采用 ada-url 4：以 `xn--` 开头、但无法解码为有效 UTS #46 label 的 ASCII hostname label 会被保留并转为小写，而不是被拒绝。只要这类 label 同时满足 `shared/ns-pattern.js` 中的 ASCII DNS grammar，WDL 就会把它作为 literal route label 接受；`control/topology.js` 仍执行 numeric-host canonicalization，Unicode route name 仍不受支持。
+
 Bundled workerd 允许 `Fetcher` 和 Durable Object class stub 在不启用 experimental flag 的情况下作为 opaque JSRPC 参数传递。WDL 把持有这种 stub 视为 capability delegation：接收方可以按 stub 内由 host 写入的 caller properties 调用目标，但不能改写这些 properties，也不能取出隐藏的平台 backend capability。该委托可以在内存中保留；但 WDL 会在 deploy 和 retained-state load 时拒绝 `allow_irrevocable_stub_storage`，static host worker 也不会启用它，因此长期持久化 stub 不属于受支持的 WDL surface。
 
 ## Bindings 和存储
@@ -72,7 +74,7 @@ Bundled workerd 允许 `Fetcher` 和 Durable Object class stub 在不启用 expe
 | R2 multipart upload、customer-provided encryption keys 和 Cloudflare-specific checksum 行为 | Not supported | 当前 R2 facade 面向 WDL worker/assets 所需的 S3-compatible object 操作。高级 Cloudflare R2 行为需要先设计，才能写成兼容合同。 |
 | Queue `contentType = "v8"` 和 per-consumer `max_concurrency` | Not supported | Queue message 支持文档化的 `json`、`text` 和 `bytes` content type；只有 `v8` 会被拒绝。Dispatch concurrency 仍由 scheduler 拥有，`max_concurrency` 会被拒绝，而不是静默忽略。 |
 | Incoming TCP `connect()` handler 和 Socket RPC transfer | Not supported | Bundled workerd 已有 incoming `connect()` entrypoint 和 autogated Socket RPC transfer 路径，但 WDL 没有配置 tenant raw-TCP ingress，也没有启用该 autogate；这不影响已记录的 outbound `cloudflare:sockets` surface。 |
-| 上游 experimental compatibility flags 和不可撤销 stub storage | Not supported | Tenant `compatibility_flags` 中属于上游 workerd `$experimental` 的 enable flag，以及 WDL 显式拒绝的 `allow_irrevocable_stub_storage`，会在 deploy 和 runtime decode 阶段被拒绝。 |
+| 上游 experimental compatibility flags 和不可撤销 stub storage | Not supported | Tenant `compatibility_flags` 中属于上游 workerd `$experimental` 的 enable flag，以及 WDL 显式拒绝的 `allow_irrevocable_stub_storage`，会在 deploy 和 runtime decode 阶段被拒绝；这也排除了仅在 New Module Registry 下可用的 `import.meta.dirname` 和 `import.meta.filename`。 |
 | Python Workers | Not supported | WDL 拒绝 Python module manifest，而不是让 workerd 在 cold-load 时失败。 |
 | Durable Object cross-script binding 和 migration rename/delete 语义 | Not supported | WDL DO class 仅支持 same-worker。Storage identity、owner routing 和 delete cleanup 由 WDL 管理，不兼容 Cloudflare migration 模型。 |
 | Cloudflare account API parity | Not supported | WDL 暴露自己的 CLI/control API。Cloudflare API 兼容不是目标。 |

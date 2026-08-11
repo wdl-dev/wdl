@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Updated the bundled workerd and Workers types pins to `1.20260811.1` and `5.20260811.1`, raising the maximum tenant compatibility date to `2026-08-18`.
+- Adopted workerd's live-view BYOB stream hardening and ada-url 4 URL behavior. New Module Registry-only `import.meta.dirname` and `import.meta.filename` remain unavailable because WDL continues to reject the experimental registry flag; the Workers declarations and experimental flag set are unchanged.
+
 ## wdl.20260810.1 - 2026-08-10
 
 - Added strict `DO_PREVENT_EVICTION` configuration: actors remain resident by default, while explicit `false` enables stock workerd eviction for workloads that accept current in-flight hibernating WebSocket limitations. Task-scoped session-policy fences prevent stale native facet reuse across host reconstruction and owner movement while preserving SQLite and quiescent hibernating WebSocket continuity.
