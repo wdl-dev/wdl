@@ -236,6 +236,56 @@ test("AI provider control rejects non-well-formed upstream model identifiers", a
   assert.equal(response.json.error, "invalid_ai_provider");
 });
 
+test("AI model listing sorts complete ids across prefix-related providers", async () => {
+  const ns = uniqueNs("ai-model-order");
+  for (const [provider, alias] of [["my", "zeta"], ["my-provider", "alpha"]]) {
+    const created = await adminPut(`/ns/${ns}/ai/providers/${provider}`, {
+      kind: "openai",
+      models: {
+        [alias]: {
+          upstreamModel: "gpt-test",
+          protocol: "responses",
+          transports: ["http"],
+          inputModalities: ["text"],
+          outputModalities: ["text"],
+        },
+      },
+    });
+    assertStatus(created, 200, `${provider} AI provider create`);
+    const credential = await adminPut(`/ns/${ns}/ai/providers/${provider}/credential`, {
+      revision: created.json.provider.revision,
+      credential: "fake-openai-key",
+    });
+    assertStatus(credential, 200, `${provider} AI credential create`);
+  }
+  await deployAiWorker(ns);
+  const expected = ["my-provider/alpha", "my/zeta"];
+  const controlModels = await readIntegrationJson(
+    await adminFetch(`/ns/${ns}/ai/models`),
+    200,
+    "Control AI model order"
+  );
+  assert.deepEqual(
+    controlModels.models.map((/** @type {{ id: string }} */ model) => model.id),
+    expected
+  );
+  const runtimeModels = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/models"),
+    200,
+    "runtime AI model order"
+  );
+  assert.deepEqual(
+    runtimeModels.models.map((/** @type {{ id: string }} */ model) => model.id),
+    expected
+  );
+  const result = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json?model=my-provider%2Falpha"),
+    200,
+    "AI run after cross-provider model ordering"
+  );
+  assert.equal(result.model, "gpt-test");
+});
+
 /** @param {import("node:net").Socket} socket @param {string} label */
 async function readAiCloseFrame(socket, label) {
   try {
@@ -503,25 +553,26 @@ test("AI provider rotation reaches the next request and new socket without redep
   assertStatus(rotated, 200, "OpenAI provider rotation");
   const rotatedRevision = rotated.json.provider.revision;
   assert.notEqual(rotatedRevision, initialRevision);
-  assert.equal(rotated.json.provider.credentialConfigured, false);
+  assert.equal(rotated.json.provider.credentialConfigured, true);
 
   const staleCredential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
     revision: initialRevision,
     credential: "fake-openai-key-rotated",
   });
   assertStatus(staleCredential, 409, "stale OpenAI credential write");
+
+  const nextRequest = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
+    200,
+    "AI request after provider metadata rotation"
+  );
+  assert.equal(nextRequest.model, "gpt-test-rotated");
+
   const rotatedCredential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
     revision: rotatedRevision,
     credential: "fake-openai-key-rotated",
   });
   assertStatus(rotatedCredential, 200, "rotated OpenAI credential write");
-
-  const nextRequest = await readIntegrationJson(
-    await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
-    200,
-    "AI request after provider rotation"
-  );
-  assert.equal(nextRequest.model, "gpt-test-rotated");
 
   const nextSocket = await wsHandshake(ns, "/ai/responses-ws");
   try {

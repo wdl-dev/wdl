@@ -13,7 +13,12 @@ import {
 import { expectedAiProviderDestination } from "../../runtime/bindings/ai-provider.js";
 
 /**
- * @typedef {{ name: string, valid: boolean, value: Record<string, unknown> }} AiContractCase
+ * @typedef {{
+ *   name: string,
+ *   valid: boolean,
+ *   deserializes?: boolean,
+ *   value: Record<string, unknown>,
+ * }} AiContractCase
  * @typedef {{
  *   limits: {
  *     providerMaxCount: number,
@@ -22,6 +27,21 @@ import { expectedAiProviderDestination } from "../../runtime/bindings/ai-provide
  *     providerRecordMaxBytes: number,
  *     upstreamModelMaxBytes: number,
  *     credentialMaxBytes: number,
+ *   },
+ *   boundaries: {
+ *     providerAliasLengths: Array<{ length: number, valid: boolean }>,
+ *     modelAliasLengths: Array<{ length: number, valid: boolean }>,
+ *     upstreamModels: Array<{
+ *       name: string,
+ *       unit: string,
+ *       repeat: number,
+ *       suffix: string,
+ *       bytes: number,
+ *       valid: boolean,
+ *     }>,
+ *     credentialLengths: Array<{ length: number, valid: boolean }>,
+ *     providerModelCounts: Array<{ count: number, valid: boolean }>,
+ *     modelsResponseCounts: Array<{ count: number, valid: boolean }>,
  *   },
  *   aliases: Array<{ value: string, provider: boolean, model: boolean }>,
  *   upstreamModels: Array<{ name: string, json: string, valid: boolean }>,
@@ -40,6 +60,68 @@ const fixture = /** @type {AiContractFixture} */ (
 const aiContract = await importRepositoryModule("shared/ai-contract.js", importSpecifierReplacements({
   "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
 }));
+const capabilities = {
+  functionTools: false,
+  structuredOutput: false,
+  reasoning: false,
+  previousResponseId: false,
+  providerTools: false,
+  binaryFrames: false,
+};
+
+/** @param {string} upstreamModel */
+function descriptor(upstreamModel) {
+  return {
+    upstreamModel,
+    protocol: "responses",
+    transports: ["http"],
+    inputModalities: ["text"],
+    outputModalities: ["text"],
+    capabilities,
+  };
+}
+
+/** @param {number} count @param {string} [upstreamModel] */
+function providerRecord(count, upstreamModel = "model") {
+  return {
+    revision: "0".repeat(32),
+    kind: "openai",
+    models: Object.fromEntries(Array.from({ length: count }, (_, index) => [
+      `m${String(index).padStart(2, "0")}`,
+      descriptor(upstreamModel),
+    ])),
+  };
+}
+
+/** @param {string} upstreamModel @param {string} [credential] */
+function resolveResponse(upstreamModel, credential = "token") {
+  return {
+    provider: "openai",
+    alias: "primary",
+    kind: "openai",
+    upstreamModel,
+    protocol: "responses",
+    transport: "http",
+    destination: "https://api.openai.com/v1/responses",
+    credential,
+    inputModalities: ["text"],
+    capabilities,
+  };
+}
+
+/** @param {number} count */
+function modelsResponse(count) {
+  return {
+    models: Array.from({ length: count }, (_, index) => ({
+      id: `p${String(Math.floor(index / 32)).padStart(2, "0")}/m${String(index % 32).padStart(2, "0")}`,
+      protocol: "responses",
+      transports: ["http"],
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+      capabilities,
+    })),
+  };
+}
 
 test("AI persisted limits match the cross-language fixture", () => {
   assert.deepEqual(fixture.limits, {
@@ -56,6 +138,44 @@ test("AI aliases match the cross-language fixture", () => {
   for (const item of fixture.aliases) {
     assert.equal(isValidAiProviderName(item.value), item.provider, item.value);
     assert.equal(isValidAiModelAlias(item.value), item.model, item.value);
+  }
+});
+
+test("AI size and count boundaries match the cross-language fixture", () => {
+  for (const item of fixture.boundaries.providerAliasLengths) {
+    assert.equal(isValidAiProviderName("p".repeat(item.length)), item.valid);
+  }
+  for (const item of fixture.boundaries.modelAliasLengths) {
+    assert.equal(isValidAiModelAlias("m".repeat(item.length)), item.valid);
+  }
+  for (const item of fixture.boundaries.upstreamModels) {
+    const value = item.unit.repeat(item.repeat) + item.suffix;
+    assert.equal(new TextEncoder().encode(value).byteLength, item.bytes, item.name);
+    const provider = () => aiContract.normalizeAiProviderRecord(providerRecord(1, value));
+    const response = () => aiContract.normalizeAiResolveResponse(resolveResponse(value));
+    if (item.valid) {
+      assert.equal(provider().models.m00.upstreamModel, value, item.name);
+      assert.equal(response().upstreamModel, value, item.name);
+    } else {
+      assert.throws(provider, Error, item.name);
+      assert.throws(response, Error, item.name);
+    }
+  }
+  for (const item of fixture.boundaries.credentialLengths) {
+    const credential = "x".repeat(item.length);
+    const parse = () => aiContract.normalizeAiResolveResponse(resolveResponse("model", credential));
+    if (item.valid) assert.equal(parse().credential, credential);
+    else assert.throws(parse);
+  }
+  for (const item of fixture.boundaries.providerModelCounts) {
+    const parse = () => aiContract.normalizeAiProviderRecord(providerRecord(item.count));
+    if (item.valid) assert.equal(Object.keys(parse().models).length, item.count);
+    else assert.throws(parse);
+  }
+  for (const item of fixture.boundaries.modelsResponseCounts) {
+    const parse = () => aiContract.normalizeAiModelsResponse(modelsResponse(item.count));
+    if (item.valid) assert.equal(parse().models.length, item.count);
+    else assert.throws(parse);
   }
 });
 
@@ -143,9 +263,10 @@ test("AI resolve and model-list requests match the cross-language fixture", () =
   for (const item of fixture.modelsResponses) {
     const parse = () => aiContract.normalizeAiModelsResponse(item.value);
     if (item.valid) {
+      const expected = /** @type {{ models: Array<{ id: string }> }} */ (item.value);
       assert.deepEqual(
         parse().models.map((/** @type {{ id: string }} */ { id }) => id),
-        ["openai/primary"]
+        expected.models.map(({ id }) => id)
       );
     }
     else assert.throws(parse);

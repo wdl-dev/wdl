@@ -7,6 +7,33 @@
     "upstreamModelMaxBytes": 256,
     "credentialMaxBytes": 16384
   },
+  "boundaries": {
+    "providerAliasLengths": [
+      { "length": 32, "valid": true },
+      { "length": 33, "valid": false }
+    ],
+    "modelAliasLengths": [
+      { "length": 64, "valid": true },
+      { "length": 65, "valid": false }
+    ],
+    "upstreamModels": [
+      { "name": "ascii-at-limit", "unit": "x", "repeat": 256, "suffix": "", "bytes": 256, "valid": true },
+      { "name": "utf8-at-limit", "unit": "\u754c", "repeat": 85, "suffix": "x", "bytes": 256, "valid": true },
+      { "name": "utf8-over-limit", "unit": "\u754c", "repeat": 85, "suffix": "xx", "bytes": 257, "valid": false }
+    ],
+    "credentialLengths": [
+      { "length": 16384, "valid": true },
+      { "length": 16385, "valid": false }
+    ],
+    "providerModelCounts": [
+      { "count": 32, "valid": true },
+      { "count": 33, "valid": false }
+    ],
+    "modelsResponseCounts": [
+      { "count": 128, "valid": true },
+      { "count": 129, "valid": false }
+    ]
+  },
   "aliases": [
     { "value": "openai", "provider": true, "model": true },
     { "value": "provider-32-characters-long-name", "provider": true, "model": true },
@@ -154,15 +181,33 @@
     {
       "name": "transport-mismatch",
       "valid": false,
+      "deserializes": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
-        "models": { "primary": { "upstreamModel": "deepseek", "protocol": "embeddings", "transports": ["sse"] } }
+        "models": {
+          "primary": {
+            "upstreamModel": "deepseek",
+            "protocol": "embeddings",
+            "transports": ["sse"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
       }
     },
     {
       "name": "deepseek-embeddings-unavailable",
       "valid": false,
+      "deserializes": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
@@ -170,7 +215,17 @@
           "embed": {
             "upstreamModel": "deepseek-embedding",
             "protocol": "embeddings",
-            "transports": ["http"]
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
           }
         }
       }
@@ -341,6 +396,43 @@
               "structuredOutput": true,
               "reasoning": true,
               "previousResponseId": true,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "valid": true,
+      "value": {
+        "models": [
+          {
+            "id": "my-provider/alpha",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          },
+          {
+            "id": "my/zeta",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
               "providerTools": false,
               "binaryFrames": false
             }

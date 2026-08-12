@@ -580,8 +580,11 @@ export class AiBinding extends WorkerEntrypoint {
     let operation = "fetch";
     try {
       const url = virtualUrl(request);
+      const websocket = (request.headers.get("upgrade") || "").toLowerCase() === "websocket";
       if (url.pathname === "/v1/models") operation = "models";
-      else if (url.pathname === "/v1/responses") operation = "responses";
+      else if (url.pathname === "/v1/responses") {
+        operation = websocket ? "responses_websocket" : "responses";
+      }
       else if (url.pathname === "/v1/chat/completions") operation = "chat_completions";
       else if (url.pathname === "/v1/embeddings") operation = "embeddings";
       else if (url.pathname === "/v1/realtime") operation = "realtime_websocket";
@@ -591,7 +594,6 @@ export class AiBinding extends WorkerEntrypoint {
         operation,
         async () => {
           if (url.pathname === "/v1/models") return await handleModels(binding, request, url, requestId);
-          const websocket = (request.headers.get("upgrade") || "").toLowerCase() === "websocket";
           if (websocket) return await handleWebSocket(binding, request, url, requestId);
           return await handleHttp(binding, request, url, requestId);
         }

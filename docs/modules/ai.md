@@ -139,10 +139,12 @@ Control owns these namespace-scoped routes:
 | `GET /ns/<ns>/ai/models` | `ai.model.list` |
 
 A provider write contains `kind` and one or more model descriptors. Control generates
-a new 128-bit revision and atomically clears any old credential. A credential write
-must carry that exact revision, preventing changed metadata from silently inheriting a
-credential approved for the previous destination/model set. Provider deletion removes
-metadata and credential together, including credential-only repair residue.
+a new 128-bit revision. An update within the same provider kind preserves its existing
+credential because the kind owns the current bearer-authentication shape; creating a
+provider over credential-only residue or changing provider kind clears the credential
+in the same transaction. A credential write must carry the exact current revision, so
+a delayed write cannot attach to another provider incarnation. Provider deletion
+removes metadata and credential together, including credential-only repair residue.
 Credentials are bounded visible-ASCII bearer tokens without whitespace; malformed
 values are rejected before encryption.
 

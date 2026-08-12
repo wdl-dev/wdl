@@ -68,7 +68,7 @@ Host, secret, data, and auth operations:
 | `GET` | `/ns/<ns>/secrets` | Lists namespace-level secret keys only; there is no API that reads secret values back. |
 | `PUT` / `DELETE` | `/ns/<ns>/secrets/<KEY>` | Mutates one namespace-level secret. No version bump; changes take effect on the next natural cold-load. |
 | `GET` | `/ns/<ns>/ai/providers[/<name>]` | Lists provider metadata and credential-present state without returning credential values. |
-| `PUT` / `DELETE` | `/ns/<ns>/ai/providers/<name>` | Replaces canonical provider metadata with a new revision and clears the old credential, or deletes metadata and credential together. |
+| `PUT` / `DELETE` | `/ns/<ns>/ai/providers/<name>` | Replaces canonical provider metadata with a new revision. Same-kind updates preserve the credential; kind changes and creation over credential-only residue clear it. Delete removes metadata and credential together. |
 | `PUT` | `/ns/<ns>/ai/providers/<name>/credential` | Encrypts a credential under an exact provider-revision CAS. |
 | `GET` | `/ns/<ns>/ai/models` | Lists bounded models whose provider credential is configured. |
 | `GET` / `POST` / `DELETE` | `/ns/<ns>/d1/databases[/<databaseRef>]` | Lists, creates, or deletes D1 databases. Create flips provisional metadata ready after d1-runtime initialization; delete tombstones and best-effort releases owner lease. |
@@ -129,11 +129,13 @@ Control lifecycle operations are split so each critical transition has one autho
   changes keep invalidating that view, control returns
   `namespace_secret_mutation_contention`.
 - AI provider metadata and credentials are separate writes by design. Replacing
-  metadata allocates a new revision and clears the credential in one watched
-  transaction; the credential PUT must present that revision. This prevents endpoint
-  or model changes from inheriting an older authorization. Provider records are
-  canonical JSON, credentials use the shared `WDL-ENC:` envelope, and malformed
-  persisted state fails closed.
+  metadata allocates a new revision. A same-kind update preserves the credential
+  because provider kind owns the official destination and bearer-authentication
+  shape; changing kind or creating metadata over credential-only residue clears the
+  credential in the same watched transaction. Credential PUT must present the current
+  revision, preventing a delayed write from attaching to another provider
+  incarnation. Provider records are canonical JSON, credentials use the shared
+  `WDL-ENC:` envelope, and malformed persisted state fails closed.
 - Version delete and whole-worker delete are fail-closed. They collect blockers from
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.

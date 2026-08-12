@@ -8,6 +8,7 @@ import {
   AI_STREAM_MAX_BYTES,
   AI_WS_FRAME_MAX_BYTES,
   AiBinding,
+  aiProviderWebSocketRequest,
   aiPoolStateForTest,
   makeAiBinding,
   modelList,
@@ -193,7 +194,7 @@ test("AI host model list strips resolver-only identity and credential fields", a
   });
 });
 
-test("AI host rejects unsupported DeepSeek and background inputs before provider I/O", async () => {
+test("AI host allows empty DeepSeek state and rejects unsupported inputs before provider I/O", async () => {
   let providerCalls = 0;
   const resolution = openAiResolution({
     provider: "deepseek",
@@ -206,12 +207,22 @@ test("AI host rejects unsupported DeepSeek and background inputs before provider
     capabilities: { ...openAiResolution().capabilities, previousResponseId: false },
   });
   const { binding } = makeAiBinding({
-    AI_NETWORK: { async fetch() { providerCalls += 1; return Response.json({}); } },
+    AI_NETWORK: { async fetch() { providerCalls += 1; return Response.json({ id: "resp_test" }); } },
   });
   await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+    const allowed = await binding.fetch(request({
+      model: "deepseek/flash",
+      input: "hello",
+      previous_response_id: null,
+      conversation: null,
+      store: false,
+    }));
+    assert.equal(allowed.status, 200);
+
     /** @type {Array<[Record<string, unknown>, string]>} */
     const cases = [
       [{ input: "hello", previous_response_id: "resp_old" }, "ai_continuation_unsupported"],
+      [{ input: "hello", conversation: { id: "conv_1" } }, "ai_continuation_unsupported"],
       [{ input: "hello", store: true }, "ai_store_unsupported"],
       [{ input: [{ type: "input_image", image_url: "https://images.example/input.png" }] }, "ai_input_modality_unsupported"],
       [{ input: [{ type: "input_file", file_url: "https://files.example/input.pdf" }] }, "ai_input_modality_unsupported"],
@@ -223,7 +234,7 @@ test("AI host rejects unsupported DeepSeek and background inputs before provider
       assert.equal((await readJsonResponse(response, 400, error)).error, error);
     }
   });
-  assert.equal(providerCalls, 0);
+  assert.equal(providerCalls, 1);
 });
 
 test("AI host reports an oversized tenant request as 413 before resolution", async () => {
@@ -522,6 +533,36 @@ test("AI host treats a Chat Completions error event as terminal", async () => {
     entry.name === "ai_pool_events" &&
     entry.labels.pool === "stream" &&
     entry.labels.outcome === "provider_error"));
+  assert.equal(aiPoolStateForTest().stream.inUse, 0);
+});
+
+test("AI host treats Chat Completions DONE as terminal", async () => {
+  const frame = "data: [DONE]\n\n";
+  let cancelled = false;
+  const resolution = openAiResolution({
+    protocol: "chat_completions",
+    destination: "https://api.openai.com/v1/chat/completions",
+    transport: "sse",
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        return new Response(new ReadableStream({
+          start(controller) { controller.enqueue(new TextEncoder().encode(frame)); },
+          cancel() { cancelled = true; },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+    const response = await binding.fetch(request({
+      model: "openai/primary",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    }, "/v1/chat/completions"));
+    assert.equal(await response.text(), frame);
+  });
+  assert.equal(cancelled, true);
   assert.equal(aiPoolStateForTest().stream.inUse, 0);
 });
 
@@ -1226,11 +1267,41 @@ test("AI host WebSocket pins the model and preserves a no-status close", async (
   assert.deepEqual(upstream.closed, { code: undefined, reason: undefined });
   assert.deepEqual(downstream.closed, { code: undefined, reason: undefined });
   assert.equal(providerCalls.length, 1);
+  assert.deepEqual(AI_HOST_TEST_STATE.bindingOperations, ["responses_websocket"]);
   assert.equal(aiPoolStateForTest().websocket.inUse, 0);
   assert.equal(AI_HOST_TEST_STATE.metrics.filter((entry) =>
     entry.name === "ai_pool_events" &&
     entry.labels.pool === "websocket" &&
     ["provider_closed", "client_closed"].includes(entry.labels.outcome)).length, 1);
+});
+
+test("AI provider WebSocket duration follows the official adapter bound", () => {
+  const base = {
+    transport: "responses_websocket",
+    destination: "wss://api.openai.com/v1/responses",
+  };
+  assert.equal(
+    aiProviderWebSocketRequest(openAiResolution(base)).maxDurationMs,
+    59 * 60_000
+  );
+  assert.equal(
+    aiProviderWebSocketRequest(openAiResolution({
+      ...base,
+      provider: "xai",
+      kind: "xai",
+      destination: "wss://api.x.ai/v1/responses",
+    })).maxDurationMs,
+    24 * 60_000
+  );
+});
+
+test("AI host bounds provider WebSocket frames", async () => {
+  const { upstream, downstream } = await openFakeAiWebSocket();
+  assert.ok(downstream);
+  upstream.dispatch("message", { data: new Uint8Array(AI_WS_FRAME_MAX_BYTES + 1).buffer });
+  assert.equal(upstream.closed?.code, 1009);
+  assert.equal(downstream.closed?.code, 1009);
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 
 test("AI host cancels an oversized WebSocket rejection response", async () => {

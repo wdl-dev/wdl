@@ -16,10 +16,11 @@ import { runtimeProxyBindingStubUrl } from "./runtime-proxy-stub.js";
  * }} AiHostMetric
  */
 
-/** @type {{ metrics: AiHostMetric[], logs: unknown[] }} */
+/** @type {{ metrics: AiHostMetric[], logs: unknown[], bindingOperations: string[] }} */
 export const AI_HOST_TEST_STATE = {
   metrics: [],
   logs: [],
+  bindingOperations: [],
 };
 /** @type {typeof globalThis & { __aiHostTestState?: typeof AI_HOST_TEST_STATE }} */
 const aiHostGlobal = globalThis;
@@ -46,7 +47,8 @@ export const metrics = {
     globalThis.__aiHostTestState.metrics.push({ kind: "gauge", name, labels, value });
   },
 };
-export async function recordBindingOperation(_service, _binding, _operation, fn) {
+export async function recordBindingOperation(_service, _binding, operation, fn) {
+  globalThis.__aiHostTestState.bindingOperations.push(operation);
   return await fn();
 }
 `);
@@ -60,6 +62,7 @@ const aiCapacityUrl = repositoryModuleDataUrl("runtime/bindings/ai-capacity.js",
 ]);
 const aiProviderUrl = repositoryModuleDataUrl("runtime/bindings/ai-provider.js");
 const aiWebSocketUrl = repositoryModuleDataUrl("runtime/bindings/ai-websocket.js");
+const aiProvider = await import(aiProviderUrl);
 
 const mod = await importRepositoryModule("runtime/bindings/ai.js", [
   [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
@@ -90,10 +93,12 @@ export const {
   aiPoolStateForTest,
   resetAiPoolStateForTest,
 } = mod;
+export const { aiProviderWebSocketRequest } = aiProvider;
 
 export function resetAiHostTestState() {
   AI_HOST_TEST_STATE.metrics.length = 0;
   AI_HOST_TEST_STATE.logs.length = 0;
+  AI_HOST_TEST_STATE.bindingOperations.length = 0;
   resetAiPoolStateForTest();
 }
 

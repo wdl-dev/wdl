@@ -117,7 +117,12 @@ function validateProviderName(provider) {
   }
 }
 
-/** @param {import("shared-redis").RedisClient} redis @param {(session: import("shared-redis").RedisSession) => Promise<unknown>} fn */
+/**
+ * @template T
+ * @param {import("shared-redis").RedisClient} redis
+ * @param {(session: import("shared-redis").RedisSession) => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
 async function mutate(redis, fn) {
   return await runOptimistic(redis, {
     attempts: AI_MUTATION_ATTEMPTS,
@@ -145,18 +150,23 @@ async function putProvider({ request, ns, provider }) {
   const providersKey = aiProvidersKey(ns);
   const credentialsKey = aiProviderCredentialsKey(ns);
   const redis = requireControlRedis();
-  await mutate(redis, async (iso) => {
+  const credentialConfigured = await mutate(redis, async (iso) => {
     await iso.watch(providersKey, credentialsKey);
     const raw = await iso.hGetAll(providersKey);
     const providers = parseStoredProviders(raw);
+    const previous = providers.get(provider);
+    const credentialExists = await iso.hExists(credentialsKey, provider);
+    const preserveCredential = previous?.kind === record.kind && credentialExists;
     providers.set(provider, record);
     assertProviderAggregate(providers);
-    await iso.multi()
-      .hSet(providersKey, provider, JSON.stringify(record))
-      .hDel(credentialsKey, provider)
-      .exec();
+    const tx = iso.multi().hSet(providersKey, provider, JSON.stringify(record));
+    if (!preserveCredential) tx.hDel(credentialsKey, provider);
+    await tx.exec();
+    return preserveCredential;
   });
-  return jsonResponse(200, { provider: providerResponse(provider, record, false) });
+  return jsonResponse(200, {
+    provider: providerResponse(provider, record, credentialConfigured),
+  });
 }
 
 /** @param {{ request: Request, env: Record<string, unknown>, ns: string, provider: string }} args */
@@ -261,6 +271,7 @@ async function getModels({ ns }) {
       models.push({ id: `${provider}/${alias}`, provider, alias, kind: record.kind, ...descriptor });
     }
   }
+  models.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
   return jsonResponse(200, { models });
 }
 

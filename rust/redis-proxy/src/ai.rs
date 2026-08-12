@@ -504,14 +504,111 @@ pub(crate) async fn models(
             });
         }
     }
+    entries.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(Json(ModelsResponse { models: entries }))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::Value;
 
     use super::*;
+
+    fn fixture_capabilities() -> Capabilities {
+        Capabilities {
+            function_tools: false,
+            structured_output: false,
+            reasoning: false,
+            previous_response_id: false,
+            provider_tools: false,
+            binary_frames: false,
+        }
+    }
+
+    fn fixture_descriptor(upstream_model: &str) -> ModelDescriptor {
+        ModelDescriptor {
+            upstream_model: upstream_model.to_string(),
+            protocol: Protocol::Responses,
+            transports: vec![Transport::Http],
+            input_modalities: vec!["text".to_string()],
+            output_modalities: vec!["text".to_string()],
+            capabilities: fixture_capabilities(),
+        }
+    }
+
+    fn fixture_provider_record(count: usize, upstream_model: &str) -> ProviderRecord {
+        let models = (0..count)
+            .map(|index| (format!("m{index:02}"), fixture_descriptor(upstream_model)))
+            .collect::<BTreeMap<_, _>>();
+        ProviderRecord {
+            revision: "0".repeat(32),
+            kind: ProviderKind::Openai,
+            models,
+        }
+    }
+
+    fn fixture_resolve_response(upstream_model: &str, credential: &str) -> ResolveResponse {
+        ResolveResponse {
+            provider: "openai".to_string(),
+            alias: "primary".to_string(),
+            kind: ProviderKind::Openai,
+            upstream_model: upstream_model.to_string(),
+            protocol: Protocol::Responses,
+            transport: Transport::Http,
+            destination: "https://api.openai.com/v1/responses".to_string(),
+            credential: credential.to_string(),
+            input_modalities: vec!["text".to_string()],
+            capabilities: fixture_capabilities(),
+        }
+    }
+
+    fn valid_resolve_response(response: &ResolveResponse) -> bool {
+        let transports = [response.transport.clone()];
+        valid_provider_alias(&response.provider)
+            && valid_model_alias(&response.alias)
+            && validate_upstream_model(&response.upstream_model)
+            && validate_protocol_transports(&response.protocol, &transports)
+            && validate_string_set(
+                &response.input_modalities,
+                &["audio", "file", "image", "text"],
+            )
+            && !response.destination.is_empty()
+            && validate_credential(&response.credential).is_ok()
+            && provider_supports_protocol(&response.kind, &response.protocol, &transports)
+    }
+
+    fn fixture_models_response(count: usize) -> ModelsResponse {
+        let models = (0..count)
+            .map(|index| ModelListEntry {
+                id: format!("p{:02}/m{:02}", index / 32, index % 32),
+                protocol: Protocol::Responses,
+                transports: vec![Transport::Http],
+                input_modalities: vec!["text".to_string()],
+                output_modalities: vec!["text".to_string()],
+                capabilities: fixture_capabilities(),
+            })
+            .collect();
+        ModelsResponse { models }
+    }
+
+    fn valid_models_response(response: &ModelsResponse) -> bool {
+        response.models.len() <= AI_NAMESPACE_MODEL_MAX_COUNT
+            && response
+                .models
+                .windows(2)
+                .all(|pair| pair[0].id < pair[1].id)
+            && response.models.iter().all(|model| {
+                split_model_reference(&model.id).is_ok()
+                    && validate_protocol_transports(&model.protocol, &model.transports)
+                    && validate_string_set(
+                        &model.input_modalities,
+                        &["audio", "file", "image", "text"],
+                    )
+                    && validate_string_set(&model.output_modalities, &["audio", "text"])
+            })
+    }
 
     #[test]
     fn ai_contract_fixture_matches_rust_readers() {
@@ -531,6 +628,73 @@ mod tests {
         );
         assert_eq!(limits["upstreamModelMaxBytes"], AI_UPSTREAM_MODEL_MAX_BYTES);
         assert_eq!(limits["credentialMaxBytes"], AI_CREDENTIAL_MAX_BYTES);
+        let boundaries = &fixture["boundaries"];
+        for item in boundaries["providerAliasLengths"].as_array().unwrap() {
+            let value = "p".repeat(item["length"].as_u64().unwrap() as usize);
+            assert_eq!(
+                valid_provider_alias(&value),
+                item["valid"].as_bool().unwrap()
+            );
+        }
+        for item in boundaries["modelAliasLengths"].as_array().unwrap() {
+            let value = "m".repeat(item["length"].as_u64().unwrap() as usize);
+            assert_eq!(valid_model_alias(&value), item["valid"].as_bool().unwrap());
+        }
+        for item in boundaries["upstreamModels"].as_array().unwrap() {
+            let value = format!(
+                "{}{}",
+                item["unit"]
+                    .as_str()
+                    .unwrap()
+                    .repeat(item["repeat"].as_u64().unwrap() as usize),
+                item["suffix"].as_str().unwrap()
+            );
+            let expected = item["valid"].as_bool().unwrap();
+            assert_eq!(value.len(), item["bytes"].as_u64().unwrap() as usize);
+            assert_eq!(
+                validate_upstream_model(&value),
+                expected,
+                "{}",
+                item["name"]
+            );
+            let raw = serde_json::to_vec(&fixture_provider_record(1, &value)).unwrap();
+            assert_eq!(
+                parse_provider_record(&raw).is_ok(),
+                expected,
+                "{}",
+                item["name"]
+            );
+            assert_eq!(
+                valid_resolve_response(&fixture_resolve_response(&value, "token")),
+                expected,
+                "{}",
+                item["name"]
+            );
+        }
+        for item in boundaries["credentialLengths"].as_array().unwrap() {
+            let credential = "x".repeat(item["length"].as_u64().unwrap() as usize);
+            let expected = item["valid"].as_bool().unwrap();
+            assert_eq!(validate_credential(&credential).is_ok(), expected);
+            assert_eq!(
+                valid_resolve_response(&fixture_resolve_response("model", &credential)),
+                expected
+            );
+        }
+        for item in boundaries["providerModelCounts"].as_array().unwrap() {
+            let count = item["count"].as_u64().unwrap() as usize;
+            let raw = serde_json::to_vec(&fixture_provider_record(count, "model")).unwrap();
+            assert_eq!(
+                parse_provider_record(&raw).is_ok(),
+                item["valid"].as_bool().unwrap()
+            );
+        }
+        for item in boundaries["modelsResponseCounts"].as_array().unwrap() {
+            let response = fixture_models_response(item["count"].as_u64().unwrap() as usize);
+            assert_eq!(
+                valid_models_response(&response),
+                item["valid"].as_bool().unwrap()
+            );
+        }
         for item in fixture["aliases"].as_array().unwrap() {
             let value = item["value"].as_str().unwrap();
             assert_eq!(
@@ -570,7 +734,11 @@ mod tests {
             );
         }
         for item in fixture["providerRecords"].as_array().unwrap() {
-            let valid = serde_json::from_value::<ProviderRecord>(item["value"].clone())
+            let deserialized = serde_json::from_value::<ProviderRecord>(item["value"].clone());
+            if item["deserializes"].as_bool() == Some(true) {
+                assert!(deserialized.is_ok(), "{}", item["name"]);
+            }
+            let valid = deserialized
                 .ok()
                 .and_then(|record| serde_json::to_vec(&record).ok())
                 .is_some_and(|raw| parse_provider_record(&raw).is_ok());
@@ -595,45 +763,13 @@ mod tests {
         for item in fixture["resolveResponses"].as_array().unwrap() {
             let parsed = serde_json::from_value::<ResolveResponse>(item["value"].clone())
                 .ok()
-                .filter(|response| {
-                    let transports = [response.transport.clone()];
-                    valid_provider_alias(&response.provider)
-                        && valid_model_alias(&response.alias)
-                        && validate_upstream_model(&response.upstream_model)
-                        && validate_protocol_transports(&response.protocol, &transports)
-                        && validate_string_set(
-                            &response.input_modalities,
-                            &["audio", "file", "image", "text"],
-                        )
-                        && !response.destination.is_empty()
-                        && validate_credential(&response.credential).is_ok()
-                        && provider_supports_protocol(
-                            &response.kind,
-                            &response.protocol,
-                            &transports,
-                        )
-                });
+                .filter(valid_resolve_response);
             assert_eq!(parsed.is_some(), item["valid"].as_bool().unwrap());
         }
         for item in fixture["modelsResponses"].as_array().unwrap() {
             let parsed = serde_json::from_value::<ModelsResponse>(item["value"].clone())
                 .ok()
-                .filter(|response| {
-                    response.models.len() <= AI_NAMESPACE_MODEL_MAX_COUNT
-                        && response
-                            .models
-                            .windows(2)
-                            .all(|pair| pair[0].id < pair[1].id)
-                        && response.models.iter().all(|model| {
-                            split_model_reference(&model.id).is_ok()
-                                && validate_protocol_transports(&model.protocol, &model.transports)
-                                && validate_string_set(
-                                    &model.input_modalities,
-                                    &["audio", "file", "image", "text"],
-                                )
-                                && validate_string_set(&model.output_modalities, &["audio", "text"])
-                        })
-                });
+                .filter(valid_models_response);
             assert_eq!(parsed.is_some(), item["valid"].as_bool().unwrap());
         }
     }

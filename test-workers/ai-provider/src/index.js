@@ -180,9 +180,6 @@ export default {
       return json({ error: { message: "method not allowed", type: "invalid_request_error" } }, 405);
     }
     const body = await request.json();
-    if (body.model === "gpt-test-rotated" && credentialGeneration !== "rotated") {
-      return json({ error: { message: "stale fake credential", type: "authentication_error" } }, 401);
-    }
     if (body.wdl_test_delay_ms) {
       await new Promise((resolve) => setTimeout(resolve, Number(body.wdl_test_delay_ms)));
     }

@@ -130,7 +130,7 @@ test("AI provider and credential lifecycle uses revision CAS without exposing pl
   );
 });
 
-test("AI provider update rotates revision and atomically removes its credential", async () => {
+test("AI provider update rotates revision and preserves a compatible credential", async () => {
   const first = await readJsonResponse(
     await call("PUT", ["providers", "deepseek"], providerBody("deepseek")),
     200
@@ -144,8 +144,36 @@ test("AI provider update rotates revision and atomically removes its credential"
     200
   );
   assert.notEqual(second.provider.revision, first.provider.revision);
+  assert.equal(second.provider.credentialConfigured, true);
+  assert.ok(redis().hashes.get("ai:provider-credentials:demo")?.deepseek);
+});
+
+test("AI provider kind change atomically removes its credential", async () => {
+  const first = await readJsonResponse(
+    await call("PUT", ["providers", "primary"], providerBody("openai")),
+    200
+  );
+  await call("PUT", ["providers", "primary", "credential"], {
+    revision: first.provider.revision,
+    credential: "openai-key",
+  });
+  const second = await readJsonResponse(
+    await call("PUT", ["providers", "primary"], providerBody("xai")),
+    200
+  );
+  assert.notEqual(second.provider.revision, first.provider.revision);
   assert.equal(second.provider.credentialConfigured, false);
-  assert.equal(redis().hashes.get("ai:provider-credentials:demo")?.deepseek, undefined);
+  assert.equal(redis().hashes.get("ai:provider-credentials:demo")?.primary, undefined);
+});
+
+test("AI provider creation removes a credential-only repair residue", async () => {
+  redis().hashes.set("ai:provider-credentials:demo", { openai: "WDL-ENC:residual" });
+  const created = await readJsonResponse(
+    await call("PUT", ["providers", "openai"], providerBody()),
+    200
+  );
+  assert.equal(created.provider.credentialConfigured, false);
+  assert.equal(redis().hashes.get("ai:provider-credentials:demo")?.openai, undefined);
 });
 
 test("AI credential rejects values that cannot form a Bearer header", async () => {

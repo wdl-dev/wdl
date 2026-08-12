@@ -83,7 +83,7 @@ Control 拥有以下 namespace-scoped route：
 | `PUT /ns/<ns>/ai/providers/<name>/credential` | `ai.provider.write` |
 | `GET /ns/<ns>/ai/models` | `ai.model.list` |
 
-Provider write 包含 `kind` 和一个或多个 model descriptor。Control 生成新的 128-bit revision，并原子清除旧 credential。Credential write 必须携带完全相同的 revision，防止 metadata 改变后静默继承为旧 destination/model set 批准的 credential。Provider delete 会一起删除 metadata 与 credential，包括 credential-only repair residue。Credential 是有字节上限、不含空白的 visible-ASCII bearer token；malformed value 在加密前被拒绝。
+Provider write 包含 `kind` 和一个或多个 model descriptor。Control 生成新的 128-bit revision。同一 provider kind 内更新 metadata 时保留已有 credential，因为 kind 拥有当前 bearer authentication shape；在 credential-only residue 上创建 provider 或改变 provider kind 时，Control 会在同一事务中清除 credential。Credential write 必须携带当前完全相同的 revision，防止延迟写入挂到另一个 provider incarnation。Provider delete 会一起删除 metadata 与 credential，包括 credential-only repair residue。Credential 是有字节上限、不含空白的 visible-ASCII bearer token；malformed value 在加密前被拒绝。
 
 Provider 和 model alias grammar 由 `shared/ns-pattern.js` 拥有。`upstreamModel` 是非空、well-formed Unicode 的 opaque provider identifier，UTF-8 上限 256 bytes；它有意不使用 alias grammar。
 
