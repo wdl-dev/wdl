@@ -18,7 +18,7 @@ const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
  * @typedef {{ binding?: unknown, name?: unknown, className?: unknown, workflowKey?: unknown }} RuntimeWorkflowSpec
  * @typedef {{ vars?: Record<string, unknown> | null, workflows?: RuntimeWorkflowSpec[] | null, bindings?: Record<string, RuntimeBindingSpec> | null, assets?: { prefix?: unknown } | null }} RuntimeBundleMeta
  * @typedef {(options: { props: Record<string, unknown> }) => unknown} RuntimeEntrypointFactory
- * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory } }} RuntimeContext
+ * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, AiBinding: RuntimeEntrypointFactory } }} RuntimeContext
  * @typedef {{ name: string, spec: RuntimeBindingSpec, ns: string, worker: string, version: string }} DoBindingFactoryArgs
  * @typedef {{ doOwnerNetwork?: unknown, doBindingFactory?: (args: DoBindingFactoryArgs) => unknown, workflowsBackend?: unknown, bindingEntries?: Array<[string, RuntimeBindingSpec]>, workflows?: RuntimeWorkflowSpec[] }} BuildWorkerEnvOptions
  * @typedef {{ value: unknown, needsDoBackend?: boolean }} RuntimeBindingMaterialized
@@ -132,6 +132,18 @@ function materializeR2Binding({ name, spec, ns, ctx }) {
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
+function materializeAiBinding({ name, ns, worker, version, ctx }) {
+  if (typeof ctx.exports.AiBinding !== "function") {
+    throw new Error("AiBinding runtime binding adapter is not configured");
+  }
+  return {
+    value: ctx.exports.AiBinding({
+      props: { ns, worker, version, binding: name },
+    }),
+  };
+}
+
+/** @param {RuntimeBindingMaterializerArgs} args */
 function materializeDoBinding({ name, spec, ns, worker, version, options }) {
   if (typeof spec.className !== "string" || !spec.className) {
     throw new Error(`Binding "${name}" is a Durable Object binding but missing className`);
@@ -229,6 +241,7 @@ const RUNTIME_BINDING_MATERIALIZERS = Object.assign(Object.create(null), {
   queue: materializeQueueBinding,
   d1: materializeD1Binding,
   r2: materializeR2Binding,
+  ai: materializeAiBinding,
   do: materializeDoBinding,
   service: materializeServiceBinding,
 });

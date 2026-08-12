@@ -36,6 +36,7 @@ import { handle as handleWorkers } from "control-handlers-workers";
 import { handle as handleDelete } from "control-handlers-delete";
 import { handle as handleD1 } from "control-handlers-d1";
 import { handle as handleR2 } from "control-handlers-r2";
+import { handle as handleAi } from "control-handlers-ai";
 import { handle as handleLogsTail } from "control-handlers-logs-tail";
 import { handle as handleWorkflows } from "control-handlers-workflows";
 
@@ -87,6 +88,7 @@ const NS_SCOPED_KINDS = new Set([
   "logsTail",
   "d1",
   "r2",
+  "ai",
   "workflows",
   "workers",
 ]);
@@ -176,6 +178,10 @@ async function dispatchNamespaceRoute(routeInfo, context) {
     case "r2":
       return await handleR2({
         method, url, ns: nsName, subPath: routeInfo.subPath ?? [], requestId,
+      });
+    case "ai":
+      return await handleAi({
+        request, env, method, ns: nsName, subPath: routeInfo.subPath ?? [], requestId,
       });
     case "workflows":
       return await handleWorkflows({

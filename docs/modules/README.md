@@ -15,6 +15,7 @@ paths live in [`../contributing.md`](../contributing.md).
 |---|---|---|
 | Gateway routing | `gateway.md`, `gateway.zh.md` | `gateway/`, gateway integration tests |
 | Runtime loader and bindings | `runtime.md`, `runtime.zh.md` | `runtime/`, `shared/`, runtime unit/integration tests |
+| AI binding | `ai.md`, `ai.zh.md` | `runtime/bindings/ai.js`, `runtime/ai-client.js`, `control/handlers/ai.js`, `rust/redis-proxy/src/ai.rs`, AI tests |
 | CLI and Wrangler input | `cli.md`, `cli.zh.md` | Downstream standalone CLI, CLI integration tests, README Quick Start / Deploy A Worker |
 | Control and auth | `control-auth.md`, `control-auth.zh.md` | `control/`, `auth/`, `shared/auth-*` |
 | Durable Objects | `durable-objects.md`, `durable-objects.zh.md` | `do-runtime/`, `runtime/do-client.js`, DO tests |

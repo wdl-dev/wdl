@@ -89,6 +89,7 @@ The module docs are the current detailed references for each family:
 - [Queues and cron](modules/queues-cron.md)
 - [Workflows](modules/workflows.md)
 - [Log tail and observability](modules/log-tail-observability.md)
+- [AI binding](modules/ai.md)
 - [Infra and deployment](modules/infra.md)
 
 For a feature-by-feature view of Cloudflare Workers compatibility, read the [Workers
@@ -140,6 +141,10 @@ Stateful binding calls:
   tokenized CDN URLs from bundle metadata and `ASSETS_CDN_BASE`.
 - KV uses redis-proxy DB 1 key families. Service and platform bindings are in-isolate
   JSRPC surfaces whose ACL and target metadata are resolved by control/runtime.
+- AI facades ask the colocated redis-proxy for an atomic DB 0 provider/credential
+  snapshot, then use a dedicated public-only network binding to reach an allowlisted
+  official provider. Credentials remain in host code; tenant code receives the
+  generated `run()` / `models()` facade and OpenAI-compatible `fetch()` surface.
 
 ## Trust Boundaries
 
@@ -154,6 +159,11 @@ Hidden Fetcher bindings such as DO, D1, and workflows backends are platform plum
 They must not be exposed to user code. Runtime wrappers remove those bindings before
 tenant code observes `env`.
 
+AI provider credentials follow the same boundary: Control encrypts them at rest,
+redis-proxy decrypts them only while resolving a call, and the runtime host binding
+attaches them after tenant headers have been discarded. Tenant-visible AI facades never
+receive the credential or the private resolver Fetcher.
+
 Tenant-running Fargate task roles must stay least-privilege; tenant code must not
 receive broad cloud credentials through task metadata.
 
@@ -162,7 +172,8 @@ receive broad cloud credentials through task metadata.
 Valkey logical DBs are split by authority:
 
 - DB 0: control-plane metadata, route state, lifecycle indexes, secrets, referrer
-  indexes, D1/DO metadata, cron config, and queue consumer projections.
+  indexes, D1/DO metadata, AI provider/credential records, cron config, and queue
+  consumer projections.
 - DB 1: data-plane KV, queue streams, delayed queues, log-tail streams, and cleanup
   queues.
 - DB 2: workflows workflow instance state.

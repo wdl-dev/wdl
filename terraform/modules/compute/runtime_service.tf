@@ -67,7 +67,7 @@ resource "aws_ecs_task_definition" "user_runtime" {
         { name = "REDIS_PROXY_URL", value = "http://127.0.0.1:7070" },
         local.log_level_env,
         { name = "ASSETS_CDN_BASE", value = var.assets_cdn_base },
-      ], local.r2_s3_env)
+      ], local.r2_s3_env, local.ai_runtime_env)
 
       secrets = concat([
         { name = "R2_S3_ACCESS_KEY_ID", valueFrom = "${var.runtime_r2_secret_arn}:access_key_id::" },

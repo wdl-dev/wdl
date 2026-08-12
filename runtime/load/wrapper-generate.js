@@ -165,12 +165,14 @@ export default wrappedDefault;
  * @param {Record<string, unknown>} workflowBindings
  * @param {string[]} entrypointNames
  * @param {RuntimeWorkerIdentity | null | undefined} [workerIdentity]
+ * @param {string[]} [aiBindings]
  */
-export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, r2Bindings, doBindings, workflowBindings, entrypointNames, workerIdentity = null) {
+export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, r2Bindings, doBindings, workflowBindings, entrypointNames, workerIdentity = null, aiBindings = []) {
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
   const d1BindingJson = JSON.stringify(d1Bindings);
   const r2BindingJson = JSON.stringify(r2Bindings);
   const doBindingJson = JSON.stringify(doBindings);
+  const aiBindingJson = JSON.stringify(aiBindings);
   const workflowBindingJson = JSON.stringify(
     identifiedWorkflowBindings(workflowBindings, workerIdentity)
   );
@@ -179,6 +181,7 @@ export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, 
   const d1Import = d1Bindings.length ? `import { D1Database } from "./_wdl-d1-client.js";` : "";
   const r2Import = r2Bindings.length ? `import { R2Bucket } from "./_wdl-r2-client.js";` : "";
   const doImport = doBindings.length ? `import { DurableObjectNamespace } from "./_wdl-do-client.js";` : "";
+  const aiImport = aiBindings.length ? `import { Ai } from "./_wdl-ai-client.js";` : "";
   const workflowImport = Object.keys(workflowBindings).length ? `import { Workflow } from "./_wdl-workflows-client.js";` : "";
   const hidesRawEnvExports = doBindings.length || Object.keys(workflowBindings).length;
   const starExport = hidesRawEnvExports
@@ -202,6 +205,7 @@ import * as __WdlHostRuntime__ from "./${HOST_BINDING_RUNTIME_MODULE_NAME}";
 ${d1Import}
 ${r2Import}
 ${doImport}
+${aiImport}
 ${workflowImport}
 import * as __WdlUserModule__ from ${userMain};
 // Explicit aliases replace same-name star exports without declaring tenant
@@ -219,6 +223,7 @@ export class __WdlWorkflowNotify__ extends WorkerEntrypoint {
 const D1_BINDINGS = ${d1BindingJson};
 const R2_BINDINGS = ${r2BindingJson};
 const DO_BINDINGS = ${doBindingJson};
+const AI_BINDINGS = ${aiBindingJson};
 const WORKFLOW_BINDINGS = ${workflowBindingJson};
 const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
 const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
@@ -320,6 +325,9 @@ function wrapEnv(env, requestIdOrContext = null) {
     if (out[name] !== undefined) {
       out[name] = new DurableObjectNamespace(out[name], doOptions(requestIdOrContext, doBackend, doOwnerNetwork));
     }
+  });
+  __WdlHostRuntime__.forEachArray(AI_BINDINGS, (name) => {
+    if (out[name] !== undefined) out[name] = new Ai(out[name]);
   });
   __WdlHostRuntime__.forEachObjectEntry(WORKFLOW_BINDINGS, (name, metadata) => {
     out[name] = new Workflow(metadata, workflowOptions(requestIdOrContext, workflowsBackend));

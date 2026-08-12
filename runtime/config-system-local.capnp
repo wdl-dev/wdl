@@ -1,5 +1,6 @@
 using Workerd = import "/workerd/workerd.capnp";
 using Base = import "config-system.capnp";
+using AiTest = import "../test-workers/ai-provider/config.capnp";
 
 const config :Workerd.Config = (
   services = [
@@ -20,6 +21,7 @@ const config :Workerd.Config = (
       allow = ["private", "public"],
       tlsOptions = (trustBrowserCas = true),
     )),
+    (name = "ai-public-network", worker = .AiTest.providerWorker),
   ],
 
   sockets = [

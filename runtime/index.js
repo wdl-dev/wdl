@@ -27,6 +27,7 @@ export { ServiceBinding } from "runtime-bindings-service";
 export { QueueProducer } from "runtime-bindings-queue";
 export { D1Database } from "runtime-bindings-d1";
 export { R2Bucket } from "runtime-bindings-r2";
+export { AiBinding } from "runtime-bindings-ai";
 export { DurableObjectNamespace } from "runtime-bindings-do";
 export { InternalAuthBackend } from "runtime-bindings-internal-auth-backend";
 

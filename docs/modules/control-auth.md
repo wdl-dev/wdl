@@ -3,7 +3,7 @@
 ## Purpose
 
 Control is the static control-plane worker that owns deploy, promote, lifecycle, secret,
-route, D1, R2, workflow, log-tail, and auth-token APIs. Auth is a static JSRPC worker
+route, D1, R2, AI, workflow, log-tail, and auth-token APIs. Auth is a static JSRPC worker
 that verifies and issues scoped admin tokens.
 
 ## Current Implementation
@@ -67,6 +67,10 @@ Host, secret, data, and auth operations:
 | `PUT` / `DELETE` | `/ns/<ns>/worker/<name>/secrets/<KEY>` | Mutates one worker-level secret. PUT stores a `WDL-ENC:` envelope; active workers are bumped and promoted to force fresh cold-loads. |
 | `GET` | `/ns/<ns>/secrets` | Lists namespace-level secret keys only; there is no API that reads secret values back. |
 | `PUT` / `DELETE` | `/ns/<ns>/secrets/<KEY>` | Mutates one namespace-level secret. No version bump; changes take effect on the next natural cold-load. |
+| `GET` | `/ns/<ns>/ai/providers[/<name>]` | Lists provider metadata and credential-present state without returning credential values. |
+| `PUT` / `DELETE` | `/ns/<ns>/ai/providers/<name>` | Replaces canonical provider metadata with a new revision and clears the old credential, or deletes metadata and credential together. |
+| `PUT` | `/ns/<ns>/ai/providers/<name>/credential` | Encrypts a credential under an exact provider-revision CAS. |
+| `GET` | `/ns/<ns>/ai/models` | Lists bounded models whose provider credential is configured. |
 | `GET` / `POST` / `DELETE` | `/ns/<ns>/d1/databases[/<databaseRef>]` | Lists, creates, or deletes D1 databases. Create flips provisional metadata ready after d1-runtime initialization; delete tombstones and best-effort releases owner lease. |
 | `POST` | `/ns/<ns>/d1/databases/<databaseRef>/query` | Operator SQL execute path used by `wdl d1 execute`. |
 | `GET` / `POST` | `/ns/<ns>/d1/databases/<databaseRef>/migrations[...]` | Migration list/status/apply. Apply is forward-only under an advisory Redis UX lock; owner serialization and SQLite transactions remain the correctness boundary. |
@@ -124,6 +128,12 @@ Control lifecycle operations are split so each critical transition has one autho
   worker/version metadata they need to re-estimate before commit; if concurrent metadata
   changes keep invalidating that view, control returns
   `namespace_secret_mutation_contention`.
+- AI provider metadata and credentials are separate writes by design. Replacing
+  metadata allocates a new revision and clears the credential in one watched
+  transaction; the credential PUT must present that revision. This prevents endpoint
+  or model changes from inheriting an older authorization. Provider records are
+  canonical JSON, credentials use the shared `WDL-ENC:` envelope, and malformed
+  persisted state fails closed.
 - Version delete and whole-worker delete are fail-closed. They collect blockers from
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.
@@ -215,6 +225,8 @@ Key families:
 | `worker-version-referrers:<ns>:<worker>:<version>` | Set | Control | Rebuildable service-binding referrer index. | Blocks version delete while callers reference the version. |
 | `worker-delete-lock:<ns>:<worker>` | String EX | Control | Per-worker delete critical-section lock; value is `whole:<token>` or `version:<token>`. | Expires automatically; execute delete releases by completion. Only `whole` fences new DO ownership. |
 | `secrets:<ns>`, `secrets:<ns>:<worker>` | Hash | Control | Namespace and worker secret stores; values are `WDL-ENC:` envelopes. Control encrypts writes; redis-proxy decrypts only during `/runtime/load`. | Deleted by secret lifecycle or worker delete. |
+| `ai:providers:<ns>` | Hash | Control | Canonical provider metadata keyed by provider alias. | Survives zero Workers; explicit provider delete removes its field. |
+| `ai:provider-credentials:<ns>` | Hash | Control | `WDL-ENC:` provider credentials keyed by provider alias. | redis-proxy decrypts only for authenticated AI resolve; explicit provider delete removes its field. |
 | `queue:__system__:worker-delete-s3-cleanup:s` | DB 1 Stream | Control/s3-cleanup worker | Best-effort post-commit object cleanup queue; logical queue name is `worker-delete-s3-cleanup`. | Enqueued only after Redis delete commit succeeds; enqueue failure returns `cleanup_queue_failed` warning. |
 | `auth:token:<tokenId>` | Hash | Auth | Authoritative token record. | Revoke/expiry delete active record and write tombstone fields. |
 | `auth:hash:<sha256>` | String | Auth | Plaintext-token hash -> token id lookup. | Deleted on revoke/expiry. |
@@ -336,6 +348,8 @@ Auth-specific contract:
 - Control never calls gateway directly. It writes Redis and publishes invalidation
   messages.
 - Control encrypts secret PUT values before entering Redis mutation loops.
+- Control similarly encrypts AI credentials before the watched revision-CAS loop and
+  never returns plaintext from provider read/list APIs.
   Encryption/provider failure returns a control error and does not write a plaintext
   fallback.
 - Worker delete commits Redis lifecycle state first; async S3 cleanup enqueue is
@@ -379,6 +393,9 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 
 - Cross-tier Control shape changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes).
+- AI routes ship after redis-proxy and runtime/do-runtime readers can consume the
+  provider and binding contracts. Pause Control mutations while the combined
+  system-runtime reader/Control writer tier rolls.
 - Control and gateway must keep route invalidation channel names aligned.
 - Auth role changes should be reviewed as security boundary changes and tested against
   reserved namespace behavior.
@@ -392,6 +409,8 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 - `tests/unit/control-lifecycle-indexes.test.js`
 - `tests/unit/control-shared-stub.test.js`
 - `tests/unit/control-handlers-workflows.test.js`
+- `tests/unit/control-ai-handler.test.js`
+- `tests/unit/ai-contract.test.js`
 - `tests/unit/control-d1-migrations.test.js`
 - `tests/unit/redis-lock.test.js`
 - `tests/unit/auth-lib.test.js`
@@ -399,6 +418,7 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 - `tests/integration/auth-worker.test.js`
 - `tests/integration/auth-platform.test.js`
 - `tests/integration/system-pool-auth.test.js`
+- `tests/integration/ai-binding.test.js`
 - `tests/unit/style-contracts.test.js`
 
 ## Known Constraints And Non-Goals

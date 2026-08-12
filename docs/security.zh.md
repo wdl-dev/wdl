@@ -76,6 +76,8 @@ Control handler 不应从 URL prefix 自己推断权限。应使用 `parseContro
 
 Secret PUT handler 只在校验和加密期间看到 plaintext。Redis secret store 中保存的是 `WDL-ENC:` envelope；redis-proxy 只在服务 `/runtime/load` 时解密。Runtime cold-load 路径没有 steady-state plaintext fallback，因此 secret-envelope provider key 缺失或错误时，使用 secret 的 worker 会 fail closed。
 
+AI credential PUT 复用同一个 envelope owner，但读取路径不同。Control 在精确 provider revision 下加密 namespace credential；authenticated redis-proxy `/ai/resolve` 原子读取 metadata 与 ciphertext，并只为本地 host binding 解密。Provider list/get 和 model-list response 永不包含 plaintext。
+
 ## Binding 和状态安全
 
 Binding 是 tenant capability 的主要 surface：
@@ -84,6 +86,7 @@ Binding 是 tenant capability 的主要 surface：
 - D1 和 DO facade 进入 stateful runtime，由后者拥有 single-writer lease 和 generation fence。
 - Workflows facade 调 workflows；workflows 拥有 DB 2 state，并不信任 tenant body 中的 identity 字段。
 - R2 在 runtime 使用平台 S3-compatible credential；tenant code 拿到 R2 binding，而不是 raw credential。
+- AI 暴露 generated facade，credential 保持 host-only。redis-proxy 只生成三个官方 adapter 的精确 destination；runtime 再次校验 destination、丢弃 tenant authorization/endpoint header、拒绝 redirect，并只通过 public-only `AI_NETWORK` service 发送 provider traffic。
 - ASSETS 只暴露 `env.ASSETS.url(path)` 生成 tokenized CDN URL；runtime 不暴露 assets 的 S3 credential 或 bytes。
 - Service 和 platform binding 从 control metadata 与 ACL 解析；跨 namespace service call 需要 target-side authorization。
 - Secret 只在 runtime `env` 构造时 materialize 成 plaintext。At rest 时，`secrets:<ns>` 和 `secrets:<ns>:<worker>` hash value 是 envelope ciphertext；Redis snapshot 和 debug read 不应暴露 tenant secret plaintext。
@@ -126,5 +129,6 @@ Request id 可以跨服务传播，但传播前必须 sanitize 并限制长度�
 - `tests/unit/style-contracts.test.js`：route channel、hidden Fetcher stripping、internal socket split、Fargate/task-role infrastructure guard、low-cardinality metrics 等 drift guard。
 - `tests/unit/auth-lib.test.js`、`tests/unit/auth-index.test.js`、`tests/integration/auth-worker.test.js`、`tests/integration/auth-platform.test.js`：token 和 role 边界。
 - `tests/unit/runtime-load.test.js`、`tests/unit/runtime-binding-surface.test.js`、`tests/integration/service-bindings.test.js`：wrapper 和 binding 暴露。
+- `tests/unit/runtime-ai-binding.test.js`、`tests/unit/control-ai-handler.test.js`、`tests/integration/ai-binding.test.js`：credential non-exposure、精确 destination、public-only egress plumbing、有界 lifecycle 和 DO teardown 行为。
 - `tests/unit/gateway-dispatch.test.js`、`tests/integration/gateway.test.js`、`tests/integration/routing-gateway.test.js`：route 和 reserved namespace 行为。
 - `tests/integration/d1-*.test.js`、`tests/integration/durable-objects*.test.js` 和 workflows integration tests：stateful binding 的 owner/fence 行为。

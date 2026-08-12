@@ -1383,6 +1383,38 @@ test("gateway websocket proxy propagates normal upstream close", async () => {
   assert.equal(lifecycleChecks, 1);
 });
 
+test("gateway websocket proxy propagates an application-terminal upstream close", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  /** @type {Array<[number, string]>} */
+  const sessions = [];
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {
+      recordSessionLifetime: (/** @type {number} */ durationMs, /** @type {string} */ outcome) =>
+        sessions.push([durationMs, outcome]),
+    }
+  );
+
+  upstream.dispatch("close", { code: 1008, reason: "policy rejected" });
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1008,
+    reason: "policy rejected",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, ["established"]);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0][1], "upstream_terminal_close");
+});
+
 test("gateway websocket proxy propagates an upstream close without a status code", () => {
   const upstream = new FakeWebSocket("upstream");
   /** @type {string[]} */

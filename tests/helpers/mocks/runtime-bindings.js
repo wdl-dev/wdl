@@ -5,6 +5,7 @@ export class ServiceBinding {}
 export class QueueProducer {}
 export class D1Database {}
 export class R2Bucket {}
+export class AiBinding {}
 export class DurableObjectNamespace {}
 export class InternalAuthBackend {}
 export class DoAlarmBinding {}

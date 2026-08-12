@@ -65,6 +65,9 @@ except for co-located sidecars:
   HTTP/1.1 Upgrade. Do not silently downgrade gateway/runtime/DO traffic to a plain L4
   path unless the 101 upgrade path has been revalidated.
 - `redis-proxy` runs as a local sidecar beside runtime/DO tasks.
+- AI provider traffic leaves user-runtime, system-runtime, and do-runtime through a
+  dedicated public-only `AI_NETWORK` service. It does not use system-runtime's broader
+  private-and-public default outbound service.
 - Scheduler joins the Service Connect namespace as a client for runtime internal
   dispatch and workflows tick, while Valkey/Redis access uses its own connection
   configuration. Workflows delivers Durable Object alarms to do-runtime through
@@ -107,6 +110,34 @@ only unauthenticated service endpoints. The token is platform plumbing,
 not a tenant binding: runtime wrapper code strips it from tenant-visible `env`, host-owned
 DO proxies and host-side backend capabilities add it for DO forwarding, and spoofed tenant
 headers are removed before forwarding.
+
+AI runtime limits are explicit environment inputs on user-runtime, system-runtime, and
+do-runtime:
+
+| Variable | Default | Scope |
+| --- | ---: | --- |
+| `AI_REQUEST_MAX_IN_FLIGHT` | `32` | Model-list and HTTP body-admission calls per runtime replica; non-streaming calls remain here through completion. |
+| `AI_STREAM_MAX_IN_FLIGHT` | `16` | Open SSE streams after request-pool body admission per runtime replica. |
+| `AI_WS_MAX_SESSIONS` | `8` | Open provider WebSockets per runtime replica. |
+| `AI_REQUEST_BUDGET_MS` | `120000` | End-to-end non-WebSocket request deadline. |
+| `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | Maximum SSE interval with no provider bytes. |
+| `AI_STREAM_MAX_DURATION_MS` | `300000` | Absolute SSE lifetime. |
+| `AI_WS_HANDSHAKE_BUDGET_MS` | `15000` | Provider WebSocket handshake deadline. |
+| `AI_WS_IDLE_TIMEOUT_MS` | `120000` | Maximum WebSocket interval with no provider frame. |
+| `AI_WS_MAX_DURATION_MS` | `1440000` | Operator WebSocket lifetime cap before adapter-specific clamping. |
+
+These are process-local safety pools, not namespace quota or billing controls.
+User-runtime and do-runtime have independent pools because they are separate services.
+The code-owned request, response, frame, and aggregate byte caps are documented in the
+[AI module](ai.md).
+
+AI client source is embedded only by the three base module owners:
+`runtime/config-user.capnp`, `runtime/config-system.capnp`, and
+`do-runtime/config.capnp`. Their local and evictable configs import those worker graphs.
+Cap'n Proto service lists do not inherit, so every concrete user-runtime,
+system-runtime, and do-runtime config declares the `ai-public-network` service it binds.
+Production configs use a public-only network service; local configs route the same
+binding to the deterministic fake provider Worker.
 
 ## Redis / Storage Contracts
 
@@ -250,6 +281,9 @@ operations unless explicitly debugging.
 - `tests/integration/durable-objects-eviction.test.js`: resident-default selection plus
   explicit eviction, actor reconstruction, task-local session-policy fencing across an
   owner round trip, SQLite continuity, and quiescent hibernating WebSocket continuity.
+- `tests/integration/ai-binding.test.js`: provider/credential lifecycle, runtime and DO
+  facades, public-only HTTP/SSE/WebSocket forwarding, SDK compatibility, and watchdog
+  cleanup after caller teardown.
 - Smoke tests against the target deployed environment after rolling.
 
 ## Known Constraints And Non-Goals

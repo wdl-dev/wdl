@@ -872,6 +872,46 @@ test("gateway-proxied ws closes with 1011 when backend reconnect cannot produce 
   }
 });
 
+test("gateway-proxied ws propagates an application-terminal backend close", async () => {
+  const ns = uniqueNs("ws-terminal-close");
+  const name = "terminal";
+  const code = `
+    export default {
+      async fetch(request) {
+        if (request.headers.get("Upgrade") !== "websocket") {
+          return new Response("need upgrade", { status: 426 });
+        }
+        const pair = new WebSocketPair();
+        const client = pair[0];
+        const server = pair[1];
+        server.accept();
+        setTimeout(() => server.close(1008, "policy rejected"), 100);
+        return new Response(null, { status: 101, webSocket: client });
+      },
+    };
+  `;
+  await deployAndPromote(ns, name, { code });
+
+  const beforeReconnect = await gatewayWebSocketProxyCount("reconnected");
+  const beforeTerminal = await gatewayWebSocketSessionLifetimeCount("upstream_terminal_close");
+  const { status, socket } = await wsHandshake(ns, `/${name}`);
+  try {
+    assert.equal(status, 101);
+    const close = await readOneServerCloseFrame(socket);
+    assert.deepEqual(close, { code: 1008, reason: "policy rejected" });
+    socket.write(encodeClientCloseFrame(close.code, close.reason));
+    await waitForSocketClose(socket);
+    assert.equal(await gatewayWebSocketProxyCount("reconnected"), beforeReconnect);
+    await waitUntil(
+      "gateway records the application-terminal backend close",
+      async () => await gatewayWebSocketSessionLifetimeCount("upstream_terminal_close") >
+        beforeTerminal
+    );
+  } finally {
+    socket.destroy();
+  }
+});
+
 test("non-ws requests still go through the respond() rewrite (x-request-id preserved)", async () => {
   const ns = uniqueNs("ws");
   const name = "no-upgrade";

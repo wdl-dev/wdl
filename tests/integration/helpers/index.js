@@ -7,7 +7,7 @@ export { envoyStat, internalHttpRequest, runtimeDispatchPost, runtimeInternalGet
 export { encodeClientBinaryFrame, encodeClientCloseFrame, encodeClientCloseFrameWithoutStatus, encodeClientTextFrame, frameJson, hostWsHandshake, readJsonServerFrame, readOneServerBinaryFrame, readOneServerCloseFrame, readOneServerTextFrame, serviceWebSocketRoundTrip, wsHandshake } from "./websocket.js";
 export { delay, ensureStackUp, readGatewayHealth, resetStack, setupIntegrationSuite, waitForActivation, waitForCurrentSlotFixtureWindow, waitForGateway, waitForGatewayCacheState, waitForGatewaySubscriber, waitForGatewayToRuntime, waitForScheduler, waitUntil } from "./stack.js";
 export { adminFetch, adminGet, adminGetFresh, adminPost, adminPut, deployAndPromote, fetchWithToken } from "./admin-http.js";
-export { gatewayFetch, gatewayUrl, gatewayWorkerId, hostFetch, rawHttpGet, uniqueNs } from "./gateway-http.js";
+export { gatewayFetch, gatewayStream, gatewayUrl, gatewayWorkerId, hostFetch, rawHttpGet, uniqueNs } from "./gateway-http.js";
 export { assertIntegrationJson, readIntegrationJson, responseJson, responseJsonOrNull, withResponseJsonAccessors } from "./http-response.js";
 export { parseBase64Json, parseJsonText, parseStdoutJson } from "./json-payload.js";
 export { structuredServiceLogEvents } from "./structured-logs.js";

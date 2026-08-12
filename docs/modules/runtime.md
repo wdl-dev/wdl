@@ -61,15 +61,16 @@ workerd config wiring has a few non-obvious constraints:
 - Internal socket `:8088`: `GET /_healthz`, `GET /_metrics`, workflow run/notify,
   scheduled dispatch, and queue dispatch only.
 - `redis-proxy` sidecar: cold-load, tenant secret envelope decrypt, KV, queue producer,
-  log-tail active checks and appends.
+  AI provider resolution/model discovery, and log-tail active checks and appends.
 - Hidden service Fetchers: D1 backend, DO backend, workflows backend, and DO
   owner-network direct path.
 - Env-backed bindings: queues and KV call `redis-proxy`; R2 signs S3-compatible requests;
-  ASSETS uses deploy-time metadata to generate tokenized CDN URLs rather than hidden
-  Fetchers.
+  AI resolves encrypted namespace credentials through redis-proxy and uses a
+  public-only network service; ASSETS uses deploy-time metadata to generate tokenized
+  CDN URLs rather than hidden Fetchers.
 
-Tenant-visible bindings include KV, R2, D1, Durable Objects, Queues, ASSETS, service
-bindings, platform bindings, and workflows.
+Tenant-visible bindings include KV, R2, D1, Durable Objects, Queues, AI, ASSETS,
+service bindings, platform bindings, and workflows.
 
 ## Binding Implementation Model
 
@@ -96,6 +97,10 @@ services. Runtime therefore treats bindings as adapters:
   code observes `env`.
 - R2 is an S3-compatible object-storage adapter: runtime signs requests with platform
   credentials and sends them to the configured endpoint.
+- AI is a host binding plus generated tenant-realm facade. Runtime asks redis-proxy for
+  an atomic provider/credential snapshot, revalidates the exact official destination,
+  and uses the public-only `AI_NETWORK` service. Provider credentials never enter the
+  loaded Worker env. See [`ai.md`](ai.md) for the protocol and lifecycle contract.
 - ASSETS is a deploy-artifact URL helper: control uploads assets to S3-compatible
   storage during deploy, while runtime reads `__meta__.assets` plus `ASSETS_CDN_BASE`
   and only exposes `env.ASSETS.url(path)` for tokenized CDN URLs.
@@ -142,6 +147,12 @@ is present; malformed write metadata is rejected before the host binding call.
 Tenant-facing R2 errors expose operation/status plus virtual object keys where useful,
 but not raw S3 response bodies or physical `r2/<ns>/<bucket>/...` keys. Control-plane
 R2 admin errors may retain backend detail for operators.
+
+AI accepts at most one `{ type: "ai" }` binding. Generated wrapper code exposes
+`fetch()`, `run()`, and `models()` in both handler env and imported env while the host
+entrypoint itself exposes only `fetch()`. The virtual raw origin is `https://ai.wdl`;
+provider aliases, official destinations, Redis shapes, byte/time bounds, WebSocket
+rules, and non-goals are owned by [`ai.md`](ai.md).
 
 ASSETS is a deploy-artifact helper, not a full Cloudflare Pages asset pipeline. Control
 uploads files to `assets/<ns>/<worker>/<token>/<path>`, injects an `ASSETS` binding, and
@@ -252,6 +263,9 @@ upstream flags during cold load.
 
 - user-runtime loaded workers receive public-only outbound. Runtime itself keeps
   internal outbound for Redis and S3-compatible storage work.
+- AI provider traffic uses an explicit public-only `AI_NETWORK` service. The host
+  binding may use internal outbound only for its authenticated colocated redis-proxy
+  resolve call; tenant code never receives either hidden capability or the credential.
 - system-runtime loaded `__system__` workers intentionally receive private+public
   outbound.
 - Privileged runtime endpoints must be added to `runtime/internal.js` on `:8088`, not to
@@ -263,8 +277,8 @@ upstream flags during cold load.
 
 ## Observability
 
-Runtime emits request logs and metrics for loading, binding operations, `redis-proxy`
-calls, workflow replay cache, loader evictions, and dispatch envelopes. Tail worker
+Runtime emits request logs and metrics for loading, binding operations, AI pool state,
+`redis-proxy` calls, workflow replay cache, loader evictions, and dispatch envelopes. Tail worker
 emits structured stdout for console/exception capture and forwards to `wdl tail` only
 when a matching active tail session exists.
 
@@ -273,6 +287,9 @@ when a matching active tail session exists.
 - Runtime/Control contract changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes); do not rely on an
   uncoordinated simultaneous roll.
+- AI binding rollout specifically requires redis-proxy and runtime/do-runtime readers
+  before system-runtime/Control accepts `{ type: "ai" }`. Pause Control mutations
+  while the combined system-runtime reader/writer tier rolls; the CLI sender ships last.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
   Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
   available without that flag in the bundled workerd baseline. The current upstream

@@ -82,6 +82,11 @@ function websocketClosedNormally(evt) {
   return evt.code === 1000 || evt.code === 1005;
 }
 
+/** @param {{ code: number }} evt */
+function websocketCloseShouldReconnect(evt) {
+  return evt.code === 1001 || evt.code === 1006 || evt.code === 1011;
+}
+
 // Keep these defaults mirrored with the deployment env defaults when changing
 // the system default.
 const RECONNECT_DELAYS_MS = [0, 100, 250, 500, 1000, 2000, 5000];
@@ -419,14 +424,18 @@ export function proxyGatewayWebSocket(
   /**
    * @param {WebSocket} attachedUpstream
    * @param {{ code: number, reason: string }} evt
-   * @param {boolean} normal
+   * @param {boolean} reconnect
    */
-  async function handleUpstreamClose(attachedUpstream, evt, normal) {
+  async function handleUpstreamClose(attachedUpstream, evt, reconnect) {
     if (upstream !== attachedUpstream) return;
-    if (normal) {
+    if (!reconnect) {
       upstream = null;
       if (!downstreamClosed) {
-        closeDownstream(evt.code, evt.reason, "upstream_normal_close");
+        closeDownstream(
+          evt.code,
+          evt.reason,
+          websocketClosedNormally(evt) ? "upstream_normal_close" : "upstream_terminal_close"
+        );
       }
       return;
     }
@@ -455,7 +464,7 @@ export function proxyGatewayWebSocket(
       }
     });
     attachedUpstream.addEventListener("close", (evt) => {
-      void handleUpstreamClose(attachedUpstream, evt, websocketClosedNormally(evt));
+      void handleUpstreamClose(attachedUpstream, evt, websocketCloseShouldReconnect(evt));
     });
     attachedUpstream.addEventListener("error", () => {
       if (upstream !== attachedUpstream) return;

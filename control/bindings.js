@@ -155,6 +155,12 @@ const BINDING_VALIDATORS = Object.assign(Object.create(null), /** @type {Record<
     }
     assertNotRuntimeReservedEntrypoint(`bindings.${name}`, className);
   },
+  ai(b, name) {
+    const fields = Object.keys(b);
+    if (fields.length !== 1 || fields[0] !== "type") {
+      throw new Error(`bindings.${name}: ai binding accepts only { type: "ai" }`);
+    }
+  },
 }));
 
 /** @param {unknown} bindings */
@@ -163,6 +169,7 @@ export function validateBindings(bindings) {
   if (typeof bindings !== "object" || Array.isArray(bindings)) {
     throw new Error("bindings must be an object");
   }
+  let aiBindingCount = 0;
   for (const [name, b] of Object.entries(bindings)) {
     // Reject before shape: `__proto__` / `toString` etc. would poison
     // env via the prototype path.
@@ -195,6 +202,9 @@ export function validateBindings(bindings) {
       );
     }
     validate(spec, name);
+    if (spec.type === "ai" && ++aiBindingCount > 1) {
+      throw new Error("bindings: at most one ai binding is supported");
+    }
   }
 }
 

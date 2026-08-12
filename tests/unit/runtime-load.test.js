@@ -195,6 +195,7 @@ function makeCtx(runtimeEnv = null) {
       QueueProducer: (/** @type {{ props: any }} */ { props }) => ({ kind: "queue", props }),
       D1Database: (/** @type {{ props: any }} */ { props }) => ({ kind: "d1", props }),
       R2Bucket: (/** @type {{ props: any }} */ { props }) => ({ kind: "r2", props }),
+      AiBinding: (/** @type {{ props: any }} */ { props }) => ({ kind: "ai", props }),
       ServiceBinding: (/** @type {{ props: any }} */ { props }) => ({ kind: "service", props }),
       DurableObjectNamespace: (/** @type {{ props: any }} */ { props }) => ({ kind: "do", props }),
       InternalAuthBackend: (/** @type {{ props: any }} */ { props }) => ({
@@ -272,6 +273,7 @@ test("buildWorkerEnv stays aligned with control env budget binding estimates", (
       Q: { type: "queue", id: "orders", deliveryDelaySeconds: 12 },
       DB: { type: "d1", databaseId: "d1_0123456789abcdef0123456789abcdef" },
       BUCKET: { type: "r2", bucketName: "uploads" },
+      AI: { type: "ai" },
       ROOM: { type: "do", className: "Room", doStorageId: "do_0123456789abcdef0123456789abcdef" },
       AUTH: {
         type: "service",
@@ -301,6 +303,7 @@ test("buildWorkerEnv stays aligned with control env budget binding estimates", (
       QueueProducer: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "queue", props }),
       D1Database: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "d1", props }),
       R2Bucket: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "r2", props }),
+      AiBinding: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "ai", props }),
       ServiceBinding: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "service", props }),
     },
   };
@@ -441,6 +444,42 @@ test("buildWorkerEnv: materializes R2 bindings with namespace-scoped bucket prop
       binding: "BUCKET",
     },
   });
+});
+
+test("buildWorkerEnv: materializes AI with immutable caller identity", () => {
+  const env = buildWorkerEnv(
+    { bindings: { AI: { type: "ai" } } },
+    {},
+    {},
+    "demo",
+    "agent",
+    "v7",
+    "https://assets.example",
+    makeCtx()
+  );
+
+  assert.deepEqual(env.AI, {
+    kind: "ai",
+    props: { ns: "demo", worker: "agent", version: "v7", binding: "AI" },
+  });
+});
+
+test("buildWorkerEnv: fails closed when the AI host adapter is missing", () => {
+  const ctx = makeCtx();
+  delete /** @type {any} */ (ctx.exports).AiBinding;
+  assert.throws(
+    () => buildWorkerEnv(
+      { bindings: { AI: { type: "ai" } } },
+      {},
+      {},
+      "demo",
+      "agent",
+      "v7",
+      "https://assets.example",
+      ctx
+    ),
+    /AiBinding runtime binding adapter is not configured/
+  );
 });
 
 test("buildWorkerEnv: materializes DO metadata with internal direct backend", () => {
@@ -2104,6 +2143,24 @@ test("wrapWorkerCodeForHostBindings: injects local R2 facade for R2 bindings", (
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-r2-client.js"], /this\._stub/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const R2_BINDINGS = \["BUCKET"\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new R2Bucket\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
+});
+
+test("wrapWorkerCodeForHostBindings: an AI-only worker receives the local facade", () => {
+  const workerCode = {
+    mainModule: "worker.js",
+    modules: { "worker.js": "export default { fetch() {} };" },
+  };
+  wrapWorkerCodeForHostBindings(workerCode, {
+    bindings: { AI: { type: "ai" } },
+  }, STUB_RUNTIME_INJECTION_SOURCES);
+
+  const modules = /** @type {Record<string, string>} */ (workerCode.modules);
+  assert.equal(workerCode.mainModule, "_wdl-wrapper.js");
+  assert.match(modules["_wdl-ai-client.js"], /class Ai/);
+  assert.match(modules["_wdl-request-id.js"], /requestIdFromOptions/);
+  assert.match(modules["_wdl-wrapper.js"], /import \{ Ai \}/);
+  assert.match(modules["_wdl-wrapper.js"], /const AI_BINDINGS = \["AI"\];/);
+  assert.match(modules["_wdl-wrapper.js"], /new Ai\(out\[name\]\)/);
 });
 
 test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object bindings", () => {

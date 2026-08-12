@@ -78,6 +78,7 @@ const IMPORT_STUBS = {
   "runtime-bindings-queue": emptyBindingUrl,
   "runtime-bindings-d1": emptyBindingUrl,
   "runtime-bindings-r2": emptyBindingUrl,
+  "runtime-bindings-ai": emptyBindingUrl,
   "runtime-bindings-do": emptyBindingUrl,
   "runtime-bindings-internal-auth-backend": emptyBindingUrl,
 };

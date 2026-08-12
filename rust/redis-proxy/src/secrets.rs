@@ -117,6 +117,15 @@ impl SecretEnvelopeDecryptor {
         Ok(out)
     }
 
+    pub(crate) fn decrypt_hash_field(
+        &self,
+        hash_key: &str,
+        field: &str,
+        value: &[u8],
+    ) -> AppResult<String> {
+        self.decrypt_value(hash_key, field, value)
+    }
+
     fn decrypt_value(&self, hash_key: &str, field: &str, value: &[u8]) -> AppResult<String> {
         if !value.starts_with(SECRET_ENVELOPE_PREFIX) {
             return Err(secret_decrypt_error(

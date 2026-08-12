@@ -182,11 +182,14 @@ whether a route changed.
   inactive worker: initial admission returns `503`, while an established session closes
   with `1012`.
   Torn or malformed state fails closed with `1011` for established sessions.
-- Normal upstream closure propagates without another lifecycle read. After abnormal
-  loss, an unchanged active version permits transparent reconnect to the same pinned
-  worker id when the sequence is unchanged or the current projection is `preserve`. A
-  changed active version, or a newer sequence in the current `restart` projection, closes
-  the public and backend peers with `1012 service restart`.
+- Normal and application-terminal upstream Close frames propagate without another
+  lifecycle read. Gateway treats only `1001`, synthetic `1006`, and `1011` as
+  reconnectable backend-loss signals; protocol/policy/resource closes and application
+  `3xxx`/`4xxx` closes reach the public peer instead of silently starting a new backend
+  session. After reconnectable loss, an unchanged active version permits transparent
+  reconnect to the same pinned worker id when the sequence is unchanged or the current
+  projection is `preserve`. A changed active version, or a newer sequence in the current
+  `restart` projection, closes the public and backend peers with `1012 service restart`.
   Lifecycle commands have a socket-closing two-second deadline. Transport failures and
   transient Redis reply codes (`BUSY`, `CLUSTERDOWN`, `LOADING`, `MASTERDOWN`,
   `READONLY`, and `TRYAGAIN`) retry within the configured reconnect schedule. Malformed

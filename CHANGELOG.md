@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added an opt-in namespace-scoped AI binding with encrypted BYO credentials, official OpenAI/xAI/DeepSeek adapters, OpenAI-compatible HTTP/SSE and WebSocket protocols, agent `run()` helpers, bounded model discovery, public-only egress, and process-local lifetime/resource guards. Roll out redis-proxy, then user-runtime/do-runtime; pause Control mutations while system-runtime delivers its reader and Control writer, then publish the CLI. Public release requires the official-provider live matrix from the Tokyo ECS runtime and do-runtime exits.
+- Propagated application-terminal backend WebSocket Close frames through Gateway instead of treating protocol, policy, resource, and application close codes as backend-loss signals eligible for transparent reconnect.
+
 ## wdl.20260811.1 - 2026-08-11
 
 - Updated the bundled workerd and Workers types pins to `1.20260811.1` and `5.20260811.1`, raising the maximum tenant compatibility date to `2026-08-18`; BYOB reads now honor live buffer bounds after resize or transfer, and Control accepts ada-url 4-preserved literal `xn--` host labels while retaining potential-IPv4 rejection. New Module Registry-only APIs remain unavailable.

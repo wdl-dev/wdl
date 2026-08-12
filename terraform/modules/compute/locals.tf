@@ -80,6 +80,18 @@ locals {
     { name = "R2_S3_ENDPOINT", value = local.aws_s3_endpoint },
   ]
 
+  ai_runtime_env = [
+    { name = "AI_REQUEST_MAX_IN_FLIGHT", value = "32" },
+    { name = "AI_STREAM_MAX_IN_FLIGHT", value = "16" },
+    { name = "AI_WS_MAX_SESSIONS", value = "8" },
+    { name = "AI_REQUEST_BUDGET_MS", value = "120000" },
+    { name = "AI_STREAM_IDLE_TIMEOUT_MS", value = "30000" },
+    { name = "AI_STREAM_MAX_DURATION_MS", value = "300000" },
+    { name = "AI_WS_HANDSHAKE_BUDGET_MS", value = "15000" },
+    { name = "AI_WS_IDLE_TIMEOUT_MS", value = "120000" },
+    { name = "AI_WS_MAX_DURATION_MS", value = "1440000" },
+  ]
+
   # ECS starts a full replacement set, waits for health, then drains old tasks.
   zero_downtime_deployment = {
     maximum_percent         = 200

@@ -8,9 +8,9 @@ families, and ownership rules that span modules.
 
 WDL uses a deliberate logical split:
 
-- **`DB 0`, control plane:** bundles, routes/patterns, auth, D1/DO owner state, cron
-  config, queue-consumer config, lifecycle metadata, and workflow definitions
-  (`wf:defs:*`).
+- **`DB 0`, control plane:** bundles, routes/patterns, auth, AI provider metadata and
+  credentials, D1/DO owner state, cron config, queue-consumer config, lifecycle
+  metadata, and workflow definitions (`wf:defs:*`).
 - **`DB 1`, data plane:** KV hash buckets, queue streams, delayed queues, orphan streams,
   and live log-tail streams.
 - **`DB 2`, workflows:** `wf:schema_version`, instance state, step records/summaries,
@@ -62,6 +62,8 @@ auth:delegated-issue-lock:<issuerTokenId>:<templateId>
                                   String EX, delegated-token issuer/template issue lock
 secrets:<ns>                    Hash, namespace-level WDL-ENC envelopes
 secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelopes
+ai:providers:<ns>               Hash, provider alias -> canonical provider JSON
+ai:provider-credentials:<ns>    Hash, provider alias -> WDL-ENC credential envelope
 ```
 
 `worker:<ns>:<name>:v:<int>` uses a positive JavaScript-safe integer version in the
@@ -208,6 +210,7 @@ Feature modules own the detailed contracts:
 - Queues and cron: [Queues and Cron](modules/queues-cron.md)
 - Workflows: [Workflows](modules/workflows.md)
 - Log tail: [Log Tail And Observability](modules/log-tail-observability.md)
+- AI: [AI Binding](modules/ai.md)
 - Runtime/KV/R2/ASSETS/service/platform bindings: [Runtime](modules/runtime.md)
 - Control/auth/lifecycle/delete blockers: [Control And Auth](modules/control-auth.md)
 
@@ -225,8 +228,8 @@ Cross-cutting constraints:
 - Queue main streams are not trimmed because at-least-once delivery is the contract.
   Diagnostic streams such as DLQ, orphan, and log-tail streams may use bounded
   approximate trim.
-- Secret hash values are `WDL-ENC:` envelopes in steady state. There is no plaintext
-  fallback on `/runtime/load`.
+- Secret and AI credential hash values are `WDL-ENC:` envelopes in steady state. There
+  is no plaintext fallback on `/runtime/load` or authenticated `/ai/resolve`.
 - Workflows owns DB 2 instance state. `wf:ready:cursor` is the internal ready-shard
   fairness cursor. Control owns only DB 0 `wf:defs:*`; other tiers must not write DB 2
   directly.

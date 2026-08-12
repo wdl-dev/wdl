@@ -41,6 +41,7 @@ Local compose 是开发便利环境，不是 production delivery contract。它�
 - ECS Service Connect 覆盖 runtime、D1、DO 和 workflows service target。
 - 承载 WebSocket 的 Service Connect target 必须保留会传递 HTTP/1.1 Upgrade 的 HTTP 语义。不要在未重新验证 101 upgrade path 的情况下，把 gateway/runtime/DO traffic 悄悄降级成普通 L4 path。
 - `redis-proxy` 是 runtime/DO task 旁边的本地 sidecar。
+- AI provider traffic 从 user-runtime、system-runtime 和 do-runtime 的专用 public-only `AI_NETWORK` service 出站，不使用 system-runtime 同时允许 private/public 的默认 outbound service。
 - Scheduler 作为 client 加入 Service Connect namespace，用于 runtime internal dispatch 和 workflows tick，Valkey/Redis 访问走自己的连接配置。Workflows 通过 `/internal/do/alarms/dispatch` 把 Durable Object alarm 投递给 do-runtime。
 - GitHub release workflow 在 `wdl.*` tag push 时校验 `VERSION` 和 `CHANGELOG.md` 并发布 release image，也可手动运行同一条 build path 做 validation 或重新 publish。
 - Terraform-managed infrastructure 通过 Terraform apply 管理。
@@ -59,6 +60,24 @@ Gateway 和 runtime 在不同环境中使用稳定的内部端口合同：
 不要把 private mesh endpoint 暴露到 public ingress。K8s 和 ECS 交付都必须通过 Service Connect、ClusterIP Services、NetworkPolicy 或等价控制保持这个假设成立。
 
 Private mesh caller 和 receiver 共享 `WDL_INTERNAL_AUTH_TOKEN` 作为当前 internal token。runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy sidecar 之间的调用会携带 `x-wdl-internal-auth`。轮换期间 receiver 还会接受可选的 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`；caller 始终只发送当前 token。Receiver 要求 auth header 恰好出现一次；两个 token 值都只能包含 visible ASCII byte，不能包含空白或逗号，确保 Fetch header normalization 不改变 token，并避免 header joining 把重复 header 伪装成单个已配置 token。Health 和 metrics endpoint 是唯一不要求该 token 的 service endpoint。这个 token 是平台 plumbing，不是 tenant binding：runtime wrapper code 会从 tenant-visible `env` 中剥离它，host-owned DO proxy 和 host-side backend capability 会在 DO forwarding 时添加它，并在 forwarding 前删除租户伪造的同名 header。
+
+User-runtime、system-runtime 和 do-runtime 使用以下显式 AI runtime limit：
+
+| 变量 | 默认值 | 范围 |
+| --- | ---: | --- |
+| `AI_REQUEST_MAX_IN_FLIGHT` | `32` | 每个 runtime replica 的 model-list 与 HTTP body-admission 调用；non-streaming call 会一直持有到完成。 |
+| `AI_STREAM_MAX_IN_FLIGHT` | `16` | 每个 runtime replica 在 request-pool body admission 后开放的 SSE stream。 |
+| `AI_WS_MAX_SESSIONS` | `8` | 每个 runtime replica 的开放 provider WebSocket。 |
+| `AI_REQUEST_BUDGET_MS` | `120000` | 非 WebSocket 请求的端到端 deadline。 |
+| `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | SSE 连续没有 provider byte 的最大间隔。 |
+| `AI_STREAM_MAX_DURATION_MS` | `300000` | SSE 绝对存活时间。 |
+| `AI_WS_HANDSHAKE_BUDGET_MS` | `15000` | Provider WebSocket 握手 deadline。 |
+| `AI_WS_IDLE_TIMEOUT_MS` | `120000` | WebSocket 连续没有 provider frame 的最大间隔。 |
+| `AI_WS_MAX_DURATION_MS` | `1440000` | Adapter-specific clamp 前的 operator WebSocket lifetime cap。 |
+
+这些是进程内 safety pool，不是 namespace quota 或计费控制。User-runtime 与 do-runtime 是独立服务，因此拥有彼此独立的 pool。代码拥有的 request、response、frame 和 aggregate byte cap 记录在 [AI 模块](ai.zh.md)。
+
+AI client source 只由三个 base module owner 嵌入：`runtime/config-user.capnp`、`runtime/config-system.capnp` 和 `do-runtime/config.capnp`；local/evictable config 会 import 这些 worker graph。Cap'n Proto service list 不继承，因此每个具体 user-runtime、system-runtime 和 do-runtime config 都声明它绑定的 `ai-public-network` service。Production config 使用 public-only network service；local config 把同一 binding 路由到 deterministic fake provider Worker。
 
 ## Redis / Storage 合同
 
@@ -136,6 +155,7 @@ Terraform test 环境优先用 Terraform-managed change，不要用手动 rollin
 - `npm run test:integration`
 - `tests/unit/style-contracts.test.js`：local compose Envoy mesh 形态、D1/DO test-hook IaC gate、DO residency 默认值，以及 Fargate-only Terraform launch contract。
 - `tests/integration/durable-objects-eviction.test.js`：resident 默认值与显式 eviction 选择、actor 重建、owner 往返后的 task-local session-policy fence、SQLite 连续性，以及静默 hibernating WebSocket 连续性。
+- `tests/integration/ai-binding.test.js`：provider/credential 生命周期、runtime 与 DO facade、public-only HTTP/SSE/WebSocket forwarding、SDK compatibility，以及 caller teardown 后的 watchdog cleanup。
 - 目标 deployed environment rolling 后的 smoke tests。
 
 ## 已知约束和非目标

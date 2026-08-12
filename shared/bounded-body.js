@@ -13,20 +13,33 @@ export class BodyTooLargeError extends Error {
  * @param {ReadableStream<Uint8Array>} stream
  * @param {number} maxBytes
  * @param {() => Error} [overflowError]
+ * @param {AbortSignal} [signal]
  * @returns {Promise<Uint8Array>}
  */
 export async function readBoundedStreamBytes(
   stream,
   maxBytes,
-  overflowError = () => new BodyTooLargeError(maxBytes)
+  overflowError = () => new BodyTooLargeError(maxBytes),
+  signal
 ) {
   const reader = stream.getReader();
+  const abort = () => {
+    try {
+      void reader.cancel(signal?.reason).catch(() => {});
+    } catch {
+      // Cancellation is best-effort; throwIfAborted() owns the caller-visible error.
+    }
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
   /** @type {Uint8Array[]} */
   const chunks = [];
   let total = 0;
   try {
+    signal?.throwIfAborted();
     while (true) {
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.byteLength;
@@ -42,6 +55,7 @@ export async function readBoundedStreamBytes(
       chunks.push(chunk);
     }
   } finally {
+    signal?.removeEventListener("abort", abort);
     try { reader.releaseLock(); } catch {}
   }
 
@@ -62,9 +76,11 @@ export async function readBoundedStreamBytes(
 /**
  * @param {Request} request
  * @param {number} maxBytes
+ * @param {AbortSignal} [signal]
  * @returns {Promise<Uint8Array>}
  */
-export async function readBoundedBytes(request, maxBytes) {
+export async function readBoundedBytes(request, maxBytes, signal) {
+  signal?.throwIfAborted();
   const contentLength = request.headers.get("content-length");
   if (contentLength != null && contentLength !== "") {
     const declared = Number(contentLength);
@@ -73,13 +89,14 @@ export async function readBoundedBytes(request, maxBytes) {
     }
   }
   if (!request.body) return new Uint8Array();
-  return readBoundedStreamBytes(request.body, maxBytes);
+  return readBoundedStreamBytes(request.body, maxBytes, undefined, signal);
 }
 
 /**
  * @param {Request} request
  * @param {number} maxBytes
+ * @param {AbortSignal} [signal]
  */
-export async function readBoundedText(request, maxBytes) {
-  return utf8Decoder.decode(await readBoundedBytes(request, maxBytes));
+export async function readBoundedText(request, maxBytes, signal) {
+  return utf8Decoder.decode(await readBoundedBytes(request, maxBytes, signal));
 }

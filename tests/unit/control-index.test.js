@@ -87,6 +87,7 @@ const controlIndex = (await importRepositoryModule("control/index.js", importSpe
   "control-handlers-delete": handlerUrl,
   "control-handlers-d1": handlerUrl,
   "control-handlers-r2": handlerUrl,
+  "control-handlers-ai": handlerUrl,
   "control-handlers-logs-tail": handlerUrl,
   "control-handlers-workflows": handlerUrl,
 }))).default;

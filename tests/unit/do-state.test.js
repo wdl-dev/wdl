@@ -16,21 +16,25 @@ export function createLogger() { return function log() {}; }
 export function logStructured(service, level, event, fields = {}) {
   /** @type {any} */ (globalThis).__doStateErrorLogs.push({ service, level, event, ...fields });
 }
-export class MetricsRegistry {
+`);
+
+const runtimeMetricsUrl = moduleDataUrl(`
+export const metrics = {
   setGauge(name, labels, value) {
     /** @type {any} */ (globalThis).__doStateGaugeSamples.push({ name, labels, value });
-  }
+  },
   increment(name, labels) {
     /** @type {any} */ (globalThis).__doStateMetricSamples.push({ type: "increment", name, labels });
-  }
+  },
   observe(name, labels, value) {
     /** @type {any} */ (globalThis).__doStateMetricSamples.push({ type: "observe", name, labels, value });
-  }
-}
+  },
+};
 `);
 
 const src = applyModuleReplacements(readRepositoryFile("do-runtime/state.js"), [
   [/from "shared-observability";/, `from ${JSON.stringify(observabilityUrl)};`],
+  [/from "runtime-metrics";/, `from ${JSON.stringify(runtimeMetricsUrl)};`],
 ]);
 
 const {

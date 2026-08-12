@@ -35,6 +35,7 @@ Every protocol shape needs one owning module and one current written source:
 | Redis keys and logical DB split | `docs/redis-key-layout.md` plus shared key helpers |
 | Route and pattern projections | `shared/route-projection.js`, `control/routing.js`, `gateway/` |
 | D1 query/facade protocol | `docs/modules/d1.md`, `shared/d1-*`, `d1-runtime/`, runtime D1 binding |
+| AI provider records, resolver snapshots, and facade protocol | `docs/modules/ai.md`, `shared/ai-contract.js`, `control/handlers/ai.js`, `runtime/bindings/ai.js`, `runtime/ai-client.js`, `rust/redis-proxy/src/ai.rs`, `tests/fixtures/ai-contract.json` |
 | Durable Object invoke/connect protocol | `docs/modules/durable-objects.md`, `runtime/_wdl-do-transport.js`, `do-runtime/protocol.js` |
 | Session policy projection and lifecycle notifications | `docs/modules/control-auth.md`, `docs/modules/gateway.md`, `shared/worker-contract.js`, `control/routing.js`, `control/handlers/delete-plan.js`, `gateway/runtime.js`, `gateway/websocket-lifecycle.js`, `do-runtime/owner-registry.js`, `rust/workflows/src/api/do_alarms/dispatch.rs` |
 | Queue, cron, and delayed queue records | `docs/modules/queues-cron.md`, `shared/queue-keys.js`, scheduler/proxy Rust modules |
@@ -60,8 +61,8 @@ normalizers. "Schema" here means a single canonical definition that:
 The first candidates are:
 
 - deploy request body and emitted bundle metadata;
-- binding metadata for KV, R2, D1, DO, workflows, service bindings, platform bindings,
-  queues, assets, vars, and secrets;
+- binding metadata for KV, R2, AI, D1, DO, workflows, service bindings, platform
+  bindings, queues, assets, vars, and secrets;
 - Redis projections for active routes, pattern routes, cron/queue/workflow lifecycle
   indexes, and workflow definitions;
 - runtime-load and DO/D1 binary envelope metadata;

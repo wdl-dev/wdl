@@ -142,6 +142,22 @@ export function isValidWorkflowName(name) {
 export const WORKFLOW_INSTANCE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 export const WORKFLOW_KEY_RE = /^wf_[0-9a-f]{32}$/;
 
+// AI aliases are operator-facing identifiers embedded in model references and
+// Redis hash fields. Provider names stay DNS-label shaped; model aliases also
+// allow dots and underscores used by model catalogs without admitting `/`.
+export const AI_PROVIDER_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+export const AI_MODEL_ALIAS_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+
+/** @param {unknown} name */
+export function isValidAiProviderName(name) {
+  return typeof name === "string" && AI_PROVIDER_NAME_RE.test(name);
+}
+
+/** @param {unknown} name */
+export function isValidAiModelAlias(name) {
+  return typeof name === "string" && AI_MODEL_ALIAS_RE.test(name);
+}
+
 // `:` in an id would corrupt `queue:<ns>:<id>:s` parsing; camelCase
 // would split one logical queue across two log-field entries.
 export const QUEUE_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;

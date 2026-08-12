@@ -41,6 +41,7 @@ const utf8Decoder = new TextDecoder();
  *   d1Bindings: string[],
  *   r2Bindings: string[],
  *   doBindings: string[],
+ *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
  *   hostWrappedClassNames: string[],
  *   needsDoBackend: boolean,
@@ -63,7 +64,7 @@ const utf8Decoder = new TextDecoder();
  *   observe(name: string, labels: Record<string, string | number | boolean> | null | undefined, value: number): void,
  * }} RuntimeLoaderMetrics
  * @typedef {(options: { props: Record<string, unknown> }) => unknown} RuntimeEntrypointFactory
- * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, DurableObjectNamespace: RuntimeEntrypointFactory, InternalAuthBackend: RuntimeEntrypointFactory } }} RuntimeContext
+ * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, AiBinding: RuntimeEntrypointFactory, DurableObjectNamespace: RuntimeEntrypointFactory, InternalAuthBackend: RuntimeEntrypointFactory } }} RuntimeContext
  */
 
 /**

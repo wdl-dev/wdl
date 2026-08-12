@@ -25,6 +25,10 @@ const config :Workerd.Config = (
       allow = ["private", "public"],
       tlsOptions = (trustBrowserCas = true),
     )),
+    (name = "ai-public-network", network = (
+      allow = ["public"],
+      tlsOptions = (trustBrowserCas = true),
+    )),
   ],
 
   sockets = [
@@ -61,6 +65,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-bindings-queue", esModule = embed "bindings/queue.js"),
     (name = "runtime-bindings-d1", esModule = embed "bindings/d1.js"),
     (name = "runtime-bindings-r2", esModule = embed "bindings/r2.js"),
+    (name = "runtime-bindings-ai", esModule = embed "bindings/ai.js"),
     (name = "runtime-bindings-r2-metadata", esModule = embed "bindings/r2/metadata.js"),
     (name = "runtime-bindings-r2-xml", esModule = embed "bindings/r2/xml.js"),
     (name = "runtime-bindings-do", esModule = embed "bindings/do.js"),
@@ -90,6 +95,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-owner-hint-cache-source", text = embed "_wdl-owner-hint-cache.js"),
     (name = "runtime-request-id-source", text = embed "_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "workflows-client.js"),
+    (name = "runtime-ai-client-source", text = embed "ai-client.js"),
     (name = "runtime-r2-utils", esModule = embed "r2-utils.js"),
     (name = "hex.js", esModule = embed "../shared/hex.js"),
     (name = "errors.js", esModule = embed "../shared/errors.js"),
@@ -100,6 +106,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "shared-utf8", esModule = embed "../shared/utf8.js"),
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-ns-pattern", esModule = embed "../shared/ns-pattern.js"),
+    (name = "shared-ai-contract", esModule = embed "../shared/ai-contract.js"),
     (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-respond", esModule = embed "../shared/respond.js"),
     (name = "shared-s3-retry", esModule = embed "../shared/s3-retry.js"),
@@ -129,6 +136,7 @@ const loaderWorker :Workerd.Worker = (
     # Loaded system workers get `network` (allow=private+public) as their
     # globalOutbound — the intended privilege asymmetry vs user pool.
     (name = "PUBLIC_NETWORK", service = "network"),
+    (name = "AI_NETWORK", service = "ai-public-network"),
     (name = "D1_BACKEND", service = "d1-runtime"),
     (name = "DO_BACKEND", service = "do-runtime"),
     (name = "WORKFLOWS_BACKEND", service = "workflows"),
@@ -139,6 +147,15 @@ const loaderWorker :Workerd.Worker = (
     (name = "R2_S3_ACCESS_KEY_ID", fromEnvironment = "R2_S3_ACCESS_KEY_ID"),
     (name = "R2_S3_SECRET_ACCESS_KEY", fromEnvironment = "R2_S3_SECRET_ACCESS_KEY"),
     (name = "R2_S3_REGION", fromEnvironment = "R2_S3_REGION"),
+    (name = "AI_REQUEST_MAX_IN_FLIGHT", fromEnvironment = "AI_REQUEST_MAX_IN_FLIGHT"),
+    (name = "AI_STREAM_MAX_IN_FLIGHT", fromEnvironment = "AI_STREAM_MAX_IN_FLIGHT"),
+    (name = "AI_WS_MAX_SESSIONS", fromEnvironment = "AI_WS_MAX_SESSIONS"),
+    (name = "AI_REQUEST_BUDGET_MS", fromEnvironment = "AI_REQUEST_BUDGET_MS"),
+    (name = "AI_STREAM_IDLE_TIMEOUT_MS", fromEnvironment = "AI_STREAM_IDLE_TIMEOUT_MS"),
+    (name = "AI_STREAM_MAX_DURATION_MS", fromEnvironment = "AI_STREAM_MAX_DURATION_MS"),
+    (name = "AI_WS_HANDSHAKE_BUDGET_MS", fromEnvironment = "AI_WS_HANDSHAKE_BUDGET_MS"),
+    (name = "AI_WS_IDLE_TIMEOUT_MS", fromEnvironment = "AI_WS_IDLE_TIMEOUT_MS"),
+    (name = "AI_WS_MAX_DURATION_MS", fromEnvironment = "AI_WS_MAX_DURATION_MS"),
   ],
 );
 
@@ -199,6 +216,7 @@ const controlWorker :Workerd.Worker = (
     (name = "control-handlers-delete-plan",     esModule = embed "../control/handlers/delete-plan.js"),
     (name = "control-handlers-d1",              esModule = embed "../control/handlers/d1.js"),
     (name = "control-handlers-r2",              esModule = embed "../control/handlers/r2.js"),
+    (name = "control-handlers-ai",              esModule = embed "../control/handlers/ai.js"),
     (name = "control-handlers-logs-tail",       esModule = embed "../control/handlers/logs-tail.js"),
     (name = "control-handlers-workflows",       esModule = embed "../control/handlers/workflows.js"),
     (name = "shared-redis",          esModule = embed "../shared/redis.js"),
@@ -224,6 +242,7 @@ const controlWorker :Workerd.Worker = (
     (name = "shared-bounded-body",   esModule = embed "../shared/bounded-body.js"),
     (name = "shared-request-scope",  esModule = embed "../shared/request-scope.js"),
     (name = "shared-ns-pattern",     esModule = embed "../shared/ns-pattern.js"),
+    (name = "shared-ai-contract",     esModule = embed "../shared/ai-contract.js"),
     (name = "ns-pattern.js",         esModule = embed "../shared/ns-pattern.js"),
     (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-auth-token",     esModule = embed "../shared/auth-token.js"),
@@ -263,6 +282,7 @@ const controlWorker :Workerd.Worker = (
     (name = "runtime-owner-hint-cache-source", text = embed "_wdl-owner-hint-cache.js"),
     (name = "runtime-request-id-source", text = embed "_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "workflows-client.js"),
+    (name = "runtime-ai-client-source", text = embed "ai-client.js"),
     (name = "do-runtime-alarm-shim-source", esModule = embed "../do-runtime/alarm-shim-source.js"),
     (name = "wdl-package-json-source", text = embed "../package.json"),
     (name = "runtime-r2-utils",      esModule = embed "r2-utils.js"),

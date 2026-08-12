@@ -94,6 +94,7 @@ const METRIC_ALLOWED_LABEL_KEYS = new Set([
   "mode",
   "operation",
   "outcome",
+  "pool",
   "reason",
   "route",
   "scope",
@@ -433,6 +434,21 @@ test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
   assert.match(js, /return `secrets:\$\{ns\}:\$\{worker\}`/);
   assert.match(rust, /format!\("secrets:\{\}", q\.ns\)/);
   assert.match(rust, /format!\("secrets:\{\}:\{\}", q\.ns, q\.worker\)/);
+});
+
+test("AI persisted and wire contracts share one JS and Rust fixture", () => {
+  const jsReader = readRepoFile("tests/unit/ai-contract.test.js");
+  const rustReader = readRepoFile("rust/redis-proxy/src/ai.rs");
+  const fixture = "tests/fixtures/ai-contract.json";
+
+  assert.match(jsReader, new RegExp(RegExp.escape(fixture)));
+  assert.match(rustReader, /include_str!\("\.\.\/\.\.\/\.\.\/tests\/fixtures\/ai-contract\.json"\)/);
+  assert.match(jsReader, /normalizeAiProviderRecord/);
+  assert.match(jsReader, /normalizeAiResolveResponse/);
+  assert.match(jsReader, /normalizeAiModelsResponse/);
+  assert.match(rustReader, /fn parse_provider_record/);
+  assert.match(rustReader, /struct ResolveResponse/);
+  assert.match(rustReader, /struct ModelsResponse/);
 });
 
 test("worker delete lock key stays aligned across control and workflows", () => {
@@ -2270,9 +2286,11 @@ test("S3 cleanup lifecycle literals stay in shared lifecycle helper", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("D1 and DO workerd env tunables are exposed through capnp bindings", () => {
+test("D1, DO, and AI workerd env tunables are exposed through capnp bindings", () => {
   const d1 = withoutLineComments(readRepoFile("d1-runtime/config.capnp"));
   const doRuntime = withoutLineComments(readRepoFile("do-runtime/config.capnp"));
+  const userRuntime = withoutLineComments(readRepoFile("runtime/config-user.capnp"));
+  const systemRuntime = withoutLineComments(readRepoFile("runtime/config-system.capnp"));
   const exposed = (/** @type {string} */ source, /** @type {string} */ name) => new RegExp(
     `\\(name = "${name}", fromEnvironment = "${name}"\\)`
   ).test(source);
@@ -2305,6 +2323,26 @@ test("D1 and DO workerd env tunables are exposed through capnp bindings", () => 
     "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS",
   ]) {
     assert.equal(exposed(doRuntime, name), true, `${name} must reach do-runtime workerd env`);
+  }
+
+  for (const name of [
+    "AI_REQUEST_MAX_IN_FLIGHT",
+    "AI_STREAM_MAX_IN_FLIGHT",
+    "AI_WS_MAX_SESSIONS",
+    "AI_REQUEST_BUDGET_MS",
+    "AI_STREAM_IDLE_TIMEOUT_MS",
+    "AI_STREAM_MAX_DURATION_MS",
+    "AI_WS_HANDSHAKE_BUDGET_MS",
+    "AI_WS_IDLE_TIMEOUT_MS",
+    "AI_WS_MAX_DURATION_MS",
+  ]) {
+    for (const [service, source] of [
+      ["user-runtime", userRuntime],
+      ["system-runtime", systemRuntime],
+      ["do-runtime", doRuntime],
+    ]) {
+      assert.equal(exposed(source, name), true, `${name} must reach ${service} workerd env`);
+    }
   }
 });
 

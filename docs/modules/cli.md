@@ -141,7 +141,7 @@ WDL follows Wrangler inheritance for selected environments:
 
 - Non-inheritable keys must be redeclared per env: `vars`, `kv_namespaces`,
   `r2_buckets`, `d1_databases`, `services`, `queues`, `workflows`, durable object
-  bindings, and similar binding tables.
+  bindings, `[ai]`, and similar binding tables.
 - Inheritable keys such as `assets` follow Wrangler's selected-env behavior and may be
   overridden explicitly.
 - Top-level-only keys such as `name` and `migrations` are rejected inside env tables.
@@ -164,6 +164,7 @@ Supported config surfaces:
 | `[triggers] crons` and `[[triggers.schedules]]` | UTC Cloudflare-compatible crons plus WDL timezone extension. |
 | `[[queues.producers]]` and `[[queues.consumers]]` | Producer and consumer metadata. `max_concurrency` is rejected. |
 | `[[workflows]]` | Same-worker Workflows V2 bindings. |
+| `[ai]` | Declares one tenant binding name, for example `binding = "AI"`. Provider metadata and credentials remain namespace resources managed separately through `wdl ai`; they are not embedded in the bundle or inherited into selected environments. |
 
 `[[analytics_engine_datasets]]` is rejected at deploy at both top level and selected-env
 level. Unsupported fields should fail loudly rather than be silently dropped when they
@@ -188,6 +189,10 @@ platform-side behavior is fixed:
 - R2 commands operate under the namespace prefix `r2/<ns>/`. Empty declared virtual
   buckets are not visible from prefix-derived listings until their first object is
   written.
+- AI commands manage namespace-scoped official-provider metadata, revision-CAS
+  credentials, and the bounded resolved model list. Credential input is hidden or read
+  from stdin; it is never stored in Wrangler config. Provider state follows namespace
+  secret lifecycle and may outlive the last worker in the namespace.
 - Workflows commands talk to the workflows service; the CLI must not write DB2 directly.
 - Tail commands open live SSE sessions through control.
 
@@ -228,6 +233,10 @@ integration files marked `// @wdl-cli-integration`:
 - `tests/integration/cli-workers-dev-optout.test.js`
 - `tests/integration/log-tail.test.js`
 - `tests/integration/pages-assets-demo.test.js`
+
+The CLI repository owns `[ai]` parsing, extension stripping, provider command tests,
+and the `examples/ai-agent-demo` packaging path. The platform-side runtime and Control
+contract is covered by `tests/integration/ai-binding.test.js`.
 - `tests/integration/r2-cli-binding.test.js`
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`

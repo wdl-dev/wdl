@@ -84,6 +84,14 @@ export function rawHttpGet(url) {
  */
 
 /**
+ * @typedef {{
+ *   status: number | undefined,
+ *   headers: import("node:http").IncomingHttpHeaders,
+ *   body: import("node:http").IncomingMessage,
+ * }} GatewayStreamResponse
+ */
+
+/**
  * @param {string} ns
  * @param {string} p
  * @param {{ method?: string, headers?: Record<string, string>, body?: string | Buffer }} [init]
@@ -120,6 +128,37 @@ export function gatewayFetch(ns, p, init = {}) {
           });
         });
       }
+    );
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+// Return on response headers so tests can observe a body that intentionally
+// remains open. Callers own and must destroy the returned body.
+/**
+ * @param {string} ns
+ * @param {string} p
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string | Buffer }} [init]
+ * @returns {Promise<GatewayStreamResponse>}
+ */
+export function gatewayStream(ns, p, init = {}) {
+  const method = init.method || "GET";
+  const headers = { Host: `${ns}.workers.local`, ...(init.headers || {}) };
+  const body = init.body;
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: GATEWAY_HOST,
+        port: GATEWAY_PORT,
+        method,
+        path: p,
+        headers,
+        agent: false,
+      },
+      (res) => resolve({ status: res.statusCode, headers: res.headers, body: res })
     );
     req.on("error", reject);
     if (body) req.write(body);

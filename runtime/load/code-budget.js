@@ -44,6 +44,7 @@ const utf8Decoder = new TextDecoder();
  *   d1Bindings: string[],
  *   r2Bindings: string[],
  *   doBindings: string[],
+ *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
  *   hostWrappedClassNames: string[],
  *   needsDoBackend: boolean,
@@ -65,6 +66,7 @@ const utf8Decoder = new TextDecoder();
  *   ownerHintCacheSource: string,
  *   requestIdSource: string,
  *   workflowsClientSource: string,
+ *   aiClientSource: string,
  * }} RuntimeInjectionSources
  * @typedef {[name: string, source: string]} RuntimeModuleInjection
  */
@@ -134,18 +136,24 @@ function runtimeModuleInjections(sources) {
     requestIdModuleInjection,
     ["_wdl-workflows-client.js", sources.workflowsClientSource],
   ];
+  /** @type {RuntimeModuleInjection[]} */
+  const aiModuleInjections = [
+    requestIdModuleInjection,
+    ["_wdl-ai-client.js", sources.aiClientSource],
+  ];
   return {
     d1ModuleInjections,
     r2ModuleInjections,
     doModuleInjections,
     workflowsModuleInjections,
+    aiModuleInjections,
   };
 }
 
 /**
  * @typedef {{
  *   modules: RuntimeModuleInjection[],
- *   bindingNames(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings">): string[],
+ *   bindingNames(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings" | "aiBindings">): string[],
  * }} HostFacadeBindingDefinition
  */
 
@@ -158,6 +166,7 @@ function hostFacadeBindingDefinitions(injections) {
     d1ModuleInjections,
     r2ModuleInjections,
     doModuleInjections,
+    aiModuleInjections,
   } = injections;
   return [
     {
@@ -171,6 +180,10 @@ function hostFacadeBindingDefinitions(injections) {
     {
       modules: doModuleInjections,
       bindingNames(plan) { return plan.doBindings; },
+    },
+    {
+      modules: aiModuleInjections,
+      bindingNames(plan) { return plan.aiBindings; },
     },
   ];
 }
@@ -191,12 +204,16 @@ function addHostFacadeBinding(plan, spec, name) {
     case "do":
       plan.doBindings.push(name);
       return;
+    case "ai":
+      plan.aiBindings.push(name);
+      return;
   }
 }
 
 /** @param {RuntimeMetaPlan} plan */
 function hasHostFacadeBindings(plan) {
-  return plan.d1Bindings.length > 0 || plan.r2Bindings.length > 0 || plan.doBindings.length > 0;
+  return plan.d1Bindings.length > 0 || plan.r2Bindings.length > 0 ||
+    plan.doBindings.length > 0 || plan.aiBindings.length > 0;
 }
 
 /** @param {RuntimeBundleMeta} meta */
@@ -272,6 +289,7 @@ export function analyzeRuntimeMeta(meta) {
     d1Bindings: [],
     r2Bindings: [],
     doBindings: [],
+    aiBindings: [],
     workflowBindings: Object.create(null),
     hostWrappedClassNames: [],
     needsDoBackend: false,
@@ -336,7 +354,8 @@ function runtimeInjectedModuleSources(
           plan.doBindings,
           plan.workflowBindings,
           plan.hostWrappedClassNames,
-          workerIdentity
+          workerIdentity,
+          plan.aiBindings
         )
       : generateAbortShimWrapperModule(mainModule)
   );

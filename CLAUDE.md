@@ -30,7 +30,7 @@ WDL is a self-hosted multi-tenant Workers platform built on stock Cloudflare wor
 It dynamically loads immutable worker versions from Valkey/Redis through workerd's
 `workerLoader` API and implements the missing platform services around it: control,
 auth, KV, R2, D1, Durable Objects, queues, cron, Workflows, ASSETS, service/platform
-bindings, observability, and lifecycle cleanup.
+bindings, AI, observability, and lifecycle cleanup.
 
 Core service families:
 

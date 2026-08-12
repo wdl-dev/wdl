@@ -1,0 +1,266 @@
+{
+  "aliases": [
+    { "value": "openai", "provider": true, "model": true },
+    { "value": "provider-32-characters-long-name", "provider": true, "model": true },
+    { "value": "agent.preview_v2", "provider": false, "model": true },
+    { "value": "UPPER", "provider": false, "model": false },
+    { "value": "bad/name", "provider": false, "model": false },
+    { "value": "-bad", "provider": false, "model": false }
+  ],
+  "providerRecords": [
+    {
+      "name": "responses",
+      "valid": true,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "openai",
+        "models": {
+          "primary": {
+            "upstreamModel": "vendor:model@preview",
+            "protocol": "responses",
+            "transports": ["http", "responses_websocket", "sse"],
+            "inputModalities": ["image", "text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": true,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "realtime",
+      "valid": true,
+      "value": {
+        "revision": "fedcba9876543210fedcba9876543210",
+        "kind": "xai",
+        "models": {
+          "voice": {
+            "upstreamModel": "grok-voice",
+            "protocol": "realtime",
+            "transports": ["realtime_websocket"],
+            "inputModalities": ["audio", "text"],
+            "outputModalities": ["audio", "text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "ascii-alias-order",
+      "valid": true,
+      "value": {
+        "revision": "11111111111111111111111111111111",
+        "kind": "openai",
+        "models": {
+          "a-a": {
+            "upstreamModel": "model-hyphen",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          },
+          "a_a": {
+            "upstreamModel": "model-underscore",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "bad-revision",
+      "valid": false,
+      "value": { "revision": "1", "kind": "openai", "models": {} }
+    },
+    {
+      "name": "endpoint-injection",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "openai",
+        "endpoint": "https://example.com",
+        "models": { "primary": { "upstreamModel": "gpt", "protocol": "responses", "transports": ["http"] } }
+      }
+    },
+    {
+      "name": "transport-mismatch",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": { "primary": { "upstreamModel": "deepseek", "protocol": "embeddings", "transports": ["sse"] } }
+      }
+    },
+    {
+      "name": "deepseek-embeddings-unavailable",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "embed": {
+            "upstreamModel": "deepseek-embedding",
+            "protocol": "embeddings",
+            "transports": ["http"]
+          }
+        }
+      }
+    }
+  ],
+  "resolveRequests": [
+    { "valid": true, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary/extra", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary", "protocol": "responses", "transport": "tcp" } }
+  ],
+  "modelsRequests": [
+    { "valid": true, "value": { "ns": "demo", "binding": "AI" } },
+    { "valid": false, "value": { "ns": "Bad", "binding": "AI" } }
+  ],
+  "resolveResponses": [
+    {
+      "valid": true,
+      "value": {
+        "provider": "openai",
+        "alias": "primary",
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "openai",
+        "upstreamModel": "vendor:model@preview",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://api.openai.com/v1/responses",
+        "credential": "fixture-credential",
+        "inputModalities": ["image", "text"],
+        "outputModalities": ["text"],
+        "capabilities": {
+          "functionTools": true,
+          "structuredOutput": true,
+          "reasoning": true,
+          "previousResponseId": true,
+          "providerTools": false,
+          "binaryFrames": false
+        }
+      }
+    },
+    {
+      "valid": false,
+      "value": {
+        "provider": "openai",
+        "alias": "primary",
+        "revision": "bad",
+        "kind": "openai",
+        "upstreamModel": "gpt",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://attacker.invalid",
+        "credential": "fixture-credential",
+        "inputModalities": ["text"],
+        "outputModalities": ["text"],
+        "capabilities": {}
+      }
+    },
+    {
+      "valid": false,
+      "value": {
+        "provider": "openai",
+        "alias": "primary",
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "openai",
+        "upstreamModel": "gpt",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://api.openai.com/v1/responses",
+        "credential": "invalid credential",
+        "inputModalities": ["text"],
+        "outputModalities": ["text"],
+        "capabilities": {
+          "functionTools": false,
+          "structuredOutput": false,
+          "reasoning": false,
+          "previousResponseId": false,
+          "providerTools": false,
+          "binaryFrames": false
+        }
+      }
+    }
+  ],
+  "modelsResponses": [
+    {
+      "valid": true,
+      "value": {
+        "models": [
+          {
+            "id": "openai/primary",
+            "provider": "openai",
+            "alias": "primary",
+            "revision": "0123456789abcdef0123456789abcdef",
+            "kind": "openai",
+            "upstreamModel": "vendor:model@preview",
+            "protocol": "responses",
+            "transports": ["http", "responses_websocket", "sse"],
+            "inputModalities": ["image", "text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": true,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "valid": false,
+      "value": {
+        "models": [
+          {
+            "id": "openai/primary",
+            "provider": "xai",
+            "alias": "primary",
+            "revision": "0123456789abcdef0123456789abcdef",
+            "kind": "openai",
+            "upstreamModel": "gpt",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {}
+          }
+        ]
+      }
+    }
+  ]
+}

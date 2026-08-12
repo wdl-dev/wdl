@@ -83,7 +83,7 @@ CLI 读取 `wrangler.toml`、`wrangler.jsonc` 或 `wrangler.json`；三种格式
 
 WDL 遵循 Wrangler selected-env 继承规则：
 
-- 非继承 key 必须在每个 env 中重新声明：`vars`、`kv_namespaces`、`r2_buckets`、`d1_databases`、`services`、`queues`、`workflows`、Durable Object bindings 以及类似 binding table。
+- 非继承 key 必须在每个 env 中重新声明：`vars`、`kv_namespaces`、`r2_buckets`、`d1_databases`、`services`、`queues`、`workflows`、Durable Object bindings、`[ai]` 以及类似 binding table。
 - `assets` 这类可继承 key 遵循 Wrangler selected-env 行为，也可以显式覆盖。
 - `name` 和 `migrations` 这类 top-level-only key 出现在 env table 中会被拒绝。
 
@@ -105,6 +105,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 | `[triggers] crons` 和 `[[triggers.schedules]]` | Cloudflare-compatible UTC cron 加 WDL timezone extension。 |
 | `[[queues.producers]]` 和 `[[queues.consumers]]` | Producer 和 consumer metadata。`max_concurrency` 被拒绝。 |
 | `[[workflows]]` | Same-worker Workflows V2 binding。 |
+| `[ai]` | 声明一个 tenant binding name，例如 `binding = "AI"`。Provider metadata 和 credential 是由 `wdl ai` 单独管理的 namespace resource，不会进入 bundle，也不会继承到 selected environment。 |
 
 `[[analytics_engine_datasets]]` 在 top level 和 selected-env level 都会被 deploy 拒绝。Unsupported field 不应在暗示 WDL 未实现的平台行为时被静默忽略。
 
@@ -118,6 +119,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 - Secret mutation 必须显式选择 worker scope 或 namespace scope，避免误写 namespace-wide secret。提交的空字符串是已设置 secret，不是 unset。
 - D1 命令管理 namespace D1 database 和 forward-only migration file。Migration filename 是 migration id；已 apply 的文件不应 rename 或编辑。
 - R2 命令在 namespace 前缀 `r2/<ns>/` 下操作。空的 declared virtual bucket 在第一次写入对象前，不会出现在由 prefix 推导的 list 结果里。
+- AI 命令管理 namespace-scoped official-provider metadata、revision-CAS credential 和有界的 resolved model list。Credential 通过隐藏输入或 stdin 读取，绝不写入 Wrangler config。Provider state 遵循 namespace secret 生命周期，可以在最后一个 worker 删除后继续存在。
 - Workflows 命令通过 workflows service 操作；CLI 不得直接写 DB2。
 - Tail 命令通过 control 打开 live SSE session。
 
@@ -148,6 +150,8 @@ Tail 是 live debug 路径，不是 audit storage。Tail protocol 细节见 [Log
 - `tests/integration/cli-workers-dev-optout.test.js`
 - `tests/integration/log-tail.test.js`
 - `tests/integration/pages-assets-demo.test.js`
+
+CLI 仓库负责 `[ai]` parsing、extension stripping、provider command tests 和 `examples/ai-agent-demo` packaging path；平台侧 runtime/Control 合同由 `tests/integration/ai-binding.test.js` 保护。
 - `tests/integration/r2-cli-binding.test.js`
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`

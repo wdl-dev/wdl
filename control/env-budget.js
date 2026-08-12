@@ -33,6 +33,7 @@ const ESTIMATED_RUNTIME_CONTEXT = Object.freeze({
     QueueProducer: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "queue", props }),
     D1Database: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "d1", props }),
     R2Bucket: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "r2", props }),
+    AiBinding: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "ai", props }),
     ServiceBinding: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "service", props }),
   }),
 });

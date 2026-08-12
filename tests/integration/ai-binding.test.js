@@ -1,0 +1,688 @@
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { buildSync } from "esbuild";
+
+import {
+  adminFetch,
+  adminPut,
+  assertStatus,
+  deployAndPromote,
+  encodeClientBinaryFrame,
+  encodeClientCloseFrame,
+  encodeClientTextFrame,
+  frameJson,
+  gatewayFetch,
+  gatewayStream,
+  readIntegrationJson,
+  readOneServerBinaryFrame,
+  readOneServerCloseFrame,
+  readOneServerTextFrame,
+  serviceInternalGet,
+  setupIntegrationSuite,
+  uniqueNs,
+  waitUntil,
+  wsHandshake,
+} from "./helpers/index.js";
+import { prometheusCounter } from "./helpers/prometheus.js";
+
+setupIntegrationSuite();
+
+const AI_WORKER = readFileSync(
+  new URL("../../test-workers/ai-binding/src/index.js", import.meta.url),
+  "utf8"
+);
+const AI_OPENAI_SDK_WORKER = buildSync({
+  entryPoints: [new URL("../../test-workers/ai-openai-sdk/src/index.js", import.meta.url).pathname],
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2025",
+  conditions: ["worker", "browser"],
+  write: false,
+}).outputFiles[0].text;
+
+/**
+ * @typedef {{
+ *   credential: string,
+ *   record: {
+ *     kind: string,
+ *     models: Record<string, {
+ *       upstreamModel: string,
+ *       protocol: string,
+ *       transports: string[],
+ *       inputModalities: string[],
+ *       outputModalities: string[],
+ *       capabilities?: Record<string, boolean>,
+ *     }>,
+ *   },
+ * }} AiProviderFixture
+ */
+
+/** @type {Readonly<{ openai: AiProviderFixture, xai: AiProviderFixture, deepseek: AiProviderFixture }>} */
+const PROVIDERS = Object.freeze({
+  openai: {
+    credential: "fake-openai-key",
+    record: {
+      kind: "openai",
+      models: {
+        primary: {
+          upstreamModel: "gpt-test",
+          protocol: "responses",
+          transports: ["http", "sse", "responses_websocket"],
+          inputModalities: ["text", "image"],
+          outputModalities: ["text"],
+          capabilities: {
+            functionTools: true,
+            structuredOutput: true,
+            reasoning: true,
+            previousResponseId: true,
+          },
+        },
+        embedding: {
+          upstreamModel: "text-embedding-test",
+          protocol: "embeddings",
+          transports: ["http"],
+          inputModalities: ["text"],
+          outputModalities: ["text"],
+        },
+      },
+    },
+  },
+  xai: {
+    credential: "fake-xai-key",
+    record: {
+      kind: "xai",
+      models: {
+        agent: {
+          upstreamModel: "grok-test",
+          protocol: "responses",
+          transports: ["http", "sse", "responses_websocket"],
+          inputModalities: ["text"],
+          outputModalities: ["text"],
+        },
+        realtime: {
+          upstreamModel: "grok-realtime-test",
+          protocol: "realtime",
+          transports: ["realtime_websocket"],
+          inputModalities: ["text", "audio"],
+          outputModalities: ["text", "audio"],
+          capabilities: { binaryFrames: true },
+        },
+      },
+    },
+  },
+  deepseek: {
+    credential: "fake-deepseek-key",
+    record: {
+      kind: "deepseek",
+      models: {
+        chat: {
+          upstreamModel: "deepseek-v4-flash",
+          protocol: "chat_completions",
+          transports: ["http", "sse"],
+          inputModalities: ["text"],
+          outputModalities: ["text"],
+          capabilities: { functionTools: true, reasoning: true },
+        },
+        flash: {
+          upstreamModel: "deepseek-v4-flash",
+          protocol: "responses",
+          transports: ["http", "sse"],
+          inputModalities: ["text"],
+          outputModalities: ["text"],
+          capabilities: { functionTools: true, reasoning: true },
+        },
+      },
+    },
+  },
+});
+
+/** @param {string} ns */
+async function configureProviders(ns) {
+  for (const [name, provider] of Object.entries(PROVIDERS)) {
+    const created = await adminPut(`/ns/${ns}/ai/providers/${name}`, provider.record);
+    assertStatus(created, 200, `${name} AI provider create`);
+    const revision = created.json.provider.revision;
+    const credential = await adminPut(`/ns/${ns}/ai/providers/${name}/credential`, {
+      revision,
+      credential: provider.credential,
+    });
+    assertStatus(credential, 200, `${name} AI credential create`);
+  }
+}
+
+/** @param {string} ns */
+async function deployAiWorker(ns) {
+  await deployAndPromote(ns, "ai", {
+    mainModule: "worker.js",
+    modules: { "worker.js": AI_WORKER },
+    compatibilityDate: "2026-08-11",
+    bindings: {
+      AI: { type: "ai" },
+      AI_PROBE: { type: "do", className: "AiProbe" },
+    },
+  });
+}
+
+/** @param {string} prefix */
+async function setupAiNamespace(prefix) {
+  const ns = uniqueNs(prefix);
+  await configureProviders(ns);
+  await deployAiWorker(ns);
+  return { ns };
+}
+
+/** @param {string} name @param {string} pool @param {string} [outcome] */
+function doAiMetric(name, pool, outcome = undefined) {
+  const body = serviceInternalGet("do-runtime", 8788, "/_metrics").body;
+  /** @type {Record<string, string>} */
+  const labels = { service: "do-runtime", pool };
+  if (outcome !== undefined) labels.outcome = outcome;
+  return prometheusCounter(body, name, labels);
+}
+
+/** @param {string} name @param {string} pool @param {string} [outcome] */
+function runtimeAiMetric(name, pool, outcome = undefined) {
+  const body = serviceInternalGet("user-runtime", 8088, "/_metrics").body;
+  /** @type {Record<string, string>} */
+  const labels = { service: "user-runtime", pool };
+  if (outcome !== undefined) labels.outcome = outcome;
+  return prometheusCounter(body, name, labels);
+}
+
+function requestReleaseCount() {
+  return ["cancelled", "completed", "deadline"].reduce(
+    (total, outcome) => total + doAiMetric("wdl_ai_pool_events_total", "request", outcome),
+    0
+  );
+}
+
+/** @param {string} pool */
+function runtimeReleaseCount(pool) {
+  return [
+    "cancelled",
+    "client_closed",
+    "completed",
+    "deadline",
+    "idle_timeout",
+    "provider_closed",
+    "provider_error",
+    "stream_error",
+  ].reduce((total, outcome) =>
+    total + runtimeAiMetric("wdl_ai_pool_events_total", pool, outcome), 0);
+}
+
+/** @param {import("node:net").Socket} socket @param {string} label */
+async function readAiCloseFrame(socket, label) {
+  try {
+    return await readOneServerCloseFrame(socket);
+  } catch (error) {
+    throw new Error(`${label}: ${error instanceof Error ? error.message : String(error)}`, {
+      cause: error,
+    });
+  }
+}
+
+test("AI binding exposes agent-capable HTTP and SSE without exposing provider credentials", async () => {
+  const { ns } = await setupAiNamespace("ai-http");
+
+  const surface = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/surface"),
+    200,
+    "AI surface"
+  );
+  assert.deepEqual(surface, {
+    handler: { fetch: "function", run: "function", models: "function" },
+    imported: { fetch: "function", run: "function", models: "function" },
+    processEnvContainsCredential: false,
+  });
+
+  const modelList = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/models"),
+    200,
+    "AI models"
+  );
+  assert.deepEqual(modelList.models.map((/** @type {{ id: string }} */ model) => model.id), [
+    "deepseek/chat",
+    "deepseek/flash",
+    "openai/embedding",
+    "openai/primary",
+    "xai/agent",
+    "xai/realtime",
+  ]);
+  assert.equal(modelList.models.some((/** @type {Record<string, unknown>} */ model) =>
+    "upstreamModel" in model), false);
+
+  for (const [model, upstreamModel] of [
+    ["openai/primary", "gpt-test"],
+    ["xai/agent", "grok-test"],
+    ["deepseek/flash", "deepseek-v4-flash"],
+  ]) {
+    const response = await readIntegrationJson(
+      await gatewayFetch(ns, `/ai/json?model=${encodeURIComponent(model)}`),
+      200,
+      `${model} JSON response`
+    );
+    assert.equal(response.model, upstreamModel);
+    assert.equal(response.status, "completed");
+  }
+
+  const raw = await gatewayFetch(ns, "/ai/raw");
+  assert.equal(raw.headers["openai-request-id"], "fake-provider-request");
+  assert.equal((await readIntegrationJson(raw, 200, "raw AI response")).model, "gpt-test");
+
+  const chat = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/chat"),
+    200,
+    "DeepSeek Chat Completions response"
+  );
+  assert.equal(chat.object, "chat.completion");
+  assert.equal(chat.model, "deepseek-v4-flash");
+
+  const embedding = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/embedding"),
+    200,
+    "OpenAI embeddings response"
+  );
+  assert.equal(embedding.object, "list");
+  assert.equal(embedding.model, "text-embedding-test");
+  assert.deepEqual(embedding.data[0].embedding, [0.1, 0.2]);
+
+  const stream = await gatewayFetch(ns, "/ai/sse");
+  assertStatus(stream, 200, "Responses SSE");
+  assert.match(String(stream.headers["content-type"]), /^text\/event-stream/);
+  const streamText = await stream.text();
+  assert.match(streamText, /event: response\.created/);
+  assert.match(streamText, /event: response\.completed/);
+  assert.match(streamText, /"model":"grok-test"/);
+
+  const chatStream = await gatewayFetch(ns, "/ai/chat-sse");
+  assertStatus(chatStream, 200, "Chat Completions SSE");
+  assert.match(String(chatStream.headers["content-type"]), /^text\/event-stream/);
+  const chatStreamText = await chatStream.text();
+  assert.match(chatStreamText, /"object":"chat\.completion\.chunk"/);
+  assert.match(chatStreamText, /data: \[DONE\]/);
+
+  const aborted = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/abort"),
+    200,
+    "AI cancellation"
+  );
+  assert.deepEqual(aborted, {
+    aborted: true,
+    name: "AbortError",
+    code: 20,
+  });
+
+  const deleted = await adminFetch(`/ns/${ns}/ai/providers/deepseek`, { method: "DELETE" });
+  assert.deepEqual(
+    await readIntegrationJson(deleted, 200, "DeepSeek provider delete"),
+    { ok: true, deleted: true }
+  );
+  const missing = await adminFetch(`/ns/${ns}/ai/providers/deepseek`);
+  assertStatus(missing, 404, "deleted DeepSeek provider");
+  assert.doesNotMatch(await missing.text(), /fake-deepseek-key/);
+});
+
+test("AI provider rotation reaches the next request and new socket without redeploy", async () => {
+  const ns = uniqueNs("ai-rotation");
+  const created = await adminPut(`/ns/${ns}/ai/providers/openai`, PROVIDERS.openai.record);
+  assertStatus(created, 200, "initial OpenAI provider create");
+  const initialRevision = created.json.provider.revision;
+  const initialCredential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
+    revision: initialRevision,
+    credential: PROVIDERS.openai.credential,
+  });
+  assertStatus(initialCredential, 200, "initial OpenAI credential create");
+  await deployAiWorker(ns);
+
+  const initial = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
+    200,
+    "initial AI request"
+  );
+  assert.equal(initial.model, "gpt-test");
+
+  const rotatedRecord = structuredClone(PROVIDERS.openai.record);
+  rotatedRecord.models.primary.upstreamModel = "gpt-test-rotated";
+  const rotated = await adminPut(`/ns/${ns}/ai/providers/openai`, rotatedRecord);
+  assertStatus(rotated, 200, "OpenAI provider rotation");
+  const rotatedRevision = rotated.json.provider.revision;
+  assert.notEqual(rotatedRevision, initialRevision);
+  assert.equal(rotated.json.provider.credentialConfigured, false);
+
+  const staleCredential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
+    revision: initialRevision,
+    credential: "fake-openai-key-rotated",
+  });
+  assertStatus(staleCredential, 409, "stale OpenAI credential write");
+  const rotatedCredential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
+    revision: rotatedRevision,
+    credential: "fake-openai-key-rotated",
+  });
+  assertStatus(rotatedCredential, 200, "rotated OpenAI credential write");
+
+  const nextRequest = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
+    200,
+    "AI request after provider rotation"
+  );
+  assert.equal(nextRequest.model, "gpt-test-rotated");
+
+  const nextSocket = await wsHandshake(ns, "/ai/responses-ws");
+  try {
+    assertStatus(nextSocket, 101, "Responses WebSocket after provider rotation");
+    nextSocket.socket.write(encodeClientTextFrame(JSON.stringify({
+      type: "response.create",
+      model: "openai/primary",
+      input: "after rotation",
+    })));
+    const completed = frameJson(await readOneServerTextFrame(nextSocket.socket));
+    assert.equal(completed.response.model, "gpt-test-rotated");
+    const close = readOneServerCloseFrame(nextSocket.socket);
+    nextSocket.socket.write(encodeClientCloseFrame(1000, "done"));
+    assert.deepEqual(await close, { code: 1000, reason: "done" });
+  } finally {
+    nextSocket.socket.destroy();
+  }
+});
+
+test("AI streams forward provider errors and release cancelled stream permits", async () => {
+  const { ns } = await setupAiNamespace("ai-stream-lifecycle");
+  const baseline = runtimeAiMetric("wdl_ai_pool_in_use", "stream");
+  const beforeAcquired = runtimeAiMetric("wdl_ai_pool_events_total", "stream", "acquired");
+  const beforeReleased = runtimeReleaseCount("stream");
+  const beforeProviderError = runtimeAiMetric(
+    "wdl_ai_pool_events_total",
+    "stream",
+    "provider_error"
+  );
+
+  const cancelled = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/stream-cancel"),
+    200,
+    "cancelled AI stream"
+  );
+  assert.equal(cancelled.done, false);
+  assert.match(cancelled.first, /event: response\.created/);
+  await waitUntil("cancelled AI stream permit acquired", () =>
+    runtimeAiMetric("wdl_ai_pool_events_total", "stream", "acquired") === beforeAcquired + 1);
+  await waitUntil("cancelled AI stream permit released", () =>
+    runtimeReleaseCount("stream") === beforeReleased + 1);
+  assert.equal(runtimeAiMetric("wdl_ai_pool_in_use", "stream"), baseline);
+
+  const providerError = await gatewayFetch(ns, "/ai/sse-error");
+  assertStatus(providerError, 200, "AI provider SSE error");
+  const providerErrorText = await providerError.text();
+  assert.match(providerErrorText, /event: error/);
+  assert.match(providerErrorText, /fake provider error/);
+  await waitUntil("provider-error AI stream permit released", () =>
+    runtimeAiMetric("wdl_ai_pool_in_use", "stream") === baseline);
+  assert.equal(
+    runtimeAiMetric("wdl_ai_pool_events_total", "stream", "provider_error") -
+      beforeProviderError,
+    1
+  );
+});
+
+test("AI stream and WebSocket idle deadlines release platform permits", async () => {
+  const { ns } = await setupAiNamespace("ai-idle-deadline");
+  const streamBaseline = runtimeAiMetric("wdl_ai_pool_in_use", "stream");
+  const beforeStreamIdle = runtimeAiMetric(
+    "wdl_ai_pool_events_total",
+    "stream",
+    "idle_timeout"
+  );
+  const response = await gatewayStream(ns, "/ai/stream-idle");
+  assertStatus(response, 200, "idle AI stream");
+  const iterator = response.body[Symbol.asyncIterator]();
+  let pendingRead = Promise.resolve();
+  try {
+    const first = await iterator.next();
+    assert.equal(first.done, false);
+    assert.match(Buffer.from(first.value).toString("utf8"), /event: response\.created/);
+    pendingRead = iterator.next().then(() => undefined, () => undefined);
+    await waitUntil("idle AI stream deadline", () =>
+      runtimeAiMetric("wdl_ai_pool_events_total", "stream", "idle_timeout") ===
+        beforeStreamIdle + 1,
+    { timeoutMs: 10_000, intervalMs: 100 });
+    assert.equal(runtimeAiMetric("wdl_ai_pool_in_use", "stream"), streamBaseline);
+  } finally {
+    response.body.destroy();
+    await pendingRead;
+  }
+
+  const websocketBaseline = runtimeAiMetric("wdl_ai_pool_in_use", "websocket");
+  const beforeWebSocketIdle = runtimeAiMetric(
+    "wdl_ai_pool_events_total",
+    "websocket",
+    "idle_timeout"
+  );
+  const idleSocket = await wsHandshake(ns, "/ai/responses-ws");
+  try {
+    assertStatus(idleSocket, 101, "idle Responses WebSocket upgrade");
+    assert.deepEqual(await readAiCloseFrame(idleSocket.socket, "idle Responses close"), {
+      code: 1012,
+      reason: "AI websocket idle timeout",
+    });
+    await waitUntil("idle AI WebSocket deadline", () =>
+      runtimeAiMetric("wdl_ai_pool_events_total", "websocket", "idle_timeout") ===
+        beforeWebSocketIdle + 1);
+    assert.equal(runtimeAiMetric("wdl_ai_pool_in_use", "websocket"), websocketBaseline);
+  } finally {
+    idleSocket.socket.destroy();
+  }
+});
+
+test("AI providers outlive the last worker and remain usable after namespace recreation", async () => {
+  const ns = uniqueNs("ai-lifecycle");
+  const created = await adminPut(`/ns/${ns}/ai/providers/openai`, PROVIDERS.openai.record);
+  assertStatus(created, 200, "retained OpenAI provider create");
+  const credential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
+    revision: created.json.provider.revision,
+    credential: PROVIDERS.openai.credential,
+  });
+  assertStatus(credential, 200, "retained OpenAI credential create");
+  await deployAiWorker(ns);
+
+  const deleted = await adminFetch(`/ns/${ns}/worker/ai/delete`, { method: "POST" });
+  const deletedBody = await readIntegrationJson(deleted, 200, "AI worker delete");
+  assert.equal(deletedBody.deleted, true);
+
+  const retained = await readIntegrationJson(
+    await adminFetch(`/ns/${ns}/ai/providers/openai`),
+    200,
+    "retained AI provider"
+  );
+  assert.equal(retained.provider.credentialConfigured, true);
+  const models = await readIntegrationJson(
+    await adminFetch(`/ns/${ns}/ai/models`),
+    200,
+    "retained AI models"
+  );
+  assert.deepEqual(
+    models.models.map((/** @type {{ id: string }} */ model) => model.id),
+    ["openai/embedding", "openai/primary"]
+  );
+
+  await deployAiWorker(ns);
+  const response = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
+    200,
+    "AI after namespace recreation"
+  );
+  assert.equal(response.model, "gpt-test");
+});
+
+test("AI request admission bounds a stalled tenant upload before provider I/O", async () => {
+  const { ns } = await setupAiNamespace("ai-slow-upload");
+  const startedAt = Date.now();
+  const response = await gatewayFetch(ns, "/ai/slow-upload");
+  const body = await readIntegrationJson(response, 504, "stalled AI upload");
+  assert.equal(body.error, "ai_request_timeout");
+  assert.equal(Date.now() - startedAt < 10_000, true);
+});
+
+test("AI binding bridges agent and Realtime WebSockets with bounded lifecycle", async () => {
+  const { ns } = await setupAiNamespace("ai-ws");
+  const baseline = runtimeAiMetric("wdl_ai_pool_in_use", "websocket");
+
+  const responses = await wsHandshake(ns, "/ai/responses-ws");
+  try {
+    assertStatus(responses, 101, "Responses WebSocket upgrade");
+    responses.socket.write(encodeClientTextFrame(JSON.stringify({
+      type: "response.create",
+      model: "openai/primary",
+      input: "wdl_test_tool_loop",
+    })));
+    const toolCall = frameJson(await readOneServerTextFrame(responses.socket));
+    assert.equal(toolCall.type, "response.completed");
+    assert.equal(toolCall.response.id, "resp_tool");
+    assert.equal(toolCall.response.model, "gpt-test");
+    assert.deepEqual(toolCall.response.output[0], {
+      type: "function_call",
+      call_id: "call_fake",
+      name: "lookup",
+      arguments: "{}",
+    });
+    responses.socket.write(encodeClientTextFrame(JSON.stringify({
+      type: "response.create",
+      model: "openai/primary",
+      previous_response_id: "resp_tool",
+      input: [{ type: "function_call_output", call_id: "call_fake", output: "value" }],
+    })));
+    const completed = frameJson(await readOneServerTextFrame(responses.socket));
+    assert.equal(completed.response.id, "resp_final");
+    assert.equal(completed.response.model, "gpt-test");
+    assert.equal(completed.response.output[0].content[0].text, "tool result accepted");
+    const close = readAiCloseFrame(responses.socket, "Responses reciprocal close");
+    responses.socket.write(encodeClientCloseFrame(1000, "done"));
+    assert.deepEqual(await close, { code: 1000, reason: "done" });
+  } finally {
+    responses.socket.destroy();
+  }
+
+  const realtime = await wsHandshake(ns, "/ai/realtime-ws");
+  try {
+    assertStatus(realtime, 101, "Realtime WebSocket upgrade");
+    realtime.socket.write(encodeClientTextFrame(JSON.stringify({
+      type: "session.update",
+      session: { model: "xai/realtime", modalities: ["text", "audio"] },
+    })));
+    const updated = frameJson(await readOneServerTextFrame(realtime.socket));
+    assert.equal(updated.type, "session.updated");
+    assert.equal(updated.session.model, "grok-realtime-test");
+
+    const binary = Buffer.from([0, 1, 127, 128, 255]);
+    const echoed = readOneServerBinaryFrame(realtime.socket);
+    realtime.socket.write(encodeClientBinaryFrame(binary));
+    assert.deepEqual(await echoed, binary);
+    const close = readAiCloseFrame(realtime.socket, "Realtime reciprocal close");
+    realtime.socket.write(encodeClientCloseFrame(1000, "done"));
+    assert.deepEqual(await close, { code: 1000, reason: "done" });
+  } finally {
+    realtime.socket.destroy();
+  }
+
+  const malformed = await wsHandshake(ns, "/ai/responses-ws");
+  try {
+    assertStatus(malformed, 101, "malformed Responses WebSocket upgrade");
+    malformed.socket.write(encodeClientTextFrame("not JSON"));
+    assert.deepEqual(await readAiCloseFrame(malformed.socket, "malformed frame close"), {
+      code: 1008,
+      reason: "AI websocket frame rejected",
+    });
+  } finally {
+    malformed.socket.destroy();
+  }
+
+  const abandoned = await wsHandshake(ns, "/ai/responses-ws");
+  assertStatus(abandoned, 101, "abandoned Responses WebSocket upgrade");
+  await waitUntil("abandoned AI WebSocket permit acquired", () =>
+    runtimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline + 1);
+  abandoned.socket.destroy();
+  await waitUntil("AI WebSocket permits released", () =>
+    runtimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline,
+  { timeoutMs: 10_000, intervalMs: 100 });
+});
+
+test("official OpenAI SDK uses the AI Fetcher for Responses JSON, SSE, and cancellation", async () => {
+  const ns = uniqueNs("ai-openai-sdk");
+  const created = await adminPut("/ns/" + ns + "/ai/providers/openai", PROVIDERS.openai.record);
+  assertStatus(created, 200, "SDK OpenAI provider create");
+  const credential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
+    revision: created.json.provider.revision,
+    credential: PROVIDERS.openai.credential,
+  });
+  assertStatus(credential, 200, "SDK OpenAI credential create");
+  await deployAndPromote(ns, "sdk", {
+    mainModule: "worker.js",
+    modules: { "worker.js": AI_OPENAI_SDK_WORKER },
+    compatibilityDate: "2026-08-11",
+    bindings: { AI: { type: "ai" } },
+  });
+
+  const json = await readIntegrationJson(
+    await gatewayFetch(ns, "/sdk/json"),
+    200,
+    "OpenAI SDK JSON"
+  );
+  assert.deepEqual(json, { id: "resp_fake", model: "gpt-test", status: "completed" });
+
+  const stream = await readIntegrationJson(
+    await gatewayFetch(ns, "/sdk/stream"),
+    200,
+    "OpenAI SDK stream"
+  );
+  assert.deepEqual(stream.eventTypes, [
+    "response.created",
+    "response.output_text.delta",
+    "response.completed",
+  ]);
+
+  const aborted = await readIntegrationJson(
+    await gatewayFetch(ns, "/sdk/abort"),
+    200,
+    "OpenAI SDK cancellation"
+  );
+  assert.deepEqual(aborted, {
+    aborted: true,
+    name: "Error",
+    constructor: "APIUserAbortError",
+    message: "Request was aborted.",
+  });
+});
+
+test("DO AI calls complete and caller teardown leaves the host watchdog alive", async () => {
+  const { ns } = await setupAiNamespace("ai-do-teardown");
+  const completed = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/do/json?name=teardown"),
+    200,
+    "DO AI request"
+  );
+  assert.equal(completed.model, "gpt-test");
+  assert.equal(completed.status, "completed");
+
+  const beforeGauge = doAiMetric("wdl_ai_pool_in_use", "request");
+  const beforeAcquired = doAiMetric("wdl_ai_pool_events_total", "request", "acquired");
+  const beforeReleased = requestReleaseCount();
+
+  const started = await gatewayFetch(ns, "/ai/do/start?name=teardown");
+  assertStatus(started, 202, "DO AI request start");
+  await waitUntil("DO AI request permit acquired", () =>
+    doAiMetric("wdl_ai_pool_in_use", "request") === beforeGauge + 1
+  );
+
+  await gatewayFetch(ns, "/ai/do/abort?name=teardown").catch(() => null);
+  await waitUntil("DO AI request permit released after actor teardown", () =>
+    doAiMetric("wdl_ai_pool_in_use", "request") === beforeGauge,
+  { timeoutMs: 10_000, intervalMs: 100 });
+
+  assert.equal(
+    doAiMetric("wdl_ai_pool_events_total", "request", "acquired") - beforeAcquired,
+    1
+  );
+  assert.equal(requestReleaseCount() - beforeReleased, 1);
+  assert.equal(doAiMetric("wdl_ai_pool_events_total", "request", "deadline") >= 1, true);
+});
