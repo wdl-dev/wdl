@@ -143,27 +143,17 @@ test("DurableObjectNamespace binding fetch rejects non-Response host results", a
   );
 });
 
-test("DurableObjectNamespace metadata host proxy handles normal fetch while websocket uses backend fetcher", async () => {
+test("DurableObjectNamespace host proxy handles normal and WebSocket fetch", async () => {
   /** @type {any[]} */
   const proxyCalls = [];
-  /** @type {any[]} */
-  const backendCalls = [];
   const ns = new DurableObjectNamespace({
-    ns: "tenant",
-    worker: "chat",
-    version: "v1",
-    doStorageId: "do_0123456789abcdef0123456789abcdef",
-    binding: "ROOM",
-    className: "Room",
-    hostProxy: {
-      async fetchObject(/** @type {string} */ objectName, /** @type {Request} */ request) {
-        proxyCalls.push({ objectName, request });
-        return new Response("proxy-ok");
-      },
+    async fetch(/** @type {Request} */ request) {
+      proxyCalls.push({ request, websocket: true });
+      return new Response("websocket-ok");
     },
-  }, {
-    backend: {
-      fetch: makeRecordingFetch(backendCalls, { response: new Response("backend-ok") }),
+    async fetchObject(/** @type {string} */ objectName, /** @type {Request} */ request) {
+      proxyCalls.push({ objectName, request });
+      return new Response("proxy-ok");
     },
   });
 
@@ -177,26 +167,20 @@ test("DurableObjectNamespace metadata host proxy handles normal fetch while webs
   });
 
   assert.equal(await normal.text(), "proxy-ok");
-  assert.equal(await websocket.text(), "backend-ok");
-  assert.equal(proxyCalls.length, 1);
-  assert.equal(backendCalls.length, 1);
-  assert.equal(backendCalls[0].url, "http://do-runtime/internal/do/connect");
+  assert.equal(await websocket.text(), "websocket-ok");
+  assert.equal(proxyCalls.length, 2);
+  assert.equal(proxyCalls[0].objectName, "room-a");
+  assert.equal(proxyCalls[1].websocket, true);
+  assert.equal(proxyCalls[1].request.headers.get("x-wdl-do-binding-object-name"), "room-a");
 });
 
-test("DurableObjectNamespace classifies metadata with a captured Object.hasOwn", async () => {
+test("DurableObjectNamespace classifies host proxies with a captured Object.hasOwn", async () => {
   await withMockedProperty(Object, "hasOwn", () => {
     throw new Error("tenant Object.hasOwn was called");
   }, async () => {
     const namespace = new DurableObjectNamespace({
-      ns: "tenant",
-      worker: "worker",
-      version: "v1",
-      doStorageId: "storage",
-      className: "Room",
-      hostProxy: {
-        async fetchObject() {
-          return new Response("ok");
-        },
+      async fetchObject() {
+        return new Response("ok");
       },
     });
     const response = await namespace.get(namespace.idFromName("room")).fetch("https://example.test/");

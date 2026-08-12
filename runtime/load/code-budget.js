@@ -37,7 +37,7 @@ const utf8Decoder = new TextDecoder();
  * @typedef {{ binding?: unknown, className?: unknown }} RuntimeWorkflowSpec
  * @typedef {{ ns: string, worker: string, version: string }} RuntimeWorkerIdentity
  * @typedef {{ entrypoint?: unknown }} RuntimeExportSpec
- * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null }} RuntimeBundleMeta
+ * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null, compatibilityFlags?: unknown }} RuntimeBundleMeta
  * @typedef {{
  *   bindingEntries: Array<[string, RuntimeBindingSpec]>,
  *   workflows: RuntimeWorkflowSpec[],
@@ -47,8 +47,6 @@ const utf8Decoder = new TextDecoder();
  *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
  *   hostWrappedClassNames: string[],
- *   needsDoBackend: boolean,
- *   needsWorkflowsBackend: boolean,
  *   needsHostBindingWrapper: boolean,
  * }} RuntimeMetaPlan
  * @typedef {{
@@ -255,8 +253,6 @@ export function analyzeRuntimeMeta(meta) {
     aiBindings: [],
     workflowBindings: Object.create(null),
     hostWrappedClassNames: [],
-    needsDoBackend: false,
-    needsWorkflowsBackend: false,
     needsHostBindingWrapper: false,
   };
   for (const [name, spec] of bindingEntries) {
@@ -275,9 +271,8 @@ export function analyzeRuntimeMeta(meta) {
   for (const workflow of workflows) {
     if (typeof workflow?.binding === "string" && workflow.binding) plan.workflowBindings[workflow.binding] = workflow;
   }
-  plan.needsDoBackend = plan.doBindings.length > 0;
-  plan.needsWorkflowsBackend = Object.keys(plan.workflowBindings).length > 0;
-  plan.needsHostBindingWrapper = hasHostFacadeBindings(plan) || plan.needsWorkflowsBackend;
+  plan.needsHostBindingWrapper =
+    hasHostFacadeBindings(plan) || Object.keys(plan.workflowBindings).length > 0;
   if (plan.needsHostBindingWrapper) {
     plan.hostWrappedClassNames = hostWrappedClassNames(meta, bindingEntries, workflows);
   }
@@ -308,7 +303,7 @@ function runtimeInjectedModuleSources(
   for (const { planKey, injectionKey } of Object.values(HOST_FACADE_BINDING_DEFINITIONS)) {
     if (plan[planKey].length > 0) addModules(injections[injectionKey]);
   }
-  if (plan.needsWorkflowsBackend) {
+  if (Object.keys(plan.workflowBindings).length > 0) {
     addModules(injections.workflowsModuleInjections);
   }
   out.set(WORKFLOWS_MODULE_NAME, WORKFLOWS_MODULE_SOURCE);
@@ -330,6 +325,8 @@ function runtimeInjectedModuleSources(
             entrypointNames: plan.hostWrappedClassNames,
             workerIdentity,
             aiBindings: plan.aiBindings,
+            importableEnvDisabled: Array.isArray(meta.compatibilityFlags) &&
+              meta.compatibilityFlags.includes("disallow_importable_env"),
           }
         )
       : generateAbortShimWrapperModule(mainModule)

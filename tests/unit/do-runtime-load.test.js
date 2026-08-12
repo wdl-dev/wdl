@@ -28,11 +28,6 @@ export function buildWorkerEnv() { return {}; }
 export function doAlarmBindingProps({ ns, worker, version, doStorageId }) {
   return { ns, worker, version, doStorageId };
 }
-export function internalAuthBackend(ctx, env, binding) {
-  return typeof ctx.exports.InternalAuthBackend === "function"
-    ? ctx.exports.InternalAuthBackend({ props: { binding } })
-    : env[binding];
-}
 export function decodeRuntimeLoadPayload(buffer) {
   return JSON.parse(new TextDecoder().decode(buffer));
 }
@@ -250,7 +245,6 @@ test("DO runtime load: applies the host-binding wrapper before the alarm wrapper
     DO_BACKEND: { fetch() {} },
   }, {
     exports: {
-      InternalAuthBackend: (/** @type {{ props: any }} */ { props }) => ({ kind: "internal-auth-backend", props }),
       DoAlarmBinding: (/** @type {{ props: any }} */ { props }) => ({ props }),
     },
   }, invoke(), "req-wrapper");
@@ -326,7 +320,6 @@ test("DO runtime load: rejects reserved alarm shim module collisions", async () 
       DO_BACKEND: { fetch() {} },
     }, {
       exports: {
-        InternalAuthBackend: (/** @type {{ props: any }} */ { props }) => ({ kind: "internal-auth-backend", props }),
         DoAlarmBinding: (/** @type {{ props: any }} */ { props }) => ({ props }),
       },
     }, invoke(), "req-reserved"),

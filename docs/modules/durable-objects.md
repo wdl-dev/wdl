@@ -200,6 +200,11 @@ different `doStorageId`.
   response-header stripping for both the host binding and injected facade. Its connect
   wrapper deliberately omits the invoke-only router fallback required to preserve
   owner-established WebSocket upgrades.
+- Runtime materializes one host adapter per declared DO binding. Immutable adapter props
+  fix namespace, worker version, storage identity, and class before internal auth is
+  attached; loaded-worker env never contains a generic DO router or owner-network
+  Fetcher. Module evaluation may observe this scoped transport, but it cannot select a
+  different DO binding identity.
 - `WEBSOCKET_RECONNECT_DELAYS_MS` and `WEBSOCKET_MAX_BUFFERED_MESSAGES` tune gateway
   backend reconnect budget and client-message buffering without a code rebuild.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due
@@ -340,6 +345,11 @@ required.
   `WDL_INTERNAL_AUTH_TOKEN` through `x-wdl-internal-auth`; health and metrics are the
   only unauthenticated endpoints.
 - Tenant code reaches DOs only through runtime-generated facades and frozen metadata.
+- Module-scope raw env contains only binding-scoped DO host adapters and do-runtime's
+  fixed worker/storage alarm-index adapter. DO adapters rebuild internal invoke/connect
+  metadata from fixed props and strip tenant-supplied control headers before dispatch;
+  the alarm adapter exposes no generic Fetcher, and delivery remains fenced by the
+  matching SQLite row token.
 - Tenant-visible DO metadata and errors must not include owner task ids, backend
   endpoints, or raw transport error text.
 - Owner hints are trusted only when returned by do-runtime headers and validated against

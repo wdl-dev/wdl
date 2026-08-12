@@ -31,7 +31,7 @@ workerd config wiring 有几条不明显的约束：`workerd serve` 的 config �
 - Loader socket `:8081`：gateway-routed tenant fetch 流量。
 - Internal socket `:8088`：只处理 `GET /_healthz`、`GET /_metrics`、workflow run/notify、scheduled dispatch 和 queue dispatch。
 - `redis-proxy` sidecar：cold-load、tenant secret envelope decrypt、KV、queue producer、AI provider resolve/model discovery、log-tail active check 和 append。
-- 隐藏 service Fetcher：D1 backend、DO backend、workflows backend，以及 DO owner-network direct path。
+- Host-side stateful binding transport：通用 D1、DO 和 workflows backend Fetcher 留在 loader realm，loaded-worker env 只接收声明级 scoped host adapter。DO host adapter 通过 runtime 的 internal-network outbound 完成 owner direct forwarding，不存在 loaded-worker owner-network Fetcher。
 - Env-backed binding：queues 和 KV 调 `redis-proxy`；R2 签名 S3-compatible request；AI 通过 redis-proxy 解析加密的 namespace credential，并使用 public-only network service；ASSETS 使用 deploy-time metadata 生成 tokenized CDN URL，不是隐藏 Fetcher。
 
 Tenant 可见 binding 包括 KV、R2、D1、Durable Objects、Queues、AI、ASSETS、service bindings、platform bindings 和 workflows。
@@ -42,7 +42,7 @@ workerd 提供 isolate、module evaluation、named entrypoint 和 JSRPC 机制�
 
 - KV、queue producer 这类纯数据 binding 调 colocated redis-proxy sidecar。Loaded worker 看到 Cloudflare-shaped object，但 method call 会先通过 workerd JSRPC 回到 runtime，再经 HTTP 调 redis-proxy。
 - Secret value 也在 cold-load 时经过 redis-proxy。redis-proxy 解密 `WDL-ENC:` value 后，runtime 在 internal load envelope 中收到 plaintext `ns_secrets` 和 `worker_secrets`；tenant-facing `env` 形状保持不变。Env materialization 使用固定优先级：bundle vars，然后 namespace secrets，然后 worker secrets。同名 worker-level secret 覆盖 namespace-level secret，namespace-level secret 覆盖 var。Control 会在 deploy 和 secret mutation 过程中用 shape-only factory 调用 cold-load 同一个 `buildWorkerEnv()` materializer，再用留有 headroom 的预算估算完整 workerLoader env，包括用户 vars/secrets、runtime 注入的 binding env value，以及 platform/service binding props 中复制的 required caller secret，避免超限配置拖到 runtime cold-load 才失败。
-- D1、Durable Objects、Workflows 这类 stateful binding 调专门 backend service。Hidden backend Fetcher 留在 runtime 内部，并在 tenant code 观察 `env` 前被删除。
+- D1、Durable Objects、Workflows 这类 stateful binding 通过 binding-scoped host adapter 调专门 backend service。不可变 props 把每个 adapter 限定到声明的 database、object namespace 或 workflow；loaded worker 不会拿到通用的 authenticated DO 或 Workflows Fetcher。
 - R2 是 S3-compatible object-storage adapter：runtime 使用平台 credential 签名请求，并发送到配置的 endpoint。
 - AI 是 host binding 加 generated tenant-realm facade。Runtime 从 redis-proxy 读取原子的 provider/credential snapshot，重新校验精确官方 destination，再通过 public-only `AI_NETWORK` service 出站。Provider credential 不进入 loaded Worker env。Protocol 与 lifecycle 合同见 [`ai.zh.md`](ai.zh.md)。
 - ASSETS 是 deploy artifact URL helper：control 在 deploy 时把 assets 上传到 S3-compatible storage；runtime 读取 `__meta__.assets` 和 `ASSETS_CDN_BASE`，只暴露 `env.ASSETS.url(path)` 用来生成 tokenized CDN URL。
@@ -56,7 +56,9 @@ KV 支持常用 `KVNamespace` 调用：`get`、batch `get`、`getWithMetadata`�
 
 R2 binding 把 `bucket_name` 映射到平台 S3-compatible bucket 下的 namespace-scoped virtual bucket：`r2/<ns>/<bucket_name>/<object-key>`。同一个 namespace 中使用同一 `bucket_name` 的 worker 会有意共享数据；不同 namespace 通过前缀隔离。Runtime 支持常用 `head`、`get`、`put`、`delete` 和 `list` 路径。`get()` 返回 streaming body，便捷 reader 执行 25 MiB cap。`put(stream, ...)` 目前会先 buffer，再发单个 S3 PUT，并使用同一个 cap；不支持 multipart upload、SSE-C 和 checksum selection。Conditional requests 和 range GET 实现常用 R2 行为。`list({ include: [...] })` 为 metadata fields 额外执行 HEAD，并使用并发 cap。Tenant 提供的 `Headers` metadata 如果包含 `Expires`，其值必须是 canonical IMF-fixdate；malformed write metadata 会在 host binding call 前被拒绝。Tenant-facing R2 error 只暴露 operation/status，以及有帮助的 virtual object key；不会暴露原始 S3 response body 或 physical `r2/<ns>/<bucket>/...` key。Control-plane R2 admin error 可以为 operator 保留 backend detail。
 
-AI 最多接受一个 `{ type: "ai" }` binding。Generated wrapper 在 handler env 与 imported env 中都暴露 `fetch()`、`run()` 和 `models()`，host entrypoint prototype 本身只暴露 `fetch()`。Virtual raw origin 是 `https://ai.wdl`；provider alias、官方 destination、Redis shape、byte/time bound、WebSocket 规则和非目标由 [`ai.zh.md`](ai.zh.md) 拥有。
+AI 最多接受一个 `{ type: "ai" }` binding。Generated wrapper 通过 positional handler/entrypoint env 暴露 `fetch()`、`run()` 和 `models()`；启用 importable env 时，invocation 内对 imported env proxy 的实时读取会看到同一个 facade。Host entrypoint prototype 本身只暴露 `fetch()`。Virtual raw origin 是 `https://ai.wdl`；provider alias、官方 destination、Redis shape、byte/time bound、WebSocket 规则和非目标由 [`ai.zh.md`](ai.zh.md) 拥有。
+
+Generated host-facade wrapper 保留 Worker 的 importable-env compatibility contract：只有未设置 `disallow_importable_env` 时才调用 workerd `withEnv()`。启用 importable env 时，tenant module 可以在 module scope 保存 imported env proxy，并在 invocation 中从 proxy 实时读取 binding；module evaluation 期间直接缓存单个 binding 不属于 facade contract，因为 module evaluation 早于 wrapper invocation，只可能观察到 binding-scoped raw host adapter。设置 `disallow_importable_env` 后，module scope 和 invocation 中的 imported env 都保持为空，positional env 仍然获得 generated facade。
 
 ASSETS 是 deploy-artifact helper，不是完整 Cloudflare Pages asset pipeline。Control 把文件上传到 `assets/<ns>/<worker>/<token>/<path>`，注入 `ASSETS` binding，runtime 暴露同步的 `env.ASSETS.url(path)`。该方法在 runtime 中不做 IO，并用 `ASSETS_CDN_BASE` 返回浏览器可访问的 CDN URL。Path 按 `/` 切段，空段、`.` 和 `..` 被拒绝，每段会 percent-encode。Version 在 load 时绑定，因此 rollback 会切换 asset URL。需要对静态文件做 auth 或 rewrite 的 worker 应把文件留在 bundle 里，而不是使用 declared `assets`。
 
@@ -102,8 +104,9 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 - system-runtime loaded `__system__` worker 刻意拥有 private+public outbound。
 - 新增 privileged runtime endpoint 必须加到 `runtime/internal.js` 的 `:8088`，不能加到 gateway-facing loader socket。
 - 匹配 `__WDL_*__` 的 binding 和匹配 `__Wdl*__` 的 entrypoint 属于平台保留。
+- Tenant module evaluation 可观察到的 raw env value 被限定到其声明的 binding identity。DO 与 Workflow adapter 会先覆盖 caller 提供的 identity，再附加 internal auth；loaded-worker env 永远不放置通用 authenticated backend Fetcher。
 - D1/DO owner hint 只信任 runtime service 生成的 header，不信任 tenant response body。
-- Workflow binding 通过 `workflows` service；冻结的 Workflow identity 只嵌入生成的私有 wrapper，不进入 raw worker env，因此 Node-compatible `process.env` 不会暴露该 metadata object。
+- Workflow binding 通过 `workflows` service；冻结 identity 位于 generated private wrapper code 和 host-binding props，不以 JSON-compatible metadata object 进入 raw worker env，因此 Node-compatible `process.env` 不会暴露该对象。
 
 ## 可观测性
 

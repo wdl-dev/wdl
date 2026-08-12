@@ -99,7 +99,7 @@ Key families：
 
 Workflow execution 使用两条 channel：
 
-1. Loaded worker 通过 reserved `__WDL_WORKFLOWS_BACKEND__` Fetcher binding 调 workflows。Runtime 从 bundle metadata 附加 identity；workflows 不信任 tenant body 中的 namespace、worker、version、workflow key、class 或 instance identity。
+1. Generated `Workflow` facade 调用 binding-scoped host adapter。Adapter 只接受公开 Workflow operation，用不可变 binding props 覆盖 namespace、worker、version、workflow key 和 class，附加 mesh authentication 后转发到 workflows；tenant request field 不能选择其它 workflow。
 2. workflows 把已 claim 的 run dispatch 回 runtime `:8088` 上的 `/internal/workflows/run`。Runtime 加载 frozen worker version 并调用 `className.run(event, stepFacade)`。
 
 Get、status 和 list read 会从请求中的 namespace、workflow key 与 instance id 派生 payload hash。读取 result/error payload 前，persisted `ns`、`workflowKey`、`instanceId` 和 `payloadsKey` 必须与该 canonical identity 一致；任何 divergence 都会以 invalid state fail closed。
@@ -138,8 +138,7 @@ Progress callback 是 best-effort same-worker Durable Object push。Create reque
 ## 安全边界
 
 - workflows private API 不公开路由。
-- Tenant code 只拿 runtime `Workflow` facade，不拿 raw backend Fetcher。
-- 保留的 `__WDL_WORKFLOWS_BACKEND__` binding 在 user env 暴露前会被移除。
+- Positional env 获得 runtime `Workflow` facade。Module evaluation 最多观察到 binding-scoped host adapter，绝不会拿到通用 authenticated workflows service Fetcher；adapter 固定 identity，并且只暴露公开 operation。
 - Observer role 只拿 `workflow.list`。Instance list/status 是 payload-bearing，需要 `workflow.read`。
 - Workflow read endpoint 除非明确设计为 metadata-only，否则应视为 payload-bearing。
 - workflows lifecycle check 失败时，control delete fail closed。

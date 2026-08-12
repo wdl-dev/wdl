@@ -88,6 +88,7 @@ test("generated host wrappers alias legal entrypoint names without declaration c
     "user",
     "WorkerEntrypoint",
     "abortIsolate",
+    "withEnv",
     "withRequestContext",
     "wrapEnv",
     "wrapClassInstance",
@@ -103,6 +104,7 @@ test("generated host wrappers alias legal entrypoint names without declaration c
   const cloudflareUrl = moduleDataUrl(`
     export class WorkerEntrypoint {}
     export function abortIsolate() {}
+    export function withEnv(_env, fn) { return fn(); }
   `);
   const d1Url = moduleDataUrl("export class D1Database {}");
   const r2Url = moduleDataUrl("export class R2Bucket {}");
@@ -150,6 +152,7 @@ test("default host wrappers reuse stripping work without sharing request-scoped 
   const cloudflareUrl = moduleDataUrl(`
     export class WorkerEntrypoint {}
     export function abortIsolate() {}
+    export function withEnv(_env, fn) { return fn(); }
   `);
   const d1Url = moduleDataUrl(`
     export class D1Database {

@@ -35,7 +35,7 @@ Reserved namespace 是精确字面量，不是宽泛的 `__*` 约定。当前集
 WDL 使用 stock workerd，不 patch workerd。因此 runtime 隔离从 workerd isolate 边界开始，再叠加 WDL 的 wrapper 和网络规则：
 
 - Tenant bundle 通过 `workerLoader` 作为 immutable worker version 加载。
-- Runtime wrapper generation 构造 tenant-visible `env`；D1、DO、workflows 和 owner-network path 等 hidden platform Fetcher binding 留在 runtime 内，并在 tenant code 观察 `env` 前删除。
+- Runtime wrapper generation 构造 tenant-visible `env`。通用 authenticated backend Fetcher 留在 runtime 内，永远不进入 loaded-worker env；module evaluation 最多只能观察由不可变 props 限定到对应 D1、DO 或 Workflow 声明的 scoped host adapter。DO host adapter 通过 runtime internal network 自行完成 owner direct forwarding。
 - user-runtime loaded worker 只拿 public-only outbound。Tenant `fetch()` 和 `cloudflare:sockets` 不应访问 platform-private address。
 - system-runtime 的 `__system__` worker 刻意拥有 private+public outbound，因为它们是平台代码，不是 tenant code。
 - 特权 runtime event 使用私有 `:8088` internal socket。Gateway 不应保留 `/_scheduled` 这样的 tenant-visible path；socket 边界才是安全边界。

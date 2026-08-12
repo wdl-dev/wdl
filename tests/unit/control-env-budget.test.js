@@ -274,22 +274,12 @@ test("worker env budget includes do-runtime alarm binding for Durable Object wor
 
   assert.deepEqual(estimated.ROOM, {
     __wdlBinding: "do",
-    ns: "demo",
-    worker: "api",
-    version: "v12",
-    doStorageId: "do_0123456789abcdef0123456789abcdef",
-    binding: "ROOM",
-    className: "Room",
-    hostProxy: {
-      __wdlBinding: "do-host-proxy",
-      props: {
-        ns: "demo",
-        worker: "api",
-        version: "v12",
-        doStorageId: "do_0123456789abcdef0123456789abcdef",
-        binding: "ROOM",
-        className: "Room",
-      },
+    props: {
+      ns: "demo",
+      worker: "api",
+      version: "v12",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
     },
   });
   assert.deepEqual(estimated.__WDL_DO_ALARMS__, {

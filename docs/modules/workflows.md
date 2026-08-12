@@ -242,10 +242,10 @@ Key families:
 
 Workflow execution uses two channels:
 
-1. Loaded workers call workflows through the reserved `__WDL_WORKFLOWS_BACKEND__`
-   Fetcher binding. Runtime adds identity from bundle metadata; workflows does not trust
-   tenant body fields for namespace, worker, version, workflow key, class, or instance
-   identity.
+1. The generated `Workflow` facade calls a binding-scoped host adapter. The adapter
+   accepts only public Workflow operations, replaces namespace, worker, version,
+   workflow key, and class with immutable binding props, attaches mesh authentication,
+   and forwards to workflows. Tenant request fields cannot select another workflow.
 2. workflows dispatches claimed runs back to runtime `/internal/workflows/run` on
    `:8088`. Runtime loads the frozen worker version and invokes `className.run(event,
    stepFacade)`.
@@ -356,8 +356,9 @@ best-effort callback and records a dropped outcome; delivery is not transactiona
 ## Security Boundaries
 
 - workflows private API is not public-routed.
-- Tenant code only receives the runtime `Workflow` facade, not the raw backend Fetcher.
-- Reserved `__WDL_WORKFLOWS_BACKEND__` binding is stripped before user env exposure.
+- Positional env receives the runtime `Workflow` facade. Module evaluation can observe
+  only its binding-scoped host adapter, never the generic authenticated workflows
+  service Fetcher; the adapter fixes identity and exposes only public operations.
 - Observer roles receive `workflow.list` only. Instance list/status are payload-bearing
   and require `workflow.read`.
 - Workflow read endpoints must be treated as payload-bearing unless explicitly designed

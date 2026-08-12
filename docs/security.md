@@ -63,9 +63,11 @@ WDL uses stock workerd and does not patch it. Runtime isolation therefore starts
 workerd isolate boundaries and continues with WDL-specific wrapper and network rules:
 
 - Tenant bundles are loaded as immutable worker versions through `workerLoader`.
-- Runtime wrapper generation constructs the tenant-visible `env`; hidden platform
-  Fetcher bindings for D1, DO, workflows, and owner-network paths stay inside runtime
-  and are deleted before tenant code observes `env`.
+- Runtime wrapper generation constructs the tenant-visible `env`. Generic authenticated
+  backend Fetchers stay inside runtime and never enter loaded-worker env; module
+  evaluation may observe only declaration-scoped host adapters whose immutable props
+  limit them to the corresponding D1, DO, or Workflow binding. The DO host adapter owns
+  direct owner forwarding through runtime's internal network.
 - user-runtime loaded workers receive public-only outbound. Tenant `fetch()` and
   `cloudflare:sockets` must not reach platform-private addresses.
 - system-runtime `__system__` workers intentionally have private+public outbound because

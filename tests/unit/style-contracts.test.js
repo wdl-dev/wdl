@@ -2209,8 +2209,9 @@ test("workflow instance state is owned by workflows DB2", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("host wrapper hides raw exports whenever internal Fetchers are injected", () => {
+test("host wrapper exposes only binding-scoped DO and Workflow capabilities", () => {
   const source = withoutLineComments(readRepoFile("runtime/load/wrapper-generate.js"));
+  const envBuild = withoutLineComments(readRepoFile("runtime/load/env-build.js"));
   const wrapper = source.slice(
     source.indexOf("function generateHostBindingWrapperModule"),
     source.length
@@ -2218,16 +2219,17 @@ test("host wrapper hides raw exports whenever internal Fetchers are injected", (
   assert.match(wrapper, /const hidesRawEnvExports = doBindings\.length \|\| Object\.keys\(workflowBindings\)\.length;/);
   assert.match(wrapper, /const starExport = hidesRawEnvExports\s*\?\s*"[^"]*only wrapped entrypoints are re-exported\."/);
 
-  const envPreparation = source.slice(
-    source.indexOf("function envTemplateState"),
-    source.indexOf("async function notifyWorkflowCallback")
-  );
-  for (const binding of [
-    "DO_BACKEND_BINDING",
-    "DO_OWNER_NETWORK_BINDING",
-    "WORKFLOWS_BACKEND_BINDING",
+  assert.match(source, /const INTERNAL_BINDING_RE = \/\^__WDL_/);
+  assert.match(source, /if \(__WdlHostRuntime__\.regexpTest\(INTERNAL_BINDING_RE, name\)\) delete template\[name\]/);
+  assert.match(envBuild, /ctx\.exports\.DurableObjectNamespace\(\{/);
+  assert.match(envBuild, /ctx\.exports\.WorkflowBinding\(\{/);
+  for (const privateBinding of [
+    "__WDL_DO_BACKEND__",
+    "__WDL_DO_OWNER_NETWORK__",
+    "__WDL_WORKFLOWS_BACKEND__",
   ]) {
-    assert.match(envPreparation, new RegExp(`delete template\\[${RegExp.escape(binding)}\\]`));
+    assert.doesNotMatch(envBuild, new RegExp(RegExp.escape(privateBinding)));
+    assert.doesNotMatch(source, new RegExp(RegExp.escape(privateBinding)));
   }
 });
 
@@ -2662,8 +2664,7 @@ test("owner endpoint validation lives in a shared contract owner", () => {
     assert.match(config, /name = "runtime-owner-endpoint-source"/);
   }
   for (const config of [userConfig, systemConfig]) {
-    const doOwnerNetwork = /const doOwnerNetworkWorker[\s\S]*?\n\);/.exec(config)?.[0] || "";
-    assert.match(doOwnerNetwork, /name = "shared-owner-endpoint"/);
+    assert.doesNotMatch(config, /doOwnerNetworkWorker|DO_OWNER_NETWORK/);
   }
 });
 

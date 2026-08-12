@@ -1,6 +1,62 @@
 import { DurableObject, env as importedEnv } from "cloudflare:workers";
 
 const AI_ORIGIN = "https://ai.wdl";
+const moduleScopeEnv = {
+  ai: importedEnv.AI,
+  doBackend: importedEnv.__WDL_DO_BACKEND__,
+  ownerNetwork: importedEnv.__WDL_DO_OWNER_NETWORK__,
+  workflowsBackend: importedEnv.__WDL_WORKFLOWS_BACKEND__,
+};
+
+async function moduleScopeAiCalls() {
+  if (!moduleScopeEnv.ai) {
+    return { fetch: "missing", run: "missing", models: "missing" };
+  }
+  let fetch = "rejected";
+  try {
+    const response = await moduleScopeEnv.ai.fetch(`${AI_ORIGIN}/v1/models`);
+    fetch = response.status === 200 ? "resolved" : `status:${response.status}`;
+  } catch {}
+  let run = "resolved";
+  try {
+    await moduleScopeEnv.ai.run("openai/primary", { input: "module scope" });
+  } catch {
+    run = "rejected";
+  }
+  let models = "resolved";
+  try {
+    await moduleScopeEnv.ai.models();
+  } catch {
+    models = "rejected";
+  }
+  return { fetch, run, models };
+}
+
+async function aiSurface(env) {
+  return {
+    handler: {
+      fetch: typeof env.AI?.fetch,
+      run: typeof env.AI?.run,
+      models: typeof env.AI?.models,
+    },
+    imported: {
+      fetch: typeof importedEnv.AI?.fetch,
+      run: typeof importedEnv.AI?.run,
+      models: typeof importedEnv.AI?.models,
+    },
+    moduleScope: {
+      fetch: typeof moduleScopeEnv.ai?.fetch,
+      run: typeof moduleScopeEnv.ai?.run,
+      models: typeof moduleScopeEnv.ai?.models,
+    },
+    moduleScopeCalls: await moduleScopeAiCalls(),
+    hidden: {
+      doBackend: typeof moduleScopeEnv.doBackend,
+      ownerNetwork: typeof moduleScopeEnv.ownerNetwork,
+      workflowsBackend: typeof moduleScopeEnv.workflowsBackend,
+    },
+  };
+}
 
 function aiRequest(path, body, signal) {
   return new Request(`${AI_ORIGIN}${path}`, {
@@ -34,9 +90,49 @@ function processEnvContainsCredential() {
   );
 }
 
+function closeBridgePeer(peer, event) {
+  try {
+    if (event.code === 1005 && event.reason === "") {
+      peer.close();
+      return;
+    }
+    const code = [1004, 1005, 1006, 1015].includes(event.code) ? 1011 : event.code;
+    peer.close(code, event.reason);
+  } catch {
+    // The opposite close handler may already have completed the handshake.
+  }
+}
+
+async function bridgedAiWebSocket(env) {
+  const upstreamResponse = await env.AI.run("openai/primary", null, { websocket: true });
+  const upstream = upstreamResponse.webSocket;
+  if (!upstream) throw new Error("AI upgrade did not return a WebSocket");
+
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  upstream.binaryType = "arraybuffer";
+  server.binaryType = "arraybuffer";
+  upstream.accept();
+  server.accept();
+  upstream.addEventListener("message", (event) => server.send(event.data));
+  server.addEventListener("message", (event) => upstream.send(event.data));
+  upstream.addEventListener("close", (event) => closeBridgePeer(server, event));
+  server.addEventListener("close", (event) => closeBridgePeer(upstream, event));
+
+  return new Response(null, {
+    status: 101,
+    headers: upstreamResponse.headers,
+    webSocket: client,
+  });
+}
+
 export class AiProbe extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/surface") {
+      return Response.json(await aiSurface(this.env));
+    }
     if (url.pathname === "/start") {
       const pending = this.env.AI.fetch(aiRequest("/v1/responses", {
         model: "openai/primary",
@@ -53,6 +149,11 @@ export class AiProbe extends DurableObject {
     if (url.pathname === "/json") {
       return Response.json(await this.env.AI.run("openai/primary", { input: "from durable object" }));
     }
+    if (url.pathname === "/imported-json") {
+      return Response.json(await importedEnv.AI.run("openai/primary", {
+        input: "from durable object imported env",
+      }));
+    }
     if (url.pathname === "/responses-ws") {
       return await this.env.AI.run("openai/primary", null, { websocket: true });
     }
@@ -64,21 +165,23 @@ async function handler(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/surface") {
     return Response.json({
-      handler: {
-        fetch: typeof env.AI.fetch,
-        run: typeof env.AI.run,
-        models: typeof env.AI.models,
-      },
-      imported: {
-        fetch: typeof importedEnv.AI.fetch,
-        run: typeof importedEnv.AI.run,
-        models: typeof importedEnv.AI.models,
-      },
+      ...await aiSurface(env),
       processEnvContainsCredential: processEnvContainsCredential(),
     });
   }
   if (url.pathname === "/models") {
     return Response.json({ models: await env.AI.models() });
+  }
+  if (url.pathname === "/imported") {
+    const models = await importedEnv.AI.models();
+    const result = await importedEnv.AI.run("openai/primary", {
+      input: "from imported env",
+    });
+    return Response.json({
+      model: result.model,
+      status: result.status,
+      models: models.map((model) => model.id),
+    });
   }
   if (url.pathname === "/json") {
     const model = url.searchParams.get("model") || "openai/primary";
@@ -225,6 +328,9 @@ async function handler(request, env) {
   }
   if (url.pathname === "/responses-ws") {
     return await env.AI.run("openai/primary", null, { websocket: true });
+  }
+  if (url.pathname === "/responses-ws-bridge") {
+    return await bridgedAiWebSocket(env);
   }
   if (url.pathname === "/responses-ws-provider-loss") {
     return await env.AI.run("openai/primary", null, { websocket: true });

@@ -27,6 +27,7 @@ export const HOST_BINDING_RESERVED_MODULE_NAMES = Object.freeze([
   "_wdl-owner-hint-cache.js",
   "_wdl-request-id.js",
   "_wdl-workflows-client.js",
+  "_wdl-ai-client.js",
   "_wdl-host-wrapper-runtime.js",
   "_wdl-wrapper.js",
 ]);

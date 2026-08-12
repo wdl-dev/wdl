@@ -343,6 +343,110 @@ test("AI host preserves semantic SSE bytes and releases the stream permit at ter
   assertAborted(providerSignal);
 });
 
+test("AI host accepts bare-CR SSE frames and split CRLF boundaries", async () => {
+  const chunks = [
+    "event: response.created\r",
+    "\ndata: {\"type\":\"response.created\"}\r",
+    "\n\r",
+    "\nevent: response.completed\r",
+    "data: {\"type\":\"response.completed\"}\r",
+    "\r",
+  ];
+  const expected = chunks.join("");
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        return new Response(new ReadableStream({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+            controller.close();
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    },
+  });
+  await withMockedProperty(
+    globalThis,
+    "fetch",
+    resolver(openAiResolution({ transport: "sse" })),
+    async () => {
+      const response = await binding.fetch(request({
+        model: "openai/primary",
+        input: "hello",
+        stream: true,
+      }));
+      assert.equal(await response.text(), expected);
+    }
+  );
+  assert.deepEqual(aiPoolStateForTest().stream, { inUse: 0, highWater: 1 });
+});
+
+test("AI host flushes a bare-CR terminal frame from a quiet provider", async () => {
+  const frame = "event: response.completed\rdata: {\"type\":\"response.completed\"}\r\r";
+  const { binding } = makeAiBinding({
+    AI_STREAM_IDLE_TIMEOUT_MS: "10",
+    AI_NETWORK: {
+      async fetch() {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(frame));
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    },
+  });
+  await withMockedProperty(
+    globalThis,
+    "fetch",
+    resolver(openAiResolution({ transport: "sse" })),
+    async () => {
+      const response = await binding.fetch(request({
+        model: "openai/primary",
+        input: "hello",
+        stream: true,
+      }));
+      assert.equal(await response.text(), frame);
+    }
+  );
+  assert.deepEqual(aiPoolStateForTest().stream, { inUse: 0, highWater: 1 });
+});
+
+test("AI host finds a buffered terminal behind non-terminal frames at idle", async () => {
+  const frames = [
+    'event: response.created\ndata: {"type":"response.created"}\n\n',
+    'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed"}\n\n',
+  ];
+  const expected = frames.join("");
+  const { binding } = makeAiBinding({
+    AI_STREAM_IDLE_TIMEOUT_MS: "20",
+    AI_NETWORK: {
+      async fetch() {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(expected));
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    },
+  });
+  await withMockedProperty(
+    globalThis,
+    "fetch",
+    resolver(openAiResolution({ transport: "sse" })),
+    async () => {
+      const response = await binding.fetch(request({
+        model: "openai/primary",
+        input: "hello",
+        stream: true,
+      }));
+      await delay(60);
+      assert.equal(await response.text(), expected);
+    }
+  );
+  assert.deepEqual(aiPoolStateForTest().stream, { inUse: 0, highWater: 1 });
+});
+
 test("AI host forwards a near-limit SSE frame assembled from small provider chunks", async () => {
   const prefix = "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"padding\":\"";
   const suffix = "\"}\r\n\r\n";
@@ -1303,6 +1407,39 @@ test("AI WebSocket idle and overall deadlines close both peers and release capac
       entry.labels.pool === "websocket" &&
       entry.labels.outcome === outcome));
   }
+});
+
+test("AI WebSocket idle deadline tracks provider frames rather than client activity", async () => {
+  const nativeSetTimeout = globalThis.setTimeout;
+  /** @type {number[]} */
+  const scheduled = [];
+  const recordingSetTimeout = new Proxy(nativeSetTimeout, {
+    apply(target, thisArg, args) {
+      scheduled.push(Number(args[1]));
+      return Reflect.apply(target, thisArg, args);
+    },
+  });
+  await withMockedProperty(globalThis, "setTimeout", recordingSetTimeout, async () => {
+    const session = await openFakeAiWebSocket({
+      env: { AI_WS_IDLE_TIMEOUT_MS: "1000", AI_WS_MAX_DURATION_MS: "2000" },
+    });
+    assert.ok(session.downstream);
+    const idleSchedules = () => scheduled.filter((delayMs) => delayMs === 1000).length;
+    const initialSchedules = idleSchedules();
+
+    session.downstream.dispatch("message", {
+      data: JSON.stringify({ type: "response.create", input: "client activity" }),
+    });
+    assert.equal(idleSchedules(), initialSchedules);
+
+    session.upstream.dispatch("message", {
+      data: JSON.stringify({ type: "response.created", response: { id: "r" } }),
+    });
+    assert.equal(idleSchedules(), initialSchedules + 1);
+    session.downstream.dispatch("close", { code: 1000, reason: "done" });
+    await Promise.all(session.waitUntilTasks);
+  });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 
 test("AI host WebSocket applies frame bounds after upstream model injection", async () => {

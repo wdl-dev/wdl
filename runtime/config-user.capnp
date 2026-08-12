@@ -9,7 +9,6 @@ const config :Workerd.Config = (
   services = [
     (name = "loader", worker = .loaderWorker),
     (name = "tail-worker", worker = .tailWorker),
-    (name = "do-owner-network", worker = .doOwnerNetworkWorker),
     (name = "d1-runtime", external = (address = "d1-runtime:8787", http = ())),
     (name = "do-runtime", external = (address = "do-runtime:8788", http = ())),
     (name = "workflows", external = (address = "workflows:9120", http = ())),
@@ -72,7 +71,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-bindings-r2-metadata", esModule = embed "bindings/r2/metadata.js"),
     (name = "runtime-bindings-r2-xml", esModule = embed "bindings/r2/xml.js"),
     (name = "runtime-bindings-do", esModule = embed "bindings/do.js"),
-    (name = "runtime-bindings-internal-auth-backend", esModule = embed "bindings/internal-auth-backend.js"),
+    (name = "runtime-bindings-workflow", esModule = embed "bindings/workflow.js"),
     (name = "runtime-do-transport", esModule = embed "_wdl-do-transport.js"),
     (name = "_wdl-request-id.js", esModule = embed "_wdl-request-id.js"),
     (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
@@ -144,7 +143,6 @@ const loaderWorker :Workerd.Worker = (
     (name = "D1_BACKEND", service = "d1-runtime"),
     (name = "DO_BACKEND", service = "do-runtime"),
     (name = "WORKFLOWS_BACKEND", service = "workflows"),
-    (name = "DO_OWNER_NETWORK", service = "do-owner-network"),
     (name = "D1_QUERY_TIMEOUT_MS", fromEnvironment = "D1_QUERY_TIMEOUT_MS"),
     (name = "R2_S3_ENDPOINT", fromEnvironment = "R2_S3_ENDPOINT"),
     (name = "R2_S3_BUCKET", fromEnvironment = "R2_S3_BUCKET"),
@@ -160,19 +158,6 @@ const loaderWorker :Workerd.Worker = (
     (name = "AI_WS_HANDSHAKE_BUDGET_MS", fromEnvironment = "AI_WS_HANDSHAKE_BUDGET_MS"),
     (name = "AI_WS_IDLE_TIMEOUT_MS", fromEnvironment = "AI_WS_IDLE_TIMEOUT_MS"),
     (name = "AI_WS_MAX_DURATION_MS", fromEnvironment = "AI_WS_MAX_DURATION_MS"),
-  ],
-);
-
-const doOwnerNetworkWorker :Workerd.Worker = (
-  modules = [
-    (name = "worker", esModule = embed "do-owner-network.js"),
-    (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
-    (name = "shared-internal-auth", esModule = embed "../shared/internal-auth.js"),
-  ],
-  compatibilityDate = "2026-04-24",
-  globalOutbound = "internal-network",
-  bindings = [
-    (name = "WDL_INTERNAL_AUTH_TOKEN", fromEnvironment = "WDL_INTERNAL_AUTH_TOKEN"),
   ],
 );
 

@@ -13,7 +13,6 @@ import {
 } from "../helpers/load-shared-module.js";
 import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { makeRecordingFetch, withMockedFetch } from "../helpers/mock-fetch.js";
-import { withMockedProperty } from "../helpers/mock-global.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
@@ -40,7 +39,6 @@ const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl(
   })
 );
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
-const FETCH_STUB = { fetch() {} };
 const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "control-lib": CONTROL_LIB_URL,
   "runtime-load-env-build": RUNTIME_ENV_BUILD_URL,
@@ -151,6 +149,18 @@ const {
 const RUNTIME_LOAD_MAGIC = "WDLLOAD!";
 const RUNTIME_LOAD_CONTENT_TYPE = "application/vnd.wdl.runtime-load";
 const TEST_WORKER_IDENTITY = { ns: "demo", worker: "app", version: "v1" };
+const CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB = `
+  import { AsyncLocalStorage } from "node:async_hooks";
+  const envStorage = new AsyncLocalStorage();
+  export const env = new Proxy({}, {
+    get(_target, property) {
+      return envStorage.getStore()?.[property];
+    },
+  });
+  export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }
+  export function abortIsolate() {}
+  export function withEnv(value, fn) { return envStorage.run(value, fn); }
+`;
 
 /** @param {{ bundle: Record<string, any>, ns_secrets?: Record<string, unknown>, worker_secrets?: Record<string, unknown> }} args */
 function encodeRuntimeLoadPayload({ bundle, ns_secrets = {}, worker_secrets = {} }) {
@@ -186,8 +196,7 @@ function u32(value) {
   return bytes;
 }
 
-/** @param {Record<string, unknown> | null} [runtimeEnv] */
-function makeCtx(runtimeEnv = null) {
+function makeCtx() {
   return {
     exports: {
       KV: (/** @type {{ props: any }} */ { props }) => ({ kind: "kv", props }),
@@ -198,21 +207,7 @@ function makeCtx(runtimeEnv = null) {
       AiBinding: (/** @type {{ props: any }} */ { props }) => ({ kind: "ai", props }),
       ServiceBinding: (/** @type {{ props: any }} */ { props }) => ({ kind: "service", props }),
       DurableObjectNamespace: (/** @type {{ props: any }} */ { props }) => ({ kind: "do", props }),
-      InternalAuthBackend: (/** @type {{ props: any }} */ { props }) => ({
-        kind: "internal-auth-backend",
-        props,
-        async fetch(/** @type {RequestInfo | URL | string} */ input, /** @type {RequestInit | undefined} */ init = undefined) {
-          const env = runtimeEnv || {};
-          const backend = /** @type {{ fetch(input: RequestInfo | URL | string, init?: RequestInit): Promise<Response> }} */ (env[props.binding]);
-          return await backend.fetch(input, {
-            ...init,
-            headers: {
-              ...Object.fromEntries(new Headers(init?.headers)),
-              "x-wdl-internal-auth": String(env.WDL_INTERNAL_AUTH_TOKEN),
-            },
-          });
-        },
-      }),
+      WorkflowBinding: (/** @type {{ props: any }} */ { props }) => ({ kind: "workflow", props }),
     },
   };
 }
@@ -293,9 +288,6 @@ test("buildWorkerEnv stays aligned with control env budget binding estimates", (
   };
   const nsSecrets = { SHARED: "ns-secret", API_TOKEN: "ns-token" };
   const workerSecrets = { SHARED: "worker-secret", API_TOKEN: "worker-token" };
-  const doBackend = { __wdlBinding: "internal", name: "DO_BACKEND" };
-  const doOwnerNetwork = { __wdlBinding: "internal", name: "DO_OWNER_NETWORK" };
-  const workflowsBackend = { __wdlBinding: "internal", name: "WORKFLOWS_BACKEND" };
   const ctx = {
     exports: {
       KV: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "kv", props }),
@@ -305,6 +297,8 @@ test("buildWorkerEnv stays aligned with control env budget binding estimates", (
       R2Bucket: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "r2", props }),
       AiBinding: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "ai", props }),
       ServiceBinding: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "service", props }),
+      DurableObjectNamespace: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "do", props }),
+      WorkflowBinding: (/** @type {{ props: any }} */ { props }) => ({ __wdlBinding: "workflow", props }),
     },
   };
   const runtimeEnv = buildWorkerEnv(
@@ -315,31 +309,7 @@ test("buildWorkerEnv stays aligned with control env budget binding estimates", (
     "app",
     "v5",
     "https://assets.example",
-    /** @type {any} */ (ctx),
-    doBackend,
-    {
-      doOwnerNetwork,
-      workflowsBackend,
-      // Record the same host-proxy payload shape that the runtime DO factory
-      // passes into Worker env so the control estimator must mirror it.
-      /** @param {{ name: string, spec: any, ns: string, worker: string, version: string }} input */
-      doBindingFactory(input) {
-        const { name, spec, ns, worker, version } = input;
-        const props = {
-          ns,
-          worker,
-          version,
-          doStorageId: spec.doStorageId,
-          binding: name,
-          className: spec.className,
-        };
-        return {
-          __wdlBinding: "do",
-          ...props,
-          hostProxy: { __wdlBinding: "do-host-proxy", props },
-        };
-      },
-    }
+    /** @type {any} */ (ctx)
   );
 
   const estimatedEnv = estimatedWorkerLoaderEnv({
@@ -482,8 +452,7 @@ test("buildWorkerEnv: fails closed when the AI host adapter is missing", () => {
   );
 });
 
-test("buildWorkerEnv: materializes DO metadata with internal direct backend", () => {
-  const backend = { fetch() {} };
+test("buildWorkerEnv: materializes a binding-scoped DO host adapter", () => {
   const env = buildWorkerEnv(
     {
       bindings: {
@@ -496,24 +465,24 @@ test("buildWorkerEnv: materializes DO metadata with internal direct backend", ()
     "app",
     "v5",
     "https://assets.example",
-    makeCtx(),
-    backend
+    makeCtx()
   );
 
   assert.deepEqual(env.ROOM, {
-    ns: "demo",
-    worker: "app",
-    version: "v5",
-    doStorageId: "do_0123456789abcdef0123456789abcdef",
-    binding: "ROOM",
-    className: "Room",
+    kind: "do",
+    props: {
+      ns: "demo",
+      worker: "app",
+      version: "v5",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+    },
   });
-  assert.equal(env.__WDL_DO_BACKEND__, backend);
-  assert.equal(Object.hasOwn(env, "__WDL_INTERNAL_AUTH_TOKEN__"), false);
+  assert.equal(Object.hasOwn(env, "__WDL_DO_BACKEND__"), false);
+  assert.equal(Object.hasOwn(env, "__WDL_DO_OWNER_NETWORK__"), false);
 });
 
-test("buildWorkerEnv: keeps Workflow metadata out of raw env", () => {
-  const backend = { fetch() {} };
+test("buildWorkerEnv: materializes a binding-scoped Workflow host adapter", () => {
   const env = buildWorkerEnv(
     {
       workflows: [
@@ -531,17 +500,26 @@ test("buildWorkerEnv: keeps Workflow metadata out of raw env", () => {
     "shop",
     "v4",
     "https://assets.example",
-    makeCtx(),
-    null,
-    { workflowsBackend: backend }
+    makeCtx()
   );
 
-  assert.equal(Object.hasOwn(env, "ORDERS"), false);
-  assert.equal(env.__WDL_WORKFLOWS_BACKEND__, backend);
-  assert.equal(Object.hasOwn(env, "__WDL_INTERNAL_AUTH_TOKEN__"), false);
+  assert.deepEqual(env.ORDERS, {
+    kind: "workflow",
+    props: {
+      ns: "demo",
+      worker: "shop",
+      version: "v4",
+      name: "orders",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+      className: "OrderWorkflow",
+    },
+  });
+  assert.equal(Object.hasOwn(env, "__WDL_WORKFLOWS_BACKEND__"), false);
 });
 
-test("buildWorkerEnv: workflow binding backend must come from runtime options", () => {
+test("buildWorkerEnv: workflow binding requires the scoped host adapter", () => {
+  const ctx = makeCtx();
+  delete /** @type {any} */ (ctx.exports).WorkflowBinding;
   assert.throws(
     () => buildWorkerEnv(
       {
@@ -561,9 +539,9 @@ test("buildWorkerEnv: workflow binding backend must come from runtime options", 
       "shop",
       "v4",
       "https://assets.example",
-      makeCtx()
+      ctx
     ),
-    /requires WORKFLOWS_BACKEND service binding/
+    /Workflow binding adapter is not configured/
   );
 });
 
@@ -583,43 +561,26 @@ test("buildWorkerEnv: workflow binding requires frozen workflow metadata", () =>
   );
 });
 
-test("buildWorkerEnv: custom DO factory supports do-runtime JSRPC namespaces", () => {
+test("buildWorkerEnv: DO binding requires the scoped host adapter", () => {
   const ctx = makeCtx();
-  const env = buildWorkerEnv(
-    {
-      bindings: {
-        ROOM: { type: "do", className: "Room", doStorageId: "do_0123456789abcdef0123456789abcdef" },
+  delete /** @type {any} */ (ctx.exports).DurableObjectNamespace;
+  assert.throws(
+    () => buildWorkerEnv(
+      {
+        bindings: {
+          ROOM: { type: "do", className: "Room", doStorageId: "do_0123456789abcdef0123456789abcdef" },
+        },
       },
-    },
-    {},
-    {},
-    "demo",
-    "app",
-    "v5",
-    "https://assets.example",
-    ctx,
-    null,
-    {
-      doBindingFactory(/** @type {{ name: string, spec: any, ns: string, worker: string, version: string }} */ { name, spec, ns, worker, version }) {
-        return ctx.exports.DurableObjectNamespace({
-          props: { ns, worker, version, doStorageId: spec.doStorageId, binding: name, className: spec.className },
-        });
-      },
-    }
+      {},
+      {},
+      "demo",
+      "app",
+      "v5",
+      "https://assets.example",
+      ctx
+    ),
+    /DurableObjectNamespace runtime binding adapter is not configured/
   );
-
-  assert.deepEqual(env.ROOM, {
-    kind: "do",
-    props: {
-      ns: "demo",
-      worker: "app",
-      version: "v5",
-      doStorageId: "do_0123456789abcdef0123456789abcdef",
-      binding: "ROOM",
-      className: "Room",
-    },
-  });
-  assert.equal(env.__WDL_DO_BACKEND__, undefined);
 });
 
 test("buildWorkerEnv: cross-ns service binding overrides targetNs from spec.ns", () => {
@@ -940,8 +901,7 @@ test("buildWorkerEnv: stored DO binding cannot target runtime-reserved class nam
         "app",
         "v1",
         "https://assets.example",
-        makeCtx(),
-        FETCH_STUB
+        makeCtx()
       ),
     /targets reserved runtime entrypoint "__WdlAbort__"/
   );
@@ -962,8 +922,7 @@ test("buildWorkerEnv: stored DO binding cannot target reserved JS class names", 
         "app",
         "v1",
         "https://assets.example",
-        makeCtx(),
-        FETCH_STUB
+        makeCtx()
       ),
     /invalid Durable Object class name "class"/
   );
@@ -982,9 +941,7 @@ test("buildWorkerEnv: stored workflow binding cannot target reserved JS class na
         "app",
         "v1",
         "https://assets.example",
-        makeCtx(),
-        null,
-        FETCH_STUB
+        makeCtx()
       ),
     /invalid workflow class name "class"/
   );
@@ -1000,9 +957,7 @@ test("buildWorkerEnv: stored workflow binding cannot target reserved JS class na
         "app",
         "v1",
         "https://assets.example",
-        makeCtx(),
-        null,
-        FETCH_STUB
+        makeCtx()
       ),
     /targets reserved runtime entrypoint "__WdlAbort__"/
   );
@@ -1325,30 +1280,7 @@ test("getLoadedWorkerStub records cache misses before scheduling active-version 
   );
 });
 
-test("createLoaderCallback: DO bindings are host proxies and workflow auth stays out of generated facade code", async () => {
-  /** @type {Array<{ service: string, headers: HeadersInit | undefined }>} */
-  const privateCalls = [];
-  const doBackend = {
-    async fetch(/** @type {RequestInfo | URL | string} */ _input, /** @type {RequestInit} */ init = {}) {
-      privateCalls.push({ service: "do", headers: init.headers });
-      return new Response("ok");
-    },
-  };
-  const doOwnerNetwork = {
-    async fetch(/** @type {RequestInfo | URL | string} */ _input, /** @type {RequestInit} */ init = {}) {
-      privateCalls.push({ service: "do-owner-network", headers: init.headers });
-      return new Response("ok");
-    },
-  };
-  const workflowsBackend = {
-    async fetch(/** @type {RequestInfo | URL | string} */ _input, /** @type {RequestInit} */ init = {}) {
-      privateCalls.push({ service: "workflows", headers: init.headers });
-      return new Response("ok");
-    },
-  };
-  const originalSet = Headers.prototype.set;
-  const originalPush = Array.prototype.push;
-
+test("createLoaderCallback: raw env contains only binding-scoped DO and Workflow adapters", async () => {
   await withMockedFetch(
     async () => new Response(encodeRuntimeLoadPayload({
       bundle: {
@@ -1379,14 +1311,13 @@ test("createLoaderCallback: DO bindings are host proxies and workflow auth stays
         WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
         ASSETS_CDN_BASE: "https://assets.example",
         PUBLIC_NETWORK: { kind: "public-network" },
-        DO_BACKEND: doBackend,
-        DO_OWNER_NETWORK: doOwnerNetwork,
-        WORKFLOWS_BACKEND: workflowsBackend,
+        DO_BACKEND: { fetch() {} },
+        WORKFLOWS_BACKEND: { fetch() {} },
       };
       const workerCode = await createLoaderCallback({
         requestId: "rid-private-backend",
         env,
-        ctx: makeCtx(env),
+        ctx: makeCtx(),
         ns: "demo",
         worker: "app",
         version: "v1",
@@ -1396,64 +1327,34 @@ test("createLoaderCallback: DO bindings are host proxies and workflow auth stays
       const wrapperSource = /** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"];
       assert.doesNotMatch(wrapperSource, /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
       assert.deepEqual(workerCode.env.ROOMS, {
-        ns: "demo",
-        worker: "app",
-        version: "v1",
-        doStorageId: "do_0123456789abcdef0123456789abcdef",
-        binding: "ROOMS",
-        className: "Room",
-        hostProxy: {
-          kind: "do",
-          props: {
-            ns: "demo",
-            worker: "app",
-            version: "v1",
-            doStorageId: "do_0123456789abcdef0123456789abcdef",
-            binding: "ROOMS",
-            className: "Room",
-          },
+        kind: "do",
+        props: {
+          ns: "demo",
+          worker: "app",
+          version: "v1",
+          doStorageId: "do_0123456789abcdef0123456789abcdef",
+          className: "Room",
         },
       });
-      assert.equal(Object.hasOwn(workerCode.env, "__WDL_DO_BACKEND__"), true);
-      assert.equal(Object.hasOwn(workerCode.env, "__WDL_DO_OWNER_NETWORK__"), true);
-      assert.equal(Object.hasOwn(workerCode.env, "__WDL_INTERNAL_AUTH_TOKEN__"), false);
-      /** @type {string[]} */
-      const capturedAuthWrites = [];
-      await withMockedProperty(Headers.prototype, "set", /** @this {Headers} */ function set(
-        /** @type {string} */ name,
-        /** @type {string} */ value
-      ) {
-        if (String(name).toLowerCase() === "x-wdl-internal-auth") {
-          capturedAuthWrites.push(String(value));
-        }
-        return originalSet.call(this, name, value);
-      }, async () => withMockedProperty(Array.prototype, "push", /** @this {unknown[]} */ function push(...items) {
-        for (const item of items) {
-          if (Array.isArray(item) && item.includes("test-internal-auth-token")) {
-            capturedAuthWrites.push(String(item));
-          }
-        }
-        return originalPush.apply(this, items);
-      }, async () => {
-        await /** @type {any} */ (workerCode.env).__WDL_DO_BACKEND__.fetch("http://do-runtime/internal/do/invoke", {
-          headers: { "x-wdl-internal-auth": "spoofed" },
-        });
-        await /** @type {any} */ (workerCode.env).__WDL_DO_OWNER_NETWORK__.fetch("http://do-owner-network/internal/do/invoke", {
-          headers: { "x-wdl-internal-auth": "spoofed" },
-        });
-        await /** @type {any} */ (workerCode.env).__WDL_WORKFLOWS_BACKEND__.fetch("http://workflows/internal/workflows/create", {
-          headers: { "x-wdl-internal-auth": "spoofed" },
-        });
-      }));
-      assert.deepEqual(capturedAuthWrites, []);
-      assert.deepEqual(privateCalls.map((call) => [
-        call.service,
-        new Headers(call.headers).get("x-wdl-internal-auth"),
-      ]), [
-        ["do", "test-internal-auth-token"],
-        ["do-owner-network", "test-internal-auth-token"],
-        ["workflows", "test-internal-auth-token"],
-      ]);
+      assert.deepEqual(workerCode.env.ORDERS, {
+        kind: "workflow",
+        props: {
+          ns: "demo",
+          worker: "app",
+          version: "v1",
+          name: "orders",
+          workflowKey: "wf_0123456789abcdef0123456789abcdef",
+          className: "OrderWorkflow",
+        },
+      });
+      for (const name of [
+        "__WDL_DO_BACKEND__",
+        "__WDL_DO_OWNER_NETWORK__",
+        "__WDL_WORKFLOWS_BACKEND__",
+        "__WDL_INTERNAL_AUTH_TOKEN__",
+      ]) {
+        assert.equal(Object.hasOwn(workerCode.env, name), false, name);
+      }
     }
   );
 });
@@ -1783,7 +1684,11 @@ test("workerLoader code estimator does not rewrite CommonJS workflow strings", (
 });
 
 test("wrapWorkerCodeForHostBindings rejects empty reserved module collisions", () => {
-  for (const reserved of ["_wdl-wrapper.js", "_wdl-host-wrapper-runtime.js"]) {
+  for (const reserved of [
+    "_wdl-wrapper.js",
+    "_wdl-host-wrapper-runtime.js",
+    "_wdl-ai-client.js",
+  ]) {
     const workerCode = {
       mainModule: "worker.js",
       modules: {
@@ -1845,7 +1750,7 @@ test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserv
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \[\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new D1Database\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /requestIdFromEventArg/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /wrapClassInstance\(this, requestContext\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /wrapClassInstance\(this, requestContext, wrappedEnv\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /forEachArray\(HOST_WRAPPED_HANDLER_KEYS/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Api/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /__WdlWrappedEntrypoint\d+__ as Admin/);
@@ -1871,14 +1776,113 @@ test("wrapWorkerCodeForHostBindings preserves compatibility flags", () => {
   }
 });
 
+test("wrapWorkerCodeForHostBindings respects disallow_importable_env", async () => {
+  const workerCode = {
+    compatibilityFlags: ["disallow_importable_env"],
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": `
+        import { env as importedEnv } from "./_cf_workers_stub.js";
+        const captured = importedEnv.DB;
+        export default {
+          fetch(_request, env) {
+            return Response.json({
+              positional: env.DB?.constructor?.name,
+              imported: typeof importedEnv.DB,
+              captured: typeof captured,
+            });
+          },
+        };
+      `,
+    },
+  };
+  wrapWorkerCodeForHostBindings(workerCode, {
+    compatibilityFlags: ["disallow_importable_env"],
+    bindings: { DB: { type: "d1", databaseId: "main" } },
+  });
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const IMPORTABLE_ENV_DISABLED = true;/);
+
+  await withTempDir("wdl-disabled-importable-env-", async (dir) => {
+    writeFileSync(path.join(dir, "_cf_workers_stub.js"), CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB);
+    for (const [name, source] of Object.entries(workerCode.modules)) {
+      const stubbed = name === "_wdl-wrapper.js"
+        ? source.replace(`from "cloudflare:workers"`, `from "./_cf_workers_stub.js"`)
+        : source;
+      writeFileSync(path.join(dir, name), stubbed);
+    }
+    const wrapped = await import(`file://${path.join(dir, workerCode.mainModule)}`);
+    const response = await wrapped.default.fetch(
+      new Request("https://worker.invalid/"),
+      { DB: { raw: true } },
+      {}
+    );
+    await assertJsonResponse(response, 200, {
+      positional: "D1Database",
+      imported: "undefined",
+      captured: "undefined",
+    });
+  });
+});
+
+test("disallow_importable_env applies to class construction, getters, and methods", async () => {
+  const workerCode = {
+    compatibilityFlags: ["disallow_importable_env"],
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": `
+        import { env as importedEnv } from "./_cf_workers_stub.js";
+        export class Api {
+          constructor(_ctx, env) {
+            this.env = env;
+            this.importedInConstructor = typeof importedEnv.DB;
+          }
+          get importedInGetter() { return typeof importedEnv.DB; }
+          importedInMethod() { return typeof importedEnv.DB; }
+          positionalBinding() { return this.env.DB?.constructor?.name; }
+        }
+        export default {};
+      `,
+    },
+  };
+  wrapWorkerCodeForHostBindings(workerCode, {
+    compatibilityFlags: ["disallow_importable_env"],
+    bindings: { DB: { type: "d1", databaseId: "main" } },
+    exports: [{ entrypoint: "Api", allowedCallers: ["*"] }],
+  });
+
+  await withTempDir("wdl-disabled-importable-env-class-", async (dir) => {
+    writeFileSync(path.join(dir, "_cf_workers_stub.js"), CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB);
+    for (const [name, source] of Object.entries(workerCode.modules)) {
+      const stubbed = name === "_wdl-wrapper.js"
+        ? source.replace(`from "cloudflare:workers"`, `from "./_cf_workers_stub.js"`)
+        : source;
+      writeFileSync(path.join(dir, name), stubbed);
+    }
+    const wrapped = await import(`file://${path.join(dir, workerCode.mainModule)}`);
+    const instance = new wrapped.Api({}, { DB: { raw: true } });
+
+    assert.equal(instance.positionalBinding(), "D1Database");
+    assert.equal(instance.importedInConstructor, "undefined");
+    assert.equal(instance.importedInGetter, "undefined");
+    assert.equal(instance.importedInMethod(), "undefined");
+  });
+});
+
 test("wrapWorkerCodeForHostBindings: default object wraps inherited and accessor handler keys", async () => {
   const workerCode = {
     mainModule: "worker.js",
     modules: {
       "worker.js": `
+        import { env as importedEnv } from "./_cf_workers_stub.js";
         class Worker {
-          fetch(_request, env) {
-            return Response.json({ name: env.DB?.constructor?.name, raw: env.DB?.raw === true });
+          async fetch(_request, env) {
+            await Promise.resolve();
+            return Response.json({
+              name: env.DB?.constructor?.name,
+              raw: env.DB?.raw === true,
+              importedName: importedEnv.DB?.constructor?.name,
+              importedRaw: importedEnv.DB?.raw === true,
+            });
           }
         }
         const worker = new Worker();
@@ -1899,10 +1903,7 @@ test("wrapWorkerCodeForHostBindings: default object wraps inherited and accessor
 
   await withTempDir("wdl-default-wrapper-", async (dir) => {
     const cwStub = path.join(dir, "_cf_workers_stub.js");
-    writeFileSync(cwStub, `
-      export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }
-      export function abortIsolate() {}
-    `);
+    writeFileSync(cwStub, CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB);
     for (const [name, source] of Object.entries(workerCode.modules)) {
       const file = path.join(dir, name);
       const stubbed = name === "_wdl-wrapper.js"
@@ -1920,6 +1921,8 @@ test("wrapWorkerCodeForHostBindings: default object wraps inherited and accessor
     assert.deepEqual(await (await wrapped.default.fetch(new Request("http://worker/"), env, {})).json(), {
       name: "D1Database",
       raw: false,
+      importedName: "D1Database",
+      importedRaw: false,
     });
     assert.deepEqual(await (await wrapped.default.queue("queue-a", env, {})).json(), {
       name: "D1Database",
@@ -1933,6 +1936,7 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
     mainModule: "worker.js",
     modules: {
       "worker.js": `
+        import { env as importedEnv } from "./_cf_workers_stub.js";
         import * as hostRuntime from "./_wdl-host-wrapper-runtime.js";
         export function hostRuntimeContextExports() {
           return {
@@ -1941,15 +1945,23 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
           };
         }
         export class Api {
-          constructor(ctx, env) { this.env = env; }
+          constructor(ctx, env) {
+            this.env = env;
+            this.importedInConstructor = importedEnv.DB?.constructor?.name;
+          }
           dbConstructorName() { return this.env.DB?.constructor?.name; }
+          get importedDbConstructorName() { return importedEnv.DB?.constructor?.name; }
+          async importedDbConstructorNameAfterAwait() {
+            await Promise.resolve();
+            return importedEnv.DB?.constructor?.name;
+          }
           rawDbVisible() { return this.env.DB?.raw === true; }
           echo(value) { return value; }
         }
         export class currentRequestId extends Api {}
         export class runWithRequestContext extends Api {}
         export class __wdlRunWithRequestContext extends Api {}
-        export default {};
+        export default class DefaultApi extends Api {}
       `,
     },
   };
@@ -1968,10 +1980,7 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
     // Substitute with a local stub so the wrapper module loads under
     // node:test, where we exercise the D1 wrapping behavior.
     const cwStub = path.join(dir, "_cf_workers_stub.js");
-    writeFileSync(cwStub, `
-      export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }
-      export function abortIsolate() {}
-    `);
+    writeFileSync(cwStub, CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB);
     for (const [name, source] of Object.entries(workerCode.modules)) {
       const file = path.join(dir, name);
       const stubbed = name === "_wdl-wrapper.js"
@@ -1991,7 +2000,15 @@ test("wrapWorkerCodeForHostBindings: declared named entrypoints are wrapper subc
       [Symbol.for("wdl.host-bindings-wrapped")]: true,
     });
     assert.equal(instance.dbConstructorName(), "D1Database");
+    assert.equal(instance.importedInConstructor, "D1Database");
+    assert.equal(instance.importedDbConstructorName, "D1Database");
+    assert.equal(await instance.importedDbConstructorNameAfterAwait(), "D1Database");
     assert.equal(instance.rawDbVisible(), false);
+    assert.notEqual(wrapped.default, user.default);
+    assert.ok(wrapped.default.prototype instanceof user.default);
+    const defaultInstance = new wrapped.default({}, { DB: { raw: true } });
+    assert.equal(defaultInstance.importedInConstructor, "D1Database");
+    assert.equal(await defaultInstance.importedDbConstructorNameAfterAwait(), "D1Database");
     for (const name of ["currentRequestId", "runWithRequestContext", "__wdlRunWithRequestContext"]) {
       assert.ok(new wrapped[name]({}, { DB: { raw: true } }) instanceof user[name]);
     }
@@ -2206,7 +2223,7 @@ test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object 
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-owner-endpoint.js"], /validOwnerEndpointForService/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \["ROOMS"\];/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new DurableObjectNamespace\(out\[name\], doOptions\(requestIdOrContext, doBackend, doOwnerNetwork\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new DurableObjectNamespace\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Room/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from/);
@@ -2242,7 +2259,7 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /this\.name = "NonRetryableError"/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \{ Workflow \}/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const WORKFLOW_BINDINGS = \{"ORDERS":/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(metadata, workflowOptions\(requestIdOrContext, workflowsBackend\)\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(metadata, \{[\s\S]*backend: out\[name\]/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /"ns":"demo","worker":"app","version":"v1"/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback/);
@@ -2495,10 +2512,7 @@ test("wrapWorkerCodeForHostBindings: DO wrappers hide internal backend from unde
 
   await withTempDir("wdl-do-wrapper-", async (dir) => {
     const cwStub = path.join(dir, "_cf_workers_stub.js");
-    writeFileSync(cwStub, `
-      export class WorkerEntrypoint {}
-      export function abortIsolate() {}
-    `);
+    writeFileSync(cwStub, CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB);
     for (const [name, source] of Object.entries(workerCode.modules)) {
       const file = path.join(dir, name);
       const stubbed = name === "_wdl-wrapper.js"
@@ -2564,10 +2578,7 @@ test("wrapWorkerCodeForHostBindings: workflow wrappers hide internal backend fro
 
   await withTempDir("wdl-workflow-wrapper-", async (dir) => {
     const cwStub = path.join(dir, "_cf_workers_stub.js");
-    writeFileSync(cwStub, `
-      export class WorkerEntrypoint {}
-      export function abortIsolate() {}
-    `);
+    writeFileSync(cwStub, CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB);
     writeFileSync(path.join(dir, "_wdl-workflows-client.js"), `
       export class Workflow {
         constructor(metadata) { this.metadata = metadata; }
@@ -2605,16 +2616,18 @@ test("wrapWorkerCodeForHostBindings: workflow wrappers hide internal backend fro
 });
 
 test("wrapWorkerCodeForHostBindings: rejects reserved wrapper module as mainModule", () => {
-  assert.throws(
-    () => wrapWorkerCodeForHostBindings(
-      {
-        mainModule: "_wdl-wrapper.js",
-        modules: { "src/worker.js": "export default {};", "_wdl-owner-endpoint.js": "export default {};" },
-      },
-      { bindings: { DB: { type: "d1", databaseId: "main" } } }
-    ),
-    /reserved module names/
-  );
+  for (const mainModule of ["_wdl-wrapper.js", "_wdl-ai-client.js"]) {
+    assert.throws(
+      () => wrapWorkerCodeForHostBindings(
+        {
+          mainModule,
+          modules: { "src/worker.js": "export default {};" },
+        },
+        { bindings: { DB: { type: "d1", databaseId: "main" } } }
+      ),
+      /reserved module names/
+    );
+  }
 });
 
 test("wrapWorkerCodeForHostBindings: stored exports cannot target reserved runtime entrypoints", () => {

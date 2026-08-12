@@ -9,19 +9,14 @@ import {
 } from "shared-ns-pattern";
 import { parseVersion } from "shared-worker-contract";
 
-const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
-const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
-const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
-
 /**
  * @typedef {Record<string, unknown> & { type?: string, id?: unknown, databaseId?: unknown, bucketName?: unknown, className?: unknown, doStorageId?: unknown, service?: unknown, ns?: unknown, version?: unknown, entrypoint?: unknown, deliveryDelaySeconds?: unknown, requiredCallerSecrets?: unknown }} RuntimeBindingSpec
  * @typedef {{ binding?: unknown, name?: unknown, className?: unknown, workflowKey?: unknown }} RuntimeWorkflowSpec
  * @typedef {{ vars?: Record<string, unknown> | null, workflows?: RuntimeWorkflowSpec[] | null, bindings?: Record<string, RuntimeBindingSpec> | null, assets?: { prefix?: unknown } | null }} RuntimeBundleMeta
  * @typedef {(options: { props: Record<string, unknown> }) => unknown} RuntimeEntrypointFactory
- * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, AiBinding: RuntimeEntrypointFactory } }} RuntimeContext
- * @typedef {{ name: string, spec: RuntimeBindingSpec, ns: string, worker: string, version: string }} DoBindingFactoryArgs
- * @typedef {{ doOwnerNetwork?: unknown, doBindingFactory?: (args: DoBindingFactoryArgs) => unknown, workflowsBackend?: unknown, bindingEntries?: Array<[string, RuntimeBindingSpec]>, workflows?: RuntimeWorkflowSpec[] }} BuildWorkerEnvOptions
- * @typedef {{ value: unknown, needsDoBackend?: boolean }} RuntimeBindingMaterialized
+ * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, AiBinding: RuntimeEntrypointFactory, DurableObjectNamespace: RuntimeEntrypointFactory, WorkflowBinding: RuntimeEntrypointFactory } }} RuntimeContext
+ * @typedef {{ bindingEntries?: Array<[string, RuntimeBindingSpec]>, workflows?: RuntimeWorkflowSpec[] }} BuildWorkerEnvOptions
+ * @typedef {{ value: unknown }} RuntimeBindingMaterialized
  * @typedef {{
  *   name: string,
  *   spec: RuntimeBindingSpec,
@@ -144,7 +139,7 @@ function materializeAiBinding({ ns, worker, version, ctx }) {
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
-function materializeDoBinding({ name, spec, ns, worker, version, options }) {
+function materializeDoBinding({ name, spec, ns, worker, version, ctx }) {
   if (typeof spec.className !== "string" || !spec.className) {
     throw new Error(`Binding "${name}" is a Durable Object binding but missing className`);
   }
@@ -159,22 +154,19 @@ function materializeDoBinding({ name, spec, ns, worker, version, options }) {
       `Binding "${name}" targets reserved runtime entrypoint "${spec.className}" (redeploy ${ns}/${worker})`
     );
   }
-  if (typeof options.doBindingFactory === "function") {
-    return {
-      value: options.doBindingFactory({ name, spec, ns, worker, version }),
-      needsDoBackend: true,
-    };
+  if (typeof ctx.exports.DurableObjectNamespace !== "function") {
+    throw new Error("DurableObjectNamespace runtime binding adapter is not configured");
   }
   return {
-    value: {
-      ns,
-      worker,
-      version,
-      doStorageId: spec.doStorageId,
-      binding: name,
-      className: spec.className,
-    },
-    needsDoBackend: true,
+    value: ctx.exports.DurableObjectNamespace({
+      props: {
+        ns,
+        worker,
+        version,
+        doStorageId: spec.doStorageId,
+        className: spec.className,
+      },
+    }),
   };
 }
 
@@ -256,7 +248,6 @@ const RUNTIME_BINDING_MATERIALIZERS = Object.assign(Object.create(null), {
  * @param {string} version
  * @param {string | undefined | null} cdnBase
  * @param {RuntimeContext} ctx
- * @param {unknown} [doBackend]
  * @param {BuildWorkerEnvOptions} [options]
  */
 export function buildWorkerEnv(
@@ -268,7 +259,6 @@ export function buildWorkerEnv(
   version,
   cdnBase,
   ctx,
-  doBackend = null,
   options = {}
 ) {
   validateEnvSourceNames(meta.vars, "var", ns, worker);
@@ -276,12 +266,9 @@ export function buildWorkerEnv(
   validateEnvSourceNames(workerSecrets, "worker secret", ns, worker);
   /** @type {Record<string, unknown>} */
   const env = { ...(meta.vars || {}), ...nsSecrets, ...workerSecrets };
-  const doOwnerNetwork = options?.doOwnerNetwork ?? null;
-  let hasDoBinding = false;
-  let hasWorkflowBinding = false;
   // JSON-compatible workerLoader env values are mirrored into process.env
-  // under Node compatibility. The generated wrapper owns Workflow metadata
-  // and materializes the tenant facade without placing it in raw env.
+  // under Node compatibility. Workflow identity therefore stays in fixed
+  // host-binding props while the generated wrapper builds the tenant facade.
   for (const workflow of options.workflows || (Array.isArray(meta.workflows) ? meta.workflows : [])) {
     const { binding, name, className, workflowKey } = workflow || {};
     if (
@@ -301,7 +288,19 @@ export function buildWorkerEnv(
     if (WDL_RESERVED_ENTRYPOINT_RE.test(className)) {
       throw new Error(`Workflow binding "${binding}" targets reserved runtime entrypoint "${className}" (redeploy ${ns}/${worker})`);
     }
-    hasWorkflowBinding = true;
+    if (typeof ctx.exports.WorkflowBinding !== "function") {
+      throw new Error("Workflow binding adapter is not configured");
+    }
+    env[binding] = ctx.exports.WorkflowBinding({
+      props: {
+        ns,
+        worker,
+        version,
+        name,
+        workflowKey,
+        className,
+      },
+    });
   }
   for (const [name, spec] of options.bindingEntries || Object.entries(meta.bindings || {})) {
     if (!BINDING_NAME_RE.test(name) || WDL_RESERVED_BINDING_RE.test(name) || RESERVED_OBJECT_KEYS.has(name)) {
@@ -327,17 +326,6 @@ export function buildWorkerEnv(
       options,
     });
     env[name] = materialized.value;
-    hasDoBinding ||= materialized.needsDoBackend === true;
-  }
-  if (hasDoBinding) {
-    if (doBackend != null) env[DO_BACKEND_BINDING] = doBackend;
-    if (doOwnerNetwork != null) env[DO_OWNER_NETWORK_BINDING] = doOwnerNetwork;
-  }
-  if (hasWorkflowBinding) {
-    if (options.workflowsBackend == null) {
-      throw new Error("Workflow binding requires WORKFLOWS_BACKEND service binding on runtime");
-    }
-    env[WORKFLOWS_BACKEND_BINDING] = options.workflowsBackend;
   }
   return env;
 }

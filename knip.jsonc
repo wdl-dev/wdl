@@ -13,7 +13,6 @@
         // wrapper, so this is an external module entry rather than an ignored
         // source file. Its static dependencies remain covered by Knip.
         "runtime/d1-client.js",
-        "runtime/do-owner-network.js",
         "runtime/index.js",
         "runtime/tail-worker.js",
         "tests/integration/helpers/ws-roundtrip-runner.cjs",

@@ -199,9 +199,11 @@ whether a route changed.
   `x-wdl-websocket-reconnect-policy: disabled` response header for a session whose
   application state cannot be reconstructed. Gateway strips the header from the public
   response and closes that public session with `1012 service restart` on backend loss
-  instead of issuing a replacement upgrade. AI Responses and Realtime sessions use
-  this policy; ordinary Worker and Durable Object WebSockets retain bounded transparent
-  reconnect.
+  instead of issuing a replacement upgrade. AI Responses and Realtime upgrades set this
+  policy. Tenant code that terminates a separate `WebSocketPair` around an AI socket must
+  copy the AI upgrade response headers onto its returned `101`; internal policy metadata
+  does not cross that response boundary automatically. Ordinary Worker and Durable Object
+  WebSockets retain bounded transparent reconnect.
 - A `1012` close ends the application session; the client reconnects and repeats its
   application handshake. Client messages queued under an older backend reconnect epoch
   may be discarded without per-frame ack/nack when that epoch resets.

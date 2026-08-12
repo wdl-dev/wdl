@@ -180,8 +180,8 @@ export function createAiWebSocketBridge(options) {
           return;
         }
         target.send(frame.data);
+        resetIdle();
       }
-      resetIdle();
     } catch {
       finish(1008, "AI websocket frame rejected", "frame_error");
     }

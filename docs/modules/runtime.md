@@ -62,8 +62,10 @@ workerd config wiring has a few non-obvious constraints:
   scheduled dispatch, and queue dispatch only.
 - `redis-proxy` sidecar: cold-load, tenant secret envelope decrypt, KV, queue producer,
   AI provider resolution/model discovery, and log-tail active checks and appends.
-- Hidden service Fetchers: D1 backend, DO backend, workflows backend, and DO
-  owner-network direct path.
+- Host-side stateful binding transport: generic D1, DO, and workflows backend Fetchers
+  remain in the loader realm, while loaded-worker env receives declaration-scoped host
+  adapters. The DO host adapter performs owner direct forwarding through runtime's
+  internal-network outbound; there is no loaded-worker owner-network Fetcher.
 - Env-backed bindings: queues and KV call `redis-proxy`; R2 signs S3-compatible requests;
   AI resolves encrypted namespace credentials through redis-proxy and uses a
   public-only network service; ASSETS uses deploy-time metadata to generate tokenized
@@ -93,8 +95,9 @@ services. Runtime therefore treats bindings as adapters:
   including required caller secret copies in platform/service binding props, so an
   over-large env fails in the control plane instead of during runtime cold-load.
 - Stateful bindings such as D1, Durable Objects, and Workflows call dedicated backend
-  services. The hidden backend Fetchers stay in runtime and are removed before tenant
-  code observes `env`.
+  services through binding-scoped host adapters. Immutable props restrict each adapter
+  to the declared database, object namespace, or workflow; loaded workers never receive
+  a generic authenticated DO or Workflows Fetcher.
 - R2 is an S3-compatible object-storage adapter: runtime signs requests with platform
   credentials and sends them to the configured endpoint.
 - AI is a host binding plus generated tenant-realm facade. Runtime asks redis-proxy for
@@ -149,10 +152,20 @@ but not raw S3 response bodies or physical `r2/<ns>/<bucket>/...` keys. Control-
 R2 admin errors may retain backend detail for operators.
 
 AI accepts at most one `{ type: "ai" }` binding. Generated wrapper code exposes
-`fetch()`, `run()`, and `models()` in both handler env and imported env while the host
-entrypoint itself exposes only `fetch()`. The virtual raw origin is `https://ai.wdl`;
-provider aliases, official destinations, Redis shapes, byte/time bounds, WebSocket
-rules, and non-goals are owned by [`ai.md`](ai.md).
+`fetch()`, `run()`, and `models()` through positional handler/entrypoint env. When
+importable env is enabled, invocation-time reads from the imported env proxy see the
+same facade. The host entrypoint itself exposes only `fetch()`. The virtual raw origin
+is `https://ai.wdl`; provider aliases, official destinations, Redis shapes, byte/time
+bounds, WebSocket rules, and non-goals are owned by [`ai.md`](ai.md).
+
+Generated host-facade wrappers preserve the Worker's importable-env compatibility
+contract. They use workerd `withEnv()` only when `disallow_importable_env` is absent.
+With importable env enabled, tenant modules may retain the imported env proxy at module
+scope and read bindings from that proxy during an invocation. Capturing an individual
+binding during module evaluation is not a facade contract: evaluation precedes wrapper
+invocation and can observe only the raw binding-scoped host adapter. With
+`disallow_importable_env`, imported env remains empty at module scope and during
+invocations, while positional env still receives generated facades.
 
 ASSETS is a deploy-artifact helper, not a full Cloudflare Pages asset pipeline. Control
 uploads files to `assets/<ns>/<worker>/<token>/<path>`, injects an `ASSETS` binding, and
@@ -272,6 +285,10 @@ upstream flags during cold load.
   the gateway-facing loader socket.
 - Reserved bindings matching `__WDL_*__` and reserved entrypoints matching `__Wdl*__`
   are platform-owned.
+- Raw env values observable during tenant module evaluation are restricted to their
+  declared binding identity. DO and Workflow adapters attach internal auth only after
+  replacing caller-supplied identity; generic authenticated backend Fetchers are never
+  placed in loaded-worker env.
 - Owner hints for D1/DO are trusted only when authored by runtime services, not from
   tenant response bodies.
 

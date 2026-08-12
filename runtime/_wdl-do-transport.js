@@ -14,6 +14,8 @@ export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
 export const DO_OWNER_HINT_CODE = "do_owner_hint";
 export const INTERNAL_AUTH_HEADER = "x-wdl-internal-auth";
+export const DO_BINDING_WEBSOCKET_OBJECT_HEADER = "x-wdl-do-binding-object-name";
+export const DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER = "x-wdl-do-binding-request-id";
 
 const DO_OWNER_HINT_HEADERS = {
   ownerKey: "x-wdl-do-owner-key",
@@ -228,6 +230,49 @@ function copyHeaders(source) {
     (value, name) => headerAppend(out, name, value),
   ]);
   return out;
+}
+
+/**
+ * Build the request sent through a binding-scoped WorkerEntrypoint.fetch().
+ * The host adapter owns namespace/class identity; the tenant supplies only the
+ * object name and original public WebSocket request.
+ *
+ * @param {string} objectName
+ * @param {Request} request
+ * @param {string | null} requestId
+ */
+export function scopedDoWebSocketRequest(objectName, request, requestId) {
+  const headers = copyHeaders(intrinsicReflectApply(intrinsicRequestHeadersGet, request, []));
+  headerSet(headers, DO_BINDING_WEBSOCKET_OBJECT_HEADER, objectName);
+  if (requestId) {
+    headerSet(headers, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER, requestId);
+  } else {
+    headerDelete(headers, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER);
+  }
+  return new IntrinsicRequest(request, { headers });
+}
+
+/** @param {Request} request */
+export function readScopedDoWebSocketRequest(request) {
+  if (!isWebSocketUpgrade(request)) {
+    throw new TypeError("Durable Object binding transport only accepts WebSocket upgrades");
+  }
+  const sourceHeaders = intrinsicReflectApply(intrinsicRequestHeadersGet, request, []);
+  const objectName = headerValue(sourceHeaders, DO_BINDING_WEBSOCKET_OBJECT_HEADER);
+  if (!objectName) {
+    throw new TypeError("Durable Object binding transport requires an object name");
+  }
+  const requestId = sanitizeRequestId(
+    headerValue(sourceHeaders, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER)
+  );
+  const headers = copyHeaders(sourceHeaders);
+  headerDelete(headers, DO_BINDING_WEBSOCKET_OBJECT_HEADER);
+  headerDelete(headers, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER);
+  return {
+    objectName,
+    requestId,
+    request: new IntrinsicRequest(request, { headers }),
+  };
 }
 
 /** @param {Headers} headers */

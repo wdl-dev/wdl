@@ -24,7 +24,12 @@ const { DurableObjectNamespace } = await importRepositoryModule("runtime/binding
   [/from "runtime-owner-hint-cache";/, `from ${JSON.stringify(ownerHintCacheUrl)};`],
   [/from "shared-internal-auth";/, `from ${JSON.stringify(internalAuthUrl)};`],
 ]);
-const { connectHeaders, ownerHintFromHeaders, requestSpec } = await import(transportUrl);
+const {
+  connectHeaders,
+  ownerHintFromHeaders,
+  requestSpec,
+  scopedDoWebSocketRequest,
+} = await import(transportUrl);
 
 /** @param {any} backend */
 function bindingWithBackend(backend) {
@@ -453,4 +458,33 @@ test("DO-to-DO websocket strips owner hint headers from successful upgrades", as
   assert.equal(response.headers.get("x-wdl-do-owner-key"), null);
   assert.equal(response.headers.get("x-wdl-do-owner-hint"), null);
   assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
+});
+
+test("binding-scoped fetch fixes DO identity and strips its private envelope", async () => {
+  /** @type {any[]} */
+  const calls = [];
+  const binding = bindingWithBackend({
+    fetch: makeRecordingFetch(calls, { response: new Response("upgrade") }),
+  });
+  const tenantRequest = new Request("https://demo.workers.example/ws", {
+    headers: {
+      Connection: "Upgrade",
+      Upgrade: "websocket",
+      "Sec-WebSocket-Key": "abc",
+      "x-wdl-do-ns": "attacker",
+    },
+  });
+  const response = await binding.fetch(scopedDoWebSocketRequest(
+    "room-scoped",
+    tenantRequest,
+    "rid-scoped"
+  ));
+
+  assert.equal(await response.text(), "upgrade");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://do-runtime/internal/do/connect");
+  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-ns"), "tenant");
+  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-object-name"), "room-scoped");
+  assert.equal(new Headers(calls[0].init.headers).get("x-request-id"), "rid-scoped");
+  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-binding-object-name"), null);
 });

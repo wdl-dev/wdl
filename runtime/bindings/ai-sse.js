@@ -46,7 +46,8 @@ function createFrameBuffer(maxFrameBytes) {
     end += chunk.byteLength;
   };
 
-  const findFrameEnd = () => {
+  /** @param {boolean} flushTrailingCr */
+  const findFrameEnd = (flushTrailingCr) => {
     let index = scan;
     while (index < end) {
       const byte = bytes[index];
@@ -54,7 +55,7 @@ function createFrameBuffer(maxFrameBytes) {
         index += 1;
         continue;
       }
-      if (byte === 0x0d && index + 1 >= end) {
+      if (byte === 0x0d && index + 1 >= end && !flushTrailingCr) {
         scan = index;
         return -1;
       }
@@ -70,8 +71,9 @@ function createFrameBuffer(maxFrameBytes) {
     return -1;
   };
 
-  const take = () => {
-    const frameEnd = findFrameEnd();
+  /** @param {boolean} [flushTrailingCr] */
+  const take = (flushTrailingCr = false) => {
+    const frameEnd = findFrameEnd(flushTrailingCr);
     if (frameEnd < 0) {
       if (end - start > maxFrameBytes) {
         throw new Error(`AI stream frame exceeds ${maxFrameBytes} bytes`);
@@ -191,14 +193,47 @@ export function createAiStreamingResponse({
     try { output?.error(error); } catch {}
     cleanup(outcome);
   };
+  /**
+   * Idle/EOF reconciliation must inspect every frame already buffered by the
+   * provider. Backpressure may have left a terminal event behind earlier
+   * non-terminal frames from the same chunk.
+   *
+   * @param {ReadableStreamDefaultController<Uint8Array>} controller
+   */
+  const drainCompletedFrames = (controller) => {
+    for (;;) {
+      const frame = frames.take(true);
+      if (frame === null) return false;
+      if (enqueueFrame(controller, frame)) return true;
+    }
+  };
   const resetIdle = () => {
     if (idleTimer !== null) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      fail(new Error("AI stream idle timeout"), "idle_timeout");
+      try {
+        if (output !== null && drainCompletedFrames(output)) return;
+        fail(new Error("AI stream idle timeout"), "idle_timeout");
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error(errorMessage(err)), "stream_error");
+      }
     }, idleMs);
   };
   resetIdle();
   lease.schedule(maxDurationMs);
+
+  /**
+   * @param {ReadableStreamDefaultController<Uint8Array>} controller
+   * @param {Uint8Array} frame
+   */
+  function enqueueFrame(controller, frame) {
+    const outcome = terminalOutcome(frame, protocol);
+    controller.enqueue(frame);
+    if (outcome === null) return false;
+    stopUpstream(new Error("AI stream terminal event"));
+    cleanup(outcome);
+    controller.close();
+    return true;
+  }
 
   const body = new ReadableStream({
     start(controller) { output = controller; },
@@ -207,17 +242,14 @@ export function createAiStreamingResponse({
         for (;;) {
           const frame = frames.take();
           if (frame !== null) {
-            const outcome = terminalOutcome(frame, protocol);
-            controller.enqueue(frame);
-            if (outcome !== null) {
-              stopUpstream(new Error("AI stream terminal event"));
-              cleanup(outcome);
-              controller.close();
-            }
+            enqueueFrame(controller, frame);
             return;
           }
           const { value, done } = await reader.read();
-          if (done) throw new Error("AI stream ended before its terminal event");
+          if (done) {
+            if (drainCompletedFrames(controller)) return;
+            throw new Error("AI stream ended before its terminal event");
+          }
           const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
           total += chunk.byteLength;
           if (total > maxBytes) throw new Error(`AI stream exceeds ${maxBytes} bytes`);

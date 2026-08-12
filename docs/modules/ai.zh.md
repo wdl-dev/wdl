@@ -11,7 +11,7 @@ AI 是 BYO provider 能力。每个 namespace 拥有自己的 provider metadata 
 AI request 经过以下 owner：
 
 1. Wrangler `[ai]` 配置生成一个 `{ "type": "ai" }` bundle binding。
-2. Runtime 使用不可变的 `{ ns, worker, version }` props materialize `AiBinding` host entrypoint。Generated wrapper 会为 handler env 和 imported env 都把 raw host stub 替换成 tenant-realm `Ai` facade，并把当前 request id 带入每个 facade 创建的 host request。
+2. Runtime 使用不可变的 `{ ns, worker, version }` props materialize `AiBinding` host entrypoint。Generated wrapper 会在 positional env，以及启用了 importable env 时 invocation 内对 imported env proxy 的实时读取中，把 raw host stub 替换成 tenant-realm `Ai` facade，并把当前 request id 带入每个 facade 创建的 host request。
 3. Host binding 请求 colocated redis-proxy 解析 public model id。Proxy 从 DB 0 原子读取 provider metadata 与加密 credential，校验 canonical state，解密 credential，并返回精确的官方 destination。
 4. Runtime 再用内建 adapter table 独立校验 destination，附加 credential，并通过 public-only `AI_NETWORK` service 发出请求。
 5. JSON response、semantic SSE frame 或 WebSocket frame 返回 tenant；credential 和 resolver-only metadata 不会暴露。
@@ -19,6 +19,8 @@ AI request 经过以下 owner：
 同一个 facade 也可在 Durable Object 中使用。DO 调用消耗 do-runtime replica 自己的 process-local pool，不与 user-runtime 共用。Host-side `waitUntil()` watchdog 持有最终 permit release，因此 actor teardown 不会让 pool cleanup 依赖 tenant cancellation event 是否被投递。
 
 Host `AiBinding` prototype 只暴露 `fetch()`。`run()` 和 `models()` 位于 generated tenant-realm facade，使 `AbortSignal`、native `Response`、`ReadableStream` 和 WebSocket object 不需要再跨第二层 JSRPC method boundary。
+
+Importable env 遵循 workerd compatibility 语义。代码可以在 module scope 保存 `import { env } from "cloudflare:workers"` 得到的 proxy，并在 invocation 内实时读取 `env.AI` 取得 facade；不能在 module evaluation 时缓存 `const ai = env.AI` 后期待它提供 `run()` 或 `models()`，因为 module evaluation 早于 wrapper invocation，此时只能看到仅有 `fetch()` 的 binding-scoped raw host stub。设置 `disallow_importable_env` 后，imported env 不暴露 AI binding；positional handler 和 Durable Object env 仍暴露完整 facade。
 
 ## 对外接口
 
@@ -124,7 +126,19 @@ Pool saturation 返回 `429 ai_capacity_exhausted`，不会排队。User runtime
 
 Host 在 request body、resolver 或 provider I/O 前注册 watchdog。SSE request 在完成有界 body admission 后，把同一个 lease 从 request pool 原子 transfer 到 stream pool，不会同时占用两个 permit。正常完成可以提前 release；如果 workerd 没有投递 mid-response `AbortSignal`、stream cancellation 或 socket teardown，幂等 deadline 仍是最终 release/abort owner。超限的 non-streaming response、被拒绝的 WebSocket handshake body、redirect 和错误的 streaming content type 都会在释放 permit 前 abort provider I/O；body cancellation 只是次级 cleanup signal。SSE 必须看到 protocol terminal event（`response.completed`、`response.incomplete`、`response.failed`、`error` 或 Chat Completions `[DONE]`）；terminal event 前 EOF 是错误。Terminal frame 会在 stream permit 分别记录 `completed`、`provider_incomplete`、`provider_failed` 或 `provider_error` 前原样转发。Semantic terminal event 或 tenant cancellation 还会独立 abort provider fetch，不依赖 stream cancellation 能否传递。Provider I/O 可能产生 side effect 后，WDL 不做隐式 inference retry。
 
-WebSocket text frame 必须是 JSON。WDL 把 model field 固定为已解析的 upstream model，执行 advertised binary-frame support，并传播有界 close code/reason。WDL 将 Gateway 原本视为可重连的 provider-loss close 转换成终止性的 `1013 AI provider connection lost`，因此 Gateway 不会静默替换 provider session。Initial upgrade 还会禁用 Gateway backend replacement，因此 runtime 丢失时 public session 会以 `1012 service restart` 关闭，不会在同一条 client connection 后面创建新的 provider session。WDL 不重连 AI WebSocket，也不恢复 provider session。
+WebSocket text frame 必须是 JSON。WDL 把 model field 固定为已解析的 upstream model，执行 advertised binary-frame support，并传播有界 close code/reason。WDL 将 Gateway 原本视为可重连的 provider-loss close 转换成终止性的 `1013 AI provider connection lost`，因此 Gateway 不会静默替换 provider session。Initial upgrade 还会禁用 Gateway backend replacement，因此 runtime 丢失时 public session 会以 `1012 service restart` 关闭，不会在同一条 client connection 后面创建新的 provider session。这些保证适用于 AI binding 自己持有的 WebSocket。若 tenant 代码终结一个独立的 `WebSocketPair` 并桥接 AI socket，它必须在自己返回的 `101` 上保留 AI upgrade headers：
+
+```js
+const aiUpgrade = await env.AI.run(model, null, { websocket: true });
+// ...把 aiUpgrade.webSocket 桥接到 client...
+return new Response(null, {
+  status: 101,
+  webSocket: client,
+  headers: aiUpgrade.headers,
+});
+```
+
+Gateway 会消费并从公开响应中删除内部 policy header。若桥接层遗漏这些 headers，tenant WebSocket 会保留 Gateway 普通的有界 backend replacement 行为，runtime 丢失时可能创建新的 provider session。WDL 不重连 AI binding 持有的 WebSocket，也不恢复它的 provider session。
 
 ## 安全边界
 
@@ -161,7 +175,7 @@ Receiver-before-sender 顺序先滚 redis-proxy 与 Gateway，再滚 user-runtim
 - `tests/unit/ai-contract.test.js` 与 Rust `ai_contract_fixture_matches_rust_readers` 测试固定共享 persisted/resolver grammar 和 exact official destination。
 - `tests/unit/control-ai-handler.test.js` 覆盖 revision CAS、encryption、canonical state、aggregate limit、residual cleanup 和 zero-Worker persistence semantics。
 - `tests/unit/runtime-ai-client.test.js` 与 `tests/unit/runtime-ai-binding.test.js` 覆盖 facade option、官方 destination、byte/frame bound、SSE terminal、慢上传 cancellation、watchdog、pool lease transfer 与 WebSocket model pinning。
-- `tests/integration/ai-binding.test.js` 覆盖 handler/imported env、provider rotation、zero-Worker recreation、JSON/SSE、Responses 与 Realtime WebSocket、OpenAI SDK、credential non-exposure、终止 user-runtime/do-runtime loss 和 DO caller teardown。
+- `tests/integration/ai-binding.test.js` 覆盖 positional 与 live imported env、显式禁用 importable env、provider rotation、zero-Worker recreation、JSON/SSE、Responses 与 Realtime WebSocket、OpenAI SDK、credential non-exposure、终止 user-runtime/do-runtime loss 和 DO caller teardown。
 
 Integration 使用仓库内 fake official provider。真实 credential 绝不能提交或打印到测试输出。
 

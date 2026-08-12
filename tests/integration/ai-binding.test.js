@@ -156,12 +156,13 @@ async function configureProviders(ns) {
   }
 }
 
-/** @param {string} ns */
-async function deployAiWorker(ns) {
+/** @param {string} ns @param {{ compatibilityFlags?: string[] }} [options] */
+async function deployAiWorker(ns, { compatibilityFlags = [] } = {}) {
   await deployAndPromote(ns, "ai", {
     mainModule: "worker.js",
     modules: { "worker.js": AI_WORKER },
     compatibilityDate: "2026-08-11",
+    compatibilityFlags,
     bindings: {
       AI: { type: "ai" },
       AI_PROBE: { type: "do", className: "AiProbe" },
@@ -257,8 +258,31 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   assert.deepEqual(surface, {
     handler: { fetch: "function", run: "function", models: "function" },
     imported: { fetch: "function", run: "function", models: "function" },
+    moduleScope: { fetch: "function", run: "function", models: "function" },
+    moduleScopeCalls: { fetch: "resolved", run: "rejected", models: "rejected" },
+    hidden: {
+      doBackend: "undefined",
+      ownerNetwork: "undefined",
+      workflowsBackend: "undefined",
+    },
     processEnvContainsCredential: false,
   });
+
+  const imported = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/imported"),
+    200,
+    "imported AI facade"
+  );
+  assert.equal(imported.model, "gpt-test");
+  assert.equal(imported.status, "completed");
+  assert.deepEqual(imported.models, [
+    "deepseek/chat",
+    "deepseek/flash",
+    "openai/embedding",
+    "openai/primary",
+    "xai/agent",
+    "xai/realtime",
+  ]);
 
   const modelList = await readIntegrationJson(
     await gatewayFetch(ns, "/ai/models"),
@@ -399,6 +423,59 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   const missing = await adminFetch(`/ns/${ns}/ai/providers/deepseek`);
   assertStatus(missing, 404, "deleted DeepSeek provider");
   assert.doesNotMatch(await missing.text(), /fake-deepseek-key/);
+});
+
+test("AI positional facades remain usable when importable env is disabled", async () => {
+  const ns = uniqueNs("ai-importable-env-disabled");
+  await configureProviders(ns);
+  await deployAiWorker(ns, { compatibilityFlags: ["disallow_importable_env"] });
+
+  const hidden = {
+    doBackend: "undefined",
+    ownerNetwork: "undefined",
+    workflowsBackend: "undefined",
+  };
+  const imported = { fetch: "undefined", run: "undefined", models: "undefined" };
+  const handler = { fetch: "function", run: "function", models: "function" };
+  const surface = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/surface"),
+    200,
+    "disabled importable env AI surface"
+  );
+  assert.deepEqual(surface, {
+    handler,
+    imported,
+    moduleScope: imported,
+    moduleScopeCalls: { fetch: "missing", run: "missing", models: "missing" },
+    hidden,
+    processEnvContainsCredential: false,
+  });
+
+  const result = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json"),
+    200,
+    "disabled importable env positional AI call"
+  );
+  assert.equal(result.status, "completed");
+
+  const doSurface = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/do/surface?name=disabled"),
+    200,
+    "disabled importable env DO AI surface"
+  );
+  assert.deepEqual(doSurface, {
+    handler,
+    imported,
+    moduleScope: imported,
+    moduleScopeCalls: { fetch: "missing", run: "missing", models: "missing" },
+    hidden,
+  });
+  const doResult = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/do/json?name=disabled"),
+    200,
+    "disabled importable env DO positional AI call"
+  );
+  assert.equal(doResult.status, "completed");
 });
 
 test("AI provider rotation reaches the next request and new socket without redeploy", async () => {
@@ -702,12 +779,18 @@ test("AI provider loss terminates the public WebSocket without Gateway session r
   }
 });
 
-test("AI WebSocket terminates instead of replacing its provider session after runtime loss", async () => {
+test("tenant-bridged AI WebSocket preserves terminal policy after runtime loss", async () => {
   const { ns } = await setupAiNamespace("ai-ws-runtime-loss");
-  const response = await wsHandshake(ns, "/ai/responses-ws");
+  const response = await wsHandshake(ns, "/ai/responses-ws-bridge");
   try {
-    assertStatus(response, 101, "runtime-loss Responses WebSocket upgrade");
+    assertStatus(response, 101, "tenant-bridged Responses WebSocket upgrade");
     assert.equal(response.headers["x-wdl-websocket-reconnect-policy"], undefined);
+    response.socket.write(encodeClientTextFrame(JSON.stringify({
+      type: "response.create",
+      input: "tenant bridge",
+    })));
+    const completed = frameJson(await readOneServerTextFrame(response.socket));
+    assert.equal(completed.type, "response.completed");
     composeKill("user-runtime");
     assert.deepEqual(await readOneServerCloseFrame(response.socket, { timeoutMs: 10_000 }), {
       code: 1012,
@@ -808,6 +891,14 @@ test("DO AI calls complete and caller teardown leaves the host watchdog alive", 
   );
   assert.equal(completed.model, "gpt-test");
   assert.equal(completed.status, "completed");
+
+  const imported = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/do/imported-json?name=teardown"),
+    200,
+    "DO imported AI facade request"
+  );
+  assert.equal(imported.model, "gpt-test");
+  assert.equal(imported.status, "completed");
 
   const beforeGauge = doAiMetric("wdl_ai_pool_in_use", "request");
   const beforeAcquired = doAiMetric("wdl_ai_pool_events_total", "request", "acquired");

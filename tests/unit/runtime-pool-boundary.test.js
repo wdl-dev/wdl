@@ -80,7 +80,7 @@ const IMPORT_STUBS = {
   "runtime-bindings-r2": emptyBindingUrl,
   "runtime-bindings-ai": emptyBindingUrl,
   "runtime-bindings-do": emptyBindingUrl,
-  "runtime-bindings-internal-auth-backend": emptyBindingUrl,
+  "runtime-bindings-workflow": emptyBindingUrl,
 };
 
 const runtimeIndexSrc = applyModuleReplacements(

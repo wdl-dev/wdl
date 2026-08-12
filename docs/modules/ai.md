@@ -21,8 +21,9 @@ An AI request crosses these owners:
    `{ "type": "ai" }`.
 2. Runtime materializes an `AiBinding` host entrypoint with immutable
    `{ ns, worker, version }` props. Generated wrapper code replaces the raw host stub
-   with the tenant-realm `Ai` facade for both handler env and imported env, and carries
-   the current request id into every facade-created host request.
+   with the tenant-realm `Ai` facade in positional env and in invocation-time reads from
+   an enabled imported env proxy. It carries the current request id into every
+   facade-created host request.
 3. The host binding asks the colocated redis-proxy to resolve a public model id. The
    proxy atomically reads provider metadata and its encrypted credential from DB 0,
    validates canonical state, decrypts the credential, and returns an exact official
@@ -42,6 +43,14 @@ The host `AiBinding` prototype intentionally exposes only `fetch()`. `run()` and
 `models()` live in the generated tenant-realm facade, where `AbortSignal`, native
 `Response`, `ReadableStream`, and WebSocket objects do not have to cross a second JSRPC
 method boundary.
+
+Importable env follows workerd compatibility semantics. Code may retain
+`import { env } from "cloudflare:workers"` at module scope and read `env.AI` during an
+invocation to obtain the facade. It must not cache `const ai = env.AI` during module
+evaluation and expect `run()` or `models()`: evaluation precedes wrapper invocation, so
+that value is the raw binding-scoped host stub with `fetch()` only. With
+`disallow_importable_env`, imported env exposes no AI binding; positional handler and
+Durable Object env still expose the full facade.
 
 ## Public Interfaces
 
@@ -223,8 +232,26 @@ reasons. Provider-loss closes that Gateway would otherwise treat as reconnectabl
 translated to terminal `1013 AI provider connection lost`, so Gateway cannot silently
 replace the provider session. The initial upgrade also disables Gateway backend
 replacement, so runtime loss closes the public session with `1012 service restart`
-instead of creating a new provider session behind the same client connection. WDL does
-not reconnect an AI WebSocket or resume a provider session.
+instead of creating a new provider session behind the same client connection. These
+guarantees apply to the WebSocket owned by the AI binding. If tenant code terminates a
+separate `WebSocketPair` and bridges it to the AI socket, it must preserve the AI upgrade
+headers on its own `101` response so Gateway retains the terminal policy:
+
+```js
+const aiUpgrade = await env.AI.run(model, null, { websocket: true });
+// ...bridge aiUpgrade.webSocket to client...
+return new Response(null, {
+  status: 101,
+  webSocket: client,
+  headers: aiUpgrade.headers,
+});
+```
+
+Gateway consumes and removes the internal policy header before the public response. If
+the bridge omits these headers, the tenant WebSocket keeps Gateway's ordinary bounded
+backend replacement behavior, and runtime loss can create a fresh provider session.
+WDL does not reconnect a WebSocket owned by the AI binding or resume its provider
+session.
 
 ## Security Boundaries
 
@@ -284,10 +311,10 @@ provider availability.
   `tests/unit/runtime-ai-binding.test.js` cover facade options, official destinations,
   byte/frame bounds, SSE terminals, slow-upload cancellation, watchdogs, pool lease
   transfer, and WebSocket model pinning.
-- `tests/integration/ai-binding.test.js` covers handler/imported env, provider rotation,
-  zero-Worker recreation, JSON/SSE, Responses and Realtime WebSockets, OpenAI SDK use,
-  credential non-exposure, terminal user-runtime/do-runtime loss, and DO caller
-  teardown.
+- `tests/integration/ai-binding.test.js` covers positional and live imported env,
+  explicit importable-env disablement, provider rotation, zero-Worker recreation,
+  JSON/SSE, Responses and Realtime WebSockets, OpenAI SDK use, credential non-exposure,
+  terminal user-runtime/do-runtime loss, and DO caller teardown.
 
 Integration uses an in-repo fake official provider. Real credentials must never be
 committed or printed by test output.
