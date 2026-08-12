@@ -30,10 +30,11 @@ function request(body, path = "/v1/responses") {
   });
 }
 
-/** @param {AbortSignal | null} signal @param {string} [message] */
+/** @param {AbortSignal | null} signal @param {string} [message] @returns {AbortSignal} */
 function assertAborted(signal, message = undefined) {
   assert.ok(signal, message);
   assert.equal(signal.aborted, true, message);
+  return signal;
 }
 
 /** @param {ReturnType<typeof openAiResolution>} [resolution] @returns {typeof fetch} */
@@ -1277,6 +1278,8 @@ test("AI WebSocket pool saturates before resolution and recovers after close", a
   assert.equal(aiPoolStateForTest().websocket.inUse, 1);
 
   first.downstream.dispatch("close", { code: 1000, reason: "done" });
+  const providerSignal = assertAborted(first.providerSignal);
+  assert.equal(providerSignal.reason?.name, "AbortError");
   await Promise.all(first.waitUntilTasks);
   assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });

@@ -132,7 +132,7 @@ export function createAiWebSocketBridge(options) {
     closed = true;
     if (idleTimer !== null) clearTimeout(idleTimer);
     idleTimer = null;
-    try { aborter.abort(reason); } catch {}
+    try { aborter.abort(); } catch {}
     closeAiWebSocket(
       downstream,
       close.downstreamCode ?? code,
