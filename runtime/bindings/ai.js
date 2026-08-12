@@ -130,6 +130,11 @@ function requireModel(value, label = "model") {
   if (typeof value !== "string" || value.length === 0) {
     throw new AiBindingError(400, "ai_invalid_model", `${label} must be <provider>/<alias>`);
   }
+  try {
+    parseAiModelReference(value);
+  } catch {
+    throw new AiBindingError(400, "ai_invalid_model", `${label} must be <provider>/<alias>`);
+  }
   return value;
 }
 
@@ -252,6 +257,37 @@ function requireAiNetwork(env) {
   return env.AI_NETWORK;
 }
 
+/** @param {Response} response @param {AbortController} aborter */
+async function readProviderResponseBytes(response, aborter) {
+  try {
+    return response.body
+      ? await readBoundedStreamBytes(
+        response.body,
+        AI_RESPONSE_MAX_BYTES,
+        undefined,
+        aborter.signal
+      )
+      : new Uint8Array();
+  } catch (err) {
+    aborter.abort(err);
+    if (err instanceof BodyTooLargeError) {
+      throw new AiBindingError(
+        502,
+        "ai_provider_response_too_large",
+        `AI provider response exceeds ${AI_RESPONSE_MAX_BYTES} bytes`
+      );
+    }
+    throw err;
+  }
+}
+
+/** @param {Response} response @param {AbortController} aborter @param {AiBindingError} error */
+async function rejectProviderResponse(response, aborter, error) {
+  aborter.abort(error);
+  await discardResponseBody(response);
+  throw error;
+}
+
 /** @param {AiHostBinding} binding @param {Request} request @param {URL} url @param {string} requestId */
 async function handleModels(binding, request, url, requestId) {
   if (
@@ -364,14 +400,24 @@ async function handleHttp(binding, request, url, requestId) {
       aborter.signal.throwIfAborted();
     }
     if (response.status >= 300 && response.status < 400) {
-      await discardResponseBody(response);
-      throw new AiBindingError(502, "ai_provider_redirect", "AI provider redirect was rejected");
+      await rejectProviderResponse(
+        response,
+        aborter,
+        new AiBindingError(502, "ai_provider_redirect", "AI provider redirect was rejected")
+      );
     }
     const headers = aiProviderResponseHeaders(response, requestId);
     if (stream && response.ok) {
       if (!hasContentType(response.headers.get("content-type"), SSE_CONTENT_TYPE) || !response.body) {
-        await discardResponseBody(response);
-        throw new AiBindingError(502, "ai_provider_invalid_response", "AI provider did not return an event stream");
+        await rejectProviderResponse(
+          response,
+          aborter,
+          new AiBindingError(
+            502,
+            "ai_provider_invalid_response",
+            "AI provider did not return an event stream"
+          )
+        );
       }
       const streamLifecycle = createAiStreamingResponse({
         response,
@@ -389,9 +435,7 @@ async function handleHttp(binding, request, url, requestId) {
       streamOwnsLease = true;
       return new Response(streamLifecycle.body, { status: response.status, headers });
     }
-    const bytes = response.body
-      ? await readBoundedStreamBytes(response.body, AI_RESPONSE_MAX_BYTES, undefined, aborter.signal)
-      : new Uint8Array();
+    const bytes = await readProviderResponseBytes(response, aborter);
     aborter.signal.throwIfAborted();
     return new Response(/** @type {BodyInit} */ (bytes), { status: response.status, headers });
   } catch (err) {
@@ -468,10 +512,15 @@ async function handleWebSocket(binding, request, url, requestId) {
       }
       aborter.signal.throwIfAborted();
     }
+    if (response.status >= 300 && response.status < 400) {
+      await rejectProviderResponse(
+        response,
+        aborter,
+        new AiBindingError(502, "ai_provider_redirect", "AI provider redirect was rejected")
+      );
+    }
     if (response.status !== 101 || !response.webSocket) {
-      const bytes = response.body
-        ? await readBoundedStreamBytes(response.body, AI_RESPONSE_MAX_BYTES, undefined, aborter.signal)
-        : new Uint8Array();
+      const bytes = await readProviderResponseBytes(response, aborter);
       lease.release("provider_rejected");
       return new Response(/** @type {BodyInit} */ (bytes), {
         status: response.status,

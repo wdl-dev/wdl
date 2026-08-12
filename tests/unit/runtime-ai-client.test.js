@@ -13,6 +13,19 @@ function responseModel(transports = ["http", "sse", "responses_websocket"]) {
   };
 }
 
+/**
+ * @param {unknown} error
+ * @param {{ status: number, code: string, message?: string }} expected
+ */
+function matchesAiError(error, expected) {
+  if (!(error instanceof Error)) return false;
+  const details = /** @type {Error & { status?: unknown, code?: unknown }} */ (error);
+  return details.name === "AIError" &&
+    details.status === expected.status &&
+    details.code === expected.code &&
+    (expected.message === undefined || details.message === expected.message);
+}
+
 test("AI tenant facade exposes raw fetch and bounded model discovery", async () => {
   /** @type {Request[]} */
   const requests = [];
@@ -66,6 +79,64 @@ test("AI tenant run selects JSON and SSE transport from the model contract", asy
   const finalCall = calls.at(-1);
   assert.ok(finalCall);
   assert.equal(finalCall.headers.get("accept"), "text/event-stream");
+});
+
+test("AI tenant run classifies a malformed successful response as a gateway error", async () => {
+  const ai = new Ai({
+    async fetch(request) {
+      assert.ok(request instanceof Request);
+      if (request.url.endsWith("/v1/models")) {
+        return Response.json({ models: [responseModel()] });
+      }
+      return new Response("not json", { status: 200, headers: { "content-type": "text/plain" } });
+    },
+  });
+
+  await assert.rejects(
+    () => ai.run("openai/primary", { input: "hello" }),
+    (error) => matchesAiError(error, { status: 502, code: "ai_request_failed" })
+  );
+});
+
+test("AI tenant run preserves OpenAI-compatible provider error details", async () => {
+  /** @type {Array<{
+   *   providerError: { message: string, type: string, code?: string },
+   *   expectedCode: string,
+   * }>} */
+  const scenarios = [
+    {
+      providerError: {
+        message: "rate limited by provider",
+        type: "rate_limit_error",
+        code: "rate_limit_exceeded",
+      },
+      expectedCode: "rate_limit_exceeded",
+    },
+    {
+      providerError: { message: "provider authentication failed", type: "authentication_error" },
+      expectedCode: "authentication_error",
+    },
+  ];
+  for (const { providerError, expectedCode } of scenarios) {
+    const ai = new Ai({
+      async fetch(request) {
+        assert.ok(request instanceof Request);
+        if (request.url.endsWith("/v1/models")) {
+          return Response.json({ models: [responseModel()] });
+        }
+        return Response.json({ error: providerError }, { status: 429 });
+      },
+    });
+
+    await assert.rejects(
+      () => ai.run("openai/primary", { input: "hello" }),
+      (error) => matchesAiError(error, {
+        status: 429,
+        code: expectedCode,
+        message: providerError.message,
+      })
+    );
+  }
 });
 
 test("AI tenant run rejects unsupported options and unavailable transports before inference", async () => {

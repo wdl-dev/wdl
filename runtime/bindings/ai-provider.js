@@ -66,6 +66,7 @@ function collectInputModalities(found, value) {
   if (type === "text" || type === "input_text") found.add("text");
   if (type === "image_url" || type === "input_image") found.add("image");
   if (type === "audio" || type === "input_audio") found.add("audio");
+  if (type === "file" || type === "input_file") found.add("file");
 
   // Only message/content containers carry user media. Tool schemas and tool
   // arguments are opaque provider fields and must not be searched recursively.

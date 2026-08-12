@@ -95,9 +95,60 @@ async function handler(request, env) {
   }
   if (url.pathname === "/raw") {
     return await env.AI.fetch(aiRequest("/v1/responses", {
-      model: "openai/primary",
+      model: url.searchParams.get("model") || "openai/primary",
       input: "raw response",
     }));
+  }
+  if (url.pathname === "/file") {
+    const response = await env.AI.run("openai/primary", {
+      input: [{
+        role: "user",
+        content: [{
+          type: "input_file",
+          file_url: "https://files.example/input.pdf",
+        }],
+      }],
+      wdl_test_mode: "file_input",
+    });
+    return Response.json({
+      model: response.model,
+      type: response.wdl_file_input?.type,
+      fileUrl: response.wdl_file_input?.file_url,
+    });
+  }
+  if (url.pathname === "/deepseek-file") {
+    try {
+      await env.AI.run("deepseek/flash", {
+        input: [{ type: "input_file", file_url: "https://files.example/input.pdf" }],
+      });
+      return Response.json({ status: 200, code: null });
+    } catch (error) {
+      return Response.json({ status: error?.status, code: error?.code });
+    }
+  }
+  if (url.pathname === "/invalid-json") {
+    try {
+      await env.AI.run("openai/primary", { input: "invalid JSON", wdl_test_mode: "invalid_json" });
+      return Response.json({ failed: false });
+    } catch (error) {
+      return Response.json({ name: error?.name, status: error?.status, code: error?.code });
+    }
+  }
+  if (url.pathname === "/provider-error") {
+    try {
+      await env.AI.run("openai/primary", {
+        input: "provider error",
+        wdl_test_mode: "provider_error",
+      });
+      return Response.json({ failed: false });
+    } catch (error) {
+      return Response.json({
+        name: error?.name,
+        status: error?.status,
+        code: error?.code,
+        message: error?.message,
+      });
+    }
   }
   if (url.pathname === "/slow-upload") {
     return await env.AI.fetch(stalledAiRequest());

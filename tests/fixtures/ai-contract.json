@@ -57,7 +57,7 @@
             "upstreamModel": "vendor:model@preview",
             "protocol": "responses",
             "transports": ["http", "responses_websocket", "sse"],
-            "inputModalities": ["image", "text"],
+            "inputModalities": ["file", "image", "text"],
             "outputModalities": ["text"],
             "capabilities": {
               "functionTools": true,
@@ -174,6 +174,81 @@
           }
         }
       }
+    },
+    {
+      "name": "deepseek-multimodal-unavailable",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "vision": {
+            "upstreamModel": "deepseek-v4-flash",
+            "protocol": "responses",
+            "transports": ["http", "sse"],
+            "inputModalities": ["file", "image", "text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "deepseek-continuation-unavailable",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "flash": {
+            "upstreamModel": "deepseek-v4-flash",
+            "protocol": "responses",
+            "transports": ["http", "sse"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": true,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "deepseek-audio-output-unavailable",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "voice": {
+            "upstreamModel": "deepseek-v4-flash",
+            "protocol": "responses",
+            "transports": ["http", "sse"],
+            "inputModalities": ["text"],
+            "outputModalities": ["audio", "text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
     }
   ],
   "resolveRequests": [
@@ -199,7 +274,7 @@
         "transport": "http",
         "destination": "https://api.openai.com/v1/responses",
         "credential": "fixture-credential",
-        "inputModalities": ["image", "text"],
+        "inputModalities": ["file", "image", "text"],
         "capabilities": {
           "functionTools": true,
           "structuredOutput": true,
@@ -259,7 +334,7 @@
             "id": "openai/primary",
             "protocol": "responses",
             "transports": ["http", "responses_websocket", "sse"],
-            "inputModalities": ["image", "text"],
+            "inputModalities": ["file", "image", "text"],
             "outputModalities": ["text"],
             "capabilities": {
               "functionTools": true,

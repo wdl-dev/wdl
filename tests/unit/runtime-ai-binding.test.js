@@ -30,6 +30,12 @@ function request(body, path = "/v1/responses") {
   });
 }
 
+/** @param {AbortSignal | null} signal @param {string} [message] */
+function assertAborted(signal, message = undefined) {
+  assert.ok(signal, message);
+  assert.equal(signal.aborted, true, message);
+}
+
 /** @param {ReturnType<typeof openAiResolution>} [resolution] @returns {typeof fetch} */
 function resolver(resolution = openAiResolution()) {
   return async (input, init = {}) => {
@@ -130,6 +136,7 @@ test("AI host inspects only user content when enforcing input modalities", async
   const providerBodies = [];
   const textOnly = openAiResolution({ inputModalities: ["text"] });
   const imageOnly = openAiResolution({ inputModalities: ["image"] });
+  const fileOnly = openAiResolution({ inputModalities: ["file"] });
   const { binding } = makeAiBinding({
     AI_NETWORK: {
       async fetch(
@@ -163,7 +170,14 @@ test("AI host inspects only user content when enforcing input modalities", async
     }));
     assert.equal(response.status, 200);
   });
-  assert.equal(providerBodies.length, 2);
+  await withMockedProperty(globalThis, "fetch", resolver(fileOnly), async () => {
+    const response = await binding.fetch(request({
+      model: "openai/primary",
+      input: [{ type: "input_file", file_url: "https://files.example/input.pdf" }],
+    }));
+    assert.equal(response.status, 200);
+  });
+  assert.equal(providerBodies.length, 3);
 });
 
 test("AI host model list strips resolver-only identity and credential fields", async () => {
@@ -199,6 +213,8 @@ test("AI host rejects unsupported DeepSeek and background inputs before provider
       [{ input: "hello", previous_response_id: "resp_old" }, "ai_continuation_unsupported"],
       [{ input: "hello", store: true }, "ai_store_unsupported"],
       [{ input: [{ type: "input_image", image_url: "https://images.example/input.png" }] }, "ai_input_modality_unsupported"],
+      [{ input: [{ type: "input_file", file_url: "https://files.example/input.pdf" }] }, "ai_input_modality_unsupported"],
+      [{ messages: [{ role: "user", content: [{ type: "file", file: { file_id: "file_1" } }] }] }, "ai_input_modality_unsupported"],
       [{ input: "hello", background: true }, "ai_background_unsupported"],
     ];
     for (const [body, error] of cases) {
@@ -223,6 +239,33 @@ test("AI host reports an oversized tenant request as 413 before resolution", asy
     (await readJsonResponse(response, 413, "oversized AI request")).error,
     "ai_request_too_large"
   );
+});
+
+test("AI host rejects malformed HTTP and WebSocket model references before resolution", async () => {
+  let resolverCalls = 0;
+  const { binding } = makeAiBinding();
+  await withMockedProperty(globalThis, "fetch", async () => {
+    resolverCalls += 1;
+    throw new Error("resolver must not run");
+  }, async () => {
+    const http = await binding.fetch(request({ model: "openai", input: "hello" }));
+    assert.equal(
+      (await readJsonResponse(http, 400, "malformed AI HTTP model")).error,
+      "ai_invalid_model"
+    );
+
+    const websocket = await binding.fetch(new Request(
+      "https://ai.wdl/v1/responses?model=OpenAI%2Fprimary",
+      { headers: { upgrade: "websocket" } }
+    ));
+    assert.equal(
+      (await readJsonResponse(websocket, 400, "malformed AI WebSocket model")).error,
+      "ai_invalid_model"
+    );
+  });
+  assert.equal(resolverCalls, 0);
+  assert.equal(aiPoolStateForTest().request.inUse, 0);
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 
 test("AI host replaces tenant headers with the official provider allowlist", async () => {
@@ -276,7 +319,10 @@ test("AI host preserves semantic SSE bytes and releases the stream permit at ter
   let providerSignal = null;
   const { binding } = makeAiBinding({
     AI_NETWORK: {
-      async fetch(_url, init = {}) {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
         providerSignal = init.signal ?? null;
         const bytes = new TextEncoder().encode(expected);
         return new Response(new ReadableStream({
@@ -293,7 +339,7 @@ test("AI host preserves semantic SSE bytes and releases the stream permit at ter
     assert.equal(await response.text(), expected);
   });
   assert.deepEqual(aiPoolStateForTest().stream, { inUse: 0, highWater: 1 });
-  assert.equal(providerSignal?.aborted, true);
+  assertAborted(providerSignal);
 });
 
 test("AI host forwards a near-limit SSE frame assembled from small provider chunks", async () => {
@@ -465,6 +511,8 @@ test("AI host bounds total SSE bytes independently of valid frame size", async (
 
 test("AI host cancels an oversized non-streaming provider response", async () => {
   let cancelled = false;
+  /** @type {AbortSignal | null} */
+  let providerSignal = null;
   const providerBody = new ReadableStream({
     start(controller) {
       controller.enqueue(new Uint8Array(AI_RESPONSE_MAX_BYTES + 1));
@@ -473,7 +521,11 @@ test("AI host cancels an oversized non-streaming provider response", async () =>
   });
   const { binding } = makeAiBinding({
     AI_NETWORK: {
-      async fetch() {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
+        providerSignal = init.signal ?? null;
         return new Response(providerBody, { headers: { "content-type": "application/json" } });
       },
     },
@@ -482,11 +534,55 @@ test("AI host cancels an oversized non-streaming provider response", async () =>
     const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
     assert.equal(
       (await readJsonResponse(response, 502, "oversized AI provider response")).error,
-      "ai_binding_error"
+      "ai_provider_response_too_large"
     );
   });
   assert.equal(cancelled, true);
+  assertAborted(providerSignal);
   assert.equal(aiPoolStateForTest().request.inUse, 0);
+});
+
+test("AI host aborts rejected provider responses before releasing capacity", async () => {
+  for (const scenario of [
+    {
+      name: "redirect",
+      body: { model: "openai/primary", input: "hello" },
+      resolution: openAiResolution(),
+      response: () => new Response("redirect", { status: 302, headers: { location: "https://other.invalid" } }),
+      code: "ai_provider_redirect",
+    },
+    {
+      name: "invalid event stream",
+      body: { model: "openai/primary", input: "hello", stream: true },
+      resolution: openAiResolution({ transport: "sse" }),
+      response: () => new Response("not an event stream", { headers: { "content-type": "text/plain" } }),
+      code: "ai_provider_invalid_response",
+    },
+  ]) {
+    /** @type {AbortSignal | null} */
+    let providerSignal = null;
+    const { binding } = makeAiBinding({
+      AI_NETWORK: {
+        async fetch(
+          /** @type {RequestInfo | URL} */ _url,
+          /** @type {RequestInit} */ init = {}
+        ) {
+          providerSignal = init.signal ?? null;
+          return scenario.response();
+        },
+      },
+    });
+    await withMockedProperty(globalThis, "fetch", resolver(scenario.resolution), async () => {
+      const response = await binding.fetch(request(scenario.body));
+      assert.equal(
+        (await readJsonResponse(response, 502, `AI provider ${scenario.name}`)).error,
+        scenario.code
+      );
+    });
+    assertAborted(providerSignal, scenario.name);
+    assert.equal(aiPoolStateForTest().request.inUse, 0, scenario.name);
+    assert.equal(aiPoolStateForTest().stream.inUse, 0, scenario.name);
+  }
 });
 
 test("AI stream duration terminates the tenant stream when upstream ignores abort", async () => {
@@ -568,7 +664,10 @@ test("AI stream pool saturates independently and recovers after cancellation", a
   const { binding } = makeAiBinding({
     AI_STREAM_MAX_IN_FLIGHT: "1",
     AI_NETWORK: {
-      async fetch(_url, init = {}) {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
         providerCalls += 1;
         providerSignal = init.signal ?? null;
         return new Response(new ReadableStream({ pull() { return new Promise(() => {}); } }), {
@@ -595,7 +694,7 @@ test("AI stream pool saturates independently and recovers after cancellation", a
     await first.body?.cancel("test complete");
   });
   assert.equal(aiPoolStateForTest().stream.inUse, 0);
-  assert.equal(providerSignal?.aborted, true);
+  assertAborted(providerSignal);
   assert.ok(AI_HOST_TEST_STATE.metrics.some((entry) =>
     entry.name === "ai_pool_events" &&
     entry.labels.pool === "stream" &&
@@ -927,6 +1026,8 @@ async function openFakeAiWebSocket(options = {}) {
   /** @type {Array<{ url: string, headers: Headers }>} */
   const providerCalls = [];
   let resolverCalls = 0;
+  /** @type {AbortSignal | null} */
+  let providerSignal = null;
   /** @type {Headers | null} */
   let responseHeaders = null;
   const { binding, waitUntilTasks } = makeAiBinding({
@@ -937,6 +1038,7 @@ async function openFakeAiWebSocket(options = {}) {
         /** @type {RequestInit} */ init = {}
       ) {
         providerCalls.push({ url: String(url), headers: new Headers(init.headers) });
+        providerSignal = init.signal ?? null;
         if (options.providerResponse) return options.providerResponse;
         return { status: 101, headers: new Headers(), body: null, webSocket: upstream };
       },
@@ -981,6 +1083,7 @@ async function openFakeAiWebSocket(options = {}) {
     providerCalls,
     resolverCalls,
     responseHeaders,
+    providerSignal,
     waitUntilTasks,
   };
 }
@@ -1033,7 +1136,7 @@ test("AI host cancels an oversized WebSocket rejection response", async () => {
     },
     cancel() { cancelled = true; },
   });
-  await openFakeAiWebSocket({
+  const { providerSignal } = await openFakeAiWebSocket({
     providerResponse: new Response(providerBody, {
       status: 400,
       headers: { "content-type": "application/json" },
@@ -1041,6 +1144,42 @@ test("AI host cancels an oversized WebSocket rejection response", async () => {
     expectedStatus: 502,
   });
   assert.equal(cancelled, true);
+  assertAborted(providerSignal);
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
+test("AI host rejects WebSocket provider redirects before releasing capacity", async () => {
+  /** @type {AbortSignal | null} */
+  let providerSignal = null;
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
+        providerSignal = init.signal ?? null;
+        return new Response("redirect", {
+          status: 302,
+          headers: { location: "https://other.invalid" },
+        });
+      },
+    },
+  });
+  const resolution = openAiResolution({
+    transport: "responses_websocket",
+    destination: "wss://api.openai.com/v1/responses",
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+    const response = await binding.fetch(new Request(
+      "https://ai.wdl/v1/responses?model=openai%2Fprimary",
+      { headers: { upgrade: "websocket" } }
+    ));
+    assert.equal(
+      (await readJsonResponse(response, 502, "AI WebSocket provider redirect")).error,
+      "ai_provider_redirect"
+    );
+  });
+  assertAborted(providerSignal);
   assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 

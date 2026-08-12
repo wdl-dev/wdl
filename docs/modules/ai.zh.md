@@ -41,6 +41,8 @@ binding = "AI"
 
 Provider 选择由 tenant code 传入的 model id 决定，不写在 Wrangler 配置里。Model id 使用 `<provider>/<alias>`，例如 `openai/primary`。
 
+Malformed public model id 会在 resolver 或 provider I/O 前由 host admission 以 `400 ai_invalid_model` 拒绝。
+
 ### Tenant facade
 
 - `await env.AI.models()` 返回已配置 credential 的 model。Entry 暴露 public id、protocol、transports、modalities 和 capability hints，不暴露 upstream model id、provider revision、destination 或 credential。
@@ -60,7 +62,9 @@ Provider 选择由 tenant code 传入的 model id 决定，不写在 Wrangler �
 
 HTTP inference request 必须是 JSON，model 位于 body。Tenant authorization、endpoint、host、redirect 和任意 outbound header 都不会被转发。WDL 只转发有界的 content type、retry delay 和 provider request id 等 response header。`x-request-id` 始终是 WDL request id；使用同名 header 的 provider id 改由 `x-ai-provider-request-id` 暴露。
 
-`run()` 透传 provider-native request/response field。只要所选 provider/model 支持，function tools、structured output、reasoning field、provider tools 和 multimodal input 都可使用。WDL 不执行 tool、不校验 tool argument，也不会自动继续 agent loop。
+`run()` 透传 provider-native request/response field。只要所选 provider/model 支持，function tools、structured output、reasoning field、provider tools 和 multimodal input 都可使用。Input modality 包括 text、image、audio 和 Responses direct file item；WDL 不提供 provider file upload 或 lifecycle API。WDL 不执行 tool、不校验 tool argument，也不会自动继续 agent loop。
+
+无法解码为 JSON 的成功响应会让 `run()` 以 status 为 `502` 的 `AIError` 失败。对于非成功响应，`run()` 保留有界 OpenAI-compatible provider message 和字符串 code；没有 code 时回退到 provider type。`fetch()` 仍是 raw-response escape hatch。
 
 OpenAI 官方 JavaScript SDK 可通过 `baseURL: "https://ai.wdl/v1"`、任意非空 placeholder API key 和 `fetch: env.AI.fetch.bind(env.AI)` 使用 JSON、SSE 与 cancellation。WDL 丢弃 SDK authorization header，在 host binding 内附加 namespace credential。SDK WebSocket helper 不属于兼容承诺；应用直接使用 binding WebSocket surface。
 
@@ -118,7 +122,7 @@ Pool saturation 返回 `429 ai_capacity_exhausted`，不会排队。User runtime
 
 固定 byte limit 为：request JSON 8 MiB、non-streaming response 16 MiB、SSE response 32 MiB、SSE frame 1 MiB、WebSocket frame 1 MiB、每个 WebSocket direction 128 MiB。默认时间边界为：request/setup 120 秒、SSE idle 30 秒、SSE duration 五分钟、WebSocket handshake 15 秒、WebSocket idle 两分钟、operator WebSocket duration 24 分钟。有效 WebSocket duration 取 operator bound 与官方 adapter bound 的较小值。
 
-Host 在 request body、resolver 或 provider I/O 前注册 watchdog。SSE request 在完成有界 body admission 后，把同一个 lease 从 request pool 原子 transfer 到 stream pool，不会同时占用两个 permit。正常完成可以提前 release；如果 workerd 没有投递 mid-response `AbortSignal`、stream cancellation 或 socket teardown，幂等 deadline 仍是最终 release/abort owner。SSE 必须看到 protocol terminal event（`response.completed`、`response.incomplete`、`response.failed`、`error` 或 Chat Completions `[DONE]`）；terminal event 前 EOF 是错误。Terminal frame 会在 stream permit 分别记录 `completed`、`provider_incomplete`、`provider_failed` 或 `provider_error` 前原样转发。Semantic terminal event 或 tenant cancellation 还会独立 abort provider fetch，不依赖 stream cancellation 能否传递。Provider I/O 可能产生 side effect 后，WDL 不做隐式 inference retry。
+Host 在 request body、resolver 或 provider I/O 前注册 watchdog。SSE request 在完成有界 body admission 后，把同一个 lease 从 request pool 原子 transfer 到 stream pool，不会同时占用两个 permit。正常完成可以提前 release；如果 workerd 没有投递 mid-response `AbortSignal`、stream cancellation 或 socket teardown，幂等 deadline 仍是最终 release/abort owner。超限的 non-streaming response、被拒绝的 WebSocket handshake body、redirect 和错误的 streaming content type 都会在释放 permit 前 abort provider I/O；body cancellation 只是次级 cleanup signal。SSE 必须看到 protocol terminal event（`response.completed`、`response.incomplete`、`response.failed`、`error` 或 Chat Completions `[DONE]`）；terminal event 前 EOF 是错误。Terminal frame 会在 stream permit 分别记录 `completed`、`provider_incomplete`、`provider_failed` 或 `provider_error` 前原样转发。Semantic terminal event 或 tenant cancellation 还会独立 abort provider fetch，不依赖 stream cancellation 能否传递。Provider I/O 可能产生 side effect 后，WDL 不做隐式 inference retry。
 
 WebSocket text frame 必须是 JSON。WDL 把 model field 固定为已解析的 upstream model，执行 advertised binary-frame support，并传播有界 close code/reason。WDL 将 Gateway 原本视为可重连的 provider-loss close 转换成终止性的 `1013 AI provider connection lost`，因此 Gateway 不会静默替换 provider session。Initial upgrade 还会禁用 Gateway backend replacement，因此 runtime 丢失时 public session 会以 `1012 service restart` 关闭，不会在同一条 client connection 后面创建新的 provider session。WDL 不重连 AI WebSocket，也不恢复 provider session。
 
@@ -166,6 +170,6 @@ Integration 使用仓库内 fake official provider。真实 credential 绝不能
 - 不接受任意 OpenAI-compatible endpoint。新增 provider 必须增加经过 review 的精确 destination adapter 和 conformance test。
 - 没有 managed catalog、平台共享 credential、usage aggregation、billing、quota、distributed fairness 或自动 provider failover。
 - 未实现 `toMarkdown()`、异步 batch inference、background Responses、stored file API、WebRTC、SIP 或自动 tool execution。
-- DeepSeek continuation（`previous_response_id`/conversation state）、stored responses、embeddings 与 WebSocket transport 会被拒绝。
+- DeepSeek non-text input 或 output、continuation（`previous_response_id`/conversation state）、stored responses、embeddings 与 WebSocket transport 会在 provider I/O 前被拒绝。
 - Provider-native warning 与 semantic event 原样透传；WDL 不发明私有 provider event protocol。
 - Durable Object 内的 AI WebSocket 仍是普通 outbound session。DO hibernation 不会让 provider socket durable 或可重连。

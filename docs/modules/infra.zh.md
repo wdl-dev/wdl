@@ -68,7 +68,7 @@ User-runtime、system-runtime 和 do-runtime 使用以下显式 AI runtime limit
 | `AI_REQUEST_MAX_IN_FLIGHT` | `32` | 每个 runtime replica 的 model-list 与 HTTP body-admission 调用；non-streaming call 会一直持有到完成。 |
 | `AI_STREAM_MAX_IN_FLIGHT` | `16` | 每个 runtime replica 在 request-pool body admission 后开放的 SSE stream。 |
 | `AI_WS_MAX_SESSIONS` | `8` | 每个 runtime replica 的开放 provider WebSocket。 |
-| `AI_REQUEST_BUDGET_MS` | `120000` | 非 WebSocket 请求的端到端 deadline。 |
+| `AI_REQUEST_BUDGET_MS` | `120000` | Model-list 与 HTTP setup deadline；non-streaming inference 持续受它约束到完成，SSE 在 response headers 后切换到 stream-duration bound。 |
 | `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | SSE 连续没有 provider byte 的最大间隔。 |
 | `AI_STREAM_MAX_DURATION_MS` | `300000` | SSE 绝对存活时间。 |
 | `AI_WS_HANDSHAKE_BUDGET_MS` | `15000` | Provider WebSocket 握手 deadline。 |

@@ -29,7 +29,7 @@ export const AI_TRANSPORTS = Object.freeze([
 const PROVIDER_KINDS = new Set(AI_PROVIDER_KINDS);
 const PROTOCOLS = new Set(AI_PROTOCOLS);
 const TRANSPORTS = new Set(AI_TRANSPORTS);
-const INPUT_MODALITIES = new Set(["text", "image", "audio"]);
+const INPUT_MODALITIES = new Set(["text", "image", "audio", "file"]);
 const OUTPUT_MODALITIES = new Set(["text", "audio"]);
 const CAPABILITY_KEYS = [
   "functionTools",
@@ -210,14 +210,31 @@ function normalizeModelDescriptor(raw, scope) {
   };
 }
 
-/** @param {string} kind @param {{ protocol: string, transports: string[] }} descriptor @param {string} scope */
-function assertProviderModelSupport(kind, descriptor, scope) {
+/** @param {string} kind @param {{ protocol: string, transports: string[], inputModalities: string[], capabilities: AiCapabilities }} descriptor @param {string} scope */
+function assertProviderRequestSupport(kind, descriptor, scope) {
   if (kind !== "deepseek") return;
   if (descriptor.protocol !== "responses" && descriptor.protocol !== "chat_completions") {
     throw new Error(`${scope}.protocol is not available for provider kind deepseek`);
   }
   if (descriptor.transports.some((transport) => transport !== "http" && transport !== "sse")) {
     throw new Error(`${scope}.transports contains a transport unavailable for provider kind deepseek`);
+  }
+  if (descriptor.inputModalities.length !== 1 || descriptor.inputModalities[0] !== "text") {
+    throw new Error(`${scope}.inputModalities is unavailable for provider kind deepseek`);
+  }
+  if (descriptor.capabilities.previousResponseId) {
+    throw new Error(`${scope}.capabilities.previousResponseId is unavailable for provider kind deepseek`);
+  }
+}
+
+/** @param {string} kind @param {ReturnType<typeof normalizeModelDescriptor>} descriptor @param {string} scope */
+function assertProviderModelSupport(kind, descriptor, scope) {
+  assertProviderRequestSupport(kind, descriptor, scope);
+  if (
+    kind === "deepseek" &&
+    (descriptor.outputModalities.length !== 1 || descriptor.outputModalities[0] !== "text")
+  ) {
+    throw new Error(`${scope}.outputModalities is unavailable for provider kind deepseek`);
   }
 }
 
@@ -324,7 +341,7 @@ export function normalizeAiResolveResponse(raw) {
     ),
     capabilities: normalizeCapabilities(value.capabilities, "resolve response.capabilities"),
   };
-  assertProviderModelSupport(value.kind, descriptor, "resolve response");
+  assertProviderRequestSupport(value.kind, descriptor, "resolve response");
   if (typeof value.destination !== "string" || value.destination.length === 0) {
     throw new Error("resolve response.destination is invalid");
   }

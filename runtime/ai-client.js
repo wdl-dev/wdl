@@ -89,15 +89,25 @@ function aiError(payload, status) {
   const record = payload && typeof payload === "object"
     ? /** @type {Record<string, unknown>} */ (payload)
     : {};
+  const providerError = record.error && typeof record.error === "object" &&
+      !Array.isArray(record.error)
+    ? /** @type {Record<string, unknown>} */ (record.error)
+    : null;
   const message = typeof record.message === "string" && record.message
     ? record.message
+    : typeof providerError?.message === "string" && providerError.message
+      ? providerError.message
     : `AI request failed with status ${status}`;
+  const code = typeof record.error === "string" && record.error
+    ? record.error
+    : typeof providerError?.code === "string" && providerError.code
+      ? providerError.code
+      : typeof providerError?.type === "string" && providerError.type
+        ? providerError.type
+        : "ai_request_failed";
   const error = new Error(message);
   error.name = "AIError";
-  return Object.assign(error, {
-    code: typeof record.error === "string" ? record.error : "ai_request_failed",
-    status,
-  });
+  return Object.assign(error, { code, status });
 }
 
 /** @param {Response} response */
@@ -106,7 +116,7 @@ async function requireOkJson(response) {
   try {
     payload = await responseJson(response);
   } catch {
-    throw aiError(null, response.status);
+    throw aiError(null, response.ok ? 502 : response.status);
   }
   if (!response.ok) throw aiError(payload, response.status);
   return payload;

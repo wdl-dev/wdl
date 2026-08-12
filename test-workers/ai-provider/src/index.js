@@ -189,6 +189,25 @@ export default {
     if (body.stream === true) {
       return eventStream(body, url.pathname.endsWith("/chat/completions") ? "chat" : "responses");
     }
+    if (body.wdl_test_mode === "invalid_json") {
+      return new Response("not json", { status: 200, headers: { "content-type": "text/plain" } });
+    }
+    if (body.wdl_test_mode === "provider_error") {
+      return json({
+        error: {
+          message: "rate limited by fake provider",
+          type: "rate_limit_error",
+          code: "rate_limit_exceeded",
+        },
+      }, 429);
+    }
+    if (body.wdl_test_mode === "file_input") {
+      const file = body.input?.[0]?.content?.[0];
+      if (file?.type !== "input_file" || typeof file.file_url !== "string") {
+        return json({ error: { message: "missing fake file input", type: "invalid_request_error" } }, 400);
+      }
+      return json({ ...responseObject(body), wdl_file_input: file });
+    }
     if (url.pathname.endsWith("/chat/completions")) {
       return json({
         id: "chatcmpl_fake",

@@ -74,7 +74,7 @@ const PROVIDERS = Object.freeze({
           upstreamModel: "gpt-test",
           protocol: "responses",
           transports: ["http", "sse", "responses_websocket"],
-          inputModalities: ["text", "image"],
+          inputModalities: ["text", "image", "file"],
           outputModalities: ["text"],
           capabilities: {
             functionTools: true,
@@ -298,6 +298,55 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   assert.equal(raw.headers["x-ai-provider-request-id"], "fake-provider-generic-request");
   assert.equal(raw.headers["x-request-id"], rawRequestId);
   assert.equal((await readIntegrationJson(raw, 200, "raw AI response")).model, "gpt-test");
+
+  const fileInput = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/file"),
+    200,
+    "Responses file input"
+  );
+  assert.deepEqual(fileInput, {
+    model: "gpt-test",
+    type: "input_file",
+    fileUrl: "https://files.example/input.pdf",
+  });
+
+  const deepSeekFile = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/deepseek-file"),
+    200,
+    "DeepSeek file input rejection"
+  );
+  assert.deepEqual(deepSeekFile, {
+    status: 400,
+    code: "ai_input_modality_unsupported",
+  });
+
+  const malformedModel = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/raw?model=OpenAI%2Fprimary"),
+    400,
+    "malformed raw AI model"
+  );
+  assert.equal(malformedModel.error, "ai_invalid_model");
+
+  assert.deepEqual(await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/invalid-json"),
+    200,
+    "malformed successful AI response"
+  ), {
+    name: "AIError",
+    status: 502,
+    code: "ai_request_failed",
+  });
+
+  assert.deepEqual(await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/provider-error"),
+    200,
+    "OpenAI-compatible provider error"
+  ), {
+    name: "AIError",
+    status: 429,
+    code: "rate_limit_exceeded",
+    message: "rate limited by fake provider",
+  });
 
   const chat = await readIntegrationJson(
     await gatewayFetch(ns, "/ai/chat"),
@@ -666,8 +715,8 @@ test("AI WebSocket terminates instead of replacing its provider session after ru
     });
   } finally {
     response.socket.destroy();
+    composeUp(["--wait", "user-runtime"], { stdio: "pipe" });
   }
-  composeUp(["--wait", "user-runtime"], { stdio: "pipe" });
   await waitUntil("user-runtime available after AI WebSocket replacement", async () => {
     try {
       return (await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary")).status === 200;
@@ -689,8 +738,8 @@ test("DO AI WebSocket terminates instead of replacing its provider session after
     });
   } finally {
     response.socket.destroy();
+    await recreateDoSingleRuntime();
   }
-  await recreateDoSingleRuntime();
 });
 
 test("official OpenAI SDK uses the AI Fetcher for Responses JSON, SSE, and cancellation", async () => {

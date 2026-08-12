@@ -64,6 +64,8 @@ The persisted bundle shape is:
 
 Provider selection is part of the model id passed by tenant code, not Wrangler
 configuration. Model ids use `<provider>/<alias>`, for example `openai/primary`.
+Malformed public model ids fail host admission with `400 ai_invalid_model` before
+resolver or provider I/O.
 
 ### Tenant facade
 
@@ -99,8 +101,14 @@ that same header is exposed as `x-ai-provider-request-id` instead.
 
 `run()` forwards native provider request and response fields. Function tools,
 structured output, reasoning fields, provider tools, and multimodal inputs therefore
-remain usable when the selected provider/model supports them. WDL does not execute
-tools, validate tool arguments, or automatically continue an agent loop.
+remain usable when the selected provider/model supports them. Input modalities include
+text, image, audio, and direct Responses file items; WDL does not provide provider file
+upload or lifecycle APIs. WDL does not execute tools, validate tool arguments, or
+automatically continue an agent loop.
+Successful responses that cannot be decoded as JSON fail `run()` with an `AIError`
+whose status is `502`. For non-success responses, `run()` preserves the bounded
+OpenAI-compatible provider message and string code, falling back to the provider type
+when no code exists. `fetch()` remains the raw-response escape hatch.
 
 The official OpenAI JavaScript SDK works for JSON, SSE, and cancellation with
 `baseURL: "https://ai.wdl/v1"`, any non-empty placeholder API key, and
@@ -198,6 +206,9 @@ request atomically transfers its lease from the request pool to the stream pool 
 bounded body admission; it never holds both permits. Normal completion can release
 early; an idempotent deadline remains the final release/abort owner if workerd does not
 deliver a mid-response `AbortSignal`, stream cancellation, or socket teardown.
+Oversized non-streaming responses, rejected WebSocket handshake bodies, redirects, and
+invalid streaming content types abort provider I/O before releasing their permit; body
+cancellation is only a secondary cleanup signal.
 SSE requires a protocol terminal event (`response.completed`, `response.incomplete`,
 `response.failed`, `error`, or Chat Completions `[DONE]`); EOF before that event is an
 error. Terminal frames are forwarded unchanged before the stream permit records
@@ -289,8 +300,9 @@ committed or printed by test output.
   distributed fairness, or automatic provider failover exists.
 - No `toMarkdown()`, asynchronous batch inference, background Responses, stored file
   APIs, WebRTC, SIP, or automatic tool execution is implemented.
-- DeepSeek continuation (`previous_response_id`/conversation state), stored responses,
-  embeddings, and WebSocket transports are rejected.
+- DeepSeek non-text input or output, continuation (`previous_response_id`/conversation
+  state), stored responses, embeddings, and WebSocket transports are rejected before
+  provider I/O.
 - Provider-native warnings and semantic events pass through; WDL does not invent a
   private provider event protocol.
 - An AI WebSocket inside a Durable Object is an ordinary outbound session. DO

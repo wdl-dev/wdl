@@ -121,7 +121,7 @@ are checked against that owner:
 | `AI_REQUEST_MAX_IN_FLIGHT` | `32` | Model-list and HTTP body-admission calls per runtime replica; non-streaming calls remain here through completion. |
 | `AI_STREAM_MAX_IN_FLIGHT` | `16` | Open SSE streams after request-pool body admission per runtime replica. |
 | `AI_WS_MAX_SESSIONS` | `8` | Open provider WebSockets per runtime replica. |
-| `AI_REQUEST_BUDGET_MS` | `120000` | End-to-end non-WebSocket request deadline. |
+| `AI_REQUEST_BUDGET_MS` | `120000` | Model-list and HTTP setup deadline; non-streaming inference remains covered through completion, while SSE switches to its stream-duration bound after response headers. |
 | `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | Maximum SSE interval with no provider bytes. |
 | `AI_STREAM_MAX_DURATION_MS` | `300000` | Absolute SSE lifetime. |
 | `AI_WS_HANDSHAKE_BUDGET_MS` | `15000` | Provider WebSocket handshake deadline. |

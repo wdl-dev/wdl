@@ -230,7 +230,10 @@ fn validate_protocol_transports(protocol: &Protocol, transports: &[Transport]) -
 
 fn validate_descriptor(descriptor: &ModelDescriptor) -> bool {
     if !validate_upstream_model(&descriptor.upstream_model)
-        || !validate_string_set(&descriptor.input_modalities, &["audio", "image", "text"])
+        || !validate_string_set(
+            &descriptor.input_modalities,
+            &["audio", "file", "image", "text"],
+        )
         || !validate_string_set(&descriptor.output_modalities, &["audio", "text"])
     {
         return false;
@@ -256,6 +259,10 @@ fn provider_supports_protocol(
 
 fn provider_supports_descriptor(kind: &ProviderKind, descriptor: &ModelDescriptor) -> bool {
     provider_supports_protocol(kind, &descriptor.protocol, &descriptor.transports)
+        && (!matches!(kind, ProviderKind::Deepseek)
+            || (descriptor.input_modalities == ["text"]
+                && descriptor.output_modalities == ["text"]
+                && !descriptor.capabilities.previous_response_id))
 }
 
 fn transport_order(value: &Transport) -> u8 {
@@ -596,7 +603,7 @@ mod tests {
                         && validate_protocol_transports(&response.protocol, &transports)
                         && validate_string_set(
                             &response.input_modalities,
-                            &["audio", "image", "text"],
+                            &["audio", "file", "image", "text"],
                         )
                         && !response.destination.is_empty()
                         && validate_credential(&response.credential).is_ok()
@@ -622,7 +629,7 @@ mod tests {
                                 && validate_protocol_transports(&model.protocol, &model.transports)
                                 && validate_string_set(
                                     &model.input_modalities,
-                                    &["audio", "image", "text"],
+                                    &["audio", "file", "image", "text"],
                                 )
                                 && validate_string_set(&model.output_modalities, &["audio", "text"])
                         })
