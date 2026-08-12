@@ -98,6 +98,12 @@ export const ROUTES_FLUSH_CHANNEL = "routes:flush";
 export const PATTERNS_CHANNEL = "patterns:invalidate";
 export const SESSION_POLICY_CHANNEL = "session-policy:restart";
 export const WORKER_DELETE_CHANNEL = "worker:delete";
+
+// Initial backend upgrades can opt one public WebSocket session out of
+// Gateway's transparent backend replacement. Gateway strips this internal
+// response header before returning the public 101.
+export const WEBSOCKET_RECONNECT_POLICY_HEADER = "x-wdl-websocket-reconnect-policy";
+export const WEBSOCKET_RECONNECT_POLICY_DISABLED = "disabled";
 const HOSTS_PREFIX = "hosts:";
 const NS_HOSTS_PREFIX = "ns-hosts:";
 const HOST_DECLARATIONS_PREFIX = "host-declarations:";

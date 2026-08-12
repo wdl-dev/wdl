@@ -17,7 +17,10 @@ const ALLOWED_PATHS = Object.freeze({
 function json(data, status = 200) {
   return Response.json(data, {
     status,
-    headers: { "openai-request-id": "fake-provider-request" },
+    headers: {
+      "openai-request-id": "fake-provider-request",
+      "x-request-id": "fake-provider-generic-request",
+    },
   });
 }
 
@@ -101,6 +104,10 @@ function websocket(request, url, credentialGeneration) {
       return;
     }
     if (url.pathname === "/v1/responses" && message.type === "response.create") {
+      if (message.wdl_test_mode === "provider_loss") {
+        server.close(1001, "provider restart");
+        return;
+      }
       if (message.model === "gpt-test-rotated" && credentialGeneration !== "rotated") {
         server.close(1008, "stale fake credential");
         return;

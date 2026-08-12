@@ -10,11 +10,22 @@ import {
   isValidAiModelAlias,
   isValidAiProviderName,
 } from "../../shared/ns-pattern.js";
+import { expectedAiProviderDestination } from "../../runtime/bindings/ai-provider.js";
 
 /**
  * @typedef {{ name: string, valid: boolean, value: Record<string, unknown> }} AiContractCase
  * @typedef {{
+ *   limits: {
+ *     providerMaxCount: number,
+ *     modelsPerProviderMax: number,
+ *     namespaceModelMaxCount: number,
+ *     providerRecordMaxBytes: number,
+ *     upstreamModelMaxBytes: number,
+ *     credentialMaxBytes: number,
+ *   },
  *   aliases: Array<{ value: string, provider: boolean, model: boolean }>,
+ *   upstreamModels: Array<{ name: string, json: string, valid: boolean }>,
+ *   destinations: Array<{ kind: string, protocol: string, transport: string, destination: string | null }>,
  *   providerRecords: AiContractCase[],
  *   resolveRequests: AiContractCase[],
  *   modelsRequests: AiContractCase[],
@@ -30,10 +41,50 @@ const aiContract = await importRepositoryModule("shared/ai-contract.js", importS
   "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
 }));
 
+test("AI persisted limits match the cross-language fixture", () => {
+  assert.deepEqual(fixture.limits, {
+    providerMaxCount: aiContract.AI_PROVIDER_MAX_COUNT,
+    modelsPerProviderMax: aiContract.AI_MODELS_PER_PROVIDER_MAX,
+    namespaceModelMaxCount: aiContract.AI_NAMESPACE_MODEL_MAX_COUNT,
+    providerRecordMaxBytes: aiContract.AI_PROVIDER_RECORD_MAX_BYTES,
+    upstreamModelMaxBytes: aiContract.AI_UPSTREAM_MODEL_MAX_BYTES,
+    credentialMaxBytes: aiContract.AI_CREDENTIAL_MAX_BYTES,
+  });
+});
+
 test("AI aliases match the cross-language fixture", () => {
   for (const item of fixture.aliases) {
     assert.equal(isValidAiProviderName(item.value), item.provider, item.value);
     assert.equal(isValidAiModelAlias(item.value), item.model, item.value);
+  }
+});
+
+test("AI official destinations match the cross-language fixture", () => {
+  const protocolTransports = {
+    responses: ["http", "sse", "responses_websocket"],
+    chat_completions: ["http", "sse"],
+    embeddings: ["http"],
+    realtime: ["realtime_websocket"],
+  };
+  const expectedCases = new Set();
+  for (const kind of aiContract.AI_PROVIDER_KINDS) {
+    for (const [protocol, transports] of Object.entries(protocolTransports)) {
+      for (const transport of transports) expectedCases.add(`${kind}/${protocol}/${transport}`);
+    }
+  }
+  assert.deepEqual(
+    new Set(fixture.destinations.map(
+      ({ kind, protocol, transport }) => `${kind}/${protocol}/${transport}`
+    )),
+    expectedCases,
+    "destination fixture must cover every legal provider/protocol/transport combination"
+  );
+  for (const item of fixture.destinations) {
+    assert.equal(
+      expectedAiProviderDestination(item.kind, item.protocol, item.transport),
+      item.destination,
+      `${item.kind}/${item.protocol}/${item.transport}`
+    );
   }
 });
 
@@ -52,6 +103,24 @@ test("AI provider records match the cross-language fixture", () => {
     } else {
       assert.throws(parse, Error, item.name);
     }
+  }
+});
+
+test("AI upstream model strings match the cross-language fixture", () => {
+  for (const item of fixture.upstreamModels) {
+    const upstreamModel = JSON.parse(item.json);
+    const parse = () => aiContract.normalizeAiProviderWrite({
+      kind: "openai",
+      models: {
+        primary: {
+          upstreamModel,
+          protocol: "responses",
+          transports: ["http"],
+        },
+      },
+    }, "0".repeat(32));
+    if (item.valid) assert.equal(parse().models.primary.upstreamModel, upstreamModel, item.name);
+    else assert.throws(parse, Error, item.name);
   }
 });
 

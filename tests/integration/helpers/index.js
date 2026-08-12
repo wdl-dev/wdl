@@ -1,7 +1,7 @@
 export { ADMIN_HOST_HEADER, ADMIN_TOKEN, ASSETS_CDN_BASE, CONTROL_URL, GATEWAY_HOST, GATEWAY_PORT, ROOT, S3MOCK_HOST, S3MOCK_PORT, WDL_CLI_BIN } from "./env.js";
 export { assertNotStatus, assertStatus, assertStatusIn } from "./assertions.js";
 export { assertOk, sh, runWdlCli } from "./cli.js";
-export { composeExec, composeProfileUp, composeRecreate, composeRestart, composeScale, composeStart, composeStop, composeUp, runProbeNode, runProbeNodeAsync, withServiceStopped } from "./compose.js";
+export { composeExec, composeKill, composeProfileUp, composeRecreate, composeRestart, composeScale, composeStart, composeStop, composeUp, runProbeNode, runProbeNodeAsync, withServiceStopped } from "./compose.js";
 export { ensureD1SingleRuntime, ensureDoSingleRuntime, recreateD1MultiRuntimes, recreateDoMultiRuntimes, recreateDoSingleRuntime, restartDoSingleRuntime, startDoOwnerTask, stopD1MultiRuntimes, stopDoMultiRuntimes, stopDoOwnerTask, withDoMultiRuntimes, withDoOwnerTask } from "./runtimes.js";
 export { envoyStat, internalHttpRequest, runtimeDispatchPost, runtimeInternalGet, runtimeInternalGetWithHeaders, runtimeInternalPost, schedulerMetricsText, serviceInternalGet, serviceInternalPost, serviceInternalPostAsync, serviceInternalPostLarge, systemRuntimeInternalPost } from "./internal-http.js";
 export { encodeClientBinaryFrame, encodeClientCloseFrame, encodeClientCloseFrameWithoutStatus, encodeClientTextFrame, frameJson, hostWsHandshake, readJsonServerFrame, readOneServerBinaryFrame, readOneServerCloseFrame, readOneServerTextFrame, serviceWebSocketRoundTrip, wsHandshake } from "./websocket.js";

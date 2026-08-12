@@ -7,6 +7,8 @@ import {
   adminFetch,
   adminPut,
   assertStatus,
+  composeKill,
+  composeUp,
   deployAndPromote,
   encodeClientBinaryFrame,
   encodeClientCloseFrame,
@@ -18,6 +20,7 @@ import {
   readOneServerBinaryFrame,
   readOneServerCloseFrame,
   readOneServerTextFrame,
+  recreateDoSingleRuntime,
   serviceInternalGet,
   setupIntegrationSuite,
   uniqueNs,
@@ -39,6 +42,7 @@ const AI_OPENAI_SDK_WORKER = buildSync({
   platform: "browser",
   target: "es2025",
   conditions: ["worker", "browser"],
+  external: ["cloudflare:workers"],
   write: false,
 }).outputFiles[0].text;
 
@@ -208,10 +212,28 @@ function runtimeReleaseCount(pool) {
     "idle_timeout",
     "provider_closed",
     "provider_error",
+    "provider_failed",
+    "provider_incomplete",
     "stream_error",
   ].reduce((total, outcome) =>
     total + runtimeAiMetric("wdl_ai_pool_events_total", pool, outcome), 0);
 }
+
+test("AI provider control rejects non-well-formed upstream model identifiers", async () => {
+  const ns = uniqueNs("ai-provider-unicode");
+  const response = await adminPut(`/ns/${ns}/ai/providers/openai`, {
+    kind: "openai",
+    models: {
+      primary: {
+        upstreamModel: JSON.parse('"\\ud800"'),
+        protocol: "responses",
+        transports: ["http"],
+      },
+    },
+  });
+  assertStatus(response, 400, "non-well-formed AI upstream model");
+  assert.equal(response.json.error, "invalid_ai_provider");
+});
 
 /** @param {import("node:net").Socket} socket @param {string} label */
 async function readAiCloseFrame(socket, label) {
@@ -268,8 +290,13 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
     assert.equal(response.status, "completed");
   }
 
-  const raw = await gatewayFetch(ns, "/ai/raw");
+  const rawRequestId = "ai-binding-integration-request";
+  const raw = await gatewayFetch(ns, "/ai/raw", {
+    headers: { "x-request-id": rawRequestId },
+  });
   assert.equal(raw.headers["openai-request-id"], "fake-provider-request");
+  assert.equal(raw.headers["x-ai-provider-request-id"], "fake-provider-generic-request");
+  assert.equal(raw.headers["x-request-id"], rawRequestId);
   assert.equal((await readIntegrationJson(raw, 200, "raw AI response")).model, "gpt-test");
 
   const chat = await readIntegrationJson(
@@ -607,6 +634,65 @@ test("AI binding bridges agent and Realtime WebSockets with bounded lifecycle", 
   { timeoutMs: 10_000, intervalMs: 100 });
 });
 
+test("AI provider loss terminates the public WebSocket without Gateway session reset", async () => {
+  const { ns } = await setupAiNamespace("ai-ws-provider-loss");
+  const response = await wsHandshake(ns, "/ai/responses-ws-provider-loss");
+  try {
+    assertStatus(response, 101, "provider-loss Responses WebSocket upgrade");
+    response.socket.write(encodeClientTextFrame(JSON.stringify({
+      type: "response.create",
+      input: "provider loss",
+      wdl_test_mode: "provider_loss",
+    })));
+    assert.deepEqual(await readOneServerCloseFrame(response.socket), {
+      code: 1013,
+      reason: "AI provider connection lost",
+    });
+  } finally {
+    response.socket.destroy();
+  }
+});
+
+test("AI WebSocket terminates instead of replacing its provider session after runtime loss", async () => {
+  const { ns } = await setupAiNamespace("ai-ws-runtime-loss");
+  const response = await wsHandshake(ns, "/ai/responses-ws");
+  try {
+    assertStatus(response, 101, "runtime-loss Responses WebSocket upgrade");
+    assert.equal(response.headers["x-wdl-websocket-reconnect-policy"], undefined);
+    composeKill("user-runtime");
+    assert.deepEqual(await readOneServerCloseFrame(response.socket, { timeoutMs: 10_000 }), {
+      code: 1012,
+      reason: "service restart",
+    });
+  } finally {
+    response.socket.destroy();
+  }
+  composeUp(["--wait", "user-runtime"], { stdio: "pipe" });
+  await waitUntil("user-runtime available after AI WebSocket replacement", async () => {
+    try {
+      return (await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary")).status === 200;
+    } catch {
+      return false;
+    }
+  }, { timeoutMs: 10_000, intervalMs: 100 });
+});
+
+test("DO AI WebSocket terminates instead of replacing its provider session after do-runtime loss", async () => {
+  const { ns } = await setupAiNamespace("ai-do-ws-runtime-loss");
+  const response = await wsHandshake(ns, "/ai/do/responses-ws?name=runtime-loss");
+  try {
+    assertStatus(response, 101, "DO runtime-loss Responses WebSocket upgrade");
+    composeKill("do-runtime");
+    assert.deepEqual(await readOneServerCloseFrame(response.socket, { timeoutMs: 10_000 }), {
+      code: 1012,
+      reason: "service restart",
+    });
+  } finally {
+    response.socket.destroy();
+  }
+  await recreateDoSingleRuntime();
+});
+
 test("official OpenAI SDK uses the AI Fetcher for Responses JSON, SSE, and cancellation", async () => {
   const ns = uniqueNs("ai-openai-sdk");
   const created = await adminPut("/ns/" + ns + "/ai/providers/openai", PROVIDERS.openai.record);
@@ -621,6 +707,16 @@ test("official OpenAI SDK uses the AI Fetcher for Responses JSON, SSE, and cance
     modules: { "worker.js": AI_OPENAI_SDK_WORKER },
     compatibilityDate: "2026-08-11",
     bindings: { AI: { type: "ai" } },
+  });
+
+  const surface = await readIntegrationJson(
+    await gatewayFetch(ns, "/sdk/surface"),
+    200,
+    "AI-only facade surface"
+  );
+  assert.deepEqual(surface, {
+    handler: { fetch: "function", run: "function", models: "function" },
+    imported: { fetch: "function", run: "function", models: "function" },
   });
 
   const json = await readIntegrationJson(

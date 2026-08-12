@@ -150,8 +150,8 @@ Tail 是 live debug 路径，不是 audit storage。Tail protocol 细节见 [Log
 - `tests/integration/cli-workers-dev-optout.test.js`
 - `tests/integration/log-tail.test.js`
 - `tests/integration/pages-assets-demo.test.js`
-
-CLI 仓库负责 `[ai]` parsing、extension stripping、provider command tests 和 `examples/ai-agent-demo` packaging path；平台侧 runtime/Control 合同由 `tests/integration/ai-binding.test.js` 保护。
 - `tests/integration/r2-cli-binding.test.js`
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`
+
+CLI 仓库负责 `[ai]` parsing、extension stripping、provider command tests 和 `examples/ai-agent-demo` packaging path；平台侧 runtime/Control 合同由 `tests/integration/ai-binding.test.js` 保护。

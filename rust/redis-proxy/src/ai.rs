@@ -89,7 +89,6 @@ struct ProviderRecord {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolveRequest {
     ns: String,
-    binding: String,
     model: String,
     protocol: Protocol,
     transport: Transport,
@@ -99,7 +98,6 @@ pub(crate) struct ResolveRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ModelsRequest {
     ns: String,
-    binding: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -107,7 +105,6 @@ pub(crate) struct ModelsRequest {
 pub(crate) struct ResolveResponse {
     provider: String,
     alias: String,
-    revision: String,
     kind: ProviderKind,
     upstream_model: String,
     protocol: Protocol,
@@ -115,7 +112,6 @@ pub(crate) struct ResolveResponse {
     destination: String,
     credential: String,
     input_modalities: Vec<String>,
-    output_modalities: Vec<String>,
     capabilities: Capabilities,
 }
 
@@ -123,11 +119,6 @@ pub(crate) struct ResolveResponse {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ModelListEntry {
     id: String,
-    provider: String,
-    alias: String,
-    revision: String,
-    kind: ProviderKind,
-    upstream_model: String,
     protocol: Protocol,
     transports: Vec<Transport>,
     input_modalities: Vec<String>,
@@ -155,16 +146,6 @@ fn providers_key(ns: &str) -> String {
 
 fn credentials_key(ns: &str) -> String {
     format!("ai:provider-credentials:{ns}")
-}
-
-fn valid_binding(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    value.len() <= 64
-        && (first.is_ascii_alphabetic() || first == '_' || first == '$')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
 
 fn valid_provider_alias(value: &str) -> bool {
@@ -197,12 +178,9 @@ fn split_model_reference(model: &str) -> AppResult<(&str, &str)> {
     Ok((provider, alias))
 }
 
-fn validate_request_identity(ns: &str, binding: &str) -> AppResult<()> {
+fn validate_request_identity(ns: &str) -> AppResult<()> {
     if !is_valid_runtime_load_ns(ns) {
         return Err(AppError::bad_request("invalid AI namespace"));
-    }
-    if !valid_binding(binding) {
-        return Err(AppError::bad_request("invalid AI binding name"));
     }
     Ok(())
 }
@@ -228,15 +206,12 @@ fn validate_string_set(values: &[String], allowed: &[&str]) -> bool {
         && values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
-fn validate_descriptor(descriptor: &ModelDescriptor) -> bool {
-    if descriptor.upstream_model.is_empty()
-        || descriptor.upstream_model.len() > AI_UPSTREAM_MODEL_MAX_BYTES
-        || !validate_string_set(&descriptor.input_modalities, &["audio", "image", "text"])
-        || !validate_string_set(&descriptor.output_modalities, &["audio", "text"])
-    {
-        return false;
-    }
-    let allowed = match descriptor.protocol {
+fn validate_upstream_model(value: &str) -> bool {
+    !value.is_empty() && value.len() <= AI_UPSTREAM_MODEL_MAX_BYTES
+}
+
+fn validate_protocol_transports(protocol: &Protocol, transports: &[Transport]) -> bool {
+    let allowed = match protocol {
         Protocol::Responses => &[
             Transport::Http,
             Transport::Sse,
@@ -246,30 +221,41 @@ fn validate_descriptor(descriptor: &ModelDescriptor) -> bool {
         Protocol::Embeddings => &[Transport::Http][..],
         Protocol::Realtime => &[Transport::RealtimeWebsocket][..],
     };
-    !descriptor.transports.is_empty()
-        && descriptor
-            .transports
-            .iter()
-            .all(|value| allowed.contains(value))
-        && descriptor
-            .transports
+    !transports.is_empty()
+        && transports.iter().all(|value| allowed.contains(value))
+        && transports
             .windows(2)
             .all(|pair| transport_order(&pair[0]) < transport_order(&pair[1]))
 }
 
-fn provider_supports_descriptor(kind: &ProviderKind, descriptor: &ModelDescriptor) -> bool {
+fn validate_descriptor(descriptor: &ModelDescriptor) -> bool {
+    if !validate_upstream_model(&descriptor.upstream_model)
+        || !validate_string_set(&descriptor.input_modalities, &["audio", "image", "text"])
+        || !validate_string_set(&descriptor.output_modalities, &["audio", "text"])
+    {
+        return false;
+    }
+    validate_protocol_transports(&descriptor.protocol, &descriptor.transports)
+}
+
+fn provider_supports_protocol(
+    kind: &ProviderKind,
+    protocol: &Protocol,
+    transports: &[Transport],
+) -> bool {
     match kind {
         ProviderKind::Openai | ProviderKind::Xai => true,
         ProviderKind::Deepseek => {
-            matches!(
-                descriptor.protocol,
-                Protocol::Responses | Protocol::ChatCompletions
-            ) && descriptor
-                .transports
-                .iter()
-                .all(|transport| matches!(transport, Transport::Http | Transport::Sse))
+            matches!(protocol, Protocol::Responses | Protocol::ChatCompletions)
+                && transports
+                    .iter()
+                    .all(|transport| matches!(transport, Transport::Http | Transport::Sse))
         }
     }
+}
+
+fn provider_supports_descriptor(kind: &ProviderKind, descriptor: &ModelDescriptor) -> bool {
+    provider_supports_protocol(kind, &descriptor.protocol, &descriptor.transports)
 }
 
 fn transport_order(value: &Transport) -> u8 {
@@ -382,7 +368,7 @@ pub(crate) async fn resolve(
     State(state): State<AppState>,
     Json(request): Json<ResolveRequest>,
 ) -> AppResult<Json<ResolveResponse>> {
-    validate_request_identity(&request.ns, &request.binding)?;
+    validate_request_identity(&request.ns)?;
     let (provider, alias) = split_model_reference(&request.model)?;
     let providers_key = providers_key(&request.ns);
     let credentials_key = credentials_key(&request.ns);
@@ -441,7 +427,6 @@ pub(crate) async fn resolve(
     Ok(Json(ResolveResponse {
         provider: provider.to_string(),
         alias: alias.to_string(),
-        revision: record.revision,
         kind: record.kind,
         upstream_model: descriptor.upstream_model.clone(),
         protocol: request.protocol,
@@ -449,7 +434,6 @@ pub(crate) async fn resolve(
         destination: resolved_destination,
         credential,
         input_modalities: descriptor.input_modalities.clone(),
-        output_modalities: descriptor.output_modalities.clone(),
         capabilities: descriptor.capabilities.clone(),
     }))
 }
@@ -458,7 +442,7 @@ pub(crate) async fn models(
     State(state): State<AppState>,
     Json(request): Json<ModelsRequest>,
 ) -> AppResult<Json<ModelsResponse>> {
-    validate_request_identity(&request.ns, &request.binding)?;
+    validate_request_identity(&request.ns)?;
     let providers_key = providers_key(&request.ns);
     let credentials_key = credentials_key(&request.ns);
     let (raw_providers, credential_names): (BTreeMap<String, Vec<u8>>, Vec<String>) = state
@@ -505,11 +489,6 @@ pub(crate) async fn models(
         for (alias, descriptor) in record.models {
             entries.push(ModelListEntry {
                 id: format!("{provider}/{alias}"),
-                provider: provider.clone(),
-                alias,
-                revision: record.revision.clone(),
-                kind: record.kind.clone(),
-                upstream_model: descriptor.upstream_model,
                 protocol: descriptor.protocol,
                 transports: descriptor.transports,
                 input_modalities: descriptor.input_modalities,
@@ -532,6 +511,19 @@ mod tests {
         let fixture: Value =
             serde_json::from_str(include_str!("../../../tests/fixtures/ai-contract.json"))
                 .expect("AI contract fixture parses");
+        let limits = &fixture["limits"];
+        assert_eq!(limits["providerMaxCount"], AI_PROVIDER_MAX_COUNT);
+        assert_eq!(limits["modelsPerProviderMax"], AI_MODELS_PER_PROVIDER_MAX);
+        assert_eq!(
+            limits["namespaceModelMaxCount"],
+            AI_NAMESPACE_MODEL_MAX_COUNT
+        );
+        assert_eq!(
+            limits["providerRecordMaxBytes"],
+            AI_PROVIDER_RECORD_MAX_BYTES
+        );
+        assert_eq!(limits["upstreamModelMaxBytes"], AI_UPSTREAM_MODEL_MAX_BYTES);
+        assert_eq!(limits["credentialMaxBytes"], AI_CREDENTIAL_MAX_BYTES);
         for item in fixture["aliases"].as_array().unwrap() {
             let value = item["value"].as_str().unwrap();
             assert_eq!(
@@ -545,6 +537,31 @@ mod tests {
                 "{value}"
             );
         }
+        for item in fixture["upstreamModels"].as_array().unwrap() {
+            let parsed = serde_json::from_str::<String>(item["json"].as_str().unwrap())
+                .ok()
+                .filter(|value| validate_upstream_model(value));
+            assert_eq!(
+                parsed.is_some(),
+                item["valid"].as_bool().unwrap(),
+                "{}",
+                item["name"]
+            );
+        }
+        for item in fixture["destinations"].as_array().unwrap() {
+            let kind = serde_json::from_value::<ProviderKind>(item["kind"].clone()).unwrap();
+            let protocol = serde_json::from_value::<Protocol>(item["protocol"].clone()).unwrap();
+            let transport = serde_json::from_value::<Transport>(item["transport"].clone()).unwrap();
+            let actual = destination(&kind, &protocol, &transport).ok();
+            assert_eq!(
+                actual.as_deref(),
+                item["destination"].as_str(),
+                "{}/{}/{}",
+                item["kind"],
+                item["protocol"],
+                item["transport"]
+            );
+        }
         for item in fixture["providerRecords"].as_array().unwrap() {
             let valid = serde_json::from_value::<ProviderRecord>(item["value"].clone())
                 .ok()
@@ -556,7 +573,7 @@ mod tests {
             let parsed = serde_json::from_value::<ResolveRequest>(item["value"].clone())
                 .map_err(|_| ())
                 .and_then(|request| {
-                    validate_request_identity(&request.ns, &request.binding).map_err(|_| ())?;
+                    validate_request_identity(&request.ns).map_err(|_| ())?;
                     split_model_reference(&request.model).map_err(|_| ())?;
                     Ok(())
                 });
@@ -565,34 +582,29 @@ mod tests {
         for item in fixture["modelsRequests"].as_array().unwrap() {
             let parsed = serde_json::from_value::<ModelsRequest>(item["value"].clone())
                 .map_err(|_| ())
-                .and_then(|request| {
-                    validate_request_identity(&request.ns, &request.binding).map_err(|_| ())
-                });
+                .and_then(|request| validate_request_identity(&request.ns).map_err(|_| ()));
             assert_eq!(parsed.is_ok(), item["valid"].as_bool().unwrap());
         }
         for item in fixture["resolveResponses"].as_array().unwrap() {
             let parsed = serde_json::from_value::<ResolveResponse>(item["value"].clone())
                 .ok()
                 .filter(|response| {
-                    let descriptor = ModelDescriptor {
-                        upstream_model: response.upstream_model.clone(),
-                        protocol: response.protocol.clone(),
-                        transports: vec![response.transport.clone()],
-                        input_modalities: response.input_modalities.clone(),
-                        output_modalities: response.output_modalities.clone(),
-                        capabilities: response.capabilities.clone(),
-                    };
+                    let transports = [response.transport.clone()];
                     valid_provider_alias(&response.provider)
                         && valid_model_alias(&response.alias)
-                        && response.revision.len() == 32
-                        && response
-                            .revision
-                            .bytes()
-                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                        && validate_upstream_model(&response.upstream_model)
+                        && validate_protocol_transports(&response.protocol, &transports)
+                        && validate_string_set(
+                            &response.input_modalities,
+                            &["audio", "image", "text"],
+                        )
                         && !response.destination.is_empty()
                         && validate_credential(&response.credential).is_ok()
-                        && validate_descriptor(&descriptor)
-                        && provider_supports_descriptor(&response.kind, &descriptor)
+                        && provider_supports_protocol(
+                            &response.kind,
+                            &response.protocol,
+                            &transports,
+                        )
                 });
             assert_eq!(parsed.is_some(), item["valid"].as_bool().unwrap());
         }
@@ -606,66 +618,17 @@ mod tests {
                             .windows(2)
                             .all(|pair| pair[0].id < pair[1].id)
                         && response.models.iter().all(|model| {
-                            let descriptor = ModelDescriptor {
-                                upstream_model: model.upstream_model.clone(),
-                                protocol: model.protocol.clone(),
-                                transports: model.transports.clone(),
-                                input_modalities: model.input_modalities.clone(),
-                                output_modalities: model.output_modalities.clone(),
-                                capabilities: model.capabilities.clone(),
-                            };
-                            model.id == format!("{}/{}", model.provider, model.alias)
-                                && valid_provider_alias(&model.provider)
-                                && valid_model_alias(&model.alias)
-                                && model.revision.len() == 32
-                                && model.revision.bytes().all(|byte| {
-                                    byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
-                                })
-                                && validate_descriptor(&descriptor)
-                                && provider_supports_descriptor(&model.kind, &descriptor)
+                            split_model_reference(&model.id).is_ok()
+                                && validate_protocol_transports(&model.protocol, &model.transports)
+                                && validate_string_set(
+                                    &model.input_modalities,
+                                    &["audio", "image", "text"],
+                                )
+                                && validate_string_set(&model.output_modalities, &["audio", "text"])
                         })
                 });
             assert_eq!(parsed.is_some(), item["valid"].as_bool().unwrap());
         }
-    }
-
-    #[test]
-    fn official_adapter_destinations_are_exact() {
-        assert_eq!(
-            destination(
-                &ProviderKind::Openai,
-                &Protocol::Responses,
-                &Transport::Http
-            )
-            .unwrap(),
-            "https://api.openai.com/v1/responses"
-        );
-        assert_eq!(
-            destination(
-                &ProviderKind::Xai,
-                &Protocol::Responses,
-                &Transport::ResponsesWebsocket
-            )
-            .unwrap(),
-            "wss://api.x.ai/v1/responses"
-        );
-        assert_eq!(
-            destination(
-                &ProviderKind::Deepseek,
-                &Protocol::Responses,
-                &Transport::Sse
-            )
-            .unwrap(),
-            "https://api.deepseek.com/responses"
-        );
-        assert!(
-            destination(
-                &ProviderKind::Deepseek,
-                &Protocol::Realtime,
-                &Transport::RealtimeWebsocket
-            )
-            .is_err()
-        );
     }
 
     #[test]

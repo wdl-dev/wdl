@@ -82,6 +82,7 @@ Control 写 Redis 并 publish invalidation。Gateway 不反向调用 control 查
 - WebSocket backend reconnect 有上限，并且 client-frame buffer 有上限。
 - Route 解析后，Gateway 会在同一个 Redis linearization point 读取 route 和 session policy projection。Initial route mismatch 会在 backend upgrade 前返回 `503 gateway_routing_unavailable`；这是有意让 client 在 stale route-cache hit 后重试完整 upgrade，而不是引入第二条 route-resolution path 或 admission 已失效的 immutable version。Upgrade 后的第二次检查构成该 backend 的 active-state admission point。异常 backend loss 后，Gateway 会在 retry 前检查，并在挂接 replacement backend 前再次验证成功的 upgrade；initial/replacement backend socket 在检查期间仍由该 request 持有，因此 terminal lifecycle signal 可以立即关闭它。如果 `preserve` promotion 在这次最终 snapshot 之后才提交，刚 admission 的 backend 仍可继续 drain。Gateway 不会增加跨服务 barrier，也不会逐 frame 执行 lifecycle check。Active route 旁缺失 session policy projection 表示 default `preserve`；route 和 projection 同时缺失表示 worker inactive，initial admission 返回 `503`，已建立 session 以 `1012` 关闭；malformed 或 torn state 会让已建立 session 以 `1011` fail closed。
 - 正常和 application-terminal upstream Close frame 会直接传播，不再读取 lifecycle state。Gateway 仅把 `1001`、synthetic `1006` 和 `1011` 视为可重连 backend-loss signal；protocol/policy/resource close 及应用 `3xxx`/`4xxx` close 会送达 public peer，而不会静默启动新 backend session。可重连 loss 后，只要 active version 未变化，并且 sequence 未变化或当前 projection 为 `preserve`，Gateway 就会透明重连同一个 pinned worker id；active version 变化，或当前 projection 为 `restart` 且 sequence 增长时，Gateway 会以 `1012 service restart` 关闭 public/backend peers。Lifecycle command 带主动关闭 socket 的两秒 deadline。Redis transport failure 和 transient reply code（`BUSY`、`CLUSTERDOWN`、`LOADING`、`MASTERDOWN`、`READONLY`、`TRYAGAIN`）会在配置的 reconnect schedule 内重试；malformed persisted state、非 transient Redis reply error、sequence 回退或 retry 耗尽时，Gateway 才会以 `1011` 关闭两端，不会重连 stale state。
+- Initial backend `101` 可以为无法重建应用状态的 session 设置内部响应头 `x-wdl-websocket-reconnect-policy: disabled`。Gateway 会从公开响应中删除该 header，并在 backend 丢失时以 `1012 service restart` 结束 public session，而不是发起 replacement upgrade。AI Responses 与 Realtime session 使用此策略；普通 Worker 和 Durable Object WebSocket 仍保留有界透明重连。
 - `1012` 关闭会结束应用会话；client 需要重连并重新执行应用握手。Gateway 重置 backend reconnect epoch 时，旧 epoch 下排队的 client message 可能被丢弃，且没有逐帧 ack/nack。
 - Gateway 自有 WebSocket peer 使用 `arraybuffer` 接收二进制消息，使文本帧和二进制帧都能保持原类型转发；tenant WebSocket 代码仍遵循 workerd 的常规 `binaryType` 合同。
 - Client close 和 error event 会同时终止公开 WebSocket pair 与当前 backend socket。Backend Close frame 使用 workerd 默认的 reciprocal Close 处理，不会在正常关闭或重连时留下半开旧 backend socket。无状态码 Close frame 仍保持无状态码；不能出现在 wire 上的异常 close code 会按 `1011` 转发，转发 reason 遵守 WebSocket 的 123-byte UTF-8 上限。
@@ -105,6 +106,7 @@ Gateway 输出包含 request id、route context 和 outcome 的 request log。Me
 ## 部署 / Rollout 注意事项
 
 - 不改变 forwarded header 合同时，gateway 的 route-cache 或 request-parsing 改动可以独立 rolling。
+- AI 等新 backend feature 依赖 terminal provider close propagation 或禁用 backend replacement 前，必须先完成对应 Gateway WebSocket handling rolling。
 - runtime internal socket path 的变化不应通过 gateway path filtering 实现。
 - Route invalidation channel 改动必须与 control 对齐；style-contract 测试会保护这些字面量。
 

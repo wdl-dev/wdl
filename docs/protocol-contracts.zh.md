@@ -26,7 +26,9 @@
 | Redis key 和逻辑 DB split | `docs/redis-key-layout.zh.md` 加共享 key helper |
 | Route 和 pattern projection | `shared/route-projection.js`、`control/routing.js`、`gateway/` |
 | D1 query/facade protocol | `docs/modules/d1.zh.md`、`shared/d1-*`、`d1-runtime/`、runtime D1 binding |
-| AI provider record、resolver snapshot 和 facade protocol | `docs/modules/ai.zh.md`、`shared/ai-contract.js`、`control/handlers/ai.js`、`runtime/bindings/ai.js`、`runtime/ai-client.js`、`rust/redis-proxy/src/ai.rs`、`tests/fixtures/ai-contract.json` |
+| AI provider record 和 resolver snapshot | `docs/modules/ai.zh.md`、`shared/ai-contract.js`、`control/handlers/ai.js`、`rust/redis-proxy/src/ai.rs`、`tests/fixtures/ai-contract.json` |
+| AI tenant/provider HTTP、SSE、WebSocket 和 facade protocol | `docs/modules/ai.zh.md`、`runtime/bindings/ai*.js`、`runtime/ai-client.js` |
+| 内部 WebSocket backend reconnect policy | `docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`gateway/websocket.js` |
 | Durable Object invoke/connect protocol | `docs/modules/durable-objects.zh.md`、`runtime/_wdl-do-transport.js`、`do-runtime/protocol.js` |
 | Session policy projection 和 lifecycle notification | `docs/modules/control-auth.zh.md`、`docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`control/routing.js`、`control/handlers/delete-plan.js`、`gateway/runtime.js`、`gateway/websocket-lifecycle.js`、`do-runtime/owner-registry.js`、`rust/workflows/src/api/do_alarms/dispatch.rs` |
 | Queue、cron、delayed queue record | `docs/modules/queues-cron.zh.md`、`shared/queue-keys.js`、scheduler/proxy Rust modules |

@@ -37,6 +37,7 @@ const source = applyModuleReplacements(readRepositoryFile("control/handlers/ai.j
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(nsPatternUrl)};`],
   [/from "shared-secret-envelope";/, `from ${JSON.stringify(repositoryFileUrl("shared/secret-envelope.js"))};`],
 ]);
+const { AI_CREDENTIAL_MAX_BYTES } = await import(aiContractUrl);
 const { handle } = await import(moduleDataUrl(source));
 
 beforeEach(() => {
@@ -56,6 +57,18 @@ function providerBody(kind = "openai") {
         capabilities: { functionTools: true, structuredOutput: true },
       },
     },
+  };
+}
+
+/** @param {number} count */
+function providerBodyWithModels(count) {
+  const descriptor = providerBody().models.primary;
+  return {
+    kind: "openai",
+    models: Object.fromEntries(Array.from(
+      { length: count },
+      (_, index) => [`model-${index}`, descriptor]
+    )),
   };
 }
 
@@ -151,6 +164,30 @@ test("AI credential rejects values that cannot form a Bearer header", async () =
   assert.equal(redis().hashes.get("ai:provider-credentials:demo")?.openai, undefined);
 });
 
+test("AI credential body budget admits the maximum escaped credential", async () => {
+  const created = await readJsonResponse(
+    await call("PUT", ["providers", "openai"], providerBody()),
+    200
+  );
+  const credential = "\"".repeat(AI_CREDENTIAL_MAX_BYTES);
+  assert.ok(JSON.stringify({
+    revision: created.provider.revision,
+    credential,
+  }).length > 32 * 1024);
+
+  assert.equal((await call("PUT", ["providers", "openai", "credential"], {
+    revision: created.provider.revision,
+    credential,
+  })).status, 200);
+  const encrypted = redis().hashes.get("ai:provider-credentials:demo")?.openai;
+  assert.ok(encrypted);
+  assert.equal(await decryptSecretValue(encrypted, {
+    env,
+    hashKey: "ai:provider-credentials:demo",
+    fieldName: "openai",
+  }), credential);
+});
+
 test("AI provider delete removes metadata and credential while missing delete is idempotent", async () => {
   const created = await readJsonResponse(
     await call("PUT", ["providers", "xai"], providerBody("xai")),
@@ -198,4 +235,25 @@ test("AI provider reader fails closed when persisted aggregate bounds are exceed
   const response = await call("GET", ["providers"]);
   assert.equal(response.status, 500);
   assert.equal((await readJsonResponse(response, 500)).error, "ai_state_corrupt");
+});
+
+test("AI provider writes enforce the namespace provider bound", async () => {
+  for (let index = 0; index < 8; index += 1) {
+    assert.equal((await call("PUT", ["providers", `provider-${index}`], providerBody())).status, 200);
+  }
+  const response = await call("PUT", ["providers", "provider-8"], providerBody());
+  assert.equal((await readJsonResponse(response, 409)).error, "ai_provider_limit");
+  assert.equal(Object.keys(redis().hashes.get("ai:providers:demo") || {}).length, 8);
+});
+
+test("AI provider writes enforce the aggregate namespace model bound", async () => {
+  for (let index = 0; index < 4; index += 1) {
+    assert.equal(
+      (await call("PUT", ["providers", `provider-${index}`], providerBodyWithModels(32))).status,
+      200
+    );
+  }
+  const response = await call("PUT", ["providers", "provider-4"], providerBody());
+  assert.equal((await readJsonResponse(response, 409)).error, "ai_model_limit");
+  assert.equal(Object.keys(redis().hashes.get("ai:providers:demo") || {}).length, 4);
 });

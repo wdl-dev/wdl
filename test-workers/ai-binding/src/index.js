@@ -53,6 +53,9 @@ export class AiProbe extends DurableObject {
     if (url.pathname === "/json") {
       return Response.json(await this.env.AI.run("openai/primary", { input: "from durable object" }));
     }
+    if (url.pathname === "/responses-ws") {
+      return await this.env.AI.run("openai/primary", null, { websocket: true });
+    }
     return new Response("not found", { status: 404 });
   }
 }
@@ -170,6 +173,9 @@ async function handler(request, env) {
     }
   }
   if (url.pathname === "/responses-ws") {
+    return await env.AI.run("openai/primary", null, { websocket: true });
+  }
+  if (url.pathname === "/responses-ws-provider-loss") {
     return await env.AI.run("openai/primary", null, { websocket: true });
   }
   if (url.pathname === "/realtime-ws") {

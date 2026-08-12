@@ -1,5 +1,4 @@
 import {
-  BINDING_NAME_RE,
   isValidAiModelAlias,
   isValidAiProviderName,
   isValidRuntimeLoadNs,
@@ -50,12 +49,11 @@ const MODEL_DESCRIPTOR_KEYS = new Set([
 ]);
 const PROVIDER_RECORD_KEYS = new Set(["revision", "kind", "models"]);
 const PROVIDER_WRITE_KEYS = new Set(["kind", "models"]);
-const RESOLVE_REQUEST_KEYS = new Set(["ns", "binding", "model", "protocol", "transport"]);
-const MODELS_REQUEST_KEYS = new Set(["ns", "binding"]);
+const RESOLVE_REQUEST_KEYS = new Set(["ns", "model", "protocol", "transport"]);
+const MODELS_REQUEST_KEYS = new Set(["ns"]);
 const RESOLVE_RESPONSE_KEYS = new Set([
   "provider",
   "alias",
-  "revision",
   "kind",
   "upstreamModel",
   "protocol",
@@ -63,16 +61,10 @@ const RESOLVE_RESPONSE_KEYS = new Set([
   "destination",
   "credential",
   "inputModalities",
-  "outputModalities",
   "capabilities",
 ]);
 const MODEL_LIST_ENTRY_KEYS = new Set([
   "id",
-  "provider",
-  "alias",
-  "revision",
-  "kind",
-  "upstreamModel",
   "protocol",
   "transports",
   "inputModalities",
@@ -156,37 +148,53 @@ function normalizeCapabilities(raw, scope) {
 }
 
 /** @param {unknown} raw @param {string} scope */
-function normalizeModelDescriptor(raw, scope) {
-  const value = requireRecord(raw, scope);
-  rejectUnknownFields(value, MODEL_DESCRIPTOR_KEYS, scope);
+function normalizeUpstreamModel(raw, scope) {
   if (
-    typeof value.upstreamModel !== "string" ||
-    value.upstreamModel.length === 0 ||
-    utf8Bytes(value.upstreamModel) > AI_UPSTREAM_MODEL_MAX_BYTES
+    typeof raw !== "string" ||
+    raw.length === 0 ||
+    !raw.isWellFormed() ||
+    utf8Bytes(raw) > AI_UPSTREAM_MODEL_MAX_BYTES
   ) {
     throw new Error(
-      `${scope}.upstreamModel must be non-empty and at most ${AI_UPSTREAM_MODEL_MAX_BYTES} UTF-8 bytes`
+      `${scope}.upstreamModel must be well-formed, non-empty, and at most ${AI_UPSTREAM_MODEL_MAX_BYTES} UTF-8 bytes`
     );
   }
-  if (typeof value.protocol !== "string" || !PROTOCOLS.has(value.protocol)) {
+  return raw;
+}
+
+/** @param {unknown} rawProtocol @param {unknown} rawTransports @param {string} scope */
+function normalizeProtocolTransports(rawProtocol, rawTransports, scope) {
+  if (typeof rawProtocol !== "string" || !PROTOCOLS.has(rawProtocol)) {
     throw new Error(`${scope}.protocol is not supported`);
   }
-  const transports = normalizeStringSet(value.transports, TRANSPORTS, `${scope}.transports`);
-  const allowedTransports = value.protocol === "responses"
+  const transports = normalizeStringSet(rawTransports, TRANSPORTS, `${scope}.transports`);
+  const allowedTransports = rawProtocol === "responses"
     ? new Set(["http", "sse", "responses_websocket"])
-    : value.protocol === "chat_completions"
+    : rawProtocol === "chat_completions"
       ? new Set(["http", "sse"])
-      : value.protocol === "embeddings"
+      : rawProtocol === "embeddings"
         ? new Set(["http"])
         : new Set(["realtime_websocket"]);
   for (const transport of transports) {
     if (!allowedTransports.has(transport)) {
-      throw new Error(`${scope}.transports contains ${transport} for protocol ${value.protocol}`);
+      throw new Error(`${scope}.transports contains ${transport} for protocol ${rawProtocol}`);
     }
   }
+  return { protocol: rawProtocol, transports };
+}
+
+/** @param {unknown} raw @param {string} scope */
+function normalizeModelDescriptor(raw, scope) {
+  const value = requireRecord(raw, scope);
+  rejectUnknownFields(value, MODEL_DESCRIPTOR_KEYS, scope);
+  const { protocol, transports } = normalizeProtocolTransports(
+    value.protocol,
+    value.transports,
+    scope
+  );
   return {
-    upstreamModel: value.upstreamModel,
-    protocol: value.protocol,
+    upstreamModel: normalizeUpstreamModel(value.upstreamModel, scope),
+    protocol,
     transports,
     inputModalities: normalizeStringSet(
       value.inputModalities ?? ["text"],
@@ -202,7 +210,7 @@ function normalizeModelDescriptor(raw, scope) {
   };
 }
 
-/** @param {string} kind @param {ReturnType<typeof normalizeModelDescriptor>} descriptor @param {string} scope */
+/** @param {string} kind @param {{ protocol: string, transports: string[] }} descriptor @param {string} scope */
 function assertProviderModelSupport(kind, descriptor, scope) {
   if (kind !== "deepseek") return;
   if (descriptor.protocol !== "responses" && descriptor.protocol !== "chat_completions") {
@@ -274,9 +282,6 @@ export function normalizeAiResolveRequest(raw) {
   const value = requireRecord(raw, "resolve request");
   rejectUnknownFields(value, RESOLVE_REQUEST_KEYS, "resolve request");
   if (!isValidRuntimeLoadNs(value.ns)) throw new Error("resolve request.ns is invalid");
-  if (typeof value.binding !== "string" || !BINDING_NAME_RE.test(value.binding)) {
-    throw new Error("resolve request.binding is invalid");
-  }
   parseAiModelReference(value.model);
   if (typeof value.protocol !== "string" || !PROTOCOLS.has(value.protocol)) {
     throw new Error("resolve request.protocol is not supported");
@@ -286,7 +291,6 @@ export function normalizeAiResolveRequest(raw) {
   }
   return {
     ns: value.ns,
-    binding: value.binding,
     model: value.model,
     protocol: value.protocol,
     transport: value.transport,
@@ -298,10 +302,7 @@ export function normalizeAiModelsRequest(raw) {
   const value = requireRecord(raw, "models request");
   rejectUnknownFields(value, MODELS_REQUEST_KEYS, "models request");
   if (!isValidRuntimeLoadNs(value.ns)) throw new Error("models request.ns is invalid");
-  if (typeof value.binding !== "string" || !BINDING_NAME_RE.test(value.binding)) {
-    throw new Error("models request.binding is invalid");
-  }
-  return { ns: value.ns, binding: value.binding };
+  return { ns: value.ns };
 }
 
 /** @param {unknown} raw */
@@ -310,20 +311,19 @@ export function normalizeAiResolveResponse(raw) {
   rejectUnknownFields(value, RESOLVE_RESPONSE_KEYS, "resolve response");
   if (!isValidAiProviderName(value.provider)) throw new Error("resolve response.provider is invalid");
   if (!isValidAiModelAlias(value.alias)) throw new Error("resolve response.alias is invalid");
-  if (typeof value.revision !== "string" || !AI_PROVIDER_REVISION_RE.test(value.revision)) {
-    throw new Error("resolve response.revision is invalid");
-  }
   if (typeof value.kind !== "string" || !PROVIDER_KINDS.has(value.kind)) {
     throw new Error("resolve response.kind is not supported");
   }
-  const descriptor = normalizeModelDescriptor({
-    upstreamModel: value.upstreamModel,
-    protocol: value.protocol,
-    transports: [value.transport],
-    inputModalities: value.inputModalities,
-    outputModalities: value.outputModalities,
-    capabilities: value.capabilities,
-  }, "resolve response");
+  const descriptor = {
+    upstreamModel: normalizeUpstreamModel(value.upstreamModel, "resolve response"),
+    ...normalizeProtocolTransports(value.protocol, [value.transport], "resolve response"),
+    inputModalities: normalizeStringSet(
+      value.inputModalities ?? ["text"],
+      INPUT_MODALITIES,
+      "resolve response.inputModalities"
+    ),
+    capabilities: normalizeCapabilities(value.capabilities, "resolve response.capabilities"),
+  };
   assertProviderModelSupport(value.kind, descriptor, "resolve response");
   if (typeof value.destination !== "string" || value.destination.length === 0) {
     throw new Error("resolve response.destination is invalid");
@@ -332,7 +332,6 @@ export function normalizeAiResolveResponse(raw) {
   return {
     provider: value.provider,
     alias: value.alias,
-    revision: value.revision,
     kind: value.kind,
     upstreamModel: descriptor.upstreamModel,
     protocol: descriptor.protocol,
@@ -340,7 +339,6 @@ export function normalizeAiResolveResponse(raw) {
     destination: value.destination,
     credential,
     inputModalities: descriptor.inputModalities,
-    outputModalities: descriptor.outputModalities,
     capabilities: descriptor.capabilities,
   };
 }
@@ -350,32 +348,23 @@ function normalizeModelListEntry(raw, scope) {
   const value = requireRecord(raw, scope);
   rejectUnknownFields(value, MODEL_LIST_ENTRY_KEYS, scope);
   if (typeof value.id !== "string") throw new Error(`${scope}.id is invalid`);
-  const reference = parseAiModelReference(value.id);
-  if (value.provider !== reference.provider || value.alias !== reference.alias) {
-    throw new Error(`${scope} identity fields disagree`);
-  }
-  if (typeof value.revision !== "string" || !AI_PROVIDER_REVISION_RE.test(value.revision)) {
-    throw new Error(`${scope}.revision is invalid`);
-  }
-  if (typeof value.kind !== "string" || !PROVIDER_KINDS.has(value.kind)) {
-    throw new Error(`${scope}.kind is not supported`);
-  }
-  const descriptor = normalizeModelDescriptor({
-    upstreamModel: value.upstreamModel,
-    protocol: value.protocol,
-    transports: value.transports,
-    inputModalities: value.inputModalities,
-    outputModalities: value.outputModalities,
-    capabilities: value.capabilities,
-  }, scope);
-  assertProviderModelSupport(value.kind, descriptor, scope);
+  parseAiModelReference(value.id);
+  const descriptor = normalizeProtocolTransports(value.protocol, value.transports, scope);
   return {
     id: value.id,
-    provider: reference.provider,
-    alias: reference.alias,
-    revision: value.revision,
-    kind: value.kind,
-    ...descriptor,
+    protocol: descriptor.protocol,
+    transports: descriptor.transports,
+    inputModalities: normalizeStringSet(
+      value.inputModalities ?? ["text"],
+      INPUT_MODALITIES,
+      `${scope}.inputModalities`
+    ),
+    outputModalities: normalizeStringSet(
+      value.outputModalities ?? ["text"],
+      OUTPUT_MODALITIES,
+      `${scope}.outputModalities`
+    ),
+    capabilities: normalizeCapabilities(value.capabilities, `${scope}.capabilities`),
   };
 }
 

@@ -132,13 +132,13 @@ function materializeR2Binding({ name, spec, ns, ctx }) {
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
-function materializeAiBinding({ name, ns, worker, version, ctx }) {
+function materializeAiBinding({ ns, worker, version, ctx }) {
   if (typeof ctx.exports.AiBinding !== "function") {
     throw new Error("AiBinding runtime binding adapter is not configured");
   }
   return {
     value: ctx.exports.AiBinding({
-      props: { ns, worker, version, binding: name },
+      props: { ns, worker, version },
     }),
   };
 }

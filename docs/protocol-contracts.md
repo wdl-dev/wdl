@@ -35,7 +35,9 @@ Every protocol shape needs one owning module and one current written source:
 | Redis keys and logical DB split | `docs/redis-key-layout.md` plus shared key helpers |
 | Route and pattern projections | `shared/route-projection.js`, `control/routing.js`, `gateway/` |
 | D1 query/facade protocol | `docs/modules/d1.md`, `shared/d1-*`, `d1-runtime/`, runtime D1 binding |
-| AI provider records, resolver snapshots, and facade protocol | `docs/modules/ai.md`, `shared/ai-contract.js`, `control/handlers/ai.js`, `runtime/bindings/ai.js`, `runtime/ai-client.js`, `rust/redis-proxy/src/ai.rs`, `tests/fixtures/ai-contract.json` |
+| AI provider records and resolver snapshots | `docs/modules/ai.md`, `shared/ai-contract.js`, `control/handlers/ai.js`, `rust/redis-proxy/src/ai.rs`, `tests/fixtures/ai-contract.json` |
+| AI tenant/provider HTTP, SSE, WebSocket, and facade protocol | `docs/modules/ai.md`, `runtime/bindings/ai*.js`, `runtime/ai-client.js` |
+| Internal WebSocket backend reconnect policy | `docs/modules/gateway.md`, `shared/worker-contract.js`, `gateway/websocket.js` |
 | Durable Object invoke/connect protocol | `docs/modules/durable-objects.md`, `runtime/_wdl-do-transport.js`, `do-runtime/protocol.js` |
 | Session policy projection and lifecycle notifications | `docs/modules/control-auth.md`, `docs/modules/gateway.md`, `shared/worker-contract.js`, `control/routing.js`, `control/handlers/delete-plan.js`, `gateway/runtime.js`, `gateway/websocket-lifecycle.js`, `do-runtime/owner-registry.js`, `rust/workflows/src/api/do_alarms/dispatch.rs` |
 | Queue, cron, and delayed queue records | `docs/modules/queues-cron.md`, `shared/queue-keys.js`, scheduler/proxy Rust modules |

@@ -50,16 +50,32 @@ export async function recordBindingOperation(_service, _binding, _operation, fn)
   return await fn();
 }
 `);
+const aiSseUrl = repositoryModuleDataUrl("runtime/bindings/ai-sse.js", [
+  [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
+]);
+const aiCapacityUrl = repositoryModuleDataUrl("runtime/bindings/ai-capacity.js", [
+  [/from "shared-ai-runtime-config";/, `from ${JSON.stringify(repositoryFileUrl("shared/ai-runtime-config.js"))};`],
+  [/from "runtime-metrics";/, `from ${JSON.stringify(metricsUrl)};`],
+  [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(runtimeProxyBindingStubUrl())};`],
+]);
+const aiProviderUrl = repositoryModuleDataUrl("runtime/bindings/ai-provider.js");
+const aiWebSocketUrl = repositoryModuleDataUrl("runtime/bindings/ai-websocket.js");
 
 const mod = await importRepositoryModule("runtime/bindings/ai.js", [
   [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
   [/from "shared-ai-contract";/, `from ${JSON.stringify(aiContractUrl)};`],
+  [/from "shared-ai-runtime-config";/, `from ${JSON.stringify(repositoryFileUrl("shared/ai-runtime-config.js"))};`],
   [/from "shared-bounded-body";/, `from ${JSON.stringify(repositoryFileUrl("shared/bounded-body.js"))};`],
   [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
   [/from "shared-internal-auth";/, `from ${JSON.stringify(repositoryFileUrl("shared/internal-auth.js"))};`],
   [/from "shared-observability";/, `from ${JSON.stringify(observabilityUrl)};`],
   [/from "shared-respond";/, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
+  [/from "shared-worker-contract";/, `from ${JSON.stringify(repositoryFileUrl("shared/worker-contract.js"))};`],
   [/from "runtime-metrics";/, `from ${JSON.stringify(metricsUrl)};`],
+  [/from "runtime-bindings-ai-capacity";/, `from ${JSON.stringify(aiCapacityUrl)};`],
+  [/from "runtime-bindings-ai-provider";/, `from ${JSON.stringify(aiProviderUrl)};`],
+  [/from "runtime-bindings-ai-sse";/, `from ${JSON.stringify(aiSseUrl)};`],
+  [/from "runtime-bindings-ai-websocket";/, `from ${JSON.stringify(aiWebSocketUrl)};`],
   [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(runtimeProxyBindingStubUrl())};`],
 ]);
 
@@ -83,9 +99,10 @@ export function resetAiHostTestState() {
 
 /**
  * @param {Record<string, unknown>} [envOverrides]
- * @param {{ ns?: string, worker?: string, version?: string, binding?: string }} [props]
+ * @param {{ ns?: string, worker?: string, version?: string }} [props]
+ * @param {{ waitUntil?: (promise: Promise<unknown>) => void }} [hostOptions]
  */
-export function makeAiBinding(envOverrides = {}, props = {}) {
+export function makeAiBinding(envOverrides = {}, props = {}, hostOptions = {}) {
   /** @type {Promise<unknown>[]} */
   const waitUntilTasks = [];
   const binding = new AiBinding({
@@ -93,9 +110,11 @@ export function makeAiBinding(envOverrides = {}, props = {}) {
       ns: props.ns ?? "demo",
       worker: props.worker ?? "agent",
       version: props.version ?? "v1",
-      binding: props.binding ?? "AI",
     },
-    waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilTasks.push(promise); },
+    waitUntil(/** @type {Promise<unknown>} */ promise) {
+      if (hostOptions.waitUntil) hostOptions.waitUntil(promise);
+      else waitUntilTasks.push(promise);
+    },
   }, {
     SERVICE_NAME: "user-runtime",
     REDIS_PROXY_URL: "http://redis-proxy:8080",
@@ -110,7 +129,6 @@ export function makeAiBinding(envOverrides = {}, props = {}) {
  * @typedef {{
  *   provider: string,
  *   alias: string,
- *   revision: string,
  *   kind: string,
  *   upstreamModel: string,
  *   protocol: string,
@@ -118,7 +136,6 @@ export function makeAiBinding(envOverrides = {}, props = {}) {
  *   destination: string,
  *   credential: string,
  *   inputModalities: string[],
- *   outputModalities: string[],
  *   capabilities: Record<string, boolean>,
  * }} AiTestResolution
  */
@@ -128,7 +145,6 @@ export function openAiResolution(overrides = {}) {
   return {
     provider: "openai",
     alias: "primary",
-    revision: "0123456789abcdef0123456789abcdef",
     kind: "openai",
     upstreamModel: "gpt-test",
     protocol: "responses",
@@ -136,7 +152,6 @@ export function openAiResolution(overrides = {}) {
     destination: "https://api.openai.com/v1/responses",
     credential: "fake-openai-key",
     inputModalities: ["image", "text"],
-    outputModalities: ["text"],
     capabilities: {
       functionTools: true,
       structuredOutput: true,
@@ -151,6 +166,14 @@ export function openAiResolution(overrides = {}) {
 
 /** @param {AiTestResolution} [resolution] */
 export function modelList(resolution = openAiResolution()) {
-  const { credential: _credential, destination: _destination, transport, ...entry } = resolution;
-  return { models: [{ ...entry, id: `${entry.provider}/${entry.alias}`, transports: [transport] }] };
+  return {
+    models: [{
+      id: `${resolution.provider}/${resolution.alias}`,
+      protocol: resolution.protocol,
+      transports: [resolution.transport],
+      inputModalities: resolution.inputModalities,
+      outputModalities: ["text"],
+      capabilities: resolution.capabilities,
+    }],
+  };
 }

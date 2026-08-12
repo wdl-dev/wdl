@@ -18,7 +18,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `gateway/config-local.capnp` | Local gateway workerd config compiled for Docker Compose with Envoy-backed private service routes. |
 | `gateway/index.js` | Gateway worker dispatch branches: admin-host short-circuit, subdomain routing, pattern routing, and routed WebSocket proxy setup. |
 | `gateway/dispatch.js` | Pure gateway dispatch decision tree and route target selection. |
-| `gateway/websocket.js` | Local `WebSocketPair` termination, reconnect forwarding, `101` upgrade preservation, and session-policy lifecycle closure. |
+| `gateway/websocket.js` | Local `WebSocketPair` termination, reconnect forwarding, `101` upgrade preservation, internal backend reconnect-policy enforcement, and session-policy lifecycle closure. |
 | `gateway/runtime.js` | Gateway static routing-option memoization, route/pattern caches, Redis subscriber invalidation, logging, metrics, and health/metrics snapshots. |
 | `gateway/websocket-lifecycle.js` | Process-local WebSocket lifecycle admission, registry/reconciliation, and atomic route/session-policy reads. |
 | `gateway/lib.js` | Pure routing helpers and shared routing-state error used by workerd and Node tests. |
@@ -31,7 +31,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `runtime/metrics.js` | Runtime Prometheus snapshot helpers and bounded metric aggregation. |
 | `runtime/dispatch.js` and `runtime/dispatch/*` | Fetch, scheduled, queue, workflow dispatch, workflow step facade, replay cache, and deterministic workflow JSON helpers. |
 | `runtime/load.js` and `runtime/load/*` | Bundle decode, module rewrite, env construction, wrapper generation, injected runtime source ownership, and hidden binding stripping. `code-budget.js`, `injection-sources.js`, and `wrapper-generate.js` also own generated AI facade inclusion for AI-only bundles. |
-| `runtime/bindings/` | Host-side binding adapters for KV, D1, R2, Durable Objects, ASSETS, service, queue, and AI. `runtime/bindings/ai.js` owns provider resolution, public-only HTTP/WebSocket forwarding, process-local limits, deadlines, and watchdog cleanup. |
+| `runtime/bindings/` | Host-side binding adapters for KV, D1, R2, Durable Objects, ASSETS, service, queue, and AI. `runtime/bindings/ai.js` owns AI admission, provider resolution, public-only forwarding, and protocol orchestration; `runtime/bindings/ai-capacity.js` owns process-local pool accounting, lease transfer, metrics, deadlines, and watchdog cleanup; `runtime/bindings/ai-provider.js` owns official destinations, provider request policy, credential-bearing headers, and bounded response headers; `runtime/bindings/ai-sse.js` owns incremental SSE framing and terminal-event classification; `runtime/bindings/ai-websocket.js` owns bounded frame forwarding, model rewriting, idle detection, and close propagation. |
 | `runtime/ai-client.js` | Tenant-realm AI facade source for `run()`, `models()`, OpenAI-compatible fetch, streaming, and WebSocket helpers. |
 | `runtime/workflows-client.js`, `runtime/dispatch/workflow-*.js`, `runtime/load/wrapper-generate.js` | Workflow binding materialization, identity injection, backend client, dispatch facade, replay cache, and step semantics. |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture plus activation-gated append path for `wdl tail`. |
@@ -43,7 +43,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `control/workflows-client.js` | Internal Control-to-Workflows POST transport with explicit caller-owned timeout selection; callers own endpoint-specific response interpretation. |
 | `control/lib.js` | Pure Control data-shaping: route-to-action classification, key helpers, canonical bundle `__meta__` parsing, and referrer redaction. |
 | `control/bundle.js` | Bundle/module normalization, compatibility metadata, vars, and emitted module manifest construction. |
-| `control/bindings.js` | Service/platform binding parsers, ACL evaluation, and linker helpers. |
+| `control/bindings.js` | Generic binding validation and normalization, including the singleton AI binding, plus service/platform parsing, ACL evaluation, and linker helpers. |
 | `control/topology.js` | Route, pattern, cron, queue consumer, and workflow declaration parsing for deploy metadata. |
 | `control/routing.js`, `control/routing/route-plan.js` | Promote, secret bump/promote, atomic session policy projection/allocation, host reconcile WATCH/MULTI loops, and pure route/pattern planning helpers. |
 | `control/lifecycle-indexes.js` | Redis mutation helpers for worker lifecycle, cron, queue consumer, and referrer indexes. |
@@ -74,8 +74,9 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar and platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, AI provider/model alias, module path, reserved object-key, and reserved namespace grammars. |
-| `shared/ai-contract.js` | Canonical AI provider record, model descriptor, revision, adapter, protocol, capability, and DB 0 key contract shared by Control and runtime tests. |
-| `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner/session-policy keys and projection, and route/session-policy notification channel helpers. |
+| `shared/ai-contract.js` | Canonical AI provider record, model descriptor, revision, provider kind, protocol, capability, and DB 0 key contract shared by Control and runtime tests. |
+| `shared/ai-runtime-config.js` | Canonical defaults, hard maxima, and normalization for process-local AI runtime pools and deadlines. |
+| `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner/session-policy keys and projection, route/session-policy notification channels, and the internal WebSocket backend-reconnect policy. |
 | `shared/workerd-compat-flags.js` | Pinned upstream mirror of experimental enable flags plus WDL-owned dynamic-worker date, unsupported-flag, and error-serialization policy. |
 | `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |

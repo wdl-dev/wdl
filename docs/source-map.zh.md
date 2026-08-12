@@ -15,7 +15,7 @@
 | `gateway/config-local.capnp` | 为 Docker Compose 编译的本地 Gateway workerd config，使用 Envoy-backed private service routes。 |
 | `gateway/index.js` | Gateway worker dispatch 分支：admin-host short-circuit、subdomain routing、pattern routing 和 routed WebSocket proxy setup。 |
 | `gateway/dispatch.js` | 纯 gateway dispatch decision tree 和 route target selection。 |
-| `gateway/websocket.js` | 本地 `WebSocketPair` 终结、reconnect forwarding、`101` upgrade preservation 和 session-policy lifecycle closure。 |
+| `gateway/websocket.js` | 本地 `WebSocketPair` 终结、reconnect forwarding、`101` upgrade preservation、内部 backend reconnect-policy enforcement 和 session-policy lifecycle closure。 |
 | `gateway/runtime.js` | Gateway 静态 routing-option memoization、route/pattern caches、Redis subscriber invalidation、logging、metrics 和 health/metrics snapshots。 |
 | `gateway/websocket-lifecycle.js` | 进程内 WebSocket lifecycle admission、registry/reconciliation 和 atomic route/session-policy reads。 |
 | `gateway/lib.js` | workerd 和 Node tests 共用的纯 routing helpers 与 routing-state error。 |
@@ -28,7 +28,7 @@
 | `runtime/metrics.js` | Runtime Prometheus snapshot helpers 和 bounded metric aggregation。 |
 | `runtime/dispatch.js` 和 `runtime/dispatch/*` | Fetch、scheduled、queue、workflow dispatch、workflow step facade、replay cache 和 deterministic workflow JSON helpers。 |
 | `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation、runtime 注入源码 ownership 和 hidden binding stripping。`code-budget.js`、`injection-sources.js` 和 `wrapper-generate.js` 还负责让只声明 AI 的 bundle 生成并计入 AI facade。 |
-| `runtime/bindings/` | KV、D1、R2、Durable Objects、ASSETS、service、queue 和 AI 的 host-side binding adapters。`runtime/bindings/ai.js` 负责 provider 解析、public-only HTTP/WebSocket forwarding、进程内限制、deadline 和 watchdog cleanup。 |
+| `runtime/bindings/` | KV、D1、R2、Durable Objects、ASSETS、service、queue 和 AI 的 host-side binding adapters。`runtime/bindings/ai.js` 负责 AI admission、provider 解析、public-only forwarding 和协议编排；`runtime/bindings/ai-capacity.js` 负责进程内 pool 计数、lease transfer、metrics、deadline 和 watchdog cleanup；`runtime/bindings/ai-provider.js` 负责 official destination、provider request policy、携带 credential 的 header 和有界 response header；`runtime/bindings/ai-sse.js` 负责增量 SSE framing 和 terminal-event classification；`runtime/bindings/ai-websocket.js` 负责有界 frame forwarding、model rewrite、idle detection 和 close propagation。 |
 | `runtime/ai-client.js` | Tenant realm 的 AI facade source，负责 `run()`、`models()`、OpenAI-compatible fetch、streaming 和 WebSocket helper。 |
 | `runtime/workflows-client.js`、`runtime/dispatch/workflow-*.js`、`runtime/load/wrapper-generate.js` | Workflow binding materialization、identity injection、backend client、dispatch facade、replay cache 和 step semantics。 |
 | `runtime/tail-worker.js` / `runtime/tail-forwarder.js` | Workerd tail capture 和 `wdl tail` 的 activation-gated append path。 |
@@ -40,7 +40,7 @@
 | `control/workflows-client.js` | timeout 由 caller 显式选择的 Control-to-Workflows internal POST transport；endpoint-specific response interpretation 仍由 caller 持有。 |
 | `control/lib.js` | 纯 Control data-shaping：route-to-action classification、key helpers、canonical bundle `__meta__` parsing 和 referrer redaction。 |
 | `control/bundle.js` | Bundle/module normalization、compatibility metadata、vars 和 emitted module manifest construction。 |
-| `control/bindings.js` | Service/platform binding parsers、ACL evaluation 和 linker helpers。 |
+| `control/bindings.js` | 通用 binding validation 和 normalization（包括 singleton AI binding），以及 service/platform parsing、ACL evaluation 和 linker helpers。 |
 | `control/topology.js` | Deploy metadata 中 routes、patterns、cron、queue consumer 和 workflow declaration parsing。 |
 | `control/routing.js`、`control/routing/route-plan.js` | Promote、secret bump/promote、atomic session policy projection/allocation、host reconcile WATCH/MULTI loops，以及纯 route/pattern planning helpers。 |
 | `control/lifecycle-indexes.js` | Worker lifecycle、cron、queue consumer 和 referrer indexes 的 Redis mutation helpers。 |
@@ -71,8 +71,9 @@
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |
 | `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar 与 platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、AI provider/model alias、module path、reserved object-key 和 reserved namespace grammars。 |
-| `shared/ai-contract.js` | Control 与 runtime tests 共用的 AI provider record、model descriptor、revision、adapter、protocol、capability 和 DB 0 key canonical contract。 |
-| `shared/worker-contract.js` | Worker version grammar，以及 worker、route-plane、lifecycle、DO owner/session-policy keys 和 projection 与 route/session-policy notification channel helpers。 |
+| `shared/ai-contract.js` | Control 与 runtime tests 共用的 AI provider record、model descriptor、revision、provider kind、protocol、capability 和 DB 0 key canonical contract。 |
+| `shared/ai-runtime-config.js` | Process-local AI runtime pool 与 deadline 的 canonical 默认值、hard maximum 和 normalization。 |
+| `shared/worker-contract.js` | Worker version grammar，以及 worker、route-plane、lifecycle、DO owner/session-policy keys 和 projection、route/session-policy notification channels 与内部 WebSocket backend-reconnect policy。 |
 | `shared/workerd-compat-flags.js` | 上游 workerd experimental enable flags 的 pinned mirror，以及 WDL-owned dynamic-worker 日期、unsupported-flag 和 error-serialization policy。 |
 | `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |

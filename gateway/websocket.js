@@ -1,6 +1,10 @@
 import { logStructured } from "shared-observability";
 import { discardResponseBody } from "shared-respond";
 import { utf8ByteLength } from "shared-utf8";
+import {
+  WEBSOCKET_RECONNECT_POLICY_DISABLED,
+  WEBSOCKET_RECONNECT_POLICY_HEADER,
+} from "shared-worker-contract";
 import { deleteGatewayInternalHeaders } from "gateway-lib";
 
 /**
@@ -227,6 +231,8 @@ export function proxyGatewayWebSocket(
   /** @type {Promise<"continue" | "restart" | "error"> | null} */
   let lifecycleGate = null;
   const sessionStartedAt = Date.now();
+  const reconnectDisabled = initialResponse.headers.get(WEBSOCKET_RECONNECT_POLICY_HEADER) ===
+    WEBSOCKET_RECONNECT_POLICY_DISABLED;
 
   acceptProxyWebSocket(downstream);
 
@@ -361,6 +367,16 @@ export function proxyGatewayWebSocket(
     closeDownstreamAndUpstream(1011, "lifecycle check failed", "lifecycle_check_failed");
   }
 
+  /** @param {WebSocket} attachedUpstream */
+  function closeWithoutReconnect(attachedUpstream) {
+    if (upstream !== attachedUpstream || downstreamClosed) return;
+    upstream = null;
+    record("reconnect_suppressed");
+    recordEvent("info", "websocket_reconnect_suppressed");
+    closeDownstream(1012, "service restart", "reconnect_suppressed");
+    closeWebSocket(attachedUpstream, 1012, "service restart");
+  }
+
   function beginLifecycleCheck() {
     if (lifecycleGate) return lifecycleGate;
     const checkLifecycle = options.checkLifecycle;
@@ -408,6 +424,10 @@ export function proxyGatewayWebSocket(
    */
   async function handleUpstreamFailure(attachedUpstream) {
     if (upstream !== attachedUpstream) return;
+    if (reconnectDisabled) {
+      closeWithoutReconnect(attachedUpstream);
+      return;
+    }
     upstream = null;
     if (downstreamClosed) return;
     setDetached(true);
@@ -564,6 +584,10 @@ export function proxyGatewayWebSocket(
     try {
       current.send(data);
     } catch {
+      if (reconnectDisabled) {
+        closeWithoutReconnect(current);
+        return;
+      }
       if (upstream === current) upstream = null;
       closeWebSocket(current, 1011, "upstream send failed");
       setDetached(true);

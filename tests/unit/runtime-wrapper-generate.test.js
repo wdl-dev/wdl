@@ -23,7 +23,7 @@ const TEST_WORKER_IDENTITY = { ns: "demo", worker: "app", version: "v1" };
 function generatedWrappers() {
   return {
     abortOnly: generateAbortShimWrapperModule("worker.js"),
-    hostBindings: generateHostBindingWrapperModule("worker.js", [], [], [], {}, []),
+    hostBindings: generateHostBindingWrapperModule("worker.js"),
   };
 }
 
@@ -63,7 +63,7 @@ test("generated wrapper flavors preserve default-export class detection", () => 
 });
 
 test("host wrapper runtime evaluates before the tenant module", () => {
-  const source = generateHostBindingWrapperModule("worker.js", [], [], ["ROOM"], {}, []);
+  const source = generateHostBindingWrapperModule("worker.js", { doBindings: ["ROOM"] });
   assert.ok(
     source.indexOf(`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}";`) <
       source.indexOf('import * as __WdlUserModule__ from "./worker.js";')
@@ -77,11 +77,7 @@ test("workflow host wrappers require an authoritative worker identity", () => {
   assert.throws(
     () => generateHostBindingWrapperModule(
       "worker.js",
-      [],
-      [],
-      [],
-      { FLOW: { className: "Workflow" } },
-      []
+      { workflowBindings: { FLOW: { className: "Workflow" } } }
     ),
     /requires worker identity/
   );
@@ -115,12 +111,14 @@ test("generated host wrappers alias legal entrypoint names without declaration c
   const source = applyModuleReplacements(
     generateHostBindingWrapperModule(
       "worker.js",
-      ["DB"],
-      ["BUCKET"],
-      ["ROOM"],
-      { FLOW: { className: "Workflow" } },
-      entrypointNames,
-      TEST_WORKER_IDENTITY
+      {
+        d1Bindings: ["DB"],
+        r2Bindings: ["BUCKET"],
+        doBindings: ["ROOM"],
+        workflowBindings: { FLOW: { className: "Workflow" } },
+        entrypointNames,
+        workerIdentity: TEST_WORKER_IDENTITY,
+      }
     ),
     [
       ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
@@ -167,7 +165,7 @@ test("default host wrappers reuse stripping work without sharing request-scoped 
     }
   `);
   const source = applyModuleReplacements(
-    generateHostBindingWrapperModule("worker.js", ["DB"], [], [], {}, []),
+    generateHostBindingWrapperModule("worker.js", { d1Bindings: ["DB"] }),
     [
       ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
       [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],

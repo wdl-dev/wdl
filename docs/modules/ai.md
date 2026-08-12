@@ -20,8 +20,9 @@ An AI request crosses these owners:
 1. Wrangler `[ai]` configuration produces one bundle binding with shape
    `{ "type": "ai" }`.
 2. Runtime materializes an `AiBinding` host entrypoint with immutable
-   `{ ns, worker, version, binding }` props. Generated wrapper code replaces the raw
-   host stub with the tenant-realm `Ai` facade for both handler env and imported env.
+   `{ ns, worker, version }` props. Generated wrapper code replaces the raw host stub
+   with the tenant-realm `Ai` facade for both handler env and imported env, and carries
+   the current request id into every facade-created host request.
 3. The host binding asks the colocated redis-proxy to resolve a public model id. The
    proxy atomically reads provider metadata and its encrypted credential from DB 0,
    validates canonical state, decrypts the credential, and returns an exact official
@@ -93,7 +94,8 @@ raw provider `Response` use `fetch()`; `returnRawResponse` is not supported.
 For HTTP inference, the request must be JSON and the model must be in the body. Tenant
 authorization, endpoint, host, redirect, and arbitrary outbound headers are never
 forwarded. WDL forwards bounded response headers such as content type, retry delay, and
-provider request id, then replaces `x-request-id` with the WDL request id.
+provider request id. `x-request-id` remains the WDL request id; a provider that uses
+that same header is exposed as `x-ai-provider-request-id` instead.
 
 `run()` forwards native provider request and response fields. Function tools,
 structured output, reasoning fields, provider tools, and multimodal inputs therefore
@@ -128,8 +130,8 @@ Credentials are bounded visible-ASCII bearer tokens without whitespace; malforme
 values are rejected before encryption.
 
 Provider and model alias grammar is owned by `shared/ns-pattern.js`. `upstreamModel` is
-an opaque, non-empty provider identifier with a 256-byte UTF-8 limit; it deliberately
-does not use alias grammar.
+an opaque, non-empty, well-formed Unicode provider identifier with a 256-byte UTF-8
+limit; it deliberately does not use alias grammar.
 
 | Provider kind | Supported adapter protocols |
 |---|---|
@@ -156,12 +158,15 @@ Control allows at most eight providers, 32 models per provider, 128 models per
 namespace, and 64 KiB per provider record. Credentials are non-empty and at most
 16 KiB, and use the visible-ASCII bearer-token grammar described above.
 
-`/ai/resolve` reads one provider record and credential in one Lua snapshot.
-`/ai/models` reads the complete bounded provider snapshot plus credential-field
-presence in one Lua call; it returns configured hints without decrypting every
-credential. Malformed, non-canonical, torn, or over-limit provider state fails closed,
-and `/ai/resolve` also fails closed on an undecryptable credential. The shared JS/Rust
-grammar is pinned by `tests/fixtures/ai-contract.json`.
+`/ai/resolve` accepts `{ ns, model, protocol, transport }` and reads one provider record
+and credential in one Lua snapshot. `/ai/models` accepts `{ ns }`, reads the complete
+bounded provider snapshot plus credential-field presence in one Lua call, and returns
+configured hints without decrypting every credential. Binding name is not part of
+either wire request because one Worker can declare at most one AI binding. Malformed,
+non-canonical, torn, or over-limit provider state fails closed, and `/ai/resolve` also
+fails closed on an undecryptable credential. The shared JS/Rust grammar is pinned by
+`tests/fixtures/ai-contract.json`; resolver responses contain only fields consumed by
+the host request path.
 
 Provider state follows namespace-secret lifecycle: it may outlive the last Worker in a
 namespace. Deleting and later recreating the last Worker does not delete provider
@@ -195,13 +200,20 @@ early; an idempotent deadline remains the final release/abort owner if workerd d
 deliver a mid-response `AbortSignal`, stream cancellation, or socket teardown.
 SSE requires a protocol terminal event (`response.completed`, `response.incomplete`,
 `response.failed`, `error`, or Chat Completions `[DONE]`); EOF before that event is an
-error. A top-level `error` event is forwarded before the stream permit records a
-`provider_error` outcome. Responses are not silently retried after provider I/O can
+error. Terminal frames are forwarded unchanged before the stream permit records
+`completed`, `provider_incomplete`, `provider_failed`, or `provider_error`. A semantic
+terminal event or tenant cancellation also aborts the provider fetch independently of
+stream-cancellation delivery. Responses are not silently retried after provider I/O can
 have side effects.
 
 WebSocket text frames must be JSON. WDL pins model fields to the resolved upstream
 model, enforces advertised binary-frame support, and propagates bounded close codes and
-reasons. It does not reconnect an AI WebSocket or resume a provider session.
+reasons. Provider-loss closes that Gateway would otherwise treat as reconnectable are
+translated to terminal `1013 AI provider connection lost`, so Gateway cannot silently
+replace the provider session. The initial upgrade also disables Gateway backend
+replacement, so runtime loss closes the public session with `1012 service restart`
+instead of creating a new provider session behind the same client connection. WDL does
+not reconnect an AI WebSocket or resume a provider session.
 
 ## Security Boundaries
 
@@ -224,7 +236,7 @@ reasons. It does not reconnect an AI WebSocket or resume a provider session.
 AI calls use the shared binding metrics:
 
 - `wdl_binding_operations_total{service,binding="ai",operation,outcome}`
-- `wdl_binding_operation_duration_ms{service,binding="ai",operation,outcome}`
+- `wdl_binding_operation_duration_ms{service,binding="ai",operation}`
 
 Pool state uses bounded labels only:
 
@@ -232,18 +244,19 @@ Pool state uses bounded labels only:
 - `wdl_ai_pool_high_water{service,pool}`
 - `wdl_ai_pool_events_total{service,pool,outcome}`
 
-Rejected host calls emit `ai_binding_request_rejected`; Control mutations emit bounded
-AI lifecycle events. Namespace, worker, version, and raw error text stay in logs rather
-than metric labels.
+Rejected host calls emit `ai_binding_request_rejected`; rejected Control AI mutations
+emit bounded structured events through the shared Control request log. Namespace,
+worker, version, and raw error text stay in logs rather than metric labels.
 
 ## Deployment / Rollout Notes
 
-The receiver-before-sender order is redis-proxy, then user-runtime/do-runtime host
-readers. Pause Control mutations while rolling system-runtime because that one service
-delivers both the system reader and Control writer; after old tasks drain, resume
-mutations and publish the CLI that can emit `[ai]`. Runtime and do-runtime must be able
-to materialize the new binding before Control accepts bundle metadata that references
-it.
+The receiver-before-sender order is redis-proxy and Gateway, then
+user-runtime/do-runtime host readers. Gateway must understand application-terminal
+provider closes before AI WebSockets are public. Pause Control mutations while rolling
+system-runtime because that one service delivers both the system reader and Control
+writer; after old tasks drain, resume mutations and publish the CLI that can emit
+`[ai]`. Runtime and do-runtime must be able to materialize the new binding before
+Control accepts bundle metadata that references it.
 
 Before public release, the official-provider matrix must pass from the actual Tokyo ECS
 user-runtime and do-runtime egress for OpenAI, xAI, and DeepSeek. Local fake-provider
@@ -253,7 +266,7 @@ provider availability.
 ## Tests
 
 - `tests/unit/ai-contract.test.js` and the Rust `ai_contract_fixture_matches_rust_readers`
-  test pin the shared persisted and resolver grammar.
+  test pin the shared persisted/resolver grammar and exact official destinations.
 - `tests/unit/control-ai-handler.test.js` covers revision CAS, encryption, canonical
   state, aggregate limits, residual cleanup, and zero-Worker persistence semantics.
 - `tests/unit/runtime-ai-client.test.js` and
@@ -262,7 +275,8 @@ provider availability.
   transfer, and WebSocket model pinning.
 - `tests/integration/ai-binding.test.js` covers handler/imported env, provider rotation,
   zero-Worker recreation, JSON/SSE, Responses and Realtime WebSockets, OpenAI SDK use,
-  credential non-exposure, and DO caller teardown.
+  credential non-exposure, terminal user-runtime/do-runtime loss, and DO caller
+  teardown.
 
 Integration uses an in-repo fake official provider. Real credentials must never be
 committed or printed by test output.

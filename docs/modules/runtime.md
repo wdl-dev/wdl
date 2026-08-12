@@ -287,9 +287,10 @@ when a matching active tail session exists.
 - Runtime/Control contract changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes); do not rely on an
   uncoordinated simultaneous roll.
-- AI binding rollout specifically requires redis-proxy and runtime/do-runtime readers
-  before system-runtime/Control accepts `{ type: "ai" }`. Pause Control mutations
-  while the combined system-runtime reader/writer tier rolls; the CLI sender ships last.
+- AI binding rollout specifically requires redis-proxy and Gateway first, then
+  runtime/do-runtime readers before system-runtime/Control accepts `{ type: "ai" }`.
+  Pause Control mutations while the combined system-runtime reader/writer tier rolls;
+  the CLI sender ships last.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
   Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
   available without that flag in the bundled workerd baseline. The current upstream

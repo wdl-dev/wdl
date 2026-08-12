@@ -112,7 +112,7 @@ Runtime 为 loading、binding operation、AI pool state、`redis-proxy` call、w
 ## 部署 / Rollout 注意事项
 
 - Runtime/Control 合同变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程，不能依赖未协调的同时 rolling。
-- AI binding rollout 要先部署 redis-proxy 与 runtime/do-runtime reader；system-runtime/Control 这个 reader/writer 合一层 rolling 时暂停 Control mutation，完成后再接受 `{ type: "ai" }`，最后发布 CLI sender。
+- AI binding rollout 要先部署 redis-proxy 与 Gateway，再部署 runtime/do-runtime reader；system-runtime/Control 这个 reader/writer 合一层 rolling 时暂停 Control mutation，完成后再接受 `{ type: "ai" }`，最后发布 CLI sender。
 - Runtime 不为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 会注入 `__WdlAbort__`；当前 bundled workerd baseline 的 `abortIsolate()` 不需要该 flag，并且当前 upstream 实现只移除 loader cache identity，同时允许 outstanding call 自然 drain；升级 workerd 时必须重新核对该行为。
 - Bundled workerd 在 active request 外（包括 dynamic module evaluation）调用 `Date.now()`、无参数 `new Date()` 或 `performance.now()` 时都返回 `0`。Generated wrapper 原样传递 request-owned `ExecutionContext`，因此无需 WDL shim 即可使用 `ctx.abort(reason?)`、`ctx.tracing.startSpan()` 和 span attribute setter。`ctx.abort()` 只终止当前 stateless invocation，与 host-only `abortIsolate()` eviction 无关。
 - compatibility date 不早于 `2026-08-04` 时，workerd 默认同时启用 `nodejs_compat` 和 `nodejs_compat_v2`。Tenant 如果不需要这两层 surface，必须同时指定 `no_nodejs_compat` 与 `no_nodejs_compat_v2`。

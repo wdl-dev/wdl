@@ -1,4 +1,13 @@
 import OpenAI from "openai";
+import { env as importedEnv } from "cloudflare:workers";
+
+function bindingSurface(binding) {
+  return {
+    fetch: typeof binding?.fetch,
+    run: typeof binding?.run,
+    models: typeof binding?.models,
+  };
+}
 
 function client(env) {
   return new OpenAI({
@@ -12,6 +21,12 @@ function client(env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/surface") {
+      return Response.json({
+        handler: bindingSurface(env.AI),
+        imported: bindingSurface(importedEnv.AI),
+      });
+    }
     const openai = client(env);
     if (url.pathname === "/json") {
       const response = await openai.responses.create({

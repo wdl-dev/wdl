@@ -233,10 +233,10 @@ integration files marked `// @wdl-cli-integration`:
 - `tests/integration/cli-workers-dev-optout.test.js`
 - `tests/integration/log-tail.test.js`
 - `tests/integration/pages-assets-demo.test.js`
+- `tests/integration/r2-cli-binding.test.js`
+- `tests/integration/route-demo.test.js`
+- `tests/integration/s3-cleanup.test.js`
 
 The CLI repository owns `[ai]` parsing, extension stripping, provider command tests,
 and the `examples/ai-agent-demo` packaging path. The platform-side runtime and Control
 contract is covered by `tests/integration/ai-binding.test.js`.
-- `tests/integration/r2-cli-binding.test.js`
-- `tests/integration/route-demo.test.js`
-- `tests/integration/s3-cleanup.test.js`

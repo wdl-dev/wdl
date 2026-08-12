@@ -159,15 +159,26 @@ export default wrappedDefault;
 
 /**
  * @param {string} userMainSpecifier
- * @param {string[]} d1Bindings
- * @param {string[]} r2Bindings
- * @param {string[]} doBindings
- * @param {Record<string, unknown>} workflowBindings
- * @param {string[]} entrypointNames
- * @param {RuntimeWorkerIdentity | null | undefined} [workerIdentity]
- * @param {string[]} [aiBindings]
+ * @param {{
+ *   d1Bindings?: string[],
+ *   r2Bindings?: string[],
+ *   doBindings?: string[],
+ *   workflowBindings?: Record<string, unknown>,
+ *   entrypointNames?: string[],
+ *   workerIdentity?: RuntimeWorkerIdentity | null,
+ *   aiBindings?: string[],
+ * }} [options]
  */
-export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, r2Bindings, doBindings, workflowBindings, entrypointNames, workerIdentity = null, aiBindings = []) {
+export function generateHostBindingWrapperModule(userMainSpecifier, options = {}) {
+  const {
+    d1Bindings = [],
+    r2Bindings = [],
+    doBindings = [],
+    workflowBindings = {},
+    entrypointNames = [],
+    workerIdentity = null,
+    aiBindings = [],
+  } = options;
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
   const d1BindingJson = JSON.stringify(d1Bindings);
   const r2BindingJson = JSON.stringify(r2Bindings);
@@ -327,7 +338,7 @@ function wrapEnv(env, requestIdOrContext = null) {
     }
   });
   __WdlHostRuntime__.forEachArray(AI_BINDINGS, (name) => {
-    if (out[name] !== undefined) out[name] = new Ai(out[name]);
+    if (out[name] !== undefined) out[name] = new Ai(out[name], requestIdOptions(requestIdOrContext));
   });
   __WdlHostRuntime__.forEachObjectEntry(WORKFLOW_BINDINGS, (name, metadata) => {
     out[name] = new Workflow(metadata, workflowOptions(requestIdOrContext, workflowsBackend));

@@ -567,7 +567,7 @@ export function parseControlRoute(pathname, method) {
       if (route) return route;
     }
 
-    // /ns/<ns>/ai/providers[/<name>[/credential]] and /ai/models
+    // /ns/<ns>/ai/providers[/<name>[/credential]] and /ns/<ns>/ai/models
     if (segs[2] === "ai") {
       const route = {
         kind: "ai",

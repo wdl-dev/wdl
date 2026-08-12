@@ -1,4 +1,12 @@
 {
+  "limits": {
+    "providerMaxCount": 8,
+    "modelsPerProviderMax": 32,
+    "namespaceModelMaxCount": 128,
+    "providerRecordMaxBytes": 65536,
+    "upstreamModelMaxBytes": 256,
+    "credentialMaxBytes": 16384
+  },
   "aliases": [
     { "value": "openai", "provider": true, "model": true },
     { "value": "provider-32-characters-long-name", "provider": true, "model": true },
@@ -6,6 +14,36 @@
     { "value": "UPPER", "provider": false, "model": false },
     { "value": "bad/name", "provider": false, "model": false },
     { "value": "-bad", "provider": false, "model": false }
+  ],
+  "upstreamModels": [
+    { "name": "opaque-provider-syntax", "json": "\"vendor:model@preview\"", "valid": true },
+    { "name": "unicode", "json": "\"model-\u6a21\u578b\"", "valid": true },
+    { "name": "empty", "json": "\"\"", "valid": false },
+    { "name": "lone-leading-surrogate", "json": "\"\\ud800\"", "valid": false },
+    { "name": "lone-trailing-surrogate", "json": "\"\\udc00\"", "valid": false }
+  ],
+  "destinations": [
+    { "kind": "openai", "protocol": "responses", "transport": "http", "destination": "https://api.openai.com/v1/responses" },
+    { "kind": "openai", "protocol": "responses", "transport": "sse", "destination": "https://api.openai.com/v1/responses" },
+    { "kind": "openai", "protocol": "responses", "transport": "responses_websocket", "destination": "wss://api.openai.com/v1/responses" },
+    { "kind": "openai", "protocol": "chat_completions", "transport": "http", "destination": "https://api.openai.com/v1/chat/completions" },
+    { "kind": "openai", "protocol": "chat_completions", "transport": "sse", "destination": "https://api.openai.com/v1/chat/completions" },
+    { "kind": "openai", "protocol": "embeddings", "transport": "http", "destination": "https://api.openai.com/v1/embeddings" },
+    { "kind": "openai", "protocol": "realtime", "transport": "realtime_websocket", "destination": "wss://api.openai.com/v1/realtime" },
+    { "kind": "xai", "protocol": "responses", "transport": "http", "destination": "https://api.x.ai/v1/responses" },
+    { "kind": "xai", "protocol": "responses", "transport": "sse", "destination": "https://api.x.ai/v1/responses" },
+    { "kind": "xai", "protocol": "responses", "transport": "responses_websocket", "destination": "wss://api.x.ai/v1/responses" },
+    { "kind": "xai", "protocol": "chat_completions", "transport": "http", "destination": "https://api.x.ai/v1/chat/completions" },
+    { "kind": "xai", "protocol": "chat_completions", "transport": "sse", "destination": "https://api.x.ai/v1/chat/completions" },
+    { "kind": "xai", "protocol": "embeddings", "transport": "http", "destination": "https://api.x.ai/v1/embeddings" },
+    { "kind": "xai", "protocol": "realtime", "transport": "realtime_websocket", "destination": "wss://api.x.ai/v1/realtime" },
+    { "kind": "deepseek", "protocol": "responses", "transport": "http", "destination": "https://api.deepseek.com/responses" },
+    { "kind": "deepseek", "protocol": "responses", "transport": "sse", "destination": "https://api.deepseek.com/responses" },
+    { "kind": "deepseek", "protocol": "chat_completions", "transport": "http", "destination": "https://api.deepseek.com/chat/completions" },
+    { "kind": "deepseek", "protocol": "chat_completions", "transport": "sse", "destination": "https://api.deepseek.com/chat/completions" },
+    { "kind": "deepseek", "protocol": "embeddings", "transport": "http", "destination": null },
+    { "kind": "deepseek", "protocol": "realtime", "transport": "realtime_websocket", "destination": null },
+    { "kind": "deepseek", "protocol": "responses", "transport": "responses_websocket", "destination": null }
   ],
   "providerRecords": [
     {
@@ -139,13 +177,15 @@
     }
   ],
   "resolveRequests": [
-    { "valid": true, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary", "protocol": "responses", "transport": "http" } },
-    { "valid": false, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary/extra", "protocol": "responses", "transport": "http" } },
-    { "valid": false, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary", "protocol": "responses", "transport": "tcp" } }
+    { "valid": true, "value": { "ns": "demo", "model": "openai/primary", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "model": "openai/primary/extra", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "model": "openai/primary", "protocol": "responses", "transport": "tcp" } }
   ],
   "modelsRequests": [
-    { "valid": true, "value": { "ns": "demo", "binding": "AI" } },
-    { "valid": false, "value": { "ns": "Bad", "binding": "AI" } }
+    { "valid": true, "value": { "ns": "demo" } },
+    { "valid": false, "value": { "ns": "demo", "binding": "AI" } },
+    { "valid": false, "value": { "ns": "Bad" } }
   ],
   "resolveResponses": [
     {
@@ -153,7 +193,6 @@
       "value": {
         "provider": "openai",
         "alias": "primary",
-        "revision": "0123456789abcdef0123456789abcdef",
         "kind": "openai",
         "upstreamModel": "vendor:model@preview",
         "protocol": "responses",
@@ -161,7 +200,6 @@
         "destination": "https://api.openai.com/v1/responses",
         "credential": "fixture-credential",
         "inputModalities": ["image", "text"],
-        "outputModalities": ["text"],
         "capabilities": {
           "functionTools": true,
           "structuredOutput": true,
@@ -194,7 +232,6 @@
       "value": {
         "provider": "openai",
         "alias": "primary",
-        "revision": "0123456789abcdef0123456789abcdef",
         "kind": "openai",
         "upstreamModel": "gpt",
         "protocol": "responses",
@@ -202,7 +239,6 @@
         "destination": "https://api.openai.com/v1/responses",
         "credential": "invalid credential",
         "inputModalities": ["text"],
-        "outputModalities": ["text"],
         "capabilities": {
           "functionTools": false,
           "structuredOutput": false,
@@ -221,11 +257,6 @@
         "models": [
           {
             "id": "openai/primary",
-            "provider": "openai",
-            "alias": "primary",
-            "revision": "0123456789abcdef0123456789abcdef",
-            "kind": "openai",
-            "upstreamModel": "vendor:model@preview",
             "protocol": "responses",
             "transports": ["http", "responses_websocket", "sse"],
             "inputModalities": ["image", "text"],
@@ -247,12 +278,7 @@
       "value": {
         "models": [
           {
-            "id": "openai/primary",
-            "provider": "xai",
-            "alias": "primary",
-            "revision": "0123456789abcdef0123456789abcdef",
-            "kind": "openai",
-            "upstreamModel": "gpt",
+            "id": "openai/primary/extra",
             "protocol": "responses",
             "transports": ["http"],
             "inputModalities": ["text"],

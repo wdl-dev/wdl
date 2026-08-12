@@ -1,7 +1,9 @@
 /**
  * Tenant-realm AI facade. This file is embedded as text and injected into
- * dynamic Workers, so it must remain dependency-free.
+ * dynamic Workers with the shared request-id helper.
  */
+
+import { requestIdFromOptions } from "./_wdl-request-id.js";
 
 const AI_ORIGIN = "https://ai.wdl";
 const ALLOWED_OPTIONS = new Set(["signal", "websocket"]);
@@ -15,6 +17,7 @@ const REJECTED_OPTIONS = new Set([
   "sessionOptions",
 ]);
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicHeadersSet = Headers.prototype.set;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
 const intrinsicObjectEntries = Object.entries;
@@ -24,7 +27,7 @@ const IntrinsicRequest = Request;
 const intrinsicResponseJson = Response.prototype.json;
 
 /** @typedef {{ fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> }} AiFetcher */
-/** @typedef {{ fetcher: AiFetcher }} AiState */
+/** @typedef {{ fetcher: AiFetcher, requestIdOptions: object }} AiState */
 
 const state = new WeakMap();
 
@@ -45,10 +48,16 @@ async function responseJson(response) {
   return await intrinsicReflectApply(intrinsicResponseJson, response, []);
 }
 
-/** @param {AiFetcher} fetcher @param {Request} request */
-async function fetchRequest(fetcher, request) {
+/** @param {AiState} binding @param {RequestInfo | URL} input @param {RequestInit} [init] */
+async function fetchRequest(binding, input, init = undefined) {
+  const { fetcher, requestIdOptions } = binding;
   if (!fetcher || typeof fetcher.fetch !== "function") {
     throw new TypeError("AI host Fetcher is not configured");
+  }
+  const request = new IntrinsicRequest(input, init);
+  const requestId = requestIdFromOptions(requestIdOptions);
+  if (requestId) {
+    intrinsicReflectApply(intrinsicHeadersSet, request.headers, ["x-request-id", requestId]);
   }
   return await intrinsicReflectApply(fetcher.fetch, fetcher, [request]);
 }
@@ -103,12 +112,12 @@ async function requireOkJson(response) {
   return payload;
 }
 
-/** @param {AiFetcher} fetcher @param {AbortSignal | undefined} signal */
-async function listModels(fetcher, signal) {
-  const response = await fetchRequest(fetcher, new IntrinsicRequest(`${AI_ORIGIN}/v1/models`, {
+/** @param {AiState} binding @param {AbortSignal | undefined} signal */
+async function listModels(binding, signal) {
+  const response = await fetchRequest(binding, `${AI_ORIGIN}/v1/models`, {
     method: "GET",
     signal,
-  }));
+  });
   const payload = await requireOkJson(response);
   const record = payload && typeof payload === "object"
     ? /** @type {Record<string, unknown>} */ (payload)
@@ -150,20 +159,18 @@ function protocolPath(protocol) {
 }
 
 export class Ai {
-  /** @param {AiFetcher} fetcher */
-  constructor(fetcher) {
-    weakMapSet(this, { fetcher });
+  /** @param {AiFetcher} fetcher @param {object} [requestIdOptions] */
+  constructor(fetcher, requestIdOptions = {}) {
+    weakMapSet(this, { fetcher, requestIdOptions });
   }
 
   /** @param {RequestInfo | URL} input @param {RequestInit} [init] */
   async fetch(input, init = undefined) {
-    const { fetcher } = weakMapGet(this);
-    return await fetchRequest(fetcher, new IntrinsicRequest(input, init));
+    return await fetchRequest(weakMapGet(this), input, init);
   }
 
   async models() {
-    const { fetcher } = weakMapGet(this);
-    return await listModels(fetcher, undefined);
+    return await listModels(weakMapGet(this), undefined);
   }
 
   /** @param {string} model @param {unknown} inputs @param {Record<string, unknown>} [rawOptions] */
@@ -173,9 +180,9 @@ export class Ai {
     }
     const options = normalizeOptions(rawOptions);
     const signal = /** @type {AbortSignal | undefined} */ (options.signal);
-    const { fetcher } = weakMapGet(this);
+    const binding = weakMapGet(this);
     const descriptor = /** @type {Record<string, unknown>} */ (
-      modelDescriptor(await listModels(fetcher, signal), model)
+      modelDescriptor(await listModels(binding, signal), model)
     );
 
     if (options.websocket === true) {
@@ -190,11 +197,11 @@ export class Ai {
       requireTransport(descriptor, transport);
       const url = new URL(`${AI_ORIGIN}${protocol === "responses" ? "/v1/responses" : "/v1/realtime"}`);
       url.searchParams.set("model", model);
-      const response = await fetchRequest(fetcher, new IntrinsicRequest(url, {
+      const response = await fetchRequest(binding, url, {
         method: "GET",
         headers: new IntrinsicHeaders({ Upgrade: "websocket" }),
         signal,
-      }));
+      });
       const websocketResponse = /** @type {Response & { webSocket?: WebSocket }} */ (response);
       if (websocketResponse.status !== 101 || !websocketResponse.webSocket) {
         let payload = null;
@@ -216,7 +223,7 @@ export class Ai {
       throw new TypeError("AI inputs.stream must be boolean");
     }
     requireTransport(descriptor, stream ? "sse" : "http");
-    const response = await fetchRequest(fetcher, new IntrinsicRequest(
+    const response = await fetchRequest(binding,
       `${AI_ORIGIN}${protocolPath(String(descriptor.protocol))}`,
       {
         method: "POST",
@@ -227,7 +234,7 @@ export class Ai {
         body: JSON.stringify(body),
         signal,
       }
-    ));
+    );
     if (stream) {
       if (!response.ok) await requireOkJson(response);
       if (!response.body) throw aiError({ message: "AI stream response has no body" }, 502);

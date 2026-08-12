@@ -195,6 +195,13 @@ whether a route changed.
   `READONLY`, and `TRYAGAIN`) retry within the configured reconnect schedule. Malformed
   persisted state, non-transient Redis reply errors, regressed sequence state, or
   exhausted retries close both peers with `1011` instead of reconnecting stale state.
+- An initial backend `101` can set the internal
+  `x-wdl-websocket-reconnect-policy: disabled` response header for a session whose
+  application state cannot be reconstructed. Gateway strips the header from the public
+  response and closes that public session with `1012 service restart` on backend loss
+  instead of issuing a replacement upgrade. AI Responses and Realtime sessions use
+  this policy; ordinary Worker and Durable Object WebSockets retain bounded transparent
+  reconnect.
 - A `1012` close ends the application session; the client reconnects and repeats its
   application handshake. Client messages queued under an older backend reconnect epoch
   may be discarded without per-frame ack/nack when that epoch resets.
@@ -250,6 +257,8 @@ readiness.
 
 - Gateway can roll independently for route-cache or request-parsing changes that
   preserve forwarded headers.
+- Application-terminal close and backend-reconnect policy handling must roll before a
+  new backend feature such as AI relies on either contract.
 - Changes to runtime internal socket paths do not require gateway path filtering.
 - Route invalidation channel changes must stay aligned with control; style-contract
   tests protect the literal channel names.

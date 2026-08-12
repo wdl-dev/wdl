@@ -14,6 +14,7 @@ import {
   stringEnv,
 } from "control-shared";
 import {
+  AI_CREDENTIAL_MAX_BYTES,
   AI_NAMESPACE_MODEL_MAX_COUNT,
   AI_PROVIDER_MAX_COUNT,
   AI_PROVIDER_REVISION_RE,
@@ -28,7 +29,8 @@ import { encryptSecretValue, SecretEnvelopeError } from "shared-secret-envelope"
 
 const AI_MUTATION_ATTEMPTS = 5;
 const AI_PROVIDER_BODY_MAX_BYTES = 128 * 1024;
-const AI_CREDENTIAL_BODY_MAX_BYTES = 32 * 1024;
+// JSON escaping can double a visible-ASCII credential before semantic validation.
+const AI_CREDENTIAL_BODY_MAX_BYTES = AI_CREDENTIAL_MAX_BYTES * 2 + 1024;
 
 class AiControlError extends ControlAbort {
   /** @param {number} status @param {string} code @param {string} message */
@@ -76,12 +78,17 @@ function parseStoredProviders(raw) {
   if (providers.size > AI_PROVIDER_MAX_COUNT) {
     throw new AiControlError(500, "ai_state_corrupt", "AI provider count exceeds its bound");
   }
-  let modelCount = 0;
-  for (const record of providers.values()) modelCount += Object.keys(record.models).length;
-  if (modelCount > AI_NAMESPACE_MODEL_MAX_COUNT) {
+  if (providerModelCount(providers) > AI_NAMESPACE_MODEL_MAX_COUNT) {
     throw new AiControlError(500, "ai_state_corrupt", "AI model count exceeds its bound");
   }
   return providers;
+}
+
+/** @param {Map<string, ReturnType<typeof normalizeAiProviderRecord>>} providers */
+function providerModelCount(providers) {
+  let count = 0;
+  for (const record of providers.values()) count += Object.keys(record.models).length;
+  return count;
 }
 
 /** @param {Map<string, ReturnType<typeof normalizeAiProviderRecord>>} providers */
@@ -89,9 +96,7 @@ function assertProviderAggregate(providers) {
   if (providers.size > AI_PROVIDER_MAX_COUNT) {
     throw new AiControlError(409, "ai_provider_limit", `Namespace may have at most ${AI_PROVIDER_MAX_COUNT} AI providers`);
   }
-  let modelCount = 0;
-  for (const record of providers.values()) modelCount += Object.keys(record.models).length;
-  if (modelCount > AI_NAMESPACE_MODEL_MAX_COUNT) {
+  if (providerModelCount(providers) > AI_NAMESPACE_MODEL_MAX_COUNT) {
     throw new AiControlError(
       409,
       "ai_model_limit",
@@ -122,7 +127,7 @@ async function mutate(redis, fn) {
   }, fn);
 }
 
-/** @param {{ request: Request, env: Record<string, unknown>, ns: string, provider: string }} args */
+/** @param {{ request: Request, ns: string, provider: string }} args */
 async function putProvider({ request, ns, provider }) {
   validateProviderName(provider);
   const parsed = await readJsonBody(request, {
@@ -271,7 +276,7 @@ export async function handle({ request, env, method, ns, subPath, requestId }) {
     if (subPath[0] === "providers" && subPath.length === 2) {
       const provider = subPath[1];
       if (method === "GET") return await getProviders({ ns, provider });
-      if (method === "PUT") return await putProvider({ request, env, ns, provider });
+      if (method === "PUT") return await putProvider({ request, ns, provider });
       if (method === "DELETE") return await deleteProvider({ ns, provider });
     }
     if (

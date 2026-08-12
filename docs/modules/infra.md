@@ -112,7 +112,9 @@ DO proxies and host-side backend capabilities add it for DO forwarding, and spoo
 headers are removed before forwarding.
 
 AI runtime limits are explicit environment inputs on user-runtime, system-runtime, and
-do-runtime:
+do-runtime. Defaults and runtime hard maxima are owned by
+`shared/ai-runtime-config.js`; deployment surfaces repeat the defaults explicitly and
+are checked against that owner:
 
 | Variable | Default | Scope |
 | --- | ---: | --- |

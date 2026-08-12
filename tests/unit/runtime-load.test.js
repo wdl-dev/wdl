@@ -460,7 +460,7 @@ test("buildWorkerEnv: materializes AI with immutable caller identity", () => {
 
   assert.deepEqual(env.AI, {
     kind: "ai",
-    props: { ns: "demo", worker: "agent", version: "v7", binding: "AI" },
+    props: { ns: "demo", worker: "agent", version: "v7" },
   });
 });
 
@@ -2160,7 +2160,34 @@ test("wrapWorkerCodeForHostBindings: an AI-only worker receives the local facade
   assert.match(modules["_wdl-request-id.js"], /requestIdFromOptions/);
   assert.match(modules["_wdl-wrapper.js"], /import \{ Ai \}/);
   assert.match(modules["_wdl-wrapper.js"], /const AI_BINDINGS = \["AI"\];/);
-  assert.match(modules["_wdl-wrapper.js"], /new Ai\(out\[name\]\)/);
+  assert.match(
+    modules["_wdl-wrapper.js"],
+    /new Ai\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/
+  );
+});
+
+test("wrapWorkerCodeForHostBindings: malformed persisted AI bindings fail closed", () => {
+  for (const [bindings, expected] of [
+    [
+      { AI: { type: "ai", provider: "forged" } },
+      /AI binding "AI" has invalid persisted shape/,
+    ],
+    [
+      { AI: { type: "ai" }, SECOND_AI: { type: "ai" } },
+      /Persisted metadata contains more than one AI binding/,
+    ],
+  ]) {
+    assert.throws(
+      () => wrapWorkerCodeForHostBindings(
+        {
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default { fetch() {} };" },
+        },
+        { bindings }
+      ),
+      expected
+    );
+  }
 });
 
 test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object bindings", () => {

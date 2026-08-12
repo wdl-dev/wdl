@@ -69,7 +69,18 @@ const utf8Decoder = new TextDecoder();
  *   aiClientSource: string,
  * }} RuntimeInjectionSources
  * @typedef {[name: string, source: string]} RuntimeModuleInjection
+ * @typedef {"d1Bindings" | "r2Bindings" | "doBindings" | "aiBindings"} HostFacadePlanKey
+ * @typedef {"d1ModuleInjections" | "r2ModuleInjections" | "doModuleInjections" | "aiModuleInjections"} HostFacadeInjectionKey
+ * @typedef {{ planKey: HostFacadePlanKey, injectionKey: HostFacadeInjectionKey }} HostFacadeBindingDefinition
  */
+
+/** @type {Readonly<Record<string, HostFacadeBindingDefinition>>} */
+const HOST_FACADE_BINDING_DEFINITIONS = Object.freeze({
+  d1: { planKey: "d1Bindings", injectionKey: "d1ModuleInjections" },
+  r2: { planKey: "r2Bindings", injectionKey: "r2ModuleInjections" },
+  do: { planKey: "doBindings", injectionKey: "doModuleInjections" },
+  ai: { planKey: "aiBindings", injectionKey: "aiModuleInjections" },
+});
 
 /** @param {string | Uint8Array} body */
 function moduleBodyByteLength(body) {
@@ -151,69 +162,21 @@ function runtimeModuleInjections(sources) {
 }
 
 /**
- * @typedef {{
- *   modules: RuntimeModuleInjection[],
- *   bindingNames(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings" | "aiBindings">): string[],
- * }} HostFacadeBindingDefinition
- */
-
-/**
- * @param {ReturnType<typeof runtimeModuleInjections>} injections
- * @returns {HostFacadeBindingDefinition[]}
- */
-function hostFacadeBindingDefinitions(injections) {
-  const {
-    d1ModuleInjections,
-    r2ModuleInjections,
-    doModuleInjections,
-    aiModuleInjections,
-  } = injections;
-  return [
-    {
-      modules: d1ModuleInjections,
-      bindingNames(plan) { return plan.d1Bindings; },
-    },
-    {
-      modules: r2ModuleInjections,
-      bindingNames(plan) { return plan.r2Bindings; },
-    },
-    {
-      modules: doModuleInjections,
-      bindingNames(plan) { return plan.doBindings; },
-    },
-    {
-      modules: aiModuleInjections,
-      bindingNames(plan) { return plan.aiBindings; },
-    },
-  ];
-}
-
-/**
  * @param {RuntimeMetaPlan} plan
  * @param {RuntimeBindingSpec} spec
  * @param {string} name
  */
 function addHostFacadeBinding(plan, spec, name) {
-  switch (spec?.type) {
-    case "d1":
-      plan.d1Bindings.push(name);
-      return;
-    case "r2":
-      plan.r2Bindings.push(name);
-      return;
-    case "do":
-      plan.doBindings.push(name);
-      return;
-    case "ai":
-      plan.aiBindings.push(name);
-      return;
-  }
+  if (typeof spec?.type !== "string") return;
+  const definition = HOST_FACADE_BINDING_DEFINITIONS[spec.type];
+  if (definition) plan[definition.planKey].push(name);
 }
 
 /** @param {RuntimeMetaPlan} plan */
 function hasHostFacadeBindings(plan) {
-  return plan.d1Bindings.length > 0 || plan.r2Bindings.length > 0 ||
-    plan.doBindings.length > 0 || plan.aiBindings.length > 0;
+  return Object.values(HOST_FACADE_BINDING_DEFINITIONS).some(
+    ({ planKey }) => plan[planKey].length > 0
+  );
 }
 
 /** @param {RuntimeBundleMeta} meta */
@@ -297,6 +260,16 @@ export function analyzeRuntimeMeta(meta) {
     needsHostBindingWrapper: false,
   };
   for (const [name, spec] of bindingEntries) {
+    if (spec?.type === "ai") {
+      if (Object.keys(spec).length !== 1) {
+        throw new Error(
+          `AI binding ${JSON.stringify(name)} has invalid persisted shape (redeploy worker)`
+        );
+      }
+      if (plan.aiBindings.length > 0) {
+        throw new Error("Persisted metadata contains more than one AI binding (redeploy worker)");
+      }
+    }
     addHostFacadeBinding(plan, spec, name);
   }
   for (const workflow of workflows) {
@@ -332,8 +305,8 @@ function runtimeInjectedModuleSources(
   const addModules = (modules) => {
     for (const [name, source] of modules) out.set(name, source);
   };
-  for (const definition of hostFacadeBindingDefinitions(injections)) {
-    if (definition.bindingNames(plan).length > 0) addModules(definition.modules);
+  for (const { planKey, injectionKey } of Object.values(HOST_FACADE_BINDING_DEFINITIONS)) {
+    if (plan[planKey].length > 0) addModules(injections[injectionKey]);
   }
   if (plan.needsWorkflowsBackend) {
     addModules(injections.workflowsModuleInjections);
@@ -349,13 +322,15 @@ function runtimeInjectedModuleSources(
     plan.needsHostBindingWrapper
       ? generateHostBindingWrapperModule(
           mainModule,
-          plan.d1Bindings,
-          plan.r2Bindings,
-          plan.doBindings,
-          plan.workflowBindings,
-          plan.hostWrappedClassNames,
-          workerIdentity,
-          plan.aiBindings
+          {
+            d1Bindings: plan.d1Bindings,
+            r2Bindings: plan.r2Bindings,
+            doBindings: plan.doBindings,
+            workflowBindings: plan.workflowBindings,
+            entrypointNames: plan.hostWrappedClassNames,
+            workerIdentity,
+            aiBindings: plan.aiBindings,
+          }
         )
       : generateAbortShimWrapperModule(mainModule)
   );

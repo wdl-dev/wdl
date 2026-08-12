@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   AI_HOST_TEST_STATE,
   AI_REQUEST_MAX_BYTES,
+  AI_RESPONSE_MAX_BYTES,
   AI_STREAM_FRAME_MAX_BYTES,
   AI_STREAM_MAX_BYTES,
   AI_WS_FRAME_MAX_BYTES,
@@ -33,7 +34,9 @@ function request(body, path = "/v1/responses") {
 function resolver(resolution = openAiResolution()) {
   return async (input, init = {}) => {
     const url = String(input);
-    assert.equal(new Headers(init.headers).get("x-wdl-internal-auth"), "test-internal-auth-token");
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("x-wdl-internal-auth"), "test-internal-auth-token");
+    assert.equal(headers.get("x-request-id"), "rid-ai-test");
     if (url.endsWith("/ai/models")) return Response.json(modelList(resolution));
     if (url.endsWith("/ai/resolve")) return Response.json(resolution);
     throw new Error(`unexpected resolver URL ${url}`);
@@ -58,7 +61,11 @@ test("AI host resolves trusted identity and attaches only the platform credentia
           id: "resp_test",
           model: parseJsonObjectRequestBody(init, "provider request").model,
         }, {
-          headers: { "openai-request-id": "provider-rid", authorization: "must-not-forward" },
+          headers: {
+            "openai-request-id": "provider-rid",
+            "x-request-id": "provider-generic-rid",
+            authorization: "must-not-forward",
+          },
         });
       },
     },
@@ -86,6 +93,8 @@ test("AI host resolves trusted identity and attaches only the platform credentia
       { id: "resp_test", model: "gpt-test" }
     );
     assert.equal(response.headers.get("openai-request-id"), "provider-rid");
+    assert.equal(response.headers.get("x-ai-provider-request-id"), "provider-generic-rid");
+    assert.equal(response.headers.get("x-request-id"), "rid-ai-test");
     assert.equal(response.headers.get("authorization"), null);
   });
   const providerCall = providerCalls[0];
@@ -114,6 +123,47 @@ test("AI host resolves trusted identity and attaches only the platform credentia
     },
   });
   assert.deepEqual(aiPoolStateForTest().request, { inUse: 0, highWater: 1 });
+});
+
+test("AI host inspects only user content when enforcing input modalities", async () => {
+  /** @type {Record<string, unknown>[]} */
+  const providerBodies = [];
+  const textOnly = openAiResolution({ inputModalities: ["text"] });
+  const imageOnly = openAiResolution({ inputModalities: ["image"] });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
+        providerBodies.push(parseJsonObjectRequestBody(init, "provider request"));
+        return Response.json({ id: "resp_test" });
+      },
+    },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(textOnly), async () => {
+    const response = await binding.fetch(request({
+      model: "openai/primary",
+      input: "hello",
+      tools: [{
+        type: "function",
+        name: "inspect",
+        parameters: {
+          type: "object",
+          properties: { image_url: { type: "string" } },
+        },
+      }],
+    }));
+    assert.equal(response.status, 200);
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(imageOnly), async () => {
+    const response = await binding.fetch(request({
+      model: "openai/primary",
+      input: [{ type: "input_image", image_url: "https://images.example/input.png" }],
+    }));
+    assert.equal(response.status, 200);
+  });
+  assert.equal(providerBodies.length, 2);
 });
 
 test("AI host model list strips resolver-only identity and credential fields", async () => {
@@ -222,9 +272,12 @@ test("AI host preserves semantic SSE bytes and releases the stream permit at ter
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\"}}\n\n",
   ];
   const expected = frames.join("");
+  /** @type {AbortSignal | null} */
+  let providerSignal = null;
   const { binding } = makeAiBinding({
     AI_NETWORK: {
-      async fetch() {
+      async fetch(_url, init = {}) {
+        providerSignal = init.signal ?? null;
         const bytes = new TextEncoder().encode(expected);
         return new Response(new ReadableStream({
           start(controller) {
@@ -238,6 +291,36 @@ test("AI host preserves semantic SSE bytes and releases the stream permit at ter
   await withMockedProperty(globalThis, "fetch", resolver(openAiResolution({ transport: "sse" })), async () => {
     const response = await binding.fetch(request({ model: "openai/primary", input: "hello", stream: true }));
     assert.equal(await response.text(), expected);
+  });
+  assert.deepEqual(aiPoolStateForTest().stream, { inUse: 0, highWater: 1 });
+  assert.equal(providerSignal?.aborted, true);
+});
+
+test("AI host forwards a near-limit SSE frame assembled from small provider chunks", async () => {
+  const prefix = "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"padding\":\"";
+  const suffix = "\"}\r\n\r\n";
+  const frame = `${prefix}${"x".repeat(AI_STREAM_FRAME_MAX_BYTES - prefix.length - suffix.length)}${suffix}`;
+  const bytes = new TextEncoder().encode(frame);
+  assert.equal(bytes.byteLength, AI_STREAM_FRAME_MAX_BYTES);
+
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        let offset = 0;
+        return new Response(new ReadableStream({
+          pull(controller) {
+            if (offset >= bytes.byteLength) return;
+            const end = Math.min(offset + 1021, bytes.byteLength);
+            controller.enqueue(bytes.subarray(offset, end));
+            offset = end;
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(openAiResolution({ transport: "sse" })), async () => {
+    const response = await binding.fetch(request({ model: "openai/primary", input: "hello", stream: true }));
+    assert.equal(await response.text(), frame);
   });
   assert.deepEqual(aiPoolStateForTest().stream, { inUse: 0, highWater: 1 });
 });
@@ -260,6 +343,63 @@ test("AI host forwards a top-level SSE error and records a provider failure", as
     entry.name === "ai_pool_events" &&
     entry.labels.pool === "stream" &&
     entry.labels.outcome === "provider_error"));
+});
+
+test("AI host treats a Chat Completions error event as terminal", async () => {
+  const frame = "event: error\ndata: {\"error\":{\"message\":\"provider failed\"}}\n\n";
+  const resolution = openAiResolution({
+    protocol: "chat_completions",
+    destination: "https://api.openai.com/v1/chat/completions",
+    transport: "sse",
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        return new Response(frame, { headers: { "content-type": "text/event-stream" } });
+      },
+    },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+    const response = await binding.fetch(request({
+      model: "openai/primary",
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    }, "/v1/chat/completions"));
+    assert.equal(await response.text(), frame);
+  });
+  assert.ok(AI_HOST_TEST_STATE.metrics.some((entry) =>
+    entry.name === "ai_pool_events" &&
+    entry.labels.pool === "stream" &&
+    entry.labels.outcome === "provider_error"));
+  assert.equal(aiPoolStateForTest().stream.inUse, 0);
+});
+
+test("AI host distinguishes failed and incomplete Responses terminal events", async () => {
+  const cases = [
+    ["response.failed", "provider_failed"],
+    ["response.incomplete", "provider_incomplete"],
+  ];
+  for (const [type] of cases) {
+    const frame = `event: ${type}\ndata: ${JSON.stringify({ type })}\n\n`;
+    const { binding } = makeAiBinding({
+      AI_NETWORK: {
+        async fetch() {
+          return new Response(frame, { headers: { "content-type": "text/event-stream" } });
+        },
+      },
+    });
+    await withMockedProperty(globalThis, "fetch", resolver(openAiResolution({ transport: "sse" })), async () => {
+      const response = await binding.fetch(request({ model: "openai/primary", input: "hello", stream: true }));
+      assert.equal(await response.text(), frame);
+    });
+  }
+  for (const [, outcome] of cases) {
+    assert.ok(AI_HOST_TEST_STATE.metrics.some((entry) =>
+      entry.name === "ai_pool_events" &&
+      entry.labels.pool === "stream" &&
+      entry.labels.outcome === outcome));
+  }
+  assert.equal(aiPoolStateForTest().stream.inUse, 0);
 });
 
 test("AI host fails an incomplete Responses stream and releases its permit", async () => {
@@ -323,6 +463,32 @@ test("AI host bounds total SSE bytes independently of valid frame size", async (
   assert.equal(aiPoolStateForTest().stream.inUse, 0);
 });
 
+test("AI host cancels an oversized non-streaming provider response", async () => {
+  let cancelled = false;
+  const providerBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(AI_RESPONSE_MAX_BYTES + 1));
+    },
+    cancel() { cancelled = true; },
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        return new Response(providerBody, { headers: { "content-type": "application/json" } });
+      },
+    },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(), async () => {
+    const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
+    assert.equal(
+      (await readJsonResponse(response, 502, "oversized AI provider response")).error,
+      "ai_binding_error"
+    );
+  });
+  assert.equal(cancelled, true);
+  assert.equal(aiPoolStateForTest().request.inUse, 0);
+});
+
 test("AI stream duration terminates the tenant stream when upstream ignores abort", async () => {
   const { binding, waitUntilTasks } = makeAiBinding({
     AI_STREAM_MAX_DURATION_MS: "10",
@@ -373,14 +539,38 @@ test("AI request pool saturates without a queue and recovers after completion", 
     entry.name === "ai_pool_events" && entry.labels.outcome === "saturated"));
 });
 
+test("AI capacity rolls back when the host cannot register its watchdog", async () => {
+  let resolverCalls = 0;
+  const { binding } = makeAiBinding({}, {}, {
+    waitUntil() { throw new Error("watchdog registration failed"); },
+  });
+  await withMockedProperty(globalThis, "fetch", async () => {
+    resolverCalls += 1;
+    return Response.json(openAiResolution());
+  }, async () => {
+    const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
+    assert.equal(
+      (await readJsonResponse(response, 502, "AI watchdog setup failure")).error,
+      "ai_binding_error"
+    );
+  });
+  assert.equal(resolverCalls, 0);
+  assert.equal(aiPoolStateForTest().request.inUse, 0);
+  assert.equal(AI_HOST_TEST_STATE.metrics.filter((entry) =>
+    entry.name === "ai_pool_events" && entry.labels.outcome === "setup_error").length, 1);
+});
+
 test("AI stream pool saturates independently and recovers after cancellation", async () => {
   let resolverCalls = 0;
   let providerCalls = 0;
+  /** @type {AbortSignal | null} */
+  let providerSignal = null;
   const { binding } = makeAiBinding({
     AI_STREAM_MAX_IN_FLIGHT: "1",
     AI_NETWORK: {
-      async fetch() {
+      async fetch(_url, init = {}) {
         providerCalls += 1;
+        providerSignal = init.signal ?? null;
         return new Response(new ReadableStream({ pull() { return new Promise(() => {}); } }), {
           headers: { "content-type": "text/event-stream" },
         });
@@ -405,6 +595,7 @@ test("AI stream pool saturates independently and recovers after cancellation", a
     await first.body?.cancel("test complete");
   });
   assert.equal(aiPoolStateForTest().stream.inUse, 0);
+  assert.equal(providerSignal?.aborted, true);
   assert.ok(AI_HOST_TEST_STATE.metrics.some((entry) =>
     entry.name === "ai_pool_events" &&
     entry.labels.pool === "stream" &&
@@ -593,6 +784,68 @@ test("AI host rejects resolver destination drift before provider I/O", async () 
   assert.equal(providerCalls, 0);
 });
 
+test("AI host binds resolver responses to the requested model and transport", async () => {
+  const cases = [
+    openAiResolution({ alias: "swapped" }),
+    openAiResolution({
+      provider: "xai",
+      kind: "xai",
+      destination: "https://api.x.ai/v1/responses",
+    }),
+    openAiResolution({
+      protocol: "chat_completions",
+      destination: "https://api.openai.com/v1/chat/completions",
+    }),
+    openAiResolution({ transport: "sse" }),
+  ];
+  for (const resolution of cases) {
+    let providerCalls = 0;
+    const { binding } = makeAiBinding({
+      AI_NETWORK: { async fetch() { providerCalls += 1; return Response.json({}); } },
+    });
+    await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+      const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
+      assert.equal(
+        (await readJsonResponse(response, 503, "AI resolver tuple drift")).error,
+        "ai_resolver_invalid"
+      );
+    });
+    assert.equal(providerCalls, 0);
+  }
+});
+
+test("AI host sanitizes internal resolver failures", async () => {
+  let calls = 0;
+  const { binding } = makeAiBinding();
+  await withMockedProperty(globalThis, "fetch", async () => {
+    calls += 1;
+    return Response.json({
+      error: "redis_error",
+      message: "WRONGTYPE ai:provider-credentials:private-ns",
+    }, { status: 500 });
+  }, async () => {
+    const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
+    const payload = await readJsonResponse(response, 503, "sanitized AI resolver failure");
+    assert.equal(payload.error, "redis_error");
+    assert.equal(payload.message, "AI resolver is unavailable");
+    assert.doesNotMatch(JSON.stringify(payload), /WRONGTYPE|private-ns/);
+  });
+  assert.equal(calls, 2);
+});
+
+test("AI host rejects duplicate WebSocket model parameters before resolution", async () => {
+  const { binding } = makeAiBinding();
+  const response = await binding.fetch(new Request(
+    "https://ai.wdl/v1/responses?model=openai%2Fprimary&model=openai%2Fother",
+    { headers: { upgrade: "websocket" } }
+  ));
+  assert.equal(
+    (await readJsonResponse(response, 400, "duplicate AI websocket model")).error,
+    "ai_invalid_request"
+  );
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
 class FakeResponse {
   /**
    * @param {BodyInit | null} [body]
@@ -657,6 +910,7 @@ class FakeWebSocket {
  * @param {{
  *   resolution?: ReturnType<typeof openAiResolution>,
  *   env?: Record<string, unknown>,
+ *   providerResponse?: Response,
  *   requestHeaders?: HeadersInit,
  *   expectedStatus?: number,
  * }} [options]
@@ -673,6 +927,8 @@ async function openFakeAiWebSocket(options = {}) {
   /** @type {Array<{ url: string, headers: Headers }>} */
   const providerCalls = [];
   let resolverCalls = 0;
+  /** @type {Headers | null} */
+  let responseHeaders = null;
   const { binding, waitUntilTasks } = makeAiBinding({
     ...options.env,
     AI_NETWORK: {
@@ -681,6 +937,7 @@ async function openFakeAiWebSocket(options = {}) {
         /** @type {RequestInit} */ init = {}
       ) {
         providerCalls.push({ url: String(url), headers: new Headers(init.headers) });
+        if (options.providerResponse) return options.providerResponse;
         return { status: 101, headers: new Headers(), body: null, webSocket: upstream };
       },
     },
@@ -709,7 +966,10 @@ async function openFakeAiWebSocket(options = {}) {
           { headers }
         ));
         assert.equal(response.status, options.expectedStatus ?? 101);
-        if (response.status === 101) assert.ok(response.webSocket);
+        if (response.status === 101) {
+          assert.ok(response.webSocket);
+          responseHeaders = new Headers(response.headers);
+        }
       });
     });
   });
@@ -720,12 +980,13 @@ async function openFakeAiWebSocket(options = {}) {
     downstream: /** @type {FakeWebSocket | null} */ (/** @type {unknown} */ (downstream)),
     providerCalls,
     resolverCalls,
+    responseHeaders,
     waitUntilTasks,
   };
 }
 
 test("AI host WebSocket pins the model and preserves a no-status close", async () => {
-  const { upstream, downstream, providerCalls, resolverCalls } = await openFakeAiWebSocket({
+  const { upstream, downstream, providerCalls, resolverCalls, responseHeaders } = await openFakeAiWebSocket({
     requestHeaders: {
       authorization: "Bearer tenant-secret",
       cookie: "tenant-cookie=secret",
@@ -741,6 +1002,10 @@ test("AI host WebSocket pins the model and preserves a no-status close", async (
   assert.equal(providerCalls[0].url, "https://api.openai.com/v1/responses");
   assert.deepEqual([...providerCalls[0].headers.keys()].toSorted(), ["authorization", "upgrade"]);
   assert.equal(providerCalls[0].headers.get("authorization"), "Bearer fake-openai-key");
+  assert.equal(
+    /** @type {Headers | null} */ (responseHeaders)?.get("x-wdl-websocket-reconnect-policy"),
+    "disabled"
+  );
 
   downstream.dispatch("message", {
     data: JSON.stringify({ type: "response.create", model: "openai/primary", input: "hello" }),
@@ -758,6 +1023,47 @@ test("AI host WebSocket pins the model and preserves a no-status close", async (
     entry.name === "ai_pool_events" &&
     entry.labels.pool === "websocket" &&
     ["provider_closed", "client_closed"].includes(entry.labels.outcome)).length, 1);
+});
+
+test("AI host cancels an oversized WebSocket rejection response", async () => {
+  let cancelled = false;
+  const providerBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(AI_RESPONSE_MAX_BYTES + 1));
+    },
+    cancel() { cancelled = true; },
+  });
+  await openFakeAiWebSocket({
+    providerResponse: new Response(providerBody, {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    }),
+    expectedStatus: 502,
+  });
+  assert.equal(cancelled, true);
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
+test("AI host makes provider-loss closes terminal to Gateway", async () => {
+  for (const code of [1001, 1006, 1011]) {
+    const { upstream, downstream } = await openFakeAiWebSocket();
+    assert.ok(downstream);
+    upstream.dispatch("close", { code, reason: "provider lost" });
+    assert.deepEqual(downstream.closed, {
+      code: 1013,
+      reason: "AI provider connection lost",
+    });
+    assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+  }
+
+  const errored = await openFakeAiWebSocket();
+  assert.ok(errored.downstream);
+  errored.upstream.dispatch("error");
+  assert.deepEqual(errored.downstream.closed, {
+    code: 1013,
+    reason: "AI provider connection lost",
+  });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 
 test("AI host WebSocket rejects malformed JSON and cross-model frames", async () => {
@@ -793,7 +1099,6 @@ test("AI host WebSocket enforces binary capability and rewrites Realtime models"
       transport: "realtime_websocket",
       destination: "wss://api.x.ai/v1/realtime",
       inputModalities: ["audio", "text"],
-      outputModalities: ["audio", "text"],
       capabilities: { ...openAiResolution().capabilities, binaryFrames: true },
     }),
   });

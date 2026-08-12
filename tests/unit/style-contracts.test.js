@@ -17,6 +17,7 @@ import {
   yamlDocuments,
 } from "../helpers/style-contract-scanner.js";
 import { jsFiles, readRepoFile, rustFiles, sourceFiles, withoutLineComments } from "../helpers/source-scan.js";
+import { AI_RUNTIME_SETTINGS } from "../../shared/ai-runtime-config.js";
 
 const CONTROL_FILES = jsFiles("control");
 const GATEWAY_FILES = jsFiles("gateway");
@@ -446,9 +447,17 @@ test("AI persisted and wire contracts share one JS and Rust fixture", () => {
   assert.match(jsReader, /normalizeAiProviderRecord/);
   assert.match(jsReader, /normalizeAiResolveResponse/);
   assert.match(jsReader, /normalizeAiModelsResponse/);
+  assert.match(jsReader, /expectedAiProviderDestination/);
   assert.match(rustReader, /fn parse_provider_record/);
+  assert.match(rustReader, /fn destination/);
   assert.match(rustReader, /struct ResolveResponse/);
   assert.match(rustReader, /struct ModelsResponse/);
+
+  const jsContract = readRepoFile("shared/ai-contract.js");
+  assert.match(jsContract, /return `ai:providers:\$\{ns\}`/);
+  assert.match(jsContract, /return `ai:provider-credentials:\$\{ns\}`/);
+  assert.match(rustReader, /format!\("ai:providers:\{ns\}"\)/);
+  assert.match(rustReader, /format!\("ai:provider-credentials:\{ns\}"\)/);
 });
 
 test("worker delete lock key stays aligned across control and workflows", () => {
@@ -1020,6 +1029,22 @@ test("gateway strips every client-supplied platform header it injects", () => {
 
   const websocket = withoutLineComments(readRepoFile("gateway/websocket.js"));
   assert.match(websocket, /deleteGatewayInternalHeaders\(out\)/);
+});
+
+test("WebSocket backend-reconnect policy has one shared contract owner", () => {
+  const contract = withoutLineComments(readRepoFile("shared/worker-contract.js"));
+  const gateway = withoutLineComments(readRepoFile("gateway/websocket.js"));
+  const ai = withoutLineComments(readRepoFile("runtime/bindings/ai.js"));
+  const header = extractStringConst(contract, "WEBSOCKET_RECONNECT_POLICY_HEADER");
+  const disabled = extractStringConst(contract, "WEBSOCKET_RECONNECT_POLICY_DISABLED");
+
+  assert.equal(header, "x-wdl-websocket-reconnect-policy");
+  assert.equal(disabled, "disabled");
+  for (const source of [gateway, ai]) {
+    assert.match(source, /\bWEBSOCKET_RECONNECT_POLICY_HEADER\b/);
+    assert.match(source, /\bWEBSOCKET_RECONNECT_POLICY_DISABLED\b/);
+    assert.doesNotMatch(source, /"x-wdl-websocket-reconnect-policy"/);
+  }
 });
 
 test("D1 owner protocol errors stay aligned with runtime stale-hint handling", () => {
@@ -2032,6 +2057,7 @@ test("tenant worker egress stays public-only at the workerd boundary", () => {
   const userLocal = withoutLineComments(readRepoFile("runtime/config-user-local.capnp"));
   const system = withoutLineComments(readRepoFile("runtime/config-system.capnp"));
   const doRuntime = withoutLineComments(readRepoFile("do-runtime/config.capnp"));
+  const doRuntimeEvictable = withoutLineComments(readRepoFile("do-runtime/config-evictable.capnp"));
   const doRuntimeLocal = withoutLineComments(readRepoFile("do-runtime/config-local.capnp"));
   const runtimeLoad = withoutLineComments(readRepoFile("runtime/load.js"));
   const doLoad = withoutLineComments(readRepoFile("do-runtime/load.js"));
@@ -2063,6 +2089,28 @@ test("tenant worker egress stays public-only at the workerd boundary", () => {
   );
   assert.match(runtimeLoad, /globalOutbound:\s*env\.PUBLIC_NETWORK/);
   assert.match(doLoad, /globalOutbound:\s*env\.PUBLIC_NETWORK/);
+
+  for (const [file, source] of [
+    ["runtime/config-user.capnp", user],
+    ["runtime/config-system.capnp", system],
+    ["do-runtime/config.capnp", doRuntime],
+    ["do-runtime/config-evictable.capnp", doRuntimeEvictable],
+  ]) {
+    const aiNetwork = networkBlock(source, "ai-public-network");
+    assert.match(aiNetwork, /allow = \["public"\]/, `${file} AI network must be public-only`);
+    assert.doesNotMatch(aiNetwork, /"private"/, `${file} AI network must not allow private egress`);
+  }
+  for (const [file, source] of [
+    ["runtime/config-user.capnp", user],
+    ["runtime/config-system.capnp", system],
+    ["do-runtime/config.capnp", doRuntime],
+  ]) {
+    assert.match(
+      source,
+      /\(name = "AI_NETWORK", service = "ai-public-network"\)/,
+      `${file} must bind the AI adapter to its public-only network`
+    );
+  }
 });
 
 test("Valkey 9 is the local and Terraform baseline when HFE commands are used", () => {
@@ -2325,23 +2373,73 @@ test("D1, DO, and AI workerd env tunables are exposed through capnp bindings", (
     assert.equal(exposed(doRuntime, name), true, `${name} must reach do-runtime workerd env`);
   }
 
-  for (const name of [
-    "AI_REQUEST_MAX_IN_FLIGHT",
-    "AI_STREAM_MAX_IN_FLIGHT",
-    "AI_WS_MAX_SESSIONS",
-    "AI_REQUEST_BUDGET_MS",
-    "AI_STREAM_IDLE_TIMEOUT_MS",
-    "AI_STREAM_MAX_DURATION_MS",
-    "AI_WS_HANDSHAKE_BUDGET_MS",
-    "AI_WS_IDLE_TIMEOUT_MS",
-    "AI_WS_MAX_DURATION_MS",
-  ]) {
+  for (const name of Object.keys(AI_RUNTIME_SETTINGS)) {
     for (const [service, source] of [
       ["user-runtime", userRuntime],
       ["system-runtime", systemRuntime],
       ["do-runtime", doRuntime],
     ]) {
       assert.equal(exposed(source, name), true, `${name} must reach ${service} workerd env`);
+    }
+  }
+
+  for (const [service, source] of [
+    ["user-runtime", userRuntime],
+    ["system-runtime", systemRuntime],
+    ["do-runtime", doRuntime],
+  ]) {
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-capacity", esModule = embed /,
+      `${service} must embed the AI capacity lifecycle module`
+    );
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-provider", esModule = embed /,
+      `${service} must embed the AI provider adapter module`
+    );
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-sse", esModule = embed /,
+      `${service} must embed the AI SSE framing module`
+    );
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-websocket", esModule = embed /,
+      `${service} must embed the AI WebSocket state machine`
+    );
+  }
+});
+
+test("AI runtime setting defaults stay aligned across delivery surfaces", () => {
+  const compose = readRepoFile("docker-compose.yml");
+  const terraform = readRepoFile("terraform/modules/compute/locals.tf");
+  const kubernetes = readRepoFile("deploy/kubernetes/overlays/local/kustomization.yaml");
+  const infra = readRepoFile("docs/modules/infra.md");
+  const infraZh = readRepoFile("docs/modules/infra.zh.md");
+
+  for (const [name, { defaultValue }] of Object.entries(AI_RUNTIME_SETTINGS)) {
+    assert.match(
+      compose,
+      new RegExp(`${name}: \\$\\{${name}:-${defaultValue}\\}`),
+      `${name} Compose default must match the runtime owner`
+    );
+    assert.match(
+      terraform,
+      new RegExp(`name = "${name}", value = "${defaultValue}"`),
+      `${name} Terraform default must match the runtime owner`
+    );
+    assert.match(
+      kubernetes,
+      new RegExp(`- ${name}=${defaultValue}`),
+      `${name} Kubernetes default must match the runtime owner`
+    );
+    for (const [language, source] of [["EN", infra], ["ZH", infraZh]]) {
+      assert.match(
+        source,
+        new RegExp("\\| `" + name + "` \\| `" + defaultValue + "` \\|"),
+        `${name} ${language} documentation default must match the runtime owner`
+      );
     }
   }
 });

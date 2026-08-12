@@ -22,14 +22,20 @@ test("AI tenant facade exposes raw fetch and bounded model discovery", async () 
       requests.push(request);
       return Response.json({ models: [responseModel()] });
     },
-  });
+  }, { requestId: "rid-ai-client" });
   assert.deepEqual(await ai.models(), [responseModel()]);
   assert.equal(requests[0].url, "https://ai.wdl/v1/models");
   assert.equal(requests[0].method, "GET");
 
-  const raw = await ai.fetch("https://ai.wdl/v1/models");
+  const raw = await ai.fetch("https://ai.wdl/v1/models", {
+    headers: { "x-request-id": "tenant-forged" },
+  });
   assert.equal(raw.status, 200);
   assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map((request) => request.headers.get("x-request-id")), [
+    "rid-ai-client",
+    "rid-ai-client",
+  ]);
 });
 
 test("AI tenant run selects JSON and SSE transport from the model contract", async () => {
