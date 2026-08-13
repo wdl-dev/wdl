@@ -8,6 +8,7 @@ import {
   r2CacheExpiryFromHeaders,
   r2Uint8ArrayByteLength,
   r2Uint8ArrayIsFullBuffer,
+  r2Uint8ArrayNeedsSnapshot,
   setR2CacheExpiryHeader,
 } from "./_wdl-r2-utils.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
@@ -29,7 +30,6 @@ const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const IntrinsicUint8Array = Uint8Array;
 const intrinsicObjectCreate = Object.create;
-const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicUint8ArraySet = IntrinsicUint8Array.prototype.set;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
@@ -37,8 +37,7 @@ const intrinsicWeakMapSet = WeakMap.prototype.set;
 
 /** @param {Uint8Array} bytes @returns {NonThenableByteResult} */
 function nonThenableByteResult(bytes) {
-  // Promise resolution must not read a tenant-controlled `then` from the
-  // returned bytes or Object.prototype.
+  // A null prototype keeps promise resolution away from tenant-controlled `then`.
   const result = /** @type {NonThenableByteResult} */ (intrinsicObjectCreate(null));
   result.bytes = bytes;
   return result;
@@ -80,21 +79,29 @@ function streamChunkBytes(value, operation) {
   return bytes;
 }
 
+/** @param {Uint8Array} bytes @param {number} byteLength */
+function stableStreamChunk(bytes, byteLength) {
+  // Views with externally mutable bounds or bytes require a stable snapshot.
+  if (!r2Uint8ArrayNeedsSnapshot(bytes)) return bytes;
+  // Allocate from the capped length so concurrent growth cannot exceed the limit.
+  const snapshot = new IntrinsicUint8Array(byteLength);
+  intrinsicReflectApply(intrinsicUint8ArraySet, snapshot, [bytes, 0]);
+  return snapshot;
+}
+
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
 async function readStreamWithLimit(stream, operation) {
   const reader = stream.getReader();
-  /** @type {Uint8Array[]} */
-  const chunks = [];
-  // Remove tenant-mutable Array.prototype before indexed writes while keeping
-  // the array's own length and indexed storage.
-  intrinsicObjectSetPrototypeOf(chunks, null);
+  /** @type {Record<number, Uint8Array>} */
+  const chunks = intrinsicObjectCreate(null);
+  let chunkCount = 0;
   let total = 0;
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = streamChunkBytes(value, operation);
-      const chunkLength = r2Uint8ArrayByteLength(chunk);
+      const bytes = streamChunkBytes(value, operation);
+      const chunkLength = r2Uint8ArrayByteLength(bytes);
       total += chunkLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
         cancelReaderBestEffort(
@@ -103,12 +110,14 @@ async function readStreamWithLimit(stream, operation) {
         );
         assertR2BufferSize(total, operation);
       }
-      chunks[chunks.length] = chunk;
+      const chunk = stableStreamChunk(bytes, chunkLength);
+      chunks[chunkCount] = chunk;
+      chunkCount += 1;
     }
   } finally {
     try { reader.releaseLock(); } catch {}
   }
-  if (chunks.length === 1) {
+  if (chunkCount === 1) {
     const chunk = chunks[0];
     const chunkLength = r2Uint8ArrayByteLength(chunk);
     if (r2Uint8ArrayIsFullBuffer(chunk, chunkLength)) {
@@ -118,12 +127,11 @@ async function readStreamWithLimit(stream, operation) {
   }
   const out = new IntrinsicUint8Array(total);
   let offset = 0;
-  // Avoid tenant-mutable array iterators and Uint8Array.prototype.set while
-  // joining chunks.
-  for (let i = 0; i < chunks.length; i += 1) {
+  for (let i = 0; i < chunkCount; i += 1) {
     const chunk = chunks[i];
+    const chunkLength = r2Uint8ArrayByteLength(chunk);
     intrinsicReflectApply(intrinsicUint8ArraySet, out, [chunk, offset]);
-    offset += r2Uint8ArrayByteLength(chunk);
+    offset += chunkLength;
   }
   return nonThenableByteResult(out);
 }
@@ -140,8 +148,9 @@ function cappedReadableStream(stream, operation) {
         controller.close();
         return;
       }
-      const chunk = streamChunkBytes(value, operation);
-      total += r2Uint8ArrayByteLength(chunk);
+      const bytes = streamChunkBytes(value, operation);
+      const chunkLength = r2Uint8ArrayByteLength(bytes);
+      total += chunkLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
         cancelReaderBestEffort(
           reader,
@@ -155,6 +164,7 @@ function cappedReadableStream(stream, operation) {
           return;
         }
       }
+      const chunk = stableStreamChunk(bytes, chunkLength);
       controller.enqueue(chunk);
     },
     async cancel(reason) {
@@ -430,8 +440,7 @@ export class R2ObjectBody extends R2Object {
 
 /** @param {unknown} value @returns {PreparedPutBytes} */
 function preparePutBytes(value) {
-  // Keep direct tenant bytes on a synchronous path so the async put() method
-  // never resolves an intermediate promise with a tenant-owned view.
+  // A tenant-owned view must not become an async helper's resolution value.
   if (value == null) return { bytes: new IntrinsicUint8Array(0), pendingRead: null };
   if (typeof value === "string") {
     return { bytes: utf8Encoder.encode(value), pendingRead: null };
@@ -487,19 +496,23 @@ export class R2Bucket {
   /** @param {string} key @param {unknown} value @param {AnyRecord} [options] */
   async put(key, value, options) {
     const normalizedOptions = normalizePutOptions(options);
+    const normalizedKey = normalizeR2ObjectKey(key);
+    const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
+    const put = stub.put;
+    if (typeof put !== "function") throw new TypeError("R2 stub put is not configured");
+    const requestMeta = bucketRequestMeta(this);
     const prepared = preparePutBytes(value);
     const bytes = prepared.bytes === null
       ? (await prepared.pendingRead).bytes
       : prepared.bytes;
+    // No tenant code may run between this intrinsic check and the host call.
     assertR2BufferSize(r2Uint8ArrayByteLength(bytes), "put");
-    const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
-    if (typeof stub.put !== "function") throw new TypeError("R2 stub put is not configured");
-    const meta = await stub.put(
-      normalizeR2ObjectKey(key),
+    const meta = await intrinsicReflectApply(put, stub, [
+      normalizedKey,
       bytes,
       normalizedOptions,
-      bucketRequestMeta(this)
-    );
+      requestMeta,
+    ]);
     return meta ? new R2Object(meta) : null;
   }
 

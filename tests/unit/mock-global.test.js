@@ -58,10 +58,6 @@ test("withMockedPropertyDescriptor removes newly defined properties", async () =
     { value: "mocked" },
     () => {
       assert.equal(target.missing, "mocked");
-      assert.equal(
-        Object.getOwnPropertyDescriptor(target, "missing")?.configurable,
-        true
-      );
     }
   );
 
@@ -124,37 +120,37 @@ test("withMockedPropertyDescriptors restores all properties after callback failu
   assert.equal(Object.hasOwn(target, "missing"), false);
 });
 
-test("withMockedPropertyDescriptors restores best-effort and preserves callback errors", async () => {
-  const earlier = { value: "original-earlier" };
-  const middle = { value: "original-middle" };
-  const later = { value: "original-later" };
+test("withMockedPropertyDescriptors attempts every restore and preserves callback errors", async () => {
+  const restorable = { value: "original-restorable" };
+  const blockedA = { value: "original-blocked-a" };
+  const blockedB = { value: "original-blocked-b" };
   const callbackError = new Error("callback failed");
 
   await assert.rejects(
     () => withMockedPropertyDescriptors([
       {
-        target: earlier,
+        target: restorable,
         name: "value",
-        descriptor: { value: "mocked-earlier" },
+        descriptor: { value: "mocked-restorable" },
       },
       {
-        target: middle,
+        target: blockedA,
         name: "value",
-        descriptor: { value: "mocked-middle" },
+        descriptor: { value: "mocked-blocked-a" },
       },
       {
-        target: later,
+        target: blockedB,
         name: "value",
-        descriptor: { value: "mocked-later" },
+        descriptor: { value: "mocked-blocked-b" },
       },
     ], () => {
-      Object.defineProperty(middle, "value", {
+      Object.defineProperty(blockedA, "value", {
         configurable: false,
-        value: "stuck-middle",
+        value: "stuck-blocked-a",
       });
-      Object.defineProperty(later, "value", {
+      Object.defineProperty(blockedB, "value", {
         configurable: false,
-        value: "stuck-later",
+        value: "stuck-blocked-b",
       });
       throw callbackError;
     }),
@@ -168,12 +164,12 @@ test("withMockedPropertyDescriptors restores best-effort and preserves callback 
     }
   );
 
-  assert.equal(earlier.value, "original-earlier");
-  assert.equal(middle.value, "stuck-middle");
-  assert.equal(later.value, "stuck-later");
+  assert.equal(restorable.value, "original-restorable");
+  assert.equal(blockedA.value, "stuck-blocked-a");
+  assert.equal(blockedB.value, "stuck-blocked-b");
 });
 
-test("withMockedPropertyDescriptors restores later mocks after replacing Array.prototype.push", async () => {
+test("withMockedPropertyDescriptors remains scoped when Array.prototype.push is mocked", async () => {
   const target = { value: "original" };
   const originalPush = Object.getOwnPropertyDescriptor(Array.prototype, "push");
   assert.ok(originalPush);

@@ -3,6 +3,7 @@ export const R2_LIST_LIMIT_MAX = 1000;
 // Keep in sync with shared/ns-pattern.js. This file is embedded into loaded
 // workers as _wdl-r2-utils.js, so it must stay standalone.
 export const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const R2_OBJECT_TRAVERSAL_RE = /(?:^|\/)\.{1,2}(?=\/|$)/;
 export const R2_HTTP_METADATA_FIELDS = Object.freeze([
   Object.freeze(["contentType", "content-type"]),
   Object.freeze(["contentLanguage", "content-language"]),
@@ -17,13 +18,16 @@ const typedArrayPrototype = Object.getPrototypeOf(uint8ArrayPrototype);
 const arrayBufferPrototype = ArrayBuffer.prototype;
 const dataViewPrototype = DataView.prototype;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
+const intrinsicNumberIsFinite = Number.isFinite;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicRegExpExec = RegExp.prototype.exec;
 const intrinsicTypedArrayAt = typedArrayPrototype.at;
 const intrinsicTypedArrayNameGet = prototypeGetter(
   typedArrayPrototype,
   Symbol.toStringTag
 );
 const intrinsicArrayBufferByteLengthGet = prototypeGetter(arrayBufferPrototype, "byteLength");
+const intrinsicArrayBufferResizableGet = prototypeGetter(arrayBufferPrototype, "resizable");
 const intrinsicTypedArrayBufferGet = prototypeGetter(typedArrayPrototype, "buffer");
 const intrinsicTypedArrayByteOffsetGet = prototypeGetter(typedArrayPrototype, "byteOffset");
 const intrinsicTypedArrayByteLengthGet = prototypeGetter(typedArrayPrototype, "byteLength");
@@ -39,6 +43,19 @@ function prototypeGetter(prototype, name) {
   const getter = Object.getOwnPropertyDescriptor(prototype, name)?.get;
   if (!getter) throw new TypeError(`missing intrinsic getter ${String(name)}`);
   return getter;
+}
+
+/** @param {unknown} value */
+function validatedTypedArrayByteLength(value) {
+  const byteLength = /** @type {number} */ (
+    intrinsicReflectApply(intrinsicTypedArrayByteLengthGet, value, noArguments)
+  );
+  // The intrinsic getter reports zero for detached and out-of-bounds views.
+  // `at(0)` distinguishes those invalid states from a valid empty view.
+  if (byteLength === 0) {
+    intrinsicReflectApply(intrinsicTypedArrayAt, value, atZeroArguments);
+  }
+  return byteLength;
 }
 
 /**
@@ -63,9 +80,7 @@ export function r2BufferSourceBytes(value) {
     value,
     noArguments
   );
-  // ArrayBuffer.isView() admits only TypedArray and DataView values. The
-  // intrinsic TypedArray name getter returns undefined for a DataView without
-  // consulting its mutable prototype.
+  // The intrinsic TypedArray brand getter returns undefined for DataView.
   if (typedArrayName === undefined) {
     const buffer = intrinsicReflectApply(
       intrinsicDataViewBufferGet,
@@ -85,11 +100,8 @@ export function r2BufferSourceBytes(value) {
     return new IntrinsicUint8Array(buffer, byteOffset, byteLength);
   }
 
-  // Fixed-length typed arrays expose zero public bounds after their resizable
-  // buffer shrinks out of range. The captured intrinsic rejects that state.
-  intrinsicReflectApply(intrinsicTypedArrayAt, value, atZeroArguments);
-  // Preserve zero-copy only for the real Uint8Array element kind. Prototype
-  // identity is tenant-mutable and cannot serve as a typed-array brand check.
+  const byteLength = validatedTypedArrayByteLength(value);
+  // Prototype identity is mutable, so only the intrinsic brand may select zero-copy.
   if (typedArrayName === "Uint8Array") {
     return /** @type {Uint8Array} */ (value);
   }
@@ -104,19 +116,33 @@ export function r2BufferSourceBytes(value) {
     value,
     noArguments
   );
-  const byteLength = intrinsicReflectApply(
-    intrinsicTypedArrayByteLengthGet,
-    value,
-    noArguments
-  );
   return new IntrinsicUint8Array(buffer, byteOffset, byteLength);
 }
 
 /** @param {Uint8Array} value */
 export function r2Uint8ArrayByteLength(value) {
-  return /** @type {number} */ (
-    intrinsicReflectApply(intrinsicTypedArrayByteLengthGet, value, noArguments)
+  return validatedTypedArrayByteLength(value);
+}
+
+/**
+ * Return whether retaining this view requires a stable snapshot.
+ *
+ * @param {Uint8Array} value
+ */
+export function r2Uint8ArrayNeedsSnapshot(value) {
+  const buffer = intrinsicReflectApply(
+    intrinsicTypedArrayBufferGet,
+    value,
+    noArguments
   );
+  try {
+    return /** @type {boolean} */ (
+      intrinsicReflectApply(intrinsicArrayBufferResizableGet, buffer, noArguments)
+    );
+  } catch {
+    // ArrayBuffer's getter rejects shared buffers, whose bytes may change concurrently.
+    return true;
+  }
 }
 
 /** @param {Uint8Array} value @param {number} byteLength */
@@ -135,8 +161,7 @@ export function r2Uint8ArrayIsFullBuffer(value, byteLength) {
       noArguments
     );
   } catch {
-    // A SharedArrayBuffer-backed view is valid input; use the copying path when
-    // the captured ArrayBuffer getter does not accept the backing-buffer brand.
+    // Shared backing is valid input but cannot use the full-buffer zero-copy path.
     return false;
   }
   return byteOffset === 0 && byteLength === bufferByteLength;
@@ -193,7 +218,7 @@ export function normalizeR2ObjectKey(key) {
   if (typeof key !== "string" || key.length === 0) {
     throw new TypeError("R2 key must be a non-empty string");
   }
-  if (key.split("/").some((segment) => segment === "." || segment === "..")) {
+  if (intrinsicReflectApply(intrinsicRegExpExec, R2_OBJECT_TRAVERSAL_RE, [key])) {
     throw new TypeError("R2 key must not contain . or .. path segments");
   }
   return key;
@@ -277,7 +302,7 @@ export function encodeS3Query(params) {
  * @param {string} operation
  */
 export function assertR2BufferSize(size, operation) {
-  if (typeof size !== "number" || !Number.isFinite(size) || size < 0) {
+  if (typeof size !== "number" || !intrinsicNumberIsFinite(size) || size < 0) {
     throw new Error(`R2 ${operation}: invalid byte length ${size}`);
   }
   if (size > R2_OBJECT_MAX_BUFFER_BYTES) {

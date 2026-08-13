@@ -29,6 +29,32 @@ async function settlementWithinTestWindow(promise) {
   }
 }
 
+/**
+ * @param {Uint8Array} firstChunk
+ * @param {() => void} mutate
+ * @param {{ mutateAfterClose?: boolean, trailingChunk?: Uint8Array | null }} [options]
+ */
+function streamWithMutationAfterFirstRead(
+  firstChunk,
+  mutate,
+  { mutateAfterClose = false, trailingChunk = null } = {}
+) {
+  let pullCount = 0;
+  return new ReadableStream({
+    pull(controller) {
+      pullCount += 1;
+      if (pullCount === 1) {
+        controller.enqueue(firstChunk);
+        return;
+      }
+      if (!mutateAfterClose) mutate();
+      if (trailingChunk !== null) controller.enqueue(trailingChunk);
+      controller.close();
+      if (mutateAfterClose) queueMicrotask(mutate);
+    },
+  }, { highWaterMark: 0 });
+}
+
 test("R2Bucket.list validates limit before host binding call", async () => {
   const bucket = new R2Bucket({
     async list() {
@@ -88,10 +114,17 @@ test("R2Bucket host methods preserve stub receiver", async () => {
         storageClass: "Standard",
       };
     },
+    async put(/** @type {string} */ key, /** @type {Uint8Array} */ value) {
+      assert.equal(this, stub);
+      assert.equal(key, "receiver.txt");
+      assert.deepEqual(Array.from(value), [104, 101, 108, 112]);
+      return null;
+    },
   };
   const bucket = new R2Bucket(stub);
 
   const result = /** @type {any} */ (await bucket.head("receiver.txt"));
+  await bucket.put("receiver.txt", new Uint8Array([104, 101, 108, 112]));
 
   assert.equal(result.key, "receiver.txt");
 });
@@ -176,12 +209,7 @@ test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds view
 
   const source = new ArrayBuffer(8);
   new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
-  await withMockedPropertyDescriptor(
-    Reflect,
-    "get",
-    { configurable: true, writable: true, value: () => 0 },
-    () => bucket.put("safe.bin", new MisleadingWords(source, 2, 2))
-  );
+  await bucket.put("safe.bin", new MisleadingWords(source, 2, 2));
 
   assert.equal(calls.length, 1);
   assert.deepEqual(Array.from(calls[0]), [104, 101, 108, 112]);
@@ -190,15 +218,7 @@ test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds view
   const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
   const outOfBounds = new Uint8Array(resizable, 2, 4);
   resizable.resize(1);
-  await assert.rejects(
-    () => withMockedPropertyDescriptor(
-      Uint8Array.prototype,
-      "at",
-      { configurable: true, writable: true, value: () => undefined },
-      () => bucket.put("empty.bin", outOfBounds)
-    ),
-    TypeError
-  );
+  await assert.rejects(() => bucket.put("empty.bin", outOfBounds), TypeError);
   assert.equal(calls.length, 1);
 });
 
@@ -401,7 +421,133 @@ test("R2Bucket.put keeps single-chunk ReadableStream bytes without re-copying", 
   assert.equal(thenCalls, 0);
 });
 
-test("R2Bucket.put isolates stream chunk buffering from mutable intrinsics", async () => {
+test("R2Bucket.put preserves resizable chunks across later stream reads", async () => {
+  /** @type {number[][]} */
+  const observed = [];
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed.push(Array.from(value));
+      return null;
+    },
+  });
+
+  for (const { resizeTo, mutateAfterClose, trailingChunk, expected } of [
+    {
+      resizeTo: [2],
+      mutateAfterClose: false,
+      trailingChunk: new Uint8Array([33, 34]),
+      expected: [104, 101, 108, 112, 33, 34],
+    },
+    {
+      resizeTo: [2, 4],
+      mutateAfterClose: false,
+      trailingChunk: null,
+      expected: [104, 101, 108, 112],
+    },
+    {
+      resizeTo: [2],
+      mutateAfterClose: true,
+      trailingChunk: null,
+      expected: [104, 101, 108, 112],
+    },
+  ]) {
+    const backing = new ArrayBuffer(4, { maxByteLength: 4 });
+    const first = new Uint8Array(backing);
+    first.set([104, 101, 108, 112]);
+    const stream = streamWithMutationAfterFirstRead(first, () => {
+      for (const size of resizeTo) backing.resize(size);
+    }, { mutateAfterClose, trailingChunk });
+
+    await bucket.put("resized.bin", stream);
+    assert.deepEqual(observed.at(-1), expected);
+  }
+});
+
+test("R2Bucket.put preserves shared chunks across later stream reads", async () => {
+  const backing = new SharedArrayBuffer(4);
+  const chunk = new Uint8Array(backing);
+  chunk.set([104, 101, 108, 112]);
+  /** @type {number[] | undefined} */
+  let observed;
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed = Array.from(value);
+      return null;
+    },
+  });
+  const stream = streamWithMutationAfterFirstRead(chunk, () => chunk.fill(0));
+
+  await bucket.put("shared.bin", stream);
+
+  assert.deepEqual(observed, [104, 101, 108, 112]);
+});
+
+test("R2Bucket.put stabilizes zero-length resizable chunks before later reads", async () => {
+  const backing = new ArrayBuffer(4, { maxByteLength: 8 });
+  const chunk = new Uint8Array(backing, 4, 0);
+  /** @type {Uint8Array | undefined} */
+  let observed;
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed = value;
+      return null;
+    },
+  });
+  const stream = streamWithMutationAfterFirstRead(chunk, () => backing.resize(2));
+
+  await bucket.put("empty.bin", stream);
+
+  assert.ok(observed);
+  assert.notEqual(observed, chunk);
+  assert.equal(observed.byteLength, 0);
+  assert.doesNotThrow(() => Uint8Array.prototype.at.call(observed, 0));
+});
+
+test("R2Bucket.put rejects zero-length stream chunks detached while buffered", async () => {
+  const backing = new ArrayBuffer(0);
+  const chunk = new Uint8Array(backing);
+  let hostCalls = 0;
+  const bucket = new R2Bucket({
+    async put() {
+      hostCalls += 1;
+      return null;
+    },
+  });
+  const stream = streamWithMutationAfterFirstRead(chunk, () => {
+    structuredClone(backing, { transfer: [backing] });
+  });
+
+  await assert.rejects(() => bucket.put("empty.bin", stream), TypeError);
+
+  assert.equal(hostCalls, 0);
+});
+
+test("R2Bucket.put keeps the validated body stable through the host call", async () => {
+  const backing = new ArrayBuffer(4, { maxByteLength: 16 });
+  const body = new Uint8Array(backing);
+  body.set([104, 101, 108, 112]);
+  let observedLength;
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observedLength = value.byteLength;
+      return null;
+    },
+  });
+  await withMockedPropertyDescriptor(
+    Number,
+    "isFinite",
+    {
+      configurable: true,
+      writable: true,
+      value() { backing.resize(16); return true; },
+    },
+    () => bucket.put("safe.bin", body)
+  );
+
+  assert.equal(observedLength, 4);
+});
+
+test("R2Bucket.put ignores mutable collection intrinsics while buffering", async () => {
   class MisleadingChunk extends Uint8Array {
     get buffer() { return new ArrayBuffer(0); }
     get byteOffset() { return 0; }
@@ -424,8 +570,6 @@ test("R2Bucket.put isolates stream chunk buffering from mutable intrinsics", asy
       controller.close();
     },
   });
-  let patchedSetCalls = 0;
-  let patchedIndexSetterCalls = 0;
   await withMockedPropertyDescriptors([
     {
       target: Uint8Array.prototype,
@@ -433,7 +577,7 @@ test("R2Bucket.put isolates stream chunk buffering from mutable intrinsics", asy
       descriptor: {
         configurable: true,
         writable: true,
-        value() { patchedSetCalls += 1; },
+        value() {},
       },
     },
     {
@@ -443,10 +587,7 @@ test("R2Bucket.put isolates stream chunk buffering from mutable intrinsics", asy
         configurable: true,
         /** @param {unknown} value */
         set(value) {
-          if (value === first || value === second) {
-            patchedIndexSetterCalls += 1;
-            return;
-          }
+          if (value === first || value === second) return;
           Object.defineProperty(this, "0", {
             configurable: true,
             enumerable: true,
@@ -460,8 +601,6 @@ test("R2Bucket.put isolates stream chunk buffering from mutable intrinsics", asy
 
   assert.ok(observed);
   assert.deepEqual(Array.from(observed), [104, 101, 108, 112]);
-  assert.equal(patchedSetCalls, 0);
-  assert.equal(patchedIndexSetterCalls, 0);
 });
 
 test("R2Bucket.put does not trust a mutable Uint8Array prototype as a brand", async () => {

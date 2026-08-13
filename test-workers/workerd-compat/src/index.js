@@ -28,9 +28,7 @@ function eventTargetSelfSignalProbe() {
   const { signal } = controller;
   const noop = () => {};
 
-  // Fill the target's type map before registering a listener whose removal
-  // signal is the target itself. Installing the native abort handler can grow
-  // that map and must not leave listener registration with invalidated state.
+  // A self-signal listener must remain valid as the target gains event types.
   signal.addEventListener("one", noop);
   signal.addEventListener("two", noop);
   signal.addEventListener("three", noop);
@@ -51,9 +49,7 @@ async function streamAbortRelockProbe() {
   const readable = new ReadableStream({});
   let reader;
   writableController.signal.addEventListener("abort", () => {
-    // Aborting the first pipe releases its source before aborting the
-    // destination. Re-locking here must not leave the first pipe with a stale
-    // source reference that can release or call through the new reader lock.
+    // Re-locking from abort must leave the replacement reader lock intact.
     reader = readable.getReader();
   });
 

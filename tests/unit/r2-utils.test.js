@@ -7,6 +7,7 @@ import {
   assertR2BufferSize,
   encodeS3KeyPath,
   encodeS3Query,
+  normalizeR2ObjectKey,
   r2BufferSourceBytes,
   r2PhysicalKey,
   r2PhysicalPrefix,
@@ -14,6 +15,7 @@ import {
   r2CacheExpiryFromHeaders,
   r2Uint8ArrayByteLength,
   r2Uint8ArrayIsFullBuffer,
+  r2Uint8ArrayNeedsSnapshot,
   setR2CacheExpiryHeader,
   stripR2PhysicalPrefix,
   validateR2BucketName,
@@ -33,14 +35,35 @@ test("r2PhysicalPrefix scopes virtual buckets under namespace", () => {
 });
 
 test("normalizeR2ObjectKey rejects URL path traversal segments", () => {
-  assert.throws(
-    () => r2PhysicalKey({ ns: "demo", bucketName: "uploads" }, "../x.txt"),
-    /must not contain \. or \.\. path segments/
-  );
-  assert.throws(
-    () => r2PhysicalKey({ ns: "demo", bucketName: "uploads" }, "a/./x.txt"),
-    /must not contain \. or \.\. path segments/
-  );
+  for (const key of [".", "..", "./x", "../x", "a/./x", "a/../x", "a//..//x"]) {
+    assert.throws(
+      () => normalizeR2ObjectKey(key),
+      /must not contain \. or \.\. path segments/
+    );
+  }
+  for (const key of [".hidden", "..hidden", "a/.../x", "a//x", "a/%2e%2e/x"]) {
+    assert.equal(normalizeR2ObjectKey(key), key);
+  }
+});
+
+test("normalizeR2ObjectKey rejects traversal after intrinsic tampering", async () => {
+  await withMockedPropertyDescriptors([
+    {
+      target: RegExp.prototype,
+      name: "exec",
+      descriptor: {
+        configurable: true,
+        writable: true,
+        value() { return null; },
+      },
+    },
+  ], () => {
+    assert.equal(normalizeR2ObjectKey("safe/path"), "safe/path");
+    assert.throws(
+      () => normalizeR2ObjectKey("../escape"),
+      /must not contain \. or \.\./
+    );
+  });
 });
 
 test("stripR2PhysicalPrefix rejects backend keys outside the binding prefix", () => {
@@ -185,6 +208,20 @@ test("r2Uint8Array helpers ignore own bounds and identify full buffers", () => {
   assert.equal(r2Uint8ArrayIsFullBuffer(ordinaryBytes.subarray(1), 2), false);
 });
 
+test("r2Uint8ArrayNeedsSnapshot classifies fixed and mutable backing stores", () => {
+  assert.equal(r2Uint8ArrayNeedsSnapshot(new Uint8Array(1)), false);
+  assert.equal(
+    r2Uint8ArrayNeedsSnapshot(
+      new Uint8Array(new ArrayBuffer(1, { maxByteLength: 2 }))
+    ),
+    true
+  );
+  assert.equal(
+    r2Uint8ArrayNeedsSnapshot(new Uint8Array(new SharedArrayBuffer(1))),
+    true
+  );
+});
+
 test("r2BufferSourceBytes ignores mutable prototypes when identifying view brands", () => {
   const disguisedWords = new Uint16Array(2);
   new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
@@ -220,12 +257,25 @@ test("r2BufferSourceBytes rejects detached and out-of-bounds inputs", () => {
   }
 });
 
-test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering", async () => {
+test("r2Uint8ArrayByteLength rejects invalid zero-length views", () => {
+  const detachedBuffer = new ArrayBuffer(0);
+  const detached = new Uint8Array(detachedBuffer);
+  structuredClone(detachedBuffer, { transfer: [detachedBuffer] });
+  assert.throws(() => r2Uint8ArrayByteLength(detached), TypeError);
+
+  const resizable = new ArrayBuffer(4, { maxByteLength: 8 });
+  const outOfBounds = new Uint8Array(resizable, 4, 0);
+  resizable.resize(2);
+  assert.throws(() => r2Uint8ArrayByteLength(outOfBounds), TypeError);
+});
+
+test("R2 byte-view helpers ignore post-load intrinsic tampering", async () => {
   const source = new ArrayBuffer(8);
   new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
   const words = new Uint16Array(source, 2, 2);
   const view = new DataView(source, 2, 4);
   const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+  const snapshotCandidate = new Uint8Array(resizable);
   const outOfBounds = new Uint8Array(resizable, 2, 4);
   resizable.resize(1);
 
@@ -236,6 +286,7 @@ test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering
   let viewBytes;
   /** @type {unknown} */
   let outOfBoundsError;
+  let needsSnapshot;
   await withMockedPropertyDescriptors([
     {
       target: Reflect,
@@ -243,14 +294,14 @@ test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering
       descriptor: { configurable: true, writable: true, value: () => 0 },
     },
     {
-      target: Reflect,
-      name: "get",
-      descriptor: { configurable: true, writable: true, value: () => 0 },
-    },
-    {
       target: ArrayBuffer,
       name: "isView",
       descriptor: { configurable: true, writable: true, value: () => false },
+    },
+    {
+      target: ArrayBuffer.prototype,
+      name: "resizable",
+      descriptor: { configurable: true, get: () => false },
     },
     {
       target: typedArrayPrototype,
@@ -275,6 +326,7 @@ test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering
   ], () => {
     wordBytes = r2BufferSourceBytes(words);
     viewBytes = r2BufferSourceBytes(view);
+    needsSnapshot = r2Uint8ArrayNeedsSnapshot(snapshotCandidate);
     try {
       r2BufferSourceBytes(outOfBounds);
     } catch (error) {
@@ -287,6 +339,7 @@ test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering
   assert.deepEqual(Array.from(wordBytes), [104, 101, 108, 112]);
   assert.deepEqual(Array.from(viewBytes), [104, 101, 108, 112]);
   assert.ok(outOfBoundsError instanceof TypeError);
+  assert.equal(needsSnapshot, true);
 });
 
 test("r2RangeAndSizeFromHeaders keeps object size on range responses", () => {

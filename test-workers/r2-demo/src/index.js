@@ -104,6 +104,23 @@ export default {
           },
         }));
 
+        const resizableStreamKey = `${key}.resizable-stream`;
+        const resizableStream = new ArrayBuffer(4, { maxByteLength: 4 });
+        new Uint8Array(resizableStream).set([104, 101, 108, 112]);
+        let pullCount = 0;
+        await env.B.put(resizableStreamKey, new ReadableStream({
+          pull(controller) {
+            pullCount += 1;
+            if (pullCount === 1) {
+              controller.enqueue(new Uint8Array(resizableStream));
+              return;
+            }
+            resizableStream.resize(2);
+            resizableStream.resize(4);
+            controller.close();
+          },
+        }, { highWaterMark: 0 }));
+
         const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
         const outOfBounds = new Uint8Array(resizable, 2, 4);
         resizable.resize(1);
@@ -117,12 +134,16 @@ export default {
 
         const stored = await env.B.get(key);
         const disguisedStreamStored = await env.B.get(disguisedStreamKey);
+        const resizableStreamStored = await env.B.get(resizableStreamKey);
         const absent = await env.B.get(`${key}.oob`);
         return json({
           size: meta.size,
           text: await stored.text(),
           disguisedStreamBytes: Array.from(new Uint8Array(
             await disguisedStreamStored.arrayBuffer()
+          )),
+          resizableStreamBytes: Array.from(new Uint8Array(
+            await resizableStreamStored.arrayBuffer()
           )),
           outOfBoundsRejected,
           outOfBoundsAbsent: absent === null,

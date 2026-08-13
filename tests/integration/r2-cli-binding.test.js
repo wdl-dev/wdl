@@ -127,6 +127,7 @@ test("R2 demo: CLI deploy supports PUT/GET/HEAD/LIST/range/delete and stream cop
     size: 4,
     text: "help",
     disguisedStreamBytes: [108, 112, 33, 34],
+    resizableStreamBytes: [104, 101, 108, 112],
     outOfBoundsRejected: true,
     outOfBoundsAbsent: true,
   });
