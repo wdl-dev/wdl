@@ -179,6 +179,47 @@ test("R2 host put rejects non byte-like values instead of writing an empty body"
   }
 });
 
+test("R2 host put ignores overridden view bounds and rejects out-of-bounds views", async () => {
+  /** @type {Array<{ url: string, init: any }>} */
+  const calls = [];
+  const restore = installRecordingR2FetchMock(calls, {
+    response: new Response(null, {
+      status: 200,
+      headers: { etag: '"put-etag"' },
+    }),
+  });
+  class MisleadingWords extends Uint16Array {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+
+  try {
+    const source = new ArrayBuffer(8);
+    new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
+    const meta = await makeR2Bucket().put(
+      "safe.bin",
+      new MisleadingWords(source, 2, 2)
+    );
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(Array.from(calls[0].init.body), [104, 101, 108, 112]);
+    assert.equal(Object.getPrototypeOf(calls[0].init.body), Uint8Array.prototype);
+    assert.equal(meta.size, 4);
+
+    const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+    const outOfBounds = new Uint8Array(resizable, 2, 4);
+    resizable.resize(1);
+    await assert.rejects(
+      () => makeR2Bucket().put("empty.bin", outOfBounds),
+      TypeError
+    );
+    assert.equal(calls.length, 1);
+  } finally {
+    restore();
+  }
+});
+
 test("R2 host put applies onlyIf headers and returns null on precondition failure", async () => {
   /** @type {Array<{ url: string, init: any }>} */
   const calls = [];

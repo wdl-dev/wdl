@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Updated the bundled workerd and Workers types pins to `1.20260813.1` and `5.20260813.1`, raising the maximum tenant compatibility date to `2026-08-20`. This adopts upstream EventTarget, stream teardown, sandbox-boundary, WorkerLoader, JSG unwrap, and HTMLRewriter fixes; Blob-backed responses now pay the upstream-required O(n) safety copy, while WDL's internal hot paths are unchanged.
+- Upgraded the vendored `@wdl-dev/aws-sigv4` signer from 3.0.1 to 3.0.3, preserving large-body snapshot performance while hardening ArrayBufferView snapshots.
+- Hardened R2 `put()` BufferSource and stream normalization so misleading or invalid views cannot silently upload empty or corrupted objects; ordinary `Uint8Array` normalization remains zero-copy.
+
 ## wdl.20260811.1 - 2026-08-11
 
 - Updated the bundled workerd and Workers types pins to `1.20260811.1` and `5.20260811.1`, raising the maximum tenant compatibility date to `2026-08-18`; BYOB reads now honor live buffer bounds after resize or transfer, and Control accepts ada-url 4-preserved literal `xn--` host labels while retaining potential-IPv4 rejection. New Module Registry-only APIs remain unavailable.

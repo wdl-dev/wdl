@@ -61,6 +61,14 @@ unsupported. For compatibility dates on or after `2026-08-11`, workerd also enab
 allocates instance IDs. WDL does not use that engine; its custom facade and DB 2-backed
 workflows service retain WDL-owned instance identity and lifecycle semantics.
 
+Starting with WDL's 2026-08-13 workerd pin, upstream fixes harden EventTarget
+listener removal and abort-driven `ReadableStream.pipeTo()` teardown. Blob
+streams and Blob-backed responses now copy bytes at the sandbox boundary, so
+tenant Blob responses pay one O(n) allocation and copy; WDL's internal HTTP,
+Queue, and Durable Object hot paths are unchanged. The same pin upgrades
+HTMLRewriter to lol-html 3.0.1, fixing selector and SVG/MathML handler bugs.
+These are binary behavior changes, not compatibility-date-gated behavior.
+
 Bundled workerd permits `Fetcher` and Durable Object class stubs to cross JSRPC as
 opaque arguments without an experimental flag. WDL treats possession of such a stub
 as capability delegation: the receiver can call the delegated target with the

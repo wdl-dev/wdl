@@ -85,6 +85,50 @@ export default {
         });
       }
 
+      if (request.method === "POST" && path === "view-bounds") {
+        class MisleadingWords extends Uint16Array {
+          get byteLength() { return 0; }
+        }
+        const source = new ArrayBuffer(8);
+        new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
+        const meta = await env.B.put(key, new MisleadingWords(source, 2, 2));
+
+        const disguisedWords = new Uint16Array(2);
+        new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
+        Object.setPrototypeOf(disguisedWords, Uint8Array.prototype);
+        const disguisedStreamKey = `${key}.disguised-stream`;
+        await env.B.put(disguisedStreamKey, new ReadableStream({
+          start(controller) {
+            controller.enqueue(disguisedWords);
+            controller.close();
+          },
+        }));
+
+        const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+        const outOfBounds = new Uint8Array(resizable, 2, 4);
+        resizable.resize(1);
+        let outOfBoundsRejected = false;
+        try {
+          await env.B.put(`${key}.oob`, outOfBounds);
+        } catch (error) {
+          if (!(error instanceof TypeError)) throw error;
+          outOfBoundsRejected = true;
+        }
+
+        const stored = await env.B.get(key);
+        const disguisedStreamStored = await env.B.get(disguisedStreamKey);
+        const absent = await env.B.get(`${key}.oob`);
+        return json({
+          size: meta.size,
+          text: await stored.text(),
+          disguisedStreamBytes: Array.from(new Uint8Array(
+            await disguisedStreamStored.arrayBuffer()
+          )),
+          outOfBoundsRejected,
+          outOfBoundsAbsent: absent === null,
+        });
+      }
+
       if (request.method === "GET" && path === "conditional") {
         const head = await env.B.head(key);
         if (!head) return new Response("missing", { status: 404 });

@@ -35,6 +35,8 @@ Node.js TLS 行为跟随 bundled workerd binary。从 WDL 的 2026-07-01 workerd
 
 从 WDL 的 2026-08-11 workerd pin 开始，byte-stream BYOB read 会使用实时 `ArrayBufferView` 边界，而不是缓存的 offset 和 length，包括 buffer resize 或 transfer 后的情况。同一 pin 采用 ada-url 4：以 `xn--` 开头、但无法解码为有效 UTS #46 label 的 ASCII hostname label 会被保留并转为小写，而不是被拒绝。只要这类 label 同时满足 `shared/ns-pattern.js` 中的 ASCII DNS grammar，WDL 就会把它作为 literal route label 接受；`control/topology.js` 仍执行 numeric-host canonicalization，Unicode route name 仍不受支持。对于 compatibility date 不早于 `2026-08-11` 的 worker，workerd 还会默认启用 `workflows_enable_fast_engine_creation`，改变其原生 Workflow engine 分配 instance ID 的方式。WDL 不使用该 engine；WDL 自有 facade 和由 DB 2 支撑的 workflows service 继续持有 instance identity 与 lifecycle 语义。
 
+从 WDL 的 2026-08-13 workerd pin 开始，上游修复加固了 `EventTarget` listener removal 和 abort 驱动的 `ReadableStream.pipeTo()` teardown。Blob stream 和 Blob-backed response 现在会在 sandbox boundary 复制 bytes，因此 tenant Blob response 会新增一次 O(n) allocation/copy；WDL 自身的 HTTP、Queue 和 Durable Object 热路径不变。同一 pin 把 HTMLRewriter 升级到 lol-html 3.0.1，修复 selector 和 SVG/MathML handler 问题。这些都属于 binary behavior change，不受 compatibility date gate 控制。
+
 Bundled workerd 允许 `Fetcher` 和 Durable Object class stub 在不启用 experimental flag 的情况下作为 opaque JSRPC 参数传递。WDL 把持有这种 stub 视为 capability delegation：接收方可以按 stub 内由 host 写入的 caller properties 调用目标，但不能改写这些 properties，也不能取出隐藏的平台 backend capability。该委托可以在内存中保留；但 WDL 会在 deploy 和 retained-state load 时拒绝 `allow_irrevocable_stub_storage`，static host worker 也不会启用它，因此长期持久化 stub 不属于受支持的 WDL surface。
 
 ## Bindings 和存储

@@ -4,7 +4,10 @@ import {
   assertR2BufferSize,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
+  r2BufferSourceBytes,
   r2CacheExpiryFromHeaders,
+  r2Uint8ArrayByteLength,
+  r2Uint8ArrayIsFullBuffer,
   setR2CacheExpiryHeader,
 } from "./_wdl-r2-utils.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
@@ -19,12 +22,26 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
  *   list?(options: AnyRecord, requestMeta: object): Promise<AnyRecord & { objects?: AnyRecord[], truncated?: unknown, cursor?: unknown, delimitedPrefixes?: unknown }>,
  * }} R2Stub
  * @typedef {{ stub: R2Stub, requestIdOptions: object }} R2BucketState
+ * @typedef {{ bytes: Uint8Array }} ByteReadResult
+ * @typedef {{ bytes: Uint8Array | null, pending: Promise<ByteReadResult> | null }} PreparedBytes
  */
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+const IntrinsicUint8Array = Uint8Array;
+const intrinsicObjectCreate = Object.create;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicUint8ArraySet = IntrinsicUint8Array.prototype.set;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
+
+/** @param {Uint8Array} bytes @returns {ByteReadResult} */
+function byteReadResult(bytes) {
+  // Promise resolution must not read a tenant-controlled `then` from the
+  // returned bytes or Object.prototype.
+  const result = /** @type {ByteReadResult} */ (intrinsicObjectCreate(null));
+  result.bytes = bytes;
+  return result;
+}
 
 /** @param {unknown} value */
 function dateFromUnknown(value) {
@@ -53,6 +70,15 @@ function cancelReaderBestEffort(reader, reason) {
   } catch {}
 }
 
+/** @param {unknown} value @param {string} operation */
+function streamChunkBytes(value, operation) {
+  const bytes = r2BufferSourceBytes(value);
+  if (!bytes) {
+    throw new TypeError(`R2 ${operation}: stream chunks must be BufferSource values`);
+  }
+  return bytes;
+}
+
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
 async function readStreamWithLimit(stream, operation) {
   const reader = stream.getReader();
@@ -63,8 +89,9 @@ async function readStreamWithLimit(stream, operation) {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
+      const chunk = streamChunkBytes(value, operation);
+      const chunkLength = r2Uint8ArrayByteLength(chunk);
+      total += chunkLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
         cancelReaderBestEffort(
           reader,
@@ -72,25 +99,27 @@ async function readStreamWithLimit(stream, operation) {
         );
         assertR2BufferSize(total, operation);
       }
-      chunks.push(chunk);
+      chunks[chunks.length] = chunk;
     }
   } finally {
     try { reader.releaseLock(); } catch {}
   }
   if (chunks.length === 1) {
-    const [chunk] = chunks;
-    if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
-      return chunk;
+    const chunk = chunks[0];
+    const chunkLength = r2Uint8ArrayByteLength(chunk);
+    if (r2Uint8ArrayIsFullBuffer(chunk, chunkLength)) {
+      return byteReadResult(chunk);
     }
-    return new Uint8Array(chunk);
+    return byteReadResult(new IntrinsicUint8Array(chunk));
   }
-  const out = new Uint8Array(total);
+  const out = new IntrinsicUint8Array(total);
   let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
+  for (let i = 0; i < chunks.length; i += 1) {
+    const chunk = chunks[i];
+    intrinsicReflectApply(intrinsicUint8ArraySet, out, [chunk, offset]);
+    offset += r2Uint8ArrayByteLength(chunk);
   }
-  return out;
+  return byteReadResult(out);
 }
 
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
@@ -105,8 +134,8 @@ function cappedReadableStream(stream, operation) {
         controller.close();
         return;
       }
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
+      const chunk = streamChunkBytes(value, operation);
+      total += r2Uint8ArrayByteLength(chunk);
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
         cancelReaderBestEffort(
           reader,
@@ -371,7 +400,7 @@ export class R2ObjectBody extends R2Object {
   }
 
   async bytes() {
-    return readStreamWithLimit(this.takeBody(), "get");
+    return (await readStreamWithLimit(this.takeBody(), "get")).bytes;
   }
 
   async arrayBuffer() {
@@ -393,22 +422,23 @@ export class R2ObjectBody extends R2Object {
   }
 }
 
-/** @param {unknown} value */
-async function valueToBytes(value) {
-  if (value == null) return new Uint8Array(0);
-  if (typeof value === "string") return utf8Encoder.encode(value);
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+/** @param {unknown} value @returns {PreparedBytes} */
+function valueToBytes(value) {
+  // Keep direct tenant bytes on a synchronous path so the async put() method
+  // never resolves an intermediate promise with a tenant-owned view.
+  if (value == null) return { bytes: new IntrinsicUint8Array(0), pending: null };
+  if (typeof value === "string") {
+    return { bytes: utf8Encoder.encode(value), pending: null };
   }
+  const bufferSourceBytes = r2BufferSourceBytes(value);
+  if (bufferSourceBytes) return { bytes: bufferSourceBytes, pending: null };
   if (value instanceof Blob) {
-    return readStreamWithLimit(value.stream(), "put");
+    return { bytes: null, pending: readStreamWithLimit(value.stream(), "put") };
   }
   if (value instanceof ReadableStream) {
     // WDL R2 does not implement multipart yet: stream PUT is buffered locally,
     // capped at 25 MiB, then sent as one S3 PUT.
-    return readStreamWithLimit(value, "put");
+    return { bytes: null, pending: readStreamWithLimit(value, "put") };
   }
   throw new TypeError(
     "R2 put: value must be string | ArrayBuffer | typed array | Blob | ReadableStream"
@@ -451,8 +481,11 @@ export class R2Bucket {
   /** @param {string} key @param {unknown} value @param {AnyRecord} [options] */
   async put(key, value, options) {
     const normalizedOptions = normalizePutOptions(options);
-    const bytes = await valueToBytes(value);
-    assertR2BufferSize(bytes.byteLength, "put");
+    const prepared = valueToBytes(value);
+    const bytes = prepared.bytes ?? (await /** @type {Promise<ByteReadResult>} */ (
+      prepared.pending
+    )).bytes;
+    assertR2BufferSize(r2Uint8ArrayByteLength(bytes), "put");
     const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.put !== "function") throw new TypeError("R2 stub put is not configured");
     const meta = await stub.put(

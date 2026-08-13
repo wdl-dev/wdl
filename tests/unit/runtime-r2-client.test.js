@@ -155,6 +155,86 @@ test("R2Bucket.put preserves onlyIf etag arrays for host binding", async () => {
   assert.deepEqual(calls[0].requestMeta, { requestId: "rid-put" });
 });
 
+test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds views", async () => {
+  /** @type {Uint8Array[]} */
+  const calls = [];
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      calls.push(value);
+      return null;
+    },
+  });
+  class MisleadingWords extends Uint16Array {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+
+  const source = new ArrayBuffer(8);
+  new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
+  const originalReflectGet = Object.getOwnPropertyDescriptor(Reflect, "get");
+  assert.ok(originalReflectGet);
+  let validPut;
+  try {
+    Object.defineProperty(Reflect, "get", { ...originalReflectGet, value: () => 0 });
+    validPut = bucket.put("safe.bin", new MisleadingWords(source, 2, 2));
+  } finally {
+    Object.defineProperty(Reflect, "get", originalReflectGet);
+  }
+  await validPut;
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(Array.from(calls[0]), [104, 101, 108, 112]);
+  assert.equal(Object.getPrototypeOf(calls[0]), Uint8Array.prototype);
+
+  const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+  const outOfBounds = new Uint8Array(resizable, 2, 4);
+  resizable.resize(1);
+  const originalAt = Object.getOwnPropertyDescriptor(Uint8Array.prototype, "at");
+  let outOfBoundsPut;
+  try {
+    Object.defineProperty(Uint8Array.prototype, "at", {
+      configurable: true,
+      writable: true,
+      value: () => undefined,
+    });
+    outOfBoundsPut = bucket.put("empty.bin", outOfBounds);
+  } finally {
+    if (originalAt) {
+      Object.defineProperty(Uint8Array.prototype, "at", originalAt);
+    } else {
+      Reflect.deleteProperty(Uint8Array.prototype, "at");
+    }
+  }
+  await assert.rejects(outOfBoundsPut, TypeError);
+  assert.equal(calls.length, 1);
+});
+
+test("R2Bucket.put does not assimilate a tenant Uint8Array then method", async () => {
+  let observed;
+  let thenCalls = 0;
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed = value;
+      return null;
+    },
+  });
+  const body = new Uint8Array([104, 101, 108, 112]);
+  Object.defineProperty(body, "then", {
+    /** @param {(value: Uint8Array) => void} resolve */
+    value(resolve) {
+      thenCalls += 1;
+      resolve(new Uint8Array(0));
+    },
+  });
+
+  await bucket.put("safe.bin", body);
+
+  assert.equal(observed, body);
+  assert.deepEqual(Array.from(/** @type {Uint8Array} */ (observed)), [104, 101, 108, 112]);
+  assert.equal(thenCalls, 0);
+});
+
 test("R2Bucket.put normalizes every Headers httpMetadata field", async () => {
   /** @type {any[]} */
   const calls = [];
@@ -289,6 +369,14 @@ test("R2Bucket.put reads Blob through the capped stream path", async () => {
 
 test("R2Bucket.put keeps single-chunk ReadableStream bytes without re-copying", async () => {
   const chunk = new TextEncoder().encode("hello");
+  let thenCalls = 0;
+  Object.defineProperty(chunk, "then", {
+    /** @param {(value: Uint8Array) => void} resolve */
+    value(resolve) {
+      thenCalls += 1;
+      resolve(new Uint8Array(0));
+    },
+  });
   let observed;
   const bucket = new R2Bucket({
     async put(_key, value) {
@@ -318,6 +406,77 @@ test("R2Bucket.put keeps single-chunk ReadableStream bytes without re-copying", 
 
   assert.equal(meta.size, 5);
   assert.equal(observed, chunk);
+  assert.equal(thenCalls, 0);
+});
+
+test("R2Bucket.put uses intrinsic stream chunk bounds and set", async () => {
+  class MisleadingChunk extends Uint8Array {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 4; }
+  }
+  const first = new MisleadingChunk([104, 101]);
+  const second = new MisleadingChunk([108, 112]);
+  /** @type {Uint8Array | undefined} */
+  let observed;
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed = value;
+      return null;
+    },
+  });
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(first);
+      controller.enqueue(second);
+      controller.close();
+    },
+  });
+  const originalSet = Object.getOwnPropertyDescriptor(Uint8Array.prototype, "set");
+  let patchedSetCalls = 0;
+  try {
+    Object.defineProperty(Uint8Array.prototype, "set", {
+      configurable: true,
+      writable: true,
+      value() { patchedSetCalls += 1; },
+    });
+    await bucket.put("safe.bin", stream);
+  } finally {
+    if (originalSet) {
+      Object.defineProperty(Uint8Array.prototype, "set", originalSet);
+    } else {
+      Reflect.deleteProperty(Uint8Array.prototype, "set");
+    }
+  }
+
+  assert.ok(observed);
+  assert.deepEqual(Array.from(observed), [104, 101, 108, 112]);
+  assert.equal(patchedSetCalls, 0);
+});
+
+test("R2Bucket.put does not trust a mutable Uint8Array prototype as a brand", async () => {
+  const disguisedWords = new Uint16Array(2);
+  new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
+  Object.setPrototypeOf(disguisedWords, Uint8Array.prototype);
+  /** @type {Uint8Array | undefined} */
+  let observed;
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed = value;
+      return null;
+    },
+  });
+  await bucket.put("safe.bin", new ReadableStream({
+    start(controller) {
+      controller.enqueue(disguisedWords);
+      controller.close();
+    },
+  }));
+
+  assert.ok(observed);
+  assert.ok(observed instanceof Uint8Array);
+  assert.notStrictEqual(observed, disguisedWords);
+  assert.deepEqual(Array.from(observed), [108, 112, 33, 34]);
 });
 
 test("R2Bucket.put rejects an oversized stream without waiting for cancel", async () => {
@@ -329,9 +488,12 @@ test("R2Bucket.put rejects an oversized stream without waiting for cancel", asyn
       return null;
     },
   });
+  class HiddenOversizedChunk extends Uint8Array {
+    get byteLength() { return 0; }
+  }
   const stream = new ReadableStream({
     start(controller) {
-      controller.enqueue(new Uint8Array(R2_OBJECT_MAX_BUFFER_BYTES + 1));
+      controller.enqueue(new HiddenOversizedChunk(R2_OBJECT_MAX_BUFFER_BYTES + 1));
     },
     cancel() {
       cancelled = true;

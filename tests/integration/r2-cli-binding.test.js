@@ -121,6 +121,16 @@ test("R2 demo: CLI deploy supports PUT/GET/HEAD/LIST/range/delete and stream cop
   assert.equal(copied.copied.text, "0123456789");
   assert.deepEqual(copied.copied.customMetadata, { copiedfrom: "range.txt" });
 
+  res = await call(ns, "r2-demo", "POST", "/view-bounds?key=view.bin");
+  assert.equal(res.status, 200);
+  assert.deepEqual(await responseJson(res), {
+    size: 4,
+    text: "help",
+    disguisedStreamBytes: [108, 112, 33, 34],
+    outOfBoundsRejected: true,
+    outOfBoundsAbsent: true,
+  });
+
   const buckets = runWdlCli(["r2", "buckets", "list", "--ns", ns]);
   assertOk(buckets);
   assert.match(buckets.stdout, /R2 buckets/);

@@ -23,6 +23,67 @@ async function byobProbe() {
   };
 }
 
+function eventTargetSelfSignalProbe() {
+  const controller = new AbortController();
+  const { signal } = controller;
+  const noop = () => {};
+
+  // Fill the target's type map before registering a listener whose removal
+  // signal is the target itself. Installing the native abort handler can grow
+  // that map and must not leave listener registration with invalidated state.
+  signal.addEventListener("one", noop);
+  signal.addEventListener("two", noop);
+  signal.addEventListener("three", noop);
+  signal.addEventListener("victim", noop, { signal });
+  controller.abort();
+  return signal.aborted;
+}
+
+async function streamAbortRelockProbe() {
+  let writableController;
+  const writable = new WritableStream({
+    start(controller) {
+      writableController = controller;
+    },
+  });
+  await Promise.resolve();
+
+  const readable = new ReadableStream({});
+  let reader;
+  writableController.signal.addEventListener("abort", () => {
+    // Aborting the first pipe releases its source before aborting the
+    // destination. Re-locking here must not leave the first pipe with a stale
+    // source reference that can release or call through the new reader lock.
+    reader = readable.getReader();
+  });
+
+  const controller = new AbortController();
+  controller.abort(new Error("pipe-abort"));
+  let rejectedWithAbortReason = false;
+  try {
+    await readable.pipeTo(writable, { signal: controller.signal });
+  } catch (error) {
+    rejectedWithAbortReason = error instanceof Error && error.message === "pipe-abort";
+  }
+
+  const relocked = readable.locked && reader !== undefined;
+  reader?.releaseLock();
+  return rejectedWithAbortReason && relocked;
+}
+
+async function htmlRewriterProbe() {
+  let uppercaseAttributeMatches = 0;
+  const response = new HTMLRewriter()
+    .on("[HREF]", {
+      element() {
+        uppercaseAttributeMatches += 1;
+      },
+    })
+    .transform(new Response('<a href="/">link</a>'));
+  await response.text();
+  return { uppercaseAttributeMatches };
+}
+
 function pendingInternalByobResponse(request, mode) {
   if (!request.body) throw new TypeError("request body is required");
   const reader = request.body.getReader({ mode: "byob" });
@@ -94,6 +155,9 @@ export default {
         setAttributeChained,
         setAttributesChained,
       },
+      eventTargetSelfSignalAbort: eventTargetSelfSignalProbe(),
+      streamAbortRelockSafe: await streamAbortRelockProbe(),
+      htmlRewriter: await htmlRewriterProbe(),
       byob: await byobProbe(),
       importMetaPathHelpers: {
         dirname: typeof Reflect.get(import.meta, "dirname"),

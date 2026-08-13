@@ -7,10 +7,13 @@ import {
   assertR2BufferSize,
   encodeS3KeyPath,
   encodeS3Query,
+  r2BufferSourceBytes,
   r2PhysicalKey,
   r2PhysicalPrefix,
   r2RangeAndSizeFromHeaders,
   r2CacheExpiryFromHeaders,
+  r2Uint8ArrayByteLength,
+  r2Uint8ArrayIsFullBuffer,
   setR2CacheExpiryHeader,
   stripR2PhysicalPrefix,
   validateR2BucketName,
@@ -131,6 +134,144 @@ test("assertR2BufferSize caps buffered operations at 25MiB", () => {
     () => assertR2BufferSize(R2_OBJECT_MAX_BUFFER_BYTES + 1, "put"),
     /exceeds the 25 MiB WDL R2 limit/
   );
+});
+
+test("r2BufferSourceBytes uses intrinsic view bounds and rejects unusable views", () => {
+  class MisleadingBytes extends Uint8Array {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+  class MisleadingWords extends Uint16Array {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+  class MisleadingView extends DataView {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+
+  const source = new ArrayBuffer(8);
+  new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
+  const misleadingBytes = new MisleadingBytes(source, 2, 4);
+  const misleadingWords = new MisleadingWords(source, 2, 2);
+  const misleadingView = new MisleadingView(source, 2, 4);
+  for (const view of [misleadingBytes, misleadingWords, misleadingView]) {
+    const bytes = r2BufferSourceBytes(view);
+    assert.ok(bytes);
+    assert.deepEqual(Array.from(bytes), [104, 101, 108, 112]);
+    if (view === misleadingBytes) {
+      assert.strictEqual(bytes, misleadingBytes);
+    } else {
+      assert.equal(Object.getPrototypeOf(bytes), Uint8Array.prototype);
+    }
+  }
+
+  const ordinaryBytes = new Uint8Array([1, 2, 3]);
+  Object.defineProperty(ordinaryBytes, "byteLength", { get: () => 0 });
+  assert.strictEqual(r2BufferSourceBytes(ordinaryBytes), ordinaryBytes);
+  assert.equal(r2Uint8ArrayByteLength(ordinaryBytes), 3);
+  assert.equal(r2Uint8ArrayIsFullBuffer(ordinaryBytes, 3), true);
+  assert.equal(r2Uint8ArrayIsFullBuffer(ordinaryBytes.subarray(1), 2), false);
+  assert.equal(r2BufferSourceBytes("not bytes"), null);
+
+  const disguisedWords = new Uint16Array(2);
+  new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
+  Object.setPrototypeOf(disguisedWords, Uint8Array.prototype);
+  const disguisedBytes = r2BufferSourceBytes(disguisedWords);
+  assert.ok(disguisedBytes);
+  assert.notStrictEqual(disguisedBytes, disguisedWords);
+  assert.deepEqual(Array.from(disguisedBytes), [108, 112, 33, 34]);
+
+  for (const createView of [
+    (/** @type {ArrayBuffer} */ buffer) => new Uint8Array(buffer, 2, 4),
+    (/** @type {ArrayBuffer} */ buffer) => new Uint16Array(buffer, 2, 2),
+    (/** @type {ArrayBuffer} */ buffer) => new DataView(buffer, 2, 4),
+  ]) {
+    const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+    const view = createView(resizable);
+    resizable.resize(1);
+    assert.throws(() => r2BufferSourceBytes(view), TypeError);
+  }
+
+  for (const createValue of [
+    (/** @type {ArrayBuffer} */ buffer) => buffer,
+    (/** @type {ArrayBuffer} */ buffer) => new Uint8Array(buffer),
+    (/** @type {ArrayBuffer} */ buffer) => new DataView(buffer),
+  ]) {
+    const buffer = new ArrayBuffer(8);
+    const value = createValue(buffer);
+    structuredClone(buffer, { transfer: [buffer] });
+    assert.throws(() => r2BufferSourceBytes(value), TypeError);
+  }
+});
+
+test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering", () => {
+  const source = new ArrayBuffer(8);
+  new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
+  const words = new Uint16Array(source, 2, 2);
+  const view = new DataView(source, 2, 4);
+  const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+  const outOfBounds = new Uint8Array(resizable, 2, 4);
+  resizable.resize(1);
+
+  const originalReflectApply = Object.getOwnPropertyDescriptor(Reflect, "apply");
+  const originalReflectGet = Object.getOwnPropertyDescriptor(Reflect, "get");
+  const originalIsView = Object.getOwnPropertyDescriptor(ArrayBuffer, "isView");
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+  const originalAt = Object.getOwnPropertyDescriptor(typedArrayPrototype, "at");
+  const originalTypedArrayTag = Object.getOwnPropertyDescriptor(
+    typedArrayPrototype,
+    Symbol.toStringTag
+  );
+  const originalDataView = Object.getOwnPropertyDescriptor(globalThis, "DataView");
+  assert.ok(originalReflectApply);
+  assert.ok(originalReflectGet);
+  assert.ok(originalIsView);
+  assert.ok(originalAt);
+  assert.ok(originalTypedArrayTag);
+  assert.ok(originalDataView);
+  let wordBytes;
+  let viewBytes;
+  let outOfBoundsError;
+  try {
+    Object.defineProperty(Reflect, "apply", { ...originalReflectApply, value: () => 0 });
+    Object.defineProperty(Reflect, "get", { ...originalReflectGet, value: () => 0 });
+    Object.defineProperty(ArrayBuffer, "isView", { ...originalIsView, value: () => false });
+    Object.defineProperty(typedArrayPrototype, "at", {
+      ...originalAt,
+      value: () => undefined,
+    });
+    Object.defineProperty(typedArrayPrototype, Symbol.toStringTag, {
+      ...originalTypedArrayTag,
+      get: () => "Uint8Array",
+    });
+    Object.defineProperty(globalThis, "DataView", { ...originalDataView, value: class DataView {} });
+    wordBytes = r2BufferSourceBytes(words);
+    viewBytes = r2BufferSourceBytes(view);
+    try {
+      r2BufferSourceBytes(outOfBounds);
+    } catch (error) {
+      outOfBoundsError = error;
+    }
+  } finally {
+    Object.defineProperty(Reflect, "apply", originalReflectApply);
+    Object.defineProperty(Reflect, "get", originalReflectGet);
+    Object.defineProperty(ArrayBuffer, "isView", originalIsView);
+    Object.defineProperty(typedArrayPrototype, "at", originalAt);
+    Object.defineProperty(
+      typedArrayPrototype,
+      Symbol.toStringTag,
+      originalTypedArrayTag
+    );
+    Object.defineProperty(globalThis, "DataView", originalDataView);
+  }
+
+  assert.deepEqual(Array.from(/** @type {Uint8Array} */ (wordBytes)), [104, 101, 108, 112]);
+  assert.deepEqual(Array.from(/** @type {Uint8Array} */ (viewBytes)), [104, 101, 108, 112]);
+  assert.ok(outOfBoundsError instanceof TypeError);
 });
 
 test("r2RangeAndSizeFromHeaders keeps object size on range responses", () => {
