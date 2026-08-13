@@ -1453,6 +1453,38 @@ test("gateway websocket proxy terminates a non-resumable session after backend l
   ]);
 });
 
+test("gateway websocket proxy does not reconnect a non-resumable session after send failure", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  upstream.sendError = new Error("write failed");
+  /** @type {string[]} */
+  const outcomes = [];
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream, {
+      "x-wdl-websocket-reconnect-policy": "disabled",
+    }),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome)
+  );
+
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "cannot-send" });
+  await waitFor(() => responseWebSocket(response).closed !== null);
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(upstream.closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, ["established", "reconnect_suppressed"]);
+});
+
 test("gateway websocket proxy propagates an upstream close without a status code", () => {
   const upstream = new FakeWebSocket("upstream");
   /** @type {string[]} */

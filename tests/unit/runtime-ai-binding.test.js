@@ -1078,6 +1078,22 @@ test("AI host sanitizes internal resolver failures", async () => {
   assert.equal(calls, 2);
 });
 
+test("AI host does not resolve failure messages through object prototypes", async () => {
+  for (const code of ["toString", "__proto__"]) {
+    const { binding } = makeAiBinding();
+    await withMockedProperty(globalThis, "fetch", async () => Response.json({
+      error: code,
+      message: "private-state",
+    }, { status: 500 }), async () => {
+      const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
+      assert.deepEqual(
+        await readJsonResponse(response, 503, `sanitized ${code} resolver failure`),
+        { request_id: "rid-ai-test", error: code, message: "AI resolver is unavailable" }
+      );
+    });
+  }
+});
+
 test("AI host rejects duplicate WebSocket model parameters before resolution", async () => {
   const { binding } = makeAiBinding();
   const response = await binding.fetch(new Request(

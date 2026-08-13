@@ -5,7 +5,7 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 export const DEFAULT_INTEGRATION_DURATIONS_FILE = path.join(ROOT, ".integration-test-durations.json");
 
 // Update when integration runs reveal new slow tests; ordering affects
-// scheduling latency, not correctness. Last calibrated 2026-08-10 against
+// scheduling latency, not correctness. Last calibrated 2026-08-13 against
 // .integration-test-durations.json (descending durationMs). The recorded
 // duration file, when present, takes precedence over this fallback list.
 export const SLOW_FIRST_FILES = [
@@ -21,6 +21,7 @@ export const SLOW_FIRST_FILES = [
   "durable-objects-websocket.test.js",
   "queues-retry-and-delay.test.js",
   "queues-orphan-and-control.test.js",
+  "ai-binding.test.js",
   "queues-delivery.test.js",
   "d1-read-cache.test.js",
   "delete-api.test.js",

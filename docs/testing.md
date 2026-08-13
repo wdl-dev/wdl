@@ -323,12 +323,10 @@ Prefer the narrow helper that matches the response or fixture source:
   `before(ensureStackUp)` plus `beforeEach(resetStack)`. Keep explicit hooks
   only when the file adds one-time setup, skips per-test reset, or restarts
   services.
-- `test-workers/` contains fixture workers that integration tests deploy or
-  read directly. Two layouts coexist on purpose: a full Wrangler workspace
-  (`package.json + wrangler.toml + src/`) for tests that go through the
-  CLI deploy path, and `src/`-only for fixtures the test inlines via
-  `readFileSync(new URL("../../test-workers/<name>/src/index.js", ...))`.
-  Pick by usage; see `test-workers/README.md`. The `ai-binding`,
+- `test-workers/` contains fixtures that integration tests deploy, read directly,
+  or embed as hermetic workerd services. Three layouts coexist on purpose: full
+  Wrangler workspaces, source-only workers, and embedded services with
+  `config.capnp`. Pick by usage; see `test-workers/README.md`. The `ai-binding`,
   `ai-openai-sdk`, and `ai-provider` fixtures respectively own the tenant facade,
   SDK compatibility, and local official-provider protocol simulation.
 - `examples/` contains manual demos and reference projects.

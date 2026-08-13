@@ -299,18 +299,17 @@ function wrapClassInstance(instance, requestContext, wrappedEnv) {
 }
 
 let lastRawEnv = null;
-let lastEnvTemplateState = null;
+let lastEnvTemplate = null;
 
-function envTemplateState(env) {
-  if (env === lastRawEnv && lastEnvTemplateState) return lastEnvTemplateState;
+function envTemplate(env) {
+  if (env === lastRawEnv && lastEnvTemplate) return lastEnvTemplate;
   const template = { ...env };
-  const state = { template };
   __WdlHostRuntime__.forEachArray(__WdlHostRuntime__.objectKeys(template), (name) => {
     if (__WdlHostRuntime__.regexpTest(INTERNAL_BINDING_RE, name)) delete template[name];
   });
   lastRawEnv = env;
-  lastEnvTemplateState = state;
-  return state;
+  lastEnvTemplate = template;
+  return template;
 }
 
 function wrapEnv(env, requestIdOrContext = null) {
@@ -318,8 +317,7 @@ function wrapEnv(env, requestIdOrContext = null) {
   // and default handlers may re-enter with an env already wrapped by this
   // module. A symbol marker cannot be forged by tenant vars/secrets.
   if (!env || env[HOST_BINDINGS_WRAPPED] === true) return env;
-  const { template } = envTemplateState(env);
-  const out = { ...template };
+  const out = { ...envTemplate(env) };
   __WdlHostRuntime__.forEachArray(D1_BINDINGS, (name) => {
     if (out[name] !== undefined) out[name] = new D1Database(out[name], requestIdOptions(requestIdOrContext));
   });

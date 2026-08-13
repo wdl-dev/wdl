@@ -3,6 +3,7 @@ import {
   isValidAiProviderName,
   isValidRuntimeLoadNs,
 } from "shared-ns-pattern";
+import { utf8ByteLength } from "shared-utf8";
 
 export const AI_PROVIDER_MAX_COUNT = 8;
 export const AI_MODELS_PER_PROVIDER_MAX = 32;
@@ -13,32 +14,28 @@ export const AI_CREDENTIAL_MAX_BYTES = 16 * 1024;
 export const AI_PROVIDER_REVISION_RE = /^[0-9a-f]{32}$/;
 
 export const AI_PROVIDER_KINDS = Object.freeze(["openai", "xai", "deepseek"]);
-export const AI_PROTOCOLS = Object.freeze([
-  "responses",
-  "chat_completions",
-  "embeddings",
-  "realtime",
+const PROTOCOL_TRANSPORTS = new Map([
+  ["responses", new Set(["http", "sse", "responses_websocket"])],
+  ["chat_completions", new Set(["http", "sse"])],
+  ["embeddings", new Set(["http"])],
+  ["realtime", new Set(["realtime_websocket"])],
 ]);
 export const AI_TRANSPORTS = Object.freeze([
-  "http",
-  "sse",
-  "responses_websocket",
-  "realtime_websocket",
+  ...new Set([...PROTOCOL_TRANSPORTS.values()].flatMap((transports) => [...transports])),
 ]);
 
 const PROVIDER_KINDS = new Set(AI_PROVIDER_KINDS);
-const PROTOCOLS = new Set(AI_PROTOCOLS);
 const TRANSPORTS = new Set(AI_TRANSPORTS);
 const INPUT_MODALITIES = new Set(["text", "image", "audio", "file"]);
 const OUTPUT_MODALITIES = new Set(["text", "audio"]);
-const CAPABILITY_KEYS = [
+const CAPABILITY_KEYS = new Set([
   "functionTools",
   "structuredOutput",
   "reasoning",
   "previousResponseId",
   "providerTools",
   "binaryFrames",
-];
+]);
 const MODEL_DESCRIPTOR_KEYS = new Set([
   "upstreamModel",
   "protocol",
@@ -72,7 +69,6 @@ const MODEL_LIST_ENTRY_KEYS = new Set([
   "capabilities",
 ]);
 const MODELS_RESPONSE_KEYS = new Set(["models"]);
-const textEncoder = new TextEncoder();
 
 /**
  * @typedef {{
@@ -103,11 +99,6 @@ function requireRecord(value, scope) {
   return value;
 }
 
-/** @param {string} value */
-function utf8Bytes(value) {
-  return textEncoder.encode(value).byteLength;
-}
-
 /** @param {string} left @param {string} right */
 function compareStrings(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -134,7 +125,7 @@ function normalizeStringSet(raw, allowed, scope) {
 /** @param {unknown} raw @param {string} scope @returns {AiCapabilities} */
 function normalizeCapabilities(raw, scope) {
   const value = raw === undefined ? {} : requireRecord(raw, scope);
-  rejectUnknownFields(value, new Set(CAPABILITY_KEYS), scope);
+  rejectUnknownFields(value, CAPABILITY_KEYS, scope);
   /** @type {Record<string, boolean>} */
   const out = {};
   for (const key of CAPABILITY_KEYS) {
@@ -153,7 +144,7 @@ function normalizeUpstreamModel(raw, scope) {
     typeof raw !== "string" ||
     raw.length === 0 ||
     !raw.isWellFormed() ||
-    utf8Bytes(raw) > AI_UPSTREAM_MODEL_MAX_BYTES
+    utf8ByteLength(raw) > AI_UPSTREAM_MODEL_MAX_BYTES
   ) {
     throw new Error(
       `${scope}.upstreamModel must be well-formed, non-empty, and at most ${AI_UPSTREAM_MODEL_MAX_BYTES} UTF-8 bytes`
@@ -164,17 +155,12 @@ function normalizeUpstreamModel(raw, scope) {
 
 /** @param {unknown} rawProtocol @param {unknown} rawTransports @param {string} scope */
 function normalizeProtocolTransports(rawProtocol, rawTransports, scope) {
-  if (typeof rawProtocol !== "string" || !PROTOCOLS.has(rawProtocol)) {
+  if (typeof rawProtocol !== "string") {
     throw new Error(`${scope}.protocol is not supported`);
   }
+  const allowedTransports = PROTOCOL_TRANSPORTS.get(rawProtocol);
+  if (!allowedTransports) throw new Error(`${scope}.protocol is not supported`);
   const transports = normalizeStringSet(rawTransports, TRANSPORTS, `${scope}.transports`);
-  const allowedTransports = rawProtocol === "responses"
-    ? new Set(["http", "sse", "responses_websocket"])
-    : rawProtocol === "chat_completions"
-      ? new Set(["http", "sse"])
-      : rawProtocol === "embeddings"
-        ? new Set(["http"])
-        : new Set(["realtime_websocket"]);
   for (const transport of transports) {
     if (!allowedTransports.has(transport)) {
       throw new Error(`${scope}.transports contains ${transport} for protocol ${rawProtocol}`);
@@ -268,7 +254,7 @@ function normalizeProvider(raw, { revision, requireRevision = true } = {}) {
     normalizedModels[alias] = normalizedDescriptor;
   }
   const out = { revision: normalizedRevision, kind: value.kind, models: normalizedModels };
-  if (utf8Bytes(JSON.stringify(out)) > AI_PROVIDER_RECORD_MAX_BYTES) {
+  if (utf8ByteLength(JSON.stringify(out)) > AI_PROVIDER_RECORD_MAX_BYTES) {
     throw new Error(`provider record exceeds ${AI_PROVIDER_RECORD_MAX_BYTES} UTF-8 bytes`);
   }
   return out;
@@ -300,7 +286,7 @@ export function normalizeAiResolveRequest(raw) {
   rejectUnknownFields(value, RESOLVE_REQUEST_KEYS, "resolve request");
   if (!isValidRuntimeLoadNs(value.ns)) throw new Error("resolve request.ns is invalid");
   parseAiModelReference(value.model);
-  if (typeof value.protocol !== "string" || !PROTOCOLS.has(value.protocol)) {
+  if (typeof value.protocol !== "string" || !PROTOCOL_TRANSPORTS.has(value.protocol)) {
     throw new Error("resolve request.protocol is not supported");
   }
   if (typeof value.transport !== "string" || !TRANSPORTS.has(value.transport)) {
@@ -419,7 +405,7 @@ export function assertAiCredential(value) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
-    utf8Bytes(value) > AI_CREDENTIAL_MAX_BYTES ||
+    utf8ByteLength(value) > AI_CREDENTIAL_MAX_BYTES ||
     !/^[\x21-\x7e]+$/.test(value)
   ) {
     throw new Error(

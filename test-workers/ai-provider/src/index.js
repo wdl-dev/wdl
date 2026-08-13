@@ -27,7 +27,8 @@ function json(data, status = 200) {
 function authenticate(request, url) {
   const authorization = request.headers.get("authorization") || "";
   const credential = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
-  return CREDENTIALS[url.hostname]?.[credential] || null;
+  const credentials = CREDENTIALS[url.hostname];
+  return credentials && Object.hasOwn(credentials, credential) ? credentials[credential] : null;
 }
 
 function responseObject(body) {
@@ -47,26 +48,56 @@ function responseObject(body) {
   };
 }
 
+/** @param {string} event @param {unknown} data */
+function eventFrame(event, data) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/** @param {unknown} data */
+function dataFrame(data) {
+  return `data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`;
+}
+
 function eventStream(body, protocol) {
   const staysOpen = body.wdl_test_mode === "open_stream";
-  const frames = body.wdl_test_mode === "sse_error"
-    ? [
-        `event: error\ndata: ${JSON.stringify({ type: "error", error: { message: "fake provider error" } })}\n\n`,
-      ]
-    : staysOpen
-      ? [
-          `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_fake", model: body.model } })}\n\n`,
-        ]
-    : protocol === "chat"
-    ? [
-        `data: ${JSON.stringify({ id: "chatcmpl_fake", object: "chat.completion.chunk", model: body.model, choices: [{ delta: { content: "fake" } }] })}\n\n`,
-        "data: [DONE]\n\n",
-      ]
-    : [
-        `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_fake", model: body.model } })}\n\n`,
-        `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: "fake" })}\n\n`,
-        `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: responseObject(body) })}\n\n`,
-      ];
+  let frames;
+  if (body.wdl_test_mode === "sse_error") {
+    frames = [
+      eventFrame("error", { type: "error", error: { message: "fake provider error" } }),
+    ];
+  } else if (staysOpen) {
+    frames = [
+      eventFrame("response.created", {
+        type: "response.created",
+        response: { id: "resp_fake", model: body.model },
+      }),
+    ];
+  } else if (protocol === "chat_completions") {
+    frames = [
+      dataFrame({
+        id: "chatcmpl_fake",
+        object: "chat.completion.chunk",
+        model: body.model,
+        choices: [{ delta: { content: "fake" } }],
+      }),
+      dataFrame("[DONE]"),
+    ];
+  } else {
+    frames = [
+      eventFrame("response.created", {
+        type: "response.created",
+        response: { id: "resp_fake", model: body.model },
+      }),
+      eventFrame("response.output_text.delta", {
+        type: "response.output_text.delta",
+        delta: "fake",
+      }),
+      eventFrame("response.completed", {
+        type: "response.completed",
+        response: responseObject(body),
+      }),
+    ];
+  }
   return new Response(new ReadableStream({
     start(controller) {
       const bytes = encoder.encode(frames.join(""));
@@ -184,7 +215,10 @@ export default {
       await new Promise((resolve) => setTimeout(resolve, Number(body.wdl_test_delay_ms)));
     }
     if (body.stream === true) {
-      return eventStream(body, url.pathname.endsWith("/chat/completions") ? "chat" : "responses");
+      const protocol = url.pathname.endsWith("/chat/completions")
+        ? "chat_completions"
+        : "responses";
+      return eventStream(body, protocol);
     }
     if (body.wdl_test_mode === "invalid_json") {
       return new Response("not json", { status: 200, headers: { "content-type": "text/plain" } });

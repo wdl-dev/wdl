@@ -28,6 +28,7 @@ aiHostGlobal.__aiHostTestState = AI_HOST_TEST_STATE;
 
 const aiContractUrl = repositoryModuleDataUrl("shared/ai-contract.js", [
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
+  [/from "shared-utf8";/, `from ${JSON.stringify(repositoryFileUrl("shared/utf8.js"))};`],
 ]);
 const observabilityUrl = moduleDataUrl(`
 export function ensureRequestId(headers) { return headers.get("x-request-id") || "rid-ai-test"; }
@@ -61,7 +62,9 @@ const aiCapacityUrl = repositoryModuleDataUrl("runtime/bindings/ai-capacity.js",
   [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(runtimeProxyBindingStubUrl())};`],
 ]);
 const aiProviderUrl = repositoryModuleDataUrl("runtime/bindings/ai-provider.js");
-const aiWebSocketUrl = repositoryModuleDataUrl("runtime/bindings/ai-websocket.js");
+const aiWebSocketUrl = repositoryModuleDataUrl("runtime/bindings/ai-websocket.js", [
+  [/from "shared-utf8";/, `from ${JSON.stringify(repositoryFileUrl("shared/utf8.js"))};`],
+]);
 const aiProvider = await import(aiProviderUrl);
 
 const mod = await importRepositoryModule("runtime/bindings/ai.js", [

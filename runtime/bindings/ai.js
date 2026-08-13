@@ -58,6 +58,12 @@ const AI_VIRTUAL_ORIGIN = "https://ai.wdl";
 const JSON_CONTENT_TYPE = "application/json";
 const SSE_CONTENT_TYPE = "text/event-stream";
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+/** @type {ReadonlyMap<string, string>} */
+const RESOLVER_FAILURE_MESSAGES = new Map([
+  ["ai_credential_not_configured", "AI provider credential is not configured"],
+  ["ai_state_corrupt", "AI provider state is invalid"],
+  ["secret_decrypt_failed", "AI provider credential is unavailable"],
+]);
 
 /** @typedef {{ ns: string, worker: string, version: string }} AiBindingProps */
 /** @typedef {{ fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> }} AiNetwork */
@@ -98,23 +104,27 @@ function virtualUrl(request) {
 }
 
 /** @param {Request} request @param {AbortSignal} signal */
-function requestModelBody(request, signal) {
+async function requestModelBody(request, signal) {
   if (!hasContentType(request.headers.get("content-type"), JSON_CONTENT_TYPE)) {
     throw new AiBindingError(415, "ai_unsupported_media_type", "AI request content-type must be application/json");
   }
-  return readBoundedText(request, AI_REQUEST_MAX_BYTES, signal).catch((err) => {
+  let text;
+  try {
+    text = await readBoundedText(request, AI_REQUEST_MAX_BYTES, signal);
+  } catch (err) {
     if (err instanceof BodyTooLargeError) {
       throw new AiBindingError(413, "ai_request_too_large", `AI request exceeds ${AI_REQUEST_MAX_BYTES} bytes`);
     }
     throw err;
-  }).then((text) => {
-    let parsed;
-    try { parsed = JSON.parse(text); } catch {
-      throw new AiBindingError(400, "ai_invalid_json", "AI request body must be valid JSON");
-    }
-    if (!isRecord(parsed)) throw new AiBindingError(400, "ai_invalid_request", "AI request body must be an object");
-    return /** @type {Record<string, unknown>} */ (parsed);
-  });
+  }
+  let parsed;
+  try { parsed = JSON.parse(text); } catch {
+    throw new AiBindingError(400, "ai_invalid_json", "AI request body must be valid JSON");
+  }
+  if (!isRecord(parsed)) {
+    throw new AiBindingError(400, "ai_invalid_request", "AI request body must be an object");
+  }
+  return /** @type {Record<string, unknown>} */ (parsed);
 }
 
 /** @param {string} pathname */
@@ -167,13 +177,7 @@ async function internalAiRequest(binding, path, body, signal, requestId) {
         const retryable = code === "redis_error" || response.status === 502 || response.status === 504;
         if (retryable && attempt < AI_RESOLVE_ATTEMPTS) continue;
         if (response.status >= 500) {
-          message = code === "ai_credential_not_configured"
-            ? "AI provider credential is not configured"
-            : code === "ai_state_corrupt"
-              ? "AI provider state is invalid"
-              : code === "secret_decrypt_failed"
-                ? "AI provider credential is unavailable"
-                : "AI resolver is unavailable";
+          message = RESOLVER_FAILURE_MESSAGES.get(code) ?? "AI resolver is unavailable";
         }
         throw new AiBindingError(
           response.status >= 500 ? 503 : response.status,

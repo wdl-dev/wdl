@@ -92,12 +92,16 @@ export function rawHttpGet(url) {
  */
 
 /**
+ * @typedef {{ method?: string, headers?: Record<string, string>, body?: string | Buffer }} GatewayRequestInit
+ */
+
+/**
  * @param {string} ns
  * @param {string} p
- * @param {{ method?: string, headers?: Record<string, string>, body?: string | Buffer }} [init]
- * @returns {Promise<GatewayResponse>}
+ * @param {GatewayRequestInit} init
+ * @returns {Promise<import("node:http").IncomingMessage>}
  */
-export function gatewayFetch(ns, p, init = {}) {
+function gatewayRequest(ns, p, init) {
   const method = init.method || "GET";
   const headers = { Host: `${ns}.workers.local`, ...(init.headers || {}) };
   const body = init.body;
@@ -112,27 +116,33 @@ export function gatewayFetch(ns, p, init = {}) {
         headers,
         agent: false,
       },
-      (res) => {
-        /** @type {Buffer[]} */
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const buf = Buffer.concat(chunks);
-          const body = bufferedResponseBody(buf);
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            arrayBuffer: body.arrayBuffer,
-            text: body.text,
-            json: async () => responseJson(body, "gateway response body"),
-          });
-        });
-      }
+      resolve
     );
     req.on("error", reject);
-    if (body) req.write(body);
+    if (body !== undefined) req.write(body);
     req.end();
   });
+}
+
+/**
+ * @param {string} ns
+ * @param {string} p
+ * @param {GatewayRequestInit} [init]
+ * @returns {Promise<GatewayResponse>}
+ */
+export async function gatewayFetch(ns, p, init = {}) {
+  const res = await gatewayRequest(ns, p, init);
+  /** @type {Buffer[]} */
+  const chunks = [];
+  for await (const chunk of res) chunks.push(Buffer.from(chunk));
+  const body = bufferedResponseBody(Buffer.concat(chunks));
+  return {
+    status: res.statusCode,
+    headers: res.headers,
+    arrayBuffer: body.arrayBuffer,
+    text: body.text,
+    json: async () => responseJson(body, "gateway response body"),
+  };
 }
 
 // Return on response headers so tests can observe a body that intentionally
@@ -140,30 +150,12 @@ export function gatewayFetch(ns, p, init = {}) {
 /**
  * @param {string} ns
  * @param {string} p
- * @param {{ method?: string, headers?: Record<string, string>, body?: string | Buffer }} [init]
+ * @param {GatewayRequestInit} [init]
  * @returns {Promise<GatewayStreamResponse>}
  */
-export function gatewayStream(ns, p, init = {}) {
-  const method = init.method || "GET";
-  const headers = { Host: `${ns}.workers.local`, ...(init.headers || {}) };
-  const body = init.body;
-
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        host: GATEWAY_HOST,
-        port: GATEWAY_PORT,
-        method,
-        path: p,
-        headers,
-        agent: false,
-      },
-      (res) => resolve({ status: res.statusCode, headers: res.headers, body: res })
-    );
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
+export async function gatewayStream(ns, p, init = {}) {
+  const res = await gatewayRequest(ns, p, init);
+  return { status: res.statusCode, headers: res.headers, body: res };
 }
 
 // Same raw-http reason as gatewayFetch — keep Host intact.

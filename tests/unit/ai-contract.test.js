@@ -29,7 +29,7 @@ import { expectedAiProviderDestination } from "../../runtime/bindings/ai-provide
  *     credentialMaxBytes: number,
  *   },
  *   boundaries: {
- *     providerAliasLengths: Array<{ length: number, valid: boolean }>,
+ *     providerNameLengths: Array<{ length: number, valid: boolean }>,
  *     modelAliasLengths: Array<{ length: number, valid: boolean }>,
  *     upstreamModels: Array<{
  *       name: string,
@@ -59,6 +59,7 @@ const fixture = /** @type {AiContractFixture} */ (
 );
 const aiContract = await importRepositoryModule("shared/ai-contract.js", importSpecifierReplacements({
   "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
+  "shared-utf8": repositoryFileUrl("shared/utf8.js"),
 }));
 const capabilities = {
   functionTools: false,
@@ -142,7 +143,7 @@ test("AI aliases match the cross-language fixture", () => {
 });
 
 test("AI size and count boundaries match the cross-language fixture", () => {
-  for (const item of fixture.boundaries.providerAliasLengths) {
+  for (const item of fixture.boundaries.providerNameLengths) {
     assert.equal(isValidAiProviderName("p".repeat(item.length)), item.valid);
   }
   for (const item of fixture.boundaries.modelAliasLengths) {

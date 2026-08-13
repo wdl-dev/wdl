@@ -200,7 +200,7 @@ export function createAiStreamingResponse({
    *
    * @param {ReadableStreamDefaultController<Uint8Array>} controller
    */
-  const drainCompletedFrames = (controller) => {
+  const drainBufferedFrames = (controller) => {
     for (;;) {
       const frame = frames.take(true);
       if (frame === null) return false;
@@ -211,7 +211,7 @@ export function createAiStreamingResponse({
     if (idleTimer !== null) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       try {
-        if (output !== null && drainCompletedFrames(output)) return;
+        if (output !== null && drainBufferedFrames(output)) return;
         fail(new Error("AI stream idle timeout"), "idle_timeout");
       } catch (err) {
         fail(err instanceof Error ? err : new Error(errorMessage(err)), "stream_error");
@@ -247,7 +247,7 @@ export function createAiStreamingResponse({
           }
           const { value, done } = await reader.read();
           if (done) {
-            if (drainCompletedFrames(controller)) return;
+            if (drainBufferedFrames(controller)) return;
             throw new Error("AI stream ended before its terminal event");
           }
           const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);

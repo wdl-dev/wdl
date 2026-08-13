@@ -16,18 +16,21 @@ import {
   frameJson,
   gatewayFetch,
   gatewayStream,
+  parseJsonText,
   readIntegrationJson,
   readOneServerBinaryFrame,
   readOneServerCloseFrame,
   readOneServerTextFrame,
   recreateDoSingleRuntime,
   serviceInternalGet,
+  serviceInternalPost,
   setupIntegrationSuite,
   uniqueNs,
   waitUntil,
   wsHandshake,
 } from "./helpers/index.js";
 import { prometheusCounter } from "./helpers/prometheus.js";
+import { redisDel, redisHSet } from "./helpers/redis.js";
 
 setupIntegrationSuite();
 
@@ -179,7 +182,7 @@ async function setupAiNamespace(prefix) {
 }
 
 /** @param {string} name @param {string} pool @param {string} [outcome] */
-function doAiMetric(name, pool, outcome = undefined) {
+function doRuntimeAiMetric(name, pool, outcome = undefined) {
   const body = serviceInternalGet("do-runtime", 8788, "/_metrics").body;
   /** @type {Record<string, string>} */
   const labels = { service: "do-runtime", pool };
@@ -188,7 +191,7 @@ function doAiMetric(name, pool, outcome = undefined) {
 }
 
 /** @param {string} name @param {string} pool @param {string} [outcome] */
-function runtimeAiMetric(name, pool, outcome = undefined) {
+function userRuntimeAiMetric(name, pool, outcome = undefined) {
   const body = serviceInternalGet("user-runtime", 8088, "/_metrics").body;
   /** @type {Record<string, string>} */
   const labels = { service: "user-runtime", pool };
@@ -196,15 +199,15 @@ function runtimeAiMetric(name, pool, outcome = undefined) {
   return prometheusCounter(body, name, labels);
 }
 
-function requestReleaseCount() {
+function doRuntimeRequestReleaseCount() {
   return ["cancelled", "completed", "deadline"].reduce(
-    (total, outcome) => total + doAiMetric("wdl_ai_pool_events_total", "request", outcome),
+    (total, outcome) => total + doRuntimeAiMetric("wdl_ai_pool_events_total", "request", outcome),
     0
   );
 }
 
 /** @param {string} pool */
-function runtimeReleaseCount(pool) {
+function userRuntimeReleaseCount(pool) {
   return [
     "cancelled",
     "client_closed",
@@ -217,7 +220,7 @@ function runtimeReleaseCount(pool) {
     "provider_incomplete",
     "stream_error",
   ].reduce((total, outcome) =>
-    total + runtimeAiMetric("wdl_ai_pool_events_total", pool, outcome), 0);
+    total + userRuntimeAiMetric("wdl_ai_pool_events_total", pool, outcome), 0);
 }
 
 test("AI provider control rejects non-well-formed upstream model identifiers", async () => {
@@ -284,6 +287,30 @@ test("AI model listing sorts complete ids across prefix-related providers", asyn
     "AI run after cross-provider model ordering"
   );
   assert.equal(result.model, "gpt-test");
+});
+
+test("AI model snapshot rejects overbound hashes before reading their contents", () => {
+  const ns = uniqueNs("ai-model-bounds");
+  const providersKey = `ai:providers:${ns}`;
+  const credentialsKey = `ai:provider-credentials:${ns}`;
+  const overbound = Object.fromEntries(
+    Array.from({ length: 9 }, (_, index) => [`p${index}`, "malformed"])
+  );
+  try {
+    redisHSet(providersKey, overbound);
+    const providers = serviceInternalPost("redis-proxy-user", 7070, "/ai/models", { ns });
+    assert.equal(providers.status, 500);
+    assert.equal(parseJsonText(providers.body, "overbound provider snapshot").error, "ai_state_corrupt");
+
+    redisDel(providersKey);
+    redisHSet(credentialsKey, overbound);
+    const credentials = serviceInternalPost("redis-proxy-user", 7070, "/ai/models", { ns });
+    assert.equal(credentials.status, 500);
+    assert.equal(parseJsonText(credentials.body, "overbound credential snapshot").error, "ai_state_corrupt");
+  } finally {
+    redisDel(providersKey);
+    redisDel(credentialsKey);
+  }
 });
 
 /** @param {import("node:net").Socket} socket @param {string} label */
@@ -594,10 +621,10 @@ test("AI provider rotation reaches the next request and new socket without redep
 
 test("AI streams forward provider errors and release cancelled stream permits", async () => {
   const { ns } = await setupAiNamespace("ai-stream-lifecycle");
-  const baseline = runtimeAiMetric("wdl_ai_pool_in_use", "stream");
-  const beforeAcquired = runtimeAiMetric("wdl_ai_pool_events_total", "stream", "acquired");
-  const beforeReleased = runtimeReleaseCount("stream");
-  const beforeProviderError = runtimeAiMetric(
+  const baseline = userRuntimeAiMetric("wdl_ai_pool_in_use", "stream");
+  const beforeAcquired = userRuntimeAiMetric("wdl_ai_pool_events_total", "stream", "acquired");
+  const beforeReleased = userRuntimeReleaseCount("stream");
+  const beforeProviderError = userRuntimeAiMetric(
     "wdl_ai_pool_events_total",
     "stream",
     "provider_error"
@@ -611,10 +638,10 @@ test("AI streams forward provider errors and release cancelled stream permits", 
   assert.equal(cancelled.done, false);
   assert.match(cancelled.first, /event: response\.created/);
   await waitUntil("cancelled AI stream permit acquired", () =>
-    runtimeAiMetric("wdl_ai_pool_events_total", "stream", "acquired") === beforeAcquired + 1);
+    userRuntimeAiMetric("wdl_ai_pool_events_total", "stream", "acquired") === beforeAcquired + 1);
   await waitUntil("cancelled AI stream permit released", () =>
-    runtimeReleaseCount("stream") === beforeReleased + 1);
-  assert.equal(runtimeAiMetric("wdl_ai_pool_in_use", "stream"), baseline);
+    userRuntimeReleaseCount("stream") === beforeReleased + 1);
+  assert.equal(userRuntimeAiMetric("wdl_ai_pool_in_use", "stream"), baseline);
 
   const providerError = await gatewayFetch(ns, "/ai/sse-error");
   assertStatus(providerError, 200, "AI provider SSE error");
@@ -622,18 +649,18 @@ test("AI streams forward provider errors and release cancelled stream permits", 
   assert.match(providerErrorText, /event: error/);
   assert.match(providerErrorText, /fake provider error/);
   await waitUntil("provider-error AI stream permit released", () =>
-    runtimeAiMetric("wdl_ai_pool_in_use", "stream") === baseline);
+    userRuntimeAiMetric("wdl_ai_pool_in_use", "stream") === baseline);
   assert.equal(
-    runtimeAiMetric("wdl_ai_pool_events_total", "stream", "provider_error") -
+    userRuntimeAiMetric("wdl_ai_pool_events_total", "stream", "provider_error") -
       beforeProviderError,
     1
   );
 });
 
-test("AI stream and WebSocket idle deadlines release platform permits", async () => {
+test("AI stream and WebSocket idle deadlines release runtime permits", async () => {
   const { ns } = await setupAiNamespace("ai-idle-deadline");
-  const streamBaseline = runtimeAiMetric("wdl_ai_pool_in_use", "stream");
-  const beforeStreamIdle = runtimeAiMetric(
+  const streamBaseline = userRuntimeAiMetric("wdl_ai_pool_in_use", "stream");
+  const beforeStreamIdle = userRuntimeAiMetric(
     "wdl_ai_pool_events_total",
     "stream",
     "idle_timeout"
@@ -648,17 +675,17 @@ test("AI stream and WebSocket idle deadlines release platform permits", async ()
     assert.match(Buffer.from(first.value).toString("utf8"), /event: response\.created/);
     pendingRead = iterator.next().then(() => undefined, () => undefined);
     await waitUntil("idle AI stream deadline", () =>
-      runtimeAiMetric("wdl_ai_pool_events_total", "stream", "idle_timeout") ===
+      userRuntimeAiMetric("wdl_ai_pool_events_total", "stream", "idle_timeout") ===
         beforeStreamIdle + 1,
     { timeoutMs: 10_000, intervalMs: 100 });
-    assert.equal(runtimeAiMetric("wdl_ai_pool_in_use", "stream"), streamBaseline);
+    assert.equal(userRuntimeAiMetric("wdl_ai_pool_in_use", "stream"), streamBaseline);
   } finally {
     response.body.destroy();
     await pendingRead;
   }
 
-  const websocketBaseline = runtimeAiMetric("wdl_ai_pool_in_use", "websocket");
-  const beforeWebSocketIdle = runtimeAiMetric(
+  const websocketBaseline = userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket");
+  const beforeWebSocketIdle = userRuntimeAiMetric(
     "wdl_ai_pool_events_total",
     "websocket",
     "idle_timeout"
@@ -671,9 +698,9 @@ test("AI stream and WebSocket idle deadlines release platform permits", async ()
       reason: "AI websocket idle timeout",
     });
     await waitUntil("idle AI WebSocket deadline", () =>
-      runtimeAiMetric("wdl_ai_pool_events_total", "websocket", "idle_timeout") ===
+      userRuntimeAiMetric("wdl_ai_pool_events_total", "websocket", "idle_timeout") ===
         beforeWebSocketIdle + 1);
-    assert.equal(runtimeAiMetric("wdl_ai_pool_in_use", "websocket"), websocketBaseline);
+    assert.equal(userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket"), websocketBaseline);
   } finally {
     idleSocket.socket.destroy();
   }
@@ -730,7 +757,7 @@ test("AI request admission bounds a stalled tenant upload before provider I/O", 
 
 test("AI binding bridges agent and Realtime WebSockets with bounded lifecycle", async () => {
   const { ns } = await setupAiNamespace("ai-ws");
-  const baseline = runtimeAiMetric("wdl_ai_pool_in_use", "websocket");
+  const baseline = userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket");
 
   const responses = await wsHandshake(ns, "/ai/responses-ws");
   try {
@@ -804,10 +831,10 @@ test("AI binding bridges agent and Realtime WebSockets with bounded lifecycle", 
   const abandoned = await wsHandshake(ns, "/ai/responses-ws");
   assertStatus(abandoned, 101, "abandoned Responses WebSocket upgrade");
   await waitUntil("abandoned AI WebSocket permit acquired", () =>
-    runtimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline + 1);
+    userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline + 1);
   abandoned.socket.destroy();
   await waitUntil("AI WebSocket permits released", () =>
-    runtimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline,
+    userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline,
   { timeoutMs: 10_000, intervalMs: 100 });
 });
 
@@ -951,25 +978,25 @@ test("DO AI calls complete and caller teardown leaves the host watchdog alive", 
   assert.equal(imported.model, "gpt-test");
   assert.equal(imported.status, "completed");
 
-  const beforeGauge = doAiMetric("wdl_ai_pool_in_use", "request");
-  const beforeAcquired = doAiMetric("wdl_ai_pool_events_total", "request", "acquired");
-  const beforeReleased = requestReleaseCount();
+  const beforeGauge = doRuntimeAiMetric("wdl_ai_pool_in_use", "request");
+  const beforeAcquired = doRuntimeAiMetric("wdl_ai_pool_events_total", "request", "acquired");
+  const beforeReleased = doRuntimeRequestReleaseCount();
 
   const started = await gatewayFetch(ns, "/ai/do/start?name=teardown");
   assertStatus(started, 202, "DO AI request start");
   await waitUntil("DO AI request permit acquired", () =>
-    doAiMetric("wdl_ai_pool_in_use", "request") === beforeGauge + 1
+    doRuntimeAiMetric("wdl_ai_pool_in_use", "request") === beforeGauge + 1
   );
 
   await gatewayFetch(ns, "/ai/do/abort?name=teardown").catch(() => null);
   await waitUntil("DO AI request permit released after actor teardown", () =>
-    doAiMetric("wdl_ai_pool_in_use", "request") === beforeGauge,
+    doRuntimeAiMetric("wdl_ai_pool_in_use", "request") === beforeGauge,
   { timeoutMs: 10_000, intervalMs: 100 });
 
   assert.equal(
-    doAiMetric("wdl_ai_pool_events_total", "request", "acquired") - beforeAcquired,
+    doRuntimeAiMetric("wdl_ai_pool_events_total", "request", "acquired") - beforeAcquired,
     1
   );
-  assert.equal(requestReleaseCount() - beforeReleased, 1);
-  assert.equal(doAiMetric("wdl_ai_pool_events_total", "request", "deadline") >= 1, true);
+  assert.equal(doRuntimeRequestReleaseCount() - beforeReleased, 1);
+  assert.equal(doRuntimeAiMetric("wdl_ai_pool_events_total", "request", "deadline") >= 1, true);
 });

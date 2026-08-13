@@ -8,7 +8,7 @@
     "credentialMaxBytes": 16384
   },
   "boundaries": {
-    "providerAliasLengths": [
+    "providerNameLengths": [
       { "length": 32, "valid": true },
       { "length": 33, "valid": false }
     ],

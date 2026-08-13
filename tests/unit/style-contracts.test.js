@@ -2670,8 +2670,11 @@ test("owner endpoint validation lives in a shared contract owner", () => {
 
 test("DO transport relative dependencies are registered in host and loaded-worker module graphs", () => {
   const codeBudget = readRepoFile("runtime/load/code-budget.js");
-  assert.match(codeBudget, /\["_wdl-request-id\.js", sources\.requestIdSource\]/);
-  assert.match(codeBudget, /\["_wdl-do-transport\.js", sources\.doTransportSource\]/);
+  const moduleRewrite = readRepoFile("runtime/load/module-rewrite.js");
+  assert.match(moduleRewrite, /requestId: "_wdl-request-id\.js"/);
+  assert.match(moduleRewrite, /doTransport: "_wdl-do-transport\.js"/);
+  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.requestId, sources\.requestIdSource\]/);
+  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doTransport, sources\.doTransportSource\]/);
 
   for (const file of [
     "runtime/config-user.capnp",

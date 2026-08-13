@@ -180,10 +180,12 @@ namespace, and 64 KiB per provider record. Credentials are non-empty and at most
 `/ai/resolve` accepts `{ ns, model, protocol, transport }` and reads one provider record
 and credential in one Lua snapshot. `/ai/models` accepts `{ ns }`, reads the complete
 bounded provider snapshot plus credential-field presence in one Lua call, and returns
-configured hints without decrypting every credential. Binding name is not part of
-either wire request because one Worker can declare at most one AI binding. Malformed,
-non-canonical, torn, or over-limit provider state fails closed, and `/ai/resolve` also
-fails closed on an undecryptable credential. The shared JS/Rust grammar is pinned by
+configured hints without decrypting every credential. The Lua snapshot rejects either
+hash when its cardinality exceeds the provider bound before materializing provider
+records or credential field names. Binding name is not part of either wire request
+because one Worker can declare at most one AI binding. Malformed, non-canonical, torn,
+or over-limit provider state fails closed, and `/ai/resolve` also fails closed on an
+undecryptable credential. The shared JS/Rust grammar is pinned by
 `tests/fixtures/ai-contract.json`; resolver responses contain only fields consumed by
 the host request path.
 

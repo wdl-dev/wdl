@@ -30,6 +30,7 @@ const controlSharedUrl = controlSharedHarnessUrl(GLOBAL);
 const nsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 const aiContractUrl = repositoryModuleDataUrl("shared/ai-contract.js", [
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(nsPatternUrl)};`],
+  [/from "shared-utf8";/, `from ${JSON.stringify(repositoryFileUrl("shared/utf8.js"))};`],
 ]);
 const source = applyModuleReplacements(readRepositoryFile("control/handlers/ai.js"), [
   [/from "control-shared";/, `from ${JSON.stringify(controlSharedUrl)};`],

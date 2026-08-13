@@ -23,7 +23,13 @@ return {
 "#;
 
 const MODELS_SCRIPT: &str = r#"
+local max_provider_count = tonumber(ARGV[1])
+if redis.call('HLEN', KEYS[1]) > max_provider_count
+    or redis.call('HLEN', KEYS[2]) > max_provider_count then
+  return {0, {}, {}}
+end
 return {
+  1,
   redis.call('HGETALL', KEYS[1]),
   redis.call('HKEYS', KEYS[2])
 }
@@ -148,7 +154,7 @@ fn credentials_key(ns: &str) -> String {
     format!("ai:provider-credentials:{ns}")
 }
 
-fn valid_provider_alias(value: &str) -> bool {
+fn valid_provider_name(value: &str) -> bool {
     valid_bounded_alias(value, 32, |ch| ch == '-')
 }
 
@@ -172,7 +178,7 @@ fn split_model_reference(model: &str) -> AppResult<(&str, &str)> {
     let mut parts = model.split('/');
     let provider = parts.next().unwrap_or_default();
     let alias = parts.next().unwrap_or_default();
-    if parts.next().is_some() || !valid_provider_alias(provider) || !valid_model_alias(alias) {
+    if parts.next().is_some() || !valid_provider_name(provider) || !valid_model_alias(alias) {
         return Err(AppError::bad_request("model must be <provider>/<alias>"));
     }
     Ok((provider, alias))
@@ -452,29 +458,31 @@ pub(crate) async fn models(
     validate_request_identity(&request.ns)?;
     let providers_key = providers_key(&request.ns);
     let credentials_key = credentials_key(&request.ns);
-    let (raw_providers, credential_names): (BTreeMap<String, Vec<u8>>, Vec<String>) = state
-        .with_control_redis(|mut conn| async move {
-            redis::cmd("EVAL")
-                .arg(MODELS_SCRIPT)
-                .arg(2)
-                .arg(&providers_key)
-                .arg(&credentials_key)
-                .query_async(&mut conn)
-                .await
-        })
-        .await?;
-    if raw_providers.len() > AI_PROVIDER_MAX_COUNT {
+    let (bounded, raw_providers, credential_names): (u8, BTreeMap<String, Vec<u8>>, Vec<String>) =
+        state
+            .with_control_redis(|mut conn| async move {
+                redis::cmd("EVAL")
+                    .arg(MODELS_SCRIPT)
+                    .arg(2)
+                    .arg(&providers_key)
+                    .arg(&credentials_key)
+                    .arg(AI_PROVIDER_MAX_COUNT)
+                    .query_async(&mut conn)
+                    .await
+            })
+            .await?;
+    if bounded != 1 {
         return Err(ai_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "ai_state_corrupt",
-            "AI provider count exceeds its bound",
+            "AI provider or credential count exceeds its bound",
         ));
     }
     let configured: HashSet<&str> = credential_names.iter().map(String::as_str).collect();
     let mut entries = Vec::new();
     let mut model_count = 0usize;
     for (provider, raw) in raw_providers {
-        if !valid_provider_alias(&provider) {
+        if !valid_provider_name(&provider) {
             return Err(ai_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ai_state_corrupt",
@@ -566,7 +574,7 @@ mod tests {
 
     fn valid_resolve_response(response: &ResolveResponse) -> bool {
         let transports = [response.transport.clone()];
-        valid_provider_alias(&response.provider)
+        valid_provider_name(&response.provider)
             && valid_model_alias(&response.alias)
             && validate_upstream_model(&response.upstream_model)
             && validate_protocol_transports(&response.protocol, &transports)
@@ -629,10 +637,10 @@ mod tests {
         assert_eq!(limits["upstreamModelMaxBytes"], AI_UPSTREAM_MODEL_MAX_BYTES);
         assert_eq!(limits["credentialMaxBytes"], AI_CREDENTIAL_MAX_BYTES);
         let boundaries = &fixture["boundaries"];
-        for item in boundaries["providerAliasLengths"].as_array().unwrap() {
+        for item in boundaries["providerNameLengths"].as_array().unwrap() {
             let value = "p".repeat(item["length"].as_u64().unwrap() as usize);
             assert_eq!(
-                valid_provider_alias(&value),
+                valid_provider_name(&value),
                 item["valid"].as_bool().unwrap()
             );
         }
@@ -698,7 +706,7 @@ mod tests {
         for item in fixture["aliases"].as_array().unwrap() {
             let value = item["value"].as_str().unwrap();
             assert_eq!(
-                valid_provider_alias(value),
+                valid_provider_name(value),
                 item["provider"].as_bool().unwrap(),
                 "{value}"
             );
@@ -782,5 +790,18 @@ mod tests {
         assert!(validate_credential("token value").is_err());
         assert!(validate_credential("token-\u{5bc6}\u{94a5}").is_err());
         assert!(validate_credential(&"x".repeat(AI_CREDENTIAL_MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn models_script_bounds_hashes_before_materializing_them() {
+        let provider_count = MODELS_SCRIPT.find("redis.call('HLEN', KEYS[1])").unwrap();
+        let credential_count = MODELS_SCRIPT.find("redis.call('HLEN', KEYS[2])").unwrap();
+        let providers = MODELS_SCRIPT
+            .find("redis.call('HGETALL', KEYS[1])")
+            .unwrap();
+        let credentials = MODELS_SCRIPT.find("redis.call('HKEYS', KEYS[2])").unwrap();
+        assert!(provider_count < providers);
+        assert!(credential_count < credentials);
+        assert!(MODELS_SCRIPT.contains("return {0, {}, {}}"));
     }
 }

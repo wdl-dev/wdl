@@ -16,7 +16,6 @@ import { parseVersion } from "shared-worker-contract";
  * @typedef {(options: { props: Record<string, unknown> }) => unknown} RuntimeEntrypointFactory
  * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, AiBinding: RuntimeEntrypointFactory, DurableObjectNamespace: RuntimeEntrypointFactory, WorkflowBinding: RuntimeEntrypointFactory } }} RuntimeContext
  * @typedef {{ bindingEntries?: Array<[string, RuntimeBindingSpec]>, workflows?: RuntimeWorkflowSpec[] }} BuildWorkerEnvOptions
- * @typedef {{ value: unknown }} RuntimeBindingMaterialized
  * @typedef {{
  *   name: string,
  *   spec: RuntimeBindingSpec,
@@ -28,9 +27,8 @@ import { parseVersion } from "shared-worker-contract";
  *   ctx: RuntimeContext,
  *   nsSecrets: Record<string, string>,
  *   workerSecrets: Record<string, string>,
- *   options: BuildWorkerEnvOptions,
  * }} RuntimeBindingMaterializerArgs
- * @typedef {(args: RuntimeBindingMaterializerArgs) => RuntimeBindingMaterialized} RuntimeBindingMaterializer
+ * @typedef {(args: RuntimeBindingMaterializerArgs) => unknown} RuntimeBindingMaterializer
  */
 
 /** @param {Record<string, unknown> | null | undefined} source @param {string} label @param {string} ns @param {string} worker */
@@ -50,7 +48,7 @@ function materializeKvBinding({ name, spec, ns, ctx }) {
   if (typeof spec.id !== "string" || !spec.id) {
     throw new Error(`Binding "${name}" is a KV binding but missing id`);
   }
-  return { value: ctx.exports.KV({ props: { ns, id: spec.id } }) };
+  return ctx.exports.KV({ props: { ns, id: spec.id } });
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
@@ -66,7 +64,7 @@ function materializeAssetsBinding({ name, meta, ns, worker, cdnBase, ctx }) {
       `Binding "${name}" requires __meta__.assets.prefix (bundle shape mismatch — redeploy ${ns}/${worker})`
     );
   }
-  return { value: ctx.exports.Assets({ props: { cdnBase, prefix } }) };
+  return ctx.exports.Assets({ props: { cdnBase, prefix } });
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
@@ -74,15 +72,13 @@ function materializeQueueBinding({ name, spec, ns, ctx }) {
   if (typeof spec.id !== "string" || !spec.id) {
     throw new Error(`Binding "${name}" is a queue binding but missing id (queue name)`);
   }
-  return {
-    value: ctx.exports.QueueProducer({
-      props: {
-        ns,
-        id: spec.id,
-        deliveryDelaySeconds: spec.deliveryDelaySeconds ?? 0,
-      },
-    }),
-  };
+  return ctx.exports.QueueProducer({
+    props: {
+      ns,
+      id: spec.id,
+      deliveryDelaySeconds: spec.deliveryDelaySeconds ?? 0,
+    },
+  });
 }
 
 // The estimated control-side copy of the do-runtime alarm binding env value
@@ -98,15 +94,13 @@ function materializeD1Binding({ name, spec, ns, ctx }) {
   if (typeof databaseId !== "string" || !D1_DATABASE_ID_RE.test(databaseId)) {
     throw new Error(`Binding "${name}" is a D1 binding but has invalid databaseId`);
   }
-  return {
-    value: ctx.exports.D1Database({
-      props: {
-        ns,
-        databaseId,
-        binding: name,
-      },
-    }),
-  };
+  return ctx.exports.D1Database({
+    props: {
+      ns,
+      databaseId,
+      binding: name,
+    },
+  });
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
@@ -115,15 +109,13 @@ function materializeR2Binding({ name, spec, ns, ctx }) {
   if (typeof bucketName !== "string" || !bucketName) {
     throw new Error(`Binding "${name}" is an R2 binding but missing bucketName`);
   }
-  return {
-    value: ctx.exports.R2Bucket({
-      props: {
-        ns,
-        bucketName,
-        binding: name,
-      },
-    }),
-  };
+  return ctx.exports.R2Bucket({
+    props: {
+      ns,
+      bucketName,
+      binding: name,
+    },
+  });
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
@@ -131,11 +123,9 @@ function materializeAiBinding({ ns, worker, version, ctx }) {
   if (typeof ctx.exports.AiBinding !== "function") {
     throw new Error("AiBinding runtime binding adapter is not configured");
   }
-  return {
-    value: ctx.exports.AiBinding({
-      props: { ns, worker, version },
-    }),
-  };
+  return ctx.exports.AiBinding({
+    props: { ns, worker, version },
+  });
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
@@ -157,17 +147,15 @@ function materializeDoBinding({ name, spec, ns, worker, version, ctx }) {
   if (typeof ctx.exports.DurableObjectNamespace !== "function") {
     throw new Error("DurableObjectNamespace runtime binding adapter is not configured");
   }
-  return {
-    value: ctx.exports.DurableObjectNamespace({
-      props: {
-        ns,
-        worker,
-        version,
-        doStorageId: spec.doStorageId,
-        className: spec.className,
-      },
-    }),
-  };
+  return ctx.exports.DurableObjectNamespace({
+    props: {
+      ns,
+      worker,
+      version,
+      doStorageId: spec.doStorageId,
+      className: spec.className,
+    },
+  });
 }
 
 /** @param {RuntimeBindingMaterializerArgs} args */
@@ -212,18 +200,16 @@ function materializeServiceBinding({ name, spec, ns, worker, nsSecrets, workerSe
       }
     }
   }
-  return {
-    value: ctx.exports.ServiceBinding({
-      props: {
-        targetNs: spec.ns ?? ns,
-        targetWorker: spec.service,
-        targetVersion: spec.version,
-        targetEntrypoint: spec.entrypoint ?? null,
-        callerNs: ns,
-        ...(callerSecrets ? { callerSecrets } : {}),
-      },
-    }),
-  };
+  return ctx.exports.ServiceBinding({
+    props: {
+      targetNs: spec.ns ?? ns,
+      targetWorker: spec.service,
+      targetVersion: spec.version,
+      targetEntrypoint: spec.entrypoint ?? null,
+      callerNs: ns,
+      ...(callerSecrets ? { callerSecrets } : {}),
+    },
+  });
 }
 
 /** @type {Record<string, RuntimeBindingMaterializer>} */
@@ -312,7 +298,7 @@ export function buildWorkerEnv(
     if (!materialize) {
       throw new Error(`Unsupported binding "${name}": type "${spec.type}"`);
     }
-    const materialized = materialize({
+    env[name] = materialize({
       name,
       spec,
       meta,
@@ -323,9 +309,7 @@ export function buildWorkerEnv(
       ctx,
       nsSecrets,
       workerSecrets,
-      options,
     });
-    env[name] = materialized.value;
   }
   return env;
 }

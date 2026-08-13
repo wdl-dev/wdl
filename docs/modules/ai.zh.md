@@ -106,7 +106,7 @@ AI 使用 DB 0：
 
 Provider JSON 包含 `revision`、`kind` 和 canonical alias-sorted `models` map。Control 限制每个 namespace 最多八个 provider、每个 provider 32 个 model、每个 namespace 128 个 model、每条 provider record 64 KiB；credential 非空、最多 16 KiB，并使用上述 visible-ASCII bearer-token grammar。
 
-`/ai/resolve` 接受 `{ ns, model, protocol, transport }`，在一个 Lua snapshot 中读取一条 provider record 与 credential；`/ai/models` 接受 `{ ns }`，在一个 Lua 调用中读取完整有界 provider snapshot 和 credential field presence，返回 configured hint 而不解密每个 credential。每个 Worker 最多声明一个 AI binding，因此两条 wire request 都不携带 binding name。Malformed、non-canonical、torn 或 over-limit provider state 会 fail closed；`/ai/resolve` 还会对无法解密的 credential fail closed。共享 JS/Rust grammar 由 `tests/fixtures/ai-contract.json` 固定；resolver response 只包含 host request path 实际消费的字段。
+`/ai/resolve` 接受 `{ ns, model, protocol, transport }`，在一个 Lua snapshot 中读取一条 provider record 与 credential；`/ai/models` 接受 `{ ns }`，在一个 Lua 调用中读取完整有界 provider snapshot 和 credential field presence，返回 configured hint 而不解密每个 credential。Lua snapshot 会先检查两个 hash 的 cardinality，在物化 provider record 或 credential field name 前拒绝超过 provider 上限的状态。每个 Worker 最多声明一个 AI binding，因此两条 wire request 都不携带 binding name。Malformed、non-canonical、torn 或 over-limit provider state 会 fail closed；`/ai/resolve` 还会对无法解密的 credential fail closed。共享 JS/Rust grammar 由 `tests/fixtures/ai-contract.json` 固定；resolver response 只包含 host request path 实际消费的字段。
 
 Provider state 跟随 namespace secret lifecycle，可以活过 namespace 中最后一个 Worker。删除并重新创建最后一个 Worker 不会删除 provider metadata 或 credential；只有显式 provider delete 才会删除。
 

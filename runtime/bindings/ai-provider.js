@@ -2,6 +2,24 @@ const JSON_CONTENT_TYPE = "application/json";
 const SSE_CONTENT_TYPE = "text/event-stream";
 const AI_OPENAI_WS_MAX_DURATION_MS = 59 * 60_000;
 const AI_XAI_WS_MAX_DURATION_MS = 24 * 60_000;
+/** @type {Readonly<Record<string, string>>} */
+const PROVIDER_HOSTS = Object.freeze({
+  openai: "api.openai.com",
+  xai: "api.x.ai",
+  deepseek: "api.deepseek.com",
+});
+/** @type {Readonly<Record<string, string>>} */
+const OPENAI_COMPATIBLE_PATHS = Object.freeze({
+  responses: "/v1/responses",
+  chat_completions: "/v1/chat/completions",
+  embeddings: "/v1/embeddings",
+  realtime: "/v1/realtime",
+});
+/** @type {Readonly<Record<string, string>>} */
+const DEEPSEEK_PATHS = Object.freeze({
+  responses: "/responses",
+  chat_completions: "/chat/completions",
+});
 
 /**
  * @typedef {{
@@ -32,22 +50,11 @@ function isRecord(value) {
 /** @param {string} kind @param {string} protocol @param {string} transport */
 export function expectedAiProviderDestination(kind, protocol, transport) {
   const websocket = transport === "responses_websocket" || transport === "realtime_websocket";
-  if (kind === "deepseek") {
-    if (websocket || protocol === "realtime" || protocol === "embeddings") return null;
-    return `https://api.deepseek.com${protocol === "responses" ? "/responses" : "/chat/completions"}`;
-  }
-  const host = kind === "openai" ? "api.openai.com" : kind === "xai" ? "api.x.ai" : null;
-  if (!host) return null;
-  const path = protocol === "responses"
-    ? "/v1/responses"
-    : protocol === "chat_completions"
-      ? "/v1/chat/completions"
-      : protocol === "embeddings"
-        ? "/v1/embeddings"
-        : protocol === "realtime"
-          ? "/v1/realtime"
-          : null;
-  return path ? `${websocket ? "wss" : "https"}://${host}${path}` : null;
+  const host = PROVIDER_HOSTS[kind];
+  const paths = kind === "deepseek" ? DEEPSEEK_PATHS : OPENAI_COMPATIBLE_PATHS;
+  const path = paths[protocol];
+  if (!host || !path || (kind === "deepseek" && websocket)) return null;
+  return `${websocket ? "wss" : "https"}://${host}${path}`;
 }
 
 /** @param {Set<string>} found @param {unknown} value */

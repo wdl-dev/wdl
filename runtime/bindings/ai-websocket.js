@@ -1,7 +1,7 @@
+import { utf8ByteLength } from "shared-utf8";
+
 export const AI_WS_FRAME_MAX_BYTES = 1024 * 1024;
 export const AI_WS_MAX_BYTES = 128 * 1024 * 1024;
-
-const utf8Encoder = new TextEncoder();
 
 /** @param {unknown} value */
 function isRecord(value) {
@@ -11,7 +11,7 @@ function isRecord(value) {
 /** @param {unknown} data */
 function websocketFrame(data) {
   if (typeof data === "string") {
-    const bytes = utf8Encoder.encode(data).byteLength;
+    const bytes = utf8ByteLength(data);
     return { kind: "text", data, bytes };
   }
   if (data instanceof ArrayBuffer) {
@@ -36,9 +36,12 @@ function sendableCloseCode(code) {
 /** @param {unknown} reason */
 function closeReason(reason) {
   const text = typeof reason === "string" ? reason : "AI websocket closed";
+  let bytes = 0;
   let out = "";
   for (const character of text) {
-    if (utf8Encoder.encode(out + character).byteLength > 123) break;
+    const characterBytes = utf8ByteLength(character);
+    if (bytes + characterBytes > 123) break;
+    bytes += characterBytes;
     out += character;
   }
   return out;

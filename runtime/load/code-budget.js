@@ -3,6 +3,7 @@ import {
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
 import {
+  HOST_BINDING_MODULE_NAMES,
   HOST_BINDING_RESERVED_MODULES,
   HOST_BINDING_RESERVED_MODULE_NAMES,
   WORKFLOWS_MODULE_NAME,
@@ -23,7 +24,6 @@ const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
 // src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_CODE_SIZE.
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
-const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
 const WORKFLOWS_IMPORT_MARKER = "cloudflare:workflows";
 const WORKFLOWS_IMPORT_MARKER_BYTES = nodeBuffer.from(WORKFLOWS_IMPORT_MARKER, "utf8");
 const utf8Decoder = new TextDecoder();
@@ -107,48 +107,48 @@ function containsWorkflowsImportMarker(body) {
 /** @param {RuntimeInjectionSources} sources */
 function runtimeModuleInjections(sources) {
   /** @type {RuntimeModuleInjection} */
-  const requestIdModuleInjection = ["_wdl-request-id.js", sources.requestIdSource];
+  const requestIdModuleInjection = [HOST_BINDING_MODULE_NAMES.requestId, sources.requestIdSource];
   const d1ParamsInjectedSource = sources.d1ParamsSource.replace(
     '"./utf8.js"',
-    '"./_wdl-utf8.js"'
+    `"./${HOST_BINDING_MODULE_NAMES.utf8}"`
   );
   const d1TransportInjectedSource = sources.d1TransportSource.replace(
     /from "shared-d1-data-field";/,
-    `from "./${D1_DATA_FIELD_MODULE_NAME}";`
+    `from "./${HOST_BINDING_MODULE_NAMES.d1DataField}";`
   );
   /** @type {RuntimeModuleInjection[]} */
   const d1ModuleInjections = [
     requestIdModuleInjection,
-    [D1_DATA_FIELD_MODULE_NAME, sources.d1DataFieldSource],
-    ["_wdl-utf8.js", sources.utf8Source],
-    ["_wdl-d1-params.js", d1ParamsInjectedSource],
-    ["_wdl-sql-splitter.js", sources.sqlSplitterSource],
-    ["_wdl-d1-transport.js", d1TransportInjectedSource],
-    ["_wdl-d1-client.js", sources.d1ClientSource],
+    [HOST_BINDING_MODULE_NAMES.d1DataField, sources.d1DataFieldSource],
+    [HOST_BINDING_MODULE_NAMES.utf8, sources.utf8Source],
+    [HOST_BINDING_MODULE_NAMES.d1Params, d1ParamsInjectedSource],
+    [HOST_BINDING_MODULE_NAMES.sqlSplitter, sources.sqlSplitterSource],
+    [HOST_BINDING_MODULE_NAMES.d1Transport, d1TransportInjectedSource],
+    [HOST_BINDING_MODULE_NAMES.d1Client, sources.d1ClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
   const r2ModuleInjections = [
     requestIdModuleInjection,
-    ["_wdl-r2-utils.js", sources.r2UtilsSource],
-    ["_wdl-r2-client.js", sources.r2ClientSource],
+    [HOST_BINDING_MODULE_NAMES.r2Utils, sources.r2UtilsSource],
+    [HOST_BINDING_MODULE_NAMES.r2Client, sources.r2ClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
   const doModuleInjections = [
     requestIdModuleInjection,
-    ["_wdl-do-transport.js", sources.doTransportSource],
-    ["_wdl-owner-endpoint.js", sources.ownerEndpointSource],
-    ["_wdl-owner-hint-cache.js", sources.ownerHintCacheSource],
-    ["_wdl-do-client.js", sources.doClientSource],
+    [HOST_BINDING_MODULE_NAMES.doTransport, sources.doTransportSource],
+    [HOST_BINDING_MODULE_NAMES.ownerEndpoint, sources.ownerEndpointSource],
+    [HOST_BINDING_MODULE_NAMES.ownerHintCache, sources.ownerHintCacheSource],
+    [HOST_BINDING_MODULE_NAMES.doClient, sources.doClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
   const workflowsModuleInjections = [
     requestIdModuleInjection,
-    ["_wdl-workflows-client.js", sources.workflowsClientSource],
+    [HOST_BINDING_MODULE_NAMES.workflowsClient, sources.workflowsClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
   const aiModuleInjections = [
     requestIdModuleInjection,
-    ["_wdl-ai-client.js", sources.aiClientSource],
+    [HOST_BINDING_MODULE_NAMES.aiClient, sources.aiClientSource],
   ];
   return {
     d1ModuleInjections,
@@ -178,7 +178,7 @@ function hasHostFacadeBindings(plan) {
 }
 
 /** @param {RuntimeBundleMeta} meta */
-function d1ExportedEntrypointNames(meta) {
+function exportedEntrypointNames(meta) {
   /** @type {string[]} */
   const out = [];
   for (const entry of meta.exports || []) {
@@ -208,7 +208,7 @@ function d1ExportedEntrypointNames(meta) {
  * @param {RuntimeWorkflowSpec[]} workflows
  */
 function hostWrappedClassNames(meta, bindingEntries, workflows) {
-  const out = new Set(d1ExportedEntrypointNames(meta));
+  const out = new Set(exportedEntrypointNames(meta));
   for (const [, spec] of bindingEntries) {
     if (spec?.type === "do" && typeof spec.className === "string" && spec.className) {
       if (!isValidJsClassDeclarationName(spec.className)) {

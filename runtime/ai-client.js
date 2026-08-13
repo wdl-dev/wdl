@@ -93,18 +93,20 @@ function aiError(payload, status) {
       !Array.isArray(record.error)
     ? /** @type {Record<string, unknown>} */ (record.error)
     : null;
-  const message = typeof record.message === "string" && record.message
-    ? record.message
-    : typeof providerError?.message === "string" && providerError.message
-      ? providerError.message
-    : `AI request failed with status ${status}`;
-  const code = typeof record.error === "string" && record.error
-    ? record.error
-    : typeof providerError?.code === "string" && providerError.code
-      ? providerError.code
-      : typeof providerError?.type === "string" && providerError.type
-        ? providerError.type
-        : "ai_request_failed";
+  let message = `AI request failed with status ${status}`;
+  if (typeof record.message === "string" && record.message) {
+    message = record.message;
+  } else if (typeof providerError?.message === "string" && providerError.message) {
+    message = providerError.message;
+  }
+  let code = "ai_request_failed";
+  if (typeof record.error === "string" && record.error) {
+    code = record.error;
+  } else if (typeof providerError?.code === "string" && providerError.code) {
+    code = providerError.code;
+  } else if (typeof providerError?.type === "string" && providerError.type) {
+    code = providerError.type;
+  }
   const error = new Error(message);
   error.name = "AIError";
   return Object.assign(error, { code, status });
