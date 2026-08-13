@@ -2,6 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { R2Bucket, R2Object, R2ObjectBody } from "../../runtime/r2-client.js";
 import { R2_OBJECT_MAX_BUFFER_BYTES } from "../../runtime/r2-utils.js";
+import {
+  withMockedPropertyDescriptor,
+  withMockedPropertyDescriptors,
+} from "../helpers/mock-global.js";
 
 /**
  * @param {Promise<unknown>} promise
@@ -172,16 +176,12 @@ test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds view
 
   const source = new ArrayBuffer(8);
   new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
-  const originalReflectGet = Object.getOwnPropertyDescriptor(Reflect, "get");
-  assert.ok(originalReflectGet);
-  let validPut;
-  try {
-    Object.defineProperty(Reflect, "get", { ...originalReflectGet, value: () => 0 });
-    validPut = bucket.put("safe.bin", new MisleadingWords(source, 2, 2));
-  } finally {
-    Object.defineProperty(Reflect, "get", originalReflectGet);
-  }
-  await validPut;
+  await withMockedPropertyDescriptor(
+    Reflect,
+    "get",
+    { configurable: true, writable: true, value: () => 0 },
+    () => bucket.put("safe.bin", new MisleadingWords(source, 2, 2))
+  );
 
   assert.equal(calls.length, 1);
   assert.deepEqual(Array.from(calls[0]), [104, 101, 108, 112]);
@@ -190,23 +190,15 @@ test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds view
   const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
   const outOfBounds = new Uint8Array(resizable, 2, 4);
   resizable.resize(1);
-  const originalAt = Object.getOwnPropertyDescriptor(Uint8Array.prototype, "at");
-  let outOfBoundsPut;
-  try {
-    Object.defineProperty(Uint8Array.prototype, "at", {
-      configurable: true,
-      writable: true,
-      value: () => undefined,
-    });
-    outOfBoundsPut = bucket.put("empty.bin", outOfBounds);
-  } finally {
-    if (originalAt) {
-      Object.defineProperty(Uint8Array.prototype, "at", originalAt);
-    } else {
-      Reflect.deleteProperty(Uint8Array.prototype, "at");
-    }
-  }
-  await assert.rejects(outOfBoundsPut, TypeError);
+  await assert.rejects(
+    () => withMockedPropertyDescriptor(
+      Uint8Array.prototype,
+      "at",
+      { configurable: true, writable: true, value: () => undefined },
+      () => bucket.put("empty.bin", outOfBounds)
+    ),
+    TypeError
+  );
   assert.equal(calls.length, 1);
 });
 
@@ -409,7 +401,7 @@ test("R2Bucket.put keeps single-chunk ReadableStream bytes without re-copying", 
   assert.equal(thenCalls, 0);
 });
 
-test("R2Bucket.put uses intrinsic stream chunk bounds and set", async () => {
+test("R2Bucket.put isolates stream chunk buffering from mutable intrinsics", async () => {
   class MisleadingChunk extends Uint8Array {
     get buffer() { return new ArrayBuffer(0); }
     get byteOffset() { return 0; }
@@ -432,26 +424,44 @@ test("R2Bucket.put uses intrinsic stream chunk bounds and set", async () => {
       controller.close();
     },
   });
-  const originalSet = Object.getOwnPropertyDescriptor(Uint8Array.prototype, "set");
   let patchedSetCalls = 0;
-  try {
-    Object.defineProperty(Uint8Array.prototype, "set", {
-      configurable: true,
-      writable: true,
-      value() { patchedSetCalls += 1; },
-    });
-    await bucket.put("safe.bin", stream);
-  } finally {
-    if (originalSet) {
-      Object.defineProperty(Uint8Array.prototype, "set", originalSet);
-    } else {
-      Reflect.deleteProperty(Uint8Array.prototype, "set");
-    }
-  }
+  let patchedIndexSetterCalls = 0;
+  await withMockedPropertyDescriptors([
+    {
+      target: Uint8Array.prototype,
+      name: "set",
+      descriptor: {
+        configurable: true,
+        writable: true,
+        value() { patchedSetCalls += 1; },
+      },
+    },
+    {
+      target: Array.prototype,
+      name: "0",
+      descriptor: {
+        configurable: true,
+        /** @param {unknown} value */
+        set(value) {
+          if (value === first || value === second) {
+            patchedIndexSetterCalls += 1;
+            return;
+          }
+          Object.defineProperty(this, "0", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value,
+          });
+        },
+      },
+    },
+  ], () => bucket.put("safe.bin", stream));
 
   assert.ok(observed);
   assert.deepEqual(Array.from(observed), [104, 101, 108, 112]);
   assert.equal(patchedSetCalls, 0);
+  assert.equal(patchedIndexSetterCalls, 0);
 });
 
 test("R2Bucket.put does not trust a mutable Uint8Array prototype as a brand", async () => {

@@ -22,23 +22,24 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
  *   list?(options: AnyRecord, requestMeta: object): Promise<AnyRecord & { objects?: AnyRecord[], truncated?: unknown, cursor?: unknown, delimitedPrefixes?: unknown }>,
  * }} R2Stub
  * @typedef {{ stub: R2Stub, requestIdOptions: object }} R2BucketState
- * @typedef {{ bytes: Uint8Array }} ByteReadResult
- * @typedef {{ bytes: Uint8Array | null, pending: Promise<ByteReadResult> | null }} PreparedBytes
+ * @typedef {{ bytes: Uint8Array }} NonThenableByteResult
+ * @typedef {{ bytes: Uint8Array, pendingRead: null } | { bytes: null, pendingRead: Promise<NonThenableByteResult> }} PreparedPutBytes
  */
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const IntrinsicUint8Array = Uint8Array;
 const intrinsicObjectCreate = Object.create;
+const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicUint8ArraySet = IntrinsicUint8Array.prototype.set;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
 
-/** @param {Uint8Array} bytes @returns {ByteReadResult} */
-function byteReadResult(bytes) {
+/** @param {Uint8Array} bytes @returns {NonThenableByteResult} */
+function nonThenableByteResult(bytes) {
   // Promise resolution must not read a tenant-controlled `then` from the
   // returned bytes or Object.prototype.
-  const result = /** @type {ByteReadResult} */ (intrinsicObjectCreate(null));
+  const result = /** @type {NonThenableByteResult} */ (intrinsicObjectCreate(null));
   result.bytes = bytes;
   return result;
 }
@@ -84,6 +85,9 @@ async function readStreamWithLimit(stream, operation) {
   const reader = stream.getReader();
   /** @type {Uint8Array[]} */
   const chunks = [];
+  // Remove tenant-mutable Array.prototype before indexed writes while keeping
+  // the array's own length and indexed storage.
+  intrinsicObjectSetPrototypeOf(chunks, null);
   let total = 0;
   try {
     for (;;) {
@@ -108,18 +112,20 @@ async function readStreamWithLimit(stream, operation) {
     const chunk = chunks[0];
     const chunkLength = r2Uint8ArrayByteLength(chunk);
     if (r2Uint8ArrayIsFullBuffer(chunk, chunkLength)) {
-      return byteReadResult(chunk);
+      return nonThenableByteResult(chunk);
     }
-    return byteReadResult(new IntrinsicUint8Array(chunk));
+    return nonThenableByteResult(new IntrinsicUint8Array(chunk));
   }
   const out = new IntrinsicUint8Array(total);
   let offset = 0;
+  // Avoid tenant-mutable array iterators and Uint8Array.prototype.set while
+  // joining chunks.
   for (let i = 0; i < chunks.length; i += 1) {
     const chunk = chunks[i];
     intrinsicReflectApply(intrinsicUint8ArraySet, out, [chunk, offset]);
     offset += r2Uint8ArrayByteLength(chunk);
   }
-  return byteReadResult(out);
+  return nonThenableByteResult(out);
 }
 
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
@@ -422,23 +428,23 @@ export class R2ObjectBody extends R2Object {
   }
 }
 
-/** @param {unknown} value @returns {PreparedBytes} */
-function valueToBytes(value) {
+/** @param {unknown} value @returns {PreparedPutBytes} */
+function preparePutBytes(value) {
   // Keep direct tenant bytes on a synchronous path so the async put() method
   // never resolves an intermediate promise with a tenant-owned view.
-  if (value == null) return { bytes: new IntrinsicUint8Array(0), pending: null };
+  if (value == null) return { bytes: new IntrinsicUint8Array(0), pendingRead: null };
   if (typeof value === "string") {
-    return { bytes: utf8Encoder.encode(value), pending: null };
+    return { bytes: utf8Encoder.encode(value), pendingRead: null };
   }
   const bufferSourceBytes = r2BufferSourceBytes(value);
-  if (bufferSourceBytes) return { bytes: bufferSourceBytes, pending: null };
+  if (bufferSourceBytes) return { bytes: bufferSourceBytes, pendingRead: null };
   if (value instanceof Blob) {
-    return { bytes: null, pending: readStreamWithLimit(value.stream(), "put") };
+    return { bytes: null, pendingRead: readStreamWithLimit(value.stream(), "put") };
   }
   if (value instanceof ReadableStream) {
     // WDL R2 does not implement multipart yet: stream PUT is buffered locally,
     // capped at 25 MiB, then sent as one S3 PUT.
-    return { bytes: null, pending: readStreamWithLimit(value, "put") };
+    return { bytes: null, pendingRead: readStreamWithLimit(value, "put") };
   }
   throw new TypeError(
     "R2 put: value must be string | ArrayBuffer | typed array | Blob | ReadableStream"
@@ -481,10 +487,10 @@ export class R2Bucket {
   /** @param {string} key @param {unknown} value @param {AnyRecord} [options] */
   async put(key, value, options) {
     const normalizedOptions = normalizePutOptions(options);
-    const prepared = valueToBytes(value);
-    const bytes = prepared.bytes ?? (await /** @type {Promise<ByteReadResult>} */ (
-      prepared.pending
-    )).bytes;
+    const prepared = preparePutBytes(value);
+    const bytes = prepared.bytes === null
+      ? (await prepared.pendingRead).bytes
+      : prepared.bytes;
     assertR2BufferSize(r2Uint8ArrayByteLength(bytes), "put");
     const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.put !== "function") throw new TypeError("R2 stub put is not configured");

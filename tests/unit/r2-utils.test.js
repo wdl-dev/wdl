@@ -19,6 +19,7 @@ import {
   validateR2BucketName,
 } from "../../runtime/r2-utils.js";
 import { R2_BUCKET_NAME_RE as CONTROL_R2_BUCKET_NAME_RE } from "../../shared/ns-pattern.js";
+import { withMockedPropertyDescriptors } from "../helpers/mock-global.js";
 
 test("r2PhysicalPrefix scopes virtual buckets under namespace", () => {
   assert.equal(
@@ -136,7 +137,7 @@ test("assertR2BufferSize caps buffered operations at 25MiB", () => {
   );
 });
 
-test("r2BufferSourceBytes uses intrinsic view bounds and rejects unusable views", () => {
+test("r2BufferSourceBytes uses intrinsic bounds for every BufferSource kind", () => {
   class MisleadingBytes extends Uint8Array {
     get buffer() { return new ArrayBuffer(0); }
     get byteOffset() { return 0; }
@@ -158,6 +159,10 @@ test("r2BufferSourceBytes uses intrinsic view bounds and rejects unusable views"
   const misleadingBytes = new MisleadingBytes(source, 2, 4);
   const misleadingWords = new MisleadingWords(source, 2, 2);
   const misleadingView = new MisleadingView(source, 2, 4);
+
+  const sourceBytes = r2BufferSourceBytes(source);
+  assert.ok(sourceBytes);
+  assert.deepEqual(Array.from(sourceBytes), [0, 0, 104, 101, 108, 112, 0, 0]);
   for (const view of [misleadingBytes, misleadingWords, misleadingView]) {
     const bytes = r2BufferSourceBytes(view);
     assert.ok(bytes);
@@ -168,15 +173,19 @@ test("r2BufferSourceBytes uses intrinsic view bounds and rejects unusable views"
       assert.equal(Object.getPrototypeOf(bytes), Uint8Array.prototype);
     }
   }
+  assert.equal(r2BufferSourceBytes("not bytes"), null);
+});
 
+test("r2Uint8Array helpers ignore own bounds and identify full buffers", () => {
   const ordinaryBytes = new Uint8Array([1, 2, 3]);
   Object.defineProperty(ordinaryBytes, "byteLength", { get: () => 0 });
   assert.strictEqual(r2BufferSourceBytes(ordinaryBytes), ordinaryBytes);
   assert.equal(r2Uint8ArrayByteLength(ordinaryBytes), 3);
   assert.equal(r2Uint8ArrayIsFullBuffer(ordinaryBytes, 3), true);
   assert.equal(r2Uint8ArrayIsFullBuffer(ordinaryBytes.subarray(1), 2), false);
-  assert.equal(r2BufferSourceBytes("not bytes"), null);
+});
 
+test("r2BufferSourceBytes ignores mutable prototypes when identifying view brands", () => {
   const disguisedWords = new Uint16Array(2);
   new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
   Object.setPrototypeOf(disguisedWords, Uint8Array.prototype);
@@ -184,7 +193,9 @@ test("r2BufferSourceBytes uses intrinsic view bounds and rejects unusable views"
   assert.ok(disguisedBytes);
   assert.notStrictEqual(disguisedBytes, disguisedWords);
   assert.deepEqual(Array.from(disguisedBytes), [108, 112, 33, 34]);
+});
 
+test("r2BufferSourceBytes rejects detached and out-of-bounds inputs", () => {
   for (const createView of [
     (/** @type {ArrayBuffer} */ buffer) => new Uint8Array(buffer, 2, 4),
     (/** @type {ArrayBuffer} */ buffer) => new Uint16Array(buffer, 2, 2),
@@ -199,6 +210,7 @@ test("r2BufferSourceBytes uses intrinsic view bounds and rejects unusable views"
   for (const createValue of [
     (/** @type {ArrayBuffer} */ buffer) => buffer,
     (/** @type {ArrayBuffer} */ buffer) => new Uint8Array(buffer),
+    (/** @type {ArrayBuffer} */ buffer) => new Uint16Array(buffer),
     (/** @type {ArrayBuffer} */ buffer) => new DataView(buffer),
   ]) {
     const buffer = new ArrayBuffer(8);
@@ -208,7 +220,7 @@ test("r2BufferSourceBytes uses intrinsic view bounds and rejects unusable views"
   }
 });
 
-test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering", () => {
+test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering", async () => {
   const source = new ArrayBuffer(8);
   new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
   const words = new Uint16Array(source, 2, 2);
@@ -217,38 +229,50 @@ test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering
   const outOfBounds = new Uint8Array(resizable, 2, 4);
   resizable.resize(1);
 
-  const originalReflectApply = Object.getOwnPropertyDescriptor(Reflect, "apply");
-  const originalReflectGet = Object.getOwnPropertyDescriptor(Reflect, "get");
-  const originalIsView = Object.getOwnPropertyDescriptor(ArrayBuffer, "isView");
   const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
-  const originalAt = Object.getOwnPropertyDescriptor(typedArrayPrototype, "at");
-  const originalTypedArrayTag = Object.getOwnPropertyDescriptor(
-    typedArrayPrototype,
-    Symbol.toStringTag
-  );
-  const originalDataView = Object.getOwnPropertyDescriptor(globalThis, "DataView");
-  assert.ok(originalReflectApply);
-  assert.ok(originalReflectGet);
-  assert.ok(originalIsView);
-  assert.ok(originalAt);
-  assert.ok(originalTypedArrayTag);
-  assert.ok(originalDataView);
+  /** @type {Uint8Array | null | undefined} */
   let wordBytes;
+  /** @type {Uint8Array | null | undefined} */
   let viewBytes;
+  /** @type {unknown} */
   let outOfBoundsError;
-  try {
-    Object.defineProperty(Reflect, "apply", { ...originalReflectApply, value: () => 0 });
-    Object.defineProperty(Reflect, "get", { ...originalReflectGet, value: () => 0 });
-    Object.defineProperty(ArrayBuffer, "isView", { ...originalIsView, value: () => false });
-    Object.defineProperty(typedArrayPrototype, "at", {
-      ...originalAt,
-      value: () => undefined,
-    });
-    Object.defineProperty(typedArrayPrototype, Symbol.toStringTag, {
-      ...originalTypedArrayTag,
-      get: () => "Uint8Array",
-    });
-    Object.defineProperty(globalThis, "DataView", { ...originalDataView, value: class DataView {} });
+  await withMockedPropertyDescriptors([
+    {
+      target: Reflect,
+      name: "apply",
+      descriptor: { configurable: true, writable: true, value: () => 0 },
+    },
+    {
+      target: Reflect,
+      name: "get",
+      descriptor: { configurable: true, writable: true, value: () => 0 },
+    },
+    {
+      target: ArrayBuffer,
+      name: "isView",
+      descriptor: { configurable: true, writable: true, value: () => false },
+    },
+    {
+      target: typedArrayPrototype,
+      name: "at",
+      descriptor: { configurable: true, writable: true, value: () => undefined },
+    },
+    {
+      target: typedArrayPrototype,
+      name: Symbol.toStringTag,
+      descriptor: { configurable: true, get: () => "Uint8Array" },
+    },
+    {
+      target: globalThis,
+      name: "DataView",
+      descriptor: { configurable: true, writable: true, value: class FakeDataView {} },
+    },
+    {
+      target: globalThis,
+      name: "Uint8Array",
+      descriptor: { configurable: true, writable: true, value: class FakeUint8Array {} },
+    },
+  ], () => {
     wordBytes = r2BufferSourceBytes(words);
     viewBytes = r2BufferSourceBytes(view);
     try {
@@ -256,21 +280,12 @@ test("r2BufferSourceBytes keeps using captured intrinsics after tenant tampering
     } catch (error) {
       outOfBoundsError = error;
     }
-  } finally {
-    Object.defineProperty(Reflect, "apply", originalReflectApply);
-    Object.defineProperty(Reflect, "get", originalReflectGet);
-    Object.defineProperty(ArrayBuffer, "isView", originalIsView);
-    Object.defineProperty(typedArrayPrototype, "at", originalAt);
-    Object.defineProperty(
-      typedArrayPrototype,
-      Symbol.toStringTag,
-      originalTypedArrayTag
-    );
-    Object.defineProperty(globalThis, "DataView", originalDataView);
-  }
+  });
 
-  assert.deepEqual(Array.from(/** @type {Uint8Array} */ (wordBytes)), [104, 101, 108, 112]);
-  assert.deepEqual(Array.from(/** @type {Uint8Array} */ (viewBytes)), [104, 101, 108, 112]);
+  assert.ok(wordBytes);
+  assert.ok(viewBytes);
+  assert.deepEqual(Array.from(wordBytes), [104, 101, 108, 112]);
+  assert.deepEqual(Array.from(viewBytes), [104, 101, 108, 112]);
   assert.ok(outOfBoundsError instanceof TypeError);
 });
 

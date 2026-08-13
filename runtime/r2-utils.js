@@ -19,7 +19,7 @@ const dataViewPrototype = DataView.prototype;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicTypedArrayAt = typedArrayPrototype.at;
-const intrinsicTypedArrayTagGet = prototypeGetter(
+const intrinsicTypedArrayNameGet = prototypeGetter(
   typedArrayPrototype,
   Symbol.toStringTag
 );
@@ -58,23 +58,20 @@ export function r2BufferSourceBytes(value) {
     return new IntrinsicUint8Array(/** @type {ArrayBuffer} */ (value));
   }
 
-  // Preserve zero-copy only for the real Uint8Array element kind. Prototype
-  // identity is tenant-mutable and cannot serve as a typed-array brand check.
-  const typedArrayTag = intrinsicReflectApply(
-    intrinsicTypedArrayTagGet,
+  const typedArrayName = intrinsicReflectApply(
+    intrinsicTypedArrayNameGet,
     value,
     noArguments
   );
-  if (typedArrayTag === "Uint8Array") {
-    intrinsicReflectApply(intrinsicTypedArrayAt, value, atZeroArguments);
-    return /** @type {Uint8Array} */ (value);
-  }
-
-  let buffer;
-  try {
-    buffer = intrinsicReflectApply(intrinsicTypedArrayBufferGet, value, noArguments);
-  } catch {
-    buffer = intrinsicReflectApply(intrinsicDataViewBufferGet, value, noArguments);
+  // ArrayBuffer.isView() admits only TypedArray and DataView values. The
+  // intrinsic TypedArray name getter returns undefined for a DataView without
+  // consulting its mutable prototype.
+  if (typedArrayName === undefined) {
+    const buffer = intrinsicReflectApply(
+      intrinsicDataViewBufferGet,
+      value,
+      noArguments
+    );
     const byteOffset = intrinsicReflectApply(
       intrinsicDataViewByteOffsetGet,
       value,
@@ -91,6 +88,17 @@ export function r2BufferSourceBytes(value) {
   // Fixed-length typed arrays expose zero public bounds after their resizable
   // buffer shrinks out of range. The captured intrinsic rejects that state.
   intrinsicReflectApply(intrinsicTypedArrayAt, value, atZeroArguments);
+  // Preserve zero-copy only for the real Uint8Array element kind. Prototype
+  // identity is tenant-mutable and cannot serve as a typed-array brand check.
+  if (typedArrayName === "Uint8Array") {
+    return /** @type {Uint8Array} */ (value);
+  }
+
+  const buffer = intrinsicReflectApply(
+    intrinsicTypedArrayBufferGet,
+    value,
+    noArguments
+  );
   const byteOffset = intrinsicReflectApply(
     intrinsicTypedArrayByteOffsetGet,
     value,
