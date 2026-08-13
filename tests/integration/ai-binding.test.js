@@ -199,6 +199,15 @@ function userRuntimeAiMetric(name, pool, outcome = undefined) {
   return prometheusCounter(body, name, labels);
 }
 
+function userRedisProxyAiModelsCount() {
+  const body = serviceInternalGet("redis-proxy-user", 7070, "/_metrics").body;
+  return prometheusCounter(body, "wdl_requests_total", {
+    route: "ai_models",
+    service: "redis-proxy",
+    status: "200",
+  });
+}
+
 function doRuntimeRequestReleaseCount() {
   return ["cancelled", "completed", "deadline"].reduce(
     (total, outcome) => total + doRuntimeAiMetric("wdl_ai_pool_events_total", "request", outcome),
@@ -289,7 +298,45 @@ test("AI model listing sorts complete ids across prefix-related providers", asyn
   assert.equal(result.model, "gpt-test");
 });
 
-test("AI model snapshot rejects overbound hashes before reading their contents", () => {
+test("AI catalog metadata remains usable when a credential is added after snapshot load", async () => {
+  const ns = uniqueNs("ai-credential-after-catalog");
+  const created = await adminPut(`/ns/${ns}/ai/providers/openai`, PROVIDERS.openai.record);
+  assertStatus(created, 200, "OpenAI provider create without credential");
+  await deployAiWorker(ns);
+  const modelsBefore = userRedisProxyAiModelsCount();
+
+  const initialModels = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/models"),
+    200,
+    "AI catalog before credential"
+  );
+  assert.ok(initialModels.models.some(
+    (/** @type {{ id: string }} */ model) => model.id === "openai/primary"
+  ));
+
+  const unavailable = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/raw?model=openai%2Fprimary"),
+    503,
+    "AI inference before credential"
+  );
+  assert.equal(unavailable.error, "ai_credential_not_configured");
+
+  const credential = await adminPut(`/ns/${ns}/ai/providers/openai/credential`, {
+    revision: created.json.provider.revision,
+    credential: PROVIDERS.openai.credential,
+  });
+  assertStatus(credential, 200, "OpenAI credential after catalog load");
+
+  const result = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
+    200,
+    "AI run after credential is configured"
+  );
+  assert.equal(result.model, "gpt-test");
+  assert.equal(userRedisProxyAiModelsCount(), modelsBefore + 1);
+});
+
+test("AI resolver snapshots reject overbound hashes and malformed credential fields", () => {
   const ns = uniqueNs("ai-model-bounds");
   const providersKey = `ai:providers:${ns}`;
   const credentialsKey = `ai:provider-credentials:${ns}`;
@@ -301,12 +348,43 @@ test("AI model snapshot rejects overbound hashes before reading their contents",
     const providers = serviceInternalPost("redis-proxy-user", 7070, "/ai/models", { ns });
     assert.equal(providers.status, 500);
     assert.equal(parseJsonText(providers.body, "overbound provider snapshot").error, "ai_state_corrupt");
+    const providerResolve = serviceInternalPost("redis-proxy-user", 7070, "/ai/resolve", {
+      ns,
+      model: "p0/primary",
+      protocol: "responses",
+      transport: "http",
+    });
+    assert.equal(providerResolve.status, 500);
+    assert.equal(
+      parseJsonText(providerResolve.body, "overbound provider resolve").error,
+      "ai_state_corrupt"
+    );
 
     redisDel(providersKey);
     redisHSet(credentialsKey, overbound);
     const credentials = serviceInternalPost("redis-proxy-user", 7070, "/ai/models", { ns });
     assert.equal(credentials.status, 500);
     assert.equal(parseJsonText(credentials.body, "overbound credential snapshot").error, "ai_state_corrupt");
+    const credentialResolve = serviceInternalPost("redis-proxy-user", 7070, "/ai/resolve", {
+      ns,
+      model: "p0/primary",
+      protocol: "responses",
+      transport: "http",
+    });
+    assert.equal(credentialResolve.status, 500);
+    assert.equal(
+      parseJsonText(credentialResolve.body, "overbound credential resolve").error,
+      "ai_state_corrupt"
+    );
+
+    redisDel(credentialsKey);
+    redisHSet(credentialsKey, { "bad/name": "malformed" });
+    const malformed = serviceInternalPost("redis-proxy-user", 7070, "/ai/models", { ns });
+    assert.equal(malformed.status, 500);
+    assert.equal(
+      parseJsonText(malformed.body, "malformed credential field").error,
+      "ai_state_corrupt"
+    );
   } finally {
     redisDel(providersKey);
     redisDel(credentialsKey);
@@ -323,6 +401,27 @@ async function readAiCloseFrame(socket, label) {
     });
   }
 }
+
+test("AI facade loads one catalog snapshot per loaded Worker module", async () => {
+  const { ns } = await setupAiNamespace("ai-catalog-cache");
+  const before = userRedisProxyAiModelsCount();
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const modelList = await readIntegrationJson(
+      await gatewayFetch(ns, "/ai/models"),
+      200,
+      `AI cached models ${attempt + 1}`
+    );
+    assert.equal(modelList.models.length, 6);
+  }
+  const inference = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
+    200,
+    "AI inference with cached catalog"
+  );
+  assert.equal(inference.model, "gpt-test");
+  assert.equal(userRedisProxyAiModelsCount(), before + 1);
+});
 
 test("AI binding exposes agent-capable HTTP and SSE without exposing provider credentials", async () => {
   const { ns } = await setupAiNamespace("ai-http");
@@ -836,6 +935,23 @@ test("AI binding bridges agent and Realtime WebSockets with bounded lifecycle", 
   await waitUntil("AI WebSocket permits released", () =>
     userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline,
   { timeoutMs: 10_000, intervalMs: 100 });
+});
+
+test("tenant intrinsic patches cannot bypass the host AI WebSocket model fence", async () => {
+  const { ns } = await setupAiNamespace("ai-ws-intrinsic-guard");
+  const response = await wsHandshake(ns, "/ai/responses-ws-intrinsic-guard");
+  try {
+    assertStatus(response, 101, "intrinsic guard Responses WebSocket upgrade");
+    response.socket.write(encodeClientTextFrame(
+      '{"type":"response.create","model":"attacker-model","model":"gpt-test"}'
+    ));
+    assert.deepEqual(await readAiCloseFrame(response.socket, "intrinsic guard frame close"), {
+      code: 1008,
+      reason: "AI websocket frame rejected",
+    });
+  } finally {
+    response.socket.destroy();
+  }
 });
 
 test("AI provider loss terminates the public WebSocket without Gateway session reset", async () => {

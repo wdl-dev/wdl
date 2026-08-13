@@ -26,6 +26,11 @@ const D1_RUNTIME_FILES = jsFiles("d1-runtime");
 const DO_RUNTIME_FILES = jsFiles("do-runtime");
 const AUTH_FILES = jsFiles("auth");
 const SHARED_FILES = jsFiles("shared");
+const SYSTEM_RUNTIME_AI_CAPACITY = Object.freeze({
+  AI_REQUEST_MAX_IN_FLIGHT: 32,
+  AI_STREAM_MAX_IN_FLIGHT: 16,
+  AI_WS_MAX_SESSIONS: 8,
+});
 const PRODUCTION_JS_FILES = [
   ...AUTH_FILES,
   ...CONTROL_FILES,
@@ -277,6 +282,17 @@ test("runtime R2 bucket grammar matches shared control grammar", () => {
   );
 });
 
+// The tenant-realm facade is embedded standalone, so pin its combined model
+// reference grammar to the two control-owned identifier grammars.
+test("runtime AI model reference grammar matches shared control grammar", () => {
+  const provider = extractRegex("shared/ns-pattern.js", "AI_PROVIDER_NAME_RE");
+  const alias = extractRegex("shared/ns-pattern.js", "AI_MODEL_ALIAS_RE");
+  const reference = extractRegex("runtime/ai-client.js", "AI_MODEL_REFERENCE_RE");
+  /** @param {string} literal */
+  const body = (literal) => literal.slice(2, -2);
+  assert.equal(reference, `/^${body(provider)}\\/${body(alias)}$/`);
+});
+
 test("runtime workflow clients use the same backend base URL", () => {
   assert.equal(
     extractStringConst(readRepoFile("runtime/workflows-client.js"), "WORKFLOWS_BASE_URL"),
@@ -444,14 +460,6 @@ test("AI persisted and wire contracts share one JS and Rust fixture", () => {
 
   assert.match(jsReader, new RegExp(RegExp.escape(fixture)));
   assert.match(rustReader, /include_str!\("\.\.\/\.\.\/\.\.\/tests\/fixtures\/ai-contract\.json"\)/);
-  assert.match(jsReader, /normalizeAiProviderRecord/);
-  assert.match(jsReader, /normalizeAiResolveResponse/);
-  assert.match(jsReader, /normalizeAiModelsResponse/);
-  assert.match(jsReader, /expectedAiProviderDestination/);
-  assert.match(rustReader, /fn parse_provider_record/);
-  assert.match(rustReader, /fn destination/);
-  assert.match(rustReader, /struct ResolveResponse/);
-  assert.match(rustReader, /struct ModelsResponse/);
 
   const jsContract = readRepoFile("shared/ai-contract.js");
   assert.match(jsContract, /return `ai:providers:\$\{ns\}`/);
@@ -2413,10 +2421,11 @@ test("D1, DO, and AI workerd env tunables are exposed through capnp bindings", (
   }
 });
 
-test("AI runtime setting defaults stay aligned across delivery surfaces", () => {
+test("AI runtime defaults and tier overrides stay aligned across delivery surfaces", () => {
   const compose = readRepoFile("docker-compose.yml");
   const terraform = readRepoFile("terraform/modules/compute/locals.tf");
   const kubernetes = readRepoFile("deploy/kubernetes/overlays/local/kustomization.yaml");
+  const kubernetesSystem = readRepoFile("deploy/kubernetes/base/system-runtime.yaml");
   const infra = readRepoFile("docs/modules/infra.md");
   const infraZh = readRepoFile("docs/modules/infra.zh.md");
 
@@ -2427,11 +2436,6 @@ test("AI runtime setting defaults stay aligned across delivery surfaces", () => 
       `${name} Compose default must match the runtime owner`
     );
     assert.match(
-      terraform,
-      new RegExp(`name = "${name}", value = "${defaultValue}"`),
-      `${name} Terraform default must match the runtime owner`
-    );
-    assert.match(
       kubernetes,
       new RegExp(`- ${name}=${defaultValue}`),
       `${name} Kubernetes default must match the runtime owner`
@@ -2439,10 +2443,21 @@ test("AI runtime setting defaults stay aligned across delivery surfaces", () => 
     for (const [language, source] of [["EN", infra], ["ZH", infraZh]]) {
       assert.match(
         source,
-        new RegExp("\\| `" + name + "` \\| `" + defaultValue + "` \\|"),
+        new RegExp("\\| `" + name + "` \\| `" + defaultValue + "`(?: ?[（(][^\\n]+[）)])? \\|"),
         `${name} ${language} documentation default must match the runtime owner`
       );
     }
+  }
+
+  for (const [name, defaultValue] of Object.entries(SYSTEM_RUNTIME_AI_CAPACITY)) {
+    assert.match(compose, new RegExp(`${name}: "${defaultValue}"`));
+    assert.match(terraform, new RegExp(`name = "${name}", value = "${defaultValue}"`));
+    assert.match(
+      kubernetesSystem,
+      new RegExp(`name: ${name}\\s+value: "${defaultValue}"`)
+    );
+    assert.match(infra, new RegExp("`" + defaultValue + "` on system-runtime"));
+    assert.match(infraZh, new RegExp("system-runtime 为 `" + defaultValue + "`"));
   }
 });
 

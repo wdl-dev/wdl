@@ -4,14 +4,14 @@
 
 WDL provides a namespace-scoped AI binding for agent and inference workloads. Tenant
 code receives `env.AI.fetch()`, `env.AI.run()`, and `env.AI.models()` while provider
-credentials remain in the platform control plane. The initial provider adapters target
-the official OpenAI, xAI, and DeepSeek APIs.
+credentials remain in the platform control plane. The supported provider adapters
+target the official OpenAI, xAI, and DeepSeek APIs.
 
 AI is a BYO-provider capability. Each namespace owns its provider metadata and encrypted
 credentials. WDL does not currently provide a managed model catalog, shared platform
 credential, token accounting, billing, quota enforcement, or distributed tenant
-fairness. The process-local concurrency controls described below are runtime safety
-bounds, not product quotas.
+fairness. The process-local controls described below provide finite admission and
+lifetime bounds; they are not product quotas or universal capacity guarantees.
 
 ## Current Implementation
 
@@ -22,8 +22,9 @@ An AI request crosses these owners:
 2. Runtime materializes an `AiBinding` host entrypoint with immutable
    `{ ns, worker, version }` props. Generated wrapper code replaces the raw host stub
    with the tenant-realm `Ai` facade in positional env and in invocation-time reads from
-   an enabled imported env proxy. It carries the current request id into every
-   facade-created host request.
+   an enabled imported env proxy. The facade lazily loads one bounded public model
+   catalog snapshot per loaded Worker module lifecycle and carries the current request
+   id into every facade-created host request.
 3. The host binding asks the colocated redis-proxy to resolve a public model id. The
    proxy atomically reads provider metadata and its encrypted credential from DB 0,
    validates canonical state, decrypts the credential, and returns an exact official
@@ -78,9 +79,11 @@ resolver or provider I/O.
 
 ### Tenant facade
 
-- `await env.AI.models()` returns the configured models whose provider credential is
-  present. Entries expose public id, protocol, transports, modalities, and capability
-  hints; they omit upstream model id, provider revision, destination, and credential.
+- `await env.AI.models()` returns a copy of the loaded Worker module's lazily cached
+  model catalog snapshot. The snapshot contains every configured provider model,
+  independent of credential presence. Entries expose public id, protocol, transports,
+  modalities, and capability hints; they omit upstream model id, provider revision,
+  destination, credential, and credential status.
 - `await env.AI.run(model, inputs, options?)` selects the descriptor protocol, replaces
   the public model alias with the upstream model id, and returns parsed JSON, a
   `ReadableStream` for `stream: true`, or a `101 Response` for
@@ -92,6 +95,19 @@ The only `run()` options are `signal` and `websocket`. WebSocket mode requires
 `inputs === null`; the signal bounds setup, while the returned socket owns the session
 lifecycle. Unsupported Cloudflare options fail explicitly. Applications that need the
 raw provider `Response` use `fetch()`; `returnRawResponse` is not supported.
+
+`run()` and `models()` share the same successful catalog snapshot for the lifetime of
+the loaded Worker module. Concurrent cold reads are not retained as cross-invocation
+Promises; the first successful completion becomes the shared snapshot. Failed catalog
+reads are not cached. Provider alias,
+protocol, transport, modality, or capability changes become visible after that module
+is reloaded; callers that need the current low-level list can use
+`fetch("https://ai.wdl/v1/models")`. Every inference and new socket still performs an
+authoritative `/ai/resolve`, so credential and upstream-model rotation applies to the
+next call without redeploy. Adding a missing credential also enables the next call
+without reloading the catalog because credential presence does not shape that snapshot.
+A stale cached descriptor fails closed at the resolver check and is never authority for
+credential attachment or provider destination.
 
 | Method | Virtual path | Protocol / result |
 |---|---|---|
@@ -178,14 +194,15 @@ namespace, and 64 KiB per provider record. Credentials are non-empty and at most
 16 KiB, and use the visible-ASCII bearer-token grammar described above.
 
 `/ai/resolve` accepts `{ ns, model, protocol, transport }` and reads one provider record
-and credential in one Lua snapshot. `/ai/models` accepts `{ ns }`, reads the complete
-bounded provider snapshot plus credential-field presence in one Lua call, and returns
-configured hints without decrypting every credential. The Lua snapshot rejects either
-hash when its cardinality exceeds the provider bound before materializing provider
-records or credential field names. Binding name is not part of either wire request
-because one Worker can declare at most one AI binding. Malformed, non-canonical, torn,
-or over-limit provider state fails closed, and `/ai/resolve` also fails closed on an
-undecryptable credential. The shared JS/Rust grammar is pinned by
+and credential in one Lua snapshot. It checks both hash cardinalities and validates the
+target record and credential. `/ai/models` accepts `{ ns }`, reads the complete bounded
+provider snapshot plus credential field names in one Lua call, validates every
+materialized field, and returns provider model metadata without decrypting credentials
+or filtering the catalog by credential presence.
+Binding name is not part of either wire request because one Worker can declare at most
+one AI binding. Each reader fails closed on malformed, non-canonical, torn, or
+over-limit state it materializes; `/ai/resolve` also fails closed on an undecryptable
+target credential. The shared JS/Rust grammar is pinned by
 `tests/fixtures/ai-contract.json`; resolver responses contain only fields consumed by
 the host request path.
 
@@ -199,16 +216,36 @@ Runtime maintains three independent, fail-fast pools per service replica:
 
 | Pool | Default | Holds |
 |---|---:|---|
-| request | 32 | Model listing and every HTTP request through bounded body admission; non-streaming inference remains here through completion |
-| stream | 16 | SSE inference after bounded body admission until a terminal event, error, cancellation, or deadline |
-| websocket | 8 | Responses or Realtime WebSocket sessions |
+| request | 64 | Model listing and every HTTP request through bounded body admission; non-streaming inference remains here through completion |
+| stream | 64 | SSE inference after bounded body admission until a terminal event, error, cancellation, or deadline |
+| websocket | 32 | Responses or Realtime WebSocket sessions |
+
+These are the user-runtime and do-runtime defaults. The smaller system-runtime tier
+uses deployment overrides of 32 request, 16 stream, and eight WebSocket permits. Pool
+sizes are admission limits, not token quotas, billing controls, or reservations of each
+request's maximum byte allowance.
 
 Pool saturation returns `429 ai_capacity_exhausted`; requests are not queued. User and
 DO runtimes have separate module state and therefore separate pools. These bounds limit
-one process, not a namespace across replicas.
+one process, not a namespace across replicas. They are deployment defaults for a
+self-hosted runtime, not universal hosted-product limits. Private operators can size
+them through the documented runtime environment settings; a capacity-limited hosted
+preview can choose its own deployment values without changing the binding contract.
 
-The fixed byte limits are 8 MiB request JSON, 16 MiB non-streaming response, 32 MiB SSE
-response, 1 MiB SSE frame, 1 MiB WebSocket frame, and 128 MiB per WebSocket direction.
+The fixed byte limits are 1 MiB request JSON with strict UTF-8, at most 128 nested
+container levels in HTTP request JSON and client-originated WebSocket JSON, 4 MiB
+non-streaming response, 32 MiB SSE response, 1 MiB SSE frame, 1 MiB WebSocket frame,
+and 64 MiB of charged frames per WebSocket direction. The 1 MiB request bound applies
+both to tenant ingress and to the final provider JSON after model replacement. HTTP
+container depth is checked on the bounded JSON text before `JSON.parse()` materializes
+the object graph. The WebSocket session ceiling bounds cumulative use; workerd exposes
+no JavaScript queued-byte or backpressure signal, so it is not a process-memory guarantee
+for already queued sends. Client frames charge the larger of accepted bytes and
+model-pinned forwarded bytes; provider frames charge accepted bytes. At the default
+session count, `32 * 64 MiB` per direction is a theoretical cumulative acceptance
+envelope before lifecycle closures, not reserved memory or a measured native queue
+size. Operators must size or override the session pool for their runtime memory and
+traffic distribution.
 Default time bounds are 120 seconds for request/setup, 30 seconds SSE idle, five minutes
 SSE duration, 15 seconds WebSocket handshake, two minutes WebSocket idle, and 24 minutes
 operator WebSocket duration. The effective WebSocket duration is the lower of the
@@ -230,9 +267,12 @@ terminal event or tenant cancellation also aborts the provider fetch independent
 stream-cancellation delivery. Responses are not silently retried after provider I/O can
 have side effects.
 
-WebSocket text frames must be JSON. WDL pins model fields to the resolved upstream
-model, enforces advertised binary-frame support, and propagates bounded close codes and
-reasons. Provider-loss closes that Gateway would otherwise treat as reconnectable are
+Client-originated WebSocket text frames must be JSON with at most 128 nested container
+levels. WDL rejects duplicate `type`, `model`, or `session` decision fields, changes or
+adds only the model field required for provider pinning, and forwards every unrelated
+JSON source token unchanged. It also enforces advertised binary-frame support and
+propagates bounded close codes and reasons. Provider-loss closes that Gateway would
+otherwise treat as reconnectable are
 translated to terminal `1013 AI provider connection lost`, so Gateway cannot silently
 replace the provider session. The initial upgrade also disables Gateway backend
 replacement, so runtime loss closes the public session with `1012 service restart`
@@ -292,33 +332,27 @@ worker, version, and raw error text stay in logs rather than metric labels.
 
 ## Deployment / Rollout Notes
 
-The receiver-before-sender order is redis-proxy and Gateway, then
-user-runtime/do-runtime host readers. Gateway must understand application-terminal
-provider closes before AI WebSockets are public. Pause Control mutations while rolling
-system-runtime because that one service delivers both the system reader and Control
-writer; after old tasks drain, resume mutations and publish the CLI that can emit
-`[ai]`. Runtime and do-runtime must be able to materialize the new binding before
-Control accepts bundle metadata that references it.
-
-Before public release, the official-provider matrix must pass from the actual Tokyo ECS
-user-runtime and do-runtime egress for OpenAI, xAI, and DeepSeek. Local fake-provider
-integration proves protocol and secret boundaries but is not evidence of regional
-provider availability.
+AI cross-tier changes follow the receiver-before-sender procedure in the
+[infra rollout notes](infra.md#deployment--rollout-notes). Provider availability must
+be qualified from each deployment's actual user-runtime and do-runtime egress. Local
+fake-provider integration proves protocol and secret boundaries but is not evidence of
+regional provider availability.
 
 ## Tests
 
 - `tests/unit/ai-contract.test.js` and the Rust `ai_contract_fixture_matches_rust_readers`
   test pin the shared persisted/resolver grammar and exact official destinations.
 - `tests/unit/control-ai-handler.test.js` covers revision CAS, encryption, canonical
-  state, aggregate limits, residual cleanup, and zero-Worker persistence semantics.
+  state, aggregate limits, credential-index validation, and residual cleanup.
 - `tests/unit/runtime-ai-client.test.js` and
   `tests/unit/runtime-ai-binding.test.js` cover facade options, official destinations,
   byte/frame bounds, SSE terminals, slow-upload cancellation, watchdogs, pool lease
   transfer, and WebSocket model pinning.
 - `tests/integration/ai-binding.test.js` covers positional and live imported env,
-  explicit importable-env disablement, provider rotation, zero-Worker recreation,
-  JSON/SSE, Responses and Realtime WebSockets, OpenAI SDK use, credential non-exposure,
-  terminal user-runtime/do-runtime loss, and DO caller teardown.
+  explicit importable-env disablement, loaded-module catalog reuse, credential and
+  upstream-model rotation, zero-Worker recreation, JSON/SSE, Responses and Realtime
+  WebSockets, OpenAI SDK use, credential non-exposure, terminal
+  user-runtime/do-runtime loss, and DO caller teardown.
 
 Integration uses an in-repo fake official provider. Real credentials must never be
 committed or printed by test output.

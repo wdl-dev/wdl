@@ -29,8 +29,8 @@ import { encryptSecretValue, SecretEnvelopeError } from "shared-secret-envelope"
 
 const AI_MUTATION_ATTEMPTS = 5;
 const AI_PROVIDER_BODY_MAX_BYTES = 128 * 1024;
-// JSON escaping can double a visible-ASCII credential before semantic validation.
-const AI_CREDENTIAL_BODY_MAX_BYTES = AI_CREDENTIAL_MAX_BYTES * 2 + 1024;
+// A valid ASCII credential can use a six-byte \uXXXX escape for every byte.
+const AI_CREDENTIAL_BODY_MAX_BYTES = AI_CREDENTIAL_MAX_BYTES * 6 + 1024;
 
 class AiControlError extends ControlAbort {
   /** @param {number} status @param {string} code @param {string} message */
@@ -82,6 +82,37 @@ function parseStoredProviders(raw) {
     throw new AiControlError(500, "ai_state_corrupt", "AI model count exceeds its bound");
   }
   return providers;
+}
+
+/** @param {string[]} names */
+function parseStoredCredentialNames(names) {
+  if (names.length > AI_PROVIDER_MAX_COUNT) {
+    throw new AiControlError(500, "ai_state_corrupt", "AI credential count exceeds its bound");
+  }
+  const credentials = new Set();
+  for (const name of names) {
+    if (!isValidAiProviderName(name)) {
+      throw new AiControlError(
+        500,
+        "ai_state_corrupt",
+        `AI credential provider name ${JSON.stringify(name)} is invalid`
+      );
+    }
+    credentials.add(name);
+  }
+  return credentials;
+}
+
+/** @param {string} ns */
+async function readProviderSnapshot(ns) {
+  const { hashes, keyLists } = await requireControlRedis().hGetAllManyAndHKeysMany(
+    [aiProvidersKey(ns)],
+    [aiProviderCredentialsKey(ns)]
+  );
+  return {
+    providers: parseStoredProviders(hashes[0]),
+    credentialNames: parseStoredCredentialNames(keyLists[0]),
+  };
 }
 
 /** @param {Map<string, ReturnType<typeof normalizeAiProviderRecord>>} providers */
@@ -236,37 +267,28 @@ async function deleteProvider({ ns, provider }) {
 
 /** @param {{ ns: string, provider?: string }} args */
 async function getProviders({ ns, provider }) {
-  const [rawProviders, rawCredentials] = await requireControlRedis().hGetAllMany([
-    aiProvidersKey(ns),
-    aiProviderCredentialsKey(ns),
-  ]);
-  const providers = parseStoredProviders(rawProviders);
+  const { providers, credentialNames } = await readProviderSnapshot(ns);
   if (provider !== undefined) {
     validateProviderName(provider);
     const record = providers.get(provider);
     if (!record) return jsonError(404, "ai_provider_not_found", "AI provider not found");
     return jsonResponse(200, {
-      provider: providerResponse(provider, record, Object.hasOwn(rawCredentials, provider)),
+      provider: providerResponse(provider, record, credentialNames.has(provider)),
     });
   }
   return jsonResponse(200, {
     providers: [...providers.entries()]
       .toSorted(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-      .map(([name, record]) => providerResponse(name, record, Object.hasOwn(rawCredentials, name))),
+      .map(([name, record]) => providerResponse(name, record, credentialNames.has(name))),
   });
 }
 
 /** @param {{ ns: string }} args */
 async function getModels({ ns }) {
-  const [rawProviders, rawCredentials] = await requireControlRedis().hGetAllMany([
-    aiProvidersKey(ns),
-    aiProviderCredentialsKey(ns),
-  ]);
-  const providers = parseStoredProviders(rawProviders);
+  const { providers } = await readProviderSnapshot(ns);
   const models = [];
   for (const [provider, record] of [...providers.entries()].toSorted(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0)) {
-    if (!Object.hasOwn(rawCredentials, provider)) continue;
     for (const [alias, descriptor] of Object.entries(record.models)) {
       models.push({ id: `${provider}/${alias}`, provider, alias, kind: record.kind, ...descriptor });
     }

@@ -66,8 +66,9 @@ workerd isolate boundaries and continues with WDL-specific wrapper and network r
 - Runtime wrapper generation constructs the tenant-visible `env`. Generic authenticated
   backend Fetchers stay inside runtime and never enter loaded-worker env; module
   evaluation may observe only declaration-scoped host adapters whose immutable props
-  limit them to the corresponding D1, DO, or Workflow binding. The DO host adapter owns
-  direct owner forwarding through runtime's internal network.
+  limit them to the corresponding declared binding. The DO host adapter owns direct
+  owner forwarding through runtime's internal network; the AI host adapter exposes only
+  its binding-scoped `fetch()` surface before wrapper invocation.
 - user-runtime loaded workers receive public-only outbound. Tenant `fetch()` and
   `cloudflare:sockets` must not reach platform-private addresses.
 - system-runtime `__system__` workers intentionally have private+public outbound because

@@ -1861,7 +1861,7 @@ test("commitWithWatch reads only workflow definitions declared by the new bundle
   assert.deepEqual(workflowDefReads, [["wf:defs:tenant-a:orders", ["orders"]]]);
 });
 
-test("commitWithWatch checks code budget after workflow keys are materialized", async () => {
+test("commitWithWatch checks env budget after workflow keys are materialized", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map([
     ["wf:defs:tenant-a:orders", {
@@ -1882,29 +1882,6 @@ test("commitWithWatch checks code budget after workflow keys are materialized", 
       { name: "flow", binding: "FLOW", className: "Flow" },
     ],
   };
-  const committedMeta = {
-    ...preparedMeta,
-    workflows: [
-      { ...preparedMeta.workflows[0], workflowKey: "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-    ],
-  };
-  const emptyCommittedBytes = assertTestWorkerCodeBytes({
-    meta: committedMeta,
-    normalized: [["worker.js", ""]],
-  });
-  const source = " ".repeat(WORKER_LOADER_CODE_MAX_BYTES - emptyCommittedBytes + 1);
-  assert.ok(assertTestWorkerCodeBytes({
-    meta: preparedMeta,
-    normalized: [["worker.js", source]],
-  }) <= WORKER_LOADER_CODE_MAX_BYTES);
-  assert.throws(
-    () => assertTestWorkerCodeBytes({
-      meta: committedMeta,
-      normalized: [["worker.js", source]],
-    }),
-    (err) => /** @type {{ code?: string }} */ (err).code === "worker_code_too_large"
-  );
-
   const redis = {
     /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
     async session(fn) {
@@ -1912,27 +1889,29 @@ test("commitWithWatch checks code budget after workflow keys are materialized", 
     },
   };
 
-  await assert.rejects(
-    commitWithWatch({
-      redis,
-      ns: "tenant-a",
-      name: "orders",
-      version: "v1",
-      prepared: {
-        meta: preparedMeta,
-        normalized: [["worker.js", source]],
-      },
-      outgoingRefs: [],
-      d1Refs: [],
-      controlEnv: {},
-    }),
-    /** @param {unknown} err */
-    (err) => /** @type {{ code?: string }} */ (err).code === "worker_code_too_large"
+  await commitWithWatch({
+    redis,
+    ns: "tenant-a",
+    name: "orders",
+    version: "v1",
+    prepared: {
+      meta: preparedMeta,
+      normalized: [["worker.js", "export default {}"]],
+    },
+    outgoingRefs: [],
+    d1Refs: [],
+    controlEnv: {},
+  });
+
+  const envBudgetCall = /** @type {any} */ (globalThis).__controlDeployTestState.envBudgetCalls.at(-1);
+  assert.equal(envBudgetCall.meta.workflows[0].workflowKey, "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  assert.equal(
+    /** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta.workflows[0].workflowKey,
+    "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   );
-  assert.equal(/** @type {any} */ (globalThis).__controlDeployTestState.stagedMeta, null);
 });
 
-test("worker code budget reserves the longest Workflow identity version", () => {
+test("worker code budget excludes the host-only Workflow identity version", () => {
   /** @type {{ meta: Record<string, unknown>, normalized: Array<[string, string | Uint8Array]> }} */
   const bundle = {
     meta: {
@@ -1948,7 +1927,19 @@ test("worker code budget reserves the longest Workflow identity version", () => 
     normalized: [["worker.js", "export default {}"]],
   };
 
+  const preparedBundle = {
+    ...bundle,
+    meta: {
+      ...bundle.meta,
+      workflows: [{
+        name: "flow",
+        binding: "FLOW",
+        className: "Flow",
+      }],
+    },
+  };
   const reservedBytes = assertTestWorkerCodeBytes(bundle);
+  assert.equal(assertTestWorkerCodeBytes(preparedBundle), reservedBytes);
   assert.equal(assertTestWorkerCodeBytes(bundle, { version: "v9" }), reservedBytes);
   assert.equal(assertTestWorkerCodeBytes(bundle, { version: "v10" }), reservedBytes);
 });

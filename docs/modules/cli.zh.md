@@ -91,8 +91,8 @@ WDL 遵循 Wrangler selected-env 继承规则：
 
 | 字段 | WDL 行为 |
 |---|---|
-| `name`、`main`、`compatibility_date`、`compatibility_flags` | 存入 immutable bundle metadata。Control 会拒绝早于 `2026-04-01` 的显式 `compatibility_date`，并在 commit 前拒绝格式错误、未来日期或当前 bundled workerd 不支持的值；包含 runtime/do-runtime 注入模块和生成 workflow keys 后的最终 WorkerCode 必须落在 workerd 64 MiB `workerLoader` code limit 内。 |
-| `[vars]` | 接受 string、number、boolean，并 stringified 进 `env`；vars、namespace/worker secrets、runtime 注入的 binding env value 必须落在 WDL 留有 headroom 的 workerd 1 MiB `workerLoader` env budget 内。Workflow identity 留在生成的 wrapper code 中，并由 WorkerCode budget 计数。 |
+| `name`、`main`、`compatibility_date`、`compatibility_flags` | 存入 immutable bundle metadata。Control 会拒绝早于 `2026-04-01` 的显式 `compatibility_date`，并在 commit 前拒绝格式错误、未来日期或当前 bundled workerd 不支持的值；包含 runtime/do-runtime 注入模块和 workflow import rewrite 后的最终 WorkerCode 必须落在 workerd 64 MiB `workerLoader` code limit 内。 |
+| `[vars]` | 接受 string、number、boolean，并 stringified 进 `env`；vars、namespace/worker secrets、runtime 注入的 binding env value 和 binding-scoped Workflow identity props 必须落在 WDL 留有 headroom 的 workerd 1 MiB `workerLoader` env budget 内。 |
 | `[[kv_namespaces]]` | `id` 是 platform-local KV namespace id，不是 Cloudflare UUID。 |
 | `[[r2_buckets]]` | `binding` 加 `bucket_name` 映射为平台 S3 bucket 下的 namespace-scoped virtual R2 bucket。 |
 | `[assets]` | `directory` 内容上传到 S3-compatible assets storage，并 auto-inject `ASSETS`。 |
@@ -119,7 +119,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 - Secret mutation 必须显式选择 worker scope 或 namespace scope，避免误写 namespace-wide secret。提交的空字符串是已设置 secret，不是 unset。
 - D1 命令管理 namespace D1 database 和 forward-only migration file。Migration filename 是 migration id；已 apply 的文件不应 rename 或编辑。
 - R2 命令在 namespace 前缀 `r2/<ns>/` 下操作。空的 declared virtual bucket 在第一次写入对象前，不会出现在由 prefix 推导的 list 结果里。
-- AI 命令管理 namespace-scoped official-provider metadata、revision-CAS credential 和有界的 resolved model list。Credential 通过隐藏输入或 stdin 读取，绝不写入 Wrangler config。Provider state 遵循 namespace secret 生命周期，可以在最后一个 worker 删除后继续存在。
+- AI 命令管理 namespace-scoped official-provider metadata、revision-CAS credential 和有界的 provider model metadata list。Credential 通过隐藏输入或 stdin 读取，绝不写入 Wrangler config。Provider state 遵循 namespace secret 生命周期，可以在最后一个 worker 删除后继续存在。
 - Workflows 命令通过 workflows service 操作；CLI 不得直接写 DB2。
 - Tail 命令通过 control 打开 live SSE session。
 

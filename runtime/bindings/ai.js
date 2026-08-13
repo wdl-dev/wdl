@@ -8,13 +8,14 @@ import {
 } from "shared-ai-contract";
 import {
   BodyTooLargeError,
+  readBoundedBytes,
   readBoundedStreamBytes,
-  readBoundedText,
 } from "shared-bounded-body";
 import { errorMessage } from "shared-errors";
 import { withInternalAuth } from "shared-internal-auth";
 import { ensureRequestId, logStructured } from "shared-observability";
 import { discardResponseBody, jsonError } from "shared-respond";
+import { utf8ByteLength } from "shared-utf8";
 import { aiRuntimeSetting } from "shared-ai-runtime-config";
 import {
   WEBSOCKET_RECONNECT_POLICY_DISABLED,
@@ -36,6 +37,7 @@ import {
 import { createAiStreamingResponse } from "runtime-bindings-ai-sse";
 import {
   AI_WS_FRAME_MAX_BYTES,
+  AI_WS_MAX_JSON_DEPTH,
   AI_WS_MAX_BYTES,
   closeAiWebSocket,
   createAiWebSocketBridge,
@@ -45,11 +47,12 @@ import {
   serviceNameFromEnv,
 } from "runtime-bindings-proxy";
 
-export const AI_REQUEST_MAX_BYTES = 8 * 1024 * 1024;
-export const AI_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+export const AI_REQUEST_MAX_BYTES = 1024 * 1024;
+export const AI_REQUEST_MAX_JSON_DEPTH = 128;
+export const AI_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 export const AI_STREAM_MAX_BYTES = 32 * 1024 * 1024;
 export const AI_STREAM_FRAME_MAX_BYTES = 1024 * 1024;
-export { AI_WS_FRAME_MAX_BYTES, AI_WS_MAX_BYTES };
+export { AI_WS_FRAME_MAX_BYTES, AI_WS_MAX_JSON_DEPTH, AI_WS_MAX_BYTES };
 export { aiPoolStateForTest, resetAiPoolStateForTest };
 
 const AI_INTERNAL_RESPONSE_MAX_BYTES = 512 * 1024;
@@ -89,6 +92,36 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** @param {string} text */
+function assertRequestJsonTextDepth(text) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+    } else if (character === "{" || character === "[") {
+      depth += 1;
+      if (depth > AI_REQUEST_MAX_JSON_DEPTH) {
+        throw new AiBindingError(
+          400,
+          "ai_request_too_deep",
+          `AI request JSON exceeds ${AI_REQUEST_MAX_JSON_DEPTH} levels`
+        );
+      }
+    } else if (character === "}" || character === "]") {
+      depth -= 1;
+    }
+  }
+}
+
 /** @param {string | null} contentType @param {string} expected */
 function hasContentType(contentType, expected) {
   return (contentType || "").split(";", 1)[0].trim().toLowerCase() === expected;
@@ -110,13 +143,15 @@ async function requestModelBody(request, signal) {
   }
   let text;
   try {
-    text = await readBoundedText(request, AI_REQUEST_MAX_BYTES, signal);
+    text = utf8Decoder.decode(await readBoundedBytes(request, AI_REQUEST_MAX_BYTES, signal));
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       throw new AiBindingError(413, "ai_request_too_large", `AI request exceeds ${AI_REQUEST_MAX_BYTES} bytes`);
     }
-    throw err;
+    signal.throwIfAborted();
+    throw new AiBindingError(400, "ai_request_body_unreadable", "AI request body could not be read");
   }
+  assertRequestJsonTextDepth(text);
   let parsed;
   try { parsed = JSON.parse(text); } catch {
     throw new AiBindingError(400, "ai_invalid_json", "AI request body must be valid JSON");
@@ -391,6 +426,13 @@ async function handleHttp(binding, request, url, requestId) {
         throw new AiBindingError(400, err.code, err.message);
       }
       throw err;
+    }
+    if (utf8ByteLength(provider.body) > AI_REQUEST_MAX_BYTES) {
+      throw new AiBindingError(
+        413,
+        "ai_request_too_large",
+        `AI request exceeds ${AI_REQUEST_MAX_BYTES} bytes`
+      );
     }
     const response = await network.fetch(provider.destination, {
       method: "POST",

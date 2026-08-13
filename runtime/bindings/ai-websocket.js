@@ -1,7 +1,8 @@
 import { utf8ByteLength } from "shared-utf8";
 
 export const AI_WS_FRAME_MAX_BYTES = 1024 * 1024;
-export const AI_WS_MAX_BYTES = 128 * 1024 * 1024;
+export const AI_WS_MAX_JSON_DEPTH = 128;
+export const AI_WS_MAX_BYTES = 64 * 1024 * 1024;
 
 /** @param {unknown} value */
 function isRecord(value) {
@@ -66,12 +67,179 @@ function providerCloseCode(code) {
     : normalized;
 }
 
+/** @param {string} text @param {number} start */
+function jsonStringEnd(text, start) {
+  let index = start + 1;
+  while (index < text.length) {
+    if (text[index] === "\\") index += 2;
+    else if (text[index] === '"') return index + 1;
+    else index += 1;
+  }
+  return text.length;
+}
+
+/** @param {string} text @param {number} start */
+function jsonPrimitiveEnd(text, start) {
+  let index = start + 1;
+  while (index < text.length) {
+    const character = text[index];
+    if (
+      character === " " || character === "\t" || character === "\n" ||
+      character === "\r" || character === "," || character === "]" ||
+      character === "}"
+    ) break;
+    index += 1;
+  }
+  return index;
+}
+
+/** @param {string} character */
+function isJsonWhitespace(character) {
+  return character === " " || character === "\t" || character === "\n" || character === "\r";
+}
+
+/** @param {"root" | "session" | "other"} scope @param {string} key */
+function trackedJsonField(scope, key) {
+  if (scope === "root") {
+    if (key === "type") return 1;
+    if (key === "model") return 2;
+    if (key === "session") return 4;
+  } else if (scope === "session" && key === "model") {
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * Locate only the model fields owned by the bridge. JSON.parse() already owns
+ * syntax validation; this lexical pass rejects duplicate decision fields and
+ * lets model replacement preserve every unrelated source token exactly.
+ *
+ * @param {string} text
+ */
+function inspectClientSocketJson(text) {
+  /** @type {Array<{
+   *   kind: "object" | "array",
+   *   scope: "root" | "session" | "other",
+   *   expectKey: boolean,
+   *   pendingKey: string | null,
+   *   seen: number,
+   * }>} */
+  const stack = [];
+  /** @type {{ start: number, end: number } | null} */
+  let rootModel = null;
+  /** @type {{ start: number, end: number } | null} */
+  let sessionModel = null;
+  let rootEnd = -1;
+
+  /** @param {number} start @param {number} end */
+  const recordValue = (start, end) => {
+    const context = stack[stack.length - 1];
+    if (!context || context.kind !== "object") return;
+    if (context.scope === "root" && context.pendingKey === "model") {
+      rootModel = { start, end };
+    } else if (context.scope === "session" && context.pendingKey === "model") {
+      sessionModel = { start, end };
+    }
+    context.pendingKey = null;
+  };
+
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    if (isJsonWhitespace(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === "{") {
+      if (stack.length >= AI_WS_MAX_JSON_DEPTH) {
+        throw new Error(`AI websocket JSON exceeds ${AI_WS_MAX_JSON_DEPTH} levels`);
+      }
+      const parent = stack[stack.length - 1];
+      const scope = stack.length === 0
+        ? "root"
+        : parent?.kind === "object" &&
+            parent.scope === "root" &&
+            parent.pendingKey === "session"
+          ? "session"
+          : "other";
+      if (parent?.kind === "object") parent.pendingKey = null;
+      stack.push({ kind: "object", scope, expectKey: true, pendingKey: null, seen: 0 });
+      index += 1;
+      continue;
+    }
+    if (character === "[") {
+      if (stack.length >= AI_WS_MAX_JSON_DEPTH) {
+        throw new Error(`AI websocket JSON exceeds ${AI_WS_MAX_JSON_DEPTH} levels`);
+      }
+      const parent = stack[stack.length - 1];
+      if (parent?.kind === "object") parent.pendingKey = null;
+      stack.push({ kind: "array", scope: "other", expectKey: false, pendingKey: null, seen: 0 });
+      index += 1;
+      continue;
+    }
+    if (character === "}" || character === "]") {
+      const context = stack.pop();
+      if (character === "}" && context?.scope === "root") rootEnd = index;
+      index += 1;
+      continue;
+    }
+    if (character === ",") {
+      const context = stack[stack.length - 1];
+      if (context?.kind === "object") {
+        context.expectKey = true;
+        context.pendingKey = null;
+      }
+      index += 1;
+      continue;
+    }
+    if (character === ":") {
+      index += 1;
+      continue;
+    }
+    if (character === '"') {
+      const end = jsonStringEnd(text, index);
+      const context = stack[stack.length - 1];
+      if (context?.kind === "object" && context.expectKey) {
+        if (context.scope !== "other") {
+          const key = JSON.parse(text.slice(index, end));
+          const field = trackedJsonField(context.scope, key);
+          if (field !== 0 && (context.seen & field) !== 0) {
+            throw new Error("AI websocket frame contains duplicate routing fields");
+          }
+          context.seen |= field;
+          context.pendingKey =
+            (context.scope === "root" && (key === "model" || key === "session")) ||
+              (context.scope === "session" && key === "model")
+            ? key
+            : null;
+        }
+        context.expectKey = false;
+      } else {
+        recordValue(index, end);
+      }
+      index = end;
+      continue;
+    }
+    const end = jsonPrimitiveEnd(text, index);
+    recordValue(index, end);
+    index = end;
+  }
+  return { rootEnd, rootModel, sessionModel };
+}
+
+/** @param {string} text @param {{ start: number, end: number }} span @param {string} value */
+function replaceJsonValue(text, span, value) {
+  return `${text.slice(0, span.start)}${JSON.stringify(value)}${text.slice(span.end)}`;
+}
+
 /**
  * @param {{ protocol: string, upstreamModel: string, binaryFrames: boolean }} model
  * @param {string} publicModel
  * @param {string} text
  */
 function normalizeClientSocketText(model, publicModel, text) {
+  const fields = inspectClientSocketJson(text);
   let payload;
   try { payload = JSON.parse(text); } catch {
     throw new Error("AI websocket text frames must be JSON");
@@ -86,12 +254,21 @@ function normalizeClientSocketText(model, publicModel, text) {
     throw new Error("AI realtime model is fixed for this connection");
   }
   if (model.protocol === "responses" && payload.type === "response.create") {
-    payload.model = model.upstreamModel;
+    if (payload.model === model.upstreamModel) return text;
+    if (fields.rootModel) return replaceJsonValue(text, fields.rootModel, model.upstreamModel);
+    return `${text.slice(0, fields.rootEnd)},"model":${JSON.stringify(model.upstreamModel)}` +
+      text.slice(fields.rootEnd);
   }
-  if (model.protocol === "realtime" && isRecord(payload.session) && payload.session.model != null) {
-    payload.session = { ...payload.session, model: model.upstreamModel };
+  if (
+    model.protocol === "realtime" &&
+    isRecord(payload.session) &&
+    payload.session.model != null &&
+    payload.session.model !== model.upstreamModel
+  ) {
+    if (!fields.sessionModel) throw new Error("AI realtime model field is malformed");
+    return replaceJsonValue(text, fields.sessionModel, model.upstreamModel);
   }
-  return JSON.stringify(payload);
+  return text;
 }
 
 /**
@@ -161,12 +338,12 @@ export function createAiWebSocketBridge(options) {
         const forwarded = frame.kind === "text"
           ? normalizeClientSocketText(model, publicModel, String(frame.data))
           : frame.data;
-        const forwardedFrame = websocketFrame(forwarded);
+        const forwardedFrame = forwarded === frame.data ? frame : websocketFrame(forwarded);
         if (forwardedFrame.bytes > AI_WS_FRAME_MAX_BYTES) {
           finish(1009, "AI websocket frame too large", "frame_limit");
           return;
         }
-        clientBytes += forwardedFrame.bytes;
+        clientBytes += Math.max(frame.bytes, forwardedFrame.bytes);
         if (clientBytes > AI_WS_MAX_BYTES) {
           finish(1009, "AI websocket byte limit", "byte_limit");
           return;

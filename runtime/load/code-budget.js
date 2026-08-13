@@ -35,7 +35,6 @@ const utf8Decoder = new TextDecoder();
  * @typedef {{ modules: Record<string, WorkerModuleValue>, mainModule: string, [key: string]: unknown }} WorkerCodeShape
  * @typedef {Record<string, unknown> & { type?: string, className?: unknown }} RuntimeBindingSpec
  * @typedef {{ binding?: unknown, className?: unknown }} RuntimeWorkflowSpec
- * @typedef {{ ns: string, worker: string, version: string }} RuntimeWorkerIdentity
  * @typedef {{ entrypoint?: unknown }} RuntimeExportSpec
  * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null, compatibilityFlags?: unknown }} RuntimeBundleMeta
  * @typedef {{
@@ -284,14 +283,12 @@ export function analyzeRuntimeMeta(meta) {
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
  * @param {RuntimeMetaPlan} [plan]
- * @param {RuntimeWorkerIdentity | null} [workerIdentity]
  */
 function runtimeInjectedModuleSources(
   mainModule,
   meta,
   runtimeSources,
-  plan = analyzeRuntimeMeta(meta),
-  workerIdentity = null
+  plan = analyzeRuntimeMeta(meta)
 ) {
   const injections = runtimeModuleInjections(runtimeSources);
   /** @type {Map<string, string>} */
@@ -323,7 +320,6 @@ function runtimeInjectedModuleSources(
             doBindings: plan.doBindings,
             workflowBindings: plan.workflowBindings,
             entrypointNames: plan.hostWrappedClassNames,
-            workerIdentity,
             aiBindings: plan.aiBindings,
             importableEnvDisabled: Array.isArray(meta.compatibilityFlags) &&
               meta.compatibilityFlags.includes("disallow_importable_env"),
@@ -338,7 +334,7 @@ function runtimeInjectedModuleSources(
  * @param {WorkerCodeShape} workerCode
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
- * @param {{ plan?: RuntimeMetaPlan, workerIdentity?: RuntimeWorkerIdentity | null }} [options]
+ * @param {{ plan?: RuntimeMetaPlan }} [options]
  */
 export function injectRuntimeModulesForHostBindings(
   workerCode,
@@ -364,8 +360,7 @@ export function injectRuntimeModulesForHostBindings(
     originalMain,
     meta,
     runtimeSources,
-    plan,
-    options.workerIdentity || null
+    plan
   )) {
     workerCode.modules[name] = source;
   }
@@ -410,7 +405,6 @@ export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
  *   normalized: NormalizedModule[],
  *   meta: RuntimeBundleMeta,
  *   runtimeSources: RuntimeInjectionSources,
- *   workerIdentity?: RuntimeWorkerIdentity | null,
  *   userCodeBytes?: number,
  * }} args
  */
@@ -419,7 +413,6 @@ export function estimateFinalWorkerLoaderCodeBytes({
   normalized,
   meta,
   runtimeSources,
-  workerIdentity = null,
   userCodeBytes = estimateWorkerLoaderUserCodeBytes({ normalized, meta }),
 }) {
   let total = userCodeBytes;
@@ -427,8 +420,7 @@ export function estimateFinalWorkerLoaderCodeBytes({
     mainModule,
     meta,
     runtimeSources,
-    analyzeRuntimeMeta(meta),
-    workerIdentity
+    analyzeRuntimeMeta(meta)
   )) {
     total += nodeBuffer.byteLength(source, "utf8");
   }

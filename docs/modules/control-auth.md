@@ -70,7 +70,7 @@ Host, secret, data, and auth operations:
 | `GET` | `/ns/<ns>/ai/providers[/<name>]` | Lists provider metadata and credential-present state without returning credential values. |
 | `PUT` / `DELETE` | `/ns/<ns>/ai/providers/<name>` | Replaces canonical provider metadata with a new revision. Same-kind updates preserve the credential; kind changes and creation over credential-only residue clear it. Delete removes metadata and credential together. |
 | `PUT` | `/ns/<ns>/ai/providers/<name>/credential` | Encrypts a credential under an exact provider-revision CAS. |
-| `GET` | `/ns/<ns>/ai/models` | Lists bounded models whose provider credential is configured. |
+| `GET` | `/ns/<ns>/ai/models` | Lists bounded configured provider model metadata; provider reads report credential status separately. |
 | `GET` / `POST` / `DELETE` | `/ns/<ns>/d1/databases[/<databaseRef>]` | Lists, creates, or deletes D1 databases. Create flips provisional metadata ready after d1-runtime initialization; delete tombstones and best-effort releases owner lease. |
 | `POST` | `/ns/<ns>/d1/databases/<databaseRef>/query` | Operator SQL execute path used by `wdl d1 execute`. |
 | `GET` / `POST` | `/ns/<ns>/d1/databases/<databaseRef>/migrations[...]` | Migration list/status/apply. Apply is forward-only under an advisory Redis UX lock; owner serialization and SQLite transactions remain the correctness boundary. |
@@ -96,10 +96,11 @@ Control lifecycle operations are split so each critical transition has one autho
   writes bundle metadata/modules/assets, then enters the same promote path used by
   explicit promotion. Before allocation, deploy estimates final WorkerCode under
   workerd's 64 MiB limit, including runtime/do-runtime-injected wrapper/client modules
-  and workflow import rewrites. The watched commit path is the authoritative code-budget
-  and headroomed `workerLoader` env-budget check after version allocation and metadata
-  materialization, such as resolved D1 database ids and workflow keys, before writing
-  the version.
+  and workflow import rewrites. Materialized D1 ids, DO storage ids, Workflow keys, and
+  version identity live in host props rather than generated source, so they do not
+  require a second code estimate inside WATCH retries. The watched commit path performs
+  the authoritative headroomed `workerLoader` env-budget check after version allocation
+  and metadata materialization, before writing the version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
@@ -337,7 +338,7 @@ Auth-specific contract:
 - Deploy returns `worker_code_invalid` when final WorkerCode would collide with injected
   WDL runtime/do-runtime reserved module names or lacks required bundle metadata, and
   `worker_code_too_large` when final WorkerCode, including runtime/do-runtime-injected
-  modules and generated workflow keys, exceeds workerd's 64 MiB dynamic code limit.
+  modules and workflow import rewrites, exceeds workerd's 64 MiB dynamic code limit.
   Deploy and secret mutations return `worker_env_too_large` when the estimated
   `workerLoader` env exceeds WDL's headroomed 1 MiB budget.
   `worker_env_too_large` details include `namespace`, optional `worker`, `env_bytes`,
@@ -395,9 +396,6 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 
 - Cross-tier Control shape changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes).
-- AI routes ship after redis-proxy and runtime/do-runtime readers can consume the
-  provider and binding contracts. Pause Control mutations while the combined
-  system-runtime reader/Control writer tier rolls.
 - Control and gateway must keep route invalidation channel names aligned.
 - Auth role changes should be reviewed as security boundary changes and tested against
   reserved namespace behavior.

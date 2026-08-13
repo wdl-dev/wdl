@@ -106,7 +106,7 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 - 匹配 `__WDL_*__` 的 binding 和匹配 `__Wdl*__` 的 entrypoint 属于平台保留。
 - Tenant module evaluation 可观察到的 raw env value 被限定到其声明的 binding identity。DO 与 Workflow adapter 会先覆盖 caller 提供的 identity，再附加 internal auth；loaded-worker env 永远不放置通用 authenticated backend Fetcher。
 - D1/DO owner hint 只信任 runtime service 生成的 header，不信任 tenant response body。
-- Workflow binding 通过 `workflows` service；冻结 identity 位于 generated private wrapper code 和 host-binding props，不以 JSON-compatible metadata object 进入 raw worker env，因此 Node-compatible `process.env` 不会暴露该对象。
+- Workflow binding 通过 `workflows` service；冻结 identity 只存在于 binding-scoped host props。Generated facade 只携带公开 operation field，Node-compatible `process.env` 不会暴露这些 props。
 
 ## 可观测性
 
@@ -115,14 +115,13 @@ Runtime 为 loading、binding operation、AI pool state、`redis-proxy` call、w
 ## 部署 / Rollout 注意事项
 
 - Runtime/Control 合同变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程，不能依赖未协调的同时 rolling。
-- AI binding rollout 要先部署 redis-proxy 与 Gateway，再部署 runtime/do-runtime reader；system-runtime/Control 这个 reader/writer 合一层 rolling 时暂停 Control mutation，完成后再接受 `{ type: "ai" }`，最后发布 CLI sender。
 - Runtime 不为 loaded worker 开启 workerd 的宽泛 `experimental` flag。Historical-version eviction 会注入 `__WdlAbort__`；当前 bundled workerd baseline 的 `abortIsolate()` 不需要该 flag，并且当前 upstream 实现只移除 loader cache identity，同时允许 outstanding call 自然 drain；升级 workerd 时必须重新核对该行为。
 - Bundled workerd 在 active request 外（包括 dynamic module evaluation）调用 `Date.now()`、无参数 `new Date()` 或 `performance.now()` 时都返回 `0`。Generated wrapper 原样传递 request-owned `ExecutionContext`，因此无需 WDL shim 即可使用 `ctx.abort(reason?)`、`ctx.tracing.startSpan()` 和 span attribute setter。`ctx.abort()` 只终止当前 stateless invocation，与 host-only `abortIsolate()` eviction 无关。
 - compatibility date 不早于 `2026-08-04` 时，workerd 默认同时启用 `nodejs_compat` 和 `nodejs_compat_v2`。Tenant 如果不需要这两层 surface，必须同时指定 `no_nodejs_compat` 与 `no_nodejs_compat_v2`。
 - Control 会在 deploy 时拒绝上游 `$experimental` compatibility enable flags 和 WDL 显式禁止的 `allow_irrevocable_stub_storage`，runtime 也会拒绝包含任一类 flag 的 retained metadata；static host worker 同样不会启用不可撤销 stub flag。`no_*` 这类 disable-style flag 不属于 experimental mirror，除非上游把对应 enable flag 本身标为 experimental。
 - Python Workers modules 不受支持。上游 `python_workers_20260610` flag 已不再是 experimental，但 Control 仍会拒绝新的 `py` module manifest，runtime/do-runtime 也会拒绝 retained metadata 中的 `py` module，而不是让 workerd 在 cold load 时 bootstrap Pyodide。
 - 从 WDL 的 2026-07-01 workerd pin 开始，runtime 进程使用进程级 `--experimental`，因为上游用它 gate `workerLoader` binding。不要给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
-- 从 WDL 的 2026-07-01 workerd pin 开始，Control 执行上游的 64 MiB dynamic worker code 上限和 1 MiB serialized dynamic env 上限。Control 会在分配 version 前和 commit metadata materialization 之后估算最终 WorkerCode，包含 runtime/do-runtime 注入的 wrapper/client modules、workflow import rewrite 和生成的 workflow keys；vars、namespace/worker secrets、runtime 注入的 binding env value 会在 Redis WATCH commit 和 secret mutation 路径里按 headroomed `workerLoader` env budget 做权威检查。Workflow identity 位于生成的 wrapper code，由 code budget 而非 env budget 计数；wrapper estimate 会预留最长合法 immutable version tag，确保之后由 secret 驱动的 version bump 不会让已接受代码超过 workerd 上限。Deploy 和 namespace-secret mutations 使用它们实际会加载的 version；worker-secret mutation 还会在 WATCH/COPY bump 事务内重新检查 forced bump，确保 routing flip 前覆盖已分配的 bump version。估算以 JSON bytes 为基底，并对非 Latin-1 字符串补上 V8 two-byte string overhead，因此 ASCII 混 CJK 或 emoji 的 secret 不会绕过 control 后在 cold-load 才失败。
+- 从 WDL 的 2026-07-01 workerd pin 开始，Control 执行上游的 64 MiB dynamic worker code 上限和 1 MiB serialized dynamic env 上限。Control 在分配 version 前估算一次最终 WorkerCode，包含 runtime/do-runtime 注入的 wrapper/client modules 和 workflow import rewrite。Materialized D1 id、DO storage id、Workflow key 与 version identity 位于 host props，不进入 generated source，因此 WATCH retry 不重复该代码估算。Vars、namespace/worker secrets、runtime 注入的 binding env value 会在 Redis WATCH commit 和 secret mutation 路径里按 headroomed `workerLoader` env budget 做权威检查；Workflow identity 同样由该 env budget 覆盖。Commit 与 secret mutation 路径按各自实际要加载的 version 检查；deploy 和 namespace-secret mutation 使用其实际可加载 version，worker-secret mutation 还会在 WATCH/COPY bump 事务内重新检查 forced bump，确保 routing flip 前覆盖已分配的 bump version。估算以 JSON bytes 为基底，并对非 Latin-1 字符串补上 V8 two-byte string overhead，因此 ASCII 混 CJK 或 emoji 的 secret 不会绕过 control 后在 cold-load 才失败。
 - 当前 stock workerd 中，客户端在 async `ReadableStream` response body 中途断开时，不一定调用 stream source 的 `cancel()`。Tenant streaming/SSE worker 应使用自己的 heartbeat、timeout 或应用层 close path，不要把 disconnect-driven `cancel()` 当成唯一资源清理信号。
 - workerd 升级仍可能改变默认或 compatibility-flagged runtime surface；升级时要审 exposed surface，而不只审 loader/abort path。
 

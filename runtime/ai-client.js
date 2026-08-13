@@ -16,20 +16,56 @@ const REJECTED_OPTIONS = new Set([
   "extraHeaders",
   "sessionOptions",
 ]);
+const AI_MODEL_REFERENCE_RE =
+  /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\/[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicAbortSignalThrowIfAborted = AbortSignal.prototype.throwIfAborted;
+const intrinsicArrayIsArray = Array.isArray;
+const intrinsicRegExpExec = RegExp.prototype.exec;
+const intrinsicSetHas = Set.prototype.has;
 const intrinsicHeadersSet = Headers.prototype.set;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
 const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectHasOwn = Object.hasOwn;
+const intrinsicStructuredClone = structuredClone;
 const IntrinsicHeaders = Headers;
 const IntrinsicRequest = Request;
 const intrinsicResponseJson = Response.prototype.json;
 
+/** @param {unknown} value @returns {value is unknown[]} */
+function isArray(value) {
+  return intrinsicReflectApply(intrinsicArrayIsArray, Array, [value]);
+}
+
+/** @param {Set<string>} target @param {string} value */
+function setHas(target, value) {
+  return intrinsicReflectApply(intrinsicSetHas, target, [value]);
+}
+
+/** @param {unknown[]} values @param {unknown} expected */
+function arrayIncludes(values, expected) {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === expected) return true;
+  }
+  return false;
+}
+
+/** @param {RegExp} pattern @param {string} value */
+function regexMatches(pattern, value) {
+  return intrinsicReflectApply(intrinsicRegExpExec, pattern, [value]) !== null;
+}
+
+/** @param {AbortSignal | undefined} signal */
+function throwIfAborted(signal) {
+  if (signal) intrinsicReflectApply(intrinsicAbortSignalThrowIfAborted, signal, []);
+}
+
 /** @typedef {{ fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> }} AiFetcher */
-/** @typedef {{ fetcher: AiFetcher, requestIdOptions: object }} AiState */
+/** @typedef {{ fetcher: AiFetcher, requestIdOptions: object, catalogScope: WeakKey }} AiState */
 
 const state = new WeakMap();
+const catalogSnapshots = new WeakMap();
 
 /** @param {WeakKey} target @param {unknown} value */
 function weakMapSet(target, value) {
@@ -41,6 +77,21 @@ function weakMapGet(target) {
   const value = intrinsicReflectApply(intrinsicWeakMapGet, state, [target]);
   if (!value) throw new TypeError("Illegal AI binding invocation");
   return value;
+}
+
+/** @param {WeakKey} target @returns {unknown[] | undefined} */
+function catalogSnapshot(target) {
+  return intrinsicReflectApply(intrinsicWeakMapGet, catalogSnapshots, [target]);
+}
+
+/** @param {WeakKey} target @param {unknown[]} models */
+function rememberCatalogSnapshot(target, models) {
+  intrinsicReflectApply(intrinsicWeakMapSet, catalogSnapshots, [target, models]);
+}
+
+/** @param {unknown[]} models */
+function cloneModels(models) {
+  return intrinsicReflectApply(intrinsicStructuredClone, undefined, [models]);
 }
 
 /** @param {Response} response */
@@ -65,18 +116,20 @@ async function fetchRequest(binding, input, init = undefined) {
 /** @param {unknown} raw */
 function normalizeOptions(raw) {
   if (raw == null) return {};
-  if (typeof raw !== "object" || Array.isArray(raw)) {
+  if (typeof raw !== "object" || isArray(raw)) {
     throw new TypeError("AI options must be an object");
   }
   const options = /** @type {Record<string, unknown>} */ (raw);
-  for (const [key] of intrinsicReflectApply(intrinsicObjectEntries, Object, [options])) {
-    if (REJECTED_OPTIONS.has(key)) {
+  const entries = intrinsicReflectApply(intrinsicObjectEntries, Object, [options]);
+  for (let index = 0; index < entries.length; index += 1) {
+    const key = entries[index][0];
+    if (setHas(REJECTED_OPTIONS, key)) {
       if (key === "returnRawResponse") {
         throw new TypeError("AI returnRawResponse is not supported; use env.AI.fetch() for raw responses");
       }
       throw new TypeError(`AI option ${key} is not supported`);
     }
-    if (!ALLOWED_OPTIONS.has(key)) throw new TypeError(`AI option ${key} is not supported`);
+    if (!setHas(ALLOWED_OPTIONS, key)) throw new TypeError(`AI option ${key} is not supported`);
   }
   if (options.websocket !== undefined && typeof options.websocket !== "boolean") {
     throw new TypeError("AI option websocket must be boolean");
@@ -90,7 +143,7 @@ function aiError(payload, status) {
     ? /** @type {Record<string, unknown>} */ (payload)
     : {};
   const providerError = record.error && typeof record.error === "object" &&
-      !Array.isArray(record.error)
+      !isArray(record.error)
     ? /** @type {Record<string, unknown>} */ (record.error)
     : null;
   let message = `AI request failed with status ${status}`;
@@ -125,7 +178,7 @@ async function requireOkJson(response) {
 }
 
 /** @param {AiState} binding @param {AbortSignal | undefined} signal */
-async function listModels(binding, signal) {
+async function loadModels(binding, signal) {
   const response = await fetchRequest(binding, `${AI_ORIGIN}/v1/models`, {
     method: "GET",
     signal,
@@ -134,15 +187,38 @@ async function listModels(binding, signal) {
   const record = payload && typeof payload === "object"
     ? /** @type {Record<string, unknown>} */ (payload)
     : null;
-  if (!record || !Array.isArray(record.models)) {
+  if (!record || !isArray(record.models)) {
     throw aiError({ message: "AI models response is malformed" }, 502);
   }
   return record.models;
 }
 
+/** @param {AiState} binding @param {AbortSignal | undefined} signal */
+async function catalogModels(binding, signal) {
+  throwIfAborted(signal);
+  const cached = catalogSnapshot(binding.catalogScope);
+  if (cached) return cached;
+  // Retain only settled data; an in-flight fetch Promise belongs to one request IoContext.
+  let models;
+  try {
+    models = await loadModels(binding, signal);
+  } catch (err) {
+    throwIfAborted(signal);
+    const settled = catalogSnapshot(binding.catalogScope);
+    if (settled) return settled;
+    throw err;
+  }
+  throwIfAborted(signal);
+  const settled = catalogSnapshot(binding.catalogScope);
+  if (settled) return settled;
+  rememberCatalogSnapshot(binding.catalogScope, models);
+  return models;
+}
+
 /** @param {unknown[]} models @param {string} model */
 function modelDescriptor(models, model) {
-  for (const descriptor of models) {
+  for (let index = 0; index < models.length; index += 1) {
+    const descriptor = models[index];
     if (
       descriptor &&
       typeof descriptor === "object" &&
@@ -154,7 +230,7 @@ function modelDescriptor(models, model) {
 
 /** @param {Record<string, unknown>} descriptor @param {string} transport */
 function requireTransport(descriptor, transport) {
-  if (!Array.isArray(descriptor.transports) || !descriptor.transports.includes(transport)) {
+  if (!isArray(descriptor.transports) || !arrayIncludes(descriptor.transports, transport)) {
     throw aiError({
       error: "ai_transport_unavailable",
       message: `AI model does not support ${transport}`,
@@ -171,9 +247,9 @@ function protocolPath(protocol) {
 }
 
 export class Ai {
-  /** @param {AiFetcher} fetcher @param {object} [requestIdOptions] */
-  constructor(fetcher, requestIdOptions = {}) {
-    weakMapSet(this, { fetcher, requestIdOptions });
+  /** @param {AiFetcher} fetcher @param {object} [requestIdOptions] @param {WeakKey | null} [catalogScope] */
+  constructor(fetcher, requestIdOptions = {}, catalogScope = null) {
+    weakMapSet(this, { fetcher, requestIdOptions, catalogScope: catalogScope ?? this });
   }
 
   /** @param {RequestInfo | URL} input @param {RequestInit} [init] */
@@ -182,23 +258,50 @@ export class Ai {
   }
 
   async models() {
-    return await listModels(weakMapGet(this), undefined);
+    const binding = weakMapGet(this);
+    return cloneModels(await catalogModels(binding, undefined));
   }
 
   /** @param {string} model @param {unknown} inputs @param {Record<string, unknown>} [rawOptions] */
   async run(model, inputs, rawOptions = {}) {
-    if (typeof model !== "string" || model.length === 0) {
-      throw new TypeError("AI model must be a non-empty string");
+    if (
+      typeof model !== "string" ||
+      !regexMatches(AI_MODEL_REFERENCE_RE, model)
+    ) {
+      throw aiError({
+        error: "ai_invalid_model",
+        message: "AI model must be <provider>/<alias>",
+      }, 400);
     }
     const options = normalizeOptions(rawOptions);
     const signal = /** @type {AbortSignal | undefined} */ (options.signal);
     const binding = weakMapGet(this);
+    const websocket = options.websocket === true;
+    /** @type {Record<string, unknown> | null} */
+    let body = null;
+    let stream = false;
+    if (websocket) {
+      if (inputs !== null) throw new TypeError("AI websocket run requires inputs to be null");
+    } else {
+      if (!inputs || typeof inputs !== "object" || isArray(inputs)) {
+        throw new TypeError("AI inputs must be an object");
+      }
+      body = {
+        .../** @type {Record<string, unknown>} */ (inputs),
+        model,
+      };
+      stream = intrinsicObjectHasOwn(body, "stream") && body.stream === true;
+      if (body.stream !== undefined && typeof body.stream !== "boolean") {
+        throw new TypeError("AI inputs.stream must be boolean");
+      }
+    }
+    const models = await catalogModels(binding, signal);
+    throwIfAborted(signal);
     const descriptor = /** @type {Record<string, unknown>} */ (
-      modelDescriptor(await listModels(binding, signal), model)
+      modelDescriptor(models, model)
     );
 
-    if (options.websocket === true) {
-      if (inputs !== null) throw new TypeError("AI websocket run requires inputs to be null");
+    if (websocket) {
       const protocol = descriptor.protocol;
       const transport = protocol === "responses"
         ? "responses_websocket"
@@ -223,17 +326,7 @@ export class Ai {
       return websocketResponse;
     }
 
-    if (!inputs || typeof inputs !== "object" || Array.isArray(inputs)) {
-      throw new TypeError("AI inputs must be an object");
-    }
-    const body = /** @type {Record<string, unknown>} */ ({
-      .../** @type {Record<string, unknown>} */ (inputs),
-      model,
-    });
-    const stream = intrinsicObjectHasOwn(body, "stream") && body.stream === true;
-    if (body.stream !== undefined && typeof body.stream !== "boolean") {
-      throw new TypeError("AI inputs.stream must be boolean");
-    }
+    if (!body) throw new TypeError("AI inputs must be an object");
     requireTransport(descriptor, stream ? "sse" : "http");
     const response = await fetchRequest(binding,
       `${AI_ORIGIN}${protocolPath(String(descriptor.protocol))}`,

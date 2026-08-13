@@ -81,6 +81,12 @@ spec:
           env:
             - name: REDIS_PROXY_URL
               value: http://127.0.0.1:7070
+            - name: AI_REQUEST_MAX_IN_FLIGHT
+              value: "32"
+            - name: AI_STREAM_MAX_IN_FLIGHT
+              value: "16"
+            - name: AI_WS_MAX_SESSIONS
+              value: "8"
           ports:
             - name: loader
               containerPort: 8081

@@ -166,6 +166,7 @@ export function createAiStreamingResponse({
   const frames = createFrameBuffer(maxFrameBytes);
   let total = 0;
   let closed = false;
+  let providerDone = false;
   /** @type {ReadableStreamDefaultController<Uint8Array> | null} */
   let output = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
@@ -193,32 +194,22 @@ export function createAiStreamingResponse({
     try { output?.error(error); } catch {}
     cleanup(outcome);
   };
-  /**
-   * Idle/EOF reconciliation must inspect every frame already buffered by the
-   * provider. Backpressure may have left a terminal event behind earlier
-   * non-terminal frames from the same chunk.
-   *
-   * @param {ReadableStreamDefaultController<Uint8Array>} controller
-   */
-  const drainBufferedFrames = (controller) => {
-    for (;;) {
-      const frame = frames.take(true);
-      if (frame === null) return false;
-      if (enqueueFrame(controller, frame)) return true;
-    }
-  };
-  const resetIdle = () => {
+  const clearIdle = () => {
     if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+  };
+  const armIdle = () => {
+    clearIdle();
     idleTimer = setTimeout(() => {
       try {
-        if (output !== null && drainBufferedFrames(output)) return;
+        const trailing = frames.take(true);
+        if (output !== null && trailing !== null && enqueueFrame(output, trailing)) return;
         fail(new Error("AI stream idle timeout"), "idle_timeout");
       } catch (err) {
         fail(err instanceof Error ? err : new Error(errorMessage(err)), "stream_error");
       }
     }, idleMs);
   };
-  resetIdle();
   lease.schedule(maxDurationMs);
 
   /**
@@ -240,21 +231,23 @@ export function createAiStreamingResponse({
     async pull(controller) {
       try {
         for (;;) {
-          const frame = frames.take();
+          const frame = frames.take(providerDone);
           if (frame !== null) {
             enqueueFrame(controller, frame);
             return;
           }
-          const { value, done } = await reader.read();
+          if (providerDone) throw new Error("AI stream ended before its terminal event");
+          armIdle();
+          const { value, done } = await reader.read().finally(clearIdle);
+          if (closed) return;
           if (done) {
-            if (drainBufferedFrames(controller)) return;
-            throw new Error("AI stream ended before its terminal event");
+            providerDone = true;
+            continue;
           }
           const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
           total += chunk.byteLength;
           if (total > maxBytes) throw new Error(`AI stream exceeds ${maxBytes} bytes`);
           frames.append(chunk);
-          resetIdle();
         }
       } catch (err) {
         fail(err instanceof Error ? err : new Error(errorMessage(err)), "stream_error");

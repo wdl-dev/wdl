@@ -69,7 +69,7 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
   requestIdSource:
     "export function requestIdFromOptions() { return null; } export function sanitizeRequestId() { return null; }",
   workflowsClientSource:
-    "export class Workflow { constructor(metadata) { this.metadata = metadata; } }",
+    "export class Workflow { constructor(backend) { this.backend = backend; } create() {} }",
   aiClientSource:
     "export class Ai { constructor(fetcher) { this.fetcher = fetcher; } }",
 });

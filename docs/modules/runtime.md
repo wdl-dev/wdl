@@ -222,8 +222,9 @@ Data-plane bindings use their own storage:
   per invocation as described below.
 - KV and queue producers use DB 1 through `redis-proxy`.
 - Workflow bindings call `workflows`; runtime does not read DB 2 directly. Frozen
-  Workflow identity is embedded in the generated private wrapper rather than placed in
-  raw worker env, so Node-compatible `process.env` cannot expose the metadata object.
+  Workflow identity exists once in binding-scoped host props. The generated facade
+  carries only public operation fields, and Node-compatible `process.env` cannot expose
+  the props.
 - D1 and DO bindings call their dedicated runtime services.
 - R2/ASSETS use S3-compatible object storage.
 
@@ -304,10 +305,6 @@ when a matching active tail session exists.
 - Runtime/Control contract changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes); do not rely on an
   uncoordinated simultaneous roll.
-- AI binding rollout specifically requires redis-proxy and Gateway first, then
-  runtime/do-runtime readers before system-runtime/Control accepts `{ type: "ai" }`.
-  Pause Control mutations while the combined system-runtime reader/writer tier rolls;
-  the CLI sender ships last.
 - Runtime does not enable workerd's broad `experimental` flag for loaded workers.
   Historical-version eviction injects `__WdlAbort__`, but `abortIsolate()` is
   available without that flag in the bundled workerd baseline. The current upstream
@@ -337,19 +334,19 @@ when a matching active tail session exists.
   WorkerCode unless another upstream API explicitly requires it.
 - Since WDL's 2026-07-01 workerd pin, Control has enforced upstream's 64 MiB dynamic
   worker code cap and 1 MiB serialized dynamic env cap. It estimates final WorkerCode
-  before version allocation and again after commit metadata materialization, including
-  runtime/do-runtime-injected
-  wrapper/client modules, workflow import rewrites, and generated workflow keys. Vars,
-  namespace/worker secrets, and runtime-injected binding env values are checked against
-  a headroomed `workerLoader` env budget in watched commit and secret-mutation paths.
-  Workflow identity is generated wrapper code and is covered by the code budget instead.
-  That wrapper estimate reserves the longest valid immutable version tag, so later
-  secret-driven version bumps cannot grow accepted code past the workerd cap.
-  Deploy and namespace-secret mutations use the version they can load; worker
-  secret mutations also recheck the forced bump inside the WATCH/COPY transaction so
-  the allocated bump version is covered before routing flips. The estimate starts from
-  JSON bytes and adds V8 two-byte string overhead for non-Latin-1 strings, so mixed
-  ASCII plus CJK or emoji secrets do not slip past control and fail later at cold-load.
+  once before version allocation, including runtime/do-runtime-injected wrapper/client
+  modules and workflow import rewrites. Materialized D1 ids, DO storage ids, Workflow
+  keys, and version identity live in host props rather than generated source, so WATCH
+  retries do not repeat that code estimate. Vars, namespace/worker secrets, and
+  runtime-injected binding env values are checked against a headroomed `workerLoader`
+  env budget in watched commit and secret-mutation paths. Workflow identity is part of
+  runtime-injected binding env and is covered by the env budget. Commit and
+  secret-mutation paths check the actual version they will load. Deploy and
+  namespace-secret mutations use the version they can load; worker secret mutations
+  also recheck the forced bump inside the WATCH/COPY transaction so the allocated bump
+  version is covered before routing flips. The estimate starts from JSON bytes and adds
+  V8 two-byte string overhead for non-Latin-1 strings, so mixed ASCII plus CJK or emoji
+  secrets do not slip past control and fail later at cold-load.
 - In current stock workerd, a client disconnect during an async `ReadableStream`
   response body may not call the stream source's `cancel()` callback. Tenant streaming
   and SSE workers should use their own heartbeat, timeout, or application close path

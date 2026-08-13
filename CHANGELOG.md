@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Added an opt-in namespace-scoped AI binding with encrypted BYO credentials, official OpenAI/xAI/DeepSeek adapters, OpenAI-compatible HTTP/SSE and WebSocket protocols, agent `run()` helpers, bounded model discovery, public-only egress, process-local lifetime/resource guards, and terminal runtime-loss handling that never replaces a provider session behind an existing client connection. Roll out redis-proxy and Gateway before user-runtime/do-runtime; pause Control mutations while system-runtime delivers its reader and Control writer, then publish the CLI. Public release requires the official-provider live matrix from the Tokyo ECS runtime and do-runtime exits.
+- Added an opt-in namespace-scoped AI binding with encrypted BYO credentials, official OpenAI/xAI/DeepSeek adapters, OpenAI-compatible HTTP/SSE and WebSocket protocols, agent `run()` helpers, bounded model discovery, public-only egress, process-local lifetime/resource guards, and terminal runtime-loss handling that never replaces a provider session behind an existing client connection. Roll out redis-proxy and Gateway before user-runtime/do-runtime; pause Control mutations while system-runtime delivers its reader and Control writer, then publish the CLI. Public release requires the official-provider live matrix from the Tokyo ECS runtime and do-runtime egress.
+- Kept Workflow identity exclusively in binding-scoped host props; generated tenant facades carry only public operation fields, avoiding duplicate identity in wrapper code and request bodies.
 - Propagated application-terminal backend WebSocket Close frames through Gateway instead of treating protocol, policy, resource, and application close codes as backend-loss signals eligible for transparent reconnect.
 
 ## wdl.20260811.1 - 2026-08-11

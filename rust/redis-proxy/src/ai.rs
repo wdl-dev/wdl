@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use wdl_rust_common::identity::is_valid_runtime_load_ns;
+use wdl_rust_common::redis_eval::StaticRedisScript;
 
 use crate::{AppError, AppResult, AppState};
 
@@ -15,14 +16,20 @@ const AI_PROVIDER_RECORD_MAX_BYTES: usize = 64 * 1024;
 const AI_UPSTREAM_MODEL_MAX_BYTES: usize = 256;
 const AI_CREDENTIAL_MAX_BYTES: usize = 16 * 1024;
 
-const RESOLVE_SCRIPT: &str = r#"
+const RESOLVE_SCRIPT_SOURCE: &str = r#"
+local max_provider_count = tonumber(ARGV[2])
+if redis.call('HLEN', KEYS[1]) > max_provider_count
+    or redis.call('HLEN', KEYS[2]) > max_provider_count then
+  return {0, false, false}
+end
 return {
+  1,
   redis.call('HGET', KEYS[1], ARGV[1]),
   redis.call('HGET', KEYS[2], ARGV[1])
 }
 "#;
 
-const MODELS_SCRIPT: &str = r#"
+const MODELS_SCRIPT_SOURCE: &str = r#"
 local max_provider_count = tonumber(ARGV[1])
 if redis.call('HLEN', KEYS[1]) > max_provider_count
     or redis.call('HLEN', KEYS[2]) > max_provider_count then
@@ -34,6 +41,9 @@ return {
   redis.call('HKEYS', KEYS[2])
 }
 "#;
+
+static RESOLVE_SCRIPT: StaticRedisScript = StaticRedisScript::new(RESOLVE_SCRIPT_SOURCE);
+static MODELS_SCRIPT: StaticRedisScript = StaticRedisScript::new(MODELS_SCRIPT_SOURCE);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -388,18 +398,25 @@ pub(crate) async fn resolve(
     let query_providers_key = providers_key.clone();
     let query_credentials_key = credentials_key.clone();
     let query_provider = provider.to_string();
-    let (record_raw, credential_raw): (Option<Vec<u8>>, Option<Vec<u8>>) = state
+    let (bounded, record_raw, credential_raw): (u8, Option<Vec<u8>>, Option<Vec<u8>>) = state
         .with_control_redis(move |mut conn| async move {
-            redis::cmd("EVAL")
-                .arg(RESOLVE_SCRIPT)
-                .arg(2)
-                .arg(&query_providers_key)
-                .arg(&query_credentials_key)
-                .arg(&query_provider)
-                .query_async(&mut conn)
+            let max_provider_count = AI_PROVIDER_MAX_COUNT.to_string();
+            RESOLVE_SCRIPT
+                .prepare_invoke(
+                    &[&query_providers_key, &query_credentials_key],
+                    &[&query_provider, &max_provider_count],
+                )
+                .invoke_async(&mut conn)
                 .await
         })
         .await?;
+    if bounded != 1 {
+        return Err(ai_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ai_state_corrupt",
+            "AI provider or credential count exceeds its bound",
+        ));
+    }
     let record_raw = record_raw.ok_or_else(|| {
         ai_error(
             StatusCode::NOT_FOUND,
@@ -461,13 +478,10 @@ pub(crate) async fn models(
     let (bounded, raw_providers, credential_names): (u8, BTreeMap<String, Vec<u8>>, Vec<String>) =
         state
             .with_control_redis(|mut conn| async move {
-                redis::cmd("EVAL")
-                    .arg(MODELS_SCRIPT)
-                    .arg(2)
-                    .arg(&providers_key)
-                    .arg(&credentials_key)
-                    .arg(AI_PROVIDER_MAX_COUNT)
-                    .query_async(&mut conn)
+                let max_provider_count = AI_PROVIDER_MAX_COUNT.to_string();
+                MODELS_SCRIPT
+                    .prepare_invoke(&[&providers_key, &credentials_key], &[&max_provider_count])
+                    .invoke_async(&mut conn)
                     .await
             })
             .await?;
@@ -478,7 +492,15 @@ pub(crate) async fn models(
             "AI provider or credential count exceeds its bound",
         ));
     }
-    let configured: HashSet<&str> = credential_names.iter().map(String::as_str).collect();
+    for provider in &credential_names {
+        if !valid_provider_name(provider) {
+            return Err(ai_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ai_state_corrupt",
+                "AI credential provider name is malformed",
+            ));
+        }
+    }
     let mut entries = Vec::new();
     let mut model_count = 0usize;
     for (provider, raw) in raw_providers {
@@ -497,9 +519,6 @@ pub(crate) async fn models(
                 "ai_state_corrupt",
                 "AI model count exceeds its bound",
             ));
-        }
-        if !configured.contains(provider.as_str()) {
-            continue;
         }
         for (alias, descriptor) in record.models {
             entries.push(ModelListEntry {
@@ -794,14 +813,39 @@ mod tests {
 
     #[test]
     fn models_script_bounds_hashes_before_materializing_them() {
-        let provider_count = MODELS_SCRIPT.find("redis.call('HLEN', KEYS[1])").unwrap();
-        let credential_count = MODELS_SCRIPT.find("redis.call('HLEN', KEYS[2])").unwrap();
-        let providers = MODELS_SCRIPT
+        let provider_count = MODELS_SCRIPT_SOURCE
+            .find("redis.call('HLEN', KEYS[1])")
+            .unwrap();
+        let credential_count = MODELS_SCRIPT_SOURCE
+            .find("redis.call('HLEN', KEYS[2])")
+            .unwrap();
+        let providers = MODELS_SCRIPT_SOURCE
             .find("redis.call('HGETALL', KEYS[1])")
             .unwrap();
-        let credentials = MODELS_SCRIPT.find("redis.call('HKEYS', KEYS[2])").unwrap();
+        let credentials = MODELS_SCRIPT_SOURCE
+            .find("redis.call('HKEYS', KEYS[2])")
+            .unwrap();
         assert!(provider_count < providers);
         assert!(credential_count < credentials);
-        assert!(MODELS_SCRIPT.contains("return {0, {}, {}}"));
+        assert!(MODELS_SCRIPT_SOURCE.contains("return {0, {}, {}}"));
+    }
+
+    #[test]
+    fn resolve_script_bounds_hashes_before_reading_fields() {
+        let provider_count = RESOLVE_SCRIPT_SOURCE
+            .find("redis.call('HLEN', KEYS[1])")
+            .unwrap();
+        let credential_count = RESOLVE_SCRIPT_SOURCE
+            .find("redis.call('HLEN', KEYS[2])")
+            .unwrap();
+        let provider = RESOLVE_SCRIPT_SOURCE
+            .find("redis.call('HGET', KEYS[1]")
+            .unwrap();
+        let credential = RESOLVE_SCRIPT_SOURCE
+            .find("redis.call('HGET', KEYS[2]")
+            .unwrap();
+        assert!(provider_count < provider);
+        assert!(credential_count < credential);
+        assert!(RESOLVE_SCRIPT_SOURCE.contains("return {0, false, false}"));
     }
 }

@@ -18,7 +18,6 @@ const HOST_BINDING_RUNTIME_TEST_SOURCE = applyModuleReplacements(HOST_BINDING_RU
     `from ${JSON.stringify(repositoryFileUrl("runtime/_wdl-request-id.js"))}`,
   ],
 ]);
-const TEST_WORKER_IDENTITY = { ns: "demo", worker: "app", version: "v1" };
 
 function generatedWrappers() {
   return {
@@ -73,16 +72,6 @@ test("host wrapper runtime evaluates before the tenant module", () => {
   assert.doesNotMatch(HOST_BINDING_RUNTIME_SOURCE, /AsyncLocalStorage|node:async_hooks/);
 });
 
-test("workflow host wrappers require an authoritative worker identity", () => {
-  assert.throws(
-    () => generateHostBindingWrapperModule(
-      "worker.js",
-      { workflowBindings: { FLOW: { className: "Workflow" } } }
-    ),
-    /requires worker identity/
-  );
-});
-
 test("generated host wrappers alias legal entrypoint names without declaration collisions", async () => {
   const entrypointNames = [
     "user",
@@ -119,7 +108,6 @@ test("generated host wrappers alias legal entrypoint names without declaration c
         doBindings: ["ROOM"],
         workflowBindings: { FLOW: { className: "Workflow" } },
         entrypointNames,
-        workerIdentity: TEST_WORKER_IDENTITY,
       }
     ),
     [

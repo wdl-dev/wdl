@@ -89,7 +89,7 @@ resource "aws_ecs_task_definition" "system_runtime" {
         # Pass the regional S3 endpoint explicitly so SigV4 signs against
         # the same host that the S3-compatible client will contact.
         { name = "S3_ENDPOINT", value = local.aws_s3_endpoint },
-      ], local.r2_s3_env, local.ai_runtime_env)
+      ], local.r2_s3_env, local.ai_system_runtime_env)
 
       secrets = concat([
         # BOOTSTRAP_TOKEN uses the admin token Secrets Manager ARN

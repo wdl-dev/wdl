@@ -1,7 +1,7 @@
 export const AI_RUNTIME_SETTINGS = Object.freeze({
-  AI_REQUEST_MAX_IN_FLIGHT: { defaultValue: 32, maxValue: 4096 },
-  AI_STREAM_MAX_IN_FLIGHT: { defaultValue: 16, maxValue: 1024 },
-  AI_WS_MAX_SESSIONS: { defaultValue: 8, maxValue: 1024 },
+  AI_REQUEST_MAX_IN_FLIGHT: { defaultValue: 64, maxValue: 4096 },
+  AI_STREAM_MAX_IN_FLIGHT: { defaultValue: 64, maxValue: 1024 },
+  AI_WS_MAX_SESSIONS: { defaultValue: 32, maxValue: 1024 },
   AI_REQUEST_BUDGET_MS: { defaultValue: 120_000, maxValue: 10 * 60_000 },
   AI_STREAM_IDLE_TIMEOUT_MS: { defaultValue: 30_000, maxValue: 30 * 60_000 },
   AI_STREAM_MAX_DURATION_MS: { defaultValue: 300_000, maxValue: 60 * 60_000 },

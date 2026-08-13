@@ -295,6 +295,27 @@ export function createFakeRedisClient(state, options = {}) {
         return { ...(state.hashes.get(key) || {}) };
       });
     },
+    /**
+     * @param {string[]} hashKeys
+     * @param {string[]} keyListHashes
+     */
+    async hGetAllManyAndHKeysMany(hashKeys, keyListHashes) {
+      state.commands.push([
+        "hGetAllManyAndHKeysMany",
+        [...hashKeys],
+        [...keyListHashes],
+      ]);
+      return {
+        hashes: hashKeys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return { ...(state.hashes.get(key) || {}) };
+        }),
+        keyLists: keyListHashes.map((key) => {
+          expireIfNeeded(state, key, options);
+          return Object.keys(state.hashes.get(key) || {});
+        }),
+      };
+    },
     /** @param {Array<[string, string]>} pairs */
     async hStrLenMany(pairs) {
       state.commands.push(["hStrLenMany", pairs.map(([key, field]) => [key, field])]);

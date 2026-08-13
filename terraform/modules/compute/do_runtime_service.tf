@@ -80,7 +80,7 @@ resource "aws_ecs_task_definition" "do_runtime" {
         { name = "DO_OWNER_TTL_SECONDS", value = "120" },
         { name = "DO_PREVENT_EVICTION", value = tostring(var.do_prevent_eviction) },
         { name = "D1_QUERY_TIMEOUT_MS", value = "30000" },
-      ], local.r2_s3_env, local.ai_runtime_env)
+      ], local.r2_s3_env)
 
       secrets = concat([
         { name = "R2_S3_ACCESS_KEY_ID", valueFrom = "${var.runtime_r2_secret_arn}:access_key_id::" },

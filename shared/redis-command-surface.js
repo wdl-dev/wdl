@@ -113,6 +113,26 @@ export class RedisCommandSurface {
     return replies.map(decodeHashObject);
   }
 
+  /**
+   * @param {string[]} hashKeys
+   * @param {string[]} keyListHashes
+   */
+  async hGetAllManyAndHKeysMany(hashKeys, keyListHashes) {
+    const replies = /** @type {unknown[]} */ (await this._execPipeline(
+      "HGETALL_HKEYS_PIPELINE",
+      [
+        ...hashKeys.map((key) => ["HGETALL", key]),
+        ...keyListHashes.map((key) => ["HKEYS", key]),
+      ]
+    ));
+    return {
+      hashes: replies.slice(0, hashKeys.length)
+        .map((reply) => decodeHashObject(/** @type {unknown[] | null} */ (reply))),
+      keyLists: replies.slice(hashKeys.length)
+        .map((reply) => decodeStringArray(/** @type {unknown[] | null} */ (reply))),
+    };
+  }
+
   /** @param {string} hashKey @param {string} stringKey */
   async hGetAllAndGet(hashKey, stringKey) {
     const [hashReply, valueReply] = await this._execPipeline("HGETALL_GET_PIPELINE", [

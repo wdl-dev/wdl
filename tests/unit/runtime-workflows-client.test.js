@@ -12,18 +12,10 @@ const workflowLimits = /** @type {{ createBatchMax: number }} */ (
 
 /**
  * @param {Record<string, unknown>} [runtimeOptions]
- * @param {Record<string, unknown>} [metadataOverrides]
  */
-function createWorkflowForTest(runtimeOptions = {}, metadataOverrides = {}) {
-  return new Workflow({
-    ns: "tenant-a",
-    worker: "shop",
-    version: "v7",
-    name: "orders",
-    workflowKey: "wf_0123456789abcdef0123456789abcdef",
-    className: "OrderWorkflow",
-    ...metadataOverrides,
-  }, runtimeOptions);
+function createWorkflowForTest(runtimeOptions = {}) {
+  const { backend, ...options } = runtimeOptions;
+  return new Workflow(/** @type {any} */ (backend), options);
 }
 
 test("Workflow facade does not expose private backend caller", () => {
@@ -65,7 +57,7 @@ test("Workflow instances do not expose the private caller through patched Functi
   ]);
 });
 
-test("Workflow.create preserves runtime metadata from params override", async () => {
+test("Workflow.create sends only public operation fields to its scoped backend", async () => {
   /** @type {Record<string, unknown> | undefined} */
   let capturedRequestBody;
   let capturedUrl;
@@ -103,13 +95,6 @@ test("Workflow.create preserves runtime metadata from params override", async ()
   assert.equal(new Headers(capturedInit?.headers).get("x-request-id"), "runtime-request");
   assert.equal(typeof capturedInit?.body, "string");
   assert.deepEqual(capturedRequestBody, {
-    ns: "tenant-a",
-    worker: "shop",
-    frozenVersion: "v7",
-    workflowName: "orders",
-    workflowKey: "wf_0123456789abcdef0123456789abcdef",
-    className: "OrderWorkflow",
-    requestId: "runtime-request",
     instanceId: "inst-1",
     params: {
       ns: "victim",
@@ -122,7 +107,7 @@ test("Workflow.create preserves runtime metadata from params override", async ()
   });
 });
 
-test("Workflow request identity ignores tenant-patched JSON.stringify", async () => {
+test("Workflow operation fields ignore tenant-patched JSON.stringify", async () => {
   let capturedBody = "";
   const workflow = createWorkflowForTest({
     backend: {
@@ -149,17 +134,10 @@ test("Workflow request identity ignores tenant-patched JSON.stringify", async ()
     params: null,
     retention: null,
     callback: null,
-    ns: "tenant-a",
-    worker: "shop",
-    frozenVersion: "v7",
-    workflowName: "orders",
-    workflowKey: "wf_0123456789abcdef0123456789abcdef",
-    className: "OrderWorkflow",
-    requestId: null,
   });
 });
 
-test("Workflow request identity ignores inherited Object.prototype.toJSON", async () => {
+test("Workflow operation fields ignore inherited Object.prototype.toJSON", async () => {
   let capturedBody = "";
   const workflow = createWorkflowForTest({
     backend: {
@@ -184,12 +162,12 @@ test("Workflow request identity ignores inherited Object.prototype.toJSON", asyn
   });
 
   assert.equal(inheritedCalls, 0);
-  const body = JSON.parse(capturedBody);
-  assert.equal(body.ns, "tenant-a");
-  assert.equal(body.worker, "shop");
-  assert.equal(body.frozenVersion, "v7");
-  assert.equal(body.workflowKey, "wf_0123456789abcdef0123456789abcdef");
-  assert.equal(body.className, "OrderWorkflow");
+  assert.deepEqual(JSON.parse(capturedBody), {
+    instanceId: "inst-2",
+    params: null,
+    retention: null,
+    callback: null,
+  });
 });
 
 test("Workflow.create forwards explicit non-null retention", async () => {
@@ -332,7 +310,7 @@ test("Workflow.create supports omitted requestId in context", async () => {
   assert.equal(capturedUrl, "http://workflows/internal/workflows/create");
   assert.equal(created.id, "inst-3");
   assert.ok(capturedBody, "workflow backend request body should be captured");
-  assert.equal(capturedBody.requestId, null);
+  assert.equal(Object.hasOwn(capturedBody, "requestId"), false);
 });
 
 test("Workflow.createBatch limit matches the cross-language fixture", async () => {

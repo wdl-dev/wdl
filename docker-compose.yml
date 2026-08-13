@@ -23,9 +23,9 @@ x-secret-envelope-env: &secret-envelope-env
   SECRET_ENVELOPE_KID: ${SECRET_ENVELOPE_KID:-local:compose:secret-envelope:v1}
 
 x-ai-runtime-env: &ai-runtime-env
-  AI_REQUEST_MAX_IN_FLIGHT: ${AI_REQUEST_MAX_IN_FLIGHT:-32}
-  AI_STREAM_MAX_IN_FLIGHT: ${AI_STREAM_MAX_IN_FLIGHT:-16}
-  AI_WS_MAX_SESSIONS: ${AI_WS_MAX_SESSIONS:-8}
+  AI_REQUEST_MAX_IN_FLIGHT: ${AI_REQUEST_MAX_IN_FLIGHT:-64}
+  AI_STREAM_MAX_IN_FLIGHT: ${AI_STREAM_MAX_IN_FLIGHT:-64}
+  AI_WS_MAX_SESSIONS: ${AI_WS_MAX_SESSIONS:-32}
   AI_REQUEST_BUDGET_MS: ${AI_REQUEST_BUDGET_MS:-120000}
   AI_STREAM_IDLE_TIMEOUT_MS: ${AI_STREAM_IDLE_TIMEOUT_MS:-30000}
   AI_STREAM_MAX_DURATION_MS: ${AI_STREAM_MAX_DURATION_MS:-300000}
@@ -286,6 +286,9 @@ services:
       ["serve", "-b", "/app/dist/workerd-configs/system-runtime-local.bin", "--experimental"]
     environment:
       <<: [*internal-auth-env, *secret-envelope-env, *ai-runtime-env]
+      AI_REQUEST_MAX_IN_FLIGHT: "32"
+      AI_STREAM_MAX_IN_FLIGHT: "16"
+      AI_WS_MAX_SESSIONS: "8"
       REDIS_ADDR: redis:6379
       DATA_REDIS_ADDR: redis:6379
       DATA_REDIS_DB: "1"

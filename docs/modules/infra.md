@@ -10,13 +10,13 @@ Service Connect, EFS, S3/R2-compatible storage, and release pipelines.
 
 There are two main infrastructure families:
 
-- `terraform/`: AWS ECS-shaped deployment environment.
-- `deploy/kubernetes/`: Kustomize manifests for Kubernetes-shaped deployment.
+- `terraform/`: the WDL hosted-preview AWS ECS environment.
+- `deploy/kubernetes/`: a Kustomize self-hosting template and cluster smoke baseline.
 
-Terraform is the AWS ECS-shaped deployment environment and is changed with
-`terraform plan/apply` from a developer/operator machine. Kubernetes manifests
-are release artifacts for cluster-shaped deployment and are rolled by the target
-cluster's operator workflow.
+Terraform is the hosted-preview ECS environment and is changed with `terraform
+plan/apply` from a developer/operator machine. Kubernetes manifests are release
+artifacts and a starting template for cluster-shaped self-hosting; the target cluster's
+operator workflow owns their final capacity and rollout policy.
 
 Local development uses `docker-compose.yml` and profiles such as `d1-multi` and
 `do-multi`.
@@ -33,15 +33,16 @@ Local compose is the developer convenience environment, not the production deliv
 contract. It starts the same service families with local ports, Valkey, `s3mock`, and
 an Envoy mesh for private service hops; profiles such as `d1-multi` and
 `do-multi` exercise local multi-replica behavior for targeted tests. The
-production-shaped delivery paths are Terraform and the Kubernetes manifests under
+production-shaped delivery examples are Terraform and the Kubernetes manifests under
 `deploy/kubernetes/`.
 
-These paths are intended for production operation, not only local demonstration. That
-means they preserve the service boundaries, private mesh assumptions, image contracts,
+These paths preserve the service boundaries, private mesh assumptions, image contracts,
 health/metrics endpoints, and ownership/failover rules that the runtime modules depend
-on. Operators still choose concrete capacity, managed Redis/Valkey durability,
-object storage, EFS or equivalent localDisk persistence, ingress protection, and
-regional backup/restore policy.
+on. The Kubernetes tree is a user-facing template and smoke baseline; Terraform records
+the WDL hosted-preview profile. Neither defines a universal WDL production-capacity
+contract. Operators choose concrete capacity, managed Redis/Valkey durability, object
+storage, EFS or equivalent localDisk persistence, ingress protection, and regional
+backup/restore policy.
 
 The app services intentionally keep one container boundary per deployable service,
 except for co-located sidecars:
@@ -111,27 +112,37 @@ not a tenant binding: runtime wrapper code strips it from tenant-visible `env`, 
 DO proxies and host-side backend capabilities add it for DO forwarding, and spoofed tenant
 headers are removed before forwarding.
 
-AI runtime limits are explicit environment inputs on user-runtime, system-runtime, and
+AI runtime limits are environment inputs on user-runtime, system-runtime, and
 do-runtime. Defaults and runtime hard maxima are owned by
-`shared/ai-runtime-config.js`; deployment surfaces repeat the defaults explicitly and
-are checked against that owner:
+`shared/ai-runtime-config.js`. The hosted-preview Terraform profile uses those code
+defaults for user-runtime and do-runtime and only pins the smaller system-runtime
+capacity override. Local Compose and the Kubernetes template repeat the defaults so
+operators can override them and tests pin those surfaces to the code owner:
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
-| `AI_REQUEST_MAX_IN_FLIGHT` | `32` | Model-list and HTTP body-admission calls per runtime replica; non-streaming calls remain here through completion. |
-| `AI_STREAM_MAX_IN_FLIGHT` | `16` | Open SSE streams after request-pool body admission per runtime replica. |
-| `AI_WS_MAX_SESSIONS` | `8` | Open provider WebSockets per runtime replica. |
+| `AI_REQUEST_MAX_IN_FLIGHT` | `64` (`32` on system-runtime) | Model-list and HTTP body-admission calls per runtime replica; non-streaming calls remain here through completion. |
+| `AI_STREAM_MAX_IN_FLIGHT` | `64` (`16` on system-runtime) | Open SSE streams after request-pool body admission per runtime replica. |
+| `AI_WS_MAX_SESSIONS` | `32` (`8` on system-runtime) | Open provider WebSockets per runtime replica. |
 | `AI_REQUEST_BUDGET_MS` | `120000` | Model-list and HTTP setup deadline; non-streaming inference remains covered through completion, while SSE switches to its stream-duration bound after response headers. |
-| `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | Maximum SSE interval with no provider bytes. |
+| `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | Maximum SSE interval while actively waiting for provider bytes; downstream backpressure pauses this clock. |
 | `AI_STREAM_MAX_DURATION_MS` | `300000` | Absolute SSE lifetime. |
 | `AI_WS_HANDSHAKE_BUDGET_MS` | `15000` | Provider WebSocket handshake deadline. |
 | `AI_WS_IDLE_TIMEOUT_MS` | `120000` | Maximum WebSocket interval with no provider frame. |
 | `AI_WS_MAX_DURATION_MS` | `1440000` | Operator WebSocket lifetime cap before adapter-specific clamping. |
 
-These are process-local safety pools, not namespace quota or billing controls.
-User-runtime and do-runtime have independent pools because they are separate services.
-The code-owned request, response, frame, and aggregate byte caps are documented in the
-[AI module](ai.md).
+These are replica-local admission pools, not namespace quota, billing controls, or a
+reservation of each request's maximum byte allowance. User and DO workloads use the
+higher defaults; system-runtime keeps lower defaults because AI there is an exceptional
+operator-controlled workload. The Kubernetes values are a self-hosting starting point
+and smoke profile; Terraform values describe the hosted preview. Neither is a universal
+WDL production capacity guarantee. Private operators can override the settings per
+runtime service without redefining the binding contract. User-runtime and do-runtime
+have independent pools because they are separate services. Workerd exposes no
+JavaScript queued-byte or WebSocket backpressure signal, so operators must size the
+session pool and runtime memory together for their frame and receiver-speed
+distribution. The code-owned request, response, frame, and aggregate byte caps are
+documented in the [AI module](ai.md).
 
 AI client source is embedded only by the three base module owners:
 `runtime/config-user.capnp`, `runtime/config-system.capnp`, and

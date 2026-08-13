@@ -12,7 +12,6 @@ import {
   hasDoRuntimeInjectedModules,
 } from "do-runtime-load-code-budget";
 import { errorMessage } from "shared-errors";
-import { MAX_WORKER_VERSION_TAG } from "shared-worker-contract";
 import { DO_ALARM_SHIM_SOURCE } from "do-runtime-alarm-shim-source";
 
 export { WORKER_LOADER_CODE_MAX_BYTES };
@@ -136,14 +135,6 @@ function estimateWorkerLoaderCodeBytesWithContext(bundle, context) {
       normalized: bundle.normalized,
       meta: bundle.meta,
       runtimeSources: RUNTIME_INJECTION_SOURCES,
-      workerIdentity: {
-        ns: context.ns,
-        worker: context.worker,
-        // A committed bundle can be copied to any later immutable version by a
-        // worker-secret mutation. Reserve the longest legal identity now so the
-        // copy cannot grow accepted wrapper code past workerd's limit.
-        version: MAX_WORKER_VERSION_TAG,
-      },
       userCodeBytes,
     });
     // do-runtime cold-loads the same bundle after the generic runtime wrapper has

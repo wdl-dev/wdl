@@ -142,7 +142,7 @@ export function decodeRuntimeLoadPayload(buffer) {
 /**
  * @param {WorkerCodeShape} workerCode
  * @param {RuntimeBundleMeta} meta
- * @param {{ plan?: RuntimeMetaPlan, workerIdentity?: { ns: string, worker: string, version: string } | null }} [options]
+ * @param {{ plan?: RuntimeMetaPlan }} [options]
  */
 export function wrapWorkerCodeForHostBindings(
   workerCode,
@@ -154,7 +154,7 @@ export function wrapWorkerCodeForHostBindings(
     workerCode,
     meta,
     RUNTIME_INJECTION_SOURCES,
-    { plan, workerIdentity: options.workerIdentity || null }
+    { plan }
   );
 }
 
@@ -292,10 +292,7 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
       globalOutbound: env.PUBLIC_NETWORK,
       ...(env.TAIL_WORKER ? { tails: [env.TAIL_WORKER] } : {}),
     };
-    wrapWorkerCodeForHostBindings(workerCode, meta, {
-      plan: metaPlan,
-      workerIdentity: { ns, worker, version },
-    });
+    wrapWorkerCodeForHostBindings(workerCode, meta, { plan: metaPlan });
     maybeMetric((m) => m.observe("bundle_load_duration_ms", { service: serviceName },
       Date.now() - loadStartedAt));
     return workerCode;

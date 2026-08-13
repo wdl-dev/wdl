@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import {
   AI_HOST_TEST_STATE,
   AI_REQUEST_MAX_BYTES,
+  AI_REQUEST_MAX_JSON_DEPTH,
   AI_RESPONSE_MAX_BYTES,
   AI_STREAM_FRAME_MAX_BYTES,
   AI_STREAM_MAX_BYTES,
   AI_WS_FRAME_MAX_BYTES,
+  AI_WS_MAX_JSON_DEPTH,
+  AI_WS_MAX_BYTES,
   AiBinding,
   aiProviderWebSocketRequest,
   aiPoolStateForTest,
@@ -21,6 +24,28 @@ import { readJsonResponse } from "../helpers/response-json.js";
 import { delay } from "../helpers/timing.js";
 
 beforeEach(resetAiHostTestState);
+
+test("AI fixed payload limits match the public byte contract", () => {
+  assert.deepEqual({
+    requestBytes: AI_REQUEST_MAX_BYTES,
+    requestJsonDepth: AI_REQUEST_MAX_JSON_DEPTH,
+    responseBytes: AI_RESPONSE_MAX_BYTES,
+    streamBytes: AI_STREAM_MAX_BYTES,
+    streamFrameBytes: AI_STREAM_FRAME_MAX_BYTES,
+    websocketFrameBytes: AI_WS_FRAME_MAX_BYTES,
+    websocketJsonDepth: AI_WS_MAX_JSON_DEPTH,
+    websocketDirectionBytes: AI_WS_MAX_BYTES,
+  }, {
+    requestBytes: 1_048_576,
+    requestJsonDepth: 128,
+    responseBytes: 4_194_304,
+    streamBytes: 33_554_432,
+    streamFrameBytes: 1_048_576,
+    websocketFrameBytes: 1_048_576,
+    websocketJsonDepth: 128,
+    websocketDirectionBytes: 67_108_864,
+  });
+});
 
 /** @param {Record<string, unknown>} body @param {string} [path] */
 function request(body, path = "/v1/responses") {
@@ -253,6 +278,80 @@ test("AI host reports an oversized tenant request as 413 before resolution", asy
   );
 });
 
+test("AI host rejects invalid UTF-8 before resolver or provider I/O", async () => {
+  let resolverCalls = 0;
+  let providerCalls = 0;
+  const prefix = new TextEncoder().encode('{"model":"openai/primary","input":"');
+  const suffix = new TextEncoder().encode('"}');
+  const body = new Uint8Array(prefix.byteLength + 1 + suffix.byteLength);
+  body.set(prefix);
+  body[prefix.byteLength] = 0x80;
+  body.set(suffix, prefix.byteLength + 1);
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "must-not-run" });
+      },
+    },
+  });
+
+  const response = await withMockedProperty(globalThis, "fetch", async () => {
+    resolverCalls += 1;
+    return Response.json(openAiResolution());
+  }, async () => await binding.fetch(new Request("https://ai.wdl/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  })));
+
+  assert.equal(
+    (await readJsonResponse(response, 400, "invalid UTF-8 AI request")).error,
+    "ai_request_body_unreadable"
+  );
+  assert.equal(resolverCalls, 0);
+  assert.equal(providerCalls, 0);
+});
+
+test("AI host bounds the final provider JSON after model replacement", async () => {
+  let resolverCalls = 0;
+  let providerCalls = 0;
+  const publicModel = "a/b";
+  const prefix = `{"model":"${publicModel}","input":"`;
+  const suffix = '"}';
+  const body = `${prefix}${"x".repeat(AI_REQUEST_MAX_BYTES - prefix.length - suffix.length)}${suffix}`;
+  assert.equal(new TextEncoder().encode(body).byteLength, AI_REQUEST_MAX_BYTES);
+  const resolution = openAiResolution({
+    provider: "a",
+    alias: "b",
+    upstreamModel: "m".repeat(256),
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "must-not-run" });
+      },
+    },
+  });
+
+  const response = await withMockedProperty(globalThis, "fetch", async (input, init = {}) => {
+    resolverCalls += 1;
+    return await resolver(resolution)(input, init);
+  }, async () => await binding.fetch(new Request("https://ai.wdl/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  })));
+
+  assert.equal(
+    (await readJsonResponse(response, 413, "expanded AI provider request")).error,
+    "ai_request_too_large"
+  );
+  assert.equal(resolverCalls, 1);
+  assert.equal(providerCalls, 0);
+});
+
 test("AI host rejects malformed HTTP and WebSocket model references before resolution", async () => {
   let resolverCalls = 0;
   const { binding } = makeAiBinding();
@@ -422,7 +521,7 @@ test("AI host flushes a bare-CR terminal frame from a quiet provider", async () 
   assert.deepEqual(aiPoolStateForTest().stream, { inUse: 0, highWater: 1 });
 });
 
-test("AI host finds a buffered terminal behind non-terminal frames at idle", async () => {
+test("AI host does not treat consumer backpressure as provider idle", async () => {
   const frames = [
     'event: response.created\ndata: {"type":"response.created"}\n\n',
     'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n',
@@ -435,7 +534,8 @@ test("AI host finds a buffered terminal behind non-terminal frames at idle", asy
       async fetch() {
         return new Response(new ReadableStream({
           start(controller) {
-            controller.enqueue(new TextEncoder().encode(expected));
+            controller.enqueue(new TextEncoder().encode(frames[0]));
+            controller.enqueue(new TextEncoder().encode(frames.slice(1).join("")));
           },
         }), { headers: { "content-type": "text/event-stream" } });
       },
@@ -886,6 +986,111 @@ test("AI request watchdog bounds a stalled request body before resolver I/O", as
   assert.equal(aiPoolStateForTest().request.inUse, 0);
 });
 
+test("AI request body read failures use a fixed public and log message", async () => {
+  const marker = "tenant-secret-prompt-marker";
+  let resolverCalls = 0;
+  const body = new ReadableStream({ pull() { throw new Error(marker); } });
+  const requestInit = /** @type {RequestInit & { duplex: "half" }} */ ({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+    duplex: "half",
+  });
+  const { binding } = makeAiBinding();
+  const response = await withMockedProperty(globalThis, "fetch", async () => {
+    resolverCalls += 1;
+    return Response.json(openAiResolution());
+  }, async () => await binding.fetch(new Request("https://ai.wdl/v1/responses", requestInit)));
+
+  assert.equal(
+    (await readJsonResponse(response, 400, "failed AI request body")).error,
+    "ai_request_body_unreadable"
+  );
+  assert.equal(resolverCalls, 0);
+  assert.doesNotMatch(JSON.stringify(AI_HOST_TEST_STATE.logs), new RegExp(marker));
+  assert.match(JSON.stringify(AI_HOST_TEST_STATE.logs), /AI request body could not be read/);
+});
+
+test("AI request JSON depth accepts 128 and rejects 129 before parsing", async () => {
+  let resolverCalls = 0;
+  let providerCalls = 0;
+  const requestParseCalls = new Map();
+  /** @param {number} depth */
+  const bodyAtDepth = (depth) =>
+    `{"model":"openai/primary","input":${"{\"next\":".repeat(depth - 1)}null${"}".repeat(depth - 1)}}`;
+  const acceptedBody = bodyAtDepth(AI_REQUEST_MAX_JSON_DEPTH);
+  const rejectedBody = bodyAtDepth(AI_REQUEST_MAX_JSON_DEPTH + 1);
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "resp_depth" });
+      },
+    },
+  });
+  const originalParse = JSON.parse;
+  const [accepted, rejected] = await withMockedProperty(
+    JSON,
+    "parse",
+    (text, reviver) => {
+      if (text === acceptedBody || text === rejectedBody) {
+        requestParseCalls.set(text, (requestParseCalls.get(text) || 0) + 1);
+      }
+      return originalParse(text, reviver);
+    },
+    async () => await withMockedProperty(
+      globalThis,
+      "fetch",
+      async () => {
+        resolverCalls += 1;
+        return Response.json(openAiResolution());
+      },
+      async () => await Promise.all([acceptedBody, rejectedBody].map(async (body) =>
+        await binding.fetch(new Request("https://ai.wdl/v1/responses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        }))
+      ))
+    )
+  );
+
+  assert.equal((await readJsonResponse(accepted, 200, "AI request at depth limit")).id, "resp_depth");
+  assert.equal(
+    (await readJsonResponse(rejected, 400, "AI request above depth limit")).error,
+    "ai_request_too_deep"
+  );
+  assert.equal(requestParseCalls.get(acceptedBody), 1);
+  assert.equal(requestParseCalls.get(rejectedBody) || 0, 0);
+  assert.equal(resolverCalls, 1);
+  assert.equal(providerCalls, 1);
+});
+
+test("AI request JSON depth validation accepts wide shallow input", async () => {
+  let providerCalls = 0;
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "resp_wide" });
+      },
+    },
+  });
+  const input = {
+    values: Array.from({ length: 50_000 }, () => ({})),
+    stringDelimiters: "[{\\\"".repeat(AI_REQUEST_MAX_JSON_DEPTH + 1),
+  };
+  const response = await withMockedProperty(
+    globalThis,
+    "fetch",
+    resolver(),
+    async () => await binding.fetch(request({ model: "openai/primary", input }))
+  );
+
+  assert.equal((await readJsonResponse(response, 200, "wide AI request")).id, "resp_wide");
+  assert.equal(providerCalls, 1);
+});
+
 test("AI streaming requests transfer one lease after their bounded body is read", async () => {
   /** @type {ReadableStreamDefaultController<Uint8Array> | null} */
   let bodyController = null;
@@ -1273,9 +1478,19 @@ test("AI host WebSocket pins the model and preserves a no-status close", async (
   );
 
   downstream.dispatch("message", {
-    data: JSON.stringify({ type: "response.create", model: "openai/primary", input: "hello" }),
+    data: '{"type":"response.create","model":"openai/primary","integer":9007199254740993,"overflow":1e400,"negativeZero":-0}',
   });
-  assert.equal(JSON.parse(/** @type {string} */ (upstream.sent[0])).model, "gpt-test");
+  assert.equal(
+    upstream.sent[0],
+    '{"type":"response.create","model":"gpt-test","integer":9007199254740993,"overflow":1e400,"negativeZero":-0}'
+  );
+  downstream.dispatch("message", {
+    data: '{"type":"response.create","integer":9007199254740993,"negativeZero":-0}',
+  });
+  assert.equal(
+    upstream.sent[1],
+    '{"type":"response.create","integer":9007199254740993,"negativeZero":-0,"model":"gpt-test"}'
+  );
   upstream.dispatch("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r" } }) });
   assert.equal(JSON.parse(/** @type {string} */ (downstream.sent[0])).type, "response.completed");
   upstream.dispatch("close", { code: 1005, reason: "" });
@@ -1401,6 +1616,10 @@ test("AI host WebSocket rejects malformed JSON and cross-model frames", async ()
   for (const data of [
     "not JSON",
     JSON.stringify({ type: "response.create", model: "openai/other", input: "hello" }),
+    '{"type":"response.create","type":"response.cancel"}',
+    '{"type":"response.create","model":"openai/other","model":"openai/primary"}',
+    '{"type":"response.create","m\\u006fdel":"openai/other","model":"openai/primary"}',
+    '{"type":"session.update","session":{"model":"openai/primary","model":"gpt-test"}}',
   ]) {
     const { upstream, downstream } = await openFakeAiWebSocket();
     assert.ok(downstream);
@@ -1410,6 +1629,41 @@ test("AI host WebSocket rejects malformed JSON and cross-model frames", async ()
     assert.deepEqual(downstream.closed, { code: 1008, reason: "AI websocket frame rejected" });
     assert.equal(aiPoolStateForTest().websocket.inUse, 0);
   }
+});
+
+test("AI host WebSocket bounds JSON depth before materializing the full payload", async () => {
+  const acceptedArrays = AI_WS_MAX_JSON_DEPTH - 1;
+  const accepted = `{"type":"response.cancel","payload":${"[".repeat(acceptedArrays)}0${"]".repeat(acceptedArrays)}}`;
+  const acceptedSocket = await openFakeAiWebSocket();
+  assert.ok(acceptedSocket.downstream);
+  acceptedSocket.downstream.dispatch("message", { data: accepted });
+  assert.equal(acceptedSocket.upstream.sent[0], accepted);
+  acceptedSocket.downstream.dispatch("close", { code: 1000, reason: "done" });
+
+  const rejectedArrays = AI_WS_MAX_JSON_DEPTH;
+  const rejected = `{"type":"response.cancel","payload":${"[".repeat(rejectedArrays)}0${"]".repeat(rejectedArrays)}}`;
+  const rejectedSocket = await openFakeAiWebSocket();
+  const rejectedDownstream = rejectedSocket.downstream;
+  assert.ok(rejectedDownstream);
+  const intrinsicJsonParse = JSON.parse;
+  let materializedRejectedPayload = false;
+  await withMockedProperty(JSON, "parse", (text, reviver) => {
+    if (text === rejected) materializedRejectedPayload = true;
+    return intrinsicJsonParse(text, reviver);
+  }, () => {
+    rejectedDownstream.dispatch("message", { data: rejected });
+  });
+  assert.equal(materializedRejectedPayload, false);
+  assert.equal(rejectedSocket.upstream.sent.length, 0);
+  assert.deepEqual(rejectedSocket.upstream.closed, {
+    code: 1008,
+    reason: "AI websocket frame rejected",
+  });
+  assert.deepEqual(rejectedDownstream.closed, {
+    code: 1008,
+    reason: "AI websocket frame rejected",
+  });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 
 test("AI host WebSocket enforces binary capability and rewrites Realtime models", async () => {
@@ -1435,18 +1689,19 @@ test("AI host WebSocket enforces binary capability and rewrites Realtime models"
   });
   assert.ok(realtime.downstream);
   realtime.downstream.dispatch("message", {
-    data: JSON.stringify({
-      type: "session.update",
-      session: { model: "xai/realtime", modalities: ["text", "audio"] },
-    }),
+    data: '{"type":"session.update","session":{"model":"xai/realtime","temperature":-0},"vendor":1e400}',
   });
   assert.equal(
-    JSON.parse(/** @type {string} */ (realtime.upstream.sent[0])).session.model,
-    "grok-realtime-test"
+    realtime.upstream.sent[0],
+    '{"type":"session.update","session":{"model":"grok-realtime-test","temperature":-0},"vendor":1e400}'
   );
+  const unchanged =
+    '{ "type": "input_audio_buffer.append", "sequence": 9007199254740993, "gain": -0, "audio": "AA==" }';
+  realtime.downstream.dispatch("message", { data: unchanged });
+  assert.equal(realtime.upstream.sent[1], unchanged);
   const binary = new Uint8Array([0, 1, 127, 128, 255]).buffer;
   realtime.downstream.dispatch("message", { data: binary });
-  assert.deepEqual(realtime.upstream.sent[1], binary);
+  assert.deepEqual(realtime.upstream.sent[2], binary);
   assert.equal(
     realtime.providerCalls[0].url,
     "https://api.x.ai/v1/realtime?model=grok-realtime-test"
@@ -1552,4 +1807,55 @@ test("AI host WebSocket applies frame bounds after upstream model injection", as
   } finally {
     upstream.dispatch("close", { code: 1000, reason: "test cleanup" });
   }
+});
+
+test("AI host WebSocket charges original JSON whitespace to the session byte limit", async () => {
+  const core = JSON.stringify({ type: "response.cancel", response_id: "resp_test" });
+  const frame = `${core}${" ".repeat(AI_WS_FRAME_MAX_BYTES - core.length)}`;
+  assert.equal(new TextEncoder().encode(frame).byteLength, AI_WS_FRAME_MAX_BYTES);
+  const { upstream, downstream } = await openFakeAiWebSocket();
+  assert.ok(downstream);
+
+  const acceptedFrames = AI_WS_MAX_BYTES / AI_WS_FRAME_MAX_BYTES;
+  for (let index = 0; index <= acceptedFrames; index += 1) {
+    downstream.dispatch("message", { data: frame });
+  }
+  assert.equal(upstream.sent.length, acceptedFrames);
+  assert.deepEqual(upstream.closed, { code: 1009, reason: "AI websocket byte limit" });
+  assert.deepEqual(downstream.closed, { code: 1009, reason: "AI websocket byte limit" });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
+test("AI host WebSocket charges expanded model-pinned frames to the session byte limit", async () => {
+  const upstreamModel = "m".repeat(200);
+  const targetBytes = AI_WS_MAX_BYTES / 128;
+  const empty = JSON.stringify({
+    type: "response.create",
+    model: "openai/primary",
+    input: "",
+  });
+  const frame = JSON.stringify({
+    type: "response.create",
+    model: "openai/primary",
+    input: "x".repeat(targetBytes - empty.length),
+  });
+  assert.equal(new TextEncoder().encode(frame).byteLength, targetBytes);
+  const { upstream, downstream } = await openFakeAiWebSocket({
+    resolution: openAiResolution({
+      upstreamModel,
+      transport: "responses_websocket",
+      destination: "wss://api.openai.com/v1/responses",
+    }),
+  });
+  assert.ok(downstream);
+  let sent = 0;
+  upstream.send = () => { sent += 1; };
+
+  for (let index = 0; index < 128; index += 1) {
+    downstream.dispatch("message", { data: frame });
+  }
+  assert.equal(sent, 127);
+  assert.deepEqual(upstream.closed, { code: 1009, reason: "AI websocket byte limit" });
+  assert.deepEqual(downstream.closed, { code: 1009, reason: "AI websocket byte limit" });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });

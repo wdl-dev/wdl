@@ -2,16 +2,16 @@
 
 ## 目的与范围
 
-WDL 提供 namespace-scoped AI binding，用于 agent 和 inference workload。Tenant code 获得 `env.AI.fetch()`、`env.AI.run()` 和 `env.AI.models()`，provider credential 保留在平台 control plane。首发 adapter 面向 OpenAI、xAI 和 DeepSeek 官方 API。
+WDL 提供 namespace-scoped AI binding，用于 agent 和 inference workload。Tenant code 获得 `env.AI.fetch()`、`env.AI.run()` 和 `env.AI.models()`，provider credential 保留在平台 control plane。支持的 adapter 面向 OpenAI、xAI 和 DeepSeek 官方 API。
 
-AI 是 BYO provider 能力。每个 namespace 拥有自己的 provider metadata 和加密 credential。WDL 目前不提供 managed model catalog、平台共享 credential、token 计量、计费、quota enforcement 或分布式 tenant fairness。下文的 process-local concurrency control 是 runtime safety bound，不是产品配额。
+AI 是 BYO provider 能力。每个 namespace 拥有自己的 provider metadata 和加密 credential。WDL 目前不提供 managed model catalog、平台共享 credential、token 计量、计费、quota enforcement 或分布式 tenant fairness。下文的 process-local control 提供有限的 admission 与 lifetime bound，不是产品配额或通用容量保证。
 
 ## 当前实现
 
 AI request 经过以下 owner：
 
 1. Wrangler `[ai]` 配置生成一个 `{ "type": "ai" }` bundle binding。
-2. Runtime 使用不可变的 `{ ns, worker, version }` props materialize `AiBinding` host entrypoint。Generated wrapper 会在 positional env，以及启用了 importable env 时 invocation 内对 imported env proxy 的实时读取中，把 raw host stub 替换成 tenant-realm `Ai` facade，并把当前 request id 带入每个 facade 创建的 host request。
+2. Runtime 使用不可变的 `{ ns, worker, version }` props materialize `AiBinding` host entrypoint。Generated wrapper 会在 positional env，以及启用了 importable env 时 invocation 内对 imported env proxy 的实时读取中，把 raw host stub 替换成 tenant-realm `Ai` facade。Facade 在每个 loaded Worker module lifecycle 内懒加载一份有界 public model catalog snapshot，并把当前 request id 带入每个 facade 创建的 host request。
 3. Host binding 请求 colocated redis-proxy 解析 public model id。Proxy 从 DB 0 原子读取 provider metadata 与加密 credential，校验 canonical state，解密 credential，并返回精确的官方 destination。
 4. Runtime 再用内建 adapter table 独立校验 destination，附加 credential，并通过 public-only `AI_NETWORK` service 发出请求。
 5. JSON response、semantic SSE frame 或 WebSocket frame 返回 tenant；credential 和 resolver-only metadata 不会暴露。
@@ -47,11 +47,13 @@ Malformed public model id 会在 resolver 或 provider I/O 前由 host admission
 
 ### Tenant facade
 
-- `await env.AI.models()` 返回已配置 credential 的 model。Entry 暴露 public id、protocol、transports、modalities 和 capability hints，不暴露 upstream model id、provider revision、destination 或 credential。
+- `await env.AI.models()` 返回 loaded Worker module 懒加载并缓存的 model catalog snapshot 副本。Snapshot 包含所有已配置的 provider model，不受 credential 是否存在影响。Entry 暴露 public id、protocol、transports、modalities 和 capability hints，不暴露 upstream model id、provider revision、destination、credential 或 credential status。
 - `await env.AI.run(model, inputs, options?)` 按 descriptor 选择 protocol，把 public alias 替换成 upstream model id，并返回 parsed JSON、`stream: true` 时的 `ReadableStream`，或 `{ websocket: true }` 时的 `101 Response`。
 - `await env.AI.fetch(input, init?)` 是 raw OpenAI-compatible surface，只接受 virtual origin `https://ai.wdl` 和下表路径。
 
 `run()` option 只有 `signal` 和 `websocket`。WebSocket mode 要求 `inputs === null`；signal 只约束 setup，返回的 socket 自己拥有 session lifecycle。不支持的 Cloudflare option 会显式失败。需要 raw provider `Response` 时使用 `fetch()`；不支持 `returnRawResponse`。
+
+`run()` 与 `models()` 在 loaded Worker module 生命周期内共享同一份成功加载的 catalog snapshot。并发 cold read 不会以跨 invocation Promise 的形式保留；首个成功完成的读取会成为共享 snapshot，失败读取不会缓存。Provider alias、protocol、transport、modality 或 capability 变化会在该 module 重载后可见；需要当前低层列表的调用方可使用 `fetch("https://ai.wdl/v1/models")`。每次 inference 与新 socket 仍会执行权威 `/ai/resolve`，因此 credential 和 upstream model 轮换无需 redeploy 即对下一次调用生效。Credential presence 不参与 catalog snapshot，补齐原本缺失的 credential 后，下一次调用也无需重载 catalog。过期 descriptor 会在 resolver 校验处 fail closed，不会成为附加 credential 或选择 provider destination 的权威来源。
 
 | Method | Virtual path | Protocol / result |
 |---|---|---|
@@ -106,7 +108,7 @@ AI 使用 DB 0：
 
 Provider JSON 包含 `revision`、`kind` 和 canonical alias-sorted `models` map。Control 限制每个 namespace 最多八个 provider、每个 provider 32 个 model、每个 namespace 128 个 model、每条 provider record 64 KiB；credential 非空、最多 16 KiB，并使用上述 visible-ASCII bearer-token grammar。
 
-`/ai/resolve` 接受 `{ ns, model, protocol, transport }`，在一个 Lua snapshot 中读取一条 provider record 与 credential；`/ai/models` 接受 `{ ns }`，在一个 Lua 调用中读取完整有界 provider snapshot 和 credential field presence，返回 configured hint 而不解密每个 credential。Lua snapshot 会先检查两个 hash 的 cardinality，在物化 provider record 或 credential field name 前拒绝超过 provider 上限的状态。每个 Worker 最多声明一个 AI binding，因此两条 wire request 都不携带 binding name。Malformed、non-canonical、torn 或 over-limit provider state 会 fail closed；`/ai/resolve` 还会对无法解密的 credential fail closed。共享 JS/Rust grammar 由 `tests/fixtures/ai-contract.json` 固定；resolver response 只包含 host request path 实际消费的字段。
+`/ai/resolve` 接受 `{ ns, model, protocol, transport }`，在一个 Lua snapshot 中读取一条 provider record 与 credential；它会检查两个 hash 的 cardinality，并校验目标 record 与 credential。`/ai/models` 接受 `{ ns }`，在一个 Lua 调用中读取完整有界 provider snapshot 和 credential field names，校验全部已物化 field，并返回 provider model metadata，不解密 credential，也不按 credential presence 过滤 catalog。每个 Worker 最多声明一个 AI binding，因此两条 wire request 都不携带 binding name。每个 reader 都会对它实际物化的 malformed、non-canonical、torn 或 over-limit state fail closed；`/ai/resolve` 还会对无法解密的目标 credential fail closed。共享 JS/Rust grammar 由 `tests/fixtures/ai-contract.json` 固定；resolver response 只包含 host request path 实际消费的字段。
 
 Provider state 跟随 namespace secret lifecycle，可以活过 namespace 中最后一个 Worker。删除并重新创建最后一个 Worker 不会删除 provider metadata 或 credential；只有显式 provider delete 才会删除。
 
@@ -116,17 +118,19 @@ Runtime 在每个 service replica 内维护三个独立且 fail-fast 的 pool：
 
 | Pool | 默认值 | 持有范围 |
 |---|---:|---|
-| request | 32 | Model list 与所有 HTTP request 的有界 body admission；non-streaming inference 会一直持有到完成 |
-| stream | 16 | SSE inference 在有界 body admission 后持有，直到 terminal event、error、cancellation 或 deadline |
-| websocket | 8 | Responses 或 Realtime WebSocket session |
+| request | 64 | Model list 与所有 HTTP request 的有界 body admission；non-streaming inference 会一直持有到完成 |
+| stream | 64 | SSE inference 在有界 body admission 后持有，直到 terminal event、error、cancellation 或 deadline |
+| websocket | 32 | Responses 或 Realtime WebSocket session |
 
-Pool saturation 返回 `429 ai_capacity_exhausted`，不会排队。User runtime 和 DO runtime 使用不同 module state，因此 pool 独立。这些边界限制单个进程，不限制跨 replica 的 namespace。
+以上是 user-runtime 与 do-runtime 默认值。较小的 system-runtime tier 通过部署配置覆盖为 32 个 request、16 个 stream 和 8 个 WebSocket permit。Pool size 是 admission limit，不是 token quota、计费控制，也不代表为每个请求预留了其最大 byte allowance。
 
-固定 byte limit 为：request JSON 8 MiB、non-streaming response 16 MiB、SSE response 32 MiB、SSE frame 1 MiB、WebSocket frame 1 MiB、每个 WebSocket direction 128 MiB。默认时间边界为：request/setup 120 秒、SSE idle 30 秒、SSE duration 五分钟、WebSocket handshake 15 秒、WebSocket idle 两分钟、operator WebSocket duration 24 分钟。有效 WebSocket duration 取 operator bound 与官方 adapter bound 的较小值。
+Pool saturation 返回 `429 ai_capacity_exhausted`，不会排队。User runtime 和 DO runtime 使用不同 module state，因此 pool 独立。这些边界限制单个进程，不限制跨 replica 的 namespace。它们是 self-hosted runtime 的部署默认值，不是通用 hosted product limit。私有部署可通过文档中的 runtime 环境设置按资源规模调整；容量有限的 hosted preview 也可选择自己的部署值，而不改变 binding 合同。
+
+固定 byte limit 为：使用严格 UTF-8 的 request JSON 1 MiB、HTTP request JSON 与 client-originated WebSocket JSON 的 container 最多嵌套 128 层、non-streaming response 4 MiB、SSE response 32 MiB、SSE frame 1 MiB、WebSocket frame 1 MiB、每个 WebSocket direction 累计计费 64 MiB。1 MiB request 上限同时约束 tenant ingress 和替换 model 后的最终 provider JSON；HTTP container depth 会在 `JSON.parse()` 物化 object graph 前，对有界 JSON text 执行检查。WebSocket session 上限约束生命周期累计用量；workerd 没有暴露 JavaScript queued-byte 或 backpressure signal，因此该上限不是对已排队 send 的进程内存保证。Client frame 按接收字节与完成 model 固定后的转发字节的较大值计费，provider frame 按接收字节计费。按默认 session 数计算，单方向 `32 * 64 MiB` 只是触发生命周期关闭前理论上的累计接收上界，不是预留内存或实测 native queue 大小；operator 必须按 runtime 内存和实际流量分布调整 session pool。默认时间边界为：request/setup 120 秒、SSE idle 30 秒、SSE duration 五分钟、WebSocket handshake 15 秒、WebSocket idle 两分钟、operator WebSocket duration 24 分钟。有效 WebSocket duration 取 operator bound 与官方 adapter bound 的较小值。
 
 Host 在 request body、resolver 或 provider I/O 前注册 watchdog。SSE request 在完成有界 body admission 后，把同一个 lease 从 request pool 原子 transfer 到 stream pool，不会同时占用两个 permit。正常完成可以提前 release；如果 workerd 没有投递 mid-response `AbortSignal`、stream cancellation 或 socket teardown，幂等 deadline 仍是最终 release/abort owner。超限的 non-streaming response、被拒绝的 WebSocket handshake body、redirect 和错误的 streaming content type 都会在释放 permit 前 abort provider I/O；body cancellation 只是次级 cleanup signal。SSE 必须看到 protocol terminal event（`response.completed`、`response.incomplete`、`response.failed`、`error` 或 Chat Completions `[DONE]`）；terminal event 前 EOF 是错误。Terminal frame 会在 stream permit 分别记录 `completed`、`provider_incomplete`、`provider_failed` 或 `provider_error` 前原样转发。Semantic terminal event 或 tenant cancellation 还会独立 abort provider fetch，不依赖 stream cancellation 能否传递。Provider I/O 可能产生 side effect 后，WDL 不做隐式 inference retry。
 
-WebSocket text frame 必须是 JSON。WDL 把 model field 固定为已解析的 upstream model，执行 advertised binary-frame support，并传播有界 close code/reason。WDL 将 Gateway 原本视为可重连的 provider-loss close 转换成终止性的 `1013 AI provider connection lost`，因此 Gateway 不会静默替换 provider session。Initial upgrade 还会禁用 Gateway backend replacement，因此 runtime 丢失时 public session 会以 `1012 service restart` 关闭，不会在同一条 client connection 后面创建新的 provider session。这些保证适用于 AI binding 自己持有的 WebSocket。若 tenant 代码终结一个独立的 `WebSocketPair` 并桥接 AI socket，它必须在自己返回的 `101` 上保留 AI upgrade headers：
+Client-originated WebSocket text frame 必须是 container 最多嵌套 128 层的 JSON。WDL 拒绝重复的 `type`、`model` 或 `session` 决策字段，只修改或新增 provider model 固定所需的 model field，并原样转发其它 JSON source token。WDL 同时执行 advertised binary-frame support，并传播有界 close code/reason。WDL 将 Gateway 原本视为可重连的 provider-loss close 转换成终止性的 `1013 AI provider connection lost`，因此 Gateway 不会静默替换 provider session。Initial upgrade 还会禁用 Gateway backend replacement，因此 runtime 丢失时 public session 会以 `1012 service restart` 关闭，不会在同一条 client connection 后面创建新的 provider session。这些保证适用于 AI binding 自己持有的 WebSocket。若 tenant 代码终结一个独立的 `WebSocketPair` 并桥接 AI socket，它必须在自己返回的 `101` 上保留 AI upgrade headers：
 
 ```js
 const aiUpgrade = await env.AI.run(model, null, { websocket: true });
@@ -166,16 +170,14 @@ Host rejection 记录 `ai_binding_request_rejected`；被拒绝的 Control AI mu
 
 ## 部署 / Rollout 注意事项
 
-Receiver-before-sender 顺序先滚 redis-proxy 与 Gateway，再滚 user-runtime/do-runtime host reader；公开 AI WebSocket 前，Gateway 必须已经理解 application-terminal provider close。由于 system-runtime 同时交付 system reader 和 Control writer，rolling system-runtime 时必须暂停 Control mutation；旧 task drain 完成后恢复 mutation，最后发布能够产生 `[ai]` 的 CLI。Control 接受引用新 binding 的 bundle metadata 前，runtime 和 do-runtime 必须已经能 materialize 它。
-
-正式公开前，必须从 Tokyo ECS 的真实 user-runtime 和 do-runtime 出口完成 OpenAI、xAI、DeepSeek 官方 provider matrix。Local fake-provider integration 证明 protocol 与 secret boundary，但不能证明区域 provider availability。
+AI 的跨 tier 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 receiver-before-sender 流程。Provider availability 必须从目标部署的真实 user-runtime 与 do-runtime 出口完成资格确认；local fake-provider integration 只能证明 protocol 与 secret boundary，不能证明区域 provider availability。
 
 ## 测试
 
 - `tests/unit/ai-contract.test.js` 与 Rust `ai_contract_fixture_matches_rust_readers` 测试固定共享 persisted/resolver grammar 和 exact official destination。
-- `tests/unit/control-ai-handler.test.js` 覆盖 revision CAS、encryption、canonical state、aggregate limit、residual cleanup 和 zero-Worker persistence semantics。
+- `tests/unit/control-ai-handler.test.js` 覆盖 revision CAS、encryption、canonical state、aggregate limit、credential index validation 和 residual cleanup。
 - `tests/unit/runtime-ai-client.test.js` 与 `tests/unit/runtime-ai-binding.test.js` 覆盖 facade option、官方 destination、byte/frame bound、SSE terminal、慢上传 cancellation、watchdog、pool lease transfer 与 WebSocket model pinning。
-- `tests/integration/ai-binding.test.js` 覆盖 positional 与 live imported env、显式禁用 importable env、provider rotation、zero-Worker recreation、JSON/SSE、Responses 与 Realtime WebSocket、OpenAI SDK、credential non-exposure、终止 user-runtime/do-runtime loss 和 DO caller teardown。
+- `tests/integration/ai-binding.test.js` 覆盖 positional 与 live imported env、显式禁用 importable env、loaded-module catalog 复用、credential 与 upstream model 轮换、zero-Worker recreation、JSON/SSE、Responses 与 Realtime WebSocket、OpenAI SDK、credential non-exposure、终止 user-runtime/do-runtime loss 和 DO caller teardown。
 
 Integration 使用仓库内 fake official provider。真实 credential 绝不能提交或打印到测试输出。
 

@@ -90,6 +90,16 @@ async function call(method, subPath, body = undefined) {
   return await handle({ request, env, method, ns: "demo", subPath, requestId: "rid-ai" });
 }
 
+/** @param {string[]} subPath @param {string} body */
+async function callRawPut(subPath, body) {
+  const request = new Request(`http://control.test/ns/demo/ai/${subPath.join("/")}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+  return await handle({ request, env, method: "PUT", ns: "demo", subPath, requestId: "rid-ai" });
+}
+
 test("AI provider and credential lifecycle uses revision CAS without exposing plaintext", async () => {
   const created = await call("PUT", ["providers", "openai"], providerBody());
   assert.equal(created.status, 200);
@@ -97,6 +107,12 @@ test("AI provider and credential lifecycle uses revision CAS without exposing pl
   const revision = createdBody.provider.revision;
   assert.match(revision, /^[0-9a-f]{32}$/);
   assert.equal(createdBody.provider.credentialConfigured, false);
+
+  const modelsBeforeCredential = await readJsonResponse(await call("GET", ["models"]), 200);
+  assert.deepEqual(
+    modelsBeforeCredential.models.map((/** @type {{ id: string }} */ model) => model.id),
+    ["openai/primary"]
+  );
 
   const stale = await call("PUT", ["providers", "openai", "credential"], {
     revision: "f".repeat(32),
@@ -118,6 +134,12 @@ test("AI provider and credential lifecycle uses revision CAS without exposing pl
     fieldName: "openai",
   }), "provider-secret");
 
+  const credentialReadTrap = Object.create(null);
+  Object.defineProperty(credentialReadTrap, "openai", {
+    enumerable: true,
+    get() { throw new Error("credential value must not be read while listing providers"); },
+  });
+  redis().hashes.set("ai:provider-credentials:demo", credentialReadTrap);
   const listed = await call("GET", ["providers"]);
   const listedBody = await readJsonResponse(listed, 200);
   assert.equal(listedBody.providers[0].credentialConfigured, true);
@@ -198,16 +220,11 @@ test("AI credential body budget admits the maximum escaped credential", async ()
     await call("PUT", ["providers", "openai"], providerBody()),
     200
   );
-  const credential = "\"".repeat(AI_CREDENTIAL_MAX_BYTES);
-  assert.ok(JSON.stringify({
-    revision: created.provider.revision,
-    credential,
-  }).length > 32 * 1024);
+  const credential = "!".repeat(AI_CREDENTIAL_MAX_BYTES);
+  const rawBody = `{"revision":"${created.provider.revision}","credential":"${"\\u0021".repeat(AI_CREDENTIAL_MAX_BYTES)}"}`;
+  assert.ok(rawBody.length > AI_CREDENTIAL_MAX_BYTES * 5);
 
-  assert.equal((await call("PUT", ["providers", "openai", "credential"], {
-    revision: created.provider.revision,
-    credential,
-  })).status, 200);
+  assert.equal((await callRawPut(["providers", "openai", "credential"], rawBody)).status, 200);
   const encrypted = redis().hashes.get("ai:provider-credentials:demo")?.openai;
   assert.ok(encrypted);
   assert.equal(await decryptSecretValue(encrypted, {
@@ -261,6 +278,28 @@ test("AI provider reader fails closed when persisted aggregate bounds are exceed
   redis().hashes.set("ai:providers:demo", Object.fromEntries(
     Array.from({ length: 9 }, (_, index) => [`provider-${index}`, seed])
   ));
+  const response = await call("GET", ["providers"]);
+  assert.equal(response.status, 500);
+  assert.equal((await readJsonResponse(response, 500)).error, "ai_state_corrupt");
+});
+
+test("AI provider readers fail closed on malformed credential fields", async () => {
+  await call("PUT", ["providers", "openai"], providerBody());
+  redis().hashes.set("ai:provider-credentials:demo", { "bad/name": "WDL-ENC:repair-only" });
+
+  for (const path of [["providers"], ["models"]]) {
+    const response = await call("GET", path);
+    assert.equal(response.status, 500);
+    assert.equal((await readJsonResponse(response, 500)).error, "ai_state_corrupt");
+  }
+});
+
+test("AI provider readers fail closed when credential fields exceed their bound", async () => {
+  await call("PUT", ["providers", "openai"], providerBody());
+  redis().hashes.set("ai:provider-credentials:demo", Object.fromEntries(
+    Array.from({ length: 9 }, (_, index) => [`provider-${index}`, "WDL-ENC:repair-only"])
+  ));
+
   const response = await call("GET", ["providers"]);
   assert.equal(response.status, 500);
   assert.equal((await readJsonResponse(response, 500)).error, "ai_state_corrupt");

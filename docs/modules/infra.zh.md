@@ -8,10 +8,10 @@ Infra 文档描述 local compose、Terraform-managed environment 和 Kubernetes 
 
 当前有两套主要 infra family：
 
-- `terraform/`：AWS ECS-shaped deployment environment。
-- `deploy/kubernetes/`：Kubernetes-shaped deployment 的 Kustomize manifests。
+- `terraform/`：WDL hosted-preview 的 AWS ECS environment。
+- `deploy/kubernetes/`：Kubernetes-shaped self-hosting 的 Kustomize template 与 cluster smoke baseline。
 
-Terraform 对应 AWS ECS-shaped deployment environment，由 developer/operator 从本地执行 `terraform plan/apply`。Kubernetes manifests 是 cluster-shaped deployment 的 release artifact，由目标 cluster 的 operator workflow rollout。
+Terraform 对应 hosted-preview ECS environment，由 developer/operator 从本地执行 `terraform plan/apply`。Kubernetes manifests 是 cluster-shaped self-hosting 的 release artifact 与起始模板；最终容量和 rollout policy 由目标 cluster 的 operator workflow 决定。
 
 本地开发使用 `docker-compose.yml`，以及 `d1-multi`、`do-multi` 等 profile。
 
@@ -23,9 +23,9 @@ Terraform 对应 AWS ECS-shaped deployment environment，由 developer/operator 
 - data plane storage：Redis-compatible logical DBs、S3-compatible object buckets、
   D1/DO 的 EFS localDisk
 
-Local compose 是开发便利环境，不是 production delivery contract。它用本地端口、Valkey、`s3mock` 和 Envoy mesh 启动同一组 service family；`d1-multi`、`do-multi` 等 profile 用于定向测试本地多副本行为。Production-shaped delivery path 是 Terraform 和 `deploy/kubernetes/` 下的 Kubernetes manifests。
+Local compose 是开发便利环境，不是 production delivery contract。它用本地端口、Valkey、`s3mock` 和 Envoy mesh 启动同一组 service family；`d1-multi`、`do-multi` 等 profile 用于定向测试本地多副本行为。Production-shaped delivery example 是 Terraform 和 `deploy/kubernetes/` 下的 Kubernetes manifests。
 
-这些交付路径用于生产运行，不只是本地演示。它们保留 runtime module 依赖的 service boundary、私有 mesh 假设、image contract、health/metrics endpoint，以及 ownership/failover 规则。Operator 仍然需要选择具体容量、managed Redis/Valkey durability、S3-compatible storage、EFS 或等价 localDisk persistence、ingress protection 和区域级 backup/restore 策略。
+这些交付路径保留 runtime module 依赖的 service boundary、私有 mesh 假设、image contract、health/metrics endpoint，以及 ownership/failover 规则。Kubernetes tree 是面向用户的模板与 smoke baseline；Terraform 记录 WDL hosted-preview profile。两者都不定义通用 WDL production-capacity contract。Operator 仍然需要选择具体容量、managed Redis/Valkey durability、S3-compatible storage、EFS 或等价 localDisk persistence、ingress protection 和区域级 backup/restore 策略。
 
 除 co-located sidecar 外，app service 有意保持一个可部署服务一个 container boundary：
 
@@ -61,21 +61,21 @@ Gateway 和 runtime 在不同环境中使用稳定的内部端口合同：
 
 Private mesh caller 和 receiver 共享 `WDL_INTERNAL_AUTH_TOKEN` 作为当前 internal token。runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy sidecar 之间的调用会携带 `x-wdl-internal-auth`。轮换期间 receiver 还会接受可选的 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`；caller 始终只发送当前 token。Receiver 要求 auth header 恰好出现一次；两个 token 值都只能包含 visible ASCII byte，不能包含空白或逗号，确保 Fetch header normalization 不改变 token，并避免 header joining 把重复 header 伪装成单个已配置 token。Health 和 metrics endpoint 是唯一不要求该 token 的 service endpoint。这个 token 是平台 plumbing，不是 tenant binding：runtime wrapper code 会从 tenant-visible `env` 中剥离它，host-owned DO proxy 和 host-side backend capability 会在 DO forwarding 时添加它，并在 forwarding 前删除租户伪造的同名 header。
 
-User-runtime、system-runtime 和 do-runtime 使用以下显式 AI runtime limit。默认值与 runtime hard maximum 由 `shared/ai-runtime-config.js` 统一拥有；部署 surface 显式重复默认值，并由测试与 owner 对齐：
+User-runtime、system-runtime 和 do-runtime 使用以下 AI runtime limit。默认值与 runtime hard maximum 由 `shared/ai-runtime-config.js` 统一拥有。Hosted-preview Terraform profile 的 user-runtime 与 do-runtime 直接使用代码默认值，只显式固定较小的 system-runtime capacity override；Local Compose 与 Kubernetes template 为便于 operator 覆盖而重复默认值，并由测试与代码 owner 对齐：
 
 | 变量 | 默认值 | 范围 |
 | --- | ---: | --- |
-| `AI_REQUEST_MAX_IN_FLIGHT` | `32` | 每个 runtime replica 的 model-list 与 HTTP body-admission 调用；non-streaming call 会一直持有到完成。 |
-| `AI_STREAM_MAX_IN_FLIGHT` | `16` | 每个 runtime replica 在 request-pool body admission 后开放的 SSE stream。 |
-| `AI_WS_MAX_SESSIONS` | `8` | 每个 runtime replica 的开放 provider WebSocket。 |
+| `AI_REQUEST_MAX_IN_FLIGHT` | `64`（system-runtime 为 `32`） | 每个 runtime replica 的 model-list 与 HTTP body-admission 调用；non-streaming call 会一直持有到完成。 |
+| `AI_STREAM_MAX_IN_FLIGHT` | `64`（system-runtime 为 `16`） | 每个 runtime replica 在 request-pool body admission 后开放的 SSE stream。 |
+| `AI_WS_MAX_SESSIONS` | `32`（system-runtime 为 `8`） | 每个 runtime replica 的开放 provider WebSocket。 |
 | `AI_REQUEST_BUDGET_MS` | `120000` | Model-list 与 HTTP setup deadline；non-streaming inference 持续受它约束到完成，SSE 在 response headers 后切换到 stream-duration bound。 |
-| `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | SSE 连续没有 provider byte 的最大间隔。 |
+| `AI_STREAM_IDLE_TIMEOUT_MS` | `30000` | 主动等待 provider byte 时的最大 SSE 间隔；downstream backpressure 会暂停该时钟。 |
 | `AI_STREAM_MAX_DURATION_MS` | `300000` | SSE 绝对存活时间。 |
 | `AI_WS_HANDSHAKE_BUDGET_MS` | `15000` | Provider WebSocket 握手 deadline。 |
 | `AI_WS_IDLE_TIMEOUT_MS` | `120000` | WebSocket 连续没有 provider frame 的最大间隔。 |
 | `AI_WS_MAX_DURATION_MS` | `1440000` | Adapter-specific clamp 前的 operator WebSocket lifetime cap。 |
 
-这些是进程内 safety pool，不是 namespace quota 或计费控制。User-runtime 与 do-runtime 是独立服务，因此拥有彼此独立的 pool。代码拥有的 request、response、frame 和 aggregate byte cap 记录在 [AI 模块](ai.zh.md)。
+这些是 replica-local admission pool，不是 namespace quota、计费控制，也不会按每个请求的最大 byte allowance 预留内存。User 与 DO workload 使用较高默认值；AI 对 system-runtime 是例外的 operator-controlled workload，因此保持较低默认值。Kubernetes 值是 self-hosting 起始配置与 smoke profile，Terraform 值描述 hosted preview；两者都不是通用 WDL production capacity guarantee。私有部署可按 runtime service 覆盖这些设置而不重新定义 binding 合同。User-runtime 与 do-runtime 是独立服务，因此拥有彼此独立的 pool。Workerd 没有暴露 JavaScript queued-byte 或 WebSocket backpressure signal，因此 operator 必须按自身 frame 与 receiver-speed 分布同时规划 session pool 和 runtime 内存。代码拥有的 request、response、frame 和 aggregate byte cap 记录在 [AI 模块](ai.zh.md)。
 
 AI client source 只由三个 base module owner 嵌入：`runtime/config-user.capnp`、`runtime/config-system.capnp` 和 `do-runtime/config.capnp`；local/evictable config 会 import 这些 worker graph。Cap'n Proto service list 不继承，因此每个具体 user-runtime、system-runtime 和 do-runtime config 都声明它绑定的 `ai-public-network` service。Production config 使用 public-only network service；local config 把同一 binding 路由到 deterministic fake provider Worker。
 

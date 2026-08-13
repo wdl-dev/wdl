@@ -1,6 +1,7 @@
 import { DurableObject, env as importedEnv } from "cloudflare:workers";
 
 const AI_ORIGIN = "https://ai.wdl";
+const intrinsicJsonParse = JSON.parse;
 const moduleScopeEnv = {
   ai: importedEnv.AI,
   doBackend: importedEnv.__WDL_DO_BACKEND__,
@@ -327,6 +328,19 @@ async function handler(request, env) {
     }
   }
   if (url.pathname === "/responses-ws") {
+    return await env.AI.run("openai/primary", null, { websocket: true });
+  }
+  if (url.pathname === "/responses-ws-intrinsic-guard") {
+    let modelKeyReads = 0;
+    RegExp.prototype.exec = () => null;
+    JSON.parse = (text) => {
+      if (text === '"model"') {
+        modelKeyReads += 1;
+        return modelKeyReads === 1 ? "ignored-model" : "model";
+      }
+      if (text.startsWith("{")) return { type: "response.create", model: "gpt-test" };
+      return intrinsicJsonParse(text);
+    };
     return await env.AI.run("openai/primary", null, { websocket: true });
   }
   if (url.pathname === "/responses-ws-bridge") {
