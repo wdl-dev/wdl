@@ -71,7 +71,7 @@
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |
 | `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar 与 platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、AI provider/model alias、module path、reserved object-key 和 reserved namespace grammars。 |
-| `shared/ai-contract.js` | Control 与 runtime tests 共用的 AI provider record、model descriptor、revision、provider kind、protocol、capability 和 DB 0 key canonical contract。 |
+| `shared/ai-contract.js` | Control、各 runtime tier 的 AI host binding 与跨语言 contract tests 共用的 AI provider record、model descriptor、revision、provider kind、protocol、capability 和 DB 0 key canonical contract。 |
 | `shared/ai-runtime-config.js` | Process-local AI runtime pool 与 deadline 的 canonical 默认值、hard maximum 和 normalization。 |
 | `shared/worker-contract.js` | Worker version grammar，以及 worker、route-plane、lifecycle、DO owner/session-policy keys 和 projection、route/session-policy notification channels 与内部 WebSocket backend-reconnect policy。 |
 | `shared/workerd-compat-flags.js` | 上游 workerd experimental enable flags 的 pinned mirror，以及 WDL-owned dynamic-worker 日期、unsupported-flag 和 error-serialization policy。 |

@@ -605,6 +605,16 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
     code: "ai_input_modality_unsupported",
   });
 
+  const deepSeekAudio = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/deepseek-audio"),
+    200,
+    "DeepSeek audio output rejection"
+  );
+  assert.deepEqual(deepSeekAudio, {
+    status: 400,
+    code: "ai_output_modality_unsupported",
+  });
+
   const malformedModel = await readIntegrationJson(
     await gatewayFetch(ns, "/ai/raw?model=OpenAI%2Fprimary"),
     400,

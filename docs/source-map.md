@@ -74,7 +74,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar and platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, AI provider/model alias, module path, reserved object-key, and reserved namespace grammars. |
-| `shared/ai-contract.js` | Canonical AI provider record, model descriptor, revision, provider kind, protocol, capability, and DB 0 key contract shared by Control and runtime tests. |
+| `shared/ai-contract.js` | Canonical AI provider record, model descriptor, revision, provider kind, protocol, capability, and DB 0 key contract used by Control, the AI host binding in every runtime tier, and cross-language contract tests. |
 | `shared/ai-runtime-config.js` | Canonical defaults, hard maxima, and normalization for process-local AI runtime pools and deadlines. |
 | `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner/session-policy keys and projection, route/session-policy notification channels, and the internal WebSocket backend-reconnect policy. |
 | `shared/workerd-compat-flags.js` | Pinned upstream mirror of experimental enable flags plus WDL-owned dynamic-worker date, unsupported-flag, and error-serialization policy. |

@@ -241,6 +241,7 @@ function hostWrappedClassNames(meta, bindingEntries, workflows) {
 /** @param {RuntimeBundleMeta} meta @returns {RuntimeMetaPlan} */
 export function analyzeRuntimeMeta(meta) {
   const bindingEntries = Object.entries(meta.bindings || {});
+  const bindingNames = new Set(bindingEntries.map(([name]) => name));
   const workflows = Array.isArray(meta.workflows) ? meta.workflows : [];
   /** @type {RuntimeMetaPlan} */
   const plan = {
@@ -268,7 +269,17 @@ export function analyzeRuntimeMeta(meta) {
     addHostFacadeBinding(plan, spec, name);
   }
   for (const workflow of workflows) {
-    if (typeof workflow?.binding === "string" && workflow.binding) plan.workflowBindings[workflow.binding] = workflow;
+    if (typeof workflow?.binding === "string" && workflow.binding) {
+      if (
+        bindingNames.has(workflow.binding) ||
+        Object.hasOwn(plan.workflowBindings, workflow.binding)
+      ) {
+        throw new Error(
+          `Persisted Workflow binding ${JSON.stringify(workflow.binding)} collides with another binding (redeploy worker)`
+        );
+      }
+      plan.workflowBindings[workflow.binding] = workflow;
+    }
   }
   plan.needsHostBindingWrapper =
     hasHostFacadeBindings(plan) || Object.keys(plan.workflowBindings).length > 0;

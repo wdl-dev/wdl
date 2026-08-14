@@ -2200,6 +2200,32 @@ test("wrapWorkerCodeForHostBindings: malformed persisted AI bindings fail closed
   }
 });
 
+test("wrapWorkerCodeForHostBindings: persisted Workflow binding collisions fail closed", () => {
+  for (const meta of [
+    {
+      bindings: { FLOW: { type: "do", className: "FlowActor", doStorageId: "storage" } },
+      workflows: [{ binding: "FLOW", name: "flow", className: "Flow" }],
+    },
+    {
+      workflows: [
+        { binding: "FLOW", name: "flow-a", className: "FlowA" },
+        { binding: "FLOW", name: "flow-b", className: "FlowB" },
+      ],
+    },
+  ]) {
+    assert.throws(
+      () => wrapWorkerCodeForHostBindings(
+        {
+          mainModule: "worker.js",
+          modules: { "worker.js": "export default { fetch() {} };" },
+        },
+        meta
+      ),
+      /Persisted Workflow binding "FLOW" collides with another binding/
+    );
+  }
+});
+
 test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object bindings", () => {
   const workerCode = {
     mainModule: "worker.js",

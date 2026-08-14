@@ -209,6 +209,15 @@ function enforceProviderRequest(resolved, body) {
     );
   }
   if (resolved.kind === "deepseek") {
+    if (
+      Array.isArray(body.modalities) &&
+      body.modalities.some((modality) => modality !== "text")
+    ) {
+      throw new AiProviderRequestError(
+        "ai_output_modality_unsupported",
+        "DeepSeek supports only text output"
+      );
+    }
     if (body.previous_response_id != null || body.conversation != null) {
       throw new AiProviderRequestError(
         "ai_continuation_unsupported",

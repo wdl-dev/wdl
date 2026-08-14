@@ -691,6 +691,43 @@ test("AI host allows empty DeepSeek state and rejects unsupported inputs before 
   assert.equal(providerCalls, 1);
 });
 
+test("AI host rejects DeepSeek non-text output before provider I/O", async () => {
+  let providerCalls = 0;
+  const resolution = openAiResolution({
+    provider: "deepseek",
+    alias: "flash",
+    kind: "deepseek",
+    upstreamModel: "deepseek-v4-flash",
+    protocol: "chat_completions",
+    destination: "https://api.deepseek.com/chat/completions",
+    credential: "fake-deepseek-key",
+    inputModalities: ["text"],
+    capabilities: { ...openAiResolution().capabilities, previousResponseId: false },
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: { async fetch() { providerCalls += 1; return Response.json({ id: "chat_test" }); } },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+    const rejected = await binding.fetch(request({
+      model: "deepseek/flash",
+      messages: [{ role: "user", content: "hello" }],
+      modalities: ["audio"],
+    }, "/v1/chat/completions"));
+    assert.equal(
+      (await readJsonResponse(rejected, 400, "DeepSeek audio output")).error,
+      "ai_output_modality_unsupported"
+    );
+
+    const allowed = await binding.fetch(request({
+      model: "deepseek/flash",
+      messages: [{ role: "user", content: "hello" }],
+      modalities: ["text"],
+    }, "/v1/chat/completions"));
+    assert.equal(allowed.status, 200);
+  });
+  assert.equal(providerCalls, 1);
+});
+
 test("AI host reports an oversized tenant request as 413 before resolution", async () => {
   const { binding } = makeAiBinding();
   const response = await binding.fetch(new Request("https://ai.wdl/v1/responses", {
@@ -1292,7 +1329,7 @@ test("AI request pool saturates without a queue and recovers after completion", 
   const { binding } = makeAiBinding({
     AI_REQUEST_MAX_IN_FLIGHT: "1",
     AI_NETWORK: { async fetch() { return Response.json({ ok: true }); } },
-  });
+  }, { ns: "tenant-ai", worker: "chat", version: "v7" });
   await withMockedProperty(globalThis, "fetch", async () => {
     resolverCalls += 1;
     if (resolverCalls === 1) return await pendingResolver;
@@ -1308,6 +1345,21 @@ test("AI request pool saturates without a queue and recovers after completion", 
   assert.equal(aiPoolStateForTest().request.inUse, 0);
   assert.ok(AI_HOST_TEST_STATE.metrics.some((entry) =>
     entry.name === "ai_pool_events" && entry.labels.outcome === "saturated"));
+  const rejection = /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */ (
+    AI_HOST_TEST_STATE.logs
+  ).find((entry) => entry.event === "ai_binding_request_rejected");
+  assert.ok(rejection);
+  assert.deepEqual({
+    namespace: rejection.fields.namespace,
+    worker: rejection.fields.worker,
+    version: rejection.fields.version,
+    code: rejection.fields.code,
+  }, {
+    namespace: "tenant-ai",
+    worker: "chat",
+    version: "v7",
+    code: "ai_capacity_exhausted",
+  });
 });
 
 test("AI capacity rolls back when the host cannot register its watchdog", async () => {
@@ -1694,22 +1746,37 @@ test("AI host binds resolver responses to the requested model and transport", as
 });
 
 test("AI host sanitizes internal resolver failures", async () => {
-  let calls = 0;
-  const { binding } = makeAiBinding();
-  await withMockedProperty(globalThis, "fetch", async () => {
-    calls += 1;
-    return Response.json({
-      error: "redis_error",
-      message: "WRONGTYPE ai:provider-credentials:private-ns",
-    }, { status: 500 });
-  }, async () => {
-    const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
-    const payload = await readJsonResponse(response, 503, "sanitized AI resolver failure");
-    assert.equal(payload.error, "redis_error");
-    assert.equal(payload.message, "AI resolver is unavailable");
-    assert.doesNotMatch(JSON.stringify(payload), /WRONGTYPE|private-ns/);
-  });
-  assert.equal(calls, 2);
+  const cases = [
+    {
+      code: "redis_error",
+      privateMessage: "WRONGTYPE ai:provider-credentials:private-ns",
+      publicMessage: "AI resolver is unavailable",
+      expectedCalls: 2,
+    },
+    {
+      code: "secret_decrypt_failed",
+      privateMessage: "secret envelope authentication failed for private-ns",
+      publicMessage: "AI provider credential is unavailable",
+      expectedCalls: 1,
+    },
+  ];
+  for (const { code, privateMessage, publicMessage, expectedCalls } of cases) {
+    let calls = 0;
+    const { binding } = makeAiBinding();
+    await withMockedProperty(globalThis, "fetch", async () => {
+      calls += 1;
+      return Response.json({ error: code, message: privateMessage }, { status: 500 });
+    }, async () => {
+      const response = await binding.fetch(request({ model: "openai/primary", input: "hello" }));
+      const payload = await readJsonResponse(response, 503, `sanitized ${code} resolver failure`);
+      assert.deepEqual(
+        payload,
+        { request_id: "rid-ai-test", error: code, message: publicMessage }
+      );
+      assert.equal(JSON.stringify(payload).includes(privateMessage), false);
+    });
+    assert.equal(calls, expectedCalls);
+  }
 });
 
 test("AI host does not resolve failure messages through object prototypes", async () => {

@@ -230,6 +230,17 @@ async function handler(request, env) {
       return Response.json({ status: error?.status, code: error?.code });
     }
   }
+  if (url.pathname === "/deepseek-audio") {
+    try {
+      await env.AI.run("deepseek/chat", {
+        messages: [{ role: "user", content: "hello from chat completions" }],
+        modalities: ["audio"],
+      });
+      return Response.json({ status: 200, code: null });
+    } catch (error) {
+      return Response.json({ status: error?.status, code: error?.code });
+    }
+  }
   if (url.pathname === "/invalid-json") {
     try {
       await env.AI.run("openai/primary", { input: "invalid JSON", wdl_test_mode: "invalid_json" });
