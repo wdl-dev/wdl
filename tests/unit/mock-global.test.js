@@ -120,6 +120,27 @@ test("withMockedPropertyDescriptors restores all properties after callback failu
   assert.equal(Object.hasOwn(target, "missing"), false);
 });
 
+test("withMockedPropertyDescriptors restores repeated properties in reverse order", async () => {
+  const target = { value: "original" };
+
+  await withMockedPropertyDescriptors([
+    {
+      target,
+      name: "value",
+      descriptor: { value: "first" },
+    },
+    {
+      target,
+      name: "value",
+      descriptor: { value: "second" },
+    },
+  ], () => {
+    assert.equal(target.value, "second");
+  });
+
+  assert.equal(target.value, "original");
+});
+
 test("withMockedPropertyDescriptors attempts every restore and preserves callback errors", async () => {
   const restorable = { value: "original-restorable" };
   const blockedA = { value: "original-blocked-a" };

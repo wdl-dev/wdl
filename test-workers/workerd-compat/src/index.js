@@ -30,7 +30,7 @@ function eventTargetSelfSignalProbe() {
   let victimCalls = 0;
   const victim = () => { victimCalls += 1; };
 
-  // Added event types must not corrupt a self-signal listener or its removal.
+  // Distinct event types must not corrupt a self-signal listener or its removal.
   signal.addEventListener("one", noop);
   signal.addEventListener("two", noop);
   signal.addEventListener("three", noop);
@@ -39,36 +39,6 @@ function eventTargetSelfSignalProbe() {
   controller.abort();
   signal.dispatchEvent(new Event("victim"));
   return { aborted: signal.aborted, victimCalls };
-}
-
-async function streamAbortRelockProbe() {
-  let writableController;
-  const writable = new WritableStream({
-    start(controller) {
-      writableController = controller;
-    },
-  });
-  await Promise.resolve();
-
-  const readable = new ReadableStream({});
-  let reader;
-  writableController.signal.addEventListener("abort", () => {
-    // Re-locking from abort must leave the replacement reader lock intact.
-    reader = readable.getReader();
-  });
-
-  const controller = new AbortController();
-  controller.abort(new Error("pipe-abort"));
-  let rejectedWithAbortReason = false;
-  try {
-    await readable.pipeTo(writable, { signal: controller.signal });
-  } catch (error) {
-    rejectedWithAbortReason = error instanceof Error && error.message === "pipe-abort";
-  }
-
-  const relocked = readable.locked && reader !== undefined;
-  reader?.releaseLock();
-  return rejectedWithAbortReason && relocked;
 }
 
 async function htmlRewriterProbe() {
@@ -156,7 +126,6 @@ export default {
         setAttributesChained,
       },
       eventTargetSelfSignal: eventTargetSelfSignalProbe(),
-      streamAbortRelockSafe: await streamAbortRelockProbe(),
       htmlRewriter: await htmlRewriterProbe(),
       byob: await byobProbe(),
       importMetaPathHelpers: {

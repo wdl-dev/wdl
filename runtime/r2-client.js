@@ -27,13 +27,38 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
  */
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+const IntrinsicResponse = Response;
 const IntrinsicUint8Array = Uint8Array;
 const intrinsicObjectCreate = Object.create;
+const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
 const intrinsicUint8ArraySet = IntrinsicUint8Array.prototype.set;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
+
+function findResponseBodyUsedGetter() {
+  let prototype = IntrinsicResponse.prototype;
+  while (prototype) {
+    const getter = intrinsicObjectGetOwnPropertyDescriptor(prototype, "bodyUsed")?.get;
+    if (getter) return getter;
+    prototype = intrinsicObjectGetPrototypeOf(prototype);
+  }
+  return undefined;
+}
+const intrinsicResponseBodyUsedGet = findResponseBodyUsedGetter();
+
+/** @param {Response} response */
+function responseBodyUsed(response) {
+  if (intrinsicResponseBodyUsedGet) {
+    return /** @type {boolean} */ (
+      intrinsicReflectApply(intrinsicResponseBodyUsedGet, response, [])
+    );
+  }
+  // Older JSG installs an own native data property, which shadows patched prototypes.
+  return response.bodyUsed;
+}
 
 /** @param {Uint8Array} bytes @returns {NonThenableByteResult} */
 function nonThenableByteResult(bytes) {
@@ -86,9 +111,8 @@ function passthroughStreamChunk(bytes, byteLength) {
   return snapshotStreamChunk(bytes, byteLength);
 }
 
-/** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
-async function readStreamWithLimit(stream, operation) {
-  const reader = stream.getReader();
+/** @param {ReadableStreamDefaultReader<Uint8Array>} reader @param {string} operation */
+async function readReaderWithLimit(reader, operation) {
   /** @type {Record<number, Uint8Array>} */
   const chunks = intrinsicObjectCreate(null);
   let chunkCount = 0;
@@ -133,6 +157,11 @@ async function readStreamWithLimit(stream, operation) {
     offset += chunkLength;
   }
   return nonThenableByteResult(out);
+}
+
+/** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
+function readStreamWithLimit(stream, operation) {
+  return readReaderWithLimit(stream.getReader(), operation);
 }
 
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
@@ -403,27 +432,43 @@ export class R2Object {
 
 export class R2ObjectBody extends R2Object {
   /** @type {ReadableStream<Uint8Array>} */
-  body;
-  /** @type {boolean} */
-  bodyUsed;
+  #body;
+  /** @type {Response} */
+  #bodyUsedTracker;
+  #bodyClaimed = false;
 
   /** @param {AnyRecord} meta @param {ReadableStream<Uint8Array>} body */
   constructor(meta, body) {
     super(meta);
-    this.body = cappedReadableStream(body, "get");
-    this.bodyUsed = false;
+    this.#body = cappedReadableStream(body, "get");
+    this.#bodyUsedTracker = new IntrinsicResponse(this.#body);
   }
 
-  takeBody() {
-    if (this.bodyUsed) {
+  get body() {
+    return this.#body;
+  }
+
+  get bodyUsed() {
+    return this.#isBodyUsed();
+  }
+
+  #isBodyUsed() {
+    return this.#bodyClaimed || responseBodyUsed(this.#bodyUsedTracker);
+  }
+
+  #consumeBody() {
+    if (this.#isBodyUsed()) {
       throw new TypeError("Body has already been used. It can only be used once.");
     }
-    this.bodyUsed = true;
-    return this.body;
+    // Reader acquisition is synchronous. A locked but undisturbed body fails
+    // before the one-shot claim, so releasing its unused reader permits retry.
+    const pendingRead = readStreamWithLimit(this.#body, "get");
+    this.#bodyClaimed = true;
+    return pendingRead;
   }
 
   async bytes() {
-    return (await readStreamWithLimit(this.takeBody(), "get")).bytes;
+    return (await this.#consumeBody()).bytes;
   }
 
   async arrayBuffer() {

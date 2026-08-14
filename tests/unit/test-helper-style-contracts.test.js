@@ -321,20 +321,26 @@ test("unit JSON response assertions use response-json helper", () => {
   assert.deepEqual(offenders, [], `unit JSON response helper contract violated:\n${offenders.join("\n")}`);
 });
 
-test("tests use delay helper for simple sleep promises", () => {
-  const testFiles = scannedTestFiles()
+test("tests use shared timing helpers for sleeps and bounded settlement observation", () => {
+  const testFiles = scannedTestFiles(new Set(["tests/helpers/timing.js"]))
     .filter((file) => !file.includes("/manual/"));
   /** @type {string[]} */
   const offenders = [];
   const simpleSleepPromise =
     /await\s+new\s+Promise\(\s*\(?\s*(?:resolve|r)\s*\)?\s*=>\s*setTimeout\(\s*(?:resolve|r)\s*,/;
+  // Keep this narrow: semantic Promise races remain valid; only local deadline
+  // branches owned by settlementWithin(...) are rejected.
+  const boundedSettlementRace =
+    /Promise\.race\(\s*\[[\s\S]{0,500}?(?:\bdelay\(|new\s+Promise\([\s\S]{0,250}?\bsetTimeout\()/;
   for (const file of testFiles) {
     const source = withoutStringAndTemplateLiterals(withoutLineComments(readRepoFile(file)));
     if (simpleSleepPromise.test(source)) {
       offenders.push(`${file}: use delay(...) from tests/helpers/timing.js`);
+    } else if (boundedSettlementRace.test(source)) {
+      offenders.push(`${file}: use settlementWithin(...) from tests/helpers/timing.js`);
     }
   }
-  assert.deepEqual(offenders, [], `test sleep helper contract violated:\n${offenders.join("\n")}`);
+  assert.deepEqual(offenders, [], `test timing helper contract violated:\n${offenders.join("\n")}`);
 });
 
 test("test temporary directories use temp-dir helper", () => {

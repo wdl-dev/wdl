@@ -11,12 +11,14 @@
 - Upgraded the vendored `@wdl-dev/aws-sigv4` signer from 3.0.1 to 3.0.3 with
   intrinsic ArrayBufferView bounds and constructor-copy snapshots.
 - R2 `put()` encodes string bodies without consulting a tenant-mutated
-  `TextEncoder.prototype.encode` and validates intrinsic BufferSource bounds. Buffered
-  stream readers snapshot each delivered chunk before retaining it across their next
-  read.
+  `TextEncoder.prototype.encode` and validates intrinsic BufferSource bounds. R2 GET
+  bodies expose native disturbance semantics, so convenience readers reject after a
+  partial raw-body read instead of returning only the unread suffix. Buffered stream
+  readers snapshot each delivered chunk before retaining it across their next read.
   `ReadableStreamDefaultController.enqueue()` remains reference-based, so producer
-  mutations after enqueue can affect bytes delivered before that snapshot. Direct
-  fixed `ArrayBuffer`-backed `Uint8Array` inputs retain zero-copy normalization.
+  mutations after enqueue can affect bytes delivered before that snapshot. Direct fixed
+  `ArrayBuffer`-backed `Uint8Array` PUT inputs and raw GET chunks retain zero-copy
+  normalization; resizable or shared raw GET chunks are snapshotted before exposure.
 
 ## wdl.20260811.1 - 2026-08-11
 

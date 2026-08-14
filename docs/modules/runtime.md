@@ -133,7 +133,9 @@ S3-compatible bucket: `r2/<ns>/<bucket_name>/<object-key>`. Workers in the same
 namespace using the same `bucket_name` intentionally share data; different namespaces
 are isolated by prefix. Runtime supports the common `head`, `get`, `put`, `delete`, and
 `list` paths. `get()` returns a streaming body, and convenience readers enforce the
-25 MiB cap. `put(stream, ...)` currently buffers and sends one S3 PUT with the same cap;
+25 MiB cap. `bodyUsed` reflects disturbance of the exposed stream; convenience readers
+reject after tenant code reads from that stream even if its reader later releases the
+lock. `put(stream, ...)` currently buffers and sends one S3 PUT with the same cap;
 multipart upload, SSE-C, and checksum selection are not supported. Conditional requests
 and range GETs implement the common R2 behavior. `list({ include: [...] })` performs
 extra HEAD requests for metadata fields and applies a concurrency cap. Tenant-supplied
@@ -142,7 +144,8 @@ is present; malformed write metadata is rejected before the host binding call.
 R2 encodes string PUT bodies without consulting a tenant-mutated
 `TextEncoder.prototype.encode` and validates BufferSource internal slots before
 writing. Buffered stream consumers snapshot each delivered chunk before retaining it
-across their own next read.
+across their own next read. Raw GET streams retain zero-copy normalization for chunks
+backed by fixed `ArrayBuffer`s and snapshot resizable or shared backing before exposure.
 `ReadableStreamDefaultController.enqueue()` queues object references, so producer
 mutations after enqueue can change bytes before WDL receives them. Direct `Uint8Array`
 PUT bodies backed by a fixed `ArrayBuffer` retain zero-copy normalization. Detached or

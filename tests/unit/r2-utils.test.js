@@ -198,6 +198,17 @@ test("r2BufferSourceBytes uses intrinsic bounds for every BufferSource kind", ()
   assert.equal(r2BufferSourceBytes("not bytes"), null);
 });
 
+test("r2BufferSourceBytes identifies ArrayBuffer by its internal slots", () => {
+  const buffer = new ArrayBuffer(4);
+  new Uint8Array(buffer).set([104, 101, 108, 112]);
+  Object.setPrototypeOf(buffer, null);
+
+  assert.equal(buffer instanceof ArrayBuffer, false);
+  const bytes = r2BufferSourceBytes(buffer);
+  assert.ok(bytes);
+  assert.deepEqual(Array.from(bytes), [104, 101, 108, 112]);
+});
+
 test("r2Uint8ArrayByteLength ignores own bounds", () => {
   const ordinaryBytes = new Uint8Array([1, 2, 3]);
   Object.defineProperty(ordinaryBytes, "byteLength", { get: () => 0 });
