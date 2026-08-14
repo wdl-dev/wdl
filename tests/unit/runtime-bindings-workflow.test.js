@@ -148,3 +148,35 @@ test("WorkflowBinding bounds the reconstructed backend envelope", async () => {
   );
   assert.equal(backendCalls, 0);
 });
+
+test("WorkflowBinding cancels a stalled request body when the caller aborts", { timeout: 2_000 }, async () => {
+  let backendCalls = 0;
+  let cancellations = 0;
+  const binding = bindingWithBackend(() => {
+    backendCalls += 1;
+    return Response.json({ id: "unexpected" });
+  });
+  const controller = new AbortController();
+  const reason = new DOMException("caller cancelled", "AbortError");
+  const body = new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancellations += 1;
+    },
+  });
+  const request = new Request("https://binding.invalid/internal/workflows/create", /** @type {RequestInit} */ ({
+    method: "POST",
+    body,
+    duplex: "half",
+    signal: controller.signal,
+  }));
+
+  const pending = binding.fetch(request);
+  controller.abort(reason);
+
+  await assert.rejects(pending, (error) => error === reason);
+  assert.equal(cancellations, 1);
+  assert.equal(backendCalls, 0);
+});

@@ -106,7 +106,7 @@ Gateway 负责路由，不负责授权。Control/auth 负责控制面授权。Ru
 
 特权 runtime entrypoint 通过 socket 隔离，而不是通过公开 path 保留。Tenant 流量走 runtime loader socket；scheduler 和 workflows dispatch 走私有 runtime internal socket `:8088`。
 
-DO、D1、workflows backend 等 hidden Fetcher binding 是平台 plumbing，不能暴露给用户代码。Runtime wrapper 必须在用户代码观察 `env` 前删除这些 binding。
+DO、D1、workflows backend 的通用 authenticated Fetcher 是平台 plumbing，只保留在 runtime host realm。Loaded-worker env 只获得由不可变 props 限定到对应声明 binding 的 host adapter；tenant module evaluation 可能观察到 scoped adapter，但绝不会拿到通用 backend Fetcher。
 
 AI provider credential 遵循同一边界：Control 加密持久化，redis-proxy 只在解析调用时解密，runtime host binding 丢弃 tenant header 后再附加凭据。Tenant-visible AI facade 不会拿到 credential 或私有 resolver Fetcher。
 

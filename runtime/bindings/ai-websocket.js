@@ -340,7 +340,7 @@ export function createAiWebSocketBridge(options) {
   };
   /** @param {WebSocket} target @param {"client" | "provider"} direction @param {MessageEvent} evt */
   const forward = (target, direction, evt) => {
-    if (closed) return;
+    if (closed || errorFallbackTimer !== null) return;
     try {
       const frame = websocketFrame(evt.data);
       if (frame.bytes > AI_WS_FRAME_MAX_BYTES) {

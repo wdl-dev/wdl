@@ -155,9 +155,10 @@ Privileged runtime entrypoints are separated by socket, not by public path reser
 Tenant traffic goes through the runtime loader socket. Scheduler and workflows dispatch
 use the private runtime internal socket on `:8088`.
 
-Hidden Fetcher bindings such as DO, D1, and workflows backends are platform plumbing.
-They must not be exposed to user code. Runtime wrappers remove those bindings before
-tenant code observes `env`.
+Generic authenticated Fetchers for DO, D1, and workflows backends are platform plumbing
+and remain in the runtime host realm. Loaded-worker env receives declaration-scoped host
+adapters whose immutable props restrict them to the corresponding binding. Tenant module
+evaluation may observe a scoped adapter, but never a generic backend Fetcher.
 
 AI provider credentials follow the same boundary: Control encrypts them at rest,
 redis-proxy decrypts them only while resolving a call, and the runtime host binding

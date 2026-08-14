@@ -9,7 +9,7 @@ import {
   fetchInvokeInit,
   isWebSocketUpgrade,
   replayOwnerUnavailableForFetch,
-  readScopedDoWebSocketRequest,
+  readScopedDoRequest,
   rpcInvokeInit,
   rpcResultFromResponse,
 } from "runtime-do-transport";
@@ -66,24 +66,16 @@ async function dispatchInvokeWithOwnerHint(binding, init, objectName, { replayOw
 
 export class DurableObjectNamespace extends WorkerEntrypoint {
   /**
-   * Binding-scoped WebSocket transport. WorkerEntrypoint.fetch() preserves a
-   * 101 response across workerLoader while fixed props prevent access to any
-   * other namespace, worker, storage identity, or class.
+   * Binding-scoped native fetch transport. Fixed props prevent access to any
+   * other namespace, worker, storage identity, or class, and the Fetcher path
+   * preserves request cancellation and WebSocket 101 responses.
    *
    * @param {Request} request
    */
   async fetch(request) {
-    const scoped = readScopedDoWebSocketRequest(request);
-    return await this.fetchObject(scoped.objectName, scoped.request, scoped.requestId);
-  }
-
-  /**
-   * @param {string} objectName
-   * @param {Request} request
-   * @param {string | null} [requestId]
-   * @returns {Promise<Response>}
-   */
-  async fetchObject(objectName, request, requestId = null) {
+    const scoped = readScopedDoRequest(request);
+    const { objectName, requestId } = scoped;
+    request = scoped.request;
     const props = propsOf(this);
     // Binding-scoped calls intentionally start fresh internal requests; owner
     // forwarding, if needed, will add and enforce hop-count headers.

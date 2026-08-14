@@ -26,9 +26,11 @@ const { DurableObjectNamespace } = await importRepositoryModule("runtime/binding
 ]);
 const {
   connectHeaders,
+  decodeDoObjectNameHeader,
   ownerHintFromHeaders,
+  readScopedDoRequest,
   requestSpec,
-  scopedDoWebSocketRequest,
+  scopedDoRequest,
 } = await import(transportUrl);
 
 /** @param {any} backend */
@@ -46,6 +48,52 @@ function bindingWithBackend(backend) {
     WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
   });
 }
+
+/** @param {DurableObjectNamespace} binding @param {string} objectName @param {Request} request */
+function bindingFetch(binding, objectName, request) {
+  return binding.fetch(scopedDoRequest(objectName, request, null));
+}
+
+test("binding-scoped DO object names use canonical reversible ASCII headers", () => {
+  for (const objectName of [
+    "room",
+    " room ",
+    "雪",
+    "雪".repeat(170),
+    "line\nbreak",
+    "\u0000",
+    "%20",
+  ]) {
+    const request = scopedDoRequest(
+      objectName,
+      new Request("https://tenant.workers.example/send"),
+      null
+    );
+    const encoded = request.headers.get("x-wdl-do-binding-object-name");
+    assert.match(encoded, /^[\x21-\x7e]+$/);
+    assert.equal(readScopedDoRequest(request).objectName, objectName);
+  }
+
+  for (const encoded of ["%", "%e9%9b%aa", "%41"]) {
+    const request = new Request("https://tenant.workers.example/send", {
+      headers: { "x-wdl-do-binding-object-name": encoded },
+    });
+    assert.throws(() => readScopedDoRequest(request), /invalid object name/);
+  }
+});
+
+test("binding-scoped DO object name encoding uses captured URI intrinsics", () =>
+  withMockedProperty(globalThis, "encodeURIComponent", () => "attacker", () =>
+    withMockedProperty(globalThis, "decodeURIComponent", () => "attacker", () => {
+      const request = scopedDoRequest(
+        " 雪 ",
+        new Request("https://tenant.workers.example/send"),
+        null
+      );
+      assert.equal(request.headers.get("x-wdl-do-binding-object-name"), "%20%E9%9B%AA%20");
+      assert.equal(readScopedDoRequest(request).objectName, " 雪 ");
+    })
+  ));
 
 test("DO connect headers strip tenant routing headers and preserve the scope request id", () => {
   const request = new Request("https://tenant.workers.example/ws", {
@@ -70,6 +118,21 @@ test("DO connect headers strip tenant routing headers and preserve the scope req
   assert.equal(headers.get("x-request-id"), "scope-rid");
   assert.equal(headers.get("x-wdl-do-ns"), "tenant");
   assert.equal(headers.get("x-wdl-do-object-name"), "room-a");
+});
+
+test("DO connect headers reuse the canonical object-name encoding", () => {
+  for (const objectName of [" room ", "room", "雪", "\u0000"]) {
+    const headers = connectHeaders({
+      ns: "tenant",
+      worker: "chat",
+      version: "v1",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+    }, objectName, new Request("https://tenant.workers.example/ws"), null);
+    const encoded = headers.get("x-wdl-do-object-name");
+    assert.match(encoded, /^[\x21-\x7e]+$/);
+    assert.equal(decodeDoObjectNameHeader(encoded), objectName);
+  }
 });
 
 test("DO fetch requestSpec strips tenant routing headers and preserves the scope request id", async () => {
@@ -159,7 +222,7 @@ test("DO-to-DO fetch does not replay through router when direct owner hint retry
       }),
     });
 
-    const response = await binding.fetchObject("room-a", new Request("https://demo.workers.example/send", {
+    const response = await bindingFetch(binding, "room-a", new Request("https://demo.workers.example/send", {
       method: "POST",
       body: "hello",
     }));
@@ -187,8 +250,8 @@ test("DO-to-DO fetch caches owner hints and skips router on later calls", async 
       fetch: makeRecordingFetch(calls, { response: doOwnerHintResponse() }),
     });
 
-    const first = await binding.fetchObject("cached-room", new Request("https://demo.workers.example/send"));
-    const second = await binding.fetchObject("cached-room", new Request("https://demo.workers.example/send"));
+    const first = await bindingFetch(binding, "cached-room", new Request("https://demo.workers.example/send"));
+    const second = await bindingFetch(binding, "cached-room", new Request("https://demo.workers.example/send"));
 
     assert.equal(await first.text(), "owner-ok");
     assert.equal(await second.text(), "owner-ok");
@@ -212,7 +275,7 @@ test("DO-to-DO fetch does not follow tenant body owner hints", async () => {
       fetch: makeRecordingFetch(calls, { response: tenantBodyDoOwnerHintResponse() }),
     });
 
-    const response = await binding.fetchObject("room-ignore-race-hint", new Request("https://demo.workers.example/send"));
+    const response = await bindingFetch(binding, "room-ignore-race-hint", new Request("https://demo.workers.example/send"));
 
     const body = await readJsonResponse(response, 409);
     assert.equal(body.message, "tenant body");
@@ -243,7 +306,7 @@ test("DO-to-DO fetch does not follow tenant 409 responses with owner metadata", 
       }),
     });
 
-    const response = await binding.fetchObject("room-ignore-race-hint-response", new Request("https://demo.workers.example/send"));
+    const response = await bindingFetch(binding, "room-ignore-race-hint-response", new Request("https://demo.workers.example/send"));
 
     const body = await readJsonResponse(response, 409);
     assert.equal(body.message, "tenant conflict");
@@ -287,7 +350,7 @@ test("DO-to-DO fetch retries owner generation races without hint opt-in", async 
     }),
   });
 
-  const response = await binding.fetchObject("room-race", new Request("https://demo.workers.example/send", {
+  const response = await bindingFetch(binding, "room-race", new Request("https://demo.workers.example/send", {
     method: "POST",
     body: "hello",
   }));
@@ -321,7 +384,7 @@ test("DO-to-DO fetch ignores owner hints attached to race responses", async () =
       }),
     });
 
-    const response = await binding.fetchObject("room-a", new Request("https://demo.workers.example/send"));
+    const response = await bindingFetch(binding, "room-a", new Request("https://demo.workers.example/send"));
 
     assert.equal(await response.text(), "retried");
     assert.equal(calls.length, 2);
@@ -410,7 +473,7 @@ test("DO-to-DO websocket does not fall back to router when direct owner hint ret
       fetch: makeRecordingFetch(calls, { response: doOwnerHintResponse() }),
     });
 
-    const response = await binding.fetchObject("room-a", new Request("https://demo.workers.example/ws", {
+    const response = await bindingFetch(binding, "room-a", new Request("https://demo.workers.example/ws", {
       headers: {
         Connection: "Upgrade",
         Upgrade: "websocket",
@@ -446,7 +509,7 @@ test("DO-to-DO websocket strips owner hint headers from successful upgrades", as
     },
   });
 
-  const response = await binding.fetchObject("room-a", new Request("https://demo.workers.example/ws", {
+  const response = await bindingFetch(binding, "room-a", new Request("https://demo.workers.example/ws", {
     headers: {
       Connection: "Upgrade",
       Upgrade: "websocket",
@@ -474,8 +537,8 @@ test("binding-scoped fetch fixes DO identity and strips its private envelope", a
       "x-wdl-do-ns": "attacker",
     },
   });
-  const response = await binding.fetch(scopedDoWebSocketRequest(
-    "room-scoped",
+  const response = await binding.fetch(scopedDoRequest(
+    " room-scoped ",
     tenantRequest,
     "rid-scoped"
   ));
@@ -484,7 +547,7 @@ test("binding-scoped fetch fixes DO identity and strips its private envelope", a
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "http://do-runtime/internal/do/connect");
   assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-ns"), "tenant");
-  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-object-name"), "room-scoped");
+  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-object-name"), "%20room-scoped%20");
   assert.equal(new Headers(calls[0].init.headers).get("x-request-id"), "rid-scoped");
   assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-binding-object-name"), null);
 });

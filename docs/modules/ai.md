@@ -8,7 +8,7 @@ credentials remain in the platform control plane. The supported provider adapter
 target the official OpenAI, xAI, and DeepSeek APIs.
 
 AI is a BYO-provider capability. Each namespace owns its provider metadata and encrypted
-credentials. WDL does not currently provide a managed model catalog, shared platform
+credentials. WDL does not provide a managed model catalog, shared platform
 credential, token accounting, billing, quota enforcement, or distributed tenant
 fairness. The process-local controls described below provide finite admission and
 lifetime bounds; they are not product quotas or universal capacity guarantees.
@@ -264,7 +264,9 @@ early; an idempotent deadline remains the final release/abort owner if workerd d
 deliver a mid-response `AbortSignal`, stream cancellation, or socket teardown.
 Oversized non-streaming responses, rejected WebSocket handshake bodies, redirects, and
 invalid streaming content types abort provider I/O before releasing their permit; body
-cancellation is only a secondary cleanup signal.
+cancellation is only a secondary cleanup signal. A provider `2xx` response without a
+completed WebSocket upgrade is a sanitized `502 ai_provider_invalid_response`; actual
+non-success provider responses retain their bounded status and body.
 SSE requires a protocol terminal event (`response.completed`, `response.incomplete`,
 `response.failed`, `error`, or Chat Completions `[DONE]`); EOF before that event is an
 error. Terminal frames are forwarded unchanged before the stream permit records
@@ -277,8 +279,10 @@ Client-originated WebSocket text frames must be JSON with at most 128 nested con
 levels. WDL rejects duplicate `type`, `model`, or `session` decision fields, changes or
 adds only the model field required for provider pinning, and forwards every unrelated
 JSON source token unchanged. It also enforces advertised binary-frame support and
-propagates bounded close codes and reasons. Provider-loss closes that Gateway would
-otherwise treat as reconnectable are
+propagates bounded close codes and reasons. If workerd emits an `ErrorEvent` before its
+matching `CloseEvent`, the bridge pauses forwarding during a short bounded grace so the
+real close code wins; a missing close uses the stable fallback. Provider-loss closes
+that Gateway would otherwise treat as reconnectable are
 translated to terminal `1013 AI provider connection lost`, so Gateway cannot silently
 replace the provider session. The initial upgrade also disables Gateway backend
 replacement, so runtime loss closes the public session with `1012 service restart`

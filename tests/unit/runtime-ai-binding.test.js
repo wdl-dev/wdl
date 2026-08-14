@@ -2019,6 +2019,49 @@ test("AI host rejects WebSocket provider redirects before releasing capacity", a
   assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 
+test("AI host rejects a successful provider response without a WebSocket upgrade", async () => {
+  /** @type {AbortSignal | null} */
+  let providerSignal = null;
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
+        providerSignal = init.signal ?? null;
+        return Response.json({ status: "accepted_without_upgrade" });
+      },
+    },
+  });
+  const resolution = openAiResolution({
+    transport: "responses_websocket",
+    destination: "wss://api.openai.com/v1/responses",
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+    const response = await binding.fetch(new Request(
+      "https://ai.wdl/v1/responses?model=openai%2Fprimary",
+      { headers: { upgrade: "websocket" } }
+    ));
+    assert.equal(
+      (await readJsonResponse(response, 502, "AI WebSocket missing provider upgrade")).error,
+      "ai_provider_invalid_response"
+    );
+  });
+  assertAborted(providerSignal);
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
+test("AI host preserves a bounded provider WebSocket rejection status", async () => {
+  await openFakeAiWebSocket({
+    providerResponse: Response.json(
+      { error: { type: "rate_limit_error", message: "retry later" } },
+      { status: 429 }
+    ),
+    expectedStatus: 429,
+  });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
 test("AI host makes provider-loss closes terminal to Gateway", async () => {
   for (const code of [1001, 1006, 1011]) {
     const { upstream, downstream } = await openFakeAiWebSocket();
@@ -2051,6 +2094,8 @@ test("AI host preserves a terminal provider close after an error event", async (
   assert.ok(downstream);
 
   upstream.dispatch("error");
+  downstream.dispatch("message", { data: '{"type":"response.cancel"}' });
+  assert.equal(upstream.sent.length, 0);
   await delay(1);
   upstream.dispatch("close", { code: 1009, reason: "provider frame too large" });
   await delay(0);
@@ -2095,6 +2140,8 @@ test("AI host preserves a terminal client close after an error event", async () 
   assert.ok(downstream);
 
   downstream.dispatch("error");
+  upstream.dispatch("message", { data: '{"type":"response.created"}' });
+  assert.equal(downstream.sent.length, 0);
   await delay(1);
   downstream.dispatch("close", { code: 1009, reason: "client frame too large" });
   await delay(0);

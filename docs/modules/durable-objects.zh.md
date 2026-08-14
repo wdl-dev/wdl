@@ -43,7 +43,7 @@ do-runtime 会通过 generated wrapper 截获的私有 fetch dispatch 调用 ten
 
 DO invoke envelope 通过 canonical namespace、worker、version 和 storage id 标识 persisted bundle，不接受 inline worker source。
 
-Tenant-facing DO object name/id 必须是 well-formed Unicode string。`idFromName()` / `idFromString()` 会在 hash 或 dispatch 前拒绝 lone UTF-16 surrogate；do-runtime alarm ingress 和 Workflows revalidation 执行相同边界。
+Tenant-facing DO object name/id 必须是 well-formed Unicode string。`idFromName()` / `idFromString()` 会在 hash 或 dispatch 前拒绝 lone UTF-16 surrogate；do-runtime alarm ingress 和 Workflows revalidation 执行相同边界。Binding-scoped native Fetcher 在两段 object-name header hop 上使用同一套 canonical、可逆的 ASCII encoding，因此 HTTP header normalization 不会在原始 identity 到达 do-runtime validation 前裁剪空白或拒绝 Unicode。
 
 DO host id 最多 512 UTF-8 bytes，并使用不带前导零的 canonical `shardN` suffix。DO binding class name 使用 ASCII JavaScript class-name grammar，并在 deploy 时限制为最多 468 bytes，确保所有 shard suffix 都能满足 aggregate host-id 上限。
 
@@ -94,7 +94,7 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 - WebSocket upgrade 必须在 owner endpoint 上完成。Owner-hinted WebSocket direct retry 不能 fall back 到 router-established 101。
 - Ordinary fetch/RPC 在收到可信 owner-hint，或携带 do-runtime 私有 ownership-error control header 的明确 pre-dispatch stale-owner/owner-race response 后，可以进行一次 router rediscovery；这也适用于非幂等 method 和 RPC。Tenant response body 不能触发重放。无可信标记的 direct owner transport failure，或不带这两类可信标记的 502/503/504，会清除 cached hint。安全的 `GET`/`HEAD` request 可以通过 router 重放；非幂等 method 和 RPC 会返回 `owner_unavailable`，因为 owner 可能已经应用了该请求。
 - Shared runtime transport 统一持有 host binding 与 injected facade 的 owner-hint cache wiring、invoke race retry 和 response-header stripping。Connect wrapper 刻意不包含 invoke-only router fallback，以保留 owner-established WebSocket upgrade 语义。
-- Runtime 为每个声明的 DO binding materialize 一个 host adapter。不可变 adapter props 会在附加 internal auth 前固定 namespace、worker version、storage identity 和 class；loaded-worker env 不包含通用 DO router 或 owner-network Fetcher。Module evaluation 可能观察到这个 scoped transport，但不能选择其它 DO binding identity。
+- Runtime 为每个声明的 DO binding materialize 一个 host adapter。不可变 adapter props 会在附加 internal auth 前固定 namespace、worker version、storage identity 和 class；loaded-worker env 不包含通用 DO router 或 owner-network Fetcher。Module evaluation 可能观察到这个 scoped transport，但不能选择其它 DO binding identity。DO fetch 通过原生 `Fetcher.fetch()` 而不是自定义 Request RPC 进入 adapter。静态 host worker 启用 incoming request signal，因此显式可取消的 caller `Request` 被 abort 时，会在 owner dispatch 前取消有界 body 读取。结构化 DO RPC 仍以有界 JSON data 跨越自定义 RPC 边界，不传递 `Request`。
 - `WEBSOCKET_RECONNECT_DELAYS_MS` 和 `WEBSOCKET_MAX_BUFFERED_MESSAGES` 可以在不改代码的情况下调整 gateway backend reconnect budget 和 client-message buffer cap。
 - Alarm delivery 是 at-least-once。Scheduler 唤醒 Workflows；Workflows 把到期 internal alarm job promote 到 ready，在 DB 2 run token 下 claim，然后调用 do-runtime `/internal/do/alarms/dispatch`。do-runtime 构造 `DoInvoke{kind:"alarm"}` 请求，并走正常 owner router/fence 路径。
 - Alarm mutation、retarget、dispatch 和 whole-worker storage cleanup 只接受 canonical positive JavaScript-safe-integer worker version grammar。非法 internal 或 persisted version 会在写入 job 或尝试 worker invoke 前失败。

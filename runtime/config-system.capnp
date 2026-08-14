@@ -126,7 +126,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "@wdl-dev/aws-sigv4",    esModule = embed "../shared/vendor/aws-sigv4.js"),
   ],
   compatibilityDate = "2026-04-24",
-  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers"],
+  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers", "enable_request_signal"],
   globalOutbound = "network",
   bindings = [
     (name = "SERVICE_NAME", text = "system-runtime"),

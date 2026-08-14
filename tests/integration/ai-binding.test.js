@@ -1161,7 +1161,7 @@ test("official OpenAI SDK uses the AI Fetcher for Responses JSON, SSE, and cance
   });
 });
 
-test("DO AI calls complete and caller teardown leaves the host watchdog alive", async () => {
+test("DO AI calls complete and caller teardown releases the host permit", async () => {
   const { ns } = await setupAiNamespace("ai-do-teardown");
   const completed = await readIntegrationJson(
     await gatewayFetch(ns, "/ai/do/json?name=teardown"),
@@ -1181,6 +1181,7 @@ test("DO AI calls complete and caller teardown leaves the host watchdog alive", 
 
   const beforeGauge = doRuntimeAiMetric("wdl_ai_pool_in_use", "request");
   const beforeAcquired = doRuntimeAiMetric("wdl_ai_pool_events_total", "request", "acquired");
+  const beforeCancelled = doRuntimeAiMetric("wdl_ai_pool_events_total", "request", "cancelled");
   const beforeReleased = doRuntimeRequestReleaseCount();
 
   const started = await gatewayFetch(ns, "/ai/do/start?name=teardown");
@@ -1199,5 +1200,8 @@ test("DO AI calls complete and caller teardown leaves the host watchdog alive", 
     1
   );
   assert.equal(doRuntimeRequestReleaseCount() - beforeReleased, 1);
-  assert.equal(doRuntimeAiMetric("wdl_ai_pool_events_total", "request", "deadline") >= 1, true);
+  assert.equal(
+    doRuntimeAiMetric("wdl_ai_pool_events_total", "request", "cancelled") - beforeCancelled,
+    1
+  );
 });

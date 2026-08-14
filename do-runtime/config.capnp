@@ -184,7 +184,7 @@ const doRuntimeBindings :List(Workerd.Worker.Binding) = [
 const doRuntimeWorker :Workerd.Worker = (
   modules = .doRuntimeModules,
   compatibilityDate = "2026-04-24",
-  compatibilityFlags = ["nodejs_compat"],
+  compatibilityFlags = ["nodejs_compat", "enable_request_signal"],
   globalOutbound = "internal-network",
   # The do-runtime host actor owns many user DO facets behind one stable
   # storage shard. Keep it resident so short idle gaps do not force workerd to
@@ -199,7 +199,7 @@ const doRuntimeWorker :Workerd.Worker = (
 const doRuntimeEvictableWorker :Workerd.Worker = (
   modules = .doRuntimeModules,
   compatibilityDate = "2026-04-24",
-  compatibilityFlags = ["nodejs_compat"],
+  compatibilityFlags = ["nodejs_compat", "enable_request_signal"],
   globalOutbound = "internal-network",
   durableObjectNamespaces = [
     (className = "WdlDoHostActor", uniqueKey = "wdl-do-host-v1", enableSql = true),

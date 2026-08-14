@@ -566,6 +566,17 @@ async function handleWebSocket(binding, request, url, requestId) {
       );
     }
     if (response.status !== 101 || !response.webSocket) {
+      if (response.ok || response.status === 101) {
+        await rejectProviderResponse(
+          response,
+          aborter,
+          new AiBindingError(
+            502,
+            "ai_provider_invalid_response",
+            "AI provider did not complete the WebSocket upgrade"
+          )
+        );
+      }
       const bytes = await readProviderResponseBytes(response, aborter);
       lease.release("provider_rejected");
       return new Response(/** @type {BodyInit} */ (bytes), {

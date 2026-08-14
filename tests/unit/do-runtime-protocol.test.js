@@ -6,6 +6,7 @@ import { loadDoProtocol } from "../helpers/load-do-protocol.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import {
+  encodeDoObjectNameHeader,
   dispatchDoInvokeWithHintCache,
   retryableOwnerRaceResponse,
   staleDoOwnerHintResponse,
@@ -584,6 +585,46 @@ test("normalizes do websocket connect request from internal headers", () => {
   assert.equal(invoke.request.headers.some(([name]) => name === "x-wdl-do-ownership-error"), false);
   assert.ok(invoke.request.headers.some(([name, value]) => name === "upgrade" && value === "websocket"));
   assert.ok(invoke.request.headers.some(([name, value]) => name === "x-request-id" && value === "rid-1"));
+});
+
+test("DO connect decodes canonical object names before identity validation", () => {
+  for (const objectName of [" room ", "room", "雪"]) {
+    const invoke = normalizeDoConnectRequest(new Request("http://do-runtime/internal/do/connect", {
+      headers: {
+        "x-wdl-do-ns": "tenant",
+        "x-wdl-do-worker": "chat",
+        "x-wdl-do-version": "v1",
+        "x-wdl-do-storage-id": DO_STORAGE_ID,
+        "x-wdl-do-class-name": "ChatRoom",
+        "x-wdl-do-object-name": encodeDoObjectNameHeader(objectName),
+        "x-wdl-do-request-url": "https://demo.workers.example/ws",
+      },
+    }));
+    assert.equal(invoke.objectName, objectName);
+    assert.equal(invoke.hostId, hostIdForObject(DO_STORAGE_ID, "ChatRoom", objectName));
+  }
+});
+
+test("DO connect rejects malformed and non-canonical object-name headers", () => {
+  for (const encoded of ["%", "%e9%9b%aa", "%41"]) {
+    assert.throws(
+      () => normalizeDoConnectRequest(new Request("http://do-runtime/internal/do/connect", {
+        headers: {
+          "x-wdl-do-ns": "tenant",
+          "x-wdl-do-worker": "chat",
+          "x-wdl-do-version": "v1",
+          "x-wdl-do-storage-id": DO_STORAGE_ID,
+          "x-wdl-do-class-name": "ChatRoom",
+          "x-wdl-do-object-name": encoded,
+          "x-wdl-do-request-url": "https://demo.workers.example/ws",
+        },
+      })),
+      (err) => err instanceof DoRuntimeError &&
+        err.status === 400 &&
+        err.code === "invalid_request" &&
+        err.message === "objectName wire encoding is invalid"
+    );
+  }
 });
 
 test("rejects invalid do alarm retry counts", () => {

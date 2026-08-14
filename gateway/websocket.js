@@ -321,7 +321,6 @@ export function proxyGatewayWebSocket(
 
   async function waitForUpstreamErrorDecision() {
     while (upstreamErrorGate !== null) await upstreamErrorGate;
-    if (downstreamClosed) throw new Error("WebSocket client is closed");
   }
 
   /** @param {WebSocket} attachedUpstream */
@@ -628,9 +627,11 @@ export function proxyGatewayWebSocket(
 
   /** @param {string | ArrayBuffer} data */
   async function sendClientMessage(data) {
-    await waitForUpstreamErrorDecision();
+    if (upstreamErrorGate !== null) await waitForUpstreamErrorDecision();
+    if (downstreamClosed) throw new Error("WebSocket client is closed");
     await requireReconnectAllowed();
-    await waitForUpstreamErrorDecision();
+    if (upstreamErrorGate !== null) await waitForUpstreamErrorDecision();
+    if (downstreamClosed) throw new Error("WebSocket client is closed");
     const current = upstream || await reconnectWithBudget();
     if (!current) throw new Error("WebSocket upstream unavailable");
     try {

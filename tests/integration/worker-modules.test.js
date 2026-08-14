@@ -345,6 +345,18 @@ test("host facades respect importable-env flags without exposing generic backend
     hidden,
   });
 
+  /** @type {[string, Record<string, unknown>][]} */
+  const abortCases = [
+    ["/enabled/abort-do", { name: "AbortError", message: "binding caller aborted", dispatches: 0 }],
+    ["/enabled/abort-do-nested", { name: "AbortError", message: "binding caller aborted", dispatches: 0 }],
+    ["/enabled/abort-workflow", { name: "AbortError", message: "binding caller aborted" }],
+  ];
+  for (const [path, expected] of abortCases) {
+    const response = await gatewayFetch(ns, path);
+    assert.equal(response.status, 200, path);
+    assert.deepEqual(await responseJson(response), expected, path);
+  }
+
   const disabled = {
     positional,
     imported: { room: "undefined", flow: "undefined" },

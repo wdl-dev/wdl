@@ -99,7 +99,7 @@ Key families：
 
 Workflow execution 使用两条 channel：
 
-1. Generated `Workflow` facade 调用 binding-scoped host adapter。Adapter 只接受公开 Workflow operation，用不可变 binding props 覆盖 namespace、worker、version、workflow key 和 class，附加 mesh authentication 后转发到 workflows；tenant request field 不能选择其它 workflow。
+1. Generated `Workflow` facade 调用 binding-scoped host adapter。Adapter 只接受公开 Workflow operation，用不可变 binding props 覆盖 namespace、worker、version、workflow key 和 class，附加 mesh authentication 后转发到 workflows；tenant request field 不能选择其它 workflow。Scoped adapter 使用原生 `Fetcher.fetch()`，静态 host worker 启用 incoming request signal，因此显式可取消的 scoped-transport `Request` 被 abort 时，会在 workflows request 前取消有界 body 读取。公开 `Workflow` facade 仍是结构化 operation API，不新增 `Request` 或 `AbortSignal` option。
 2. workflows 把已 claim 的 run dispatch 回 runtime `:8088` 上的 `/internal/workflows/run`。Runtime 加载 frozen worker version 并调用 `className.run(event, stepFacade)`。
 
 Get、status 和 list read 会从请求中的 namespace、workflow key 与 instance id 派生 payload hash。读取 result/error payload 前，persisted `ns`、`workflowKey`、`instanceId` 和 `payloadsKey` 必须与该 canonical identity 一致；任何 divergence 都会以 invalid state fail closed。

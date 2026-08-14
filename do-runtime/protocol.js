@@ -26,6 +26,7 @@ import {
   SESSION_POLICY_PRESERVE,
   parseVersion,
 } from "shared-worker-contract";
+import { decodeDoObjectNameHeader } from "runtime-do-transport";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
@@ -551,6 +552,15 @@ function visibleConnectHeaders(headers) {
   ));
 }
 
+/** @param {string | null} value */
+function decodeConnectObjectName(value) {
+  try {
+    return decodeDoObjectNameHeader(value);
+  } catch {
+    throw new DoRuntimeError(400, "invalid_request", "objectName wire encoding is invalid");
+  }
+}
+
 /** @param {Request} request */
 export function normalizeDoConnectRequest(request) {
   const headers = request.headers;
@@ -560,7 +570,7 @@ export function normalizeDoConnectRequest(request) {
     version: headers.get(CONNECT_HEADERS.version),
     doStorageId: headers.get(CONNECT_HEADERS.doStorageId),
     className: headers.get(CONNECT_HEADERS.className),
-    objectName: headers.get(CONNECT_HEADERS.objectName),
+    objectName: decodeConnectObjectName(headers.get(CONNECT_HEADERS.objectName)),
     owner: headers.has(CONNECT_HEADERS.ownerKey) || headers.has(CONNECT_HEADERS.ownerTaskId) || headers.has(CONNECT_HEADERS.ownerGeneration)
       ? {
           ownerKey: headers.get(CONNECT_HEADERS.ownerKey),

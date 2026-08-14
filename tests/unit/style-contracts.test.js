@@ -2703,6 +2703,27 @@ test("DO transport relative dependencies are registered in host and loaded-worke
   }
 });
 
+test("binding-scoped host Fetchers receive caller disconnect signals", () => {
+  for (const file of [
+    "runtime/config-user.capnp",
+    "runtime/config-system.capnp",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(
+      source,
+      /compatibilityFlags = \[[^\]]*"enable_request_signal"[^\]]*\]/,
+      file
+    );
+  }
+  const doRuntime = readRepoFile("do-runtime/config.capnp");
+  for (const worker of ["doRuntimeWorker", "doRuntimeEvictableWorker"]) {
+    const block = doRuntime.match(
+      new RegExp(`const ${worker}[^=]*= \\(([\\s\\S]*?)\\n\\);`)
+    )?.[1] ?? "";
+    assert.match(block, /compatibilityFlags = \[[^\]]*"enable_request_signal"[^\]]*\]/, worker);
+  }
+});
+
 test("queue delay cap literals stay aligned across standalone tiers", () => {
   const expected = "86_400";
   for (const file of ["control/lib.js", "runtime/lib.js", "rust/scheduler/src/queue/mod.rs"]) {

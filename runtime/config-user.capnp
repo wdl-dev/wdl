@@ -126,8 +126,9 @@ const loaderWorker :Workerd.Worker = (
   ],
   compatibilityDate = "2026-04-24",
   # service_binding_extra_handlers exposes stub.queue()/scheduled() on
-  # Fetcher stubs returned by workerLoader.get(). Runtime-only flag.
-  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers"],
+  # Fetcher stubs returned by workerLoader.get(). enable_request_signal lets
+  # binding-scoped host readers observe caller disconnects. Runtime-only flags.
+  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers", "enable_request_signal"],
   globalOutbound = "internal-network",
   bindings = [
     (name = "SERVICE_NAME", text = "user-runtime"),

@@ -246,6 +246,11 @@ Workflow execution uses two channels:
    accepts only public Workflow operations, replaces namespace, worker, version,
    workflow key, and class with immutable binding props, attaches mesh authentication,
    and forwards to workflows. Tenant request fields cannot select another workflow.
+   The scoped adapter uses native `Fetcher.fetch()`, and static host workers enable
+   incoming request signals. Aborting an explicitly abortable scoped-transport
+   `Request` therefore cancels bounded body ingestion before the workflows request. The
+   public `Workflow` facade remains a structured operation API and does not add a
+   `Request` or `AbortSignal` option.
 2. workflows dispatches claimed runs back to runtime `/internal/workflows/run` on
    `:8088`. Runtime loads the frozen worker version and invokes `className.run(event,
    stepFacade)`.

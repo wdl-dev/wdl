@@ -10,7 +10,7 @@ import {
   replayOwnerUnavailableForFetch,
   rpcInvokeInit,
   rpcResultFromResponse,
-  scopedDoWebSocketRequest,
+  scopedDoRequest,
 } from "./_wdl-do-transport.js";
 import { createOwnerHintCache } from "./_wdl-owner-hint-cache.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
@@ -53,7 +53,6 @@ function requireObjectIdString(value, method) {
  * }} DurableObjectBindingProps
  * @typedef {{
  *   fetch?(request: Request): unknown,
- *   fetchObject?(objectName: string, request: Request, requestId: string | null): unknown,
  *   rpcObject?(objectName: string, method: string, args: unknown[], requestId: string | null): unknown,
  * }} DurableObjectBindingProxy
  * @typedef {{
@@ -131,9 +130,7 @@ export class DurableObjectNamespace {
   /** @type {DoBackend | undefined} */
   #backend;
   /** @type {null | ((objectName: string, request: Request, requestId: string | null) => Promise<Response>)} */
-  #bindingFetchObject = null;
-  /** @type {null | ((objectName: string, request: Request, requestId: string | null) => Promise<Response>)} */
-  #bindingFetchWebSocket = null;
+  #bindingFetch = null;
   /** @type {null | ((objectName: string, method: string, args: unknown[], requestId: string | null) => Promise<unknown>)} */
   #bindingRpcObject = null;
   /** @type {DoBackend | undefined} */
@@ -146,10 +143,10 @@ export class DurableObjectNamespace {
   /** @param {DurableObjectBindingProxy} proxy */
   #setBindingProxy(proxy) {
     const fetch = proxy.fetch;
-    this.#bindingFetchWebSocket = typeof fetch === "function"
+    this.#bindingFetch = typeof fetch === "function"
       ? async (objectName, request, requestId) => {
         const response = await intrinsicReflectApply(fetch, proxy, [
-          scopedDoWebSocketRequest(objectName, request, requestId),
+          scopedDoRequest(objectName, request, requestId),
         ]);
         if (!(response instanceof Response)) {
           throw new Error("Durable Object binding fetch returned a non-Response value");
@@ -157,16 +154,6 @@ export class DurableObjectNamespace {
         return response;
       }
       : null;
-    this.#bindingFetchObject = async (objectName, request, requestId) => {
-      if (typeof proxy.fetchObject !== "function") {
-        throw new Error("Durable Object binding fetchObject is not configured");
-      }
-      const response = await proxy.fetchObject(objectName, request, requestId);
-      if (!(response instanceof Response)) {
-        throw new Error("Durable Object binding fetchObject returned a non-Response value");
-      }
-      return response;
-    };
     this.#bindingRpcObject = typeof proxy.rpcObject === "function"
       ? async (objectName, method, args, requestId) => await proxy.rpcObject?.(objectName, method, args, requestId)
       : null;
@@ -214,11 +201,8 @@ export class DurableObjectNamespace {
   /** @param {string} objectName @param {Request} request */
   async fetchObject(objectName, request) {
     const requestId = this.#currentRequestId();
-    if (this.#bindingFetchWebSocket && isWebSocketUpgrade(request)) {
-      return await this.#bindingFetchWebSocket(objectName, request, requestId);
-    }
-    if (this.#bindingFetchObject) {
-      return await this.#bindingFetchObject(objectName, request, requestId);
+    if (this.#bindingFetch) {
+      return await this.#bindingFetch(objectName, request, requestId);
     }
     // Explicit backend options are the low-level transport construction path;
     // runtime materialization supplies binding-scoped methods above.

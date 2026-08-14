@@ -456,6 +456,32 @@ test("AI provider delete removes metadata and credential while missing delete is
   assert.equal(redis().hashes.get("ai:provider-credentials:demo")?.xai, undefined);
 });
 
+test("AI provider recreation rejects a credential revision from the deleted incarnation", async () => {
+  const first = await readJsonResponse(
+    await call("PUT", ["providers", "openai"], providerBody()),
+    200
+  );
+  assert.equal((await call("DELETE", ["providers", "openai"])).status, 200);
+
+  const recreated = await readJsonResponse(
+    await call("PUT", ["providers", "openai"], providerBody()),
+    200
+  );
+  assert.notEqual(recreated.provider.revision, first.provider.revision);
+
+  const stale = await call("PUT", ["providers", "openai", "credential"], {
+    revision: first.provider.revision,
+    credential: "stale-provider-key",
+  });
+  assert.equal((await readJsonResponse(stale, 409)).error, "ai_provider_revision_mismatch");
+  assert.equal(redis().hashes.get("ai:provider-credentials:demo")?.openai, undefined);
+
+  assert.equal((await call("PUT", ["providers", "openai", "credential"], {
+    revision: recreated.provider.revision,
+    credential: "current-provider-key",
+  })).status, 200);
+});
+
 test("AI provider delete removes a residual credential without metadata", async () => {
   redis().hashes.set("ai:provider-credentials:demo", { orphan: "WDL-ENC:residual" });
   assert.deepEqual(await readJsonResponse(await call("DELETE", ["providers", "orphan"]), 200), {

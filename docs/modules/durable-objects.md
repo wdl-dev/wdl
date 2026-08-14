@@ -87,7 +87,10 @@ and storage id. They do not accept inline worker source.
 
 Tenant-facing DO object names and ids must be well-formed Unicode strings. Lone UTF-16
 surrogates are rejected by `idFromName()` / `idFromString()` before hashing or dispatch;
-do-runtime alarm ingress and Workflows revalidation enforce the same boundary.
+do-runtime alarm ingress and Workflows revalidation enforce the same boundary. The
+binding-scoped native Fetcher uses the same canonical reversible ASCII encoding for
+both object-name header hops, so HTTP header normalization cannot trim whitespace or
+reject Unicode before the original identity reaches do-runtime validation.
 
 DO host ids are capped at 512 UTF-8 bytes and use canonical `shardN` suffixes without
 leading zeroes. DO binding class names use the ASCII JavaScript class-name grammar and
@@ -204,7 +207,11 @@ different `doStorageId`.
   fix namespace, worker version, storage identity, and class before internal auth is
   attached; loaded-worker env never contains a generic DO router or owner-network
   Fetcher. Module evaluation may observe this scoped transport, but it cannot select a
-  different DO binding identity.
+  different DO binding identity. DO fetches cross into that adapter through native
+  `Fetcher.fetch()`, not custom Request RPC. Static host workers enable incoming request
+  signals, so aborting an explicitly abortable caller `Request` cancels bounded body
+  ingestion before owner dispatch. Structured DO RPC continues to cross the custom RPC
+  boundary as bounded JSON data rather than a `Request`.
 - `WEBSOCKET_RECONNECT_DELAYS_MS` and `WEBSOCKET_MAX_BUFFERED_MESSAGES` tune gateway
   backend reconnect budget and client-message buffering without a code rebuild.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due

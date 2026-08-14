@@ -14,8 +14,8 @@ export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
 export const DO_OWNER_HINT_CODE = "do_owner_hint";
 export const INTERNAL_AUTH_HEADER = "x-wdl-internal-auth";
-export const DO_BINDING_WEBSOCKET_OBJECT_HEADER = "x-wdl-do-binding-object-name";
-export const DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER = "x-wdl-do-binding-request-id";
+export const DO_BINDING_OBJECT_HEADER = "x-wdl-do-binding-object-name";
+export const DO_BINDING_REQUEST_ID_HEADER = "x-wdl-do-binding-request-id";
 
 const DO_OWNER_HINT_HEADERS = {
   ownerKey: "x-wdl-do-owner-key",
@@ -72,9 +72,17 @@ const IntrinsicRequest = Request;
 const IntrinsicResponse = Response;
 const IntrinsicUint8Array = Uint8Array;
 const IntrinsicWeakSet = WeakSet;
+const intrinsicDecodeURIComponent = decodeURIComponent;
+const intrinsicEncodeURIComponent = encodeURIComponent;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicArrayIsArray = Array.isArray;
+const intrinsicAbortSignalAbortedGet = /** @type {(this: AbortSignal) => boolean} */ (
+  prototypeGetter(AbortSignal.prototype, "aborted")
+);
+const intrinsicAbortSignalThrowIfAborted = AbortSignal.prototype.throwIfAborted;
 const intrinsicDataViewSetUint32 = DataView.prototype.setUint32;
+const intrinsicEventTargetAddEventListener = EventTarget.prototype.addEventListener;
+const intrinsicEventTargetRemoveEventListener = EventTarget.prototype.removeEventListener;
 const intrinsicHeadersAppend = Headers.prototype.append;
 const intrinsicHeadersDelete = Headers.prototype.delete;
 const intrinsicHeadersForEach = Headers.prototype.forEach;
@@ -120,6 +128,9 @@ const intrinsicRequestBodyGet = /** @type {(this: Request) => ReadableStream<Uin
 );
 const intrinsicRequestMethodGet = /** @type {(this: Request) => string} */ (
   prototypeGetter(Request.prototype, "method")
+);
+const intrinsicRequestSignalGet = /** @type {(this: Request) => AbortSignal} */ (
+  prototypeGetter(Request.prototype, "signal")
 );
 const intrinsicRequestUrlGet = /** @type {(this: Request) => string} */ (
   prototypeGetter(Request.prototype, "url")
@@ -232,42 +243,58 @@ function copyHeaders(source) {
   return out;
 }
 
+/** @param {string} objectName */
+export function encodeDoObjectNameHeader(objectName) {
+  return intrinsicReflectApply(intrinsicEncodeURIComponent, undefined, [objectName]);
+}
+
+/** @param {string | null} encoded */
+export function decodeDoObjectNameHeader(encoded) {
+  if (!encoded) {
+    throw new TypeError("Durable Object transport requires an object name");
+  }
+  let objectName;
+  try {
+    objectName = intrinsicReflectApply(intrinsicDecodeURIComponent, undefined, [encoded]);
+  } catch {
+    throw new TypeError("Durable Object transport has an invalid object name");
+  }
+  if (!objectName || encodeDoObjectNameHeader(objectName) !== encoded) {
+    throw new TypeError("Durable Object transport has an invalid object name");
+  }
+  return objectName;
+}
+
 /**
  * Build the request sent through a binding-scoped WorkerEntrypoint.fetch().
  * The host adapter owns namespace/class identity; the tenant supplies only the
- * object name and original public WebSocket request.
+ * object name and original public request.
  *
  * @param {string} objectName
  * @param {Request} request
  * @param {string | null} requestId
  */
-export function scopedDoWebSocketRequest(objectName, request, requestId) {
+export function scopedDoRequest(objectName, request, requestId) {
   const headers = copyHeaders(intrinsicReflectApply(intrinsicRequestHeadersGet, request, []));
-  headerSet(headers, DO_BINDING_WEBSOCKET_OBJECT_HEADER, objectName);
+  headerSet(headers, DO_BINDING_OBJECT_HEADER, encodeDoObjectNameHeader(objectName));
   if (requestId) {
-    headerSet(headers, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER, requestId);
+    headerSet(headers, DO_BINDING_REQUEST_ID_HEADER, requestId);
   } else {
-    headerDelete(headers, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER);
+    headerDelete(headers, DO_BINDING_REQUEST_ID_HEADER);
   }
   return new IntrinsicRequest(request, { headers });
 }
 
 /** @param {Request} request */
-export function readScopedDoWebSocketRequest(request) {
-  if (!isWebSocketUpgrade(request)) {
-    throw new TypeError("Durable Object binding transport only accepts WebSocket upgrades");
-  }
+export function readScopedDoRequest(request) {
   const sourceHeaders = intrinsicReflectApply(intrinsicRequestHeadersGet, request, []);
-  const objectName = headerValue(sourceHeaders, DO_BINDING_WEBSOCKET_OBJECT_HEADER);
-  if (!objectName) {
-    throw new TypeError("Durable Object binding transport requires an object name");
-  }
+  const objectName = decodeDoObjectNameHeader(headerValue(sourceHeaders, DO_BINDING_OBJECT_HEADER));
   const requestId = sanitizeRequestId(
-    headerValue(sourceHeaders, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER)
+    headerValue(sourceHeaders, DO_BINDING_REQUEST_ID_HEADER)
   );
   const headers = copyHeaders(sourceHeaders);
-  headerDelete(headers, DO_BINDING_WEBSOCKET_OBJECT_HEADER);
-  headerDelete(headers, DO_BINDING_WEBSOCKET_REQUEST_ID_HEADER);
+  headerDelete(headers, DO_BINDING_OBJECT_HEADER);
+  headerDelete(headers, DO_BINDING_REQUEST_ID_HEADER);
   return {
     objectName,
     requestId,
@@ -327,6 +354,11 @@ function requestMethod(request) {
 }
 
 /** @param {Request} request */
+function requestSignal(request) {
+  return intrinsicReflectApply(intrinsicRequestSignalGet, request, []);
+}
+
+/** @param {Request} request */
 function requestUrl(request) {
   return intrinsicReflectApply(intrinsicRequestUrlGet, request, []);
 }
@@ -343,6 +375,30 @@ function readStreamChunk(reader) {
   return intrinsicReflectApply(intrinsicReadableStreamReaderRead, reader, []);
 }
 
+/** @param {AbortSignal} signal */
+function abortSignalAborted(signal) {
+  return intrinsicReflectApply(intrinsicAbortSignalAbortedGet, signal, []);
+}
+
+/** @param {AbortSignal} signal */
+function throwIfAborted(signal) {
+  intrinsicReflectApply(intrinsicAbortSignalThrowIfAborted, signal, []);
+}
+
+/** @param {AbortSignal} signal @param {() => void} listener */
+function addAbortListener(signal, listener) {
+  intrinsicReflectApply(intrinsicEventTargetAddEventListener, signal, [
+    "abort",
+    listener,
+    { once: true },
+  ]);
+}
+
+/** @param {AbortSignal} signal @param {() => void} listener */
+function removeAbortListener(signal, listener) {
+  intrinsicReflectApply(intrinsicEventTargetRemoveEventListener, signal, ["abort", listener]);
+}
+
 /** @param {ReadableStreamDefaultReader<Uint8Array>} reader */
 function releaseStreamReader(reader) {
   intrinsicReflectApply(intrinsicReadableStreamReaderReleaseLock, reader, []);
@@ -354,7 +410,7 @@ function cancelStreamReader(reader) {
     const cancellation = intrinsicReflectApply(intrinsicReadableStreamReaderCancel, reader, []);
     intrinsicReflectApply(intrinsicPromiseThen, cancellation, [undefined, () => {}]);
   } catch {
-    // Cancellation is best-effort after the bounded reader has already rejected.
+    // Cancellation is best-effort; the caller-visible size or abort error must not wait on it.
   }
 }
 
@@ -501,9 +557,10 @@ function boundedRequestHeaderByteLength(value, maxBytes) {
 
 /**
  * @param {Request} request
+ * @param {AbortSignal} signal
  * @returns {Promise<Uint8Array>}
  */
-async function readRequestBodyBytes(request) {
+async function readRequestBodyBytes(request, signal) {
   // This source is injected into loaded workers, so keep the bounded reader
   // local instead of importing a helper that would add another facade module.
   const contentLength = headerValue(requestHeaders(request), "content-length");
@@ -517,12 +574,17 @@ async function readRequestBodyBytes(request) {
   if (!requestStream) return new IntrinsicUint8Array();
 
   const reader = streamReader(requestStream);
+  const abort = () => cancelStreamReader(reader);
+  addAbortListener(signal, abort);
+  if (abortSignalAborted(signal)) abort();
   /** @type {Uint8Array[]} */
   const chunks = [];
   let total = 0;
   try {
+    throwIfAborted(signal);
     while (true) {
       const { done, value } = await readStreamChunk(reader);
+      throwIfAborted(signal);
       if (done) break;
       total += byteArrayLength(value);
       if (total > MAX_DO_REQUEST_BODY_BYTES) {
@@ -532,6 +594,7 @@ async function readRequestBodyBytes(request) {
       chunks[chunks.length] = value;
     }
   } finally {
+    removeAbortListener(signal, abort);
     releaseStreamReader(reader);
   }
 
@@ -730,7 +793,9 @@ function retryableDirectOwnerResponse(response) {
  * @returns {Promise<{ spec: { method: string, url: string, headers: [string, string][] }, bodyBytes: Uint8Array | null }>}
  */
 export async function requestSpec(request, requestId) {
-  const forwarded = new IntrinsicRequest(request);
+  const signal = requestSignal(request);
+  throwIfAborted(signal);
+  const forwarded = new IntrinsicRequest(request, { signal });
   const forwardedHeaders = requestHeaders(forwarded);
   for (let i = 0; i < DO_FETCH_STRIP_HEADERS.length; i++) {
     headerDelete(forwardedHeaders, DO_FETCH_STRIP_HEADERS[i]);
@@ -747,7 +812,7 @@ export async function requestSpec(request, requestId) {
   spec.headers = headers;
   let bodyBytes = null;
   if (method !== "GET" && method !== "HEAD") {
-    const body = await readRequestBodyBytes(forwarded);
+    const body = await readRequestBodyBytes(forwarded, signal);
     if (byteArrayLength(body) > 0) bodyBytes = body;
   }
   return {
@@ -804,7 +869,7 @@ export function connectHeaders(props, objectName, request, requestId) {
   headerSet(headers, DO_CONNECT_HEADERS.version, props.version);
   headerSet(headers, DO_CONNECT_HEADERS.doStorageId, props.doStorageId);
   headerSet(headers, DO_CONNECT_HEADERS.className, props.className);
-  headerSet(headers, DO_CONNECT_HEADERS.objectName, objectName);
+  headerSet(headers, DO_CONNECT_HEADERS.objectName, encodeDoObjectNameHeader(objectName));
   headerSet(headers, DO_CONNECT_HEADERS.requestUrl, requestUrl(request));
   headerDelete(headers, "x-request-id");
   const canonicalRequestId = sanitizeRequestId(requestId);

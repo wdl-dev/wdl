@@ -63,10 +63,12 @@ function workflowOperation(request) {
 
 /** @param {Request} request */
 async function workflowFields(request) {
+  const signal = request.signal;
   let value;
   try {
-    value = JSON.parse(await readBoundedText(request, WORKFLOW_BINDING_REQUEST_BYTES_MAX));
+    value = JSON.parse(await readBoundedText(request, WORKFLOW_BINDING_REQUEST_BYTES_MAX, signal));
   } catch (error) {
+    signal.throwIfAborted();
     throw new TypeError("Workflow binding request body must be bounded JSON", { cause: error });
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {

@@ -109,8 +109,8 @@ test("DurableObjectNamespace fetch uses its private request-id provider", async 
   /** @type {any[]} */
   const calls = [];
   const ns = new DurableObjectNamespace({
-    async fetchObject(/** @type {string} */ objectName, /** @type {Request} */ request, /** @type {string} */ requestId) {
-      calls.push({ objectName, request, requestId });
+    async fetch(/** @type {Request} */ request) {
+      calls.push(request);
       return new Response("ok", { status: 201 });
     },
   }, { requestIdProvider: () => "rid-1" });
@@ -124,22 +124,22 @@ test("DurableObjectNamespace fetch uses its private request-id provider", async 
 
   assert.equal(response.status, 201);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].objectName, "room-a");
-  assert.equal(calls[0].requestId, "rid-1");
-  assert.equal(calls[0].request.method, "POST");
-  assert.equal(await calls[0].request.text(), "hello");
+  assert.equal(calls[0].headers.get("x-wdl-do-binding-object-name"), "room-a");
+  assert.equal(calls[0].headers.get("x-wdl-do-binding-request-id"), "rid-1");
+  assert.equal(calls[0].method, "POST");
+  assert.equal(await calls[0].text(), "hello");
 });
 
 test("DurableObjectNamespace binding fetch rejects non-Response host results", async () => {
   const ns = new DurableObjectNamespace({
-    async fetchObject() {
+    async fetch() {
       return { ok: true };
     },
   });
 
   await assert.rejects(
     ns.get(ns.idFromName("room-a")).fetch("https://demo.workers.example/chat"),
-    /Durable Object binding fetchObject returned a non-Response value/
+    /Durable Object binding fetch returned a non-Response value/
   );
 });
 
@@ -148,12 +148,9 @@ test("DurableObjectNamespace host proxy handles normal and WebSocket fetch", asy
   const proxyCalls = [];
   const ns = new DurableObjectNamespace({
     async fetch(/** @type {Request} */ request) {
-      proxyCalls.push({ request, websocket: true });
-      return new Response("websocket-ok");
-    },
-    async fetchObject(/** @type {string} */ objectName, /** @type {Request} */ request) {
-      proxyCalls.push({ objectName, request });
-      return new Response("proxy-ok");
+      const websocket = isWebSocketUpgrade(request);
+      proxyCalls.push({ request, websocket });
+      return new Response(websocket ? "websocket-ok" : "proxy-ok");
     },
   });
 
@@ -169,7 +166,8 @@ test("DurableObjectNamespace host proxy handles normal and WebSocket fetch", asy
   assert.equal(await normal.text(), "proxy-ok");
   assert.equal(await websocket.text(), "websocket-ok");
   assert.equal(proxyCalls.length, 2);
-  assert.equal(proxyCalls[0].objectName, "room-a");
+  assert.equal(proxyCalls[0].request.headers.get("x-wdl-do-binding-object-name"), "room-a");
+  assert.equal(proxyCalls[0].websocket, false);
   assert.equal(proxyCalls[1].websocket, true);
   assert.equal(proxyCalls[1].request.headers.get("x-wdl-do-binding-object-name"), "room-a");
 });
@@ -179,7 +177,7 @@ test("DurableObjectNamespace classifies host proxies with a captured Object.hasO
     throw new Error("tenant Object.hasOwn was called");
   }, async () => {
     const namespace = new DurableObjectNamespace({
-      async fetchObject() {
+      async fetch() {
         return new Response("ok");
       },
     });
@@ -381,9 +379,6 @@ test("DurableObjectNamespace RPC uses its private request-id provider", async ()
 
 test("DurableObjectNamespace binding RPC preserves proxy receiver", async () => {
   const binding = {
-    async fetchObject() {
-      return new Response("unused");
-    },
     async rpcObject(/** @type {string} */ objectName, /** @type {string} */ method, /** @type {unknown[]} */ args, /** @type {string} */ requestId) {
       assert.equal(this, binding);
       return { objectName, method, args, requestId };
@@ -403,9 +398,6 @@ test("DurableObjectNamespace binding RPC preserves proxy receiver", async () => 
 
 test("DurableObjectNamespace binding RPC accepts undefined host results", async () => {
   const ns = new DurableObjectNamespace({
-    async fetchObject() {
-      return new Response("unused");
-    },
     async rpcObject() {
       return undefined;
     },
@@ -2308,6 +2300,69 @@ test("DO requestSpec rejects oversized streams without waiting for cancel", asyn
   assert.equal(hostileCatchCalls, 0);
 });
 
+test("DO requestSpec cancels a stalled request body when the caller aborts", async () => {
+  let cancellations = 0;
+  const controller = new AbortController();
+  const reason = new DOMException("caller cancelled", "AbortError");
+  const body = new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancellations += 1;
+    },
+  });
+  const request = new Request("https://demo.workers.example/send", /** @type {RequestInit} */ ({
+    method: "POST",
+    body,
+    duplex: "half",
+    signal: controller.signal,
+  }));
+
+  await withMockedPropertyDescriptor(
+    Request.prototype,
+    "signal",
+    {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return new AbortController().signal;
+      },
+    },
+    () => withMockedProperty(
+      EventTarget.prototype,
+      "addEventListener",
+      function hostileAddEventListener() {},
+      () => withMockedProperty(
+        AbortSignal.prototype,
+        "throwIfAborted",
+        function hostileThrowIfAborted() {},
+        async () => {
+          const pending = requestSpec(request, "rid-abort");
+          controller.abort(reason);
+          await assert.rejects(
+            withTestTimeout(pending, "requestSpec ignored the caller abort"),
+            (error) => error === reason
+          );
+        }
+      )
+    )
+  );
+
+  assert.equal(cancellations, 1);
+});
+
+test("DO requestSpec rejects already-aborted requests before body admission", async () => {
+  for (const method of ["GET", "POST"]) {
+    const reason = new DOMException(`${method} cancelled`, "AbortError");
+    const request = new Request("https://demo.workers.example/send", {
+      method,
+      signal: AbortSignal.abort(reason),
+    });
+    await assert.rejects(requestSpec(request, null), (error) => error === reason);
+  }
+});
+
 test("DurableObjectNamespace facade uses direct upgrade path for websockets", async () => {
   /** @type {any[]} */
   const calls = [];
@@ -2677,7 +2732,7 @@ test("DurableObjectNamespace drops stale cached owner hints after owner lease bu
 });
 
 test("DurableObjectNamespace facade rejects foreign ids", async () => {
-  const ns = new DurableObjectNamespace({ fetchObject() {} });
+  const ns = new DurableObjectNamespace({ fetch() {} });
   assert.throws(() => ns.idFromName(""), /requires a non-empty string/);
   for (const value of ["\ud800", "\udc00"]) {
     assert.throws(() => ns.idFromName(value), /requires well-formed Unicode/);
