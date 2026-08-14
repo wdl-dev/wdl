@@ -112,7 +112,7 @@ export default {
         });
       }
 
-      if (request.method === "POST" && path === "view-bounds") {
+      if (request.method === "POST" && path === "buffer-integrity") {
         class MisleadingWords extends Uint16Array {
           get byteLength() { return 0; }
         }

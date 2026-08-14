@@ -50,7 +50,7 @@ function writeR2Project(dir, name) {
   writeFileSync(path.join(dir, "src/index.js"), R2_DEMO_SRC);
 }
 
-test("R2 demo: CLI deploy supports PUT/GET/HEAD/LIST/range/delete and stream copy", async () => {
+test("R2 demo: CLI deploy covers binding operations, stream copy, and buffer integrity", async () => {
   const ns = uniqueNs("r2-cli");
   const deploy = runWdlCli(["deploy", "test-workers/r2-demo", "--ns", ns]);
   assertOk(deploy);
@@ -121,7 +121,7 @@ test("R2 demo: CLI deploy supports PUT/GET/HEAD/LIST/range/delete and stream cop
   assert.equal(copied.copied.text, "0123456789");
   assert.deepEqual(copied.copied.customMetadata, { copiedfrom: "range.txt" });
 
-  res = await call(ns, "r2-demo", "POST", "/view-bounds?key=view.bin");
+  res = await call(ns, "r2-demo", "POST", "/buffer-integrity?key=buffer.bin");
   assert.equal(res.status, 200);
   assert.deepEqual(await responseJson(res), {
     size: 4,
