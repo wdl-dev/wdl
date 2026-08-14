@@ -55,13 +55,6 @@ function stringOrUndefined(value) {
   return typeof value === "string" ? value : undefined;
 }
 
-/** @param {Uint8Array} bytes @returns {ArrayBuffer} */
-function bytesToArrayBuffer(bytes) {
-  return /** @type {ArrayBuffer} */ (
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-  );
-}
-
 /** @param {ReadableStreamDefaultReader<Uint8Array>} reader @param {unknown} reason */
 function cancelReaderBestEffort(reader, reason) {
   try {
@@ -103,7 +96,13 @@ async function readStreamWithLimit(stream, operation) {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      const bytes = streamChunkBytes(value, operation);
+      let bytes;
+      try {
+        bytes = streamChunkBytes(value, operation);
+      } catch (error) {
+        cancelReaderBestEffort(reader, error);
+        throw error;
+      }
       const chunkLength = r2Uint8ArrayByteLength(bytes);
       total += chunkLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
@@ -147,7 +146,15 @@ function cappedReadableStream(stream, operation) {
         controller.close();
         return;
       }
-      const bytes = streamChunkBytes(value, operation);
+      let bytes;
+      try {
+        bytes = streamChunkBytes(value, operation);
+      } catch (error) {
+        cancelReaderBestEffort(reader, error);
+        try { reader.releaseLock(); } catch {}
+        controller.error(error);
+        return;
+      }
       const chunkLength = r2Uint8ArrayByteLength(bytes);
       total += chunkLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
@@ -419,7 +426,8 @@ export class R2ObjectBody extends R2Object {
   }
 
   async arrayBuffer() {
-    return bytesToArrayBuffer(await this.bytes());
+    const bytes = await this.bytes();
+    return /** @type {ArrayBuffer} */ (bytes.buffer);
   }
 
   async text() {

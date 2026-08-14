@@ -27,14 +27,18 @@ function eventTargetSelfSignalProbe() {
   const controller = new AbortController();
   const { signal } = controller;
   const noop = () => {};
+  let victimCalls = 0;
+  const victim = () => { victimCalls += 1; };
 
-  // A self-signal listener must remain valid as the target gains event types.
+  // Added event types must not corrupt a self-signal listener or its removal.
   signal.addEventListener("one", noop);
   signal.addEventListener("two", noop);
   signal.addEventListener("three", noop);
-  signal.addEventListener("victim", noop, { signal });
+  signal.addEventListener("victim", victim, { signal });
+  signal.dispatchEvent(new Event("victim"));
   controller.abort();
-  return signal.aborted;
+  signal.dispatchEvent(new Event("victim"));
+  return { aborted: signal.aborted, victimCalls };
 }
 
 async function streamAbortRelockProbe() {
@@ -151,7 +155,7 @@ export default {
         setAttributeChained,
         setAttributesChained,
       },
-      eventTargetSelfSignalAbort: eventTargetSelfSignalProbe(),
+      eventTargetSelfSignal: eventTargetSelfSignalProbe(),
       streamAbortRelockSafe: await streamAbortRelockProbe(),
       htmlRewriter: await htmlRewriterProbe(),
       byob: await byobProbe(),

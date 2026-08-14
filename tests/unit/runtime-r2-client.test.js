@@ -68,6 +68,25 @@ function streamWithQueuedMutationOnPull(chunk, mutate) {
   });
 }
 
+/**
+ * @param {ReadableStream<Uint8Array>} body
+ * @param {{ key?: string, size?: number }} [metadata]
+ */
+function createR2ObjectBody(body, { key = "a.txt", size = 0 } = {}) {
+  return new R2ObjectBody({
+    key,
+    version: "",
+    size,
+    etag: "abc",
+    httpEtag: '"abc"',
+    uploaded: Date.now(),
+    httpMetadata: {},
+    customMetadata: {},
+    checksums: {},
+    storageClass: "Standard",
+  }, body);
+}
+
 test("R2Bucket.list validates limit before host binding call", async () => {
   const bucket = new R2Bucket({
     async list() {
@@ -468,18 +487,10 @@ test("R2 buffered readers observe default-HWM mutations made before delivery", a
   ));
 
   const bodyChunk = new Uint8Array([104, 101, 108, 112]);
-  const body = new R2ObjectBody({
-    key: "queued.bin",
-    version: "",
-    size: bodyChunk.byteLength,
-    etag: "abc",
-    httpEtag: '"abc"',
-    uploaded: Date.now(),
-    httpMetadata: {},
-    customMetadata: {},
-    checksums: {},
-    storageClass: "Standard",
-  }, streamWithQueuedMutationOnPull(bodyChunk, () => bodyChunk.fill(0)));
+  const body = createR2ObjectBody(
+    streamWithQueuedMutationOnPull(bodyChunk, () => bodyChunk.fill(0)),
+    { key: "queued.bin", size: bodyChunk.byteLength }
+  );
 
   assert.deepEqual(putObserved, [deliveredBytes]);
   assert.deepEqual(Array.from(await body.bytes()), deliveredBytes);
@@ -724,6 +735,34 @@ test("R2Bucket.put does not trust a mutable Uint8Array prototype as a brand", as
   assert.deepEqual(Array.from(observed), [108, 112, 33, 34]);
 });
 
+test("R2Bucket.put rejects an invalid chunk without waiting for cancel", async () => {
+  let cancelCalls = 0;
+  let hostCalls = 0;
+  const bucket = new R2Bucket({
+    async put() {
+      hostCalls += 1;
+      return null;
+    },
+  });
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(/** @type {any} */ ("not bytes"));
+    },
+    cancel() {
+      cancelCalls += 1;
+      return new Promise(() => {});
+    },
+  });
+
+  const outcome = await settlementWithinTestWindow(bucket.put("invalid.bin", stream));
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(String("reason" in outcome ? outcome.reason : ""), /must be BufferSource values/);
+  assert.equal(cancelCalls, 1);
+  assert.equal(stream.locked, false);
+  assert.equal(hostCalls, 0);
+});
+
 test("R2Bucket.put rejects an oversized stream without waiting for cancel", async () => {
   let cancelled = false;
   let hostCalls = 0;
@@ -782,23 +821,12 @@ test("R2Bucket.get returns R2Object when host binding returns no body", async ()
 
 test("R2ObjectBody.bytes snapshots a full-buffer single chunk", async () => {
   const chunk = new TextEncoder().encode("hello");
-  const obj = new R2ObjectBody({
-    key: "a.txt",
-    version: "",
-    size: chunk.byteLength,
-    etag: "abc",
-    httpEtag: '"abc"',
-    uploaded: Date.now(),
-    httpMetadata: {},
-    customMetadata: {},
-    checksums: {},
-    storageClass: "Standard",
-  }, new ReadableStream({
+  const obj = createR2ObjectBody(new ReadableStream({
     start(controller) {
       controller.enqueue(chunk);
       controller.close();
     },
-  }));
+  }), { size: chunk.byteLength });
 
   const bytes = await obj.bytes();
 
@@ -809,23 +837,12 @@ test("R2ObjectBody.bytes snapshots a full-buffer single chunk", async () => {
 test("R2ObjectBody.bytes copies a sliced single chunk before exposing it", async () => {
   const backing = new TextEncoder().encode("xxhelloyy");
   const chunk = backing.subarray(2, 7);
-  const obj = new R2ObjectBody({
-    key: "a.txt",
-    version: "",
-    size: chunk.byteLength,
-    etag: "abc",
-    httpEtag: '"abc"',
-    uploaded: Date.now(),
-    httpMetadata: {},
-    customMetadata: {},
-    checksums: {},
-    storageClass: "Standard",
-  }, new ReadableStream({
+  const obj = createR2ObjectBody(new ReadableStream({
     start(controller) {
       controller.enqueue(chunk);
       controller.close();
     },
-  }));
+  }), { size: chunk.byteLength });
 
   const bytes = await obj.bytes();
 
@@ -836,25 +853,62 @@ test("R2ObjectBody.bytes copies a sliced single chunk before exposing it", async
   assert.deepEqual([...new Uint8Array(bytes.buffer)], [...bytes]);
 });
 
+test("R2ObjectBody.arrayBuffer reuses its exact-fit byte buffer", async () => {
+  const chunk = new TextEncoder().encode("hello");
+  const obj = createR2ObjectBody(new ReadableStream({
+    start(controller) {
+      controller.enqueue(chunk);
+      controller.close();
+    },
+  }), { size: chunk.byteLength });
+
+  const buffer = await withMockedPropertyDescriptor(
+    ArrayBuffer.prototype,
+    "slice",
+    {
+      writable: true,
+      value() { throw new Error("ArrayBuffer.prototype.slice should not be called"); },
+    },
+    () => obj.arrayBuffer()
+  );
+
+  assert.deepEqual([...new Uint8Array(buffer)], [...chunk]);
+});
+
+test("R2ObjectBody raw body rejects an invalid chunk without waiting for cancel", async () => {
+  let cancelCalls = 0;
+  const source = new ReadableStream({
+    start(controller) {
+      controller.enqueue(/** @type {any} */ ("not bytes"));
+    },
+    cancel() {
+      cancelCalls += 1;
+      return new Promise(() => {});
+    },
+  });
+  const obj = createR2ObjectBody(source, { key: "invalid.bin" });
+  const reader = obj.body.getReader();
+
+  const outcome = await settlementWithinTestWindow(reader.read());
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(String("reason" in outcome ? outcome.reason : ""), /must be BufferSource values/);
+  assert.equal(cancelCalls, 1);
+  assert.equal(source.locked, false);
+  reader.releaseLock();
+});
+
 test("R2ObjectBody raw body stream enforces the object byte cap", async () => {
-  const obj = new R2ObjectBody({
-    key: "huge.bin",
-    version: "",
-    size: R2_OBJECT_MAX_BUFFER_BYTES + 1,
-    etag: "abc",
-    httpEtag: '"abc"',
-    uploaded: Date.now(),
-    httpMetadata: {},
-    customMetadata: {},
-    checksums: {},
-    storageClass: "Standard",
-  }, new ReadableStream({
+  const obj = createR2ObjectBody(new ReadableStream({
     start(controller) {
       controller.enqueue(new Uint8Array(R2_OBJECT_MAX_BUFFER_BYTES));
       controller.enqueue(new Uint8Array(1));
       controller.close();
     },
-  }));
+  }), {
+    key: "huge.bin",
+    size: R2_OBJECT_MAX_BUFFER_BYTES + 1,
+  });
 
   const reader = obj.body.getReader();
   const first = await reader.read();
@@ -869,18 +923,7 @@ test("R2ObjectBody raw body stream enforces the object byte cap", async () => {
 
 test("R2ObjectBody byte cap does not wait for underlying cancel", async () => {
   let cancelled = false;
-  const obj = new R2ObjectBody({
-    key: "huge.bin",
-    version: "",
-    size: R2_OBJECT_MAX_BUFFER_BYTES + 1,
-    etag: "abc",
-    httpEtag: '"abc"',
-    uploaded: Date.now(),
-    httpMetadata: {},
-    customMetadata: {},
-    checksums: {},
-    storageClass: "Standard",
-  }, new ReadableStream({
+  const obj = createR2ObjectBody(new ReadableStream({
     start(controller) {
       controller.enqueue(new Uint8Array(R2_OBJECT_MAX_BUFFER_BYTES + 1));
     },
@@ -888,7 +931,10 @@ test("R2ObjectBody byte cap does not wait for underlying cancel", async () => {
       cancelled = true;
       return new Promise(() => {});
     },
-  }));
+  }), {
+    key: "huge.bin",
+    size: R2_OBJECT_MAX_BUFFER_BYTES + 1,
+  });
 
   const outcome = await settlementWithinTestWindow(obj.body.getReader().read());
 

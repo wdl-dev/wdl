@@ -28,7 +28,7 @@ const WORKERD_COMPAT_WORKER = readFileSync(
  *   requestClock: { dateNow: number, dateValue: number, performanceNow: number },
  *   abortType: string,
  *   tracing: { startSpanType: string, setAttributeChained: boolean, setAttributesChained: boolean },
- *   eventTargetSelfSignalAbort: boolean,
+ *   eventTargetSelfSignal: { aborted: boolean, victimCalls: number },
  *   streamAbortRelockSafe: boolean,
  *   htmlRewriter: { uppercaseAttributeMatches: number },
  *   byob: { firstDone: boolean, firstBytes: number[], finalDone: boolean, finalBytes: number[] },
@@ -189,7 +189,10 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       setAttributeChained: true,
       setAttributesChained: true,
     });
-    assert.equal(result.eventTargetSelfSignalAbort, true);
+    assert.deepEqual(result.eventTargetSelfSignal, {
+      aborted: true,
+      victimCalls: 1,
+    });
     assert.equal(result.streamAbortRelockSafe, true);
     assert.deepEqual(result.htmlRewriter, {
       uppercaseAttributeMatches: 1,
