@@ -48,6 +48,9 @@ The first bootstrap apply starts with local state because the state bucket does
 not exist yet. After it completes, write local ignored backend files from the
 `s3_backend_example` output. Each root needs its own `backend.hcl` because
 Terraform resolves `-backend-config=backend.hcl` relative to the `-chdir` root.
+The bootstrap region is independent of the deployed application region. Each
+`backend.hcl` must name the bootstrap bucket's region even when foundation or
+application resources use another region.
 
 ```text
 terraform/bootstrap/backend.hcl    key = "bootstrap/terraform.tfstate"
@@ -222,13 +225,15 @@ The ECS cluster enables both `FARGATE` and `FARGATE_SPOT` capacity providers:
   place overflow according to `od_weight` / `spot_weight`.
 - scheduler, workflows, d1-runtime, and do-runtime run on on-demand Fargate only.
 - All task definitions use ARM64 Linux Fargate-compatible CPU and memory defaults.
-- gateway, user-runtime, system-runtime, and workflows use zero-downtime rolling
-  replacement (`maximum_percent = 200`, `minimum_healthy_percent = 100`).
-- d1-runtime and do-runtime use sequential replacement (`maximum_percent = 100`,
-  `minimum_healthy_percent = 50`) with Availability Zone rebalancing disabled.
-- scheduler remains stop-before-start (`maximum_percent = 100`,
-  `minimum_healthy_percent = 0`) with Availability Zone rebalancing disabled because it
-  is a singleton control loop.
+- All seven services use start-before-stop rolling replacement
+  (`maximum_percent = 200`, `minimum_healthy_percent = 100`). Fargate can place the
+  temporary replacement capacity without waiting for fixed EC2 host headroom.
+- D1/DO hand ownership over through supervisor drain and owner fencing. Scheduler
+  dispatch paths are multi-replica safe, so its default single replica can overlap its
+  replacement without a scheduling gap.
+- D1, DO, and scheduler keep Availability Zone rebalancing disabled. This prevents
+  unrelated service rebalancing from relocating stateful owners or the control loop;
+  it does not serialize an explicit rolling deployment.
 
 Fargate task-level `cpu` and `memory` are the task reservation/limit boundary. D1 and
 Durable Object stateful runtime containers also set explicit container `memory` hard
@@ -289,8 +294,8 @@ After exporting `ADMIN_TOKEN`, bootstrap it once:
 
 ```sh
 export CONTROL_URL=https://api.wdl.dev
-export S3_ENDPOINT=https://s3.ap-east-1.amazonaws.com
-export S3_REGION=ap-east-1
+export S3_REGION=<application-region>
+export S3_ENDPOINT="https://s3.${S3_REGION}.amazonaws.com"
 export S3_BUCKET=$(AWS_PROFILE=<profile> terraform -chdir=terraform output -raw assets_bucket)
 export S3_CLEANUP_SECRET_ARN
 S3_CLEANUP_SECRET_ARN=$(

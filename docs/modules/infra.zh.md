@@ -8,10 +8,10 @@ Infra 文档描述 local compose、Terraform-managed environment 和 Kubernetes 
 
 当前有两套主要 infra family：
 
-- `terraform/`：WDL hosted-preview 的 AWS ECS environment。
+- `terraform/`：可复用的 AWS ECS/Fargate template，同时也是 WDL hosted preview 的实现。
 - `deploy/kubernetes/`：Kubernetes-shaped self-hosting 的 Kustomize template 与 cluster smoke baseline。
 
-Terraform 对应 hosted-preview ECS environment，由 developer/operator 从本地执行 `terraform plan/apply`。Kubernetes manifests 是 cluster-shaped self-hosting 的 release artifact 与起始模板；最终容量和 rollout policy 由目标 cluster 的 operator workflow 决定。
+Terraform 既是 checked-in reference deployment，也是 hosted preview 使用的实现；operator 通过各自环境的输入执行。Kubernetes manifests 是 cluster-shaped self-hosting 的 release artifact 与起始模板。两种路径的最终容量、区域和 rollout policy 都由目标环境的 operator workflow 决定。
 
 本地开发使用 `docker-compose.yml`，以及 `d1-multi`、`do-multi` 等 profile。
 
@@ -25,7 +25,7 @@ Terraform 对应 hosted-preview ECS environment，由 developer/operator 从本�
 
 Local compose 是开发便利环境，不是 production delivery contract。它用本地端口、Valkey、`s3mock` 和 Envoy mesh 启动同一组 service family；`d1-multi`、`do-multi` 等 profile 用于定向测试本地多副本行为。Production-shaped delivery example 是 Terraform 和 `deploy/kubernetes/` 下的 Kubernetes manifests。
 
-这些交付路径保留 runtime module 依赖的 service boundary、私有 mesh 假设、image contract、health/metrics endpoint，以及 ownership/failover 规则。Kubernetes tree 是面向用户的模板与 smoke baseline；Terraform 记录 WDL hosted-preview profile。两者都不定义通用 WDL production-capacity contract。Operator 仍然需要选择具体容量、managed Redis/Valkey durability、S3-compatible storage、EFS 或等价 localDisk persistence、ingress protection 和区域级 backup/restore 策略。
+这些交付路径保留 runtime module 依赖的 service boundary、私有 mesh 假设、image contract、health/metrics endpoint，以及 ownership/failover 规则。Kubernetes tree 是面向用户的模板与 smoke baseline；Terraform 是可复用的 ECS profile，同时支撑 hosted preview。两者都不定义通用 WDL production-capacity contract。Operator 仍然需要选择具体容量、managed Redis/Valkey durability、S3-compatible storage、EFS 或等价 localDisk persistence、ingress protection 和区域级 backup/restore 策略。
 
 除 co-located sidecar 外，app service 有意保持一个可部署服务一个 container boundary：
 
@@ -61,7 +61,7 @@ Gateway 和 runtime 在不同环境中使用稳定的内部端口合同：
 
 Private mesh caller 和 receiver 共享 `WDL_INTERNAL_AUTH_TOKEN` 作为当前 internal token。runtime、d1-runtime、do-runtime、scheduler、workflows 和 redis-proxy sidecar 之间的调用会携带 `x-wdl-internal-auth`。轮换期间 receiver 还会接受可选的 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`；caller 始终只发送当前 token。Receiver 要求 auth header 恰好出现一次；两个 token 值都只能包含 visible ASCII byte，不能包含空白或逗号，确保 Fetch header normalization 不改变 token，并避免 header joining 把重复 header 伪装成单个已配置 token。Health 和 metrics endpoint 是唯一不要求该 token 的 service endpoint。这个 token 是平台 plumbing，不是 tenant binding：runtime wrapper code 会从 tenant-visible `env` 中剥离它，host-owned DO proxy 和 host-side backend capability 会在 DO forwarding 时添加它，并在 forwarding 前删除租户伪造的同名 header。
 
-User-runtime、system-runtime 和 do-runtime 使用以下 AI runtime limit。默认值与 runtime hard maximum 由 `shared/ai-runtime-config.js` 统一拥有。Hosted-preview Terraform profile 的 user-runtime 与 do-runtime 直接使用代码默认值，只显式固定较小的 system-runtime capacity override；Local Compose 与 Kubernetes template 为便于 operator 覆盖而重复默认值，并由测试与代码 owner 对齐：
+User-runtime、system-runtime 和 do-runtime 使用以下 AI runtime limit。默认值与 runtime hard maximum 由 `shared/ai-runtime-config.js` 统一拥有。Terraform profile 的 user-runtime 与 do-runtime 直接使用代码默认值，只显式固定较小的 system-runtime capacity override；Local Compose 与 Kubernetes template 为便于 operator 覆盖而重复默认值，并由测试与代码 owner 对齐：
 
 | 变量 | 默认值 | 范围 |
 | --- | ---: | --- |
@@ -75,7 +75,7 @@ User-runtime、system-runtime 和 do-runtime 使用以下 AI runtime limit。默
 | `AI_WS_IDLE_TIMEOUT_MS` | `120000` | WebSocket 连续没有 provider frame 的最大间隔。 |
 | `AI_WS_MAX_DURATION_MS` | `1440000` | Adapter-specific clamp 前的 operator WebSocket lifetime cap。 |
 
-这些是 replica-local admission pool，不是 namespace quota、计费控制，也不会按每个请求的最大 byte allowance 预留内存。User 与 DO workload 使用较高默认值；AI 对 system-runtime 是例外的 operator-controlled workload，因此保持较低默认值。Kubernetes 值是 self-hosting 起始配置与 smoke profile，Terraform 值描述 hosted preview；两者都不是通用 WDL production capacity guarantee。私有部署可按 runtime service 覆盖这些设置而不重新定义 binding 合同。User-runtime 与 do-runtime 是独立服务，因此拥有彼此独立的 pool。Workerd 没有暴露 JavaScript queued-byte 或 WebSocket backpressure signal，因此 operator 必须按自身 frame 与 receiver-speed 分布同时规划 session pool 和 runtime 内存。代码拥有的 request、response、frame 和 aggregate byte cap 记录在 [AI 模块](ai.zh.md)。
+这些是 replica-local admission pool，不是 namespace quota、计费控制，也不会按每个请求的最大 byte allowance 预留内存。User 与 DO workload 使用较高默认值；AI 对 system-runtime 是例外的 operator-controlled workload，因此保持较低默认值。Kubernetes 和 Terraform profile 都是 deployment 起始配置，不是通用 WDL production capacity guarantee。Operator 可按 runtime service 覆盖这些设置而不重新定义 binding 合同。User-runtime 与 do-runtime 是独立服务，因此拥有彼此独立的 pool。Workerd 没有暴露 JavaScript queued-byte 或 WebSocket backpressure signal，因此 operator 必须按自身 frame 与 receiver-speed 分布同时规划 session pool 和 runtime 内存。代码拥有的 request、response、frame 和 aggregate byte cap 记录在 [AI 模块](ai.zh.md)。
 
 AI client source 只由三个 base module owner 嵌入：`runtime/config-user.capnp`、`runtime/config-system.capnp` 和 `do-runtime/config.capnp`；local/evictable config 会 import 这些 worker graph。Cap'n Proto service list 不继承，因此每个具体 user-runtime、system-runtime 和 do-runtime config 都声明它绑定的 `ai-public-network` service。Production config 使用 public-only network service；local config 把同一 binding 路由到 deterministic fake provider Worker。
 
@@ -96,7 +96,7 @@ Stateful storage：
 
 ## Ownership / 失败语义
 
-- Scheduler 部署默认 1 个副本；当前 dispatch 路径具备多副本安全性，但 ECS rollout 仍使用 stop-before-start replacement，部署期间可能短暂停止调度。
+- Scheduler 部署默认 1 个副本，当前 dispatch 路径具备多副本安全性。Terraform 会先启动 Fargate replacement，再 drain 旧 task，因此常规 rollout 不会刻意暂停调度。
 - Workflows 是独立 Rust service。
 - Scheduler 和 Workflows 默认最多 drain 25 秒 in-flight work；Compose、Kubernetes 和 Terraform ECS 均固定 30 秒 stop window，避免平台在默认应用 drain 结束前终止进程。部署如覆盖 `SCHEDULER_SHUTDOWN_DRAIN_MS` 或 `WORKFLOWS_SHUTDOWN_DRAIN_MS`，应同步评估对应的 stop window。
 - Gateway、user-runtime 和 system-runtime 可以放在环境的 load balancing / service discovery 层后面水平扩展。本地 route cache、已加载 isolate 和 owner hint 都是优化，不是 authority。
@@ -105,7 +105,8 @@ Stateful storage：
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
 - 除了 Fargate task memory limit，D1 和 DO 的 workerd container 还会设置显式 container memory hard limit。DO 还会给本地 redis-proxy sidecar 保留内存。
 - do-runtime 的 `DO_PREVENT_EVICTION` 默认是 `true`，会让 host actor resident，避免当前 workerd 的 actor eviction 中断在途 hibernatable WebSocket 操作。显式 `false` 会为已经验证的 workload 启用 eviction；它不能替代 container memory hard limit。
-- Terraform Fargate service 在服务能容忍 overlapping capacity 时应使用 rolling replacement。D1/DO 使用 sequential replacement；scheduler 作为 singleton control loop 保持 stop-before-start。D1/DO 和 scheduler 都关闭 Availability Zone rebalancing，让 replacement 遵循各自显式 deployment strategy。
+- 所有 Terraform Fargate service 都使用 start-before-stop rolling replacement：`maximum_percent = 200`、`minimum_healthy_percent = 100`。D1/DO 可以安全重叠 router task，由 owner lease、generation fence 和 supervisor drain 控制状态交接；scheduler 的重叠由各 dispatch path 的 Redis claim/fence 保护。
+- D1/DO 和 scheduler 继续关闭 Availability Zone rebalancing，避免 ECS 在显式 deployment 之外主动迁移 owner 或 control loop；该设置不会串行化显式 rolling deployment。
 
 ## 安全边界
 

@@ -2512,7 +2512,7 @@ test("D1 and DO deployments keep explicit runtime memory ceilings", () => {
   }
 });
 
-test("Terraform ECS services keep their Fargate placement and rollout classes", () => {
+test("Terraform ECS services keep Fargate placement and start-before-stop rollout", () => {
   const cluster = readRepoFile("terraform/modules/compute/cluster.tf");
   const locals = readRepoFile("terraform/modules/compute/locals.tf");
   const assertCapacityProviderDependency = (
@@ -2529,60 +2529,42 @@ test("Terraform ECS services keep their Fargate placement and rollout classes", 
   assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
   assert.match(
     locals,
-    /zero_downtime_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/,
+    /start_before_stop_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/,
   );
-  assert.match(
-    locals,
-    /stop_before_start_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+0\s*\}/,
-  );
-  assert.match(
-    locals,
-    /sequential_replacement_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+50\s*\}/,
-  );
+  assert.doesNotMatch(locals, /stop_before_start_deployment|sequential_replacement_deployment/);
 
-  for (const file of [
+  const statelessFiles = [
     "terraform/modules/compute/gateway_service.tf",
     "terraform/modules/compute/runtime_service.tf",
     "terraform/modules/compute/system_runtime_service.tf",
-  ]) {
-    const source = readRepoFile(file);
-    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_stateless_capacity_provider_strategies/);
-    assertCapacityProviderDependency(source, file);
-    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
-    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
-  }
-
-  for (const file of [
+  ];
+  const onDemandFiles = [
     "terraform/modules/compute/d1_runtime_service.tf",
     "terraform/modules/compute/do_runtime_service.tf",
-  ]) {
-    const source = readRepoFile(file);
-    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
-    assertCapacityProviderDependency(source, file);
-    assert.match(source, /deployment\s+=\s+local\.sequential_replacement_deployment/);
-    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
-  }
-
-  for (const file of [
     "terraform/modules/compute/scheduler_service.tf",
-  ]) {
+    "terraform/modules/compute/workflows_service.tf",
+  ];
+  const rebalancingDisabledFiles = new Set([
+    "terraform/modules/compute/d1_runtime_service.tf",
+    "terraform/modules/compute/do_runtime_service.tf",
+    "terraform/modules/compute/scheduler_service.tf",
+  ]);
+
+  for (const file of [...statelessFiles, ...onDemandFiles]) {
     const source = readRepoFile(file);
     assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
     assertCapacityProviderDependency(source, file);
-    assert.match(source, /deployment\s+=\s+local\.stop_before_start_deployment/);
-    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
-  }
-
-  {
-    const source = readRepoFile("terraform/modules/compute/workflows_service.tf");
-    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
-    assertCapacityProviderDependency(source, "terraform/modules/compute/workflows_service.tf");
-    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
-    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+    assert.match(source, /deployment\s+=\s+local\.start_before_stop_deployment/);
+    if (statelessFiles.includes(file)) {
+      assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_stateless_capacity_provider_strategies/);
+    } else {
+      assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    }
+    if (rebalancingDisabledFiles.has(file)) {
+      assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+    } else {
+      assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+    }
   }
 });
 

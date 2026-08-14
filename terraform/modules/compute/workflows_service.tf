@@ -70,7 +70,7 @@ module "workflows_service" {
   task_definition_arn    = aws_ecs_task_definition.workflows.arn
   desired_count          = var.workflows_desired_count
   enable_execute_command = true
-  deployment             = local.zero_downtime_deployment
+  deployment             = local.start_before_stop_deployment
 
   capacity_provider_strategies = local.fargate_ondemand_capacity_provider_strategies
 

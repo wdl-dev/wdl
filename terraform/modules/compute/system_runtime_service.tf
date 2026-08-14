@@ -133,7 +133,7 @@ module "system_runtime_service" {
   # so scaling out is purely a throughput choice, not correctness.
   desired_count          = 1
   enable_execute_command = true
-  deployment             = local.zero_downtime_deployment
+  deployment             = local.start_before_stop_deployment
 
   capacity_provider_strategies = local.fargate_stateless_capacity_provider_strategies
 

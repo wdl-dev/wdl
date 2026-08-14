@@ -10,13 +10,15 @@ Service Connect, EFS, S3/R2-compatible storage, and release pipelines.
 
 There are two main infrastructure families:
 
-- `terraform/`: the WDL hosted-preview AWS ECS environment.
+- `terraform/`: the reusable AWS ECS/Fargate template that also backs the WDL hosted
+  preview.
 - `deploy/kubernetes/`: a Kustomize self-hosting template and cluster smoke baseline.
 
-Terraform is the hosted-preview ECS environment and is changed with `terraform
-plan/apply` from a developer/operator machine. Kubernetes manifests are release
-artifacts and a starting template for cluster-shaped self-hosting; the target cluster's
-operator workflow owns their final capacity and rollout policy.
+Terraform is both a checked-in reference deployment and the implementation used for the
+hosted preview; operators apply it from their own environment-specific inputs.
+Kubernetes manifests are release artifacts and a starting template for cluster-shaped
+self-hosting. In either path, the target environment's operator workflow owns final
+capacity, regions, and rollout policy.
 
 Local development uses `docker-compose.yml` and profiles such as `d1-multi` and
 `do-multi`.
@@ -39,10 +41,10 @@ production-shaped delivery examples are Terraform and the Kubernetes manifests u
 These paths preserve the service boundaries, private mesh assumptions, image contracts,
 health/metrics endpoints, and ownership/failover rules that the runtime modules depend
 on. The Kubernetes tree is a user-facing template and smoke baseline; Terraform records
-the WDL hosted-preview profile. Neither defines a universal WDL production-capacity
-contract. Operators choose concrete capacity, managed Redis/Valkey durability, object
-storage, EFS or equivalent localDisk persistence, ingress protection, and regional
-backup/restore policy.
+a reusable ECS profile and backs the hosted preview. Neither defines a universal WDL
+production-capacity contract. Operators choose concrete capacity, managed Redis/Valkey
+durability, object storage, EFS or equivalent localDisk persistence, ingress
+protection, and regional backup/restore policy.
 
 The app services intentionally keep one container boundary per deployable service,
 except for co-located sidecars:
@@ -114,10 +116,10 @@ headers are removed before forwarding.
 
 AI runtime limits are environment inputs on user-runtime, system-runtime, and
 do-runtime. Defaults and runtime hard maxima are owned by
-`shared/ai-runtime-config.js`. The hosted-preview Terraform profile uses those code
-defaults for user-runtime and do-runtime and only pins the smaller system-runtime
-capacity override. Local Compose and the Kubernetes template repeat the defaults so
-operators can override them and tests pin those surfaces to the code owner:
+`shared/ai-runtime-config.js`. The Terraform profile uses those code defaults for
+user-runtime and do-runtime and only pins the smaller system-runtime capacity override.
+Local Compose and the Kubernetes template repeat the defaults so operators can override
+them and tests pin those surfaces to the code owner:
 
 | Variable | Default | Scope |
 | --- | ---: | --- |
@@ -134,15 +136,14 @@ operators can override them and tests pin those surfaces to the code owner:
 These are replica-local admission pools, not namespace quota, billing controls, or a
 reservation of each request's maximum byte allowance. User and DO workloads use the
 higher defaults; system-runtime keeps lower defaults because AI there is an exceptional
-operator-controlled workload. The Kubernetes values are a self-hosting starting point
-and smoke profile; Terraform values describe the hosted preview. Neither is a universal
-WDL production capacity guarantee. Private operators can override the settings per
-runtime service without redefining the binding contract. User-runtime and do-runtime
-have independent pools because they are separate services. Workerd exposes no
-JavaScript queued-byte or WebSocket backpressure signal, so operators must size the
-session pool and runtime memory together for their frame and receiver-speed
-distribution. The code-owned request, response, frame, and aggregate byte caps are
-documented in the [AI module](ai.md).
+operator-controlled workload. The Kubernetes and Terraform profiles are deployment
+starting points, not a universal WDL production capacity guarantee. Operators can
+override the settings per runtime service without redefining the binding contract.
+User-runtime and do-runtime have independent pools because they are separate services.
+Workerd exposes no JavaScript queued-byte or WebSocket backpressure signal, so operators
+must size the session pool and runtime memory together for their frame and
+receiver-speed distribution. The code-owned request, response, frame, and aggregate
+byte caps are documented in the [AI module](ai.md).
 
 AI client source is embedded only by the three base module owners:
 `runtime/config-user.capnp`, `runtime/config-system.capnp`, and
@@ -170,9 +171,9 @@ Stateful storage:
 
 ## Ownership / Failure Semantics
 
-- Scheduler defaults to one replica in deployment; current dispatch paths are
-  multi-replica safe, but rollout can still pause scheduling because ECS uses
-  stop-before-start replacement.
+- Scheduler defaults to one replica in deployment, and current dispatch paths are
+  multi-replica safe. Terraform starts its Fargate replacement before draining the old
+  task, so a routine rollout does not intentionally pause scheduling.
 - Workflows is a separate Rust service.
 - By default, Scheduler and Workflows drain in-flight work for up to 25 seconds.
   Compose, Kubernetes, and Terraform ECS pin 30-second stop windows so the platform
@@ -199,11 +200,13 @@ Stateful storage:
   current workerd actor eviction cannot interrupt in-flight hibernatable WebSocket
   operations. Explicit `false` enables eviction for validated workloads but is not a
   replacement for the container memory hard limit.
-- Terraform Fargate services should use rolling replacement where the service can
-  tolerate overlapping capacity. D1/DO use sequential replacement, while scheduler
-  remains stop-before-start as a singleton control loop. D1/DO and scheduler disable
-  Availability Zone rebalancing so replacement follows their explicit deployment
-  strategy.
+- All Terraform Fargate services use start-before-stop rolling replacement with
+  `maximum_percent = 200` and `minimum_healthy_percent = 100`. D1/DO safely overlap
+  router tasks while owner lease, generation fencing, and supervisor drain control
+  state handoff; scheduler overlap is covered by per-path Redis claims and fences.
+- D1/DO and scheduler keep Availability Zone rebalancing disabled so ECS does not
+  initiate unrelated owner or control-loop relocation. This setting does not serialize
+  an explicit deployment.
 
 ## Security Boundaries
 

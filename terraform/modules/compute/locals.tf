@@ -86,20 +86,10 @@ locals {
     { name = "AI_WS_MAX_SESSIONS", value = "8" },
   ]
 
-  # ECS starts a full replacement set, waits for health, then drains old tasks.
-  zero_downtime_deployment = {
+  # Fargate can place replacement capacity before ECS drains the old tasks.
+  start_before_stop_deployment = {
     maximum_percent         = 200
     minimum_healthy_percent = 100
-  }
-
-  stop_before_start_deployment = {
-    maximum_percent         = 100
-    minimum_healthy_percent = 0
-  }
-
-  sequential_replacement_deployment = {
-    maximum_percent         = 100
-    minimum_healthy_percent = 50
   }
 
   fargate_stateless_capacity_provider_strategies = [
