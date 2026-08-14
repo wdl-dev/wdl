@@ -3,9 +3,11 @@
     "providerMaxCount": 8,
     "modelsPerProviderMax": 32,
     "namespaceModelMaxCount": 128,
+    "providerNameMaxBytes": 32,
     "providerRecordMaxBytes": 65536,
     "upstreamModelMaxBytes": 256,
-    "credentialMaxBytes": 16384
+    "credentialMaxBytes": 16384,
+    "credentialEnvelopeMaxBytes": 65536
   },
   "boundaries": {
     "providerNameLengths": [
@@ -38,6 +40,9 @@
     { "value": "openai", "provider": true, "model": true },
     { "value": "provider-32-characters-long-name", "provider": true, "model": true },
     { "value": "agent.preview_v2", "provider": false, "model": true },
+    { "value": "2", "provider": true, "model": false },
+    { "value": "10", "provider": true, "model": false },
+    { "value": "2fast", "provider": true, "model": true },
     { "value": "UPPER", "provider": false, "model": false },
     { "value": "bad/name", "provider": false, "model": false },
     { "value": "-bad", "provider": false, "model": false }

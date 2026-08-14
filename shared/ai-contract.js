@@ -8,9 +8,11 @@ import { utf8ByteLength } from "shared-utf8";
 export const AI_PROVIDER_MAX_COUNT = 8;
 export const AI_MODELS_PER_PROVIDER_MAX = 32;
 export const AI_NAMESPACE_MODEL_MAX_COUNT = 128;
+export const AI_PROVIDER_NAME_MAX_BYTES = 32;
 export const AI_PROVIDER_RECORD_MAX_BYTES = 64 * 1024;
 export const AI_UPSTREAM_MODEL_MAX_BYTES = 256;
 export const AI_CREDENTIAL_MAX_BYTES = 16 * 1024;
+export const AI_CREDENTIAL_ENVELOPE_MAX_BYTES = 64 * 1024;
 export const AI_PROVIDER_REVISION_RE = /^[0-9a-f]{32}$/;
 
 export const AI_PROVIDER_KINDS = Object.freeze(["openai", "xai", "deepseek"]);

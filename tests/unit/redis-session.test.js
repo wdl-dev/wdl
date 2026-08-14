@@ -299,6 +299,14 @@ testRedisCommandSurface(
 );
 
 testRedisCommandSurface(
+  "eval",
+  ":1\r\n",
+  (surface) => surface.eval("return 1", ["state:key"], ["arg"]),
+  1,
+  "*5\r\n$4\r\nEVAL\r\n$8\r\nreturn 1\r\n$1\r\n1\r\n$9\r\nstate:key\r\n$3\r\narg\r\n"
+);
+
+testRedisCommandSurface(
   "hGetAllManyAndHKeysMany",
   "*4\r\n$3\r\napi\r\n$2\r\nv1\r\n$4\r\njobs\r\n$2\r\nv2\r\n" +
     "*2\r\n$5\r\nTOKEN\r\n$6\r\nREGION\r\n" +

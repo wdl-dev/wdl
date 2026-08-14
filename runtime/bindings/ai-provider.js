@@ -70,28 +70,116 @@ function collectInputModalities(found, value) {
   if (!isRecord(value)) return;
   const record = /** @type {Record<string, unknown>} */ (value);
   const type = typeof record.type === "string" ? record.type : "";
-  if (type === "text" || type === "input_text") found.add("text");
+  if (
+    type === "text" ||
+    type === "input_text" ||
+    type === "output_text" ||
+    type === "refusal"
+  ) {
+    found.add("text");
+  }
   if (type === "image_url" || type === "input_image") found.add("image");
   if (type === "audio" || type === "input_audio") found.add("audio");
   if (type === "file" || type === "input_file") found.add("file");
+  if (type === "computer_screenshot") found.add("image");
 
-  // Only message/content containers carry user media. Tool schemas and tool
-  // arguments are opaque provider fields and must not be searched recursively.
+  // Only documented message/content and replay-output carriers contribute
+  // modalities. Tool schemas, arguments, IDs, and encrypted state remain opaque.
   if (Object.hasOwn(record, "content")) collectInputModalities(found, record.content);
-  if (type === "function_call_output" && typeof record.output === "string") {
+  if (
+    type === "function_call_output" ||
+    type === "custom_tool_call_output" ||
+    type === "computer_call_output"
+  ) {
+    collectInputModalities(found, record.output);
+  }
+  if (
+    type === "local_shell_call_output" ||
+    type === "apply_patch_call_output" ||
+    type === "mcp_call"
+  ) {
+    if (typeof record.output === "string") found.add("text");
+  }
+  if (type === "mcp_call" && typeof record.error === "string") found.add("text");
+  if (type === "mcp_list_tools" && typeof record.error === "string") found.add("text");
+  if (type === "mcp_approval_response" && typeof record.reason === "string") {
     found.add("text");
+  }
+  if (type === "program_output" && typeof record.result === "string") found.add("text");
+  if (type === "shell_call_output" && Array.isArray(record.output)) {
+    for (const output of record.output) {
+      if (!isRecord(output)) continue;
+      const outputRecord = /** @type {Record<string, unknown>} */ (output);
+      if (
+        typeof outputRecord.stdout === "string" ||
+        typeof outputRecord.stderr === "string"
+      ) {
+        found.add("text");
+      }
+    }
+  }
+  if (type === "code_interpreter_call" && Array.isArray(record.outputs)) {
+    for (const output of record.outputs) {
+      if (!isRecord(output)) continue;
+      const outputRecord = /** @type {Record<string, unknown>} */ (output);
+      if (outputRecord.type === "logs" && typeof outputRecord.logs === "string") {
+        found.add("text");
+      }
+      if (outputRecord.type === "image" && typeof outputRecord.url === "string") {
+        found.add("image");
+      }
+    }
+  }
+  if (type === "image_generation_call" && typeof record.result === "string") {
+    found.add("image");
+  }
+  if (type === "file_search_call" && Array.isArray(record.results)) {
+    for (const result of record.results) {
+      if (!isRecord(result)) continue;
+      const resultRecord = /** @type {Record<string, unknown>} */ (result);
+      if (typeof resultRecord.text === "string") found.add("text");
+    }
   }
 }
 
-/** @param {Record<string, unknown>} body */
-function requestedInputModalities(body) {
+/** @param {Record<string, unknown>} body @param {string} protocol */
+function requestedInputModalities(body, protocol) {
   const found = new Set();
-  if (Object.hasOwn(body, "input")) collectInputModalities(found, body.input);
+  if (
+    protocol === "responses" &&
+    typeof body.instructions === "string" &&
+    body.instructions.length > 0
+  ) {
+    found.add("text");
+  }
+  if (Object.hasOwn(body, "input")) {
+    if (protocol === "embeddings") found.add("text");
+    else collectInputModalities(found, body.input);
+  }
+  if (protocol === "responses" && isRecord(body.prompt)) {
+    const prompt = /** @type {Record<string, unknown>} */ (body.prompt);
+    const variables = prompt.variables;
+    if (isRecord(variables)) {
+      const values = /** @type {Record<string, unknown>} */ (variables);
+      for (const value of Object.values(values)) {
+        collectInputModalities(found, value);
+      }
+    }
+  }
   if (Array.isArray(body.messages)) {
     for (const message of body.messages) {
       if (isRecord(message)) {
         const record = /** @type {Record<string, unknown>} */ (message);
         collectInputModalities(found, record.content);
+        if (protocol === "chat_completions") {
+          if (typeof record.refusal === "string" && record.refusal.length > 0) {
+            found.add("text");
+          }
+          if (isRecord(record.audio)) {
+            const audio = /** @type {Record<string, unknown>} */ (record.audio);
+            if (typeof audio.id === "string" && audio.id.length > 0) found.add("audio");
+          }
+        }
       }
     }
   }
@@ -106,7 +194,7 @@ function enforceProviderRequest(resolved, body) {
       "Background AI responses are not supported"
     );
   }
-  for (const modality of requestedInputModalities(body)) {
+  for (const modality of requestedInputModalities(body, resolved.protocol)) {
     if (!resolved.inputModalities.includes(modality)) {
       throw new AiProviderRequestError(
         "ai_input_modality_unsupported",

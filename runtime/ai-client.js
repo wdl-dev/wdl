@@ -17,7 +17,7 @@ const REJECTED_OPTIONS = new Set([
   "sessionOptions",
 ]);
 const AI_MODEL_REFERENCE_RE =
-  /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\/[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+  /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\/(?![0-9]+$)[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicAbortSignalThrowIfAborted = AbortSignal.prototype.throwIfAborted;
 const intrinsicArrayIsArray = Array.isArray;

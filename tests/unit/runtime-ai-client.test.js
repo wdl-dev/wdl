@@ -366,7 +366,7 @@ test("AI tenant run rejects malformed model references before host I/O", async (
     },
   });
 
-  for (const model of ["", "bad", "OpenAI/primary", "openai/-bad", "openai/a/b"]) {
+  for (const model of ["", "bad", "OpenAI/primary", "openai/-bad", "openai/2", "openai/a/b"]) {
     await assert.rejects(
       () => ai.run(model, { input: "hello" }),
       (error) => matchesAiError(error, {

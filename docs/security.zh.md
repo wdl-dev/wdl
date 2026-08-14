@@ -76,7 +76,7 @@ Control handler 不应从 URL prefix 自己推断权限。应使用 `parseContro
 
 Secret PUT handler 只在校验和加密期间看到 plaintext。Redis secret store 中保存的是 `WDL-ENC:` envelope；redis-proxy 只在服务 `/runtime/load` 时解密。Runtime cold-load 路径没有 steady-state plaintext fallback，因此 secret-envelope provider key 缺失或错误时，使用 secret 的 worker 会 fail closed。
 
-AI credential PUT 复用同一个 envelope owner，但读取路径不同。Control 在精确 provider revision 下加密 namespace credential；authenticated redis-proxy `/ai/resolve` 原子读取 metadata 与 ciphertext，并只为本地 host binding 解密。Provider list/get 和 model-list response 永不包含 plaintext。
+AI credential PUT 复用同一个 envelope owner，但读取路径不同。Credential write 仅在匹配精确的当前 provider revision 时提交。Ciphertext AAD 绑定 namespace credential hash key、provider field 和 envelope version，不绑定 provider revision；因此同 kind metadata 更新会保留现有 ciphertext。Authenticated redis-proxy `/ai/resolve` 原子读取 metadata 与 ciphertext，并只为本地 host binding 解密。Provider list/get 和 model-list response 永不包含 plaintext。
 
 ## Binding 和状态安全
 

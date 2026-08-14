@@ -24,9 +24,11 @@ import { expectedAiProviderDestination } from "../../runtime/bindings/ai-provide
  *     providerMaxCount: number,
  *     modelsPerProviderMax: number,
  *     namespaceModelMaxCount: number,
+ *     providerNameMaxBytes: number,
  *     providerRecordMaxBytes: number,
  *     upstreamModelMaxBytes: number,
  *     credentialMaxBytes: number,
+ *     credentialEnvelopeMaxBytes: number,
  *   },
  *   boundaries: {
  *     providerNameLengths: Array<{ length: number, valid: boolean }>,
@@ -129,9 +131,11 @@ test("AI persisted limits match the cross-language fixture", () => {
     providerMaxCount: aiContract.AI_PROVIDER_MAX_COUNT,
     modelsPerProviderMax: aiContract.AI_MODELS_PER_PROVIDER_MAX,
     namespaceModelMaxCount: aiContract.AI_NAMESPACE_MODEL_MAX_COUNT,
+    providerNameMaxBytes: aiContract.AI_PROVIDER_NAME_MAX_BYTES,
     providerRecordMaxBytes: aiContract.AI_PROVIDER_RECORD_MAX_BYTES,
     upstreamModelMaxBytes: aiContract.AI_UPSTREAM_MODEL_MAX_BYTES,
     credentialMaxBytes: aiContract.AI_CREDENTIAL_MAX_BYTES,
+    credentialEnvelopeMaxBytes: aiContract.AI_CREDENTIAL_ENVELOPE_MAX_BYTES,
   });
 });
 

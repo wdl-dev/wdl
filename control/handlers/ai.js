@@ -14,9 +14,12 @@ import {
   stringEnv,
 } from "control-shared";
 import {
+  AI_CREDENTIAL_ENVELOPE_MAX_BYTES,
   AI_CREDENTIAL_MAX_BYTES,
   AI_NAMESPACE_MODEL_MAX_COUNT,
   AI_PROVIDER_MAX_COUNT,
+  AI_PROVIDER_NAME_MAX_BYTES,
+  AI_PROVIDER_RECORD_MAX_BYTES,
   AI_PROVIDER_REVISION_RE,
   aiProviderCredentialsKey,
   aiProvidersKey,
@@ -26,16 +29,62 @@ import {
 } from "shared-ai-contract";
 import { isValidAiProviderName } from "shared-ns-pattern";
 import { encryptSecretValue, SecretEnvelopeError } from "shared-secret-envelope";
+import { utf8ByteLength } from "shared-utf8";
 
 const AI_MUTATION_ATTEMPTS = 5;
 const AI_PROVIDER_BODY_MAX_BYTES = 128 * 1024;
+const AI_PERSISTED_UTF8_DECODER = new TextDecoder("utf-8", {
+  fatal: true,
+  ignoreBOM: true,
+});
 // A valid ASCII credential can use a six-byte \uXXXX escape for every byte.
 const AI_CREDENTIAL_BODY_MAX_BYTES = AI_CREDENTIAL_MAX_BYTES * 6 + 1024;
-
+const AI_PROVIDER_SNAPSHOT_SCRIPT = `
+local max_count = tonumber(ARGV[1])
+local max_name_bytes = tonumber(ARGV[2])
+local max_provider_bytes = tonumber(ARGV[3])
+local max_credential_bytes = tonumber(ARGV[4])
+if redis.call("HLEN", KEYS[1]) > max_count
+    or redis.call("HLEN", KEYS[2]) > max_count then
+  return {0, {}, {}}
+end
+local provider_names = redis.call("HKEYS", KEYS[1])
+local credential_names = redis.call("HKEYS", KEYS[2])
+local providers = {}
+for _, name in ipairs(provider_names) do
+  if string.len(name) > max_name_bytes
+      or redis.call("HSTRLEN", KEYS[1], name) > max_provider_bytes then
+    return {0, {}, {}}
+  end
+  providers[#providers + 1] = name
+  providers[#providers + 1] = redis.call("HGET", KEYS[1], name)
+end
+for _, name in ipairs(credential_names) do
+  if string.len(name) > max_name_bytes
+      or redis.call("HSTRLEN", KEYS[2], name) > max_credential_bytes then
+    return {0, {}, {}}
+  end
+end
+return {1, providers, credential_names}
+`;
 class AiControlError extends ControlAbort {
   /** @param {number} status @param {string} code @param {string} message */
   constructor(status, code, message) {
     super(status, code, { message });
+  }
+}
+
+/** @param {unknown} value @param {string} label @returns {string | null} */
+function decodePersistedText(value, label) {
+  if (value === null) return null;
+  if (typeof value === "string") return value;
+  if (!(value instanceof Uint8Array)) {
+    throw new AiControlError(500, "ai_state_corrupt", `${label} has an invalid Redis type`);
+  }
+  try {
+    return AI_PERSISTED_UTF8_DECODER.decode(value);
+  } catch {
+    throw new AiControlError(500, "ai_state_corrupt", `${label} is not valid UTF-8`);
   }
 }
 
@@ -103,15 +152,59 @@ function parseStoredCredentialNames(names) {
   return credentials;
 }
 
-/** @param {string} ns */
-async function readProviderSnapshot(ns) {
-  const { hashes, keyLists } = await requireControlRedis().hGetAllManyAndHKeysMany(
-    [aiProvidersKey(ns)],
-    [aiProviderCredentialsKey(ns)]
+/** @param {unknown} raw */
+function decodeProviderHash(raw) {
+  if (!Array.isArray(raw) || raw.length % 2 !== 0) {
+    throw new Error("Invalid AI provider snapshot reply");
+  }
+  /** @type {Record<string, string | null | undefined>} */
+  const providers = Object.create(null);
+  for (let index = 0; index < raw.length; index += 2) {
+    const name = decodePersistedText(raw[index], "AI provider name");
+    if (name === null) {
+      throw new AiControlError(500, "ai_state_corrupt", "AI provider name is missing");
+    }
+    providers[name] = decodePersistedText(raw[index + 1], `AI provider ${name}`);
+  }
+  return providers;
+}
+
+/** @param {unknown} raw */
+function decodeCredentialNames(raw) {
+  if (!Array.isArray(raw)) throw new Error("Invalid AI credential snapshot reply");
+  return raw.map((value) => {
+    const name = decodePersistedText(value, "AI credential provider name");
+    if (name === null) {
+      throw new AiControlError(500, "ai_state_corrupt", "AI credential provider name is missing");
+    }
+    return name;
+  });
+}
+
+/**
+ * @param {string} ns
+ * @param {import("shared-redis").RedisClient | import("shared-redis").RedisSession} [redis]
+ */
+async function readProviderSnapshot(ns, redis = requireControlRedis()) {
+  const reply = await redis.eval(
+    AI_PROVIDER_SNAPSHOT_SCRIPT,
+    [aiProvidersKey(ns), aiProviderCredentialsKey(ns)],
+    [
+      String(AI_PROVIDER_MAX_COUNT),
+      String(AI_PROVIDER_NAME_MAX_BYTES),
+      String(AI_PROVIDER_RECORD_MAX_BYTES),
+      String(AI_CREDENTIAL_ENVELOPE_MAX_BYTES),
+    ]
   );
+  if (!Array.isArray(reply) || reply.length !== 3) {
+    throw new Error("Invalid AI provider snapshot reply");
+  }
+  if (reply[0] !== 1) {
+    throw new AiControlError(500, "ai_state_corrupt", "AI provider state exceeds its read bounds");
+  }
   return {
-    providers: parseStoredProviders(hashes[0]),
-    credentialNames: parseStoredCredentialNames(keyLists[0]),
+    providers: parseStoredProviders(decodeProviderHash(reply[1])),
+    credentialNames: parseStoredCredentialNames(decodeCredentialNames(reply[2])),
   };
 }
 
@@ -183,10 +276,9 @@ async function putProvider({ request, ns, provider }) {
   const redis = requireControlRedis();
   const credentialConfigured = await mutate(redis, async (iso) => {
     await iso.watch(providersKey, credentialsKey);
-    const raw = await iso.hGetAll(providersKey);
-    const providers = parseStoredProviders(raw);
+    const { providers, credentialNames } = await readProviderSnapshot(ns, iso);
     const previous = providers.get(provider);
-    const credentialExists = await iso.hExists(credentialsKey, provider);
+    const credentialExists = credentialNames.has(provider);
     const preserveCredential = previous?.kind === record.kind && credentialExists;
     providers.set(provider, record);
     assertProviderAggregate(providers);
@@ -230,13 +322,27 @@ async function putCredential({ request, env, ns, provider }) {
     hashKey: credentialsKey,
     fieldName: provider,
   });
+  if (utf8ByteLength(encrypted) > AI_CREDENTIAL_ENVELOPE_MAX_BYTES) {
+    throw new AiControlError(
+      503,
+      "ai_credential_encryption_unavailable",
+      "AI credential encryption produced an oversized envelope"
+    );
+  }
   await mutate(requireControlRedis(), async (iso) => {
     await iso.watch(providersKey, credentialsKey);
-    const raw = await iso.hGet(providersKey, provider);
-    if (raw === null) throw new AiControlError(404, "ai_provider_not_found", "AI provider not found");
-    const record = parseStoredProvider(provider, raw);
+    const { providers, credentialNames } = await readProviderSnapshot(ns, iso);
+    const record = providers.get(provider);
+    if (!record) throw new AiControlError(404, "ai_provider_not_found", "AI provider not found");
     if (record.revision !== body.revision) {
       throw new AiControlError(409, "ai_provider_revision_mismatch", "AI provider revision changed");
+    }
+    if (!credentialNames.has(provider) && credentialNames.size >= AI_PROVIDER_MAX_COUNT) {
+      throw new AiControlError(
+        409,
+        "ai_credential_limit",
+        `Namespace may have at most ${AI_PROVIDER_MAX_COUNT} AI provider credentials`
+      );
     }
     await iso.multi().hSet(credentialsKey, provider, encrypted).exec();
   });
@@ -253,15 +359,18 @@ async function deleteProvider({ ns, provider }) {
   validateProviderName(provider);
   const providersKey = aiProvidersKey(ns);
   const credentialsKey = aiProviderCredentialsKey(ns);
-  const deleted = await mutate(requireControlRedis(), async (iso) => {
-    await iso.watch(providersKey, credentialsKey);
-    const raw = await iso.hGet(providersKey, provider);
-    const credentialExists = await iso.hExists(credentialsKey, provider);
-    if (raw === null && !credentialExists) return false;
-    if (raw !== null) parseStoredProvider(provider, raw);
-    await iso.multi().hDel(providersKey, provider).hDel(credentialsKey, provider).exec();
-    return true;
-  });
+  const replies = await requireControlRedis().session((iso) => iso.multi()
+    .hDel(providersKey, provider)
+    .hDel(credentialsKey, provider)
+    .exec());
+  if (
+    !Array.isArray(replies) ||
+    replies.length !== 2 ||
+    replies.some((reply) => typeof reply !== "number")
+  ) {
+    throw new Error("Invalid AI provider delete reply");
+  }
+  const deleted = replies.some((reply) => reply > 0);
   return jsonResponse(200, { ok: true, deleted });
 }
 

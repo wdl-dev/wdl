@@ -21,7 +21,7 @@ import {
 import { withMockedProperty } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { readJsonResponse } from "../helpers/response-json.js";
-import { delay } from "../helpers/timing.js";
+import { delay, waitUntil } from "../helpers/timing.js";
 
 beforeEach(resetAiHostTestState);
 
@@ -207,6 +207,411 @@ test("AI host inspects only user content when enforcing input modalities", async
   assert.equal(providerBodies.length, 3);
 });
 
+test("AI host counts non-empty Responses instructions as text input", async () => {
+  let providerCalls = 0;
+  const imageOnly = openAiResolution({ inputModalities: ["image"] });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "resp_test" });
+      },
+    },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(imageOnly), async () => {
+    const rejected = await binding.fetch(request({
+      model: "openai/primary",
+      instructions: "Describe the image",
+      input: [{ type: "input_image", image_url: "https://images.example/input.png" }],
+    }));
+    assert.equal(
+      (await readJsonResponse(rejected, 400, "instructions modality")).error,
+      "ai_input_modality_unsupported"
+    );
+
+    const allowed = await binding.fetch(request({
+      model: "openai/primary",
+      instructions: "",
+      input: [{ type: "input_image", image_url: "https://images.example/input.png" }],
+    }));
+    assert.equal(allowed.status, 200);
+  });
+  assert.equal(providerCalls, 1);
+});
+
+test("AI host classifies Responses history and prompt variables before provider I/O", async () => {
+  let providerCalls = 0;
+  const imageOnly = openAiResolution({ inputModalities: ["image"] });
+  const textOnly = openAiResolution({ inputModalities: ["text"] });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "must-not-run" });
+      },
+    },
+  });
+
+  const cases = [
+    {
+      resolution: imageOnly,
+      body: {
+        model: "openai/primary",
+        input: [{
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "previous answer", annotations: [] }],
+        }],
+      },
+    },
+    {
+      resolution: imageOnly,
+      body: {
+        model: "openai/primary",
+        input: [{
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "refusal", refusal: "previous refusal" }],
+        }],
+      },
+    },
+    {
+      resolution: textOnly,
+      body: {
+        model: "openai/primary",
+        prompt: {
+          id: "pmpt_test",
+          variables: {
+            subject: {
+              type: "input_image",
+              image_url: "https://images.example/prompt.png",
+            },
+          },
+        },
+      },
+    },
+    {
+      resolution: textOnly,
+      body: {
+        model: "openai/primary",
+        prompt: {
+          id: "pmpt_test",
+          variables: {
+            source: {
+              type: "input_file",
+              file_url: "https://files.example/prompt.pdf",
+            },
+          },
+        },
+      },
+    },
+  ];
+  for (const { resolution, body } of cases) {
+    await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+      const response = await binding.fetch(request(body));
+      assert.equal(
+        (await readJsonResponse(response, 400, "Responses input modality")).error,
+        "ai_input_modality_unsupported"
+      );
+    });
+  }
+  assert.equal(providerCalls, 0);
+});
+
+test("AI host classifies Responses replay modalities before provider I/O", async () => {
+  let providerCalls = 0;
+  const imageOnly = openAiResolution({ inputModalities: ["image"] });
+  const textOnly = openAiResolution({ inputModalities: ["text"] });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "must-not-run" });
+      },
+    },
+  });
+  const cases = [
+    {
+      resolution: imageOnly,
+      input: {
+        id: "local_shell_output_1",
+        output: "command output",
+        type: "local_shell_call_output",
+        status: "completed",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        id: "shell_output_1",
+        call_id: "shell_call_1",
+        max_output_length: null,
+        output: [{
+          stdout: "command output",
+          stderr: "",
+          outcome: { type: "exit", exit_code: 0 },
+        }],
+        status: "completed",
+        type: "shell_call_output",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        call_id: "patch_call_1",
+        output: "patch applied",
+        status: "completed",
+        type: "apply_patch_call_output",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        id: "mcp_call_1",
+        arguments: "{}",
+        name: "lookup",
+        server_label: "tools",
+        output: "tool result",
+        type: "mcp_call",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        id: "mcp_call_2",
+        arguments: "{}",
+        name: "lookup",
+        server_label: "tools",
+        error: "tool failed",
+        type: "mcp_call",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        id: "mcp_tools_1",
+        server_label: "tools",
+        tools: [],
+        error: "list failed",
+        type: "mcp_list_tools",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        approval_request_id: "approval_1",
+        approve: false,
+        reason: "not approved",
+        type: "mcp_approval_response",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        id: "program_output_1",
+        call_id: "program_call_1",
+        result: "program result",
+        status: "completed",
+        type: "program_output",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        id: "code_call_1",
+        code: "print('hello')",
+        container_id: "container_1",
+        outputs: [{ type: "logs", logs: "hello" }],
+        status: "completed",
+        type: "code_interpreter_call",
+      },
+    },
+    {
+      resolution: textOnly,
+      input: {
+        id: "code_call_2",
+        code: "plot()",
+        container_id: "container_1",
+        outputs: [{ type: "image", url: "https://images.example/plot.png" }],
+        status: "completed",
+        type: "code_interpreter_call",
+      },
+    },
+    {
+      resolution: textOnly,
+      input: {
+        id: "image_call_1",
+        result: "base64-image-data",
+        status: "completed",
+        type: "image_generation_call",
+      },
+    },
+    {
+      resolution: imageOnly,
+      input: {
+        id: "file_search_1",
+        queries: ["deployment guide"],
+        results: [{
+          file_id: "file_1",
+          filename: "guide.txt",
+          score: 0.9,
+          text: "retrieved text",
+        }],
+        status: "completed",
+        type: "file_search_call",
+      },
+    },
+  ];
+
+  for (const { resolution, input } of cases) {
+    await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+      const response = await binding.fetch(request({ model: "openai/primary", input: [input] }));
+      assert.equal(
+        (await readJsonResponse(response, 400, `${input.type} modality`)).error,
+        "ai_input_modality_unsupported"
+      );
+    });
+  }
+  assert.equal(providerCalls, 0);
+});
+
+test("AI host treats Responses reasoning replay as opaque provider state", async () => {
+  /** @type {Record<string, unknown>[]} */
+  const providerBodies = [];
+  const imageOnly = openAiResolution({ inputModalities: ["image"] });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
+        providerBodies.push(parseJsonObjectRequestBody(init, "reasoning replay request"));
+        return Response.json({ id: "resp_test" });
+      },
+    },
+  });
+  const body = {
+    model: "openai/primary",
+    input: [
+      {
+        id: "reasoning_1",
+        summary: [{ type: "summary_text", text: "reasoning summary" }],
+        content: [{ type: "reasoning_text", text: "reasoning content" }],
+        encrypted_content: "opaque-reasoning-state",
+        type: "reasoning",
+      },
+      { type: "input_image", image_url: "https://images.example/current.png" },
+    ],
+    reasoning: { context: "current_turn" },
+  };
+
+  await withMockedProperty(globalThis, "fetch", resolver(imageOnly), async () => {
+    const response = await binding.fetch(request(body));
+    assert.equal(response.status, 200);
+  });
+  assert.deepEqual(providerBodies, [{ ...body, model: "gpt-test" }]);
+});
+
+test("AI host classifies Chat assistant refusal and audio history before provider I/O", async () => {
+  let providerCalls = 0;
+  /** @param {string[]} inputModalities */
+  const chatResolution = (inputModalities) => openAiResolution({
+    protocol: "chat_completions",
+    destination: "https://api.openai.com/v1/chat/completions",
+    inputModalities,
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch() {
+        providerCalls += 1;
+        return Response.json({ id: "must-not-run" });
+      },
+    },
+  });
+  const cases = [
+    {
+      resolution: chatResolution(["image"]),
+      message: { role: "assistant", content: null, refusal: "previous refusal" },
+    },
+    {
+      resolution: chatResolution(["text"]),
+      message: { role: "assistant", content: null, audio: { id: "audio_1" } },
+    },
+  ];
+
+  for (const { resolution, message } of cases) {
+    await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+      const response = await binding.fetch(request(
+        { model: "openai/primary", messages: [message] },
+        "/v1/chat/completions"
+      ));
+      assert.equal(
+        (await readJsonResponse(response, 400, "Chat assistant history modality")).error,
+        "ai_input_modality_unsupported"
+      );
+    });
+  }
+  assert.equal(providerCalls, 0);
+});
+
+test("AI host treats Embeddings token arrays as text input", async () => {
+  /** @type {Record<string, unknown>[]} */
+  const providerBodies = [];
+  /** @param {string[]} inputModalities */
+  const embeddingResolution = (inputModalities) => openAiResolution({
+    protocol: "embeddings",
+    transport: "http",
+    destination: "https://api.openai.com/v1/embeddings",
+    inputModalities,
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
+        providerBodies.push(parseJsonObjectRequestBody(init, "embedding provider request"));
+        return Response.json({ object: "list", data: [] });
+      },
+    },
+  });
+
+  for (const input of [[101, 202], [[101, 202]]]) {
+    await withMockedProperty(
+      globalThis,
+      "fetch",
+      resolver(embeddingResolution(["image"])),
+      async () => {
+        const response = await binding.fetch(request(
+          { model: "openai/primary", input },
+          "/v1/embeddings"
+        ));
+        assert.equal(
+          (await readJsonResponse(response, 400, "embedding input modality")).error,
+          "ai_input_modality_unsupported"
+        );
+      }
+    );
+  }
+  assert.equal(providerBodies.length, 0);
+
+  await withMockedProperty(
+    globalThis,
+    "fetch",
+    resolver(embeddingResolution(["text"])),
+    async () => {
+      const response = await binding.fetch(request(
+        { model: "openai/primary", input: [101, 202] },
+        "/v1/embeddings"
+      ));
+      assert.equal(response.status, 200);
+    }
+  );
+  assert.deepEqual(providerBodies, [{ model: "gpt-test", input: [101, 202] }]);
+});
+
 test("AI host model list strips resolver-only identity and credential fields", async () => {
   const { binding } = makeAiBinding();
   await withMockedProperty(globalThis, "fetch", resolver(), async () => {
@@ -252,6 +657,30 @@ test("AI host allows empty DeepSeek state and rejects unsupported inputs before 
       [{ input: [{ type: "input_image", image_url: "https://images.example/input.png" }] }, "ai_input_modality_unsupported"],
       [{ input: [{ type: "input_file", file_url: "https://files.example/input.pdf" }] }, "ai_input_modality_unsupported"],
       [{ messages: [{ role: "user", content: [{ type: "file", file: { file_id: "file_1" } }] }] }, "ai_input_modality_unsupported"],
+      [{
+        input: [{
+          type: "function_call_output",
+          call_id: "call_1",
+          output: [{ type: "input_image", image_url: "https://images.example/tool.png" }],
+        }],
+      }, "ai_input_modality_unsupported"],
+      [{
+        input: [{
+          type: "custom_tool_call_output",
+          call_id: "call_2",
+          output: [{ type: "input_file", file_url: "https://files.example/tool.pdf" }],
+        }],
+      }, "ai_input_modality_unsupported"],
+      [{
+        input: [{
+          type: "computer_call_output",
+          call_id: "call_3",
+          output: {
+            type: "computer_screenshot",
+            image_url: "https://images.example/screenshot.png",
+          },
+        }],
+      }, "ai_input_modality_unsupported"],
       [{ input: "hello", background: true }, "ai_background_unsupported"],
     ];
     for (const [body, error] of cases) {
@@ -1605,11 +2034,81 @@ test("AI host makes provider-loss closes terminal to Gateway", async () => {
   const errored = await openFakeAiWebSocket();
   assert.ok(errored.downstream);
   errored.upstream.dispatch("error");
+  await waitUntil(
+    "AI provider error fallback",
+    () => errored.downstream?.closed !== null,
+    { timeoutMs: 1000, intervalMs: 5 }
+  );
   assert.deepEqual(errored.downstream.closed, {
     code: 1013,
     reason: "AI provider connection lost",
   });
   assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
+test("AI host preserves a terminal provider close after an error event", async () => {
+  const { upstream, downstream } = await openFakeAiWebSocket();
+  assert.ok(downstream);
+
+  upstream.dispatch("error");
+  await delay(1);
+  upstream.dispatch("close", { code: 1009, reason: "provider frame too large" });
+  await delay(0);
+
+  assert.deepEqual(downstream.closed, {
+    code: 1009,
+    reason: "provider frame too large",
+  });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
+test("AI host applies the client WebSocket error fallback exactly once", async () => {
+  const { upstream, downstream } = await openFakeAiWebSocket();
+  assert.ok(downstream);
+
+  downstream.dispatch("error");
+  await waitUntil(
+    "AI client error fallback",
+    () => upstream.closed !== null,
+    { timeoutMs: 1000, intervalMs: 5 }
+  );
+
+  assert.deepEqual(upstream.closed, {
+    code: 1011,
+    reason: "AI websocket client error",
+  });
+  assert.deepEqual(downstream.closed, {
+    code: 1011,
+    reason: "AI websocket client error",
+  });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+  assert.deepEqual(AI_HOST_TEST_STATE.metrics.filter((entry) =>
+    entry.name === "ai_pool_events" &&
+    entry.labels.pool === "websocket" &&
+    entry.labels.outcome === "client_error").map((entry) => entry.labels.outcome), [
+    "client_error",
+  ]);
+});
+
+test("AI host preserves a terminal client close after an error event", async () => {
+  const { upstream, downstream } = await openFakeAiWebSocket();
+  assert.ok(downstream);
+
+  downstream.dispatch("error");
+  await delay(1);
+  downstream.dispatch("close", { code: 1009, reason: "client frame too large" });
+  await delay(0);
+
+  assert.deepEqual(upstream.closed, {
+    code: 1009,
+    reason: "client frame too large",
+  });
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+  assert.deepEqual(AI_HOST_TEST_STATE.metrics.filter((entry) =>
+    entry.name === "ai_pool_events" &&
+    entry.labels.pool === "websocket" &&
+    ["client_closed", "client_error"].includes(entry.labels.outcome)
+  ).map((entry) => entry.labels.outcome), ["client_closed"]);
 });
 
 test("AI host WebSocket rejects malformed JSON and cross-model frames", async () => {

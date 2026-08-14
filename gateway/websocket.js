@@ -28,6 +28,8 @@ import { deleteGatewayInternalHeaders } from "gateway-lib";
  */
 
 const MAX_WEBSOCKET_CLOSE_REASON_BYTES = 123;
+// workerd can dispatch ErrorEvent before the matching protocol CloseEvent.
+const UPSTREAM_ERROR_CLOSE_GRACE_MS = 100;
 const UNSENDABLE_WEBSOCKET_CLOSE_CODES = new Set([1004, 1005, 1006, 1015]);
 
 /** @param {number} code */
@@ -230,6 +232,14 @@ export function proxyGatewayWebSocket(
   let unregisterLifecycle = null;
   /** @type {Promise<"continue" | "restart" | "error"> | null} */
   let lifecycleGate = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let upstreamErrorFallback = null;
+  /** @type {WebSocket | null} */
+  let upstreamErrorSocket = null;
+  /** @type {Promise<void> | null} */
+  let upstreamErrorGate = null;
+  /** @type {((value: void | PromiseLike<void>) => void) | null} */
+  let resolveUpstreamErrorGate = null;
   const sessionStartedAt = Date.now();
   const reconnectDisabled = initialResponse.headers.get(WEBSOCKET_RECONNECT_POLICY_HEADER) ===
     WEBSOCKET_RECONNECT_POLICY_DISABLED;
@@ -295,6 +305,42 @@ export function proxyGatewayWebSocket(
     queueEpoch += 1;
   }
 
+  /** @param {WebSocket | null} [attachedUpstream] */
+  function clearUpstreamErrorFallback(attachedUpstream = null) {
+    if (attachedUpstream !== null && upstreamErrorSocket !== attachedUpstream) return false;
+    const pending = upstreamErrorSocket !== null;
+    if (upstreamErrorFallback !== null) clearTimeout(upstreamErrorFallback);
+    const resolveGate = resolveUpstreamErrorGate;
+    upstreamErrorFallback = null;
+    upstreamErrorSocket = null;
+    upstreamErrorGate = null;
+    resolveUpstreamErrorGate = null;
+    resolveGate?.(undefined);
+    return pending;
+  }
+
+  async function waitForUpstreamErrorDecision() {
+    while (upstreamErrorGate !== null) await upstreamErrorGate;
+    if (downstreamClosed) throw new Error("WebSocket client is closed");
+  }
+
+  /** @param {WebSocket} attachedUpstream */
+  function scheduleUpstreamFailure(attachedUpstream) {
+    if (upstream !== attachedUpstream || upstreamErrorSocket === attachedUpstream) return false;
+    clearUpstreamErrorFallback();
+    const { promise, resolve } = Promise.withResolvers();
+    upstreamErrorSocket = attachedUpstream;
+    upstreamErrorGate = promise;
+    resolveUpstreamErrorGate = resolve;
+    setDetached(true);
+    upstreamErrorFallback = setTimeout(() => {
+      if (upstreamErrorSocket !== attachedUpstream) return;
+      clearUpstreamErrorFallback(attachedUpstream);
+      void handleUpstreamFailure(attachedUpstream);
+    }, UPSTREAM_ERROR_CLOSE_GRACE_MS);
+    return true;
+  }
+
   /** @param {boolean} nextDetached */
   function setDetached(nextDetached) {
     if (detachedRecorded === nextDetached) return;
@@ -306,6 +352,7 @@ export function proxyGatewayWebSocket(
   function markDownstreamClosed(outcome) {
     if (downstreamClosed) return;
     downstreamClosed = true;
+    clearUpstreamErrorFallback();
     unregisterLifecycle?.();
     unregisterLifecycle = null;
     recordSessionLifetime(outcome);
@@ -447,6 +494,7 @@ export function proxyGatewayWebSocket(
    * @param {boolean} reconnect
    */
   async function handleUpstreamClose(attachedUpstream, evt, reconnect) {
+    const followedError = clearUpstreamErrorFallback(attachedUpstream);
     if (upstream !== attachedUpstream) return;
     if (!reconnect) {
       upstream = null;
@@ -459,23 +507,26 @@ export function proxyGatewayWebSocket(
       }
       return;
     }
-    record("upstream_abnormal_close");
-    recordEvent("warn", "websocket_upstream_abnormal_close", {
-      code: evt.code,
-      reason: evt.reason,
-    });
+    if (!followedError) {
+      record("upstream_abnormal_close");
+      recordEvent("warn", "websocket_upstream_abnormal_close", {
+        code: evt.code,
+        reason: evt.reason,
+      });
+    }
     await handleUpstreamFailure(attachedUpstream);
   }
 
   /** @param {WebSocket} nextUpstream */
   function attachUpstream(nextUpstream) {
+    clearUpstreamErrorFallback();
     if (pendingUpstream === nextUpstream) pendingUpstream = null;
     const attachedUpstream = nextUpstream;
     upstream = attachedUpstream;
     setDetached(false);
     acceptProxyWebSocket(attachedUpstream);
     attachedUpstream.addEventListener("message", (evt) => {
-      if (upstream !== attachedUpstream) return;
+      if (upstream !== attachedUpstream || upstreamErrorSocket === attachedUpstream) return;
       try {
         downstream.send(evt.data);
       } catch {
@@ -487,10 +538,9 @@ export function proxyGatewayWebSocket(
       void handleUpstreamClose(attachedUpstream, evt, websocketCloseShouldReconnect(evt));
     });
     attachedUpstream.addEventListener("error", () => {
-      if (upstream !== attachedUpstream) return;
+      if (!scheduleUpstreamFailure(attachedUpstream)) return;
       record("upstream_error");
       recordEvent("warn", "websocket_upstream_error");
-      void handleUpstreamFailure(attachedUpstream);
     });
   }
 
@@ -578,7 +628,9 @@ export function proxyGatewayWebSocket(
 
   /** @param {string | ArrayBuffer} data */
   async function sendClientMessage(data) {
+    await waitForUpstreamErrorDecision();
     await requireReconnectAllowed();
+    await waitForUpstreamErrorDecision();
     const current = upstream || await reconnectWithBudget();
     if (!current) throw new Error("WebSocket upstream unavailable");
     try {

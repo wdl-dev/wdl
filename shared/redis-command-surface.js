@@ -70,6 +70,11 @@ export class RedisCommandSurface {
     return /** @type {number} */ (await this._exec("PUBLISH", channel, message));
   }
 
+  /** @param {string} script @param {string[]} [keys] @param {RedisArg[]} [args] */
+  async eval(script, keys = [], args = []) {
+    return this._exec("EVAL", script, String(keys.length), ...keys, ...args);
+  }
+
   /** @param {string} cursor @param {string} match @param {number} [count] @returns {Promise<[string, string[]]>} */
   async scan(cursor, match, count = 100) {
     const result = /** @type {[Uint8Array, Uint8Array[]]} */ (

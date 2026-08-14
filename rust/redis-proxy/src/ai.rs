@@ -12,14 +12,22 @@ use crate::{AppError, AppResult, AppState};
 const AI_PROVIDER_MAX_COUNT: usize = 8;
 const AI_MODELS_PER_PROVIDER_MAX: usize = 32;
 const AI_NAMESPACE_MODEL_MAX_COUNT: usize = 128;
+const AI_PROVIDER_NAME_MAX_BYTES: usize = 32;
 const AI_PROVIDER_RECORD_MAX_BYTES: usize = 64 * 1024;
 const AI_UPSTREAM_MODEL_MAX_BYTES: usize = 256;
 const AI_CREDENTIAL_MAX_BYTES: usize = 16 * 1024;
+const AI_CREDENTIAL_ENVELOPE_MAX_BYTES: usize = 64 * 1024;
 
 const RESOLVE_SCRIPT_SOURCE: &str = r#"
 local max_provider_count = tonumber(ARGV[2])
+local max_provider_name_bytes = tonumber(ARGV[3])
+local max_provider_record_bytes = tonumber(ARGV[4])
+local max_credential_envelope_bytes = tonumber(ARGV[5])
 if redis.call('HLEN', KEYS[1]) > max_provider_count
-    or redis.call('HLEN', KEYS[2]) > max_provider_count then
+    or redis.call('HLEN', KEYS[2]) > max_provider_count
+    or string.len(ARGV[1]) > max_provider_name_bytes
+    or redis.call('HSTRLEN', KEYS[1], ARGV[1]) > max_provider_record_bytes
+    or redis.call('HSTRLEN', KEYS[2], ARGV[1]) > max_credential_envelope_bytes then
   return {0, false, false}
 end
 return {
@@ -31,14 +39,34 @@ return {
 
 const MODELS_SCRIPT_SOURCE: &str = r#"
 local max_provider_count = tonumber(ARGV[1])
+local max_provider_name_bytes = tonumber(ARGV[2])
+local max_provider_record_bytes = tonumber(ARGV[3])
+local max_credential_envelope_bytes = tonumber(ARGV[4])
 if redis.call('HLEN', KEYS[1]) > max_provider_count
     or redis.call('HLEN', KEYS[2]) > max_provider_count then
   return {0, {}, {}}
 end
+local provider_names = redis.call('HKEYS', KEYS[1])
+local credential_names = redis.call('HKEYS', KEYS[2])
+local providers = {}
+for _, name in ipairs(provider_names) do
+  if string.len(name) > max_provider_name_bytes
+      or redis.call('HSTRLEN', KEYS[1], name) > max_provider_record_bytes then
+    return {0, {}, {}}
+  end
+  providers[#providers + 1] = name
+  providers[#providers + 1] = redis.call('HGET', KEYS[1], name)
+end
+for _, name in ipairs(credential_names) do
+  if string.len(name) > max_provider_name_bytes
+      or redis.call('HSTRLEN', KEYS[2], name) > max_credential_envelope_bytes then
+    return {0, {}, {}}
+  end
+end
 return {
   1,
-  redis.call('HGETALL', KEYS[1]),
-  redis.call('HKEYS', KEYS[2])
+  providers,
+  credential_names
 }
 "#;
 
@@ -165,11 +193,12 @@ fn credentials_key(ns: &str) -> String {
 }
 
 fn valid_provider_name(value: &str) -> bool {
-    valid_bounded_alias(value, 32, |ch| ch == '-')
+    valid_bounded_alias(value, AI_PROVIDER_NAME_MAX_BYTES, |ch| ch == '-')
 }
 
 fn valid_model_alias(value: &str) -> bool {
     valid_bounded_alias(value, 64, |ch| matches!(ch, '-' | '_' | '.'))
+        && !value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn valid_bounded_alias(value: &str, max: usize, extra: impl Fn(char) -> bool) -> bool {
@@ -401,10 +430,19 @@ pub(crate) async fn resolve(
     let (bounded, record_raw, credential_raw): (u8, Option<Vec<u8>>, Option<Vec<u8>>) = state
         .with_control_redis(move |mut conn| async move {
             let max_provider_count = AI_PROVIDER_MAX_COUNT.to_string();
+            let max_provider_name_bytes = AI_PROVIDER_NAME_MAX_BYTES.to_string();
+            let max_provider_record_bytes = AI_PROVIDER_RECORD_MAX_BYTES.to_string();
+            let max_credential_envelope_bytes = AI_CREDENTIAL_ENVELOPE_MAX_BYTES.to_string();
             RESOLVE_SCRIPT
                 .prepare_invoke(
                     &[&query_providers_key, &query_credentials_key],
-                    &[&query_provider, &max_provider_count],
+                    &[
+                        &query_provider,
+                        &max_provider_count,
+                        &max_provider_name_bytes,
+                        &max_provider_record_bytes,
+                        &max_credential_envelope_bytes,
+                    ],
                 )
                 .invoke_async(&mut conn)
                 .await
@@ -414,7 +452,7 @@ pub(crate) async fn resolve(
         return Err(ai_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "ai_state_corrupt",
-            "AI provider or credential count exceeds its bound",
+            "AI provider state exceeds its read bounds",
         ));
     }
     let record_raw = record_raw.ok_or_else(|| {
@@ -448,6 +486,13 @@ pub(crate) async fn resolve(
             "AI provider credential is not configured",
         )
     })?;
+    if credential_raw.len() > AI_CREDENTIAL_ENVELOPE_MAX_BYTES {
+        return Err(ai_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ai_state_corrupt",
+            "AI provider credential envelope exceeds its byte limit",
+        ));
+    }
     let credential =
         state
             .secret_decryptor()
@@ -479,8 +524,19 @@ pub(crate) async fn models(
         state
             .with_control_redis(|mut conn| async move {
                 let max_provider_count = AI_PROVIDER_MAX_COUNT.to_string();
+                let max_provider_name_bytes = AI_PROVIDER_NAME_MAX_BYTES.to_string();
+                let max_provider_record_bytes = AI_PROVIDER_RECORD_MAX_BYTES.to_string();
+                let max_credential_envelope_bytes = AI_CREDENTIAL_ENVELOPE_MAX_BYTES.to_string();
                 MODELS_SCRIPT
-                    .prepare_invoke(&[&providers_key, &credentials_key], &[&max_provider_count])
+                    .prepare_invoke(
+                        &[&providers_key, &credentials_key],
+                        &[
+                            &max_provider_count,
+                            &max_provider_name_bytes,
+                            &max_provider_record_bytes,
+                            &max_credential_envelope_bytes,
+                        ],
+                    )
                     .invoke_async(&mut conn)
                     .await
             })
@@ -489,7 +545,7 @@ pub(crate) async fn models(
         return Err(ai_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "ai_state_corrupt",
-            "AI provider or credential count exceeds its bound",
+            "AI provider state exceeds its read bounds",
         ));
     }
     for provider in &credential_names {
@@ -649,12 +705,17 @@ mod tests {
             limits["namespaceModelMaxCount"],
             AI_NAMESPACE_MODEL_MAX_COUNT
         );
+        assert_eq!(limits["providerNameMaxBytes"], AI_PROVIDER_NAME_MAX_BYTES);
         assert_eq!(
             limits["providerRecordMaxBytes"],
             AI_PROVIDER_RECORD_MAX_BYTES
         );
         assert_eq!(limits["upstreamModelMaxBytes"], AI_UPSTREAM_MODEL_MAX_BYTES);
         assert_eq!(limits["credentialMaxBytes"], AI_CREDENTIAL_MAX_BYTES);
+        assert_eq!(
+            limits["credentialEnvelopeMaxBytes"],
+            AI_CREDENTIAL_ENVELOPE_MAX_BYTES
+        );
         let boundaries = &fixture["boundaries"];
         for item in boundaries["providerNameLengths"].as_array().unwrap() {
             let value = "p".repeat(item["length"].as_u64().unwrap() as usize);
@@ -819,14 +880,26 @@ mod tests {
         let credential_count = MODELS_SCRIPT_SOURCE
             .find("redis.call('HLEN', KEYS[2])")
             .unwrap();
-        let providers = MODELS_SCRIPT_SOURCE
-            .find("redis.call('HGETALL', KEYS[1])")
+        let provider_names = MODELS_SCRIPT_SOURCE
+            .find("redis.call('HKEYS', KEYS[1])")
             .unwrap();
-        let credentials = MODELS_SCRIPT_SOURCE
+        let credential_names = MODELS_SCRIPT_SOURCE
             .find("redis.call('HKEYS', KEYS[2])")
             .unwrap();
-        assert!(provider_count < providers);
-        assert!(credential_count < credentials);
+        let provider_length = MODELS_SCRIPT_SOURCE
+            .find("redis.call('HSTRLEN', KEYS[1], name)")
+            .unwrap();
+        let credential_length = MODELS_SCRIPT_SOURCE
+            .find("redis.call('HSTRLEN', KEYS[2], name)")
+            .unwrap();
+        let provider_read = MODELS_SCRIPT_SOURCE
+            .find("redis.call('HGET', KEYS[1], name)")
+            .unwrap();
+        assert!(provider_count < provider_names);
+        assert!(credential_count < credential_names);
+        assert!(provider_names < provider_length);
+        assert!(credential_names < credential_length);
+        assert!(provider_length < provider_read);
         assert!(MODELS_SCRIPT_SOURCE.contains("return {0, {}, {}}"));
     }
 
@@ -838,6 +911,12 @@ mod tests {
         let credential_count = RESOLVE_SCRIPT_SOURCE
             .find("redis.call('HLEN', KEYS[2])")
             .unwrap();
+        let provider_length = RESOLVE_SCRIPT_SOURCE
+            .find("redis.call('HSTRLEN', KEYS[1], ARGV[1])")
+            .unwrap();
+        let credential_length = RESOLVE_SCRIPT_SOURCE
+            .find("redis.call('HSTRLEN', KEYS[2], ARGV[1])")
+            .unwrap();
         let provider = RESOLVE_SCRIPT_SOURCE
             .find("redis.call('HGET', KEYS[1]")
             .unwrap();
@@ -846,6 +925,8 @@ mod tests {
             .unwrap();
         assert!(provider_count < provider);
         assert!(credential_count < credential);
+        assert!(provider_length < provider);
+        assert!(credential_length < credential);
         assert!(RESOLVE_SCRIPT_SOURCE.contains("return {0, false, false}"));
     }
 }

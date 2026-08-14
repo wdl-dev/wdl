@@ -66,7 +66,7 @@ Malformed public model id 会在 resolver 或 provider I/O 前由 host admission
 
 HTTP inference request 必须是 JSON，model 位于 body。Tenant authorization、endpoint、host、redirect 和任意 outbound header 都不会被转发。WDL 只转发有界的 content type、retry delay 和 provider request id 等 response header。`x-request-id` 始终是 WDL request id；使用同名 header 的 provider id 改由 `x-ai-provider-request-id` 暴露。
 
-`run()` 透传 provider-native request/response field。只要所选 provider/model 支持，function tools、structured output、reasoning field、provider tools 和 multimodal input 都可使用。Input modality 包括 text、image、audio 和 Responses direct file item；WDL 不提供 provider file upload 或 lifecycle API。WDL 不执行 tool、不校验 tool argument，也不会自动继续 agent loop。
+`run()` 透传 provider-native request/response field。只要所选 provider/model 支持，function tools、structured output、reasoning field、provider tools 和 multimodal input 都可使用。Input modality 包括 text、image、audio 和 Responses direct file item；非空 Responses `instructions` field 计为 text input。WDL 不提供 provider file upload 或 lifecycle API。WDL 不执行 tool、不校验 tool argument，也不会自动继续 agent loop。
 
 无法解码为 JSON 的成功响应会让 `run()` 以 status 为 `502` 的 `AIError` 失败。对于非成功响应，`run()` 保留有界 OpenAI-compatible provider message 和字符串 code；没有 code 时回退到 provider type。`fetch()` 仍是 raw-response escape hatch。
 
@@ -85,9 +85,9 @@ Control 拥有以下 namespace-scoped route：
 | `PUT /ns/<ns>/ai/providers/<name>/credential` | `ai.provider.write` |
 | `GET /ns/<ns>/ai/models` | `ai.model.list` |
 
-Provider write 包含 `kind` 和一个或多个 model descriptor。Control 生成新的 128-bit revision。同一 provider kind 内更新 metadata 时保留已有 credential，因为 kind 拥有当前 bearer authentication shape；在 credential-only residue 上创建 provider 或改变 provider kind 时，Control 会在同一事务中清除 credential。Credential write 必须携带当前完全相同的 revision，防止延迟写入挂到另一个 provider incarnation。Provider delete 会一起删除 metadata 与 credential，包括 credential-only repair residue。Credential 是有字节上限、不含空白的 visible-ASCII bearer token；malformed value 在加密前被拒绝。
+Provider write 包含 `kind` 和一个或多个 model descriptor。Control 生成新的 128-bit revision。同一 provider kind 内更新 metadata 时保留已有 credential，因为 kind 拥有当前 bearer authentication shape；在 credential-only residue 上创建 provider 或改变 provider kind 时，Control 会在同一事务中清除 credential。Credential write 必须携带当前完全相同的 revision，防止延迟写入挂到另一个 provider incarnation。Provider delete 会一起删除 metadata 与 credential，包括 credential-only repair residue。Credential 是有字节上限、不含空白的 visible-ASCII bearer token；malformed value 在加密前被拒绝。Control 也限制最终 encrypted envelope，保证成功写入的状态始终位于 data-plane read bound 内。
 
-Provider 和 model alias grammar 由 `shared/ns-pattern.js` 拥有。`upstreamModel` 是非空、well-formed Unicode 的 opaque provider identifier，UTF-8 上限 256 bytes；它有意不使用 alias grammar。
+Provider 和 model alias grammar 由 `shared/ns-pattern.js` 拥有；model alias 不能完全由十进制数字组成。`upstreamModel` 是非空、well-formed Unicode 的 opaque provider identifier，UTF-8 上限 256 bytes；它有意不使用 alias grammar。
 
 | Provider kind | 支持的 adapter protocol |
 |---|---|
@@ -106,9 +106,9 @@ AI 使用 DB 0：
 | `ai:providers:<ns>` | Hash：provider name 到 canonical provider JSON | Control 写；redis-proxy 读 |
 | `ai:provider-credentials:<ns>` | Hash：provider name 到 `WDL-ENC:` credential envelope | Control 写；redis-proxy 解密 |
 
-Provider JSON 包含 `revision`、`kind` 和 canonical alias-sorted `models` map。Control 限制每个 namespace 最多八个 provider、每个 provider 32 个 model、每个 namespace 128 个 model、每条 provider record 64 KiB；credential 非空、最多 16 KiB，并使用上述 visible-ASCII bearer-token grammar。
+Provider JSON 包含 `revision`、`kind` 和 canonical alias-sorted `models` map。Control 限制每个 namespace 最多八个 provider、每个 provider 32 个 model、每个 namespace 128 个 model、每条 provider record 64 KiB。Credential hash 同样最多八个 field；credential-only repair residue 在删除前会占用一个 slot。Credential 非空、最多 16 KiB，并使用上述 visible-ASCII bearer-token grammar；持久化 encrypted envelope 上限为 64 KiB。
 
-`/ai/resolve` 接受 `{ ns, model, protocol, transport }`，在一个 Lua snapshot 中读取一条 provider record 与 credential；它会检查两个 hash 的 cardinality，并校验目标 record 与 credential。`/ai/models` 接受 `{ ns }`，在一个 Lua 调用中读取完整有界 provider snapshot 和 credential field names，校验全部已物化 field，并返回 provider model metadata，不解密 credential，也不按 credential presence 过滤 catalog。每个 Worker 最多声明一个 AI binding，因此两条 wire request 都不携带 binding name。每个 reader 都会对它实际物化的 malformed、non-canonical、torn 或 over-limit state fail closed；`/ai/resolve` 还会对无法解密的目标 credential fail closed。共享 JS/Rust grammar 由 `tests/fixtures/ai-contract.json` 固定；resolver response 只包含 host request path 实际消费的字段。
+`/ai/resolve` 接受 `{ ns, model, protocol, transport }`，在一个 Lua snapshot 中读取一条 provider record 与 credential；Lua 会在返回 payload bytes 前检查两个 hash 的 cardinality 和所选 field size，reader 随后校验目标 record 与 credential。`/ai/models` 接受 `{ ns }`，先检查 field name 与 value size，再在一个 Lua 调用中返回完整有界 provider snapshot 和 credential field names；它校验全部已物化 field，并返回 provider model metadata，不解密 credential，也不按 credential presence 过滤 catalog。每个 Worker 最多声明一个 AI binding，因此两条 wire request 都不携带 binding name。每个 reader 都会对它实际物化的 malformed、non-canonical、torn 或 over-limit state fail closed；`/ai/resolve` 还会对无法解密的目标 credential fail closed。共享 JS/Rust grammar 由 `tests/fixtures/ai-contract.json` 固定；resolver response 只包含 host request path 实际消费的字段。
 
 Provider state 跟随 namespace secret lifecycle，可以活过 namespace 中最后一个 Worker。删除并重新创建最后一个 Worker 不会删除 provider metadata 或 credential；只有显式 provider delete 才会删除。
 

@@ -127,9 +127,10 @@ that same header is exposed as `x-ai-provider-request-id` instead.
 `run()` forwards native provider request and response fields. Function tools,
 structured output, reasoning fields, provider tools, and multimodal inputs therefore
 remain usable when the selected provider/model supports them. Input modalities include
-text, image, audio, and direct Responses file items; WDL does not provide provider file
-upload or lifecycle APIs. WDL does not execute tools, validate tool arguments, or
-automatically continue an agent loop.
+text, image, audio, and direct Responses file items. A non-empty Responses
+`instructions` field counts as text input. WDL does not provide provider file upload or
+lifecycle APIs. WDL does not execute tools, validate tool arguments, or automatically
+continue an agent loop.
 Successful responses that cannot be decoded as JSON fail `run()` with an `AIError`
 whose status is `502`. For non-success responses, `run()` preserves the bounded
 OpenAI-compatible provider message and string code, falling back to the provider type
@@ -162,11 +163,13 @@ in the same transaction. A credential write must carry the exact current revisio
 a delayed write cannot attach to another provider incarnation. Provider deletion
 removes metadata and credential together, including credential-only repair residue.
 Credentials are bounded visible-ASCII bearer tokens without whitespace; malformed
-values are rejected before encryption.
+values are rejected before encryption. Control also bounds the resulting encrypted
+envelope so every successful write remains within the data-plane read bound.
 
-Provider and model alias grammar is owned by `shared/ns-pattern.js`. `upstreamModel` is
-an opaque, non-empty, well-formed Unicode provider identifier with a 256-byte UTF-8
-limit; it deliberately does not use alias grammar.
+Provider and model alias grammar is owned by `shared/ns-pattern.js`; model aliases
+cannot consist only of decimal digits. `upstreamModel` is an opaque, non-empty,
+well-formed Unicode provider identifier with a 256-byte UTF-8 limit; it deliberately
+does not use alias grammar.
 
 | Provider kind | Supported adapter protocols |
 |---|---|
@@ -190,15 +193,18 @@ AI uses DB 0:
 
 Provider JSON includes `revision`, `kind`, and a canonical alias-sorted `models` map.
 Control allows at most eight providers, 32 models per provider, 128 models per
-namespace, and 64 KiB per provider record. Credentials are non-empty and at most
-16 KiB, and use the visible-ASCII bearer-token grammar described above.
+namespace, and 64 KiB per provider record. The credential hash also allows at most
+eight fields; a credential-only repair residue consumes one slot until it is deleted.
+Credentials are non-empty and at most 16 KiB, use the visible-ASCII bearer-token
+grammar described above, and have a 64 KiB persisted encrypted-envelope limit.
 
 `/ai/resolve` accepts `{ ns, model, protocol, transport }` and reads one provider record
-and credential in one Lua snapshot. It checks both hash cardinalities and validates the
-target record and credential. `/ai/models` accepts `{ ns }`, reads the complete bounded
-provider snapshot plus credential field names in one Lua call, validates every
-materialized field, and returns provider model metadata without decrypting credentials
-or filtering the catalog by credential presence.
+and credential in one Lua snapshot. Before returning payload bytes, Lua checks both
+hash cardinalities and the selected field sizes; the reader then validates the target
+record and credential. `/ai/models` accepts `{ ns }`, checks field-name and value sizes,
+then returns the complete bounded provider snapshot plus credential field names in one
+Lua call. It validates every materialized field and returns provider model metadata
+without decrypting credentials or filtering the catalog by credential presence.
 Binding name is not part of either wire request because one Worker can declare at most
 one AI binding. Each reader fails closed on malformed, non-canonical, torn, or
 over-limit state it materializes; `/ai/resolve` also fails closed on an undecryptable

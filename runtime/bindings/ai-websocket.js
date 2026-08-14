@@ -3,6 +3,8 @@ import { utf8ByteLength } from "shared-utf8";
 export const AI_WS_FRAME_MAX_BYTES = 1024 * 1024;
 export const AI_WS_MAX_JSON_DEPTH = 128;
 export const AI_WS_MAX_BYTES = 64 * 1024 * 1024;
+// Preserve a terminal protocol close that workerd dispatches after ErrorEvent.
+const AI_WS_ERROR_CLOSE_GRACE_MS = 100;
 
 /** @param {unknown} value */
 function isRecord(value) {
@@ -296,8 +298,11 @@ export function createAiWebSocketBridge(options) {
   let providerBytes = 0;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let idleTimer = null;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let errorFallbackTimer = null;
 
   const resetIdle = () => {
+    if (errorFallbackTimer !== null) return;
     if (idleTimer !== null) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => finish(1012, "AI websocket idle timeout", "idle_timeout"), idleMs);
   };
@@ -312,6 +317,8 @@ export function createAiWebSocketBridge(options) {
     closed = true;
     if (idleTimer !== null) clearTimeout(idleTimer);
     idleTimer = null;
+    if (errorFallbackTimer !== null) clearTimeout(errorFallbackTimer);
+    errorFallbackTimer = null;
     try { aborter.abort(); } catch {}
     closeAiWebSocket(
       downstream,
@@ -320,6 +327,16 @@ export function createAiWebSocketBridge(options) {
     );
     closeAiWebSocket(providerSocket, code, reason);
     onFinish(outcome);
+  };
+  /** @param {() => void} fallback */
+  const scheduleErrorFallback = (fallback) => {
+    if (closed || errorFallbackTimer !== null) return;
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+    errorFallbackTimer = setTimeout(() => {
+      errorFallbackTimer = null;
+      fallback();
+    }, AI_WS_ERROR_CLOSE_GRACE_MS);
   };
   /** @param {WebSocket} target @param {"client" | "provider"} direction @param {MessageEvent} evt */
   const forward = (target, direction, evt) => {
@@ -377,13 +394,15 @@ export function createAiWebSocketBridge(options) {
       downstreamReason: downstreamCode === evt.code ? evt.reason : "AI provider connection lost",
     });
   });
-  downstream.addEventListener("error", () => finish(1011, "AI websocket client error", "client_error"));
-  providerSocket.addEventListener("error", () => finish(
+  downstream.addEventListener("error", () => scheduleErrorFallback(
+    () => finish(1011, "AI websocket client error", "client_error")
+  ));
+  providerSocket.addEventListener("error", () => scheduleErrorFallback(() => finish(
     1011,
     "AI websocket provider error",
     "provider_error",
     { downstreamCode: 1013, downstreamReason: "AI provider connection lost" }
-  ));
+  )));
   resetIdle();
   return { client, close: () => finish(1012, "AI websocket deadline", "deadline") };
 }

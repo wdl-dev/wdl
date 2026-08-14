@@ -145,11 +145,13 @@ serving `/runtime/load`. There is no steady-state plaintext fallback on the runt
 cold-load path, so a missing or wrong secret-envelope provider key fails closed for
 workers that need secrets.
 
-AI credential PUT follows the same envelope owner but a different read path. Control
-encrypts the namespace credential under an exact provider revision; authenticated
-redis-proxy `/ai/resolve` atomically reads metadata plus ciphertext and decrypts only
-for the local host binding. Provider list/get and model-list responses never contain
-plaintext.
+AI credential PUT follows the same envelope owner but a different read path. A write
+commits only against the exact current provider revision. The ciphertext AAD binds the
+namespace credential hash key, provider field, and envelope version; it does not bind
+the provider revision, so same-kind metadata updates preserve the existing ciphertext.
+Authenticated redis-proxy `/ai/resolve` atomically reads metadata plus ciphertext and
+decrypts only for the local host binding. Provider list/get and model-list responses
+never contain plaintext.
 
 ## Binding And State Security
 

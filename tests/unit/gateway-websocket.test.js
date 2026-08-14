@@ -90,6 +90,7 @@ class FakeWebSocket {
 
   /** @param {unknown} data */
   send(data) {
+    if (this.unusable) return;
     if (this.sendError) throw this.sendError;
     if (this.closed) throw new Error(`${this.name} is closed`);
     if (!this.accepted) throw new TypeError(`${this.name} is not accepted`);
@@ -749,6 +750,73 @@ test("gateway websocket proxy records one outcome for an upstream error", async 
     event: "websocket_upstream_error",
     fields: {},
   }]);
+});
+
+test("gateway websocket proxy prefers a terminal close after an upstream error", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  /** @type {Array<[number, string]>} */
+  const sessions = [];
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {
+      recordSessionLifetime: (/** @type {number} */ durationMs, /** @type {string} */ outcome) =>
+        sessions.push([durationMs, outcome]),
+    }
+  );
+
+  upstream.dispatch("error");
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "must-not-replay" });
+  await delay(1);
+  assert.deepEqual(upstream.sent, []);
+  upstream.dispatch("close", { code: 1009, reason: "message too large" });
+  await delay(0);
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1009,
+    reason: "message too large",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, ["established", "upstream_error"]);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0][1], "upstream_terminal_close");
+});
+
+test("gateway websocket proxy queues a client frame until an errored upstream reconnects", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  /** @type {string[]} */
+  const outcomes = [];
+  let reconnectCalls = 0;
+  proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => {
+      reconnectCalls += 1;
+      return websocketResponse(upstream2);
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome)
+  );
+
+  upstream1.dispatch("error");
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "after-error" });
+  await delay(1);
+  assert.deepEqual(upstream1.sent, []);
+  assert.equal(reconnectCalls, 0);
+
+  upstream1.dispatch("close", { code: 1011, reason: "runtime restart" });
+  await waitFor(() => upstream2.sent.length === 1);
+
+  assert.deepEqual(upstream1.sent, []);
+  assert.deepEqual(upstream2.sent, ["after-error"]);
+  assert.equal(reconnectCalls, 1);
+  assert.deepEqual(outcomes, ["established", "upstream_error", "reconnected"]);
 });
 
 test("gateway websocket proxy preserves client frame order while reconnecting", async () => {

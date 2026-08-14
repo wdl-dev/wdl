@@ -161,11 +161,6 @@ export class RedisClient extends RedisCommandSurface {
     ));
   }
 
-  /** @param {string} script @param {string[]} [keys] @param {RedisArg[]} [args] */
-  async eval(script, keys = [], args = []) {
-    return this._exec("EVAL", script, String(keys.length), ...keys, ...args);
-  }
-
   /** @param {RedisCommand[]} cmdList */
   async multiExec(cmdList) {
     return this._withSocket("MULTI_EXEC", async (writer, _reader, resp) => {

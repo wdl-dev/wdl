@@ -30,7 +30,7 @@ import {
   wsHandshake,
 } from "./helpers/index.js";
 import { prometheusCounter } from "./helpers/prometheus.js";
-import { redisDel, redisHSet } from "./helpers/redis.js";
+import { redisDel, redisHGet, redisHSet } from "./helpers/redis.js";
 
 setupIntegrationSuite();
 
@@ -385,6 +385,91 @@ test("AI resolver snapshots reject overbound hashes and malformed credential fie
       parseJsonText(malformed.body, "malformed credential field").error,
       "ai_state_corrupt"
     );
+  } finally {
+    redisDel(providersKey);
+    redisDel(credentialsKey);
+  }
+});
+
+test("AI persisted readers reject oversized provider and credential fields", async () => {
+  const ns = uniqueNs("ai-field-bounds");
+  const providersKey = `ai:providers:${ns}`;
+  const credentialsKey = `ai:provider-credentials:${ns}`;
+  const created = await adminPut(`/ns/${ns}/ai/providers/openai`, PROVIDERS.openai.record);
+  assertStatus(created, 200, "bounded provider setup");
+  const validProvider = redisHGet(providersKey, "openai");
+  assert.ok(validProvider);
+  const oversized = "x".repeat(64 * 1024 + 1);
+  /** @type {Array<[string, Record<string, unknown>]>} */
+  const readerRequests = [
+    ["/ai/models", { ns }],
+    ["/ai/resolve", {
+      ns,
+      model: "openai/primary",
+      protocol: "responses",
+      transport: "http",
+    }],
+  ];
+  try {
+    redisHSet(providersKey, { openai: oversized });
+    const controlProvider = await adminFetch(`/ns/${ns}/ai/providers`);
+    assert.equal(
+      (await readIntegrationJson(controlProvider, 500, "oversized Control provider")).error,
+      "ai_state_corrupt"
+    );
+    for (const [path, body] of readerRequests) {
+      const response = serviceInternalPost("redis-proxy-user", 7070, path, body);
+      assert.equal(response.status, 500);
+      assert.equal(parseJsonText(response.body, `oversized provider ${path}`).error, "ai_state_corrupt");
+    }
+
+    redisHSet(providersKey, { openai: validProvider });
+    redisHSet(credentialsKey, { openai: oversized });
+    const controlCredential = await adminFetch(`/ns/${ns}/ai/providers`);
+    assert.equal(
+      (await readIntegrationJson(controlCredential, 500, "oversized Control credential")).error,
+      "ai_state_corrupt"
+    );
+    for (const [path, body] of readerRequests) {
+      const response = serviceInternalPost("redis-proxy-user", 7070, path, body);
+      assert.equal(response.status, 500);
+      assert.equal(parseJsonText(response.body, `oversized credential ${path}`).error, "ai_state_corrupt");
+    }
+  } finally {
+    redisDel(providersKey);
+    redisDel(credentialsKey);
+  }
+});
+
+test("AI persisted snapshots reject oversized field names before returning values", async () => {
+  const ns = uniqueNs("ai-field-name-bounds");
+  const providersKey = `ai:providers:${ns}`;
+  const credentialsKey = `ai:provider-credentials:${ns}`;
+  const oversizedName = "p".repeat(33);
+  const expectedMessage = "AI provider state exceeds its read bounds";
+  try {
+    for (const [key, label] of [
+      [providersKey, "provider"],
+      [credentialsKey, "credential"],
+    ]) {
+      redisHSet(key, { [oversizedName]: "small" });
+
+      const control = await readIntegrationJson(
+        await adminFetch(`/ns/${ns}/ai/providers`),
+        500,
+        `oversized Control ${label} field name`
+      );
+      assert.equal(control.error, "ai_state_corrupt");
+      assert.equal(control.message, "Internal error");
+
+      const models = serviceInternalPost("redis-proxy-user", 7070, "/ai/models", { ns });
+      assert.equal(models.status, 500);
+      const modelError = parseJsonText(models.body, `oversized ${label} field name`);
+      assert.equal(modelError.error, "ai_state_corrupt");
+      assert.equal(modelError.message, expectedMessage);
+
+      redisDel(key);
+    }
   } finally {
     redisDel(providersKey);
     redisDel(credentialsKey);
