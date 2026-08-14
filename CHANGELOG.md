@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- Updated the bundled workerd and Workers types pins to `1.20260813.1` and
-  `5.20260813.1`, raising the maximum tenant compatibility date to `2026-08-20`.
+- Updated the bundled workerd and Workers types pins to `1.20260814.1` and
+  `5.20260814.1`, raising the maximum tenant compatibility date to `2026-08-21`.
   The binary includes EventTarget, stream teardown, sandbox-boundary, WorkerLoader,
-  JSG unwrap, and HTMLRewriter fixes. Affected Blob, readable-stream, and
-  writable-sink adapter paths perform O(n) safety copies.
+  JSG unwrap, and HTMLRewriter fixes. Type errors use public Web IDL names instead
+  of internal `Js*` wrapper names. Affected Blob, readable-stream, and writable-sink
+  adapter paths perform O(n) safety copies.
 - Upgraded the vendored `@wdl-dev/aws-sigv4` signer from 3.0.1 to 3.0.3 with
   intrinsic ArrayBufferView bounds and constructor-copy snapshots.
 - R2 `put()` validates intrinsic BufferSource bounds. Buffered stream readers

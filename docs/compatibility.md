@@ -61,19 +61,6 @@ unsupported. For compatibility dates on or after `2026-08-11`, workerd also enab
 allocates instance IDs. WDL does not use that engine; its custom facade and DB 2-backed
 workflows service retain WDL-owned instance identity and lifecycle semantics.
 
-The bundled 2026-08-13 workerd pin supports listeners whose removal signal is their
-own EventTarget and preserves replacement reader locks during abort-driven
-`ReadableStream.pipeTo()` teardown. Blob streams and Blob-backed responses copy bytes
-at the sandbox boundary, and workerd's native writable-sink adapter copies JavaScript
-chunks before asynchronous native I/O. These paths perform an O(n) safety copy. WDL's
-direct fixed-`ArrayBuffer` R2 PUT normalization remains zero-copy. Buffered R2 stream
-consumers snapshot each delivered chunk before retaining it across their own next
-read. `ReadableStreamDefaultController.enqueue()` remains reference-based, so
-producer mutations after enqueue can affect bytes delivered before that snapshot.
-WDL's Queue binding does not use workerd's native Queue producer. HTMLRewriter uses
-lol-html 3.0.1 with corrected selector and SVG/MathML handling. These binary behaviors
-are not compatibility-date gated.
-
 Bundled workerd permits `Fetcher` and Durable Object class stubs to cross JSRPC as
 opaque arguments without an experimental flag. WDL treats possession of such a stub
 as capability delegation: the receiver can call the delegated target with the
