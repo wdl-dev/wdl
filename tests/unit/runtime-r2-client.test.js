@@ -224,6 +224,36 @@ test("R2Bucket.put preserves onlyIf etag arrays for host binding", async () => {
   assert.deepEqual(calls[0].requestMeta, { requestId: "rid-put" });
 });
 
+test("R2Bucket.put ignores a mutable TextEncoder.prototype.encode for string bodies", async () => {
+  let encodeCalls = 0;
+  /** @type {Uint8Array | undefined} */
+  let observed;
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed = value;
+      return null;
+    },
+  });
+
+  await withMockedPropertyDescriptor(
+    TextEncoder.prototype,
+    "encode",
+    {
+      configurable: true,
+      writable: true,
+      value() {
+        encodeCalls += 1;
+        return new Uint8Array(0);
+      },
+    },
+    () => bucket.put("safe.txt", "help")
+  );
+
+  assert.equal(encodeCalls, 0);
+  assert.ok(observed);
+  assert.deepEqual(Array.from(observed), [104, 101, 108, 112]);
+});
+
 test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds views", async () => {
   /** @type {Uint8Array[]} */
   const calls = [];

@@ -10,8 +10,10 @@
   adapter paths perform O(n) safety copies.
 - Upgraded the vendored `@wdl-dev/aws-sigv4` signer from 3.0.1 to 3.0.3 with
   intrinsic ArrayBufferView bounds and constructor-copy snapshots.
-- R2 `put()` validates intrinsic BufferSource bounds. Buffered stream readers
-  snapshot each delivered chunk before retaining it across their next read.
+- R2 `put()` encodes string bodies without consulting a tenant-mutated
+  `TextEncoder.prototype.encode` and validates intrinsic BufferSource bounds. Buffered
+  stream readers snapshot each delivered chunk before retaining it across their next
+  read.
   `ReadableStreamDefaultController.enqueue()` remains reference-based, so producer
   mutations after enqueue can affect bytes delivered before that snapshot. Direct
   fixed `ArrayBuffer`-backed `Uint8Array` inputs retain zero-copy normalization.

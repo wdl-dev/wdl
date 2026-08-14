@@ -139,8 +139,10 @@ and range GETs implement the common R2 behavior. `list({ include: [...] })` perf
 extra HEAD requests for metadata fields and applies a concurrency cap. Tenant-supplied
 `Headers` metadata must carry a canonical IMF-fixdate `Expires` value when that header
 is present; malformed write metadata is rejected before the host binding call.
-R2 validates BufferSource internal slots before writing. Buffered stream consumers
-snapshot each delivered chunk before retaining it across their own next read.
+R2 encodes string PUT bodies without consulting a tenant-mutated
+`TextEncoder.prototype.encode` and validates BufferSource internal slots before
+writing. Buffered stream consumers snapshot each delivered chunk before retaining it
+across their own next read.
 `ReadableStreamDefaultController.enqueue()` queues object references, so producer
 mutations after enqueue can change bytes before WDL receives them. Direct `Uint8Array`
 PUT bodies backed by a fixed `ArrayBuffer` retain zero-copy normalization. Detached or

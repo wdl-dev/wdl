@@ -30,6 +30,7 @@ const utf8Decoder = new TextDecoder();
 const IntrinsicUint8Array = Uint8Array;
 const intrinsicObjectCreate = Object.create;
 const intrinsicReflectApply = Reflect.apply;
+const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
 const intrinsicUint8ArraySet = IntrinsicUint8Array.prototype.set;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
@@ -450,7 +451,10 @@ function preparePutBytes(value) {
   // A tenant-owned view must not become an async helper's resolution value.
   if (value == null) return { bytes: new IntrinsicUint8Array(0), pendingRead: null };
   if (typeof value === "string") {
-    return { bytes: utf8Encoder.encode(value), pendingRead: null };
+    return {
+      bytes: intrinsicReflectApply(intrinsicTextEncoderEncode, utf8Encoder, [value]),
+      pendingRead: null,
+    };
   }
   const bufferSourceBytes = r2BufferSourceBytes(value);
   if (bufferSourceBytes) return { bytes: bufferSourceBytes, pendingRead: null };
