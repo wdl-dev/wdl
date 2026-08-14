@@ -34,7 +34,7 @@ async function settlementWithinTestWindow(promise) {
  * @param {() => void} mutate
  * @param {{ mutateAfterClose?: boolean, trailingChunk?: Uint8Array | null }} [options]
  */
-function streamWithMutationAfterFirstRead(
+function streamWithMutationOnSecondPull(
   firstChunk,
   mutate,
   { mutateAfterClose = false, trailingChunk = null } = {}
@@ -53,6 +53,19 @@ function streamWithMutationAfterFirstRead(
       if (mutateAfterClose) queueMicrotask(mutate);
     },
   }, { highWaterMark: 0 });
+}
+
+/** @param {Uint8Array} chunk @param {() => void} mutate */
+function streamWithQueuedMutationOnPull(chunk, mutate) {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(chunk);
+    },
+    pull(controller) {
+      mutate();
+      controller.close();
+    },
+  });
 }
 
 test("R2Bucket.list validates limit before host binding call", async () => {
@@ -379,20 +392,19 @@ test("R2Bucket.put reads Blob through the capped stream path", async () => {
   assert.deepEqual([...calls[0].value], [...new TextEncoder().encode("hello")]);
 });
 
-test("R2Bucket.put keeps single-chunk ReadableStream bytes without re-copying", async () => {
+test("R2Bucket.put does not assimilate Uint8Array.prototype.then while buffering", async () => {
   const chunk = new TextEncoder().encode("hello");
   let thenCalls = 0;
-  Object.defineProperty(chunk, "then", {
-    /** @param {(value: Uint8Array) => void} resolve */
-    value(resolve) {
-      thenCalls += 1;
-      resolve(new Uint8Array(0));
-    },
-  });
-  let observed;
+  /** @param {(value: unknown) => void} resolve */
+  function mockThen(resolve) {
+    thenCalls += 1;
+    resolve({ bytes: new Uint8Array(0) });
+  }
+  /** @type {Uint8Array[]} */
+  const observed = [];
   const bucket = new R2Bucket({
     async put(_key, value) {
-      observed = value;
+      observed.push(value);
       return {
         key: "stream.txt",
         version: "",
@@ -414,11 +426,91 @@ test("R2Bucket.put keeps single-chunk ReadableStream bytes without re-copying", 
     },
   });
 
-  const meta = /** @type {any} */ (await bucket.put("stream.txt", stream));
+  const meta = /** @type {any} */ (await withMockedPropertyDescriptors([
+    {
+      target: Uint8Array.prototype,
+      name: "then",
+      descriptor: {
+        configurable: true,
+        get() {
+          // Buffer shares this prototype; target only base Uint8Array snapshots.
+          return Object.getPrototypeOf(this) === Uint8Array.prototype
+            ? mockThen
+            : undefined;
+        },
+      },
+    },
+  ], () => bucket.put("stream.txt", stream)));
 
-  assert.equal(meta.size, 5);
-  assert.equal(observed, chunk);
   assert.equal(thenCalls, 0);
+  assert.equal(meta.size, 5);
+  assert.equal(observed.length, 1);
+  assert.notEqual(observed[0], chunk);
+  assert.deepEqual(Array.from(observed[0]), Array.from(chunk));
+});
+
+test("R2 buffered readers observe default-HWM mutations made before delivery", async () => {
+  const deliveredBytes = [0, 0, 0, 0];
+  const putChunk = new Uint8Array([104, 101, 108, 112]);
+  /** @type {number[][]} */
+  const putObserved = [];
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      putObserved.push(Array.from(value));
+      return null;
+    },
+  });
+
+  // Default-HWM PullSteps calls pull before the queued chunk reaches its reader.
+  await bucket.put("queued.bin", streamWithQueuedMutationOnPull(
+    putChunk,
+    () => putChunk.fill(0)
+  ));
+
+  const bodyChunk = new Uint8Array([104, 101, 108, 112]);
+  const body = new R2ObjectBody({
+    key: "queued.bin",
+    version: "",
+    size: bodyChunk.byteLength,
+    etag: "abc",
+    httpEtag: '"abc"',
+    uploaded: Date.now(),
+    httpMetadata: {},
+    customMetadata: {},
+    checksums: {},
+    storageClass: "Standard",
+  }, streamWithQueuedMutationOnPull(bodyChunk, () => bodyChunk.fill(0)));
+
+  assert.deepEqual(putObserved, [deliveredBytes]);
+  assert.deepEqual(Array.from(await body.bytes()), deliveredBytes);
+});
+
+test("R2Bucket.put preserves fixed chunks across later stream reads", async () => {
+  /** @type {number[][]} */
+  const observed = [];
+  const bucket = new R2Bucket({
+    async put(_key, value) {
+      observed.push(Array.from(value));
+      return null;
+    },
+  });
+
+  for (const trailingChunk of [null, new Uint8Array([33, 34])]) {
+    const first = new Uint8Array([104, 101, 108, 112]);
+    const stream = streamWithMutationOnSecondPull(
+      first,
+      () => first.fill(0),
+      { trailingChunk }
+    );
+
+    await bucket.put("fixed.bin", stream);
+    assert.deepEqual(
+      observed.at(-1),
+      trailingChunk === null
+        ? [104, 101, 108, 112]
+        : [104, 101, 108, 112, 33, 34]
+    );
+  }
 });
 
 test("R2Bucket.put preserves resizable chunks across later stream reads", async () => {
@@ -454,7 +546,7 @@ test("R2Bucket.put preserves resizable chunks across later stream reads", async 
     const backing = new ArrayBuffer(4, { maxByteLength: 4 });
     const first = new Uint8Array(backing);
     first.set([104, 101, 108, 112]);
-    const stream = streamWithMutationAfterFirstRead(first, () => {
+    const stream = streamWithMutationOnSecondPull(first, () => {
       for (const size of resizeTo) backing.resize(size);
     }, { mutateAfterClose, trailingChunk });
 
@@ -475,7 +567,7 @@ test("R2Bucket.put preserves shared chunks across later stream reads", async () 
       return null;
     },
   });
-  const stream = streamWithMutationAfterFirstRead(chunk, () => chunk.fill(0));
+  const stream = streamWithMutationOnSecondPull(chunk, () => chunk.fill(0));
 
   await bucket.put("shared.bin", stream);
 
@@ -493,7 +585,7 @@ test("R2Bucket.put stabilizes zero-length resizable chunks before later reads", 
       return null;
     },
   });
-  const stream = streamWithMutationAfterFirstRead(chunk, () => backing.resize(2));
+  const stream = streamWithMutationOnSecondPull(chunk, () => backing.resize(2));
 
   await bucket.put("empty.bin", stream);
 
@@ -503,23 +595,27 @@ test("R2Bucket.put stabilizes zero-length resizable chunks before later reads", 
   assert.doesNotThrow(() => Uint8Array.prototype.at.call(observed, 0));
 });
 
-test("R2Bucket.put rejects zero-length stream chunks detached while buffered", async () => {
+test("R2Bucket.put preserves zero-length fixed chunks after source detachment", async () => {
   const backing = new ArrayBuffer(0);
   const chunk = new Uint8Array(backing);
-  let hostCalls = 0;
+  /** @type {Uint8Array | undefined} */
+  let observed;
   const bucket = new R2Bucket({
-    async put() {
-      hostCalls += 1;
+    async put(_key, value) {
+      observed = value;
       return null;
     },
   });
-  const stream = streamWithMutationAfterFirstRead(chunk, () => {
+  const stream = streamWithMutationOnSecondPull(chunk, () => {
     structuredClone(backing, { transfer: [backing] });
   });
 
-  await assert.rejects(() => bucket.put("empty.bin", stream), TypeError);
+  await bucket.put("empty.bin", stream);
 
-  assert.equal(hostCalls, 0);
+  assert.ok(observed);
+  assert.notEqual(observed, chunk);
+  assert.equal(observed.byteLength, 0);
+  assert.doesNotThrow(() => Uint8Array.prototype.at.call(observed, 0));
 });
 
 test("R2Bucket.put keeps the validated body stable through the host call", async () => {
@@ -684,7 +780,7 @@ test("R2Bucket.get returns R2Object when host binding returns no body", async ()
   assert.equal(obj.key, "a.txt");
 });
 
-test("R2ObjectBody.bytes keeps a full-buffer single chunk without re-copying", async () => {
+test("R2ObjectBody.bytes snapshots a full-buffer single chunk", async () => {
   const chunk = new TextEncoder().encode("hello");
   const obj = new R2ObjectBody({
     key: "a.txt",
@@ -706,7 +802,8 @@ test("R2ObjectBody.bytes keeps a full-buffer single chunk without re-copying", a
 
   const bytes = await obj.bytes();
 
-  assert.equal(bytes, chunk);
+  assert.notEqual(bytes, chunk);
+  assert.deepEqual(Array.from(bytes), Array.from(chunk));
 });
 
 test("R2ObjectBody.bytes copies a sliced single chunk before exposing it", async () => {

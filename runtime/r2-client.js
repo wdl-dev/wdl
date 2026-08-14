@@ -7,8 +7,7 @@ import {
   r2BufferSourceBytes,
   r2CacheExpiryFromHeaders,
   r2Uint8ArrayByteLength,
-  r2Uint8ArrayIsFullBuffer,
-  r2Uint8ArrayNeedsSnapshot,
+  r2Uint8ArrayHasResizableOrSharedBacking,
   setR2CacheExpiryHeader,
 } from "./_wdl-r2-utils.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
@@ -80,13 +79,17 @@ function streamChunkBytes(value, operation) {
 }
 
 /** @param {Uint8Array} bytes @param {number} byteLength */
-function stableStreamChunk(bytes, byteLength) {
-  // Views with externally mutable bounds or bytes require a stable snapshot.
-  if (!r2Uint8ArrayNeedsSnapshot(bytes)) return bytes;
+function snapshotStreamChunk(bytes, byteLength) {
   // Allocate from the capped length so concurrent growth cannot exceed the limit.
   const snapshot = new IntrinsicUint8Array(byteLength);
   intrinsicReflectApply(intrinsicUint8ArraySet, snapshot, [bytes, 0]);
   return snapshot;
+}
+
+/** @param {Uint8Array} bytes @param {number} byteLength */
+function passthroughStreamChunk(bytes, byteLength) {
+  if (!r2Uint8ArrayHasResizableOrSharedBacking(bytes)) return bytes;
+  return snapshotStreamChunk(bytes, byteLength);
 }
 
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
@@ -110,7 +113,8 @@ async function readStreamWithLimit(stream, operation) {
         );
         assertR2BufferSize(total, operation);
       }
-      const chunk = stableStreamChunk(bytes, chunkLength);
+      // Own the delivered bytes before retaining them across this loop's next read.
+      const chunk = snapshotStreamChunk(bytes, chunkLength);
       chunks[chunkCount] = chunk;
       chunkCount += 1;
     }
@@ -118,12 +122,7 @@ async function readStreamWithLimit(stream, operation) {
     try { reader.releaseLock(); } catch {}
   }
   if (chunkCount === 1) {
-    const chunk = chunks[0];
-    const chunkLength = r2Uint8ArrayByteLength(chunk);
-    if (r2Uint8ArrayIsFullBuffer(chunk, chunkLength)) {
-      return nonThenableByteResult(chunk);
-    }
-    return nonThenableByteResult(new IntrinsicUint8Array(chunk));
+    return nonThenableByteResult(chunks[0]);
   }
   const out = new IntrinsicUint8Array(total);
   let offset = 0;
@@ -164,7 +163,7 @@ function cappedReadableStream(stream, operation) {
           return;
         }
       }
-      const chunk = stableStreamChunk(bytes, chunkLength);
+      const chunk = passthroughStreamChunk(bytes, chunkLength);
       controller.enqueue(chunk);
     },
     async cancel(reason) {

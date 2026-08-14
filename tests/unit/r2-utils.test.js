@@ -14,8 +14,7 @@ import {
   r2RangeAndSizeFromHeaders,
   r2CacheExpiryFromHeaders,
   r2Uint8ArrayByteLength,
-  r2Uint8ArrayIsFullBuffer,
-  r2Uint8ArrayNeedsSnapshot,
+  r2Uint8ArrayHasResizableOrSharedBacking,
   setR2CacheExpiryHeader,
   stripR2PhysicalPrefix,
   validateR2BucketName,
@@ -199,25 +198,25 @@ test("r2BufferSourceBytes uses intrinsic bounds for every BufferSource kind", ()
   assert.equal(r2BufferSourceBytes("not bytes"), null);
 });
 
-test("r2Uint8Array helpers ignore own bounds and identify full buffers", () => {
+test("r2Uint8ArrayByteLength ignores own bounds", () => {
   const ordinaryBytes = new Uint8Array([1, 2, 3]);
   Object.defineProperty(ordinaryBytes, "byteLength", { get: () => 0 });
   assert.strictEqual(r2BufferSourceBytes(ordinaryBytes), ordinaryBytes);
   assert.equal(r2Uint8ArrayByteLength(ordinaryBytes), 3);
-  assert.equal(r2Uint8ArrayIsFullBuffer(ordinaryBytes, 3), true);
-  assert.equal(r2Uint8ArrayIsFullBuffer(ordinaryBytes.subarray(1), 2), false);
 });
 
-test("r2Uint8ArrayNeedsSnapshot classifies fixed and mutable backing stores", () => {
-  assert.equal(r2Uint8ArrayNeedsSnapshot(new Uint8Array(1)), false);
+test("r2Uint8ArrayHasResizableOrSharedBacking identifies dynamic backing", () => {
+  assert.equal(r2Uint8ArrayHasResizableOrSharedBacking(new Uint8Array(1)), false);
   assert.equal(
-    r2Uint8ArrayNeedsSnapshot(
+    r2Uint8ArrayHasResizableOrSharedBacking(
       new Uint8Array(new ArrayBuffer(1, { maxByteLength: 2 }))
     ),
     true
   );
   assert.equal(
-    r2Uint8ArrayNeedsSnapshot(new Uint8Array(new SharedArrayBuffer(1))),
+    r2Uint8ArrayHasResizableOrSharedBacking(
+      new Uint8Array(new SharedArrayBuffer(1))
+    ),
     true
   );
 });
@@ -286,7 +285,7 @@ test("R2 byte-view helpers ignore post-load intrinsic tampering", async () => {
   let viewBytes;
   /** @type {unknown} */
   let outOfBoundsError;
-  let needsSnapshot;
+  let hasResizableOrSharedBacking;
   await withMockedPropertyDescriptors([
     {
       target: Reflect,
@@ -326,7 +325,9 @@ test("R2 byte-view helpers ignore post-load intrinsic tampering", async () => {
   ], () => {
     wordBytes = r2BufferSourceBytes(words);
     viewBytes = r2BufferSourceBytes(view);
-    needsSnapshot = r2Uint8ArrayNeedsSnapshot(snapshotCandidate);
+    hasResizableOrSharedBacking = r2Uint8ArrayHasResizableOrSharedBacking(
+      snapshotCandidate
+    );
     try {
       r2BufferSourceBytes(outOfBounds);
     } catch (error) {
@@ -339,7 +340,7 @@ test("R2 byte-view helpers ignore post-load intrinsic tampering", async () => {
   assert.deepEqual(Array.from(wordBytes), [104, 101, 108, 112]);
   assert.deepEqual(Array.from(viewBytes), [104, 101, 108, 112]);
   assert.ok(outOfBoundsError instanceof TypeError);
-  assert.equal(needsSnapshot, true);
+  assert.equal(hasResizableOrSharedBacking, true);
 });
 
 test("r2RangeAndSizeFromHeaders keeps object size on range responses", () => {

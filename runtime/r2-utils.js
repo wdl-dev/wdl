@@ -125,11 +125,11 @@ export function r2Uint8ArrayByteLength(value) {
 }
 
 /**
- * Return whether retaining this view requires a stable snapshot.
+ * Return whether this view has resizable or shared backing.
  *
  * @param {Uint8Array} value
  */
-export function r2Uint8ArrayNeedsSnapshot(value) {
+export function r2Uint8ArrayHasResizableOrSharedBacking(value) {
   const buffer = intrinsicReflectApply(
     intrinsicTypedArrayBufferGet,
     value,
@@ -143,28 +143,6 @@ export function r2Uint8ArrayNeedsSnapshot(value) {
     // ArrayBuffer's getter rejects shared buffers, whose bytes may change concurrently.
     return true;
   }
-}
-
-/** @param {Uint8Array} value @param {number} byteLength */
-export function r2Uint8ArrayIsFullBuffer(value, byteLength) {
-  const buffer = intrinsicReflectApply(intrinsicTypedArrayBufferGet, value, noArguments);
-  const byteOffset = intrinsicReflectApply(
-    intrinsicTypedArrayByteOffsetGet,
-    value,
-    noArguments
-  );
-  let bufferByteLength;
-  try {
-    bufferByteLength = intrinsicReflectApply(
-      intrinsicArrayBufferByteLengthGet,
-      buffer,
-      noArguments
-    );
-  } catch {
-    // Shared backing is valid input but cannot use the full-buffer zero-copy path.
-    return false;
-  }
-  return byteOffset === 0 && byteLength === bufferByteLength;
 }
 
 /** @param {Headers} headers @param {{ canonical?: boolean }} [options] */

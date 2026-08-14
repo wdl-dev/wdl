@@ -139,10 +139,12 @@ and range GETs implement the common R2 behavior. `list({ include: [...] })` perf
 extra HEAD requests for metadata fields and applies a concurrency cap. Tenant-supplied
 `Headers` metadata must carry a canonical IMF-fixdate `Expires` value when that header
 is present; malformed write metadata is rejected before the host binding call.
-R2 validates BufferSource internal slots before writing. Stream PUT snapshots chunks
-backed by a resizable `ArrayBuffer` or `SharedArrayBuffer` when they are read; ordinary
-`Uint8Array` chunks backed by a fixed `ArrayBuffer` retain the zero-copy fast path.
-Detached or out-of-bounds fixed views are rejected before the host binding call.
+R2 validates BufferSource internal slots before writing. Buffered stream consumers
+snapshot each delivered chunk before retaining it across their own next read.
+`ReadableStreamDefaultController.enqueue()` queues object references, so producer
+mutations after enqueue can change bytes before WDL receives them. Direct `Uint8Array`
+PUT bodies backed by a fixed `ArrayBuffer` retain zero-copy normalization. Detached or
+out-of-bounds fixed views are rejected before the host binding call.
 Tenant-facing R2 errors expose operation/status plus virtual object keys where useful,
 but not raw S3 response bodies or physical `r2/<ns>/<bucket>/...` keys. Control-plane
 R2 admin errors may retain backend detail for operators.

@@ -23,6 +23,33 @@ function objectShape(obj, text) {
   };
 }
 
+function streamWithMutationOnSecondPull(chunk, mutate) {
+  let firstRead = true;
+  return new ReadableStream({
+    pull(controller) {
+      if (firstRead) {
+        firstRead = false;
+        controller.enqueue(chunk);
+        return;
+      }
+      mutate();
+      controller.close();
+    },
+  }, { highWaterMark: 0 });
+}
+
+function streamWithQueuedMutationOnPull(chunk, mutate) {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(chunk);
+    },
+    pull(controller) {
+      mutate();
+      controller.close();
+    },
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -104,22 +131,30 @@ export default {
           },
         }));
 
+        const queuedStreamKey = `${key}.queued-stream`;
+        const queuedStreamChunk = new Uint8Array([104, 101, 108, 112]);
+        await env.B.put(queuedStreamKey, streamWithQueuedMutationOnPull(
+          queuedStreamChunk,
+          () => queuedStreamChunk.fill(0)
+        ));
+
+        const fixedStreamKey = `${key}.fixed-stream`;
+        const fixedStreamChunk = new Uint8Array([104, 101, 108, 112]);
+        await env.B.put(fixedStreamKey, streamWithMutationOnSecondPull(
+          fixedStreamChunk,
+          () => fixedStreamChunk.fill(0)
+        ));
+
         const resizableStreamKey = `${key}.resizable-stream`;
         const resizableStream = new ArrayBuffer(4, { maxByteLength: 4 });
         new Uint8Array(resizableStream).set([104, 101, 108, 112]);
-        let pullCount = 0;
-        await env.B.put(resizableStreamKey, new ReadableStream({
-          pull(controller) {
-            pullCount += 1;
-            if (pullCount === 1) {
-              controller.enqueue(new Uint8Array(resizableStream));
-              return;
-            }
+        await env.B.put(resizableStreamKey, streamWithMutationOnSecondPull(
+          new Uint8Array(resizableStream),
+          () => {
             resizableStream.resize(2);
             resizableStream.resize(4);
-            controller.close();
-          },
-        }, { highWaterMark: 0 }));
+          }
+        ));
 
         const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
         const outOfBounds = new Uint8Array(resizable, 2, 4);
@@ -134,6 +169,8 @@ export default {
 
         const stored = await env.B.get(key);
         const disguisedStreamStored = await env.B.get(disguisedStreamKey);
+        const queuedStreamStored = await env.B.get(queuedStreamKey);
+        const fixedStreamStored = await env.B.get(fixedStreamKey);
         const resizableStreamStored = await env.B.get(resizableStreamKey);
         const absent = await env.B.get(`${key}.oob`);
         return json({
@@ -141,6 +178,12 @@ export default {
           text: await stored.text(),
           disguisedStreamBytes: Array.from(new Uint8Array(
             await disguisedStreamStored.arrayBuffer()
+          )),
+          queuedStreamBytes: Array.from(new Uint8Array(
+            await queuedStreamStored.arrayBuffer()
+          )),
+          fixedStreamBytes: Array.from(new Uint8Array(
+            await fixedStreamStored.arrayBuffer()
           )),
           resizableStreamBytes: Array.from(new Uint8Array(
             await resizableStreamStored.arrayBuffer()
