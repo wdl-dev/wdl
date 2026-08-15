@@ -1,7 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { installMockProperty, withMockedProperty } from "../helpers/mock-global.js";
+import {
+  installMockProperty,
+  withMockedProperty,
+  withMockedPropertyDescriptor,
+} from "../helpers/mock-global.js";
 
 test("installMockProperty removes properties that did not originally exist", () => {
   /** @type {Record<string, unknown>} */
@@ -41,4 +45,60 @@ test("withMockedProperty restores after callback failures", async () => {
   );
 
   assert.equal(target.value, "original");
+});
+
+test("withMockedPropertyDescriptor removes newly defined properties", async () => {
+  /** @type {Record<string, unknown>} */
+  const target = {};
+
+  await withMockedPropertyDescriptor(
+    target,
+    "missing",
+    { value: "mocked" },
+    () => {
+      assert.equal(target.missing, "mocked");
+    }
+  );
+
+  assert.equal(Object.hasOwn(target, "missing"), false);
+});
+
+test("withMockedPropertyDescriptor restores after callback failures", async () => {
+  const target = { value: "original" };
+
+  await assert.rejects(
+    () => withMockedPropertyDescriptor(
+      target,
+      "value",
+      { value: "mocked" },
+      () => { throw new Error("boom"); }
+    ),
+    /boom/
+  );
+
+  assert.equal(target.value, "original");
+});
+
+test("withMockedPropertyDescriptor rejects non-configurable properties before mocking", async () => {
+  /** @type {Record<string, unknown>} */
+  const target = {};
+  Object.defineProperty(target, "fixed", {
+    configurable: false,
+    value: "original",
+    writable: true,
+  });
+  let callbackCalls = 0;
+
+  await assert.rejects(
+    () => withMockedPropertyDescriptor(
+      target,
+      "fixed",
+      { value: "mocked" },
+      () => { callbackCalls += 1; }
+    ),
+    /non-configurable property fixed/
+  );
+
+  assert.equal(callbackCalls, 0);
+  assert.equal(target.fixed, "original");
 });

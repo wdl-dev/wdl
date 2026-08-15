@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Updated the bundled workerd and Workers types pins to `1.20260815.1` and
+  `5.20260815.1`, raising the maximum tenant compatibility date to `2026-08-22`.
+  The binary includes EventTarget, stream teardown, sandbox-boundary, WorkerLoader,
+  JSG unwrap, and HTMLRewriter fixes. Type errors use public Web IDL names instead
+  of internal `Js*` wrapper names. Affected Blob, readable-stream, and writable-sink
+  adapter paths perform O(n) safety copies. Dynamic Workers reject
+  `streams_disable_constructors`, because WDL's injected facades require standard
+  stream constructors.
+- Upgraded the vendored `@wdl-dev/aws-sigv4` signer from 3.0.1 to 3.0.4 with
+  intrinsic ArrayBufferView bounds, constructor-copy snapshots, and prompt
+  cancellation before payload hashing.
+- R2 `put()` validates BufferSource internal bounds, rejects oversized Blob bodies
+  before materializing their bytes, and snapshots delivered stream chunks before
+  retaining them. R2 GET bodies expose native disturbance semantics, so convenience
+  readers reject after a partial raw-body read instead of returning only the unread suffix.
+  `ReadableStreamDefaultController.enqueue()` remains reference-based, so producer
+  mutations after enqueue can affect bytes delivered before that snapshot. Direct fixed
+  `ArrayBuffer`-backed `Uint8Array` PUT inputs and raw GET chunks retain zero-copy
+  normalization; resizable or shared raw GET chunks are snapshotted before exposure.
+
 ## wdl.20260811.1 - 2026-08-11
 
 - Updated the bundled workerd and Workers types pins to `1.20260811.1` and `5.20260811.1`, raising the maximum tenant compatibility date to `2026-08-18`; BYOB reads now honor live buffer bounds after resize or transfer, and Control accepts ada-url 4-preserved literal `xn--` host labels while retaining potential-IPv4 rejection. New Module Registry-only APIs remain unavailable.

@@ -161,7 +161,7 @@ npm install -g @wdl-dev/cli@1.7.1
 | 记录 mocked `fetch` 调用 | `tests/helpers/mock-fetch.js` 的 `makeRecordingFetch(...)` / `withRecordingFetch(...)` | 测试需要自定义 call record shape 时使用 `capture`。 |
 | 临时替换 global 或 property | `tests/helpers/mock-global.js` 的 `withMockedGlobal(...)`、`withMockedProperty(...)` 和 `withMockedPropertyDescriptor(...)` | 只有文件拥有 before/after cleanup 时才用 install-style helper。 |
 | 捕获 console 或 stream 输出 | `tests/helpers/output-capture.js` 的 `withCapturedConsole(...)`、`installConsoleMethodCapture(...)` 或 `installStreamWriteCapture(...)` | 测试文件不要直接替换 `console.*` 或 `process.stderr/stdout.write`。 |
-| 简单 sleep 或轮询 | `tests/helpers/timing.js` 的 `delay(...)` / `waitUntil(...)`，或 integration `stack.js` re-export | 不要替换 tenant worker source string 里的 sleep；那是被测 fixture 代码。 |
+| Sleep、轮询或有界 Promise observation | `tests/helpers/timing.js` 的 `delay(...)`、`waitUntil(...)` 和 `settlementWithin(...)`；integration `stack.js` 只 re-export `delay(...)` 和 `waitUntil(...)` | cleanup 不能被无限等待时使用 `settlementWithin(...)`；不要替换 tenant worker source string 里的 sleep，那是被测 fixture 代码。 |
 | 临时目录 | `tests/helpers/temp-dir.js` 的 `withTempDir(...)` | 优先用 scoped cleanup，不手写 `mkdtemp` / `rm` `finally` 块。 |
 | 仓库 JSON fixture 文件 | `tests/helpers/load-shared-module.js` 的 `readRepositoryJson(...)` | 保持 fixture 读取带 label，并相对仓库路径定位。 |
 

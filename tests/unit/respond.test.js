@@ -14,24 +14,9 @@ import {
 } from "../../shared/respond.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
+import { settlementWithin } from "../helpers/timing.js";
 
 const OBSERVABILITY_CONTRACT = readRepositoryJson("tests/fixtures/observability-contract.json");
-
-/** @param {Promise<unknown>} promise */
-async function settlesWithinTestWindow(promise) {
-  /** @type {ReturnType<typeof setTimeout> | undefined} */
-  let timeout;
-  try {
-    return await Promise.race([
-      promise.then(() => true),
-      new Promise((resolve) => {
-        timeout = setTimeout(() => resolve(false), 100);
-      }),
-    ]);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
-}
 
 test("discardResponseBody cancels response bodies", async () => {
   let cancelled = false;
@@ -65,9 +50,9 @@ test("discardResponseBody does not wait for cancellation cleanup", async () => {
     },
   }));
 
-  const settled = await settlesWithinTestWindow(discardResponseBody(response));
+  const outcome = await settlementWithin(discardResponseBody(response));
 
-  assert.equal(settled, true);
+  assert.equal(outcome.status, "fulfilled");
   assert.equal(cancelled, true);
 });
 

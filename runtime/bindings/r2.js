@@ -11,7 +11,9 @@ import {
   encodeS3Query,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
+  r2BufferSourceBytes,
   r2PhysicalPrefix,
+  r2Uint8ArrayByteLength,
   stripR2PhysicalPrefixWith,
 } from "runtime-r2-utils";
 import {
@@ -120,11 +122,8 @@ function serviceName(bucket) {
  * @returns {Uint8Array}
  */
 function putBodyFromUnknown(value) {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
+  const bytes = r2BufferSourceBytes(value);
+  if (bytes) return bytes;
   throw new TypeError("R2 put: value must be ArrayBuffer or ArrayBufferView");
 }
 
@@ -295,7 +294,8 @@ export class R2Bucket extends WorkerEntrypoint {
     const bucket = r2Binding(this);
     return recordBindingOperation(serviceName(bucket), "r2", "put", async () => {
       const body = putBodyFromUnknown(value);
-      assertR2BufferSize(body.byteLength, "put");
+      const bodySize = r2Uint8ArrayByteLength(body);
+      assertR2BufferSize(bodySize, "put");
       const s3 = s3ForBucket(bucket);
       const headers = headersWithRequestId(requestMeta);
       applyHttpMetadata(headers, options.httpMetadata);
@@ -315,7 +315,7 @@ export class R2Bucket extends WorkerEntrypoint {
         await discardResponseBody(res);
         throw new Error(`R2 PUT failed with ${res.status}`);
       }
-      return metaFromPutResponse(key, res.headers, body.byteLength, options);
+      return metaFromPutResponse(key, res.headers, bodySize, options);
     });
   }
 

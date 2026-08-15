@@ -7,10 +7,14 @@ import {
   assertR2BufferSize,
   encodeS3KeyPath,
   encodeS3Query,
+  normalizeR2ObjectKey,
+  r2BufferSourceBytes,
   r2PhysicalKey,
   r2PhysicalPrefix,
   r2RangeAndSizeFromHeaders,
   r2CacheExpiryFromHeaders,
+  r2Uint8ArrayByteLength,
+  r2Uint8ArrayHasResizableOrSharedBacking,
   setR2CacheExpiryHeader,
   stripR2PhysicalPrefix,
   validateR2BucketName,
@@ -29,14 +33,15 @@ test("r2PhysicalPrefix scopes virtual buckets under namespace", () => {
 });
 
 test("normalizeR2ObjectKey rejects URL path traversal segments", () => {
-  assert.throws(
-    () => r2PhysicalKey({ ns: "demo", bucketName: "uploads" }, "../x.txt"),
-    /must not contain \. or \.\. path segments/
-  );
-  assert.throws(
-    () => r2PhysicalKey({ ns: "demo", bucketName: "uploads" }, "a/./x.txt"),
-    /must not contain \. or \.\. path segments/
-  );
+  for (const key of [".", "..", "./x", "../x", "a/./x", "a/../x", "a//..//x"]) {
+    assert.throws(
+      () => normalizeR2ObjectKey(key),
+      /must not contain \. or \.\. path segments/
+    );
+  }
+  for (const key of [".hidden", "..hidden", "a/.../x", "a//x", "a/%2e%2e/x"]) {
+    assert.equal(normalizeR2ObjectKey(key), key);
+  }
 });
 
 test("stripR2PhysicalPrefix rejects backend keys outside the binding prefix", () => {
@@ -131,6 +136,102 @@ test("assertR2BufferSize caps buffered operations at 25MiB", () => {
     () => assertR2BufferSize(R2_OBJECT_MAX_BUFFER_BYTES + 1, "put"),
     /exceeds the 25 MiB WDL R2 limit/
   );
+});
+
+test("r2BufferSourceBytes uses intrinsic bounds for every BufferSource kind", () => {
+  class MisleadingBytes extends Uint8Array {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+  class MisleadingWords extends Uint16Array {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+  class MisleadingView extends DataView {
+    get buffer() { return new ArrayBuffer(0); }
+    get byteOffset() { return 0; }
+    get byteLength() { return 0; }
+  }
+
+  const source = new ArrayBuffer(8);
+  new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
+  const misleadingBytes = new MisleadingBytes(source, 2, 4);
+  const misleadingWords = new MisleadingWords(source, 2, 2);
+  const misleadingView = new MisleadingView(source, 2, 4);
+
+  const sourceBytes = r2BufferSourceBytes(source);
+  assert.ok(sourceBytes);
+  assert.deepEqual(Array.from(sourceBytes), [0, 0, 104, 101, 108, 112, 0, 0]);
+  for (const view of [misleadingBytes, misleadingWords, misleadingView]) {
+    const bytes = r2BufferSourceBytes(view);
+    assert.ok(bytes);
+    assert.deepEqual(Array.from(bytes), [104, 101, 108, 112]);
+    assert.notStrictEqual(bytes, view);
+    assert.equal(Object.getPrototypeOf(bytes), Uint8Array.prototype);
+  }
+  assert.equal(r2BufferSourceBytes("not bytes"), null);
+});
+
+test("r2Uint8ArrayByteLength ignores own bounds", () => {
+  const ordinaryBytes = new Uint8Array([1, 2, 3]);
+  Object.defineProperty(ordinaryBytes, "byteLength", { get: () => 0 });
+  assert.strictEqual(r2BufferSourceBytes(ordinaryBytes), ordinaryBytes);
+  assert.equal(r2Uint8ArrayByteLength(ordinaryBytes), 3);
+});
+
+test("r2Uint8ArrayHasResizableOrSharedBacking identifies dynamic backing", () => {
+  assert.equal(r2Uint8ArrayHasResizableOrSharedBacking(new Uint8Array(1)), false);
+  assert.equal(
+    r2Uint8ArrayHasResizableOrSharedBacking(
+      new Uint8Array(new ArrayBuffer(1, { maxByteLength: 2 }))
+    ),
+    true
+  );
+  assert.equal(
+    r2Uint8ArrayHasResizableOrSharedBacking(
+      new Uint8Array(new SharedArrayBuffer(1))
+    ),
+    true
+  );
+});
+
+test("r2BufferSourceBytes rejects detached and out-of-bounds inputs", () => {
+  for (const createView of [
+    (/** @type {ArrayBuffer} */ buffer) => new Uint8Array(buffer, 2, 4),
+    (/** @type {ArrayBuffer} */ buffer) => new Uint16Array(buffer, 2, 2),
+    (/** @type {ArrayBuffer} */ buffer) => new DataView(buffer, 2, 4),
+  ]) {
+    const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+    const view = createView(resizable);
+    resizable.resize(1);
+    assert.throws(() => r2BufferSourceBytes(view), TypeError);
+  }
+
+  for (const createValue of [
+    (/** @type {ArrayBuffer} */ buffer) => buffer,
+    (/** @type {ArrayBuffer} */ buffer) => new Uint8Array(buffer),
+    (/** @type {ArrayBuffer} */ buffer) => new Uint16Array(buffer),
+    (/** @type {ArrayBuffer} */ buffer) => new DataView(buffer),
+  ]) {
+    const buffer = new ArrayBuffer(8);
+    const value = createValue(buffer);
+    structuredClone(buffer, { transfer: [buffer] });
+    assert.throws(() => r2BufferSourceBytes(value), TypeError);
+  }
+});
+
+test("r2Uint8ArrayByteLength rejects invalid zero-length views", () => {
+  const detachedBuffer = new ArrayBuffer(0);
+  const detached = new Uint8Array(detachedBuffer);
+  structuredClone(detachedBuffer, { transfer: [detachedBuffer] });
+  assert.throws(() => r2Uint8ArrayByteLength(detached), TypeError);
+
+  const resizable = new ArrayBuffer(4, { maxByteLength: 8 });
+  const outOfBounds = new Uint8Array(resizable, 4, 0);
+  resizable.resize(2);
+  assert.throws(() => r2Uint8ArrayByteLength(outOfBounds), TypeError);
 });
 
 test("r2RangeAndSizeFromHeaders keeps object size on range responses", () => {

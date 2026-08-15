@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { loadD1Actor } from "../helpers/load-d1-actor.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
-import { delay } from "../helpers/timing.js";
+import { settlementWithin } from "../helpers/timing.js";
 
 const { D1DatabaseActor, resultFromCursor } = await loadD1Actor();
 
@@ -214,11 +214,8 @@ test("D1 actor: wait-until-idle waits for an in-flight query request", async () 
       }));
 
       try {
-        const earlyResult = await Promise.race([
-          idleResponsePromise.then(() => "resolved"),
-          delay(20).then(() => "pending"),
-        ]);
-        assert.equal(earlyResult, "pending");
+        const earlyResult = await settlementWithin(idleResponsePromise, 20);
+        assert.equal(earlyResult.status, "pending");
       } finally {
         queryReadRelease.resolve(undefined);
       }

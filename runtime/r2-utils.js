@@ -11,6 +11,138 @@ export const R2_HTTP_METADATA_FIELDS = Object.freeze([
   Object.freeze(["cacheControl", "cache-control"]),
 ]);
 const R2_IMF_FIXDATE_RE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+const IntrinsicUint8Array = Uint8Array;
+const uint8ArrayPrototype = IntrinsicUint8Array.prototype;
+const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
+const typedArrayPrototype = intrinsicObjectGetPrototypeOf(uint8ArrayPrototype);
+const arrayBufferPrototype = ArrayBuffer.prototype;
+const dataViewPrototype = DataView.prototype;
+const intrinsicArrayBufferIsView = ArrayBuffer.isView;
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicTypedArrayAt = typedArrayPrototype.at;
+const intrinsicTypedArrayNameGet = prototypeGetter(
+  typedArrayPrototype,
+  Symbol.toStringTag
+);
+const intrinsicArrayBufferByteLengthGet = prototypeGetter(arrayBufferPrototype, "byteLength");
+const intrinsicArrayBufferResizableGet = prototypeGetter(arrayBufferPrototype, "resizable");
+const intrinsicTypedArrayBufferGet = prototypeGetter(typedArrayPrototype, "buffer");
+const intrinsicTypedArrayByteOffsetGet = prototypeGetter(typedArrayPrototype, "byteOffset");
+const intrinsicTypedArrayByteLengthGet = prototypeGetter(typedArrayPrototype, "byteLength");
+const intrinsicDataViewBufferGet = prototypeGetter(dataViewPrototype, "buffer");
+const intrinsicDataViewByteOffsetGet = prototypeGetter(dataViewPrototype, "byteOffset");
+const intrinsicDataViewByteLengthGet = prototypeGetter(dataViewPrototype, "byteLength");
+/** @type {never[]} */
+const noArguments = [];
+const atZeroArguments = [0];
+
+/** @param {object} prototype @param {PropertyKey} name */
+function prototypeGetter(prototype, name) {
+  const getter = Object.getOwnPropertyDescriptor(prototype, name)?.get;
+  if (!getter) throw new TypeError(`missing intrinsic getter ${String(name)}`);
+  return getter;
+}
+
+/** @param {unknown} value */
+function validatedTypedArrayByteLength(value) {
+  const byteLength = /** @type {number} */ (
+    intrinsicReflectApply(intrinsicTypedArrayByteLengthGet, value, noArguments)
+  );
+  // The intrinsic getter reports zero for detached and out-of-bounds views.
+  // `at(0)` distinguishes those invalid states from a valid empty view.
+  if (byteLength === 0) {
+    intrinsicReflectApply(intrinsicTypedArrayAt, value, atZeroArguments);
+  }
+  return byteLength;
+}
+
+/**
+ * Normalize an R2 BufferSource without consulting overridable view properties.
+ * Returns null for values that are not an ArrayBuffer or ArrayBufferView.
+ *
+ * @param {unknown} value
+ * @returns {Uint8Array | null}
+ */
+export function r2BufferSourceBytes(value) {
+  if (!intrinsicArrayBufferIsView(value)) {
+    try {
+      intrinsicReflectApply(intrinsicArrayBufferByteLengthGet, value, noArguments);
+    } catch {
+      return null;
+    }
+    return new IntrinsicUint8Array(/** @type {ArrayBuffer} */ (value));
+  }
+
+  const typedArrayName = intrinsicReflectApply(
+    intrinsicTypedArrayNameGet,
+    value,
+    noArguments
+  );
+  // The intrinsic TypedArray brand getter returns undefined for DataView.
+  if (typedArrayName === undefined) {
+    const buffer = intrinsicReflectApply(
+      intrinsicDataViewBufferGet,
+      value,
+      noArguments
+    );
+    const byteOffset = intrinsicReflectApply(
+      intrinsicDataViewByteOffsetGet,
+      value,
+      noArguments
+    );
+    const byteLength = intrinsicReflectApply(
+      intrinsicDataViewByteLengthGet,
+      value,
+      noArguments
+    );
+    return new IntrinsicUint8Array(buffer, byteOffset, byteLength);
+  }
+
+  const byteLength = validatedTypedArrayByteLength(value);
+  if (
+    typedArrayName === "Uint8Array" &&
+    intrinsicObjectGetPrototypeOf(value) === uint8ArrayPrototype
+  ) {
+    return /** @type {Uint8Array} */ (value);
+  }
+  const buffer = intrinsicReflectApply(
+    intrinsicTypedArrayBufferGet,
+    value,
+    noArguments
+  );
+  const byteOffset = intrinsicReflectApply(
+    intrinsicTypedArrayByteOffsetGet,
+    value,
+    noArguments
+  );
+  return new IntrinsicUint8Array(buffer, byteOffset, byteLength);
+}
+
+/** @param {Uint8Array} value */
+export function r2Uint8ArrayByteLength(value) {
+  return validatedTypedArrayByteLength(value);
+}
+
+/**
+ * Return whether this view has resizable or shared backing.
+ *
+ * @param {Uint8Array} value
+ */
+export function r2Uint8ArrayHasResizableOrSharedBacking(value) {
+  const buffer = intrinsicReflectApply(
+    intrinsicTypedArrayBufferGet,
+    value,
+    noArguments
+  );
+  try {
+    return /** @type {boolean} */ (
+      intrinsicReflectApply(intrinsicArrayBufferResizableGet, buffer, noArguments)
+    );
+  } catch {
+    // ArrayBuffer's getter rejects shared buffers, whose bytes may change concurrently.
+    return true;
+  }
+}
 
 /** @param {Headers} headers @param {{ canonical?: boolean }} [options] */
 export function r2CacheExpiryFromHeaders(headers, { canonical = false } = {}) {
