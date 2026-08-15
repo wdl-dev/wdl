@@ -29,6 +29,7 @@ import {
   withMockedPropertyDescriptor,
 } from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
+import { settlementWithin } from "../helpers/timing.js";
 
 const { normalizeDoInvokeRequest } = await loadDoProtocol();
 
@@ -70,18 +71,10 @@ function referenceRpcInvokeBody(props, objectName, method, args) {
  * @param {string} message
  */
 async function withTestTimeout(promise, message) {
-  /** @type {ReturnType<typeof setTimeout> | undefined} */
-  let timeout;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(message)), 1000);
-      }),
-    ]);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
+  const outcome = await settlementWithin(promise, 1000);
+  if (outcome.status === "fulfilled") return outcome.value;
+  if (outcome.status === "rejected") throw outcome.reason;
+  throw new Error(message);
 }
 
 /** @param {UnderlyingSourceCancelCallback} onCancel @param {ResponseInit} [init] */

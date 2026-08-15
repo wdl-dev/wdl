@@ -852,20 +852,22 @@ test("prepareBundle: experimental workerd compatibility flags are rejected", () 
 });
 
 test("prepareBundle: WDL-unsupported workerd compatibility flags are rejected", () => {
-  assert.throws(
-    () => prepareBundle(
-      "w.js",
-      { "w.js": "x" },
-      { compatibilityFlags: ["allow_irrevocable_stub_storage"] }
-    ),
-    (err) => {
-      if (!(err instanceof Error)) return false;
-      const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
-      return coded.code === "compatibility_flag_unsupported" &&
-        coded.status === 400 &&
-        coded.message.includes("allow_irrevocable_stub_storage");
-    }
-  );
+  for (const flag of WDL_UNSUPPORTED_COMPAT_FLAGS) {
+    assert.throws(
+      () => prepareBundle(
+        "w.js",
+        { "w.js": "x" },
+        { compatibilityFlags: [flag] }
+      ),
+      (err) => {
+        if (!(err instanceof Error)) return false;
+        const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
+        return coded.code === "compatibility_flag_unsupported" &&
+          coded.status === 400 &&
+          coded.message.includes(flag);
+      }
+    );
+  }
 });
 
 test("prepareBundle: rejects legacy error serialization", () => {
@@ -981,7 +983,10 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   // `python_workers_20260610` graduated out of `$experimental` upstream, so tenants may set it.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_20260610"), false);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("allow_irrevocable_stub_storage"), false);
-  assert.deepEqual(WDL_UNSUPPORTED_COMPAT_FLAGS, ["allow_irrevocable_stub_storage"]);
+  assert.deepEqual(WDL_UNSUPPORTED_COMPAT_FLAGS, [
+    "allow_irrevocable_stub_storage",
+    "streams_disable_constructors",
+  ]);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unique_ctx_per_invocation"), false);
   assert.equal(
     WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("nonclass_entrypoint_reuses_ctx_across_invocations"),

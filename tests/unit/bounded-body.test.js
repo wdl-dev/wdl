@@ -6,6 +6,7 @@ import {
   readBoundedStreamBytes,
   readBoundedText,
 } from "../../shared/bounded-body.js";
+import { settlementWithin } from "../helpers/timing.js";
 
 test("readBoundedText rejects oversized declared content length", async () => {
   const request = new Request("https://demo.workers.example", {
@@ -89,20 +90,13 @@ test("readBoundedStreamBytes rejects without waiting for stream cancellation", a
       return new Promise(() => {});
     },
   });
-  let timeout;
-  try {
-    await assert.rejects(
-      Promise.race([
-        readBoundedStreamBytes(stream, 2, () => new TypeError("custom limit")),
-        new Promise((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("body reader waited for stream cancellation")), 1000);
-        }),
-      ]),
-      /custom limit/
-    );
-  } finally {
-    clearTimeout(timeout);
-  }
+  const outcome = await settlementWithin(
+    readBoundedStreamBytes(stream, 2, () => new TypeError("custom limit")),
+    1000
+  );
+
+  assert.equal(outcome.status, "rejected");
+  assert.match(String("reason" in outcome ? outcome.reason : ""), /custom limit/);
   assert.equal(cancelled, true);
 });
 

@@ -141,12 +141,23 @@ S3-compatible bucket: `r2/<ns>/<bucket_name>/<object-key>`. Workers in the same
 namespace using the same `bucket_name` intentionally share data; different namespaces
 are isolated by prefix. Runtime supports the common `head`, `get`, `put`, `delete`, and
 `list` paths. `get()` returns a streaming body, and convenience readers enforce the
-25 MiB cap. `put(stream, ...)` currently buffers and sends one S3 PUT with the same cap;
+25 MiB cap. `bodyUsed` reflects disturbance of the exposed stream; convenience readers
+reject after tenant code reads from that stream even if its reader later releases the
+lock. `put(stream, ...)` currently buffers and sends one S3 PUT with the same cap;
 multipart upload, SSE-C, and checksum selection are not supported. Conditional requests
 and range GETs implement the common R2 behavior. `list({ include: [...] })` performs
 extra HEAD requests for metadata fields and applies a concurrency cap. Tenant-supplied
 `Headers` metadata must carry a canonical IMF-fixdate `Expires` value when that header
 is present; malformed write metadata is rejected before the host binding call.
+R2 validates BufferSource internal slots before writing. Blob PUT bodies are checked
+against the object limit before their bytes are materialized. Buffered stream readers
+snapshot each delivered chunk before retaining it across the next read. Raw GET streams
+retain zero-copy normalization for chunks backed by fixed `ArrayBuffer`s and snapshot
+resizable or shared backing before exposure.
+`ReadableStreamDefaultController.enqueue()` queues object references, so producer
+mutations after enqueue can change bytes before WDL receives them. Direct `Uint8Array`
+PUT bodies backed by a fixed `ArrayBuffer` retain zero-copy normalization. Detached or
+out-of-bounds fixed views are rejected before the host binding call.
 Tenant-facing R2 errors expose operation/status plus virtual object keys where useful,
 but not raw S3 response bodies or physical `r2/<ns>/<bucket>/...` keys. Control-plane
 R2 admin errors may retain backend detail for operators.
@@ -320,10 +331,11 @@ when a matching active tail session exists.
   `nodejs_compat_v2` by default. A tenant that needs neither surface must specify both
   `no_nodejs_compat` and `no_nodejs_compat_v2`.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
-  `allow_irrevocable_stub_storage` deny policy at deploy; runtime rejects retained
-  metadata containing either class. Static host workers also omit the irrevocable-stub
-  flag. Disable-style flags such as `no_*` are not part of the experimental mirror unless
-  upstream marks the enable flag itself experimental.
+  `allow_irrevocable_stub_storage` and `streams_disable_constructors` deny policy at
+  deploy; runtime rejects retained metadata containing either class. Static host workers
+  also omit the irrevocable-stub flag. Disable-style flags such as `no_*` are not part of
+  the experimental mirror unless WDL explicitly rejects them or upstream marks the enable
+  flag itself experimental.
 - Python Workers modules are not supported. Upstream's `python_workers_20260610` flag is
   no longer experimental, but Control still rejects new `py` module manifests and
   runtime/do-runtime reject retained metadata that contains them instead of letting

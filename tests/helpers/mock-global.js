@@ -84,6 +84,7 @@ export async function withMockedProperty(target, name, mockImpl, callback) {
 
 /**
  * Temporarily replaces an accessor or other descriptor for one async scope.
+ * The temporary descriptor is installed as configurable to support cleanup.
  *
  * @template {object} T
  * @template {keyof T} K
@@ -96,11 +97,27 @@ export async function withMockedProperty(target, name, mockImpl, callback) {
  */
 export async function withMockedPropertyDescriptor(target, name, descriptor, callback) {
   const originalDescriptor = Object.getOwnPropertyDescriptor(target, name);
-  Object.defineProperty(target, name, descriptor);
-  try {
-    return /** @type {Awaited<ReturnType<TCallback>>} */ (await callback());
-  } finally {
-    if (originalDescriptor) Object.defineProperty(target, name, originalDescriptor);
-    else delete target[name];
+  if (originalDescriptor && !originalDescriptor.configurable) {
+    throw new TypeError(`Cannot temporarily mock non-configurable property ${String(name)}`);
   }
+  Object.defineProperty(target, name, {
+    ...descriptor,
+    configurable: true,
+  });
+  let result;
+  let callbackFailed = false;
+  let callbackError;
+  try {
+    result = await callback();
+  } catch (error) {
+    callbackFailed = true;
+    callbackError = error;
+  }
+  if (originalDescriptor) {
+    Object.defineProperty(target, name, originalDescriptor);
+  } else if (!Reflect.deleteProperty(target, name)) {
+    throw new Error(`Cannot restore mocked property ${String(name)}`);
+  }
+  if (callbackFailed) throw callbackError;
+  return /** @type {Awaited<ReturnType<TCallback>>} */ (result);
 }

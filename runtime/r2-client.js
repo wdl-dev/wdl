@@ -4,7 +4,10 @@ import {
   assertR2BufferSize,
   normalizeR2ListLimit,
   normalizeR2ObjectKey,
+  r2BufferSourceBytes,
   r2CacheExpiryFromHeaders,
+  r2Uint8ArrayByteLength,
+  r2Uint8ArrayHasResizableOrSharedBacking,
   setR2CacheExpiryHeader,
 } from "./_wdl-r2-utils.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
@@ -19,12 +22,76 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
  *   list?(options: AnyRecord, requestMeta: object): Promise<AnyRecord & { objects?: AnyRecord[], truncated?: unknown, cursor?: unknown, delimitedPrefixes?: unknown }>,
  * }} R2Stub
  * @typedef {{ stub: R2Stub, requestIdOptions: object }} R2BucketState
+ * @typedef {{ bytes: Uint8Array, pendingBytes: null } | { bytes: null, pendingBytes: Promise<Uint8Array> }} PreparedPutBytes
  */
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+const IntrinsicBlob = Blob;
+const IntrinsicResponse = Response;
+const IntrinsicUint8Array = Uint8Array;
+const intrinsicBlobBytes = IntrinsicBlob.prototype.bytes;
+const intrinsicBlobSlice = IntrinsicBlob.prototype.slice;
+const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicWeakMapGet = WeakMap.prototype.get;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
+
+/** @param {object | null} prototype @param {PropertyKey} name */
+function findPrototypeGetter(prototype, name) {
+  while (prototype) {
+    const getter = intrinsicObjectGetOwnPropertyDescriptor(prototype, name)?.get;
+    if (getter) return getter;
+    prototype = intrinsicObjectGetPrototypeOf(prototype);
+  }
+  return undefined;
+}
+const intrinsicBlobSizeGet = findPrototypeGetter(IntrinsicBlob.prototype, "size");
+const intrinsicResponseBodyUsedGet = findPrototypeGetter(
+  IntrinsicResponse.prototype,
+  "bodyUsed"
+);
+
+/** @param {Blob} blob */
+function blobByteLength(blob) {
+  if (intrinsicBlobSizeGet) {
+    return /** @type {number} */ (
+      intrinsicReflectApply(intrinsicBlobSizeGet, blob, [])
+    );
+  }
+  // Legacy JSG exposes size as an own native data property. A fresh bounded
+  // intrinsic slice provides its authoritative size without copying the Blob bytes.
+  const bounded = /** @type {Blob} */ (intrinsicReflectApply(
+    intrinsicBlobSlice,
+    blob,
+    [0, R2_OBJECT_MAX_BUFFER_BYTES + 1]
+  ));
+  const descriptor = intrinsicObjectGetOwnPropertyDescriptor(bounded, "size");
+  if (typeof descriptor?.value !== "number") {
+    throw new TypeError("missing intrinsic Blob.size");
+  }
+  return descriptor.value;
+}
+
+/** @param {unknown} value */
+function maybeBlobByteLength(value) {
+  try {
+    return blobByteLength(/** @type {Blob} */ (value));
+  } catch {
+    return null;
+  }
+}
+
+/** @param {Response} response */
+function responseBodyUsed(response) {
+  if (intrinsicResponseBodyUsedGet) {
+    return /** @type {boolean} */ (
+      intrinsicReflectApply(intrinsicResponseBodyUsedGet, response, [])
+    );
+  }
+  // Older JSG installs bodyUsed as an own native data property.
+  return response.bodyUsed;
+}
 
 /** @param {unknown} value */
 function dateFromUnknown(value) {
@@ -39,23 +106,43 @@ function stringOrUndefined(value) {
   return typeof value === "string" ? value : undefined;
 }
 
-/** @param {Uint8Array} bytes @returns {ArrayBuffer} */
-function bytesToArrayBuffer(bytes) {
-  return /** @type {ArrayBuffer} */ (
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-  );
-}
-
 /** @param {ReadableStreamDefaultReader<Uint8Array>} reader @param {unknown} reason */
-function cancelReaderBestEffort(reader, reason) {
+async function cancelReaderBestEffort(reader, reason) {
   try {
-    void reader.cancel(reason).catch(() => {});
+    await reader.cancel(reason);
   } catch {}
 }
 
+/** @param {unknown} value @param {string} operation */
+function streamChunkBytes(value, operation) {
+  const bytes = r2BufferSourceBytes(value);
+  if (!bytes) {
+    throw new TypeError(`R2 ${operation}: stream chunks must be BufferSource values`);
+  }
+  return bytes;
+}
+
+/** @param {Uint8Array} bytes @param {number} byteLength */
+function snapshotStreamChunk(bytes, byteLength) {
+  // Allocate from the capped length so concurrent growth cannot exceed the limit.
+  const snapshot = new IntrinsicUint8Array(byteLength);
+  snapshot.set(bytes);
+  return snapshot;
+}
+
+/** @param {Uint8Array} bytes @param {number} byteLength */
+function passthroughStreamChunk(bytes, byteLength) {
+  if (!r2Uint8ArrayHasResizableOrSharedBacking(bytes)) return bytes;
+  return snapshotStreamChunk(bytes, byteLength);
+}
+
 /** @param {ReadableStream<Uint8Array>} stream @param {string} operation */
-async function readStreamWithLimit(stream, operation) {
-  const reader = stream.getReader();
+function readStreamWithLimit(stream, operation) {
+  return readReaderWithLimit(stream.getReader(), operation);
+}
+
+/** @param {ReadableStreamDefaultReader<Uint8Array>} reader @param {string} operation */
+async function readReaderWithLimit(reader, operation) {
   /** @type {Uint8Array[]} */
   const chunks = [];
   let total = 0;
@@ -63,28 +150,29 @@ async function readStreamWithLimit(stream, operation) {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
+      let bytes;
+      try {
+        bytes = streamChunkBytes(value, operation);
+      } catch (error) {
+        void cancelReaderBestEffort(reader, error);
+        throw error;
+      }
+      const chunkLength = r2Uint8ArrayByteLength(bytes);
+      total += chunkLength;
       if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
-        cancelReaderBestEffort(
+        void cancelReaderBestEffort(
           reader,
           `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
         );
         assertR2BufferSize(total, operation);
       }
-      chunks.push(chunk);
+      chunks.push(snapshotStreamChunk(bytes, chunkLength));
     }
   } finally {
     try { reader.releaseLock(); } catch {}
   }
-  if (chunks.length === 1) {
-    const [chunk] = chunks;
-    if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
-      return chunk;
-    }
-    return new Uint8Array(chunk);
-  }
-  const out = new Uint8Array(total);
+  if (chunks.length === 1) return chunks[0];
+  const out = new IntrinsicUint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
     out.set(chunk, offset);
@@ -97,36 +185,44 @@ async function readStreamWithLimit(stream, operation) {
 function cappedReadableStream(stream, operation) {
   const reader = stream.getReader();
   let total = 0;
+  let released = false;
+  function releaseReader() {
+    if (released) return;
+    released = true;
+    try { reader.releaseLock(); } catch {}
+  }
   return new ReadableStream({
     async pull(controller) {
-      const { value, done } = await reader.read();
-      if (done) {
-        try { reader.releaseLock(); } catch {}
+      let result;
+      try {
+        result = await reader.read();
+      } catch (error) {
+        releaseReader();
+        controller.error(error);
+        return;
+      }
+      if (result.done) {
+        releaseReader();
         controller.close();
         return;
       }
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      total += chunk.byteLength;
-      if (total > R2_OBJECT_MAX_BUFFER_BYTES) {
-        cancelReaderBestEffort(
-          reader,
-          `R2 ${operation}: object exceeds ${R2_OBJECT_MAX_BUFFER_BYTES} byte limit`
-        );
-        try { reader.releaseLock(); } catch {}
-        try {
-          assertR2BufferSize(total, operation);
-        } catch (err) {
-          controller.error(err);
-          return;
-        }
+      try {
+        const bytes = streamChunkBytes(result.value, operation);
+        const chunkLength = r2Uint8ArrayByteLength(bytes);
+        total += chunkLength;
+        assertR2BufferSize(total, operation);
+        controller.enqueue(passthroughStreamChunk(bytes, chunkLength));
+      } catch (error) {
+        void cancelReaderBestEffort(reader, error);
+        releaseReader();
+        controller.error(error);
       }
-      controller.enqueue(chunk);
     },
     async cancel(reason) {
       try {
         await reader.cancel(reason);
       } finally {
-        try { reader.releaseLock(); } catch {}
+        releaseReader();
       }
     },
   });
@@ -351,31 +447,48 @@ export class R2Object {
 
 export class R2ObjectBody extends R2Object {
   /** @type {ReadableStream<Uint8Array>} */
-  body;
-  /** @type {boolean} */
-  bodyUsed;
+  #body;
+  /** @type {Response} */
+  #bodyUsedTracker;
+  #bodyClaimed = false;
 
   /** @param {AnyRecord} meta @param {ReadableStream<Uint8Array>} body */
   constructor(meta, body) {
     super(meta);
-    this.body = cappedReadableStream(body, "get");
-    this.bodyUsed = false;
+    this.#body = cappedReadableStream(body, "get");
+    this.#bodyUsedTracker = new IntrinsicResponse(this.#body);
   }
 
-  takeBody() {
-    if (this.bodyUsed) {
+  get body() {
+    return this.#body;
+  }
+
+  get bodyUsed() {
+    return this.#isBodyUsed();
+  }
+
+  #isBodyUsed() {
+    return this.#bodyClaimed || responseBodyUsed(this.#bodyUsedTracker);
+  }
+
+  #consumeBody() {
+    if (this.#isBodyUsed()) {
       throw new TypeError("Body has already been used. It can only be used once.");
     }
-    this.bodyUsed = true;
-    return this.body;
+    // Reader acquisition is synchronous. A locked but undisturbed body fails
+    // before the one-shot claim, so releasing its unused reader permits retry.
+    const pendingRead = readStreamWithLimit(this.#body, "get");
+    this.#bodyClaimed = true;
+    return pendingRead;
   }
 
   async bytes() {
-    return readStreamWithLimit(this.takeBody(), "get");
+    return await this.#consumeBody();
   }
 
   async arrayBuffer() {
-    return bytesToArrayBuffer(await this.bytes());
+    const bytes = await this.bytes();
+    return /** @type {ArrayBuffer} */ (bytes.buffer);
   }
 
   async text() {
@@ -393,22 +506,27 @@ export class R2ObjectBody extends R2Object {
   }
 }
 
-/** @param {unknown} value */
-async function valueToBytes(value) {
-  if (value == null) return new Uint8Array(0);
-  if (typeof value === "string") return utf8Encoder.encode(value);
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+/** @param {unknown} value @returns {PreparedPutBytes} */
+function preparePutBytes(value) {
+  if (value == null) return { bytes: new IntrinsicUint8Array(0), pendingBytes: null };
+  if (typeof value === "string") {
+    return {
+      bytes: utf8Encoder.encode(value),
+      pendingBytes: null,
+    };
   }
-  if (value instanceof Blob) {
-    return readStreamWithLimit(value.stream(), "put");
+  const bufferSourceBytes = r2BufferSourceBytes(value);
+  if (bufferSourceBytes) return { bytes: bufferSourceBytes, pendingBytes: null };
+  const blobLength = maybeBlobByteLength(value);
+  if (blobLength !== null) {
+    assertR2BufferSize(blobLength, "put");
+    const pendingBytes = intrinsicReflectApply(intrinsicBlobBytes, value, []);
+    return { bytes: null, pendingBytes };
   }
   if (value instanceof ReadableStream) {
     // WDL R2 does not implement multipart yet: stream PUT is buffered locally,
     // capped at 25 MiB, then sent as one S3 PUT.
-    return readStreamWithLimit(value, "put");
+    return { bytes: null, pendingBytes: readStreamWithLimit(value, "put") };
   }
   throw new TypeError(
     "R2 put: value must be string | ArrayBuffer | typed array | Blob | ReadableStream"
@@ -451,15 +569,20 @@ export class R2Bucket {
   /** @param {string} key @param {unknown} value @param {AnyRecord} [options] */
   async put(key, value, options) {
     const normalizedOptions = normalizePutOptions(options);
-    const bytes = await valueToBytes(value);
-    assertR2BufferSize(bytes.byteLength, "put");
+    const normalizedKey = normalizeR2ObjectKey(key);
     const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.put !== "function") throw new TypeError("R2 stub put is not configured");
+    const requestMeta = bucketRequestMeta(this);
+    const prepared = preparePutBytes(value);
+    const bytes = prepared.bytes === null
+      ? await prepared.pendingBytes
+      : prepared.bytes;
+    assertR2BufferSize(r2Uint8ArrayByteLength(bytes), "put");
     const meta = await stub.put(
-      normalizeR2ObjectKey(key),
+      normalizedKey,
       bytes,
       normalizedOptions,
-      bucketRequestMeta(this)
+      requestMeta
     );
     return meta ? new R2Object(meta) : null;
   }

@@ -32,6 +32,7 @@ const HOST_BINDING_ENV_WORKER = readFileSync(
  *   requestClock: { dateNow: number, dateValue: number, performanceNow: number },
  *   abortType: string,
  *   tracing: { startSpanType: string, setAttributeChained: boolean, setAttributesChained: boolean },
+ *   htmlRewriter: { uppercaseAttributeMatches: number },
  *   byob: { firstDone: boolean, firstBytes: number[], finalDone: boolean, finalBytes: number[] },
  *   importMetaPathHelpers: { dirname: string, filename: string },
  *   nodeGlobals: Record<string, string>,
@@ -189,6 +190,9 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       startSpanType: "function",
       setAttributeChained: true,
       setAttributesChained: true,
+    });
+    assert.deepEqual(result.htmlRewriter, {
+      uppercaseAttributeMatches: 1,
     });
     assert.deepEqual(result.byob, {
       firstDone: false,

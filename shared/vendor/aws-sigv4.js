@@ -114,6 +114,8 @@ function hex(input) {
 function hexNibble(value) {
   return LOWER_HEX.charAt(value);
 }
+var typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+var dataViewPrototype = DataView.prototype;
 async function prepareSigningBody(body, headers, options) {
   if (options.unsignedPayload && !headers.has(AMZ_CONTENT_SHA256_HEADER)) {
     headers.set(AMZ_CONTENT_SHA256_HEADER, UNSIGNED_PAYLOAD);
@@ -122,6 +124,7 @@ async function prepareSigningBody(body, headers, options) {
   const computePayloadHash = !headers.has(AMZ_CONTENT_SHA256_HEADER);
   const materialize = options.replay && shouldMaterializeBodyForReplay(body) || computePayloadHash && hasBody;
   const prepared = await prepareBody(body, headers, materialize, options.signal);
+  options.signal?.throwIfAborted();
   let payloadHash = headers.get(AMZ_CONTENT_SHA256_HEADER);
   if (payloadHash === null) {
     if (prepared.bytes === void 0) {
@@ -194,14 +197,11 @@ async function bodyBytes(body, signal) {
   if (typeof body === "string") {
     return textEncoder.encode(body);
   }
-  if (body instanceof Uint8Array) {
-    return new Uint8Array(body);
-  }
   if (body instanceof ArrayBuffer) {
-    return new Uint8Array(body).slice();
+    return new Uint8Array(new Uint8Array(body));
   }
   if (ArrayBuffer.isView(body)) {
-    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength).slice();
+    return snapshotArrayBufferView(body);
   }
   if (body instanceof URLSearchParams) {
     return textEncoder.encode(body.toString());
@@ -213,6 +213,18 @@ async function bodyBytes(body, signal) {
     return new Uint8Array(await body.arrayBuffer());
   }
   throw new TypeError("body must be a string, Blob, URLSearchParams, ArrayBuffer, or ArrayBufferView");
+}
+function snapshotArrayBufferView(body) {
+  let prototype = typedArrayPrototype;
+  if (body instanceof DataView) {
+    prototype = dataViewPrototype;
+  } else {
+    void Uint8Array.prototype.at.call(body, 0);
+  }
+  const buffer = Reflect.get(prototype, "buffer", body);
+  const byteOffset = Reflect.get(prototype, "byteOffset", body);
+  const byteLength = Reflect.get(prototype, "byteLength", body);
+  return new Uint8Array(new Uint8Array(buffer, byteOffset, byteLength));
 }
 function assertReadableStreamUsable(body) {
   try {

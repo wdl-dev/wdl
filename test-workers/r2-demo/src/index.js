@@ -23,6 +23,33 @@ function objectShape(obj, text) {
   };
 }
 
+function streamWithMutationOnSecondPull(chunk, mutate) {
+  let firstRead = true;
+  return new ReadableStream({
+    pull(controller) {
+      if (firstRead) {
+        firstRead = false;
+        controller.enqueue(chunk);
+        return;
+      }
+      mutate();
+      controller.close();
+    },
+  }, { highWaterMark: 0 });
+}
+
+function streamWithQueuedMutationOnPull(chunk, mutate) {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(chunk);
+    },
+    pull(controller) {
+      mutate();
+      controller.close();
+    },
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -82,6 +109,77 @@ export default {
         return json({
           put: objectShape(meta, null),
           copied: objectShape(copied, await copied.text()),
+        });
+      }
+
+      if (request.method === "POST" && path === "buffer-integrity") {
+        class MisleadingWords extends Uint16Array {
+          get byteLength() { return 0; }
+        }
+        const source = new ArrayBuffer(8);
+        new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
+        const meta = await env.B.put(key, new MisleadingWords(source, 2, 2));
+
+        const queuedStreamKey = `${key}.queued-stream`;
+        const queuedStreamChunk = new Uint8Array([104, 101, 108, 112]);
+        await env.B.put(queuedStreamKey, streamWithQueuedMutationOnPull(
+          queuedStreamChunk,
+          () => queuedStreamChunk.fill(0)
+        ));
+
+        const fixedStreamKey = `${key}.fixed-stream`;
+        const fixedStreamChunk = new Uint8Array([104, 101, 108, 112]);
+        await env.B.put(fixedStreamKey, streamWithMutationOnSecondPull(
+          fixedStreamChunk,
+          () => fixedStreamChunk.fill(0)
+        ));
+
+        const resizableStreamKey = `${key}.resizable-stream`;
+        const resizableStream = new ArrayBuffer(4, { maxByteLength: 4 });
+        new Uint8Array(resizableStream).set([104, 101, 108, 112]);
+        await env.B.put(resizableStreamKey, streamWithMutationOnSecondPull(
+          new Uint8Array(resizableStream),
+          () => {
+            resizableStream.resize(2);
+            resizableStream.resize(4);
+          }
+        ));
+
+        const blobKey = `${key}.blob`;
+        await env.B.put(blobKey, new Blob(["help"]));
+
+        const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
+        const outOfBounds = new Uint8Array(resizable, 2, 4);
+        resizable.resize(1);
+        let outOfBoundsRejected = false;
+        try {
+          await env.B.put(`${key}.oob`, outOfBounds);
+        } catch (error) {
+          if (!(error instanceof TypeError)) throw error;
+          outOfBoundsRejected = true;
+        }
+
+        const stored = await env.B.get(key);
+        const queuedStreamStored = await env.B.get(queuedStreamKey);
+        const fixedStreamStored = await env.B.get(fixedStreamKey);
+        const resizableStreamStored = await env.B.get(resizableStreamKey);
+        const blobStored = await env.B.get(blobKey);
+        const absent = await env.B.get(`${key}.oob`);
+        return json({
+          size: meta.size,
+          text: await stored.text(),
+          queuedStreamBytes: Array.from(new Uint8Array(
+            await queuedStreamStored.arrayBuffer()
+          )),
+          fixedStreamBytes: Array.from(new Uint8Array(
+            await fixedStreamStored.arrayBuffer()
+          )),
+          resizableStreamBytes: Array.from(new Uint8Array(
+            await resizableStreamStored.arrayBuffer()
+          )),
+          blobText: await blobStored.text(),
+          outOfBoundsRejected,
+          outOfBoundsAbsent: absent === null,
         });
       }
 

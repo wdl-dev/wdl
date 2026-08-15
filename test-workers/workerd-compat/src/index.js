@@ -23,6 +23,19 @@ async function byobProbe() {
   };
 }
 
+async function htmlRewriterProbe() {
+  let uppercaseAttributeMatches = 0;
+  const response = new HTMLRewriter()
+    .on("[HREF]", {
+      element() {
+        uppercaseAttributeMatches += 1;
+      },
+    })
+    .transform(new Response('<a href="/">link</a>'));
+  await response.text();
+  return { uppercaseAttributeMatches };
+}
+
 function pendingInternalByobResponse(request, mode) {
   if (!request.body) throw new TypeError("request body is required");
   const reader = request.body.getReader({ mode: "byob" });
@@ -94,6 +107,7 @@ export default {
         setAttributeChained,
         setAttributesChained,
       },
+      htmlRewriter: await htmlRewriterProbe(),
       byob: await byobProbe(),
       importMetaPathHelpers: {
         dirname: typeof Reflect.get(import.meta, "dirname"),

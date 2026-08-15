@@ -1,5 +1,5 @@
 /*
- * The experimental flags mirror workerd v1.20260811.1
+ * The experimental flags mirror workerd v1.20260815.1
  * src/workerd/io/compatibility-date.capnp. Refresh them on every workerd pin
  * bump from an upstream source checkout:
  *
@@ -11,7 +11,7 @@
  * mirror data.
  */
 
-export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260811.1";
+export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20260815.1";
 
 // WDL supports one forward-only dynamic-worker compatibility surface. Static
 // platform workers keep their independently pinned workerd service dates.
@@ -21,10 +21,11 @@ export const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
 export const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
 export const LEGACY_ERROR_SERIALIZATION_FLAG = "legacy_error_serialization";
 
-// Upstream no longer marks this flag experimental, but WDL does not expose
-// irrevocable long-term persistence for tenant-visible capability stubs.
+// WDL requires standard stream constructors for its injected platform facades
+// and does not expose irrevocable persistence for tenant-visible capability stubs.
 export const WDL_UNSUPPORTED_COMPAT_FLAGS = Object.freeze([
   "allow_irrevocable_stub_storage",
+  "streams_disable_constructors",
 ]);
 
 export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([

@@ -4,6 +4,33 @@ export function delay(ms) {
 }
 
 /**
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{ status: "fulfilled", value: T } | { status: "rejected", reason: unknown } | { status: "pending" }>}
+ */
+export async function settlementWithin(promise, timeoutMs = 100) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+  try {
+    return await Promise.race([
+      promise.then(
+        (value) => ({ status: /** @type {const} */ ("fulfilled"), value }),
+        (reason) => ({ status: /** @type {const} */ ("rejected"), reason }),
+      ),
+      new Promise((resolve) => {
+        timeout = setTimeout(
+          () => resolve({ status: /** @type {const} */ ("pending") }),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+/**
  * @param {string} label
  * @param {() => boolean | Promise<boolean | undefined | void>} check
  * @param {{ timeoutMs?: number, intervalMs?: number }} [opts]

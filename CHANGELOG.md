@@ -8,6 +8,12 @@
 - Propagated application-terminal backend WebSocket Close frames through Gateway instead of treating protocol, policy, resource, and application close codes as backend-loss signals eligible for transparent reconnect.
 - Changed the private DO WebSocket object-name header to canonical ASCII encoding. This wire change is not mixed-version compatible: after rolling redis-proxy and Gateway, quiesce all tenant dispatch and terminate existing public and DO WebSockets, update user-runtime, system-runtime, and do-runtime during a maintenance window, and resume dispatch only after no old runtime task remains.
 
+## wdl.20260815.1 - 2026-08-15
+
+- Updated the bundled workerd and Workers types pins to `1.20260815.1` and `5.20260815.1`, raising the maximum tenant compatibility date to `2026-08-22`; adopted upstream EventTarget, stream, sandbox-boundary, WorkerLoader, HTMLRewriter, and public Web IDL error-name fixes. Affected Blob and stream adapter paths now perform O(n) safety copies, and Dynamic Workers reject `streams_disable_constructors`.
+- Upgraded the vendored `@wdl-dev/aws-sigv4` signer from 3.0.1 to 3.0.4 with intrinsic bounds for typed-array and `DataView` snapshots, constructor-based snapshots that preserve large-body performance in workerd, and abort checks before payload hashing.
+- Aligned R2 `BufferSource`, `Blob`, stream, and body-consumption handling with workerd: detached or out-of-bounds views fail before host calls, oversized Blobs fail before materialization, buffered chunks are snapshotted, and convenience readers reject after partial raw reads. Direct fixed-`ArrayBuffer` `Uint8Array` PUTs and raw GET chunks remain zero-copy; resizable or shared raw GET chunks are snapshotted.
+
 ## wdl.20260811.1 - 2026-08-11
 
 - Updated the bundled workerd and Workers types pins to `1.20260811.1` and `5.20260811.1`, raising the maximum tenant compatibility date to `2026-08-18`; BYOB reads now honor live buffer bounds after resize or transfer, and Control accepts ada-url 4-preserved literal `xn--` host labels while retaining potential-IPv4 rejection. New Module Registry-only APIs remain unavailable.
