@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Updated the bundled workerd and Workers types pins to `1.20260814.1` and
-  `5.20260814.1`, raising the maximum tenant compatibility date to `2026-08-21`.
+- Updated the bundled workerd and Workers types pins to `1.20260815.1` and
+  `5.20260815.1`, raising the maximum tenant compatibility date to `2026-08-22`.
   The binary includes EventTarget, stream teardown, sandbox-boundary, WorkerLoader,
   JSG unwrap, and HTMLRewriter fixes. Type errors use public Web IDL names instead
   of internal `Js*` wrapper names. Affected Blob, readable-stream, and writable-sink
