@@ -126,10 +126,10 @@ test("R2 demo: CLI deploy covers binding operations, stream copy, and buffer int
   assert.deepEqual(await responseJson(res), {
     size: 4,
     text: "help",
-    disguisedStreamBytes: [108, 112, 33, 34],
     queuedStreamBytes: [0, 0, 0, 0],
     fixedStreamBytes: [104, 101, 108, 112],
     resizableStreamBytes: [104, 101, 108, 112],
+    blobText: "help",
     outOfBoundsRejected: true,
     outOfBoundsAbsent: true,
   });

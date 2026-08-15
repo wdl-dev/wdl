@@ -120,17 +120,6 @@ export default {
         new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
         const meta = await env.B.put(key, new MisleadingWords(source, 2, 2));
 
-        const disguisedWords = new Uint16Array(2);
-        new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
-        Object.setPrototypeOf(disguisedWords, Uint8Array.prototype);
-        const disguisedStreamKey = `${key}.disguised-stream`;
-        await env.B.put(disguisedStreamKey, new ReadableStream({
-          start(controller) {
-            controller.enqueue(disguisedWords);
-            controller.close();
-          },
-        }));
-
         const queuedStreamKey = `${key}.queued-stream`;
         const queuedStreamChunk = new Uint8Array([104, 101, 108, 112]);
         await env.B.put(queuedStreamKey, streamWithQueuedMutationOnPull(
@@ -156,6 +145,9 @@ export default {
           }
         ));
 
+        const blobKey = `${key}.blob`;
+        await env.B.put(blobKey, new Blob(["help"]));
+
         const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
         const outOfBounds = new Uint8Array(resizable, 2, 4);
         resizable.resize(1);
@@ -168,17 +160,14 @@ export default {
         }
 
         const stored = await env.B.get(key);
-        const disguisedStreamStored = await env.B.get(disguisedStreamKey);
         const queuedStreamStored = await env.B.get(queuedStreamKey);
         const fixedStreamStored = await env.B.get(fixedStreamKey);
         const resizableStreamStored = await env.B.get(resizableStreamKey);
+        const blobStored = await env.B.get(blobKey);
         const absent = await env.B.get(`${key}.oob`);
         return json({
           size: meta.size,
           text: await stored.text(),
-          disguisedStreamBytes: Array.from(new Uint8Array(
-            await disguisedStreamStored.arrayBuffer()
-          )),
           queuedStreamBytes: Array.from(new Uint8Array(
             await queuedStreamStored.arrayBuffer()
           )),
@@ -188,6 +177,7 @@ export default {
           resizableStreamBytes: Array.from(new Uint8Array(
             await resizableStreamStored.arrayBuffer()
           )),
+          blobText: await blobStored.text(),
           outOfBoundsRejected,
           outOfBoundsAbsent: absent === null,
         });

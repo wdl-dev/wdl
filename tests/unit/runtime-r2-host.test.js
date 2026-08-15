@@ -179,7 +179,7 @@ test("R2 host put rejects non byte-like values instead of writing an empty body"
   }
 });
 
-test("R2 host put ignores overridden view bounds and rejects out-of-bounds views", async () => {
+test("R2 host put normalizes view bounds before signing", async () => {
   /** @type {Array<{ url: string, init: any }>} */
   const calls = [];
   const restore = installRecordingR2FetchMock(calls, {

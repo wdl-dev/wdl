@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseBase64Json } from "../helpers/json-payload.js";
 import { readRepositoryJson, runtimeLibModuleDataUrl } from "../helpers/load-shared-module.js";
+import { WDL_UNSUPPORTED_COMPAT_FLAGS } from "../../shared/workerd-compat-flags.js";
 
 const {
   toBytes,
@@ -506,19 +507,21 @@ test("bundleToWorkerCode: experimental workerd compatibility flags fail closed",
 });
 
 test("bundleToWorkerCode: WDL-unsupported compatibility flags fail closed", () => {
-  assert.throws(
-    () => bundleToWorkerCode(
-      mkBundle(
-        {
-          mainModule: "w.js",
-          compatibilityFlags: ["allow_irrevocable_stub_storage"],
-          modules: { "w.js": { type: "module" } },
-        },
-        { "w.js": enc.encode("x") }
-      )
-    ),
-    /meta\.compatibilityFlags contains unsupported WDL flag "allow_irrevocable_stub_storage"/
-  );
+  for (const flag of WDL_UNSUPPORTED_COMPAT_FLAGS) {
+    assert.throws(
+      () => bundleToWorkerCode(
+        mkBundle(
+          {
+            mainModule: "w.js",
+            compatibilityFlags: [flag],
+            modules: { "w.js": { type: "module" } },
+          },
+          { "w.js": enc.encode("x") }
+        )
+      ),
+      new RegExp(`meta\\.compatibilityFlags contains unsupported WDL flag "${flag}"`)
+    );
+  }
 });
 
 test("bundleToWorkerCode: missing __meta__ throws", () => {

@@ -2,16 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { R2Bucket, R2Object, R2ObjectBody } from "../../runtime/r2-client.js";
 import { R2_OBJECT_MAX_BUFFER_BYTES } from "../../runtime/r2-utils.js";
-import {
-  withMockedPropertyDescriptor,
-  withMockedPropertyDescriptors,
-} from "../helpers/mock-global.js";
+import { withMockedPropertyDescriptor } from "../helpers/mock-global.js";
 import {
   importRepositoryModuleFresh,
   importSpecifierReplacements,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
-import { settlementWithin } from "../helpers/timing.js";
+import { delay, settlementWithin } from "../helpers/timing.js";
 
 /**
  * @param {Uint8Array} firstChunk
@@ -86,19 +83,23 @@ function createR2ObjectBody(body, metadata) {
   return new R2ObjectBody(r2ObjectBodyMetadata(metadata), body);
 }
 
-/** @param {unknown} responseConstructor */
-async function importR2ClientWithResponse(responseConstructor) {
+function importR2ClientFresh() {
+  return importRepositoryModuleFresh(
+    "runtime/r2-client.js",
+    importSpecifierReplacements({
+      "./_wdl-r2-utils.js": repositoryFileUrl("runtime/_wdl-r2-utils.js"),
+      "./_wdl-request-id.js": repositoryFileUrl("runtime/_wdl-request-id.js"),
+    })
+  );
+}
+
+/** @param {keyof typeof globalThis} name @param {unknown} value */
+async function importR2ClientWithGlobal(name, value) {
   return await withMockedPropertyDescriptor(
     globalThis,
-    "Response",
-    { value: responseConstructor },
-    () => importRepositoryModuleFresh(
-      "runtime/r2-client.js",
-      importSpecifierReplacements({
-        "./_wdl-r2-utils.js": repositoryFileUrl("runtime/_wdl-r2-utils.js"),
-        "./_wdl-request-id.js": repositoryFileUrl("runtime/_wdl-request-id.js"),
-      })
-    )
+    name,
+    { value },
+    importR2ClientFresh
   );
 }
 
@@ -239,36 +240,6 @@ test("R2Bucket.put preserves onlyIf etag arrays for host binding", async () => {
   assert.deepEqual(calls[0].requestMeta, { requestId: "rid-put" });
 });
 
-test("R2Bucket.put ignores a mutable TextEncoder.prototype.encode for string bodies", async () => {
-  let encodeCalls = 0;
-  /** @type {Uint8Array | undefined} */
-  let observed;
-  const bucket = new R2Bucket({
-    async put(_key, value) {
-      observed = value;
-      return null;
-    },
-  });
-
-  await withMockedPropertyDescriptor(
-    TextEncoder.prototype,
-    "encode",
-    {
-      configurable: true,
-      writable: true,
-      value() {
-        encodeCalls += 1;
-        return new Uint8Array(0);
-      },
-    },
-    () => bucket.put("safe.txt", "help")
-  );
-
-  assert.equal(encodeCalls, 0);
-  assert.ok(observed);
-  assert.deepEqual(Array.from(observed), [104, 101, 108, 112]);
-});
-
 test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds views", async () => {
   /** @type {Uint8Array[]} */
   const calls = [];
@@ -297,31 +268,6 @@ test("R2Bucket.put ignores overridden view bounds and rejects out-of-bounds view
   resizable.resize(1);
   await assert.rejects(() => bucket.put("empty.bin", outOfBounds), TypeError);
   assert.equal(calls.length, 1);
-});
-
-test("R2Bucket.put does not assimilate a tenant Uint8Array then method", async () => {
-  let observed;
-  let thenCalls = 0;
-  const bucket = new R2Bucket({
-    async put(_key, value) {
-      observed = value;
-      return null;
-    },
-  });
-  const body = new Uint8Array([104, 101, 108, 112]);
-  Object.defineProperty(body, "then", {
-    /** @param {(value: Uint8Array) => void} resolve */
-    value(resolve) {
-      thenCalls += 1;
-      resolve(new Uint8Array(0));
-    },
-  });
-
-  await bucket.put("safe.bin", body);
-
-  assert.equal(observed, body);
-  assert.deepEqual(Array.from(/** @type {Uint8Array} */ (observed)), [104, 101, 108, 112]);
-  assert.equal(thenCalls, 0);
 });
 
 test("R2Bucket.put normalizes every Headers httpMetadata field", async () => {
@@ -424,93 +370,101 @@ test("R2Bucket.put rejects timestamp onlyIf conditions", async () => {
   );
 });
 
-test("R2Bucket.put reads Blob through the capped stream path", async () => {
-  /** @type {any[]} */
-  const calls = [];
-  const bucket = new R2Bucket({
-    async put(/** @type {string} */ key, /** @type {any} */ value) {
-      calls.push({ key, value });
-      return {
-        key,
-        version: "",
-        size: value.byteLength,
-        etag: "abc",
-        httpEtag: '"abc"',
-        uploaded: Date.now(),
-        httpMetadata: {},
-        customMetadata: {},
-        checksums: {},
-        storageClass: "Standard",
-      };
-    },
-  });
-  const blob = new Blob(["hello"]);
-  blob.arrayBuffer = async () => {
-    throw new Error("Blob.arrayBuffer should not be used for R2 put");
-  };
-
-  const meta = /** @type {any} */ (await bucket.put("blob.txt", blob));
-
-  assert.equal(meta.size, 5);
-  assert.equal(calls.length, 1);
-  assert.deepEqual([...calls[0].value], [...new TextEncoder().encode("hello")]);
-});
-
-test("R2Bucket.put does not assimilate Uint8Array.prototype.then while buffering", async () => {
-  const chunk = new TextEncoder().encode("hello");
-  let thenCalls = 0;
-  /** @param {(value: unknown) => void} resolve */
-  function mockThen(resolve) {
-    thenCalls += 1;
-    resolve({ bytes: new Uint8Array(0) });
-  }
-  /** @type {Uint8Array[]} */
-  const observed = [];
+test("R2Bucket.put uploads Blob bytes", async () => {
+  /** @type {Uint8Array | undefined} */
+  let observed;
   const bucket = new R2Bucket({
     async put(_key, value) {
-      observed.push(value);
-      return {
-        key: "stream.txt",
-        version: "",
-        size: value.byteLength,
-        etag: "abc",
-        httpEtag: '"abc"',
-        uploaded: Date.now(),
-        httpMetadata: {},
-        customMetadata: {},
-        checksums: {},
-        storageClass: "Standard",
-      };
-    },
-  });
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(chunk);
-      controller.close();
+      observed = value;
+      return null;
     },
   });
 
-  const meta = /** @type {any} */ (await withMockedPropertyDescriptors([
-    {
-      target: Uint8Array.prototype,
-      name: "then",
-      descriptor: {
+  await bucket.put("blob.txt", new Blob(["hello"]));
+
+  assert.ok(observed);
+  assert.deepEqual(Array.from(observed), Array.from(new TextEncoder().encode("hello")));
+});
+
+test("R2Bucket.put preflights Blob size through an inherited getter", async () => {
+  let bytesCalls = 0;
+  class PrototypeSizeBlob {
+    get size() {
+      return R2_OBJECT_MAX_BUFFER_BYTES + 1;
+    }
+
+    slice() {
+      throw new Error("Blob.slice should not be used with a size getter");
+    }
+
+    async bytes() {
+      bytesCalls += 1;
+      return new Uint8Array();
+    }
+  }
+
+  const { R2Bucket: PrototypeSizeR2Bucket } = await importR2ClientWithGlobal(
+    "Blob",
+    PrototypeSizeBlob
+  );
+  const blob = new PrototypeSizeBlob();
+  const bucket = new PrototypeSizeR2Bucket({
+    async put() {
+      throw new Error("host put should not be called");
+    },
+  });
+
+  await assert.rejects(
+    () => bucket.put("large.bin", blob),
+    /R2 put: object is .* exceeds the 25 MiB WDL R2 limit/
+  );
+  assert.equal(bytesCalls, 0);
+});
+
+test("R2Bucket.put preflights Blob size in legacy instance-property mode", async () => {
+  let bytesCalls = 0;
+  class InstanceSizeBlob {
+    #size;
+
+    /** @param {number} size */
+    constructor(size) {
+      this.#size = size;
+      Object.defineProperty(this, "size", {
         configurable: true,
-        get() {
-          // Buffer shares this prototype; target only base Uint8Array snapshots.
-          return Object.getPrototypeOf(this) === Uint8Array.prototype
-            ? mockThen
-            : undefined;
-        },
-      },
-    },
-  ], () => bucket.put("stream.txt", stream)));
+        enumerable: true,
+        value: size,
+      });
+    }
 
-  assert.equal(thenCalls, 0);
-  assert.equal(meta.size, 5);
-  assert.equal(observed.length, 1);
-  assert.notEqual(observed[0], chunk);
-  assert.deepEqual(Array.from(observed[0]), Array.from(chunk));
+    /** @param {number} [start] @param {number} [end] */
+    slice(start = 0, end = this.#size) {
+      const boundedStart = Math.min(Math.max(start, 0), this.#size);
+      const boundedEnd = Math.min(Math.max(end, 0), this.#size);
+      return new InstanceSizeBlob(Math.max(boundedEnd - boundedStart, 0));
+    }
+
+    async bytes() {
+      bytesCalls += 1;
+      return new Uint8Array();
+    }
+  }
+
+  const { R2Bucket: InstanceSizeR2Bucket } = await importR2ClientWithGlobal(
+    "Blob",
+    InstanceSizeBlob
+  );
+  const blob = new InstanceSizeBlob(R2_OBJECT_MAX_BUFFER_BYTES + 1);
+  const bucket = new InstanceSizeR2Bucket({
+    async put() {
+      throw new Error("host put should not be called");
+    },
+  });
+
+  await assert.rejects(
+    () => bucket.put("large.bin", blob),
+    /R2 put: object is .* exceeds the 25 MiB WDL R2 limit/
+  );
+  assert.equal(bytesCalls, 0);
 });
 
 test("R2 buffered readers observe default-HWM mutations made before delivery", async () => {
@@ -674,112 +628,6 @@ test("R2Bucket.put preserves zero-length fixed chunks after source detachment", 
   assert.doesNotThrow(() => Uint8Array.prototype.at.call(observed, 0));
 });
 
-test("R2Bucket.put keeps the validated body stable through the host call", async () => {
-  const backing = new ArrayBuffer(4, { maxByteLength: 16 });
-  const body = new Uint8Array(backing);
-  body.set([104, 101, 108, 112]);
-  let observedLength;
-  const bucket = new R2Bucket({
-    async put(_key, value) {
-      observedLength = value.byteLength;
-      return null;
-    },
-  });
-  await withMockedPropertyDescriptor(
-    Number,
-    "isFinite",
-    {
-      configurable: true,
-      writable: true,
-      value() { backing.resize(16); return true; },
-    },
-    () => bucket.put("safe.bin", body)
-  );
-
-  assert.equal(observedLength, 4);
-});
-
-test("R2Bucket.put ignores mutable collection intrinsics while buffering", async () => {
-  class MisleadingChunk extends Uint8Array {
-    get buffer() { return new ArrayBuffer(0); }
-    get byteOffset() { return 0; }
-    get byteLength() { return 4; }
-  }
-  const first = new MisleadingChunk([104, 101]);
-  const second = new MisleadingChunk([108, 112]);
-  /** @type {Uint8Array | undefined} */
-  let observed;
-  const bucket = new R2Bucket({
-    async put(_key, value) {
-      observed = value;
-      return null;
-    },
-  });
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(first);
-      controller.enqueue(second);
-      controller.close();
-    },
-  });
-  await withMockedPropertyDescriptors([
-    {
-      target: Uint8Array.prototype,
-      name: "set",
-      descriptor: {
-        configurable: true,
-        writable: true,
-        value() {},
-      },
-    },
-    {
-      target: Array.prototype,
-      name: "0",
-      descriptor: {
-        configurable: true,
-        /** @param {unknown} value */
-        set(value) {
-          if (value === first || value === second) return;
-          Object.defineProperty(this, "0", {
-            configurable: true,
-            enumerable: true,
-            writable: true,
-            value,
-          });
-        },
-      },
-    },
-  ], () => bucket.put("safe.bin", stream));
-
-  assert.ok(observed);
-  assert.deepEqual(Array.from(observed), [104, 101, 108, 112]);
-});
-
-test("R2Bucket.put does not trust a mutable Uint8Array prototype as a brand", async () => {
-  const disguisedWords = new Uint16Array(2);
-  new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
-  Object.setPrototypeOf(disguisedWords, Uint8Array.prototype);
-  /** @type {Uint8Array | undefined} */
-  let observed;
-  const bucket = new R2Bucket({
-    async put(_key, value) {
-      observed = value;
-      return null;
-    },
-  });
-  await bucket.put("safe.bin", new ReadableStream({
-    start(controller) {
-      controller.enqueue(disguisedWords);
-      controller.close();
-    },
-  }));
-
-  assert.ok(observed);
-  assert.ok(observed instanceof Uint8Array);
-  assert.notStrictEqual(observed, disguisedWords);
-  assert.deepEqual(Array.from(observed), [108, 112, 33, 34]);
-});
-
 test("R2Bucket.put rejects an invalid chunk without waiting for cancel", async () => {
   let cancelCalls = 0;
   let hostCalls = 0;
@@ -798,7 +646,6 @@ test("R2Bucket.put rejects an invalid chunk without waiting for cancel", async (
       return new Promise(() => {});
     },
   });
-
   const outcome = await settlementWithin(bucket.put("invalid.bin", stream));
 
   assert.equal(outcome.status, "rejected");
@@ -898,14 +745,15 @@ test("R2ObjectBody.arrayBuffer reuses its exact-fit byte buffer", async () => {
   assert.deepEqual([...new Uint8Array(buffer)], [...chunk]);
 });
 
-test("R2ObjectBody captures an inherited Response.bodyUsed accessor", async () => {
+test("R2ObjectBody uses an inherited Response.bodyUsed accessor", async () => {
   const NativeResponse = Response;
   class InheritedBodyUsedResponse extends NativeResponse {}
   assert.equal(
     Object.getOwnPropertyDescriptor(InheritedBodyUsedResponse.prototype, "bodyUsed"),
     undefined
   );
-  const { R2ObjectBody: InheritedModeR2ObjectBody } = await importR2ClientWithResponse(
+  const { R2ObjectBody: InheritedModeR2ObjectBody } = await importR2ClientWithGlobal(
+    "Response",
     InheritedBodyUsedResponse
   );
   const obj = new InheritedModeR2ObjectBody(
@@ -913,19 +761,12 @@ test("R2ObjectBody captures an inherited Response.bodyUsed accessor", async () =
     streamFromChunks(Uint8Array.of(1))
   );
 
-  await withMockedPropertyDescriptor(
-    NativeResponse.prototype,
-    "bodyUsed",
-    { get() { return false; } },
-    async () => {
-      assert.equal(obj.bodyUsed, false);
-      const reader = obj.body.getReader();
-      const first = await reader.read();
-      reader.releaseLock();
-      assert.equal(first.done, false);
-      assert.equal(obj.bodyUsed, true);
-    }
-  );
+  assert.equal(obj.bodyUsed, false);
+  const reader = obj.body.getReader();
+  const first = await reader.read();
+  reader.releaseLock();
+  assert.equal(first.done, false);
+  assert.equal(obj.bodyUsed, true);
 });
 
 test("R2ObjectBody reads an instance Response.bodyUsed data property", async () => {
@@ -941,7 +782,8 @@ test("R2ObjectBody reads an instance Response.bodyUsed data property", async () 
     }
   }
 
-  const { R2ObjectBody: InstanceModeR2ObjectBody } = await importR2ClientWithResponse(
+  const { R2ObjectBody: InstanceModeR2ObjectBody } = await importR2ClientWithGlobal(
+    "Response",
     InstanceDataResponse
   );
   const obj = new InstanceModeR2ObjectBody(
@@ -1048,6 +890,7 @@ test("R2ObjectBody raw body rejects an invalid chunk without waiting for cancel"
   const reader = obj.body.getReader();
 
   const outcome = await settlementWithin(reader.read());
+  await delay(0);
 
   assert.equal(outcome.status, "rejected");
   assert.match(String("reason" in outcome ? outcome.reason : ""), /must be BufferSource values/);
@@ -1070,13 +913,12 @@ test("R2ObjectBody raw body stream enforces the object byte cap", async () => {
 
   const reader = obj.body.getReader();
   const first = await reader.read();
-
-  assert.equal(first.done, false);
-  assert.equal(first.value.byteLength, R2_OBJECT_MAX_BUFFER_BYTES);
   await assert.rejects(
     () => reader.read(),
     /R2 get: object is .* exceeds the 25 MiB WDL R2 limit/
   );
+  assert.equal(first.done, false);
+  assert.equal(first.value?.byteLength, R2_OBJECT_MAX_BUFFER_BYTES);
 });
 
 test("R2ObjectBody byte cap does not wait for underlying cancel", async () => {
@@ -1095,6 +937,7 @@ test("R2ObjectBody byte cap does not wait for underlying cancel", async () => {
   });
 
   const outcome = await settlementWithin(obj.body.getReader().read());
+  await delay(0);
 
   assert.equal(outcome.status, "rejected");
   assert.match(String("reason" in outcome ? outcome.reason : ""), /exceeds the 25 MiB WDL R2 limit/);

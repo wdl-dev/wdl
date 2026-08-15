@@ -193,7 +193,7 @@ Prefer the narrow helper that matches the response or fixture source:
 | Unit auth entrypoint harness state | `authMockState(...)`, `authLogs(...)`, and `lastAuthLog(...)` from `tests/helpers/load-auth-index.js` | Tests should not read or write `globalThis.__authMockState` directly; the global is private storage for the harness' inline module mocks. |
 | Unit/integration Redis command parity | `redisConformanceCases` from `tests/helpers/redis-conformance-cases.js` | Add a shared case when fake Redis and the real integration Redis wrapper must agree on command semantics. Run `tests/unit/fake-redis.test.js` and the focused Redis conformance integration file. |
 | Mocked `fetch` call recording | `makeRecordingFetch(...)` / `withRecordingFetch(...)` from `tests/helpers/mock-fetch.js` | Use `capture` when the test needs a custom call record shape. |
-| Temporary global or property replacement | `withMockedGlobal(...)`, `withMockedProperty(...)`, `withMockedPropertyDescriptor(...)`, and `withMockedPropertyDescriptors(...)` from `tests/helpers/mock-global.js` | Use the plural descriptor helper when one scope needs several mocks; use install-style helpers only when the file owns before/after cleanup. |
+| Temporary global or property replacement | `withMockedGlobal(...)`, `withMockedProperty(...)`, and `withMockedPropertyDescriptor(...)` from `tests/helpers/mock-global.js` | Use install-style helpers only when the file owns before/after cleanup. |
 | Console or stream output capture | `withCapturedConsole(...)`, `installConsoleMethodCapture(...)`, or `installStreamWriteCapture(...)` from `tests/helpers/output-capture.js` | Keep direct `console.*` and `process.stderr/stdout.write` replacement out of test files. |
 | Sleeps, polling, or bounded Promise observation | `delay(...)`, `waitUntil(...)`, and `settlementWithin(...)` from `tests/helpers/timing.js`; integration `stack.js` re-exports `delay(...)` and `waitUntil(...)` | Use `settlementWithin(...)` when cleanup must be observed without awaiting it indefinitely. Do not replace sleeps inside tenant worker source strings; those are fixture code under test. |
 | Temporary directories | `withTempDir(...)` from `tests/helpers/temp-dir.js` | Prefer scoped cleanup over hand-written `mkdtemp` / `rm` `finally` blocks. |
@@ -263,9 +263,8 @@ Prefer the narrow helper that matches the response or fixture source:
   by tests (`process.stderr.*`, `AbortSignal.*`, `Object.*`, `JSON.*`,
   `Headers.prototype.*`, `Array.prototype.*`, and `Function.prototype.*`).
   Built-in prototype descriptor mocks use
-  `withMockedPropertyDescriptor(...)`, or
-  `withMockedPropertyDescriptors(...)` when one scope needs several, instead of
-  direct `Object.defineProperty(...)` save/restore blocks.
+  `withMockedPropertyDescriptor(...)` instead of direct
+  `Object.defineProperty(...)` save/restore blocks.
   Unit tests do not boot Docker; they import through these loaders.
 - `tests/integration/helpers/` is the integration-test helper home. Each
   concern lives in its own sub-module — `admin-http.js`, `cli.js`,

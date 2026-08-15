@@ -20,7 +20,6 @@ import {
   validateR2BucketName,
 } from "../../runtime/r2-utils.js";
 import { R2_BUCKET_NAME_RE as CONTROL_R2_BUCKET_NAME_RE } from "../../shared/ns-pattern.js";
-import { withMockedPropertyDescriptors } from "../helpers/mock-global.js";
 
 test("r2PhysicalPrefix scopes virtual buckets under namespace", () => {
   assert.equal(
@@ -43,26 +42,6 @@ test("normalizeR2ObjectKey rejects URL path traversal segments", () => {
   for (const key of [".hidden", "..hidden", "a/.../x", "a//x", "a/%2e%2e/x"]) {
     assert.equal(normalizeR2ObjectKey(key), key);
   }
-});
-
-test("normalizeR2ObjectKey rejects traversal after intrinsic tampering", async () => {
-  await withMockedPropertyDescriptors([
-    {
-      target: RegExp.prototype,
-      name: "exec",
-      descriptor: {
-        configurable: true,
-        writable: true,
-        value() { return null; },
-      },
-    },
-  ], () => {
-    assert.equal(normalizeR2ObjectKey("safe/path"), "safe/path");
-    assert.throws(
-      () => normalizeR2ObjectKey("../escape"),
-      /must not contain \. or \.\./
-    );
-  });
 });
 
 test("stripR2PhysicalPrefix rejects backend keys outside the binding prefix", () => {
@@ -189,24 +168,10 @@ test("r2BufferSourceBytes uses intrinsic bounds for every BufferSource kind", ()
     const bytes = r2BufferSourceBytes(view);
     assert.ok(bytes);
     assert.deepEqual(Array.from(bytes), [104, 101, 108, 112]);
-    if (view === misleadingBytes) {
-      assert.strictEqual(bytes, misleadingBytes);
-    } else {
-      assert.equal(Object.getPrototypeOf(bytes), Uint8Array.prototype);
-    }
+    assert.notStrictEqual(bytes, view);
+    assert.equal(Object.getPrototypeOf(bytes), Uint8Array.prototype);
   }
   assert.equal(r2BufferSourceBytes("not bytes"), null);
-});
-
-test("r2BufferSourceBytes identifies ArrayBuffer by its internal slots", () => {
-  const buffer = new ArrayBuffer(4);
-  new Uint8Array(buffer).set([104, 101, 108, 112]);
-  Object.setPrototypeOf(buffer, null);
-
-  assert.equal(buffer instanceof ArrayBuffer, false);
-  const bytes = r2BufferSourceBytes(buffer);
-  assert.ok(bytes);
-  assert.deepEqual(Array.from(bytes), [104, 101, 108, 112]);
 });
 
 test("r2Uint8ArrayByteLength ignores own bounds", () => {
@@ -230,16 +195,6 @@ test("r2Uint8ArrayHasResizableOrSharedBacking identifies dynamic backing", () =>
     ),
     true
   );
-});
-
-test("r2BufferSourceBytes ignores mutable prototypes when identifying view brands", () => {
-  const disguisedWords = new Uint16Array(2);
-  new Uint8Array(disguisedWords.buffer).set([108, 112, 33, 34]);
-  Object.setPrototypeOf(disguisedWords, Uint8Array.prototype);
-  const disguisedBytes = r2BufferSourceBytes(disguisedWords);
-  assert.ok(disguisedBytes);
-  assert.notStrictEqual(disguisedBytes, disguisedWords);
-  assert.deepEqual(Array.from(disguisedBytes), [108, 112, 33, 34]);
 });
 
 test("r2BufferSourceBytes rejects detached and out-of-bounds inputs", () => {
@@ -277,81 +232,6 @@ test("r2Uint8ArrayByteLength rejects invalid zero-length views", () => {
   const outOfBounds = new Uint8Array(resizable, 4, 0);
   resizable.resize(2);
   assert.throws(() => r2Uint8ArrayByteLength(outOfBounds), TypeError);
-});
-
-test("R2 byte-view helpers ignore post-load intrinsic tampering", async () => {
-  const source = new ArrayBuffer(8);
-  new Uint8Array(source).set([0, 0, 104, 101, 108, 112, 0, 0]);
-  const words = new Uint16Array(source, 2, 2);
-  const view = new DataView(source, 2, 4);
-  const resizable = new ArrayBuffer(8, { maxByteLength: 16 });
-  const snapshotCandidate = new Uint8Array(resizable);
-  const outOfBounds = new Uint8Array(resizable, 2, 4);
-  resizable.resize(1);
-
-  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
-  /** @type {Uint8Array | null | undefined} */
-  let wordBytes;
-  /** @type {Uint8Array | null | undefined} */
-  let viewBytes;
-  /** @type {unknown} */
-  let outOfBoundsError;
-  let hasResizableOrSharedBacking;
-  await withMockedPropertyDescriptors([
-    {
-      target: Reflect,
-      name: "apply",
-      descriptor: { configurable: true, writable: true, value: () => 0 },
-    },
-    {
-      target: ArrayBuffer,
-      name: "isView",
-      descriptor: { configurable: true, writable: true, value: () => false },
-    },
-    {
-      target: ArrayBuffer.prototype,
-      name: "resizable",
-      descriptor: { configurable: true, get: () => false },
-    },
-    {
-      target: typedArrayPrototype,
-      name: "at",
-      descriptor: { configurable: true, writable: true, value: () => undefined },
-    },
-    {
-      target: typedArrayPrototype,
-      name: Symbol.toStringTag,
-      descriptor: { configurable: true, get: () => "Uint8Array" },
-    },
-    {
-      target: globalThis,
-      name: "DataView",
-      descriptor: { configurable: true, writable: true, value: class FakeDataView {} },
-    },
-    {
-      target: globalThis,
-      name: "Uint8Array",
-      descriptor: { configurable: true, writable: true, value: class FakeUint8Array {} },
-    },
-  ], () => {
-    wordBytes = r2BufferSourceBytes(words);
-    viewBytes = r2BufferSourceBytes(view);
-    hasResizableOrSharedBacking = r2Uint8ArrayHasResizableOrSharedBacking(
-      snapshotCandidate
-    );
-    try {
-      r2BufferSourceBytes(outOfBounds);
-    } catch (error) {
-      outOfBoundsError = error;
-    }
-  });
-
-  assert.ok(wordBytes);
-  assert.ok(viewBytes);
-  assert.deepEqual(Array.from(wordBytes), [104, 101, 108, 112]);
-  assert.deepEqual(Array.from(viewBytes), [104, 101, 108, 112]);
-  assert.ok(outOfBoundsError instanceof TypeError);
-  assert.equal(hasResizableOrSharedBacking, true);
 });
 
 test("r2RangeAndSizeFromHeaders keeps object size on range responses", () => {

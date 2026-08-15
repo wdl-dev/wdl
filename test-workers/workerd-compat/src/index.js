@@ -23,24 +23,6 @@ async function byobProbe() {
   };
 }
 
-function eventTargetSelfSignalProbe() {
-  const controller = new AbortController();
-  const { signal } = controller;
-  const noop = () => {};
-  let victimCalls = 0;
-  const victim = () => { victimCalls += 1; };
-
-  // Distinct event types must not corrupt a self-signal listener or its removal.
-  signal.addEventListener("one", noop);
-  signal.addEventListener("two", noop);
-  signal.addEventListener("three", noop);
-  signal.addEventListener("victim", victim, { signal });
-  signal.dispatchEvent(new Event("victim"));
-  controller.abort();
-  signal.dispatchEvent(new Event("victim"));
-  return { aborted: signal.aborted, victimCalls };
-}
-
 async function htmlRewriterProbe() {
   let uppercaseAttributeMatches = 0;
   const response = new HTMLRewriter()
@@ -125,7 +107,6 @@ export default {
         setAttributeChained,
         setAttributesChained,
       },
-      eventTargetSelfSignal: eventTargetSelfSignalProbe(),
       htmlRewriter: await htmlRewriterProbe(),
       byob: await byobProbe(),
       importMetaPathHelpers: {

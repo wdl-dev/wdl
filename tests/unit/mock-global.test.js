@@ -5,7 +5,6 @@ import {
   installMockProperty,
   withMockedProperty,
   withMockedPropertyDescriptor,
-  withMockedPropertyDescriptors,
 } from "../helpers/mock-global.js";
 
 test("installMockProperty removes properties that did not originally exist", () => {
@@ -64,6 +63,22 @@ test("withMockedPropertyDescriptor removes newly defined properties", async () =
   assert.equal(Object.hasOwn(target, "missing"), false);
 });
 
+test("withMockedPropertyDescriptor restores after callback failures", async () => {
+  const target = { value: "original" };
+
+  await assert.rejects(
+    () => withMockedPropertyDescriptor(
+      target,
+      "value",
+      { value: "mocked" },
+      () => { throw new Error("boom"); }
+    ),
+    /boom/
+  );
+
+  assert.equal(target.value, "original");
+});
+
 test("withMockedPropertyDescriptor rejects non-configurable properties before mocking", async () => {
   /** @type {Record<string, unknown>} */
   const target = {};
@@ -86,133 +101,4 @@ test("withMockedPropertyDescriptor rejects non-configurable properties before mo
 
   assert.equal(callbackCalls, 0);
   assert.equal(target.fixed, "original");
-});
-
-test("withMockedPropertyDescriptors restores all properties after callback failures", async () => {
-  const target = { existing: "original" };
-  const originalDescriptor = Object.getOwnPropertyDescriptor(target, "existing");
-  assert.ok(originalDescriptor);
-
-  await assert.rejects(
-    () => withMockedPropertyDescriptors([
-      {
-        target,
-        name: "existing",
-        descriptor: { value: "mocked", writable: false },
-      },
-      {
-        target,
-        name: "missing",
-        descriptor: { get: () => "mocked" },
-      },
-    ], () => {
-      assert.equal(target.existing, "mocked");
-      assert.equal(/** @type {any} */ (target).missing, "mocked");
-      throw new Error("boom");
-    }),
-    /boom/
-  );
-
-  assert.deepEqual(
-    Object.getOwnPropertyDescriptor(target, "existing"),
-    originalDescriptor
-  );
-  assert.equal(Object.hasOwn(target, "missing"), false);
-});
-
-test("withMockedPropertyDescriptors restores repeated properties in reverse order", async () => {
-  const target = { value: "original" };
-
-  await withMockedPropertyDescriptors([
-    {
-      target,
-      name: "value",
-      descriptor: { value: "first" },
-    },
-    {
-      target,
-      name: "value",
-      descriptor: { value: "second" },
-    },
-  ], () => {
-    assert.equal(target.value, "second");
-  });
-
-  assert.equal(target.value, "original");
-});
-
-test("withMockedPropertyDescriptors attempts every restore and preserves callback errors", async () => {
-  const restorable = { value: "original-restorable" };
-  const blockedA = { value: "original-blocked-a" };
-  const blockedB = { value: "original-blocked-b" };
-  const callbackError = new Error("callback failed");
-
-  await assert.rejects(
-    () => withMockedPropertyDescriptors([
-      {
-        target: restorable,
-        name: "value",
-        descriptor: { value: "mocked-restorable" },
-      },
-      {
-        target: blockedA,
-        name: "value",
-        descriptor: { value: "mocked-blocked-a" },
-      },
-      {
-        target: blockedB,
-        name: "value",
-        descriptor: { value: "mocked-blocked-b" },
-      },
-    ], () => {
-      Object.defineProperty(blockedA, "value", {
-        configurable: false,
-        value: "stuck-blocked-a",
-      });
-      Object.defineProperty(blockedB, "value", {
-        configurable: false,
-        value: "stuck-blocked-b",
-      });
-      throw callbackError;
-    }),
-    (error) => {
-      assert.ok(error instanceof AggregateError);
-      assert.equal(error.errors.length, 3);
-      assert.strictEqual(error.errors[0], callbackError);
-      assert.ok(error.errors[1] instanceof TypeError);
-      assert.ok(error.errors[2] instanceof TypeError);
-      return true;
-    }
-  );
-
-  assert.equal(restorable.value, "original-restorable");
-  assert.equal(blockedA.value, "stuck-blocked-a");
-  assert.equal(blockedB.value, "stuck-blocked-b");
-});
-
-test("withMockedPropertyDescriptors remains scoped when Array.prototype.push is mocked", async () => {
-  const target = { value: "original" };
-  const originalPush = Object.getOwnPropertyDescriptor(Array.prototype, "push");
-  assert.ok(originalPush);
-
-  await withMockedPropertyDescriptors([
-    {
-      target: Array.prototype,
-      name: "push",
-      descriptor: { value() {} },
-    },
-    {
-      target,
-      name: "value",
-      descriptor: { value: "mocked" },
-    },
-  ], () => {
-    assert.equal(target.value, "mocked");
-  });
-
-  assert.equal(target.value, "original");
-  assert.deepEqual(
-    Object.getOwnPropertyDescriptor(Array.prototype, "push"),
-    originalPush
-  );
 });

@@ -3,7 +3,6 @@ export const R2_LIST_LIMIT_MAX = 1000;
 // Keep in sync with shared/ns-pattern.js. This file is embedded into loaded
 // workers as _wdl-r2-utils.js, so it must stay standalone.
 export const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const R2_OBJECT_TRAVERSAL_RE = /(?:^|\/)\.{1,2}(?=\/|$)/;
 export const R2_HTTP_METADATA_FIELDS = Object.freeze([
   Object.freeze(["contentType", "content-type"]),
   Object.freeze(["contentLanguage", "content-language"]),
@@ -14,13 +13,12 @@ export const R2_HTTP_METADATA_FIELDS = Object.freeze([
 const R2_IMF_FIXDATE_RE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
 const IntrinsicUint8Array = Uint8Array;
 const uint8ArrayPrototype = IntrinsicUint8Array.prototype;
-const typedArrayPrototype = Object.getPrototypeOf(uint8ArrayPrototype);
+const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
+const typedArrayPrototype = intrinsicObjectGetPrototypeOf(uint8ArrayPrototype);
 const arrayBufferPrototype = ArrayBuffer.prototype;
 const dataViewPrototype = DataView.prototype;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
-const intrinsicNumberIsFinite = Number.isFinite;
 const intrinsicReflectApply = Reflect.apply;
-const intrinsicRegExpExec = RegExp.prototype.exec;
 const intrinsicTypedArrayAt = typedArrayPrototype.at;
 const intrinsicTypedArrayNameGet = prototypeGetter(
   typedArrayPrototype,
@@ -101,11 +99,12 @@ export function r2BufferSourceBytes(value) {
   }
 
   const byteLength = validatedTypedArrayByteLength(value);
-  // Prototype identity is mutable, so only the intrinsic brand may select zero-copy.
-  if (typedArrayName === "Uint8Array") {
+  if (
+    typedArrayName === "Uint8Array" &&
+    intrinsicObjectGetPrototypeOf(value) === uint8ArrayPrototype
+  ) {
     return /** @type {Uint8Array} */ (value);
   }
-
   const buffer = intrinsicReflectApply(
     intrinsicTypedArrayBufferGet,
     value,
@@ -196,7 +195,7 @@ export function normalizeR2ObjectKey(key) {
   if (typeof key !== "string" || key.length === 0) {
     throw new TypeError("R2 key must be a non-empty string");
   }
-  if (intrinsicReflectApply(intrinsicRegExpExec, R2_OBJECT_TRAVERSAL_RE, [key])) {
+  if (key.split("/").some((segment) => segment === "." || segment === "..")) {
     throw new TypeError("R2 key must not contain . or .. path segments");
   }
   return key;
@@ -280,7 +279,7 @@ export function encodeS3Query(params) {
  * @param {string} operation
  */
 export function assertR2BufferSize(size, operation) {
-  if (typeof size !== "number" || !intrinsicNumberIsFinite(size) || size < 0) {
+  if (typeof size !== "number" || !Number.isFinite(size) || size < 0) {
     throw new Error(`R2 ${operation}: invalid byte length ${size}`);
   }
   if (size > R2_OBJECT_MAX_BUFFER_BYTES) {
