@@ -419,7 +419,7 @@ test("DNS hostname and platform domain validation use the shared owner", () => {
   }
 });
 
-test("published CLI pin stays aligned across CI and operator docs", () => {
+test("CLI support declaration and CI pin are documented", () => {
   const [document] = yamlDocuments(".github/workflows/ci.yml");
   const workflow = /** @type {{ env?: { WDL_CLI_PACKAGE?: unknown } }} */ (
     document.toJS()
@@ -428,7 +428,14 @@ test("published CLI pin stays aligned across CI and operator docs", () => {
   if (typeof packageSpec !== "string") {
     assert.fail("ci.yml must define WDL_CLI_PACKAGE");
   }
-  assert.match(packageSpec, /^@wdl-dev\/cli@\d+\.\d+\.\d+$/);
+  const packageMatch = /^@wdl-dev\/cli@(\d+\.\d+\.\d+)$/.exec(packageSpec);
+  assert.ok(packageMatch, "WDL_CLI_PACKAGE must pin an exact published version");
+  const cliVersion = packageMatch[1];
+  const minCliMatch = /\bMIN_CLI_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/.exec(
+    withoutLineComments(readRepoFile("control/index.js"))
+  );
+  assert.ok(minCliMatch, "MIN_CLI_VERSION must declare an exact version");
+  const minCliVersion = minCliMatch[1];
   for (const file of [
     "README.md",
     "README.zh.md",
@@ -441,6 +448,25 @@ test("published CLI pin stays aligned across CI and operator docs", () => {
       file
     );
   }
+  for (const file of ["docs/modules/cli.md", "docs/modules/cli.zh.md"]) {
+    const source = readRepoFile(file);
+    assert.match(source, new RegExp(`Minimum supported CLI|最低支持 CLI`), file);
+    assert.match(source, new RegExp(`CI-qualified CLI`), file);
+    assert.ok(source.includes(`| \`${minCliVersion}\` | \`${cliVersion}\` |`), file);
+  }
+});
+
+test("Control embeds the exact WDL release identity", () => {
+  const version = readRepoFile("VERSION").trim();
+  assert.match(version, /^wdl\.\d{8}\.\d+$/);
+  assert.match(
+    withoutLineComments(readRepoFile("control/index.js")),
+    /platformVersionFromSource\(WDL_VERSION_SOURCE\)/
+  );
+  assert.match(
+    withoutLineComments(readRepoFile("runtime/config-system.capnp")),
+    /\(name = "wdl-version-source", text = embed "\.\.\/VERSION"\)/
+  );
 });
 
 test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
@@ -2742,6 +2768,10 @@ test("Docker images build from pinned public base images", () => {
   assert.match(workerdDockerfile, /COPY --from=supervisor-build \/d1-supervisor/);
   assert.match(workerdDockerfile, /COPY --from=supervisor-build \/do-supervisor/);
   assert.match(workerdDockerfile, /COPY --from=supervisor-build \/http-hc/);
+  assert.match(
+    workerdDockerfile,
+    /COPY package\.json package-lock\.json \.\/\s+RUN npm ci --omit=dev --workspaces=false\s+COPY VERSION \.\/VERSION/
+  );
   assert.doesNotMatch(workerdDockerfile, /\bapt-get\b/);
   assert.doesNotMatch(workerdDockerfile, /\bwget\b/);
   assert.doesNotMatch(workerdDockerfile, /^FROM\s+\S+:latest\b/m);

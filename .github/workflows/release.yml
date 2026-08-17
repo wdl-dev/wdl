@@ -32,17 +32,16 @@ jobs:
       actions: read
       contents: read
     outputs:
-      image_tag: ${{ steps.platform-version.outputs.image_tag }}
-      version: ${{ steps.platform-version.outputs.value }}
-      workerd_date: ${{ steps.platform-version.outputs.workerd_date }}
+      image_tag: ${{ steps.image-metadata.outputs.image_tag }}
+      workerd_date: ${{ steps.image-metadata.outputs.workerd_date }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set WDL platform version
-        id: platform-version
+      - name: Set release image metadata
+        id: image-metadata
         run: |
           node --input-type=module <<'JS' >> "$GITHUB_OUTPUT"
           import { readFileSync } from "node:fs";
@@ -50,10 +49,9 @@ jobs:
           const raw = String(lock.packages?.["node_modules/workerd"]?.version ?? "");
           const match = /^1\.(\d{8})\.\d+$/u.exec(raw);
           if (!match) {
-            throw new Error(`unexpected locked workerd version for WDL platform version: ${raw}`);
+            throw new Error(`unexpected locked workerd version for release metadata: ${raw}`);
           }
           const workerdDate = match[1];
-          console.log(`value=wdl.${raw.slice(2)}`);
           console.log(`workerd_date=${workerdDate}`);
           console.log(`image_tag=wdl.${workerdDate}.${process.env.GITHUB_SHA.slice(0, 8)}`);
           JS
@@ -65,7 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
-          WDL_WORKERD_DATE: ${{ steps.platform-version.outputs.workerd_date }}
+          WDL_WORKERD_DATE: ${{ steps.image-metadata.outputs.workerd_date }}
         run: |
           if [ "$REF_TYPE" != "tag" ]; then
             echo "push=true release must run from a tag, got ref type: $REF_TYPE" >&2

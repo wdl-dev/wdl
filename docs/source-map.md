@@ -13,6 +13,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `docker-compose.images.yml` | Local stack override that pulls published `docker.io/getwdl/wdl-workerd` and `docker.io/getwdl/wdl-rust` images instead of relying on locally built image tags. |
 | `Dockerfile.workerd` | Workerd-side image. Builds supervisors, compiles workerd configs, extracts `workerd` from npm, and ships compiled `dist/workerd-configs/*.bin` without `node_modules`. |
 | `Dockerfile.rust` | Unified Rust image for redis-proxy, scheduler, and workflows binaries; runtime command chooses the service. |
+| `VERSION` | Canonical WDL project release identity, validated by the release workflow and embedded into Control for `/whoami`. |
 | `envoy/envoy.yaml` | Local Compose private mesh proxy used by integration tests and local development. |
 | `gateway/config.capnp` | Gateway workerd config: public `:8080`, `RUNTIME_USER`, `RUNTIME_SYSTEM`, and `CONTROL` externals. |
 | `gateway/config-local.capnp` | Local gateway workerd config compiled for Docker Compose with Envoy-backed private service routes. |

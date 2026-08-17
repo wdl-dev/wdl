@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Reported the exact root `VERSION` release through `/whoami`, including WDL-only `.N` patch counters, and declared CLI `1.8.0` as both the minimum supported and CI-qualified management client without adding request-time version enforcement.
+
 ## wdl.20260817.1 - 2026-08-17
 
 - Updated the bundled workerd and Workers types pins to `1.20260817.1` and `5.20260817.1`, raising the maximum tenant compatibility date to `2026-08-24`.

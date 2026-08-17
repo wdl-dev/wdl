@@ -275,6 +275,7 @@ const controlWorker :Workerd.Worker = (
     (name = "runtime-ai-client-source", text = embed "ai-client.js"),
     (name = "do-runtime-alarm-shim-source", esModule = embed "../do-runtime/alarm-shim-source.js"),
     (name = "wdl-package-json-source", text = embed "../package.json"),
+    (name = "wdl-version-source", text = embed "../VERSION"),
     (name = "runtime-r2-utils",      esModule = embed "r2-utils.js"),
     # Pre-bundled via `npm run build:vendor`; workerd embed can't walk node_modules.
     (name = "croner",                esModule = embed "../shared/vendor/croner.js"),

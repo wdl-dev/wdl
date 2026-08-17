@@ -49,12 +49,33 @@ Namespace 选择顺序是 `--ns`，然后是 shell/base `.env` 的 `WDL_NS`，�
 CLI 可以展示：
 
 - `platformVersion`：control 返回的 WDL platform version。Canonical derivation 记录在 `control-auth.zh.md` 的 `/whoami` 段；CLI 应直接展示这个值，不应从 package metadata 自行重建。
-- `minCliVersion`：当前 platform build 支持的最低下游 CLI 版本。
+- `minCliVersion`：当前 platform build 完整文档化 management surface 所支持的最老下游 CLI 版本。
 - `urls.control`：请求实际到达的 control origin。
 - `urls.namespace`：tenant namespace origin，只在 caller 是 namespace token 且 platform 显式配置 `PLATFORM_DOMAIN` 时返回；Control 不校验该 hostname 是否公网可达。
 - `urls.assets`：配置的 public assets base URL，只在 control plane 有安全的绝对 `http`/`https` `ASSETS_CDN_BASE` 时返回；返回前会去掉 query 和 fragment。
 
-CLI 应把这些字段当作 diagnostics 和 user-facing guidance 的默认值，而不是替代用户显式配置。如果 `minCliVersion` 大于当前 CLI 版本，CLI 应在执行 mutating command 前 warning 或 fail。可选 URL hint 缺失时，应展示为 unavailable，不应自行猜测。
+当前 `main` 及其下一次 release 的维护中兼容声明为：
+
+| WDL source line | 最低支持 CLI | CI-qualified CLI |
+| --- | --- | --- |
+| 当前 `main` / 下一次 release | `1.8.0` | `1.8.0` |
+
+最低版本是对完整 CLI surface 的支持声明；CI-qualified 版本是 WDL CLI integration job 使用的精确已发布 package。两者都不是 request negotiation 或执行门禁：普通 CLI 命令不会预检 `/whoami`，Control 也不会按 CLI 版本拒绝请求。`whoami` 和 `doctor` 可以比较当前 CLI 与 `minCliVersion` 并报告兼容结果；每个请求仍由服务端执行 canonical validation。
+
+已发布 tags 保留以下资格记录。该表记录每个 release 的 integration CI 当时实际使用的精确 CLI package；历史行只是对应 release gate 的证据，不承诺这些组合今天仍受支持。
+
+| WDL release range | Release 时 CI-qualified CLI |
+| --- | --- |
+| `wdl.20260617.1` - `wdl.20260617.2` | `1.2.1` |
+| `wdl.20260701.1` | `1.3.1` |
+| `wdl.20260701.2` | `1.4.0` |
+| `wdl.20260717.1` - `wdl.20260718.1` | `1.4.1` |
+| `wdl.20260719.1` - `wdl.20260724.1` | `1.5.0` |
+| `wdl.20260727.1` | `1.6.0` |
+| `wdl.20260730.1` - `wdl.20260804.2` | `1.6.1` |
+| `wdl.20260809.1` - `wdl.20260817.1` | `1.7.1` |
+
+CLI 应把其余 discovery 字段当作 diagnostics 和 user-facing guidance 的默认值，而不是替代用户显式配置。可选 URL hint 缺失时，应展示为 unavailable，不应自行猜测。
 
 ## Deploy Pipeline
 

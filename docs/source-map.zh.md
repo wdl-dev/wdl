@@ -10,6 +10,7 @@
 | `docker-compose.images.yml` | 本地 stack override，拉取已发布的 `docker.io/getwdl/wdl-workerd` 和 `docker.io/getwdl/wdl-rust` images，而不是依赖本地构建的 image tags。 |
 | `Dockerfile.workerd` | workerd-side image。构建 supervisors，编译 workerd configs，从 npm package 提取 `workerd`，并携带编译后的 `dist/workerd-configs/*.bin`，不带 `node_modules`。 |
 | `Dockerfile.rust` | Rust 统一 image，包含 redis-proxy、scheduler 和 workflows binaries；container command 选择具体服务。 |
+| `VERSION` | Canonical WDL project release identity，由 release workflow 校验并嵌入 Control，供 `/whoami` 返回。 |
 | `envoy/envoy.yaml` | 本地 Compose private mesh proxy，供集成测试和本地开发使用。 |
 | `gateway/config.capnp` | Gateway workerd config：public `:8080`，`RUNTIME_USER`、`RUNTIME_SYSTEM` 和 `CONTROL` externals。 |
 | `gateway/config-local.capnp` | 为 Docker Compose 编译的本地 Gateway workerd config，使用 Envoy-backed private service routes。 |

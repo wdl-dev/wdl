@@ -14,7 +14,7 @@ const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 const controlLibUrl = moduleDataUrl(`
 export const NS_RE = /^[a-z0-9-]+$/;
 export function configuredPublicUrl() { return null; }
-export function platformVersionFromPackageJson() { return "wdl.test"; }
+export function platformVersionFromSource(source) { return source.trim(); }
 export function projectAccessPrincipal(principal) { return principal || null; }
 export function isAdminAcceptableNs(ns) { return typeof ns === "string" && !ns.includes("_"); }
 function withAction(route, action) { return action ? { ...route, action } : route; }
@@ -61,7 +61,7 @@ export function createHttpRequestScope() {
 }
 `);
 
-const packageJsonUrl = moduleDataUrl(`export default "{}";`);
+const versionUrl = moduleDataUrl(`export default "wdl.20990101.2\\n";`);
 const handlerUrl = moduleDataUrl(`
 export async function handle(args) {
   globalThis.__controlIndexState.handlerCalls.push(args);
@@ -74,7 +74,7 @@ const controlIndex = (await importRepositoryModule("control/index.js", importSpe
   "control-shared": controlSharedUrl,
   "shared-ns-pattern": sharedNsPatternUrl,
   "shared-request-scope": requestScopeUrl,
-  "wdl-package-json-source": packageJsonUrl,
+  "wdl-version-source": versionUrl,
   "control-handlers-reload": handlerUrl,
   "control-handlers-auth-tokens": handlerUrl,
   "control-handlers-ns-secrets": handlerUrl,
@@ -167,6 +167,8 @@ test("control whoami uses sanitized forwarded proto for public URL hints", async
 
   const body = await readJsonResponse(response, 200);
   assert.equal(body.ok, true);
+  assert.equal(body.platformVersion, "wdl.20990101.2");
+  assert.equal(body.minCliVersion, "1.8.0");
   assert.deepEqual(body.urls, {
     control: "https://control.example",
     namespace: "https://tenant-a.workers.example",

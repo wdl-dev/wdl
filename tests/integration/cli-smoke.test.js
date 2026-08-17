@@ -10,6 +10,7 @@ import {
   adminGetFresh,
   assertOk,
   gatewayFetch,
+  parseStdoutJson,
   responseJson,
   runWdlCli,
   uniqueNs,
@@ -125,6 +126,110 @@ test("wdl CLI carries restart session policy through promotion", async () => {
       "delete", "worker", "--ns", ns, "session-policy-cli", "--yes",
     ]);
     assertOk(deleted);
+  });
+});
+
+test("wdl CLI configures, deploys, and invokes an AI binding", async () => {
+  const ns = uniqueNs("wdl-ai");
+
+  await withTempDir("wdl-ai-cli-", async (project) => {
+    mkdirSync(path.join(project, "src"), { recursive: true });
+    const providerFile = path.join(project, "provider.openai.json");
+    writeFileSync(
+      path.join(project, "wrangler.toml"),
+      [
+        'name = "ai-cli-demo"',
+        'main = "src/index.js"',
+        'compatibility_date = "2026-08-11"',
+        "",
+        "[ai]",
+        'binding = "AI"',
+        "",
+      ].join("\n")
+    );
+    writeFileSync(
+      path.join(project, "src", "index.js"),
+      [
+        "export default {",
+        "  async fetch(_request, env) {",
+        '    const result = await env.AI.run("openai/primary", { input: "CLI integration" });',
+        "    return Response.json({",
+        "      model: result.model,",
+        "      status: result.status,",
+        "      text: result.output?.[0]?.content?.[0]?.text,",
+        "    });",
+        "  },",
+        "};",
+        "",
+      ].join("\n")
+    );
+    writeFileSync(
+      providerFile,
+      JSON.stringify({
+        kind: "openai",
+        models: {
+          primary: {
+            upstreamModel: "gpt-test",
+            protocol: "responses",
+            transports: ["http"],
+            inputModalities: ["text"],
+            outputModalities: ["text"],
+          },
+        },
+      }, null, 2)
+    );
+
+    const created = runWdlCli(
+      ["ai", "providers", "put", "openai", "--file", providerFile, "--ns", ns, "--json"],
+      { cwd: project }
+    );
+    assertOk(created);
+    assert.equal(
+      parseStdoutJson(created.stdout, "AI provider create").provider.credentialConfigured,
+      false
+    );
+
+    const models = runWdlCli(["ai", "models", "--ns", ns, "--json"]);
+    assertOk(models);
+    assert.deepEqual(
+      parseStdoutJson(models.stdout, "AI model list").models.map(
+        (/** @type {{ id: string }} */ model) => model.id
+      ),
+      ["openai/primary"]
+    );
+
+    const credential = runWdlCli(
+      ["ai", "credential", "put", "openai", "--ns", ns, "--json"],
+      { input: "fake-openai-key\n" }
+    );
+    assertOk(credential);
+
+    const provider = runWdlCli([
+      "ai", "providers", "get", "openai", "--ns", ns, "--json",
+    ]);
+    assertOk(provider);
+    assert.equal(
+      parseStdoutJson(provider.stdout, "AI provider read").provider.credentialConfigured,
+      true
+    );
+
+    const deploy = runWdlCli(["deploy", project, "--ns", ns]);
+    assertOk(deploy);
+    assert.match(deploy.stdout, new RegExp(`${RegExp.escape(ns)}/ai-cli-demo@v1 live`));
+
+    const routed = await gatewayFetch(ns, "/ai-cli-demo/");
+    assert.equal(routed.status, 200);
+    assert.deepEqual(await responseJson(routed), {
+      model: "gpt-test",
+      status: "completed",
+      text: "fake response",
+    });
+
+    const deleted = runWdlCli([
+      "ai", "providers", "delete", "openai", "--ns", ns, "--yes", "--json",
+    ]);
+    assertOk(deleted);
+    assert.equal(parseStdoutJson(deleted.stdout, "AI provider delete").deleted, true);
   });
 });
 

@@ -3,6 +3,11 @@ declare module "wdl-package-json-source" {
   export default source;
 }
 
+declare module "wdl-version-source" {
+  const source: string;
+  export default source;
+}
+
 declare module "runtime-d1-client-source" {
   const source: string;
   export default source;

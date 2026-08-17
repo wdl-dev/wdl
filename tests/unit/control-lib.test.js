@@ -35,7 +35,7 @@ const {
   parseControlRoute,
   configuredPublicUrl,
   parseWorkerdDependencyVersion,
-  platformVersionFromPackageJson,
+  platformVersionFromSource,
   BundleMetaError,
   parseBundleMeta,
   bundleAssetPrefix,
@@ -2271,25 +2271,18 @@ test("configuredPublicUrl returns a safe absolute base URL hint", () => {
   }
 });
 
-test("platformVersionFromPackageJson derives WDL version from bundled workerd dependency", () => {
-  assert.equal(
-    platformVersionFromPackageJson(JSON.stringify({ dependencies: { workerd: "^1.20260531.1" } })),
-    "wdl.20260531.1"
-  );
-  assert.equal(
-    platformVersionFromPackageJson(JSON.stringify({ dependencies: { workerd: "~1.20260601.2" } })),
-    "wdl.20260601.2"
-  );
-  assert.equal(platformVersionFromPackageJson("{"), "wdl.unknown");
-  assert.equal(platformVersionFromPackageJson(JSON.stringify({ dependencies: {} })), "wdl.unknown");
-  assert.equal(
-    platformVersionFromPackageJson(JSON.stringify({ dependencies: { workerd: "^2.20260531.1" } })),
-    "wdl.unknown"
-  );
-  assert.equal(
-    platformVersionFromPackageJson(JSON.stringify({ dependencies: { workerd: "1.20260531" } })),
-    "wdl.unknown"
-  );
+test("platformVersionFromSource preserves the exact WDL release counter", () => {
+  assert.equal(platformVersionFromSource("wdl.20260817.1\n"), "wdl.20260817.1");
+  assert.equal(platformVersionFromSource("  wdl.20260817.2  "), "wdl.20260817.2");
+  for (const source of [
+    "",
+    "1.20260817.1",
+    "wdl.20260817",
+    "wdl.20260817.1-dev",
+    '{"version":"wdl.20260817.1"}',
+  ]) {
+    assert.equal(platformVersionFromSource(source), "wdl.unknown", source);
+  }
 });
 
 test("parseWorkerdDependencyVersion owns the bundled dependency grammar", () => {

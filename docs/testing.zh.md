@@ -96,7 +96,7 @@ CLI 子集已经包含在 `npm run test:integration` 中；只在聚焦 CLI 路�
 CLI integration 默认使用 `PATH` 上的 `wdl` executable。本地运行应安装 `.github/workflows/ci.yml` 顶层 `WDL_CLI_PACKAGE` pin 住的已发布 CLI 版本：
 
 ```bash
-npm install -g @wdl-dev/cli@1.7.1
+npm install -g @wdl-dev/cli@1.8.0
 ```
 
 验证未发布 CLI 变更时，优先 link 或包装 checkout，让 `wdl` 出现在 `PATH` 上。`WDL_CLI_BIN` 只保留给少数需要绕过 `PATH` 解析的聚焦 run。

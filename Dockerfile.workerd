@@ -35,6 +35,7 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --workspaces=false
+COPY VERSION ./VERSION
 
 # Keep layout identical to the repo so relative `embed "../shared/*"` +
 # `embed "../control/*"` in the capnp files resolves without any rewrite.

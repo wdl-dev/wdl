@@ -8,7 +8,7 @@ import {
   NS_RE,
   parseControlRoute,
   configuredPublicUrl,
-  platformVersionFromPackageJson,
+  platformVersionFromSource,
   projectAccessPrincipal,
   isAdminAcceptableNs,
 } from "control-lib";
@@ -23,7 +23,7 @@ import {
   state,
 } from "control-shared";
 import { createHttpRequestScope } from "shared-request-scope";
-import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
+import WDL_VERSION_SOURCE from "wdl-version-source";
 import { handle as handleReload } from "control-handlers-reload";
 import { handle as handleAuthTokens } from "control-handlers-auth-tokens";
 import { handle as handleNsSecrets } from "control-handlers-ns-secrets";
@@ -93,8 +93,8 @@ const NS_SCOPED_KINDS = new Set([
   "workers",
 ]);
 
-const PLATFORM_VERSION = platformVersionFromPackageJson(PACKAGE_JSON_SOURCE);
-const MIN_CLI_VERSION = "0.11.0";
+const PLATFORM_VERSION = platformVersionFromSource(WDL_VERSION_SOURCE);
+const MIN_CLI_VERSION = "1.8.0";
 
 /**
  * @param {Request} request

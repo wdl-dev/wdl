@@ -80,7 +80,8 @@ CLI output may display:
 - `platformVersion`: the WDL platform version reported by control. The canonical
   derivation is documented in `control-auth.md` under `/whoami`; the CLI should display
   the value without trying to reconstruct it from package metadata.
-- `minCliVersion`: the minimum downstream CLI version supported by this platform build.
+- `minCliVersion`: the oldest downstream CLI version supported for the complete
+  documented management surface of this platform build.
 - `urls.control`: the control origin that the request actually reached.
 - `urls.namespace`: the tenant namespace origin, returned only for namespace tokens when
   the platform explicitly configures `PLATFORM_DOMAIN`; Control does not validate that
@@ -89,11 +90,37 @@ CLI output may display:
   plane has a safe absolute `http`/`https` `ASSETS_CDN_BASE`; query and fragment are
   stripped before returning the hint.
 
-The CLI must treat these fields as diagnostics and defaults for user-facing guidance,
-not as a replacement for explicit user configuration. If `minCliVersion` is greater than
-the running CLI version, the CLI should warn or fail before attempting mutating
-commands. Missing optional URL hints should be displayed as unavailable rather than
-guessed.
+The maintained compatibility declaration for current `main` and its next release is:
+
+| WDL source line | Minimum supported CLI | CI-qualified CLI |
+| --- | --- | --- |
+| Current `main` / next release | `1.8.0` | `1.8.0` |
+
+The minimum is a support declaration for the full CLI surface. The CI-qualified version
+is the exact published package used by WDL's CLI integration job. These values are not
+request negotiation or an execution gate: ordinary CLI commands do not preflight
+`/whoami`, and Control does not reject requests based on a CLI version. `whoami` and
+`doctor` may compare the running CLI with `minCliVersion` and report the compatibility
+result. The server remains the canonical validator for every request.
+
+Published tags retain the following qualification record. This table records the exact
+CLI package exercised by each release's integration CI; historical rows are evidence of
+that release gate, not a promise that the combination remains supported today.
+
+| WDL release range | CI-qualified CLI at release |
+| --- | --- |
+| `wdl.20260617.1` - `wdl.20260617.2` | `1.2.1` |
+| `wdl.20260701.1` | `1.3.1` |
+| `wdl.20260701.2` | `1.4.0` |
+| `wdl.20260717.1` - `wdl.20260718.1` | `1.4.1` |
+| `wdl.20260719.1` - `wdl.20260724.1` | `1.5.0` |
+| `wdl.20260727.1` | `1.6.0` |
+| `wdl.20260730.1` - `wdl.20260804.2` | `1.6.1` |
+| `wdl.20260809.1` - `wdl.20260817.1` | `1.7.1` |
+
+The CLI must treat the remaining discovery fields as diagnostics and defaults for
+user-facing guidance, not as a replacement for explicit user configuration. Missing
+optional URL hints should be displayed as unavailable rather than guessed.
 
 ## Deploy Pipeline
 

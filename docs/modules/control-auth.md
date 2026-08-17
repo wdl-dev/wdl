@@ -162,11 +162,12 @@ Control lifecycle operations are split so each critical transition has one autho
   credentials can only ask Auth to materialize one configured template.
 - `/whoami` is the only namespace-less non-ops action. It is allowed for any valid token
   because it reports only the current token's own principal, token id, request id, and
-  public diagnostics. `platformVersion` is the WDL version derived from the bundled
-  workerd date version in the `wdl.` namespace, for example `workerd` `1.20260531.1`
-  becomes `wdl.20260531.1`; it is not the project release tag, whose final counter can
-  advance for WDL-only patches on the same workerd date. The raw workerd version is
-  not returned. `minCliVersion` is the minimum supported downstream CLI version.
+  public diagnostics. `platformVersion` is the exact project release from the root
+  `VERSION` file, including the final counter that distinguishes WDL-only patches on
+  the same workerd date. The raw workerd version and image revision are not returned.
+  `minCliVersion` declares the oldest downstream CLI supported for the complete
+  documented management surface; it is diagnostic metadata, not Control-side request
+  enforcement.
   `urls.control` is the public origin that reached control. When ingress supplies a
   single `x-forwarded-proto` value of `http` or `https`, `/whoami` uses that protocol
   for `urls.control` and `urls.namespace`; otherwise it falls back to the request URL

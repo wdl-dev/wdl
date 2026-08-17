@@ -159,9 +159,9 @@ export function parseWorkerdDependencyVersion(source) {
 }
 
 /** @param {string} source */
-export function platformVersionFromPackageJson(source) {
-  const parsed = parseWorkerdDependencyVersion(source);
-  return parsed ? `wdl.${parsed.version.slice(2)}` : "wdl.unknown";
+export function platformVersionFromSource(source) {
+  const version = source.trim();
+  return /^wdl\.\d{8}\.\d+$/.test(version) ? version : "wdl.unknown";
 }
 
 // ─── Referrer index ────────────────────────────────────────────────
