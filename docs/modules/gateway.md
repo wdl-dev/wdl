@@ -182,16 +182,28 @@ whether a route changed.
   inactive worker: initial admission returns `503`, while an established session closes
   with `1012`.
   Torn or malformed state fails closed with `1011` for established sessions.
-- Normal upstream closure propagates without another lifecycle read. After abnormal
-  loss, an unchanged active version permits transparent reconnect to the same pinned
-  worker id when the sequence is unchanged or the current projection is `preserve`. A
-  changed active version, or a newer sequence in the current `restart` projection, closes
-  the public and backend peers with `1012 service restart`.
+- Normal and application-terminal upstream Close frames propagate without another
+  lifecycle read. Gateway treats only `1001`, synthetic `1006`, and `1011` as
+  reconnectable backend-loss signals; protocol/policy/resource closes and application
+  `3xxx`/`4xxx` closes reach the public peer instead of silently starting a new backend
+  session. After reconnectable loss, an unchanged active version permits transparent
+  reconnect to the same pinned worker id when the sequence is unchanged or the current
+  projection is `preserve`. A changed active version, or a newer sequence in the current
+  `restart` projection, closes the public and backend peers with `1012 service restart`.
   Lifecycle commands have a socket-closing two-second deadline. Transport failures and
   transient Redis reply codes (`BUSY`, `CLUSTERDOWN`, `LOADING`, `MASTERDOWN`,
   `READONLY`, and `TRYAGAIN`) retry within the configured reconnect schedule. Malformed
   persisted state, non-transient Redis reply errors, regressed sequence state, or
   exhausted retries close both peers with `1011` instead of reconnecting stale state.
+- An initial backend `101` can set the internal
+  `x-wdl-websocket-reconnect-policy: disabled` response header for a session whose
+  application state cannot be reconstructed. Gateway strips the header from the public
+  response and closes that public session with `1012 service restart` on backend loss
+  instead of issuing a replacement upgrade. AI Responses and Realtime upgrades set this
+  policy. Tenant code that terminates a separate `WebSocketPair` around an AI socket must
+  copy the AI upgrade response headers onto its returned `101`; internal policy metadata
+  does not cross that response boundary automatically. Ordinary Worker and Durable Object
+  WebSockets retain bounded transparent reconnect.
 - A `1012` close ends the application session; the client reconnects and repeats its
   application handshake. Client messages queued under an older backend reconnect epoch
   may be discarded without per-frame ack/nack when that epoch resets.
@@ -247,6 +259,8 @@ readiness.
 
 - Gateway can roll independently for route-cache or request-parsing changes that
   preserve forwarded headers.
+- Application-terminal close and backend-reconnect policy handling must roll before a
+  new backend feature such as AI relies on either contract.
 - Changes to runtime internal socket paths do not require gateway path filtering.
 - Route invalidation channel changes must stay aligned with control; style-contract
   tests protect the literal channel names.

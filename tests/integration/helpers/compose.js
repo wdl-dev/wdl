@@ -104,6 +104,11 @@ export function composeRecreate(service) {
   return composeUp(["--wait", service]);
 }
 
+/** @param {string} service */
+export function composeKill(service) {
+  return sh(["docker", "compose", "kill", "-s", "SIGKILL", service]);
+}
+
 /**
  * @template T
  * @param {string} service

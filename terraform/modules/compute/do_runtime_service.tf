@@ -126,7 +126,7 @@ module "do_runtime_service" {
   task_definition_arn    = aws_ecs_task_definition.do_runtime.arn
   desired_count          = var.do_runtime_desired_count
   enable_execute_command = true
-  deployment             = local.sequential_replacement_deployment
+  deployment             = local.start_before_stop_deployment
 
   availability_zone_rebalancing = "DISABLED"
 

@@ -6,7 +6,7 @@
 
 WDL 使用明确的逻辑切分：
 
-- **`DB 0`，控制面：**bundle、routes/patterns、auth、D1/DO owner state、cron config、queue-consumer config、lifecycle metadata，以及 workflow definition（`wf:defs:*`）。
+- **`DB 0`，控制面：**bundle、routes/patterns、auth、AI provider metadata/credential、D1/DO owner state、cron config、queue-consumer config、lifecycle metadata，以及 workflow definition（`wf:defs:*`）。
 - **`DB 1`，数据面：**KV hash bucket、queue stream、delayed queue、orphan stream 和 live log-tail stream。
 - **`DB 2`，workflows：**`wf:schema_version`、instance state、step record/summary、ready/due shard、event 和 event-type index、payload ref、retention index、restart target-version blocker、run lease。
 
@@ -45,6 +45,8 @@ auth:delegated-issue-lock:<issuerTokenId>:<templateId>
                                   String EX, delegated-token issuer/template 发放锁
 secrets:<ns>                    Hash, namespace-level WDL-ENC envelope
 secrets:<ns>:<worker>           Hash, worker-level WDL-ENC envelope
+ai:providers:<ns>               Hash, provider alias -> canonical provider JSON
+ai:provider-credentials:<ns>    Hash, provider alias -> WDL-ENC credential envelope
 ```
 
 `worker:<ns>:<name>:v:<int>` 的 key 使用 JavaScript safe-integer 范围内的正整数 version，而不是 `"v<int>"` tag。直接 seed Redis 的测试 fixture 必须使用 `shared/worker-contract.js#bundleKey`。
@@ -108,6 +110,7 @@ Routes、platform-domain exposure、crons、queue consumers、session policy mod
 - Queues 和 cron：[Queues 和 Cron](modules/queues-cron.zh.md)
 - Workflows：[Workflows](modules/workflows.zh.md)
 - Log tail：[Log Tail 和 Observability](modules/log-tail-observability.zh.md)
+- AI：[AI Binding](modules/ai.zh.md)
 - Runtime/KV/R2/ASSETS/service/platform bindings：[Runtime](modules/runtime.zh.md)
 - Control/auth/lifecycle/delete blockers：[Control 和 Auth](modules/control-auth.zh.md)
 
@@ -117,7 +120,7 @@ Routes、platform-domain exposure、crons、queue consumers、session policy mod
 - Index 通常是可修复 projection，不是 authority。新增 writer 前，模块文档必须说明哪个 key 是权威状态。
 - Lifecycle 和 delete blocker index 在模块文档声明为权威时就是权威；不要增加绕过这些 index 的 request-path fallback scan。
 - Queue main stream 不做 trim，因为 at-least-once delivery 是合同。DLQ、orphan、log-tail 这类诊断 stream 可以使用有界 approximate trim。
-- Secret hash value 在 steady state 下是 `WDL-ENC:` envelope。`/runtime/load` 没有 plaintext fallback。
+- Secret 和 AI credential hash value 在 steady state 下是 `WDL-ENC:` envelope。`/runtime/load` 和 authenticated `/ai/resolve` 都没有 plaintext fallback。
 - Workflows 拥有 DB 2 instance state。`wf:ready:cursor` 是内部 ready-shard 公平性 cursor。Control 只拥有 DB 0 的 `wf:defs:*`；其他 tier 不应直接写 DB 2。
 - `wf:pending-version:<ns>:<worker>:<version>` 是 Workflows-owned、30 秒的 restart blocker。Version-delete 会将它与 `wf:by-version` 一起检查；restart 成功的 DB 2 script 会在创建持久 version referrer 前原子复验初始 marker。ZSET key 使用随写入刷新的 60 秒 TTL，确保遗留 marker key 会被物理回收。
 - Workflows 还拥有 DB 2 中的 internal `wf:internal:do-alarm:*` jobs，用于 Durable Object alarm backend scheduling。do-runtime 通过 workflows HTTP API 写 alarm，而不是直接写这些 key。`wf:internal:do-alarm:ready:cursor` 是内部 ready-shard 公平性 cursor，不是租户状态。

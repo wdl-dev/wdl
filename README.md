@@ -12,7 +12,7 @@ WDL is a self-hosted multi-tenant Workers platform with multi-replica failover,
 built on stock Cloudflare workerd.
 It loads immutable Worker versions dynamically from Redis/Valkey through workerd's
 `workerLoader` API, then layers platform services around that runtime: control/auth,
-KV, R2, D1, Durable Objects, queues, cron, Workflows, ASSETS, service/platform
+KV, R2, D1, Durable Objects, queues, cron, Workflows, AI, ASSETS, service/platform
 bindings, live log tailing, Prometheus metrics, and deployment/lifecycle tooling.
 The project name began as "workerd dynamic loader"; WDL is the product name now that
 the platform extends well beyond dynamic loading.
@@ -23,8 +23,8 @@ the platform extends well beyond dynamic loading.
 - Immutable worker versions with explicit promote/rollback and hard-delete lifecycle
   APIs.
 - Wrangler-compatible deployment through the `wdl` CLI.
-- KV, R2, D1, Durable Objects, queues, cron triggers, Workflows, ASSETS, service
-  bindings, and platform bindings.
+- KV, R2, D1, Durable Objects, queues, cron triggers, Workflows, namespace-scoped AI,
+  ASSETS, service bindings, and platform bindings.
 - Secret-at-rest envelope encryption before values are written to Redis.
 - Live `wdl tail` over bounded Redis streams, structured logs, and Prometheus metrics.
 - Explicit failover semantics for D1/Durable Objects, plus multi-replica-safe dispatch

@@ -3,7 +3,7 @@
 ## Purpose
 
 Control is the static control-plane worker that owns deploy, promote, lifecycle, secret,
-route, D1, R2, workflow, log-tail, and auth-token APIs. Auth is a static JSRPC worker
+route, D1, R2, AI, workflow, log-tail, and auth-token APIs. Auth is a static JSRPC worker
 that verifies and issues scoped admin tokens.
 
 ## Current Implementation
@@ -67,6 +67,10 @@ Host, secret, data, and auth operations:
 | `PUT` / `DELETE` | `/ns/<ns>/worker/<name>/secrets/<KEY>` | Mutates one worker-level secret. PUT stores a `WDL-ENC:` envelope; active workers are bumped and promoted to force fresh cold-loads. |
 | `GET` | `/ns/<ns>/secrets` | Lists namespace-level secret keys only; there is no API that reads secret values back. |
 | `PUT` / `DELETE` | `/ns/<ns>/secrets/<KEY>` | Mutates one namespace-level secret. No version bump; changes take effect on the next natural cold-load. |
+| `GET` | `/ns/<ns>/ai/providers[/<name>]` | Lists provider metadata and credential-present state without returning credential values. |
+| `PUT` / `DELETE` | `/ns/<ns>/ai/providers/<name>` | Replaces canonical provider metadata with a new revision. Same-kind updates preserve the credential; kind changes and creation over credential-only residue clear it. Delete removes metadata and credential together. |
+| `PUT` | `/ns/<ns>/ai/providers/<name>/credential` | Encrypts a credential under an exact provider-revision CAS. |
+| `GET` | `/ns/<ns>/ai/models` | Lists bounded configured provider model metadata; provider reads report credential status separately. |
 | `GET` / `POST` / `DELETE` | `/ns/<ns>/d1/databases[/<databaseRef>]` | Lists, creates, or deletes D1 databases. Create flips provisional metadata ready after d1-runtime initialization; delete tombstones and best-effort releases owner lease. |
 | `POST` | `/ns/<ns>/d1/databases/<databaseRef>/query` | Operator SQL execute path used by `wdl d1 execute`. |
 | `GET` / `POST` | `/ns/<ns>/d1/databases/<databaseRef>/migrations[...]` | Migration list/status/apply. Apply is forward-only under an advisory Redis UX lock; owner serialization and SQLite transactions remain the correctness boundary. |
@@ -92,10 +96,11 @@ Control lifecycle operations are split so each critical transition has one autho
   writes bundle metadata/modules/assets, then enters the same promote path used by
   explicit promotion. Before allocation, deploy estimates final WorkerCode under
   workerd's 64 MiB limit, including runtime/do-runtime-injected wrapper/client modules
-  and workflow import rewrites. The watched commit path is the authoritative code-budget
-  and headroomed `workerLoader` env-budget check after version allocation and metadata
-  materialization, such as resolved D1 database ids and workflow keys, before writing
-  the version.
+  and workflow import rewrites. Materialized D1 ids, DO storage ids, Workflow keys, and
+  version identity live in host props rather than generated source, so they do not
+  require a second code estimate inside WATCH retries. The watched commit path performs
+  the authoritative headroomed `workerLoader` env-budget check after version allocation
+  and metadata materialization, before writing the version.
 - Promote is the only active-route flip. It WATCHes the delete lock, bundle metadata, D1
   refs, service-binding target refs, queue consumer keys, host declarations, and pattern
   keys needed for the candidate. The EXEC updates active routes, host reverse indexes,
@@ -124,6 +129,14 @@ Control lifecycle operations are split so each critical transition has one autho
   worker/version metadata they need to re-estimate before commit; if concurrent metadata
   changes keep invalidating that view, control returns
   `namespace_secret_mutation_contention`.
+- AI provider metadata and credentials are separate writes by design. Replacing
+  metadata allocates a new revision. A same-kind update preserves the credential
+  because provider kind owns the official destination and bearer-authentication
+  shape; changing kind or creating metadata over credential-only residue clears the
+  credential in the same watched transaction. Credential PUT must present the current
+  revision, preventing a delayed write from attaching to another provider
+  incarnation. Provider records are canonical JSON, credentials use the shared
+  `WDL-ENC:` envelope, and malformed persisted state fails closed.
 - Version delete and whole-worker delete are fail-closed. They collect blockers from
   active routes, retained versions, service refs, D1 refs, workflow lifecycle checks,
   queue/cron projections, and delete locks before committing Redis lifecycle deletion.
@@ -215,6 +228,8 @@ Key families:
 | `worker-version-referrers:<ns>:<worker>:<version>` | Set | Control | Rebuildable service-binding referrer index. | Blocks version delete while callers reference the version. |
 | `worker-delete-lock:<ns>:<worker>` | String EX | Control | Per-worker delete critical-section lock; value is `whole:<token>` or `version:<token>`. | Expires automatically; execute delete releases by completion. Only `whole` fences new DO ownership. |
 | `secrets:<ns>`, `secrets:<ns>:<worker>` | Hash | Control | Namespace and worker secret stores; values are `WDL-ENC:` envelopes. Control encrypts writes; redis-proxy decrypts only during `/runtime/load`. | Deleted by secret lifecycle or worker delete. |
+| `ai:providers:<ns>` | Hash | Control | Canonical provider metadata keyed by provider alias. | Survives zero Workers; explicit provider delete removes its field. |
+| `ai:provider-credentials:<ns>` | Hash | Control | `WDL-ENC:` provider credentials keyed by provider alias. | redis-proxy decrypts only for authenticated AI resolve; explicit provider delete removes its field. |
 | `queue:__system__:worker-delete-s3-cleanup:s` | DB 1 Stream | Control/s3-cleanup worker | Best-effort post-commit object cleanup queue; logical queue name is `worker-delete-s3-cleanup`. | Enqueued only after Redis delete commit succeeds; enqueue failure returns `cleanup_queue_failed` warning. |
 | `auth:token:<tokenId>` | Hash | Auth | Authoritative token record. | Revoke/expiry delete active record and write tombstone fields. |
 | `auth:hash:<sha256>` | String | Auth | Plaintext-token hash -> token id lookup. | Deleted on revoke/expiry. |
@@ -323,7 +338,7 @@ Auth-specific contract:
 - Deploy returns `worker_code_invalid` when final WorkerCode would collide with injected
   WDL runtime/do-runtime reserved module names or lacks required bundle metadata, and
   `worker_code_too_large` when final WorkerCode, including runtime/do-runtime-injected
-  modules and generated workflow keys, exceeds workerd's 64 MiB dynamic code limit.
+  modules and workflow import rewrites, exceeds workerd's 64 MiB dynamic code limit.
   Deploy and secret mutations return `worker_env_too_large` when the estimated
   `workerLoader` env exceeds WDL's headroomed 1 MiB budget.
   `worker_env_too_large` details include `namespace`, optional `worker`, `env_bytes`,
@@ -336,6 +351,8 @@ Auth-specific contract:
 - Control never calls gateway directly. It writes Redis and publishes invalidation
   messages.
 - Control encrypts secret PUT values before entering Redis mutation loops.
+- Control similarly encrypts AI credentials before the watched revision-CAS loop and
+  never returns plaintext from provider read/list APIs.
   Encryption/provider failure returns a control error and does not write a plaintext
   fallback.
 - Worker delete commits Redis lifecycle state first; async S3 cleanup enqueue is
@@ -392,6 +409,8 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 - `tests/unit/control-lifecycle-indexes.test.js`
 - `tests/unit/control-shared-stub.test.js`
 - `tests/unit/control-handlers-workflows.test.js`
+- `tests/unit/control-ai-handler.test.js`
+- `tests/unit/ai-contract.test.js`
 - `tests/unit/control-d1-migrations.test.js`
 - `tests/unit/redis-lock.test.js`
 - `tests/unit/auth-lib.test.js`
@@ -399,6 +418,7 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 - `tests/integration/auth-worker.test.js`
 - `tests/integration/auth-platform.test.js`
 - `tests/integration/system-pool-auth.test.js`
+- `tests/integration/ai-binding.test.js`
 - `tests/unit/style-contracts.test.js`
 
 ## Known Constraints And Non-Goals

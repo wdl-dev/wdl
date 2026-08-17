@@ -145,7 +145,12 @@ function zRangeAndExistenceSnapshots(
 
 /**
  * @param {FakeRedisState} [state]
- * @param {{ encodeGet?: boolean, nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
+ * @param {{
+ *   encodeGet?: boolean,
+ *   nowMs?: () => number,
+ *   onExecFailure?: (ops: unknown[][], remainingFailures: number) => void,
+ *   eval?: (script: string, keys: string[], args: unknown[], state: FakeRedisState) => unknown | Promise<unknown>,
+ * }} [options]
  * @returns {ReturnType<typeof createFakeRedisClient> & FakeRedisState & { state: FakeRedisState }}
  */
 export function createFakeRedis(state = createFakeRedisState(), options = {}) {
@@ -171,10 +176,21 @@ export function createFakeRedis(state = createFakeRedisState(), options = {}) {
 
 /**
  * @param {FakeRedisState} state
- * @param {{ encodeGet?: boolean, nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
+ * @param {{
+ *   encodeGet?: boolean,
+ *   nowMs?: () => number,
+ *   onExecFailure?: (ops: unknown[][], remainingFailures: number) => void,
+ *   eval?: (script: string, keys: string[], args: unknown[], state: FakeRedisState) => unknown | Promise<unknown>,
+ * }} [options]
  */
 export function createFakeRedisClient(state, options = {}) {
   return {
+    /** @param {string} script @param {string[]} [keys] @param {unknown[]} [args] */
+    async eval(script, keys = [], args = []) {
+      state.commands.push(["eval", script, [...keys], [...args]]);
+      if (!options.eval) throw new Error("Fake Redis EVAL is not configured");
+      return await options.eval(script, [...keys], [...args], state);
+    },
     /** @param {string} key */
     async get(key) {
       expireIfNeeded(state, key, options);
@@ -294,6 +310,27 @@ export function createFakeRedisClient(state, options = {}) {
         expireIfNeeded(state, key, options);
         return { ...(state.hashes.get(key) || {}) };
       });
+    },
+    /**
+     * @param {string[]} hashKeys
+     * @param {string[]} keyListHashes
+     */
+    async hGetAllManyAndHKeysMany(hashKeys, keyListHashes) {
+      state.commands.push([
+        "hGetAllManyAndHKeysMany",
+        [...hashKeys],
+        [...keyListHashes],
+      ]);
+      return {
+        hashes: hashKeys.map((key) => {
+          expireIfNeeded(state, key, options);
+          return { ...(state.hashes.get(key) || {}) };
+        }),
+        keyLists: keyListHashes.map((key) => {
+          expireIfNeeded(state, key, options);
+          return Object.keys(state.hashes.get(key) || {});
+        }),
+      };
     },
     /** @param {Array<[string, string]>} pairs */
     async hStrLenMany(pairs) {
@@ -520,7 +557,11 @@ export function createFakeRedisClient(state, options = {}) {
 
 /**
  * @param {FakeRedisState} state
- * @param {{ nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
+ * @param {{
+ *   nowMs?: () => number,
+ *   onExecFailure?: (ops: unknown[][], remainingFailures: number) => void,
+ *   eval?: (script: string, keys: string[], args: unknown[], state: FakeRedisState) => unknown | Promise<unknown>,
+ * }} [options]
  */
 export function createFakeRedisSession(state, options = {}) {
   /** @type {Map<string, { fingerprint: string, revision: number }>} */
@@ -564,6 +605,12 @@ export function createFakeRedisSession(state, options = {}) {
     captureWatch(keys);
   }
   return {
+    /** @param {string} script @param {string[]} [keys] @param {unknown[]} [args] */
+    async eval(script, keys = [], args = []) {
+      state.commands.push(["eval", script, [...keys], [...args]]);
+      if (!options.eval) throw new Error("Fake Redis EVAL is not configured");
+      return await options.eval(script, [...keys], [...args], state);
+    },
     /** @param {string[]} keys */
     async watch(...keys) {
       captureWatch(keys);

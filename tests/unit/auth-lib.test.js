@@ -252,6 +252,9 @@ const ACCESS_CASES = [
   { kind: "ops-observer", action: "workflow.list", ns: "tenant-foo", expect: EXPECT_OK },
   { kind: "ops-observer", action: "workflow.read", ns: "tenant-foo", expect: E("action_not_in_scope") },
   { kind: "ops-observer", action: "r2.bucket.list", ns: "tenant-foo", expect: EXPECT_OK },
+  { kind: "ops-observer", action: "ai.provider.read", ns: "tenant-foo", expect: EXPECT_OK },
+  { kind: "ops-observer", action: "ai.model.list", ns: "tenant-foo", expect: EXPECT_OK },
+  { kind: "ops-observer", action: "ai.provider.write", ns: "tenant-foo", expect: E("action_not_in_scope") },
   { kind: "ops-observer", action: "r2.object.head", ns: "tenant-foo", expect: E("action_not_in_scope") },
   { kind: "ops-observer", action: "r2.object.get", ns: "tenant-foo", expect: E("action_not_in_scope") },
   // KEY regression: ops-observer must NOT short-circuit red line 1 — falls
@@ -270,6 +273,9 @@ const ACCESS_CASES = [
   { kind: "platform", action: "worker.logs.tail", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
   { kind: "platform", action: "worker.deploy", ns: "tenant-foo", principalNs: "__platform__", expect: E("ns_not_in_scope") },
   { kind: "platform", action: "secret.write", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
+  { kind: "platform", action: "ai.provider.read", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
+  { kind: "platform", action: "ai.provider.write", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
+  { kind: "platform", action: "ai.model.list", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
   // host.write is deliberately not in ROLES.platform → action_not_in_scope
   { kind: "platform", action: "host.write", ns: "__platform__", principalNs: "__platform__", expect: E("action_not_in_scope") },
   { kind: "platform", action: "auth.token.issue", ns: undefined, principalNs: "__platform__", expect: E("auth_lifecycle_requires_ops") },
@@ -282,6 +288,9 @@ const ACCESS_CASES = [
   { kind: "platform-observer", action: "workflow.list", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
   { kind: "platform-observer", action: "workflow.read", ns: "__platform__", principalNs: "__platform__", expect: E("action_not_in_scope") },
   { kind: "platform-observer", action: "r2.object.list", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
+  { kind: "platform-observer", action: "ai.provider.read", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
+  { kind: "platform-observer", action: "ai.model.list", ns: "__platform__", principalNs: "__platform__", expect: EXPECT_OK },
+  { kind: "platform-observer", action: "ai.provider.write", ns: "__platform__", principalNs: "__platform__", expect: E("action_not_in_scope") },
   { kind: "platform-observer", action: "r2.object.head", ns: "__platform__", principalNs: "__platform__", expect: E("action_not_in_scope") },
   { kind: "platform-observer", action: "r2.object.get", ns: "__platform__", principalNs: "__platform__", expect: E("action_not_in_scope") },
   { kind: "platform-observer", action: "secret.write", ns: "__platform__", principalNs: "__platform__", expect: E("action_not_in_scope") },
@@ -294,6 +303,9 @@ const ACCESS_CASES = [
   { kind: "ns", action: "r2.object.head", ns: "tenant-foo", principalNs: "tenant-foo", expect: EXPECT_OK },
   { kind: "ns", action: "r2.object.get", ns: "tenant-foo", principalNs: "tenant-foo", expect: EXPECT_OK },
   { kind: "ns", action: "r2.object.delete", ns: "tenant-foo", principalNs: "tenant-foo", expect: EXPECT_OK },
+  { kind: "ns", action: "ai.provider.read", ns: "tenant-foo", principalNs: "tenant-foo", expect: EXPECT_OK },
+  { kind: "ns", action: "ai.provider.write", ns: "tenant-foo", principalNs: "tenant-foo", expect: EXPECT_OK },
+  { kind: "ns", action: "ai.model.list", ns: "tenant-foo", principalNs: "tenant-foo", expect: EXPECT_OK },
   { kind: "ns", action: "host.read", ns: "tenant-foo", principalNs: "tenant-foo", expect: EXPECT_OK },
   { kind: "ns", action: "host.write", ns: "tenant-foo", principalNs: "tenant-foo", expect: E("action_not_in_scope") },
   { kind: "ns", action: "worker.deploy", ns: "tenant-bar", principalNs: "tenant-foo", expect: E("ns_not_in_scope") },
@@ -313,6 +325,9 @@ const ACCESS_CASES = [
   { kind: "token-issuer", action: "auth.delegated_token.issue", ns: undefined, expect: EXPECT_OK },
   { kind: "token-issuer", action: "auth.token.issue", ns: undefined, expect: E("auth_lifecycle_requires_ops") },
   { kind: "token-issuer", action: "worker.deploy", ns: "tenant-foo", expect: E("action_not_in_scope") },
+  { kind: "token-issuer", action: "ai.provider.read", ns: "tenant-foo", expect: E("action_not_in_scope") },
+  { kind: "token-issuer", action: "ai.provider.write", ns: "tenant-foo", expect: E("action_not_in_scope") },
+  { kind: "token-issuer", action: "ai.model.list", ns: "tenant-foo", expect: E("action_not_in_scope") },
 
   // unknown role: red line 0 must FIRE FIRST regardless of scenario
   { kind: "bogus", action: "worker.deploy", ns: "tenant-foo", expect: E("unknown_role") },
@@ -841,6 +856,7 @@ test("actionCategory: buckets cover all KNOWN_ACTIONS prefixes", () => {
   assert.equal(actionCategory("secret.read"), "secret");
   assert.equal(actionCategory("d1.execute"), "d1");
   assert.equal(actionCategory("r2.object.get"), "r2");
+  assert.equal(actionCategory("ai.provider.write"), "ai");
   assert.equal(actionCategory("host.write"), "host");
   assert.equal(actionCategory("auth.token.issue"), "auth_token");
   assert.equal(actionCategory("system.reload"), "system");

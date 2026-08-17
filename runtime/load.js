@@ -41,10 +41,9 @@ const utf8Decoder = new TextDecoder();
  *   d1Bindings: string[],
  *   r2Bindings: string[],
  *   doBindings: string[],
+ *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
  *   hostWrappedClassNames: string[],
- *   needsDoBackend: boolean,
- *   needsWorkflowsBackend: boolean,
  *   needsHostBindingWrapper: boolean,
  * }} RuntimeMetaPlan
  * @typedef {{
@@ -52,7 +51,6 @@ const utf8Decoder = new TextDecoder();
  *   REDIS_PROXY_URL?: unknown,
  *   ASSETS_CDN_BASE?: string | null,
  *   DO_BACKEND?: unknown,
- *   DO_OWNER_NETWORK?: unknown,
  *   WORKFLOWS_BACKEND?: unknown,
  *   PUBLIC_NETWORK?: unknown,
  *   TAIL_WORKER?: unknown,
@@ -63,29 +61,8 @@ const utf8Decoder = new TextDecoder();
  *   observe(name: string, labels: Record<string, string | number | boolean> | null | undefined, value: number): void,
  * }} RuntimeLoaderMetrics
  * @typedef {(options: { props: Record<string, unknown> }) => unknown} RuntimeEntrypointFactory
- * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, DurableObjectNamespace: RuntimeEntrypointFactory, InternalAuthBackend: RuntimeEntrypointFactory } }} RuntimeContext
+ * @typedef {{ exports: Record<string, RuntimeEntrypointFactory> & { KV: RuntimeEntrypointFactory, Assets: RuntimeEntrypointFactory, QueueProducer: RuntimeEntrypointFactory, D1Database: RuntimeEntrypointFactory, R2Bucket: RuntimeEntrypointFactory, ServiceBinding: RuntimeEntrypointFactory, AiBinding: RuntimeEntrypointFactory, DurableObjectNamespace: RuntimeEntrypointFactory, WorkflowBinding: RuntimeEntrypointFactory } }} RuntimeContext
  */
-
-/**
- * Keep the internal auth token in the host loader realm. Generated tenant
- * facades receive a cloneable WorkerEntrypoint stub, not a plain object with a
- * function property, so workerd can pass it through workerLoader env cloning.
- *
- * @param {RuntimeContext} ctx
- * @param {RuntimeLoaderEnv} env
- * @param {"DO_BACKEND" | "DO_OWNER_NETWORK" | "WORKFLOWS_BACKEND"} binding
- * @returns {unknown}
- */
-export function internalAuthBackend(ctx, env, binding) {
-  const backend = env[binding];
-  if (!backend || typeof /** @type {{ fetch?: unknown }} */ (backend).fetch !== "function") {
-    throw new Error(`${binding} service binding is not configured`);
-  }
-  if (typeof ctx.exports.InternalAuthBackend !== "function") {
-    throw new Error("InternalAuthBackend runtime binding adapter is not configured");
-  }
-  return ctx.exports.InternalAuthBackend({ props: { binding } });
-}
 
 /** @param {unknown} contentType */
 export function runtimeLoadContentTypeMatches(contentType) {
@@ -165,7 +142,7 @@ export function decodeRuntimeLoadPayload(buffer) {
 /**
  * @param {WorkerCodeShape} workerCode
  * @param {RuntimeBundleMeta} meta
- * @param {{ plan?: RuntimeMetaPlan, workerIdentity?: { ns: string, worker: string, version: string } | null }} [options]
+ * @param {{ plan?: RuntimeMetaPlan }} [options]
  */
 export function wrapWorkerCodeForHostBindings(
   workerCode,
@@ -177,7 +154,7 @@ export function wrapWorkerCodeForHostBindings(
     workerCode,
     meta,
     RUNTIME_INJECTION_SOURCES,
-    { plan, workerIdentity: options.workerIdentity || null }
+    { plan }
   );
 }
 
@@ -295,45 +272,12 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
 
     const envStartedAt = Date.now();
     const runtimeCtx = /** @type {RuntimeContext} */ (ctx);
-    const doBackend = metaPlan.needsDoBackend ? internalAuthBackend(runtimeCtx, env, "DO_BACKEND") : null;
-    const doOwnerNetwork = metaPlan.needsDoBackend
-      ? internalAuthBackend(runtimeCtx, env, "DO_OWNER_NETWORK")
-      : null;
-    if (metaPlan.needsDoBackend && typeof runtimeCtx.exports.DurableObjectNamespace !== "function") {
-      throw new Error("DurableObjectNamespace runtime binding adapter is not configured");
-    }
-    const workflowsBackend = metaPlan.needsWorkflowsBackend
-      ? internalAuthBackend(runtimeCtx, env, "WORKFLOWS_BACKEND")
-      : null;
     const workerEnv = buildWorkerEnv(
       meta, nsSecrets, workerSecrets, ns, worker, version,
-      env.ASSETS_CDN_BASE, runtimeCtx, doBackend,
+      env.ASSETS_CDN_BASE, runtimeCtx,
       {
-        doOwnerNetwork,
-        workflowsBackend,
         bindingEntries: metaPlan.bindingEntries,
         workflows: metaPlan.workflows,
-        doBindingFactory({ name, spec, ns: bindingNs, worker: bindingWorker, version: bindingVersion }) {
-          const hostProxy = runtimeCtx.exports.DurableObjectNamespace({
-            props: {
-              ns: bindingNs,
-              worker: bindingWorker,
-              version: bindingVersion,
-              doStorageId: spec.doStorageId,
-              binding: name,
-              className: spec.className,
-            },
-          });
-          return {
-            ns: bindingNs,
-            worker: bindingWorker,
-            version: bindingVersion,
-            doStorageId: spec.doStorageId,
-            binding: name,
-            className: spec.className,
-            hostProxy,
-          };
-        },
       }
     );
     maybeMetric((m) => m.observe("bundle_load_stage_duration_ms", {
@@ -348,10 +292,7 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
       globalOutbound: env.PUBLIC_NETWORK,
       ...(env.TAIL_WORKER ? { tails: [env.TAIL_WORKER] } : {}),
     };
-    wrapWorkerCodeForHostBindings(workerCode, meta, {
-      plan: metaPlan,
-      workerIdentity: { ns, worker, version },
-    });
+    wrapWorkerCodeForHostBindings(workerCode, meta, { plan: metaPlan });
     maybeMetric((m) => m.observe("bundle_load_duration_ms", { service: serviceName },
       Date.now() - loadStartedAt));
     return workerCode;

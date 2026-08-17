@@ -10,6 +10,7 @@
 |---|---|---|
 | Gateway routing | `gateway.md`, `gateway.zh.md` | `gateway/`、gateway 集成测试 |
 | Runtime loader 和 bindings | `runtime.md`, `runtime.zh.md` | `runtime/`、`shared/`、runtime 单元/集成测试 |
+| AI binding | `ai.md`, `ai.zh.md` | `runtime/bindings/ai.js`、`runtime/ai-client.js`、`control/handlers/ai.js`、`rust/redis-proxy/src/ai.rs`、AI 测试 |
 | CLI 和 Wrangler 输入 | `cli.md`、`cli.zh.md` | 下游 standalone CLI、CLI integration tests、README Quick Start / Deploy A Worker |
 | Control 和 auth | `control-auth.md`, `control-auth.zh.md` | `control/`、`auth/`、`shared/auth-*` |
 | Durable Objects | `durable-objects.md`, `durable-objects.zh.md` | `do-runtime/`、`runtime/do-client.js`、DO 测试 |

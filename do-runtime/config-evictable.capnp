@@ -15,6 +15,10 @@ const config :Workerd.Config = (
       allow = ["public"],
       tlsOptions = (trustBrowserCas = true),
     )),
+    (name = "ai-public-network", network = (
+      allow = ["public"],
+      tlsOptions = (trustBrowserCas = true),
+    )),
   ],
 
   sockets = [

@@ -44,9 +44,9 @@ Scheduler owns runtime delivery:
   the projection unusable and follows absent-consumer handling, so queued backlog may
   move to the orphan stream.
 - Scheduler defaults to one replica in deployment, and current dispatch paths are
-  multi-replica safe. Extra replicas improve runtime concurrency but do not imply
-  zero-gap deployment: production rollout may still use stop-before-start semantics and
-  briefly pause scheduling.
+  multi-replica safe. Extra replicas improve runtime concurrency; Terraform also uses
+  this overlap safety to start a healthy Fargate replacement before draining the old
+  scheduler task.
 
 ## Interfaces
 

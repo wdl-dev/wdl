@@ -826,18 +826,16 @@ async function uploadDeployAssetsBeforeCommit({
  *   warnings: DeployWarning[],
  *   log: ControlLogger,
  *   controlEnv: Record<string, string | undefined>,
- *   userCodeBytes: number,
  * }} args
  * @returns {Promise<{ response: Response, commitDurationMs?: never } | { response?: never, commitDurationMs: number }>}
  */
 async function commitPreparedDeploy({
   redis, ns, name, version, prepared, outgoingRefs, d1Refs, uploadedPrefix, requestId, warnings, log, controlEnv,
-  userCodeBytes,
 }) {
   const commitStartedAt = Date.now();
   try {
     await commitWithWatch({
-      redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv, userCodeBytes,
+      redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv,
     });
   } catch (err) {
     if (uploadedPrefix) {
@@ -859,7 +857,6 @@ async function commitPreparedDeploy({
       return { response: controlAbortResponse(err, warningDetails) };
     }
     if (err instanceof WorkerEnvBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
-    if (err instanceof WorkerCodeBudgetError) return { response: codedErrorResponse(err, err.code, warningDetails) };
     if (err instanceof SecretEnvelopeError) {
       return {
         response: secretEnvelopeErrorResponse({
@@ -930,14 +927,13 @@ export async function handle({ request, env, ns, name, requestId }) {
   } = candidate.committed;
   const controlEnv = stringEnv(env);
 
-  let userCodeBytes;
   try {
-    ({ userCodeBytes } = assertWorkerLoaderCodeBudget({
+    assertWorkerLoaderCodeBudget({
       ns,
       worker: name,
       meta: prepared.meta,
       normalized: prepared.normalized,
-    }));
+    });
   } catch (err) {
     if (err instanceof WorkerCodeBudgetError) return codedErrorResponse(err, err.code, warningDetails);
     throw err;
@@ -976,7 +972,6 @@ export async function handle({ request, env, ns, name, requestId }) {
     warnings,
     log,
     controlEnv,
-    userCodeBytes,
   });
   if (commitResult.response) return commitResult.response;
 
@@ -1040,10 +1035,10 @@ async function scheduleDeployAbortCleanup({
 }
 
 /**
- * @param {{ redis: RedisClient, ns: string, name: string, version: string, prepared: PreparedBundle, outgoingRefs: OutgoingRef[], d1Refs: DeployD1Ref[], controlEnv: Record<string, string | undefined>, userCodeBytes?: number }} args
+ * @param {{ redis: RedisClient, ns: string, name: string, version: string, prepared: PreparedBundle, outgoingRefs: OutgoingRef[], d1Refs: DeployD1Ref[], controlEnv: Record<string, string | undefined> }} args
  */
 export async function commitWithWatch({
-  redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv, userCodeBytes,
+  redis, ns, name, version, prepared, outgoingRefs, d1Refs, controlEnv,
 }) {
   const vNum = parseVersion(version);
   if (vNum == null) throw new Error(`commitWithWatch: bad version ${version}`);
@@ -1071,16 +1066,6 @@ export async function commitWithWatch({
       name,
       prepared,
       resolvedD1Refs,
-    });
-    // Keep this commit-time code-budget check. Workflow keys are materialized
-    // above and then stringified into the generated host wrapper source.
-    assertWorkerLoaderCodeBudget({
-      ns,
-      worker: name,
-      version,
-      meta: committedMeta,
-      normalized: prepared.normalized,
-      userCodeBytes,
     });
     await validateCommittedEnvBudget({
       redis: iso,

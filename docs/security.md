@@ -63,9 +63,12 @@ WDL uses stock workerd and does not patch it. Runtime isolation therefore starts
 workerd isolate boundaries and continues with WDL-specific wrapper and network rules:
 
 - Tenant bundles are loaded as immutable worker versions through `workerLoader`.
-- Runtime wrapper generation constructs the tenant-visible `env`; hidden platform
-  Fetcher bindings for D1, DO, workflows, and owner-network paths stay inside runtime
-  and are deleted before tenant code observes `env`.
+- Runtime wrapper generation constructs the tenant-visible `env`. Generic authenticated
+  backend Fetchers stay inside runtime and never enter loaded-worker env; module
+  evaluation may observe only declaration-scoped host adapters whose immutable props
+  limit them to the corresponding declared binding. The DO host adapter owns direct
+  owner forwarding through runtime's internal network; the AI host adapter exposes only
+  its binding-scoped `fetch()` surface before wrapper invocation.
 - user-runtime loaded workers receive public-only outbound. Tenant `fetch()` and
   `cloudflare:sockets` must not reach platform-private addresses.
 - system-runtime `__system__` workers intentionally have private+public outbound because
@@ -142,6 +145,14 @@ serving `/runtime/load`. There is no steady-state plaintext fallback on the runt
 cold-load path, so a missing or wrong secret-envelope provider key fails closed for
 workers that need secrets.
 
+AI credential PUT follows the same envelope owner but a different read path. A write
+commits only against the exact current provider revision. The ciphertext AAD binds the
+namespace credential hash key, provider field, and envelope version; it does not bind
+the provider revision, so same-kind metadata updates preserve the existing ciphertext.
+Authenticated redis-proxy `/ai/resolve` atomically reads metadata plus ciphertext and
+decrypts only for the local host binding. Provider list/get and model-list responses
+never contain plaintext.
+
 ## Binding And State Security
 
 Bindings are the main tenant capability surface:
@@ -153,6 +164,10 @@ Bindings are the main tenant capability surface:
   tenant-provided identity fields.
 - R2 uses platform S3-compatible credentials in runtime; tenant code receives an R2
   binding, not raw credentials.
+- AI exposes a generated facade while the credential remains host-only. redis-proxy
+  generates one of three exact official destinations; runtime revalidates it, discards
+  tenant authorization/endpoint headers, rejects redirects, and sends provider traffic
+  only through the public-only `AI_NETWORK` service.
 - ASSETS only exposes `env.ASSETS.url(path)` for tokenized CDN URLs; runtime does not
   expose S3 credentials or bytes for assets.
 - Service and platform bindings are resolved from control metadata and ACLs;
@@ -226,6 +241,9 @@ propagation.
   token and role boundaries.
 - `tests/unit/runtime-load.test.js`, `tests/unit/runtime-binding-surface.test.js`,
   `tests/integration/service-bindings.test.js`: wrapper and binding exposure.
+- `tests/unit/runtime-ai-binding.test.js`, `tests/unit/control-ai-handler.test.js`, and
+  `tests/integration/ai-binding.test.js`: credential non-exposure, exact destination,
+  public-only egress plumbing, bounded lifecycle, and DO teardown behavior.
 - `tests/unit/gateway-dispatch.test.js`, `tests/integration/gateway.test.js`,
   `tests/integration/routing-gateway.test.js`: route and reserved namespace behavior.
 - `tests/integration/d1-*.test.js`, `tests/integration/durable-objects*.test.js`, and

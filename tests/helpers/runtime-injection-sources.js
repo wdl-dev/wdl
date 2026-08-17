@@ -20,6 +20,7 @@ const REAL_RUNTIME_INJECTION_SOURCE_PATHS = Object.freeze({
   ownerHintCacheSource: "runtime/_wdl-owner-hint-cache.js",
   requestIdSource: "runtime/_wdl-request-id.js",
   workflowsClientSource: "runtime/workflows-client.js",
+  aiClientSource: "runtime/ai-client.js",
 });
 
 const RUNTIME_INJECTION_SOURCE_SPECIFIERS = Object.freeze({
@@ -37,6 +38,7 @@ const RUNTIME_INJECTION_SOURCE_SPECIFIERS = Object.freeze({
   ownerHintCacheSource: "runtime-owner-hint-cache-source",
   requestIdSource: "runtime-request-id-source",
   workflowsClientSource: "runtime-workflows-client-source",
+  aiClientSource: "runtime-ai-client-source",
 });
 
 export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
@@ -67,7 +69,9 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
   requestIdSource:
     "export function requestIdFromOptions() { return null; } export function sanitizeRequestId() { return null; }",
   workflowsClientSource:
-    "export class Workflow { constructor(metadata) { this.metadata = metadata; } }",
+    "export class Workflow { constructor(backend) { this.backend = backend; } create() {} }",
+  aiClientSource:
+    "export class Ai { constructor(fetcher) { this.fetcher = fetcher; } }",
 });
 
 /** @param {string} source */

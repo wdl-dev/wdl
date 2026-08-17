@@ -61,10 +61,7 @@ module "scheduler_service" {
   desired_count          = var.scheduler_desired_count
   enable_execute_command = true
 
-  # Stop-before-start rollout. Multi-replica safety covers concurrent runtime
-  # dispatch, not a zero-gap scheduler deploy; brief skips still follow CF
-  # "skip missed on outage" semantics.
-  deployment = local.stop_before_start_deployment
+  deployment = local.start_before_stop_deployment
 
   availability_zone_rebalancing = "DISABLED"
 

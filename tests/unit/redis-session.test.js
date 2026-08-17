@@ -298,33 +298,31 @@ testRedisCommandSurface(
   "*4\r\n$6\r\nZRANGE\r\n$6\r\nranked\r\n$1\r\n0\r\n$2\r\n-1\r\n"
 );
 
-test("RedisSession.hGetAllManyAndHKeysMany preserves grouped reply order", async () => {
-  const socket = makeFakeSocket([
-    bytes(
-      "*4\r\n$3\r\napi\r\n$2\r\nv1\r\n$4\r\njobs\r\n$2\r\nv2\r\n" +
-      "*2\r\n$5\r\nTOKEN\r\n$6\r\nREGION\r\n" +
-      "*1\r\n$6\r\nSECRET\r\n"
-    ),
-  ]);
-  const { connect } = scriptedConnect(socket);
-  const client = new RedisClient("x", { connect });
-  const snapshot = await client.session((/** @type {any} */ session) =>
-    session.hGetAllManyAndHKeysMany(
-      ["routes:__platform__"],
-      ["secrets:demo", "secrets:demo:api"]
-    ));
+testRedisCommandSurface(
+  "eval",
+  ":1\r\n",
+  (surface) => surface.eval("return 1", ["state:key"], ["arg"]),
+  1,
+  "*5\r\n$4\r\nEVAL\r\n$8\r\nreturn 1\r\n$1\r\n1\r\n$9\r\nstate:key\r\n$3\r\narg\r\n"
+);
 
-  assert.deepEqual(snapshot, {
+testRedisCommandSurface(
+  "hGetAllManyAndHKeysMany",
+  "*4\r\n$3\r\napi\r\n$2\r\nv1\r\n$4\r\njobs\r\n$2\r\nv2\r\n" +
+    "*2\r\n$5\r\nTOKEN\r\n$6\r\nREGION\r\n" +
+    "*1\r\n$6\r\nSECRET\r\n",
+  (surface) => surface.hGetAllManyAndHKeysMany(
+    ["routes:__platform__"],
+    ["secrets:demo", "secrets:demo:api"]
+  ),
+  {
     hashes: [{ api: "v1", jobs: "v2" }],
     keyLists: [["TOKEN", "REGION"], ["SECRET"]],
-  });
-  assert.equal(
-    decode(socket._writes[0]),
-    "*2\r\n$7\r\nHGETALL\r\n$19\r\nroutes:__platform__\r\n" +
-      "*2\r\n$5\r\nHKEYS\r\n$12\r\nsecrets:demo\r\n" +
-      "*2\r\n$5\r\nHKEYS\r\n$16\r\nsecrets:demo:api\r\n"
-  );
-});
+  },
+  "*2\r\n$7\r\nHGETALL\r\n$19\r\nroutes:__platform__\r\n" +
+    "*2\r\n$5\r\nHKEYS\r\n$12\r\nsecrets:demo\r\n" +
+    "*2\r\n$5\r\nHKEYS\r\n$16\r\nsecrets:demo:api\r\n"
+);
 
 test("RedisSession.hGetManyAndHGetAllMany preserves grouped reply order", async () => {
   const socket = makeFakeSocket([

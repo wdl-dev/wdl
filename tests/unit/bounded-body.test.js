@@ -99,3 +99,28 @@ test("readBoundedStreamBytes rejects without waiting for stream cancellation", a
   assert.match(String("reason" in outcome ? outcome.reason : ""), /custom limit/);
   assert.equal(cancelled, true);
 });
+
+test("readBoundedStreamBytes cancels a pending reader when its signal aborts", async () => {
+  /** @type {() => void} */
+  let started = () => {};
+  const pullStarted = new Promise((resolve) => { started = () => resolve(undefined); });
+  let cancelReason;
+  const stream = new ReadableStream({
+    pull() {
+      started();
+      return new Promise(() => {});
+    },
+    cancel(reason) {
+      cancelReason = reason;
+    },
+  });
+  const controller = new AbortController();
+  const reason = new DOMException("body deadline", "AbortError");
+  const reading = readBoundedStreamBytes(stream, 16, undefined, controller.signal);
+
+  await pullStarted;
+  controller.abort(reason);
+
+  await assert.rejects(reading, (err) => err === reason);
+  assert.equal(cancelReason, reason);
+});

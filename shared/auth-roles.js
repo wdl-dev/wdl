@@ -36,6 +36,7 @@ export const KNOWN_ACTIONS = new Set([
   "d1.list", "d1.create", "d1.delete",
   "d1.migrate.read", "d1.migrate.write", "d1.execute",
   "r2.bucket.list", "r2.object.list", "r2.object.head", "r2.object.get", "r2.object.delete",
+  "ai.provider.read", "ai.provider.write", "ai.model.list",
   "host.read", "host.write",
   "auth.token.issue", "auth.token.revoke", "auth.token.list",
   "auth.delegated_token.issue",
@@ -92,6 +93,7 @@ export const ROLES = {
       "workflow.list",
       "d1.list", "d1.migrate.read",
       "r2.bucket.list", "r2.object.list",
+      "ai.provider.read", "ai.model.list",
       "host.read",
     ],
     namespaces: ["*"],
@@ -113,6 +115,7 @@ export const ROLES = {
       "d1.migrate.read", "d1.migrate.write",
       "d1.execute",
       "r2.bucket.list", "r2.object.list", "r2.object.head", "r2.object.get", "r2.object.delete",
+      "ai.provider.read", "ai.provider.write", "ai.model.list",
     ],
     namespaces: [PRINCIPAL_NS_PLACEHOLDER],
     boundNsKind: "platform-tier",
@@ -124,6 +127,7 @@ export const ROLES = {
       "secret.read",
       "d1.list", "d1.migrate.read",
       "r2.bucket.list", "r2.object.list",
+      "ai.provider.read", "ai.model.list",
     ],
     namespaces: [PRINCIPAL_NS_PLACEHOLDER],
     boundNsKind: "platform-tier",
@@ -143,6 +147,7 @@ export const ROLES = {
       "d1.migrate.read", "d1.migrate.write",
       "d1.execute",
       "r2.bucket.list", "r2.object.list", "r2.object.head", "r2.object.get", "r2.object.delete",
+      "ai.provider.read", "ai.provider.write", "ai.model.list",
       "host.read",
     ],
     namespaces: [PRINCIPAL_NS_PLACEHOLDER],
@@ -176,7 +181,7 @@ export function actionCategory(action) {
   const dot = action.indexOf(".");
   if (dot < 0) return "unknown";
   const prefix = action.slice(0, dot);
-  return ["diagnostic", "worker", "workflow", "secret", "d1", "r2", "host", "system"].includes(prefix)
+  return ["diagnostic", "worker", "workflow", "secret", "d1", "r2", "ai", "host", "system"].includes(prefix)
     ? prefix
     : "unknown";
 }

@@ -1,7 +1,7 @@
 variable "region" {
   type        = string
   default     = "ap-east-1"
-  description = "Primary AWS region for the WDL demo account."
+  description = "AWS region for Terraform state, CloudTrail, and bootstrap resources."
 }
 
 variable "environment" {

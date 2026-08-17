@@ -9,7 +9,6 @@ const config :Workerd.Config = (
   services = [
     (name = "loader", worker = .loaderWorker),
     (name = "tail-worker", worker = .tailWorker),
-    (name = "do-owner-network", worker = .doOwnerNetworkWorker),
     (name = "d1-runtime", external = (address = "d1-runtime:8787", http = ())),
     (name = "do-runtime", external = (address = "do-runtime:8788", http = ())),
     (name = "workflows", external = (address = "workflows:9120", http = ())),
@@ -24,6 +23,10 @@ const config :Workerd.Config = (
     # allow=["public"] keeps the internal service mesh unreachable —
     # tenants fetch("http://user-runtime:8081/...") etc. are TCP-blocked.
     (name = "public-network", network = (
+      allow = ["public"],
+      tlsOptions = (trustBrowserCas = true),
+    )),
+    (name = "ai-public-network", network = (
       allow = ["public"],
       tlsOptions = (trustBrowserCas = true),
     )),
@@ -60,10 +63,15 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-bindings-queue", esModule = embed "bindings/queue.js"),
     (name = "runtime-bindings-d1", esModule = embed "bindings/d1.js"),
     (name = "runtime-bindings-r2", esModule = embed "bindings/r2.js"),
+    (name = "runtime-bindings-ai", esModule = embed "bindings/ai.js"),
+    (name = "runtime-bindings-ai-capacity", esModule = embed "bindings/ai-capacity.js"),
+    (name = "runtime-bindings-ai-provider", esModule = embed "bindings/ai-provider.js"),
+    (name = "runtime-bindings-ai-sse", esModule = embed "bindings/ai-sse.js"),
+    (name = "runtime-bindings-ai-websocket", esModule = embed "bindings/ai-websocket.js"),
     (name = "runtime-bindings-r2-metadata", esModule = embed "bindings/r2/metadata.js"),
     (name = "runtime-bindings-r2-xml", esModule = embed "bindings/r2/xml.js"),
     (name = "runtime-bindings-do", esModule = embed "bindings/do.js"),
-    (name = "runtime-bindings-internal-auth-backend", esModule = embed "bindings/internal-auth-backend.js"),
+    (name = "runtime-bindings-workflow", esModule = embed "bindings/workflow.js"),
     (name = "runtime-do-transport", esModule = embed "_wdl-do-transport.js"),
     (name = "_wdl-request-id.js", esModule = embed "_wdl-request-id.js"),
     (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
@@ -89,6 +97,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "runtime-owner-hint-cache-source", text = embed "_wdl-owner-hint-cache.js"),
     (name = "runtime-request-id-source", text = embed "_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "workflows-client.js"),
+    (name = "runtime-ai-client-source", text = embed "ai-client.js"),
     (name = "runtime-r2-utils", esModule = embed "r2-utils.js"),
     (name = "hex.js", esModule = embed "../shared/hex.js"),
     (name = "errors.js", esModule = embed "../shared/errors.js"),
@@ -99,6 +108,8 @@ const loaderWorker :Workerd.Worker = (
     (name = "shared-utf8", esModule = embed "../shared/utf8.js"),
     (name = "shared-s3-xml", esModule = embed "../shared/s3-xml.js"),
     (name = "shared-ns-pattern", esModule = embed "../shared/ns-pattern.js"),
+    (name = "shared-ai-contract", esModule = embed "../shared/ai-contract.js"),
+    (name = "shared-ai-runtime-config", esModule = embed "../shared/ai-runtime-config.js"),
     (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-respond", esModule = embed "../shared/respond.js"),
     (name = "shared-s3-retry", esModule = embed "../shared/s3-retry.js"),
@@ -115,8 +126,9 @@ const loaderWorker :Workerd.Worker = (
   ],
   compatibilityDate = "2026-04-24",
   # service_binding_extra_handlers exposes stub.queue()/scheduled() on
-  # Fetcher stubs returned by workerLoader.get(). Runtime-only flag.
-  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers"],
+  # Fetcher stubs returned by workerLoader.get(). enable_request_signal lets
+  # binding-scoped host readers observe caller disconnects. Runtime-only flags.
+  compatibilityFlags = ["nodejs_compat", "service_binding_extra_handlers", "enable_request_signal"],
   globalOutbound = "internal-network",
   bindings = [
     (name = "SERVICE_NAME", text = "user-runtime"),
@@ -128,29 +140,25 @@ const loaderWorker :Workerd.Worker = (
     (name = "LOADER", workerLoader = (id = "dynamic")),
     (name = "TAIL_WORKER", service = "tail-worker"),
     (name = "PUBLIC_NETWORK", service = "public-network"),
+    (name = "AI_NETWORK", service = "ai-public-network"),
     (name = "D1_BACKEND", service = "d1-runtime"),
     (name = "DO_BACKEND", service = "do-runtime"),
     (name = "WORKFLOWS_BACKEND", service = "workflows"),
-    (name = "DO_OWNER_NETWORK", service = "do-owner-network"),
     (name = "D1_QUERY_TIMEOUT_MS", fromEnvironment = "D1_QUERY_TIMEOUT_MS"),
     (name = "R2_S3_ENDPOINT", fromEnvironment = "R2_S3_ENDPOINT"),
     (name = "R2_S3_BUCKET", fromEnvironment = "R2_S3_BUCKET"),
     (name = "R2_S3_ACCESS_KEY_ID", fromEnvironment = "R2_S3_ACCESS_KEY_ID"),
     (name = "R2_S3_SECRET_ACCESS_KEY", fromEnvironment = "R2_S3_SECRET_ACCESS_KEY"),
     (name = "R2_S3_REGION", fromEnvironment = "R2_S3_REGION"),
-  ],
-);
-
-const doOwnerNetworkWorker :Workerd.Worker = (
-  modules = [
-    (name = "worker", esModule = embed "do-owner-network.js"),
-    (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
-    (name = "shared-internal-auth", esModule = embed "../shared/internal-auth.js"),
-  ],
-  compatibilityDate = "2026-04-24",
-  globalOutbound = "internal-network",
-  bindings = [
-    (name = "WDL_INTERNAL_AUTH_TOKEN", fromEnvironment = "WDL_INTERNAL_AUTH_TOKEN"),
+    (name = "AI_REQUEST_MAX_IN_FLIGHT", fromEnvironment = "AI_REQUEST_MAX_IN_FLIGHT"),
+    (name = "AI_STREAM_MAX_IN_FLIGHT", fromEnvironment = "AI_STREAM_MAX_IN_FLIGHT"),
+    (name = "AI_WS_MAX_SESSIONS", fromEnvironment = "AI_WS_MAX_SESSIONS"),
+    (name = "AI_REQUEST_BUDGET_MS", fromEnvironment = "AI_REQUEST_BUDGET_MS"),
+    (name = "AI_STREAM_IDLE_TIMEOUT_MS", fromEnvironment = "AI_STREAM_IDLE_TIMEOUT_MS"),
+    (name = "AI_STREAM_MAX_DURATION_MS", fromEnvironment = "AI_STREAM_MAX_DURATION_MS"),
+    (name = "AI_WS_HANDSHAKE_BUDGET_MS", fromEnvironment = "AI_WS_HANDSHAKE_BUDGET_MS"),
+    (name = "AI_WS_IDLE_TIMEOUT_MS", fromEnvironment = "AI_WS_IDLE_TIMEOUT_MS"),
+    (name = "AI_WS_MAX_DURATION_MS", fromEnvironment = "AI_WS_MAX_DURATION_MS"),
   ],
 );
 

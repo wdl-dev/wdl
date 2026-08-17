@@ -24,7 +24,7 @@ Scheduler 负责实际投递：
 - Cron 代码在 `rust/scheduler/src/cron/`。
 - Queue registry、consume、delayed delivery、DLQ 和 orphan 处理在 `rust/scheduler/src/queue/`。
 - Scheduler 在构造 cron runtime worker id 前会用 canonical `wdl-rust-common` grammar 重新校验 projection 的 route namespace、worker name 和 version。非法 cron ref 会在 slot advance 或 runtime dispatch 前移除，cron sweep 也不会从 malformed worker metadata 重新播种 ref。Queue consumer 的 dispatch identity 也会在使用前重新校验；noncanonical identity 会使 projection 不可用，并按 consumer absent 处理，因此 backlog 可能进入 orphan stream。
-- 部署上 scheduler 默认 1 个副本，当前 dispatch 路径具备多副本安全性。增加副本可以提高运行时并发，但不等于部署零中断：生产 rollout 仍可采用 stop-before-start 语义，并短暂暂停调度。
+- 部署上 scheduler 默认 1 个副本，当前 dispatch 路径具备多副本安全性。增加副本可以提高运行时并发；Terraform 也利用该重叠安全性，先启动健康的 Fargate replacement，再 drain 旧 scheduler task。
 
 ## 接口
 

@@ -1,11 +1,11 @@
 import {
   createLogger,
-  MetricsRegistry,
 } from "shared-observability";
+import { metrics as runtimeMetrics } from "runtime-metrics";
 
 export const SERVICE = "do-runtime";
 
-export const metrics = new MetricsRegistry();
+export const metrics = runtimeMetrics;
 export const log = createLogger(SERVICE);
 /** @type {Map<string, import("do-runtime-owner-registry").DoOwner>} */
 export const ownedScopes = new Map();

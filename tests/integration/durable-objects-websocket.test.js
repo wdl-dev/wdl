@@ -149,6 +149,36 @@ test("Durable Object WebSocket upgrade flows through gateway, Envoy, user-runtim
   }
 });
 
+test("Durable Object WebSockets preserve Unicode and whitespace object identities", async () => {
+  const ns = uniqueNs("do-ws-object-name");
+  await deployAndPromote(ns, "chat", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WS_WORKER },
+    bindings: {
+      ROOM: { type: "do", className: "Room" },
+    },
+  });
+
+  for (const objectName of [" room ", "room", "雪"]) {
+    const { status, socket } = await wsHandshake(
+      ns,
+      `/chat?name=${encodeURIComponent(objectName)}`
+    );
+    try {
+      assert.equal(status, 101);
+      socket.write(encodeClientTextFrame("identity"));
+      assert.deepEqual(await readJsonServerFrame(socket), {
+        objectId: objectName,
+        memory: 1,
+        storage: 1,
+        text: "identity",
+      });
+    } finally {
+      socket.destroy();
+    }
+  }
+});
+
 test("gateway-proxied Durable Object WebSocket reconnects backend after do-runtime restart", async () => {
   const ns = uniqueNs("do-ws-reconnect");
   await deployAndPromote(ns, "chat", {

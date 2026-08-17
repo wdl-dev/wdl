@@ -21,6 +21,10 @@ const WORKERD_COMPAT_WORKER = readFileSync(
   new URL("../../test-workers/workerd-compat/src/index.js", import.meta.url),
   "utf8"
 );
+const HOST_BINDING_ENV_WORKER = readFileSync(
+  new URL("../../test-workers/host-binding-env/src/index.js", import.meta.url),
+  "utf8"
+);
 
 /**
  * @typedef {{
@@ -291,4 +295,89 @@ test("Workflow identity stays out of Node-compatible process.env", async () => {
     processEnvBinding: null,
     facadeCreate: "function",
   });
+});
+
+test("host facades respect importable-env flags without exposing generic backends", async () => {
+  const ns = uniqueNs("host-binding-env");
+  for (const { worker, compatibilityFlags } of [
+    { worker: "enabled", compatibilityFlags: [] },
+    { worker: "disabled", compatibilityFlags: ["disallow_importable_env"] },
+  ]) {
+    await deployAndPromote(ns, worker, {
+      mainModule: "worker.js",
+      modules: { "worker.js": HOST_BINDING_ENV_WORKER },
+      compatibilityDate: "2026-08-11",
+      compatibilityFlags,
+      bindings: {
+        ROOM: { type: "do", className: "Room" },
+      },
+      workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+    });
+  }
+
+  const hidden = {
+    doBackend: "undefined",
+    ownerNetwork: "undefined",
+    workflowsBackend: "undefined",
+  };
+  const positional = { room: "function", flow: "function" };
+  const enabledModuleScope = {
+    roomFacade: "function",
+    roomTransport: "function",
+    flowFacade: "function",
+    flowTransport: "function",
+  };
+
+  const enabledHandlerResponse = await gatewayFetch(ns, "/enabled");
+  assert.equal(enabledHandlerResponse.status, 200);
+  const enabledHandler = await responseJson(enabledHandlerResponse);
+  assert.deepEqual(enabledHandler, {
+    positional,
+    imported: positional,
+    moduleScope: { ...enabledModuleScope, alarmTransport: "undefined" },
+    moduleScopeCalls: { room: "rejected", flow: "rejected" },
+    hidden,
+  });
+  const enabledDoResponse = await gatewayFetch(ns, "/enabled/do");
+  assert.equal(enabledDoResponse.status, 200);
+  const enabledDo = await responseJson(enabledDoResponse);
+  assert.deepEqual(enabledDo, {
+    positional,
+    imported: positional,
+    moduleScope: { ...enabledModuleScope, alarmTransport: "function" },
+    moduleScopeCalls: { room: "rejected", flow: "rejected" },
+    hidden,
+  });
+
+  /** @type {[string, Record<string, unknown>][]} */
+  const abortCases = [
+    ["/enabled/abort-do", { name: "AbortError", message: "binding caller aborted", dispatches: 0 }],
+    ["/enabled/abort-do-nested", { name: "AbortError", message: "binding caller aborted", dispatches: 0 }],
+    ["/enabled/abort-workflow", { name: "AbortError", message: "binding caller aborted" }],
+  ];
+  for (const [path, expected] of abortCases) {
+    const response = await gatewayFetch(ns, path);
+    assert.equal(response.status, 200, path);
+    assert.deepEqual(await responseJson(response), expected, path);
+  }
+
+  const disabled = {
+    positional,
+    imported: { room: "undefined", flow: "undefined" },
+    moduleScope: {
+      roomFacade: "undefined",
+      roomTransport: "undefined",
+      flowFacade: "undefined",
+      flowTransport: "undefined",
+      alarmTransport: "undefined",
+    },
+    moduleScopeCalls: { room: "missing", flow: "missing" },
+    hidden,
+  };
+  const disabledHandlerResponse = await gatewayFetch(ns, "/disabled");
+  assert.equal(disabledHandlerResponse.status, 200);
+  assert.deepEqual(await responseJson(disabledHandlerResponse), disabled);
+  const disabledDoResponse = await gatewayFetch(ns, "/disabled/do");
+  assert.equal(disabledDoResponse.status, 200);
+  assert.deepEqual(await responseJson(disabledDoResponse), disabled);
 });

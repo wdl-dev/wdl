@@ -72,3 +72,8 @@ declare module "runtime-workflows-client-source" {
   const source: string;
   export default source;
 }
+
+declare module "runtime-ai-client-source" {
+  const source: string;
+  export default source;
+}

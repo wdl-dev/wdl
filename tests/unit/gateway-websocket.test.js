@@ -90,6 +90,7 @@ class FakeWebSocket {
 
   /** @param {unknown} data */
   send(data) {
+    if (this.unusable) return;
     if (this.sendError) throw this.sendError;
     if (this.closed) throw new Error(`${this.name} is closed`);
     if (!this.accepted) throw new TypeError(`${this.name} is not accepted`);
@@ -139,6 +140,7 @@ const {
     [/from "shared-observability";/, `from ${JSON.stringify(repositoryFileUrl("shared/observability.js"))};`],
     [/from "shared-respond";/, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
     [/from "shared-utf8";/, `from ${JSON.stringify(repositoryFileUrl("shared/utf8.js"))};`],
+    [/from "shared-worker-contract";/, `from ${JSON.stringify(repositoryFileUrl("shared/worker-contract.js"))};`],
     [/from "gateway-lib";/, `from ${JSON.stringify(repositoryFileUrl("gateway/lib.js"))};`],
   ]
 );
@@ -177,9 +179,13 @@ test("gateway websocket upstream fetch creates fresh requests with stable upgrad
   }
 });
 
-/** @param {FakeWebSocket} socket */
-function websocketResponse(socket) {
-  return new Response(null, /** @type {any} */ ({ status: 101, headers: new Headers(), webSocket: socket }));
+/** @param {FakeWebSocket} socket @param {HeadersInit} [headers] */
+function websocketResponse(socket, headers = undefined) {
+  return new Response(null, /** @type {any} */ ({
+    status: 101,
+    headers: new Headers(headers),
+    webSocket: socket,
+  }));
 }
 
 /** @param {any} response */
@@ -744,6 +750,73 @@ test("gateway websocket proxy records one outcome for an upstream error", async 
     event: "websocket_upstream_error",
     fields: {},
   }]);
+});
+
+test("gateway websocket proxy prefers a terminal close after an upstream error", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  /** @type {Array<[number, string]>} */
+  const sessions = [];
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {
+      recordSessionLifetime: (/** @type {number} */ durationMs, /** @type {string} */ outcome) =>
+        sessions.push([durationMs, outcome]),
+    }
+  );
+
+  upstream.dispatch("error");
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "must-not-replay" });
+  await delay(1);
+  assert.deepEqual(upstream.sent, []);
+  upstream.dispatch("close", { code: 1009, reason: "message too large" });
+  await delay(0);
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1009,
+    reason: "message too large",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, ["established", "upstream_error"]);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0][1], "upstream_terminal_close");
+});
+
+test("gateway websocket proxy queues a client frame until an errored upstream reconnects", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  /** @type {string[]} */
+  const outcomes = [];
+  let reconnectCalls = 0;
+  proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => {
+      reconnectCalls += 1;
+      return websocketResponse(upstream2);
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome)
+  );
+
+  upstream1.dispatch("error");
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "after-error" });
+  await delay(1);
+  assert.deepEqual(upstream1.sent, []);
+  assert.equal(reconnectCalls, 0);
+
+  upstream1.dispatch("close", { code: 1011, reason: "runtime restart" });
+  await waitFor(() => upstream2.sent.length === 1);
+
+  assert.deepEqual(upstream1.sent, []);
+  assert.deepEqual(upstream2.sent, ["after-error"]);
+  assert.equal(reconnectCalls, 1);
+  assert.deepEqual(outcomes, ["established", "upstream_error", "reconnected"]);
 });
 
 test("gateway websocket proxy preserves client frame order while reconnecting", async () => {
@@ -1381,6 +1454,103 @@ test("gateway websocket proxy propagates normal upstream close", async () => {
   assert.equal(sessions[0][1], "upstream_normal_close");
   assert.ok(sessions[0][0] >= 0);
   assert.equal(lifecycleChecks, 1);
+});
+
+test("gateway websocket proxy propagates an application-terminal upstream close", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  /** @type {Array<[number, string]>} */
+  const sessions = [];
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome),
+    {
+      recordSessionLifetime: (/** @type {number} */ durationMs, /** @type {string} */ outcome) =>
+        sessions.push([durationMs, outcome]),
+    }
+  );
+
+  upstream.dispatch("close", { code: 1008, reason: "policy rejected" });
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1008,
+    reason: "policy rejected",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, ["established"]);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0][1], "upstream_terminal_close");
+});
+
+test("gateway websocket proxy terminates a non-resumable session after backend loss", () => {
+  const upstream = new FakeWebSocket("upstream");
+  /** @type {string[]} */
+  const outcomes = [];
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream, {
+      "x-wdl-websocket-reconnect-policy": "disabled",
+      "x-request-id": "rid-non-resumable",
+    }),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome)
+  );
+
+  assert.equal(response.headers.get("x-wdl-websocket-reconnect-policy"), null);
+  assert.equal(response.headers.get("x-request-id"), "rid-non-resumable");
+  upstream.dispatch("close", { code: 1011, reason: "runtime restart" });
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, [
+    "established",
+    "upstream_abnormal_close",
+    "reconnect_suppressed",
+  ]);
+});
+
+test("gateway websocket proxy does not reconnect a non-resumable session after send failure", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  upstream.sendError = new Error("write failed");
+  /** @type {string[]} */
+  const outcomes = [];
+  let reconnectCalls = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream, {
+      "x-wdl-websocket-reconnect-policy": "disabled",
+    }),
+    async () => {
+      reconnectCalls += 1;
+      throw new Error("must not reconnect");
+    },
+    (/** @type {string} */ outcome) => outcomes.push(outcome)
+  );
+
+  /** @type {any} */ (lastPair)[1].dispatch("message", { data: "cannot-send" });
+  await waitFor(() => responseWebSocket(response).closed !== null);
+
+  assert.deepEqual(responseWebSocket(response).closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.deepEqual(upstream.closed, {
+    code: 1012,
+    reason: "service restart",
+  });
+  assert.equal(reconnectCalls, 0);
+  assert.deepEqual(outcomes, ["established", "reconnect_suppressed"]);
 });
 
 test("gateway websocket proxy propagates an upstream close without a status code", () => {

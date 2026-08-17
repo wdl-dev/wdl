@@ -12,6 +12,7 @@ import OWNER_ENDPOINT_SOURCE from "runtime-owner-endpoint-source";
 import OWNER_HINT_CACHE_SOURCE from "runtime-owner-hint-cache-source";
 import REQUEST_ID_SOURCE from "runtime-request-id-source";
 import WORKFLOWS_CLIENT_SOURCE from "runtime-workflows-client-source";
+import AI_CLIENT_SOURCE from "runtime-ai-client-source";
 
 export const RUNTIME_INJECTION_SOURCES = Object.freeze({
   d1ClientSource: D1_CLIENT_SOURCE,
@@ -28,4 +29,5 @@ export const RUNTIME_INJECTION_SOURCES = Object.freeze({
   ownerHintCacheSource: OWNER_HINT_CACHE_SOURCE,
   requestIdSource: REQUEST_ID_SOURCE,
   workflowsClientSource: WORKFLOWS_CLIENT_SOURCE,
+  aiClientSource: AI_CLIENT_SOURCE,
 });

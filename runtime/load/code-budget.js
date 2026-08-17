@@ -3,6 +3,7 @@ import {
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
 import {
+  HOST_BINDING_MODULE_NAMES,
   HOST_BINDING_RESERVED_MODULES,
   HOST_BINDING_RESERVED_MODULE_NAMES,
   WORKFLOWS_MODULE_NAME,
@@ -23,7 +24,6 @@ const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
 // src/workerd/api/worker-loader.c++ MAX_DYNAMIC_WORKER_CODE_SIZE.
 export const WORKER_LOADER_CODE_MAX_BYTES = 64 * 1024 * 1024;
 
-const D1_DATA_FIELD_MODULE_NAME = "_wdl-d1-data-field.js";
 const WORKFLOWS_IMPORT_MARKER = "cloudflare:workflows";
 const WORKFLOWS_IMPORT_MARKER_BYTES = nodeBuffer.from(WORKFLOWS_IMPORT_MARKER, "utf8");
 const utf8Decoder = new TextDecoder();
@@ -35,19 +35,17 @@ const utf8Decoder = new TextDecoder();
  * @typedef {{ modules: Record<string, WorkerModuleValue>, mainModule: string, [key: string]: unknown }} WorkerCodeShape
  * @typedef {Record<string, unknown> & { type?: string, className?: unknown }} RuntimeBindingSpec
  * @typedef {{ binding?: unknown, className?: unknown }} RuntimeWorkflowSpec
- * @typedef {{ ns: string, worker: string, version: string }} RuntimeWorkerIdentity
  * @typedef {{ entrypoint?: unknown }} RuntimeExportSpec
- * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null }} RuntimeBundleMeta
+ * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null, compatibilityFlags?: unknown }} RuntimeBundleMeta
  * @typedef {{
  *   bindingEntries: Array<[string, RuntimeBindingSpec]>,
  *   workflows: RuntimeWorkflowSpec[],
  *   d1Bindings: string[],
  *   r2Bindings: string[],
  *   doBindings: string[],
+ *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
  *   hostWrappedClassNames: string[],
- *   needsDoBackend: boolean,
- *   needsWorkflowsBackend: boolean,
  *   needsHostBindingWrapper: boolean,
  * }} RuntimeMetaPlan
  * @typedef {{
@@ -65,9 +63,21 @@ const utf8Decoder = new TextDecoder();
  *   ownerHintCacheSource: string,
  *   requestIdSource: string,
  *   workflowsClientSource: string,
+ *   aiClientSource: string,
  * }} RuntimeInjectionSources
  * @typedef {[name: string, source: string]} RuntimeModuleInjection
+ * @typedef {"d1Bindings" | "r2Bindings" | "doBindings" | "aiBindings"} HostFacadePlanKey
+ * @typedef {"d1ModuleInjections" | "r2ModuleInjections" | "doModuleInjections" | "aiModuleInjections"} HostFacadeInjectionKey
+ * @typedef {{ planKey: HostFacadePlanKey, injectionKey: HostFacadeInjectionKey }} HostFacadeBindingDefinition
  */
+
+/** @type {Readonly<Record<string, HostFacadeBindingDefinition>>} */
+const HOST_FACADE_BINDING_DEFINITIONS = Object.freeze({
+  d1: { planKey: "d1Bindings", injectionKey: "d1ModuleInjections" },
+  r2: { planKey: "r2Bindings", injectionKey: "r2ModuleInjections" },
+  do: { planKey: "doBindings", injectionKey: "doModuleInjections" },
+  ai: { planKey: "aiBindings", injectionKey: "aiModuleInjections" },
+});
 
 /** @param {string | Uint8Array} body */
 function moduleBodyByteLength(body) {
@@ -96,83 +106,56 @@ function containsWorkflowsImportMarker(body) {
 /** @param {RuntimeInjectionSources} sources */
 function runtimeModuleInjections(sources) {
   /** @type {RuntimeModuleInjection} */
-  const requestIdModuleInjection = ["_wdl-request-id.js", sources.requestIdSource];
+  const requestIdModuleInjection = [HOST_BINDING_MODULE_NAMES.requestId, sources.requestIdSource];
   const d1ParamsInjectedSource = sources.d1ParamsSource.replace(
     '"./utf8.js"',
-    '"./_wdl-utf8.js"'
+    `"./${HOST_BINDING_MODULE_NAMES.utf8}"`
   );
   const d1TransportInjectedSource = sources.d1TransportSource.replace(
     /from "shared-d1-data-field";/,
-    `from "./${D1_DATA_FIELD_MODULE_NAME}";`
+    `from "./${HOST_BINDING_MODULE_NAMES.d1DataField}";`
   );
   /** @type {RuntimeModuleInjection[]} */
   const d1ModuleInjections = [
     requestIdModuleInjection,
-    [D1_DATA_FIELD_MODULE_NAME, sources.d1DataFieldSource],
-    ["_wdl-utf8.js", sources.utf8Source],
-    ["_wdl-d1-params.js", d1ParamsInjectedSource],
-    ["_wdl-sql-splitter.js", sources.sqlSplitterSource],
-    ["_wdl-d1-transport.js", d1TransportInjectedSource],
-    ["_wdl-d1-client.js", sources.d1ClientSource],
+    [HOST_BINDING_MODULE_NAMES.d1DataField, sources.d1DataFieldSource],
+    [HOST_BINDING_MODULE_NAMES.utf8, sources.utf8Source],
+    [HOST_BINDING_MODULE_NAMES.d1Params, d1ParamsInjectedSource],
+    [HOST_BINDING_MODULE_NAMES.sqlSplitter, sources.sqlSplitterSource],
+    [HOST_BINDING_MODULE_NAMES.d1Transport, d1TransportInjectedSource],
+    [HOST_BINDING_MODULE_NAMES.d1Client, sources.d1ClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
   const r2ModuleInjections = [
     requestIdModuleInjection,
-    ["_wdl-r2-utils.js", sources.r2UtilsSource],
-    ["_wdl-r2-client.js", sources.r2ClientSource],
+    [HOST_BINDING_MODULE_NAMES.r2Utils, sources.r2UtilsSource],
+    [HOST_BINDING_MODULE_NAMES.r2Client, sources.r2ClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
   const doModuleInjections = [
     requestIdModuleInjection,
-    ["_wdl-do-transport.js", sources.doTransportSource],
-    ["_wdl-owner-endpoint.js", sources.ownerEndpointSource],
-    ["_wdl-owner-hint-cache.js", sources.ownerHintCacheSource],
-    ["_wdl-do-client.js", sources.doClientSource],
+    [HOST_BINDING_MODULE_NAMES.doTransport, sources.doTransportSource],
+    [HOST_BINDING_MODULE_NAMES.ownerEndpoint, sources.ownerEndpointSource],
+    [HOST_BINDING_MODULE_NAMES.ownerHintCache, sources.ownerHintCacheSource],
+    [HOST_BINDING_MODULE_NAMES.doClient, sources.doClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
   const workflowsModuleInjections = [
     requestIdModuleInjection,
-    ["_wdl-workflows-client.js", sources.workflowsClientSource],
+    [HOST_BINDING_MODULE_NAMES.workflowsClient, sources.workflowsClientSource],
+  ];
+  /** @type {RuntimeModuleInjection[]} */
+  const aiModuleInjections = [
+    requestIdModuleInjection,
+    [HOST_BINDING_MODULE_NAMES.aiClient, sources.aiClientSource],
   ];
   return {
     d1ModuleInjections,
     r2ModuleInjections,
     doModuleInjections,
     workflowsModuleInjections,
+    aiModuleInjections,
   };
-}
-
-/**
- * @typedef {{
- *   modules: RuntimeModuleInjection[],
- *   bindingNames(plan: Pick<RuntimeMetaPlan, "d1Bindings" | "r2Bindings" | "doBindings">): string[],
- * }} HostFacadeBindingDefinition
- */
-
-/**
- * @param {ReturnType<typeof runtimeModuleInjections>} injections
- * @returns {HostFacadeBindingDefinition[]}
- */
-function hostFacadeBindingDefinitions(injections) {
-  const {
-    d1ModuleInjections,
-    r2ModuleInjections,
-    doModuleInjections,
-  } = injections;
-  return [
-    {
-      modules: d1ModuleInjections,
-      bindingNames(plan) { return plan.d1Bindings; },
-    },
-    {
-      modules: r2ModuleInjections,
-      bindingNames(plan) { return plan.r2Bindings; },
-    },
-    {
-      modules: doModuleInjections,
-      bindingNames(plan) { return plan.doBindings; },
-    },
-  ];
 }
 
 /**
@@ -181,26 +164,20 @@ function hostFacadeBindingDefinitions(injections) {
  * @param {string} name
  */
 function addHostFacadeBinding(plan, spec, name) {
-  switch (spec?.type) {
-    case "d1":
-      plan.d1Bindings.push(name);
-      return;
-    case "r2":
-      plan.r2Bindings.push(name);
-      return;
-    case "do":
-      plan.doBindings.push(name);
-      return;
-  }
+  if (typeof spec?.type !== "string") return;
+  const definition = HOST_FACADE_BINDING_DEFINITIONS[spec.type];
+  if (definition) plan[definition.planKey].push(name);
 }
 
 /** @param {RuntimeMetaPlan} plan */
 function hasHostFacadeBindings(plan) {
-  return plan.d1Bindings.length > 0 || plan.r2Bindings.length > 0 || plan.doBindings.length > 0;
+  return Object.values(HOST_FACADE_BINDING_DEFINITIONS).some(
+    ({ planKey }) => plan[planKey].length > 0
+  );
 }
 
 /** @param {RuntimeBundleMeta} meta */
-function d1ExportedEntrypointNames(meta) {
+function exportedEntrypointNames(meta) {
   /** @type {string[]} */
   const out = [];
   for (const entry of meta.exports || []) {
@@ -230,7 +207,7 @@ function d1ExportedEntrypointNames(meta) {
  * @param {RuntimeWorkflowSpec[]} workflows
  */
 function hostWrappedClassNames(meta, bindingEntries, workflows) {
-  const out = new Set(d1ExportedEntrypointNames(meta));
+  const out = new Set(exportedEntrypointNames(meta));
   for (const [, spec] of bindingEntries) {
     if (spec?.type === "do" && typeof spec.className === "string" && spec.className) {
       if (!isValidJsClassDeclarationName(spec.className)) {
@@ -264,6 +241,7 @@ function hostWrappedClassNames(meta, bindingEntries, workflows) {
 /** @param {RuntimeBundleMeta} meta @returns {RuntimeMetaPlan} */
 export function analyzeRuntimeMeta(meta) {
   const bindingEntries = Object.entries(meta.bindings || {});
+  const bindingNames = new Set(bindingEntries.map(([name]) => name));
   const workflows = Array.isArray(meta.workflows) ? meta.workflows : [];
   /** @type {RuntimeMetaPlan} */
   const plan = {
@@ -272,21 +250,39 @@ export function analyzeRuntimeMeta(meta) {
     d1Bindings: [],
     r2Bindings: [],
     doBindings: [],
+    aiBindings: [],
     workflowBindings: Object.create(null),
     hostWrappedClassNames: [],
-    needsDoBackend: false,
-    needsWorkflowsBackend: false,
     needsHostBindingWrapper: false,
   };
   for (const [name, spec] of bindingEntries) {
+    if (spec?.type === "ai") {
+      if (Object.keys(spec).length !== 1) {
+        throw new Error(
+          `AI binding ${JSON.stringify(name)} has invalid persisted shape (redeploy worker)`
+        );
+      }
+      if (plan.aiBindings.length > 0) {
+        throw new Error("Persisted metadata contains more than one AI binding (redeploy worker)");
+      }
+    }
     addHostFacadeBinding(plan, spec, name);
   }
   for (const workflow of workflows) {
-    if (typeof workflow?.binding === "string" && workflow.binding) plan.workflowBindings[workflow.binding] = workflow;
+    if (typeof workflow?.binding === "string" && workflow.binding) {
+      if (
+        bindingNames.has(workflow.binding) ||
+        Object.hasOwn(plan.workflowBindings, workflow.binding)
+      ) {
+        throw new Error(
+          `Persisted Workflow binding ${JSON.stringify(workflow.binding)} collides with another binding (redeploy worker)`
+        );
+      }
+      plan.workflowBindings[workflow.binding] = workflow;
+    }
   }
-  plan.needsDoBackend = plan.doBindings.length > 0;
-  plan.needsWorkflowsBackend = Object.keys(plan.workflowBindings).length > 0;
-  plan.needsHostBindingWrapper = hasHostFacadeBindings(plan) || plan.needsWorkflowsBackend;
+  plan.needsHostBindingWrapper =
+    hasHostFacadeBindings(plan) || Object.keys(plan.workflowBindings).length > 0;
   if (plan.needsHostBindingWrapper) {
     plan.hostWrappedClassNames = hostWrappedClassNames(meta, bindingEntries, workflows);
   }
@@ -298,14 +294,12 @@ export function analyzeRuntimeMeta(meta) {
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
  * @param {RuntimeMetaPlan} [plan]
- * @param {RuntimeWorkerIdentity | null} [workerIdentity]
  */
 function runtimeInjectedModuleSources(
   mainModule,
   meta,
   runtimeSources,
-  plan = analyzeRuntimeMeta(meta),
-  workerIdentity = null
+  plan = analyzeRuntimeMeta(meta)
 ) {
   const injections = runtimeModuleInjections(runtimeSources);
   /** @type {Map<string, string>} */
@@ -314,10 +308,10 @@ function runtimeInjectedModuleSources(
   const addModules = (modules) => {
     for (const [name, source] of modules) out.set(name, source);
   };
-  for (const definition of hostFacadeBindingDefinitions(injections)) {
-    if (definition.bindingNames(plan).length > 0) addModules(definition.modules);
+  for (const { planKey, injectionKey } of Object.values(HOST_FACADE_BINDING_DEFINITIONS)) {
+    if (plan[planKey].length > 0) addModules(injections[injectionKey]);
   }
-  if (plan.needsWorkflowsBackend) {
+  if (Object.keys(plan.workflowBindings).length > 0) {
     addModules(injections.workflowsModuleInjections);
   }
   out.set(WORKFLOWS_MODULE_NAME, WORKFLOWS_MODULE_SOURCE);
@@ -331,12 +325,16 @@ function runtimeInjectedModuleSources(
     plan.needsHostBindingWrapper
       ? generateHostBindingWrapperModule(
           mainModule,
-          plan.d1Bindings,
-          plan.r2Bindings,
-          plan.doBindings,
-          plan.workflowBindings,
-          plan.hostWrappedClassNames,
-          workerIdentity
+          {
+            d1Bindings: plan.d1Bindings,
+            r2Bindings: plan.r2Bindings,
+            doBindings: plan.doBindings,
+            workflowBindings: plan.workflowBindings,
+            entrypointNames: plan.hostWrappedClassNames,
+            aiBindings: plan.aiBindings,
+            importableEnvDisabled: Array.isArray(meta.compatibilityFlags) &&
+              meta.compatibilityFlags.includes("disallow_importable_env"),
+          }
         )
       : generateAbortShimWrapperModule(mainModule)
   );
@@ -347,7 +345,7 @@ function runtimeInjectedModuleSources(
  * @param {WorkerCodeShape} workerCode
  * @param {RuntimeBundleMeta} meta
  * @param {RuntimeInjectionSources} runtimeSources
- * @param {{ plan?: RuntimeMetaPlan, workerIdentity?: RuntimeWorkerIdentity | null }} [options]
+ * @param {{ plan?: RuntimeMetaPlan }} [options]
  */
 export function injectRuntimeModulesForHostBindings(
   workerCode,
@@ -373,8 +371,7 @@ export function injectRuntimeModulesForHostBindings(
     originalMain,
     meta,
     runtimeSources,
-    plan,
-    options.workerIdentity || null
+    plan
   )) {
     workerCode.modules[name] = source;
   }
@@ -419,7 +416,6 @@ export function estimateWorkerLoaderUserCodeBytes({ normalized, meta }) {
  *   normalized: NormalizedModule[],
  *   meta: RuntimeBundleMeta,
  *   runtimeSources: RuntimeInjectionSources,
- *   workerIdentity?: RuntimeWorkerIdentity | null,
  *   userCodeBytes?: number,
  * }} args
  */
@@ -428,7 +424,6 @@ export function estimateFinalWorkerLoaderCodeBytes({
   normalized,
   meta,
   runtimeSources,
-  workerIdentity = null,
   userCodeBytes = estimateWorkerLoaderUserCodeBytes({ normalized, meta }),
 }) {
   let total = userCodeBytes;
@@ -436,8 +431,7 @@ export function estimateFinalWorkerLoaderCodeBytes({
     mainModule,
     meta,
     runtimeSources,
-    analyzeRuntimeMeta(meta),
-    workerIdentity
+    analyzeRuntimeMeta(meta)
   )) {
     total += nodeBuffer.byteLength(source, "utf8");
   }

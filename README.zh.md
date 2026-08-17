@@ -8,14 +8,14 @@
 
 > English version: [README.md](README.md)
 
-WDL 是基于 stock Cloudflare workerd、具备多副本故障切换能力的自托管多租户 Workers 平台。它通过 workerd 的 `workerLoader` API，从 Redis/Valkey 动态加载不可变 Worker 版本，并在 runtime 外侧补齐 control/auth、KV、R2、D1、Durable Objects、queues、cron、Workflows、ASSETS、service/platform bindings、实时日志 tail、Prometheus metrics，以及部署与生命周期工具。项目名最初来自 “workerd dynamic loader”；现在平台能力已经远超动态加载本身，产品名保留为 WDL。
+WDL 是基于 stock Cloudflare workerd、具备多副本故障切换能力的自托管多租户 Workers 平台。它通过 workerd 的 `workerLoader` API，从 Redis/Valkey 动态加载不可变 Worker 版本，并在 runtime 外侧补齐 control/auth、KV、R2、D1、Durable Objects、queues、cron、Workflows、AI、ASSETS、service/platform bindings、实时日志 tail、Prometheus metrics，以及部署与生命周期工具。项目名最初来自 “workerd dynamic loader”；现在平台能力已经远超动态加载本身，产品名保留为 WDL。
 
 ## 提供的能力
 
 - 按 namespace 子域名和自定义 host pattern 进行多租户路由。
 - 不可变 Worker version，显式 promote/rollback，以及硬删除 lifecycle API。
 - 通过 `wdl` CLI 部署 Wrangler 项目。
-- KV、R2、D1、Durable Objects、queues、cron triggers、Workflows、ASSETS、service bindings 和 platform bindings。
+- KV、R2、D1、Durable Objects、queues、cron triggers、Workflows、namespace-scoped AI、ASSETS、service bindings 和 platform bindings。
 - secret 写入 Redis 前进行 at-rest envelope encryption。
 - 基于有界 Redis stream 的 live `wdl tail`、结构化日志和 Prometheus metrics。
 - D1/Durable Objects 具备明确 failover 语义，runtime、scheduler 和 Workflows 具备多副本安全的 dispatch 路径。

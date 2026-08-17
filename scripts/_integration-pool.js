@@ -223,6 +223,9 @@ export function makeSlotEnv(idx, projectPrefix, basePort, s3PortBase, baseEnv = 
     CONTROL_URL: localControlUrl(gatewayPort),
     ASSETS_CDN_BASE: localAssetsCdnBase(s3mockPort),
     CONTROL_CONNECT_HOST: LOCAL_CONNECT_HOST,
+    AI_REQUEST_BUDGET_MS: baseEnv.AI_REQUEST_BUDGET_MS || "2000",
+    AI_STREAM_IDLE_TIMEOUT_MS: baseEnv.AI_STREAM_IDLE_TIMEOUT_MS || "2000",
+    AI_WS_IDLE_TIMEOUT_MS: baseEnv.AI_WS_IDLE_TIMEOUT_MS || "2000",
   };
   return env;
 }

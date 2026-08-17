@@ -3,7 +3,7 @@
 `test-workers/` contains worker fixtures owned by `tests/integration/`. Tests may
 rely on exact file names, manifest shapes, binding names, and response payloads in
 this tree, so keep fixture changes in the same commit as the tests that consume
-them. Two fixture structures coexist on purpose.
+them. Three fixture structures coexist on purpose.
 
 ## Full Workspace (`package.json` + `wrangler.toml`/`wrangler.jsonc` + `src/`)
 
@@ -38,10 +38,20 @@ Pick this when the test does not go through the CLI, usually because the helper
 builds the deploy body directly to keep the fixture in-tree but out of the test
 file. No Wrangler config is needed; do not add one.
 
+## Embedded Workerd Service (`config.capnp` + `src/`)
+
+Use an embedded service when a local workerd configuration needs a hermetic
+protocol peer that is not tenant code. The local configuration imports the
+fixture's `config.capnp`; production configurations continue to use their real
+network or service binding. `ai-provider` uses this shape for the AI provider
+protocol exercised by local integration tests.
+
 ## Adding Or Moving Fixtures
 
 - Going through `runWdlCli(["deploy", ...])` means full workspace.
 - Loaded inline by a helper via `readFileSync` means source-only.
+- Imported by a local workerd configuration as a protocol peer means embedded
+  service.
 - Do not mix layouts within one fixture without an owning test reason.
 - Do not use `examples/` as hidden test dependencies. If a demo becomes a
   test contract, move or copy the minimal fixture into `test-workers/`.

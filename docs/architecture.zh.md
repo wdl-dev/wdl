@@ -58,6 +58,7 @@ Workerd tier 使用 `index.js` 作为 entrypoint，`config*.capnp` 作为 worker
 - [Queues 和 cron](modules/queues-cron.zh.md)
 - [Workflows](modules/workflows.zh.md)
 - [Log tail 和 observability](modules/log-tail-observability.zh.md)
+- [AI binding](modules/ai.zh.md)
 - [Infra 和 deployment](modules/infra.zh.md)
 
 按 feature 查看 Cloudflare Workers 兼容度时，阅读 [Workers 兼容矩阵](compatibility.zh.md)。跨模块 trust zone 和 internal mesh 假设见 [安全模型](security.zh.md)。架构概览说明 service shape；这些文档分别记录兼容性和安全口径。
@@ -97,6 +98,7 @@ Stateful binding 调用：
 - R2 在 runtime 使用平台 S3-compatible credential 访问可变 tenant object data。
 - ASSETS 是 control 在 deploy 时上传的 immutable deploy artifact；runtime 只根据 bundle metadata 和 `ASSETS_CDN_BASE` 构造 tokenized CDN URL。
 - KV 使用 redis-proxy DB 1 key family；service 和 platform binding 是 isolate 内 JSRPC surface，其 ACL 和 target metadata 由 control/runtime 解析。
+- AI facade 通过 co-located redis-proxy 原子读取 DB 0 provider/credential snapshot，再使用专用 public-only network binding 访问 allowlist 中的官方 provider。Credential 只留在 host code；tenant code 获得生成的 `run()` / `models()` facade 和 OpenAI-compatible `fetch()` surface。
 
 ## 信任边界
 
@@ -104,7 +106,9 @@ Gateway 负责路由，不负责授权。Control/auth 负责控制面授权。Ru
 
 特权 runtime entrypoint 通过 socket 隔离，而不是通过公开 path 保留。Tenant 流量走 runtime loader socket；scheduler 和 workflows dispatch 走私有 runtime internal socket `:8088`。
 
-DO、D1、workflows backend 等 hidden Fetcher binding 是平台 plumbing，不能暴露给用户代码。Runtime wrapper 必须在用户代码观察 `env` 前删除这些 binding。
+DO、D1、workflows backend 的通用 authenticated Fetcher 是平台 plumbing，只保留在 runtime host realm。Loaded-worker env 只获得由不可变 props 限定到对应声明 binding 的 host adapter；tenant module evaluation 可能观察到 scoped adapter，但绝不会拿到通用 backend Fetcher。
+
+AI provider credential 遵循同一边界：Control 加密持久化，redis-proxy 只在解析调用时解密，runtime host binding 丢弃 tenant header 后再附加凭据。Tenant-visible AI facade 不会拿到 credential 或私有 resolver Fetcher。
 
 Tenant-running Fargate task role 必须保持 least-privilege；tenant code 不能通过 task metadata 拿到宽权限云凭证。
 
@@ -112,7 +116,7 @@ Tenant-running Fargate task role 必须保持 least-privilege；tenant code 不�
 
 Valkey logical DB 按 authority 切分：
 
-- DB 0：control-plane metadata、route state、lifecycle index、secrets、referrer index、D1/DO metadata、cron config、queue consumer projection。
+- DB 0：control-plane metadata、route state、lifecycle index、secrets、referrer index、D1/DO metadata、AI provider/credential record、cron config、queue consumer projection。
 - DB 1：data-plane KV、queue streams、delayed queues、log-tail streams、cleanup queues。
 - DB 2：workflows workflow instance state。
 

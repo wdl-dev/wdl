@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Unified Terraform ECS Fargate services on start-before-stop rolling replacement.
+- Added an opt-in namespace-scoped AI binding with encrypted BYO credentials, official OpenAI/xAI/DeepSeek adapters, OpenAI-compatible HTTP/SSE and WebSocket protocols, agent `run()` helpers, bounded model discovery, public-only egress, process-local lifetime/resource guards, and terminal runtime-loss handling that never replaces a provider session behind an existing client connection. Roll out redis-proxy and Gateway before user-runtime/do-runtime; pause Control mutations while system-runtime delivers its reader and Control writer, then publish the CLI.
+- Kept Workflow identity exclusively in binding-scoped host props; generated tenant facades carry only public operation fields, avoiding duplicate identity in wrapper code and request bodies.
+- Propagated application-terminal backend WebSocket Close frames through Gateway instead of treating protocol, policy, resource, and application close codes as backend-loss signals eligible for transparent reconnect.
+- Changed the private DO WebSocket object-name header to canonical ASCII encoding. This wire change is not mixed-version compatible: after rolling redis-proxy and Gateway, quiesce all tenant dispatch and terminate existing public and DO WebSockets, update user-runtime, system-runtime, and do-runtime during a maintenance window, and resume dispatch only after no old runtime task remains.
+
 ## wdl.20260815.1 - 2026-08-15
 
 - Updated the bundled workerd and Workers types pins to `1.20260815.1` and `5.20260815.1`, raising the maximum tenant compatibility date to `2026-08-22`; adopted upstream EventTarget, stream, sandbox-boundary, WorkerLoader, HTMLRewriter, and public Web IDL error-name fixes. Affected Blob and stream adapter paths now perform O(n) safety copies, and Dynamic Workers reject `streams_disable_constructors`.

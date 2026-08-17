@@ -3,7 +3,6 @@ import {
   buildWorkerEnv,
   doAlarmBindingProps,
   decodeRuntimeLoadPayload,
-  internalAuthBackend,
   runtimeLoadContentTypeMatches,
   wrapWorkerCodeForHostBindings,
 } from "runtime-load";
@@ -28,8 +27,7 @@ const NATIVE_DELETE_ALL_PRESERVES_ALARM_FLAG = "delete_all_preserves_alarm";
  * @typedef {Record<string, unknown> & { type?: string, className?: unknown }} WorkerBindingSpec
  * @typedef {{ bindings?: Record<string, WorkerBindingSpec> | null }} WorkerMeta
  * @typedef {Record<string, unknown> & { doStorageId?: unknown, className?: unknown }} RuntimeBindingSpec
- * @typedef {{ exports: Record<string, (options: { props: Record<string, unknown> }) => unknown> & { KV(options: { props: Record<string, unknown> }): unknown, Assets(options: { props: Record<string, unknown> }): unknown, QueueProducer(options: { props: Record<string, unknown> }): unknown, D1Database(options: { props: Record<string, unknown> }): unknown, R2Bucket(options: { props: Record<string, unknown> }): unknown, ServiceBinding(options: { props: Record<string, unknown> }): unknown, DurableObjectNamespace(options: { props: Record<string, unknown> }): unknown, DoAlarmBinding(options: { props: Record<string, unknown> }): unknown, InternalAuthBackend(options: { props: Record<string, unknown> }): unknown } }} DoRuntimeContext
- * @typedef {{ name: string, spec: RuntimeBindingSpec }} DoBindingInput
+ * @typedef {{ exports: Record<string, (options: { props: Record<string, unknown> }) => unknown> & { KV(options: { props: Record<string, unknown> }): unknown, Assets(options: { props: Record<string, unknown> }): unknown, QueueProducer(options: { props: Record<string, unknown> }): unknown, D1Database(options: { props: Record<string, unknown> }): unknown, R2Bucket(options: { props: Record<string, unknown> }): unknown, AiBinding(options: { props: Record<string, unknown> }): unknown, ServiceBinding(options: { props: Record<string, unknown> }): unknown, DurableObjectNamespace(options: { props: Record<string, unknown> }): unknown, WorkflowBinding(options: { props: Record<string, unknown> }): unknown, DoAlarmBinding(options: { props: Record<string, unknown> }): unknown } }} DoRuntimeContext
  * @typedef {string | { cjs: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
  * @typedef {{ mainModule: string, modules: Record<string, WorkerModuleValue>, compatibilityFlags?: string[], compatibilityDate?: string, env?: Record<string, unknown>, globalOutbound?: unknown }} WorkerCode
  */
@@ -182,24 +180,7 @@ export function buildDoEnv(meta, nsSecrets, workerSecrets, env, ctx, invoke) {
     invoke.worker,
     invoke.version,
     env.ASSETS_CDN_BASE,
-    ctx,
-    internalAuthBackend(ctx, env, "DO_BACKEND"),
-    {
-      workflowsBackend: internalAuthBackend(ctx, env, "WORKFLOWS_BACKEND"),
-      doBindingFactory(binding) {
-        const { name, spec } = /** @type {DoBindingInput} */ (binding);
-        return ctx.exports.DurableObjectNamespace({
-          props: {
-            ns: invoke.ns,
-            worker: invoke.worker,
-            version: invoke.version,
-            doStorageId: spec.doStorageId,
-            binding: name,
-            className: spec.className,
-          },
-        });
-      },
-    }
+    ctx
   );
   out.__WDL_DO_ALARMS__ = ctx.exports.DoAlarmBinding({
     props: doAlarmBindingProps(invoke),
@@ -234,13 +215,7 @@ export async function loadDoWorkerCode(env, ctx, invoke, requestId = null) {
     // _wdl-wrapper.js so DO classes get host-binding facades first; the
     // do-runtime wrapper then imports that module and layers only the alarm
     // storage proxy on top.
-    wrapWorkerCodeForHostBindings(workerCode, meta, {
-      workerIdentity: {
-        ns: invoke.ns,
-        worker: invoke.worker,
-        version: invoke.version,
-      },
-    });
+    wrapWorkerCodeForHostBindings(workerCode, meta);
     // The shim owns DO alarm semantics. Keep native SQLite deleteAll() away
     // from workerd's alarm scheduler, which is not valid for facet-backed DOs.
     forceNativeDeleteAllPreservesAlarm(workerCode);

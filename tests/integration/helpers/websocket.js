@@ -25,9 +25,24 @@ function internalWebSocketHeaders(headers) {
 /** @param {number} opcode @param {Buffer} payload */
 function encodeClientFrame(opcode, payload) {
   const len = payload.length;
-  if (len >= 126) throw new Error("test websocket helper only handles short payloads");
+  if ((opcode & 0x08) !== 0 && len > 125) {
+    throw new Error("WebSocket control frame payload exceeds 125 bytes");
+  }
   const mask = crypto.randomBytes(4);
-  const header = Buffer.from([0x80 | opcode, 0x80 | len]);
+  let header;
+  if (len < 126) {
+    header = Buffer.from([0x80 | opcode, 0x80 | len]);
+  } else if (len <= 0xffff) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 0x80 | 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 0x80 | 127;
+    header.writeBigUInt64BE(BigInt(len), 2);
+  }
   const masked = Buffer.alloc(len);
   for (let i = 0; i < len; i++) masked[i] = payload[i] ^ mask[i % 4];
   return Buffer.concat([header, mask, masked]);

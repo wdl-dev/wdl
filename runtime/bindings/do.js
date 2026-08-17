@@ -9,6 +9,7 @@ import {
   fetchInvokeInit,
   isWebSocketUpgrade,
   replayOwnerUnavailableForFetch,
+  readScopedDoRequest,
   rpcInvokeInit,
   rpcResultFromResponse,
 } from "runtime-do-transport";
@@ -65,15 +66,18 @@ async function dispatchInvokeWithOwnerHint(binding, init, objectName, { replayOw
 
 export class DurableObjectNamespace extends WorkerEntrypoint {
   /**
-   * @param {string} objectName
+   * Binding-scoped native fetch transport. Fixed props prevent access to any
+   * other namespace, worker, storage identity, or class, and the Fetcher path
+   * preserves request cancellation and WebSocket 101 responses.
+   *
    * @param {Request} request
-   * @param {string | null} [requestId]
-   * @returns {Promise<Response>}
    */
-  async fetchObject(objectName, request, requestId = null) {
+  async fetch(request) {
+    const scoped = readScopedDoRequest(request);
+    const { objectName, requestId } = scoped;
+    request = scoped.request;
     const props = propsOf(this);
-    // This facade is only used inside do-runtime for DO-to-DO calls. The
-    // self-service calls intentionally start fresh internal requests; owner
+    // Binding-scoped calls intentionally start fresh internal requests; owner
     // forwarding, if needed, will add and enforce hop-count headers.
     if (isWebSocketUpgrade(request)) {
       const init = {

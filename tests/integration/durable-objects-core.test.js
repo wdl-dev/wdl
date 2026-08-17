@@ -63,6 +63,18 @@ test("worker Durable Object binding routes through do-runtime and preserves obje
     storage: 1,
     body: "from-worker",
   });
+
+  for (const name of [" room ", "room", "雪"]) {
+    const response = await gatewayFetch(ns, `/counter?name=${encodeURIComponent(name)}`);
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    assert.deepEqual(responseJson({ body: text }), {
+      objectId: name,
+      memory: 1,
+      storage: 1,
+      body: "from-worker",
+    });
+  }
 });
 
 test("Durable Object SQLite supports R*Tree indexes", async () => {

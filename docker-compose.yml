@@ -22,6 +22,17 @@ x-secret-envelope-env: &secret-envelope-env
   SECRET_ENVELOPE_LOCAL_KEY_B64: ${SECRET_ENVELOPE_LOCAL_KEY_B64:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}
   SECRET_ENVELOPE_KID: ${SECRET_ENVELOPE_KID:-local:compose:secret-envelope:v1}
 
+x-ai-runtime-env: &ai-runtime-env
+  AI_REQUEST_MAX_IN_FLIGHT: ${AI_REQUEST_MAX_IN_FLIGHT:-64}
+  AI_STREAM_MAX_IN_FLIGHT: ${AI_STREAM_MAX_IN_FLIGHT:-64}
+  AI_WS_MAX_SESSIONS: ${AI_WS_MAX_SESSIONS:-32}
+  AI_REQUEST_BUDGET_MS: ${AI_REQUEST_BUDGET_MS:-120000}
+  AI_STREAM_IDLE_TIMEOUT_MS: ${AI_STREAM_IDLE_TIMEOUT_MS:-30000}
+  AI_STREAM_MAX_DURATION_MS: ${AI_STREAM_MAX_DURATION_MS:-300000}
+  AI_WS_HANDSHAKE_BUDGET_MS: ${AI_WS_HANDSHAKE_BUDGET_MS:-15000}
+  AI_WS_IDLE_TIMEOUT_MS: ${AI_WS_IDLE_TIMEOUT_MS:-120000}
+  AI_WS_MAX_DURATION_MS: ${AI_WS_MAX_DURATION_MS:-1440000}
+
 x-redis-proxy-service: &redis-proxy-service
   <<: *rust-sidecar-image
   command: ["/redis-proxy"]
@@ -69,7 +80,7 @@ x-d1-runtime-service: &d1-runtime-service
       condition: service_healthy
 
 x-do-runtime-env: &do-runtime-env
-  <<: *internal-auth-env
+  <<: [*internal-auth-env, *ai-runtime-env]
   REDIS_ADDR: redis:6379
   REDIS_PROXY_URL: http://redis-proxy-do:7070
   DO_OWNER_TTL_SECONDS: ${DO_OWNER_TTL_SECONDS:-120}
@@ -233,7 +244,7 @@ services:
     command:
       ["serve", "-b", "/app/dist/workerd-configs/user-runtime-local.bin", "--experimental"]
     environment:
-      <<: *internal-auth-env
+      <<: [*internal-auth-env, *ai-runtime-env]
       REDIS_PROXY_URL: ${USER_RUNTIME_REDIS_PROXY_URL:-http://redis-proxy-user:7070}
       D1_QUERY_TIMEOUT_MS: "3000"
       # Must resolve from the browser (not from inside the container) —
@@ -274,7 +285,10 @@ services:
     command:
       ["serve", "-b", "/app/dist/workerd-configs/system-runtime-local.bin", "--experimental"]
     environment:
-      <<: [*internal-auth-env, *secret-envelope-env]
+      <<: [*internal-auth-env, *secret-envelope-env, *ai-runtime-env]
+      AI_REQUEST_MAX_IN_FLIGHT: "32"
+      AI_STREAM_MAX_IN_FLIGHT: "16"
+      AI_WS_MAX_SESSIONS: "8"
       REDIS_ADDR: redis:6379
       DATA_REDIS_ADDR: redis:6379
       DATA_REDIS_DB: "1"

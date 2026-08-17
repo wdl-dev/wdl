@@ -174,6 +174,8 @@ fn route_name(method: &axum::http::Method, path: &str) -> &'static str {
         ("GET", "/_healthz") => "healthz",
         ("GET", "/_metrics") => "metrics",
         ("GET", "/runtime/load") => "runtime_load",
+        ("POST", "/ai/resolve") => "ai_resolve",
+        ("POST", "/ai/models") => "ai_models",
         ("GET", "/kv/get") => "kv_get",
         ("GET", "/kv/get-with-metadata") => "kv_get_with_metadata",
         ("POST", "/kv/get-batch") => "kv_get_batch",
@@ -296,6 +298,7 @@ pub fn healthcheck() -> i32 {
     healthcheck_http_200("REDIS_PROXY_PORT", 7070, "/_healthz")
 }
 
+mod ai;
 mod kv;
 mod logs;
 mod observability;
@@ -335,6 +338,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .route("/_healthz", get(healthz))
         .route("/_metrics", get(metrics_handler))
         .route("/runtime/load", get(runtime_load))
+        .route("/ai/resolve", post(ai::resolve))
+        .route("/ai/models", post(ai::models))
         .route("/kv/get", get(kv_get))
         .route("/kv/get-with-metadata", get(kv_get_with_metadata))
         .route("/kv/get-batch", post(kv_get_batch))

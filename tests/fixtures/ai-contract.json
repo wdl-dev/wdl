@@ -1,0 +1,464 @@
+{
+  "limits": {
+    "providerMaxCount": 8,
+    "modelsPerProviderMax": 32,
+    "namespaceModelMaxCount": 128,
+    "providerNameMaxBytes": 32,
+    "providerRecordMaxBytes": 65536,
+    "upstreamModelMaxBytes": 256,
+    "credentialMaxBytes": 16384,
+    "credentialEnvelopeMaxBytes": 65536
+  },
+  "boundaries": {
+    "providerNameLengths": [
+      { "length": 32, "valid": true },
+      { "length": 33, "valid": false }
+    ],
+    "modelAliasLengths": [
+      { "length": 64, "valid": true },
+      { "length": 65, "valid": false }
+    ],
+    "upstreamModels": [
+      { "name": "ascii-at-limit", "unit": "x", "repeat": 256, "suffix": "", "bytes": 256, "valid": true },
+      { "name": "utf8-at-limit", "unit": "\u754c", "repeat": 85, "suffix": "x", "bytes": 256, "valid": true },
+      { "name": "utf8-over-limit", "unit": "\u754c", "repeat": 85, "suffix": "xx", "bytes": 257, "valid": false }
+    ],
+    "credentialLengths": [
+      { "length": 16384, "valid": true },
+      { "length": 16385, "valid": false }
+    ],
+    "providerModelCounts": [
+      { "count": 32, "valid": true },
+      { "count": 33, "valid": false }
+    ],
+    "modelsResponseCounts": [
+      { "count": 128, "valid": true },
+      { "count": 129, "valid": false }
+    ]
+  },
+  "aliases": [
+    { "value": "openai", "provider": true, "model": true },
+    { "value": "provider-32-characters-long-name", "provider": true, "model": true },
+    { "value": "agent.preview_v2", "provider": false, "model": true },
+    { "value": "2", "provider": true, "model": false },
+    { "value": "10", "provider": true, "model": false },
+    { "value": "2fast", "provider": true, "model": true },
+    { "value": "UPPER", "provider": false, "model": false },
+    { "value": "bad/name", "provider": false, "model": false },
+    { "value": "-bad", "provider": false, "model": false }
+  ],
+  "upstreamModels": [
+    { "name": "opaque-provider-syntax", "json": "\"vendor:model@preview\"", "valid": true },
+    { "name": "unicode", "json": "\"model-\u6a21\u578b\"", "valid": true },
+    { "name": "empty", "json": "\"\"", "valid": false },
+    { "name": "lone-leading-surrogate", "json": "\"\\ud800\"", "valid": false },
+    { "name": "lone-trailing-surrogate", "json": "\"\\udc00\"", "valid": false }
+  ],
+  "destinations": [
+    { "kind": "openai", "protocol": "responses", "transport": "http", "destination": "https://api.openai.com/v1/responses" },
+    { "kind": "openai", "protocol": "responses", "transport": "sse", "destination": "https://api.openai.com/v1/responses" },
+    { "kind": "openai", "protocol": "responses", "transport": "responses_websocket", "destination": "wss://api.openai.com/v1/responses" },
+    { "kind": "openai", "protocol": "chat_completions", "transport": "http", "destination": "https://api.openai.com/v1/chat/completions" },
+    { "kind": "openai", "protocol": "chat_completions", "transport": "sse", "destination": "https://api.openai.com/v1/chat/completions" },
+    { "kind": "openai", "protocol": "embeddings", "transport": "http", "destination": "https://api.openai.com/v1/embeddings" },
+    { "kind": "openai", "protocol": "realtime", "transport": "realtime_websocket", "destination": "wss://api.openai.com/v1/realtime" },
+    { "kind": "xai", "protocol": "responses", "transport": "http", "destination": "https://api.x.ai/v1/responses" },
+    { "kind": "xai", "protocol": "responses", "transport": "sse", "destination": "https://api.x.ai/v1/responses" },
+    { "kind": "xai", "protocol": "responses", "transport": "responses_websocket", "destination": "wss://api.x.ai/v1/responses" },
+    { "kind": "xai", "protocol": "chat_completions", "transport": "http", "destination": "https://api.x.ai/v1/chat/completions" },
+    { "kind": "xai", "protocol": "chat_completions", "transport": "sse", "destination": "https://api.x.ai/v1/chat/completions" },
+    { "kind": "xai", "protocol": "embeddings", "transport": "http", "destination": "https://api.x.ai/v1/embeddings" },
+    { "kind": "xai", "protocol": "realtime", "transport": "realtime_websocket", "destination": "wss://api.x.ai/v1/realtime" },
+    { "kind": "deepseek", "protocol": "responses", "transport": "http", "destination": "https://api.deepseek.com/responses" },
+    { "kind": "deepseek", "protocol": "responses", "transport": "sse", "destination": "https://api.deepseek.com/responses" },
+    { "kind": "deepseek", "protocol": "chat_completions", "transport": "http", "destination": "https://api.deepseek.com/chat/completions" },
+    { "kind": "deepseek", "protocol": "chat_completions", "transport": "sse", "destination": "https://api.deepseek.com/chat/completions" },
+    { "kind": "deepseek", "protocol": "embeddings", "transport": "http", "destination": null },
+    { "kind": "deepseek", "protocol": "realtime", "transport": "realtime_websocket", "destination": null },
+    { "kind": "deepseek", "protocol": "responses", "transport": "responses_websocket", "destination": null }
+  ],
+  "providerRecords": [
+    {
+      "name": "responses",
+      "valid": true,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "openai",
+        "models": {
+          "primary": {
+            "upstreamModel": "vendor:model@preview",
+            "protocol": "responses",
+            "transports": ["http", "responses_websocket", "sse"],
+            "inputModalities": ["file", "image", "text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": true,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "realtime",
+      "valid": true,
+      "value": {
+        "revision": "fedcba9876543210fedcba9876543210",
+        "kind": "xai",
+        "models": {
+          "voice": {
+            "upstreamModel": "grok-voice",
+            "protocol": "realtime",
+            "transports": ["realtime_websocket"],
+            "inputModalities": ["audio", "text"],
+            "outputModalities": ["audio", "text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "ascii-alias-order",
+      "valid": true,
+      "value": {
+        "revision": "11111111111111111111111111111111",
+        "kind": "openai",
+        "models": {
+          "a-a": {
+            "upstreamModel": "model-hyphen",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          },
+          "a_a": {
+            "upstreamModel": "model-underscore",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "bad-revision",
+      "valid": false,
+      "value": { "revision": "1", "kind": "openai", "models": {} }
+    },
+    {
+      "name": "endpoint-injection",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "openai",
+        "endpoint": "https://example.com",
+        "models": { "primary": { "upstreamModel": "gpt", "protocol": "responses", "transports": ["http"] } }
+      }
+    },
+    {
+      "name": "transport-mismatch",
+      "valid": false,
+      "deserializes": true,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "primary": {
+            "upstreamModel": "deepseek",
+            "protocol": "embeddings",
+            "transports": ["sse"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "deepseek-embeddings-unavailable",
+      "valid": false,
+      "deserializes": true,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "embed": {
+            "upstreamModel": "deepseek-embedding",
+            "protocol": "embeddings",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "deepseek-multimodal-unavailable",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "vision": {
+            "upstreamModel": "deepseek-v4-flash",
+            "protocol": "responses",
+            "transports": ["http", "sse"],
+            "inputModalities": ["file", "image", "text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "deepseek-continuation-unavailable",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "flash": {
+            "upstreamModel": "deepseek-v4-flash",
+            "protocol": "responses",
+            "transports": ["http", "sse"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": true,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "deepseek-audio-output-unavailable",
+      "valid": false,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "voice": {
+            "upstreamModel": "deepseek-v4-flash",
+            "protocol": "responses",
+            "transports": ["http", "sse"],
+            "inputModalities": ["text"],
+            "outputModalities": ["audio", "text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    }
+  ],
+  "resolveRequests": [
+    { "valid": true, "value": { "ns": "demo", "model": "openai/primary", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "binding": "AI", "model": "openai/primary", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "model": "openai/primary/extra", "protocol": "responses", "transport": "http" } },
+    { "valid": false, "value": { "ns": "demo", "model": "openai/primary", "protocol": "responses", "transport": "tcp" } }
+  ],
+  "modelsRequests": [
+    { "valid": true, "value": { "ns": "demo" } },
+    { "valid": false, "value": { "ns": "demo", "binding": "AI" } },
+    { "valid": false, "value": { "ns": "Bad" } }
+  ],
+  "resolveResponses": [
+    {
+      "valid": true,
+      "value": {
+        "provider": "openai",
+        "alias": "primary",
+        "kind": "openai",
+        "upstreamModel": "vendor:model@preview",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://api.openai.com/v1/responses",
+        "credential": "fixture-credential",
+        "inputModalities": ["file", "image", "text"],
+        "capabilities": {
+          "functionTools": true,
+          "structuredOutput": true,
+          "reasoning": true,
+          "previousResponseId": true,
+          "providerTools": false,
+          "binaryFrames": false
+        }
+      }
+    },
+    {
+      "valid": false,
+      "value": {
+        "provider": "openai",
+        "alias": "primary",
+        "revision": "bad",
+        "kind": "openai",
+        "upstreamModel": "gpt",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://attacker.invalid",
+        "credential": "fixture-credential",
+        "inputModalities": ["text"],
+        "outputModalities": ["text"],
+        "capabilities": {}
+      }
+    },
+    {
+      "valid": false,
+      "value": {
+        "provider": "openai",
+        "alias": "primary",
+        "kind": "openai",
+        "upstreamModel": "gpt",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://api.openai.com/v1/responses",
+        "credential": "invalid credential",
+        "inputModalities": ["text"],
+        "capabilities": {
+          "functionTools": false,
+          "structuredOutput": false,
+          "reasoning": false,
+          "previousResponseId": false,
+          "providerTools": false,
+          "binaryFrames": false
+        }
+      }
+    }
+  ],
+  "modelsResponses": [
+    {
+      "valid": true,
+      "value": {
+        "models": [
+          {
+            "id": "openai/primary",
+            "protocol": "responses",
+            "transports": ["http", "responses_websocket", "sse"],
+            "inputModalities": ["file", "image", "text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": true,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "valid": true,
+      "value": {
+        "models": [
+          {
+            "id": "my-provider/alpha",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          },
+          {
+            "id": "my/zeta",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": false,
+              "structuredOutput": false,
+              "reasoning": false,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "valid": false,
+      "value": {
+        "models": [
+          {
+            "id": "openai/primary/extra",
+            "protocol": "responses",
+            "transports": ["http"],
+            "inputModalities": ["text"],
+            "outputModalities": ["text"],
+            "capabilities": {}
+          }
+        ]
+      }
+    }
+  ]
+}

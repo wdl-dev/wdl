@@ -567,6 +567,37 @@ export function parseControlRoute(pathname, method) {
       if (route) return route;
     }
 
+    // /ns/<ns>/ai/providers[/<name>[/credential]] and /ns/<ns>/ai/models
+    if (segs[2] === "ai") {
+      const route = {
+        kind: "ai",
+        scopeRoute: "ai",
+        ns,
+        subPath: segs.slice(3),
+      };
+      if (segs.length === 4 && segs[3] === "providers" && method === "GET") {
+        return withAction(route, "ai.provider.read");
+      }
+      if (segs.length === 5 && segs[3] === "providers") {
+        if (method === "GET") return withAction(route, "ai.provider.read");
+        if (method === "PUT" || method === "DELETE") {
+          return withAction(route, "ai.provider.write");
+        }
+      }
+      if (
+        segs.length === 6 &&
+        segs[3] === "providers" &&
+        segs[5] === "credential" &&
+        method === "PUT"
+      ) {
+        return withAction(route, "ai.provider.write");
+      }
+      if (segs.length === 4 && segs[3] === "models" && method === "GET") {
+        return withAction(route, "ai.model.list");
+      }
+      return route;
+    }
+
     // /ns/<ns>/worker/<name>/<action>[/<v>]
     if (segs[2] === "worker" && segs[3]) {
       const verb = segs[4];

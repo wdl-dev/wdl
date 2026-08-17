@@ -156,7 +156,7 @@ module "gateway_service" {
   task_definition_arn    = aws_ecs_task_definition.gateway.arn
   desired_count          = var.gateway_desired_count
   enable_execute_command = true
-  deployment             = local.zero_downtime_deployment
+  deployment             = local.start_before_stop_deployment
 
   capacity_provider_strategies = local.fargate_stateless_capacity_provider_strategies
 

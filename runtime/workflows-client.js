@@ -15,26 +15,16 @@ function stringifyJson(value) {
 
 /**
  * @param {Record<string, unknown>} fields
- * @param {WorkflowMetadata} metadata
- * @param {string | null} requestId
  */
-function workflowRequestBody(fields, metadata, requestId) {
+function workflowRequestBody(fields) {
   const body = /** @type {Record<string, unknown>} */ (intrinsicObjectCreate(null));
   intrinsicObjectAssign(body, fields);
-  body.ns = metadata.ns;
-  body.worker = metadata.worker;
-  body.frozenVersion = metadata.version;
-  body.workflowName = metadata.name;
-  body.workflowKey = metadata.workflowKey;
-  body.className = metadata.className;
-  body.requestId = requestId;
   return body;
 }
 
 /**
  * @typedef {{ fetch(url: string, init: RequestInit): Promise<Response> }} WorkflowBackend
- * @typedef {{ requestId?: string, requestIdProvider?: () => string | null, backend?: WorkflowBackend }} WorkflowOptions
- * @typedef {{ ns?: string, worker?: string, version?: string, name?: string, workflowKey?: string, className?: string }} WorkflowMetadata
+ * @typedef {{ requestId?: string, requestIdProvider?: () => string | null }} WorkflowOptions
  * @typedef {(endpoint: string, fields: Record<string, unknown>) => Promise<Record<string, unknown>>} WorkflowCall
  */
 
@@ -149,15 +139,12 @@ export class WorkflowInstance {
 export class Workflow {
   /** @type {WorkflowBackend | undefined} */
   #backend;
-  /** @type {WorkflowMetadata} */
-  #metadata;
   /** @type {WorkflowOptions} */
   #options;
 
-  /** @param {WorkflowMetadata | null | undefined} metadata @param {WorkflowOptions} [options] */
-  constructor(metadata, options = {}) {
-    this.#metadata = metadata || {};
-    this.#backend = options?.backend;
+  /** @param {WorkflowBackend | undefined} backend @param {WorkflowOptions} [options] */
+  constructor(backend, options = {}) {
+    this.#backend = backend;
     this.#options = options || {};
   }
 
@@ -221,9 +208,8 @@ export class Workflow {
     if (!this.#backend || typeof this.#backend.fetch !== "function") {
       throw new Error("Workflow backend is not configured");
     }
-    const metadata = this.#metadata;
     const requestId = requestIdFromOptions(this.#options);
-    const body = workflowRequestBody(fields, metadata, requestId);
+    const body = workflowRequestBody(fields);
     const response = await this.#backend.fetch(`${WORKFLOWS_BASE_URL}/${endpoint}`, {
       method: "POST",
       headers: {

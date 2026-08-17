@@ -16,15 +16,6 @@ const WORKER_ENV_META_READ_BATCH_SIZE = 32;
 // secret mutation. Redis INCR results are parsed as JS numbers today, so this
 // uses the longest safe integer-shaped `v<int>` tag.
 export const WORKER_LOADER_ENV_VERSION_PLACEHOLDER = MAX_WORKER_VERSION_TAG;
-const ESTIMATED_DO_BACKEND = Object.freeze({ __wdlBinding: "internal", name: "DO_BACKEND" });
-const ESTIMATED_DO_OWNER_NETWORK = Object.freeze({
-  __wdlBinding: "internal",
-  name: "DO_OWNER_NETWORK",
-});
-const ESTIMATED_WORKFLOWS_BACKEND = Object.freeze({
-  __wdlBinding: "internal",
-  name: "WORKFLOWS_BACKEND",
-});
 /** @type {Parameters<typeof buildWorkerEnv>[7]} */
 const ESTIMATED_RUNTIME_CONTEXT = Object.freeze({
   exports: Object.freeze({
@@ -33,7 +24,10 @@ const ESTIMATED_RUNTIME_CONTEXT = Object.freeze({
     QueueProducer: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "queue", props }),
     D1Database: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "d1", props }),
     R2Bucket: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "r2", props }),
+    AiBinding: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "ai", props }),
     ServiceBinding: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "service", props }),
+    DurableObjectNamespace: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "do", props }),
+    WorkflowBinding: (/** @type {{ props: Record<string, unknown> }} */ { props }) => ({ __wdlBinding: "workflow", props }),
   }),
 });
 
@@ -87,23 +81,6 @@ function objectRecord(value) {
     : null;
 }
 
-/** @param {{ name: string, spec: Record<string, unknown>, ns: string, worker: string, version: string }} input */
-function estimatedDoBinding({ name, spec, ns, worker, version }) {
-  const props = {
-    ns,
-    worker,
-    version,
-    doStorageId: spec.doStorageId,
-    binding: name,
-    className: spec.className,
-  };
-  return {
-    __wdlBinding: "do",
-    ...props,
-    hostProxy: { __wdlBinding: "do-host-proxy", props },
-  };
-}
-
 /**
  * @param {{
  *   ns: string,
@@ -147,13 +124,7 @@ export function estimatedWorkerLoaderEnv({
     typeof assetsCdnBase === "string" && assetsCdnBase
       ? assetsCdnBase
       : ESTIMATED_ASSETS_CDN_BASE,
-    ESTIMATED_RUNTIME_CONTEXT,
-    ESTIMATED_DO_BACKEND,
-    {
-      doOwnerNetwork: ESTIMATED_DO_OWNER_NETWORK,
-      doBindingFactory: estimatedDoBinding,
-      workflowsBackend: ESTIMATED_WORKFLOWS_BACKEND,
-    }
+    ESTIMATED_RUNTIME_CONTEXT
   );
 
   let doAlarmStorageId = null;

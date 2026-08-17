@@ -83,7 +83,7 @@ CLI 读取 `wrangler.toml`、`wrangler.jsonc` 或 `wrangler.json`；三种格式
 
 WDL 遵循 Wrangler selected-env 继承规则：
 
-- 非继承 key 必须在每个 env 中重新声明：`vars`、`kv_namespaces`、`r2_buckets`、`d1_databases`、`services`、`queues`、`workflows`、Durable Object bindings 以及类似 binding table。
+- 非继承 key 必须在每个 env 中重新声明：`vars`、`kv_namespaces`、`r2_buckets`、`d1_databases`、`services`、`queues`、`workflows`、Durable Object bindings、`[ai]` 以及类似 binding table。
 - `assets` 这类可继承 key 遵循 Wrangler selected-env 行为，也可以显式覆盖。
 - `name` 和 `migrations` 这类 top-level-only key 出现在 env table 中会被拒绝。
 
@@ -91,8 +91,8 @@ WDL 遵循 Wrangler selected-env 继承规则：
 
 | 字段 | WDL 行为 |
 |---|---|
-| `name`、`main`、`compatibility_date`、`compatibility_flags` | 存入 immutable bundle metadata。Control 会拒绝早于 `2026-04-01` 的显式 `compatibility_date`，并在 commit 前拒绝格式错误、未来日期或当前 bundled workerd 不支持的值；包含 runtime/do-runtime 注入模块和生成 workflow keys 后的最终 WorkerCode 必须落在 workerd 64 MiB `workerLoader` code limit 内。 |
-| `[vars]` | 接受 string、number、boolean，并 stringified 进 `env`；vars、namespace/worker secrets、runtime 注入的 binding env value 必须落在 WDL 留有 headroom 的 workerd 1 MiB `workerLoader` env budget 内。Workflow identity 留在生成的 wrapper code 中，并由 WorkerCode budget 计数。 |
+| `name`、`main`、`compatibility_date`、`compatibility_flags` | 存入 immutable bundle metadata。Control 会拒绝早于 `2026-04-01` 的显式 `compatibility_date`，并在 commit 前拒绝格式错误、未来日期或当前 bundled workerd 不支持的值；包含 runtime/do-runtime 注入模块和 workflow import rewrite 后的最终 WorkerCode 必须落在 workerd 64 MiB `workerLoader` code limit 内。 |
+| `[vars]` | 接受 string、number、boolean，并 stringified 进 `env`；vars、namespace/worker secrets、runtime 注入的 binding env value 和 binding-scoped Workflow identity props 必须落在 WDL 留有 headroom 的 workerd 1 MiB `workerLoader` env budget 内。 |
 | `[[kv_namespaces]]` | `id` 是 platform-local KV namespace id，不是 Cloudflare UUID。 |
 | `[[r2_buckets]]` | `binding` 加 `bucket_name` 映射为平台 S3 bucket 下的 namespace-scoped virtual R2 bucket。 |
 | `[assets]` | `directory` 内容上传到 S3-compatible assets storage，并 auto-inject `ASSETS`。 |
@@ -105,6 +105,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 | `[triggers] crons` 和 `[[triggers.schedules]]` | Cloudflare-compatible UTC cron 加 WDL timezone extension。 |
 | `[[queues.producers]]` 和 `[[queues.consumers]]` | Producer 和 consumer metadata。`max_concurrency` 被拒绝。 |
 | `[[workflows]]` | Same-worker Workflows V2 binding。 |
+| `[ai]` | 声明一个 tenant binding name，例如 `binding = "AI"`。Provider metadata 和 credential 是由 `wdl ai` 单独管理的 namespace resource，不会进入 bundle，也不会继承到 selected environment。 |
 
 `[[analytics_engine_datasets]]` 在 top level 和 selected-env level 都会被 deploy 拒绝。Unsupported field 不应在暗示 WDL 未实现的平台行为时被静默忽略。
 
@@ -118,6 +119,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 - Secret mutation 必须显式选择 worker scope 或 namespace scope，避免误写 namespace-wide secret。提交的空字符串是已设置 secret，不是 unset。
 - D1 命令管理 namespace D1 database 和 forward-only migration file。Migration filename 是 migration id；已 apply 的文件不应 rename 或编辑。
 - R2 命令在 namespace 前缀 `r2/<ns>/` 下操作。空的 declared virtual bucket 在第一次写入对象前，不会出现在由 prefix 推导的 list 结果里。
+- AI 命令管理 namespace-scoped official-provider metadata、revision-CAS credential 和有界的 provider model metadata list。Credential 通过隐藏输入或 stdin 读取，绝不写入 Wrangler config。Provider state 遵循 namespace secret 生命周期，可以在最后一个 worker 删除后继续存在。
 - Workflows 命令通过 workflows service 操作；CLI 不得直接写 DB2。
 - Tail 命令通过 control 打开 live SSE session。
 
@@ -151,3 +153,5 @@ Tail 是 live debug 路径，不是 audit storage。Tail protocol 细节见 [Log
 - `tests/integration/r2-cli-binding.test.js`
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`
+
+CLI 仓库负责 `[ai]` parsing、extension stripping、provider command tests 和 `examples/ai-agent-demo` packaging path；平台侧 runtime/Control 合同由 `tests/integration/ai-binding.test.js` 保护。

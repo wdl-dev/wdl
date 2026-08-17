@@ -11,22 +11,27 @@ export class NonRetryableError extends Error {
 }
 `;
 
+export const HOST_BINDING_MODULE_NAMES = Object.freeze({
+  d1DataField: "_wdl-d1-data-field.js",
+  d1Client: "_wdl-d1-client.js",
+  d1Params: "_wdl-d1-params.js",
+  utf8: "_wdl-utf8.js",
+  sqlSplitter: "_wdl-sql-splitter.js",
+  d1Transport: "_wdl-d1-transport.js",
+  r2Client: "_wdl-r2-client.js",
+  r2Utils: "_wdl-r2-utils.js",
+  doClient: "_wdl-do-client.js",
+  doTransport: "_wdl-do-transport.js",
+  ownerEndpoint: "_wdl-owner-endpoint.js",
+  ownerHintCache: "_wdl-owner-hint-cache.js",
+  requestId: "_wdl-request-id.js",
+  workflowsClient: "_wdl-workflows-client.js",
+  aiClient: "_wdl-ai-client.js",
+});
+
 export const HOST_BINDING_RESERVED_MODULE_NAMES = Object.freeze([
   WORKFLOWS_MODULE_NAME,
-  "_wdl-d1-data-field.js",
-  "_wdl-d1-client.js",
-  "_wdl-d1-params.js",
-  "_wdl-utf8.js",
-  "_wdl-sql-splitter.js",
-  "_wdl-d1-transport.js",
-  "_wdl-r2-client.js",
-  "_wdl-r2-utils.js",
-  "_wdl-do-client.js",
-  "_wdl-do-transport.js",
-  "_wdl-owner-endpoint.js",
-  "_wdl-owner-hint-cache.js",
-  "_wdl-request-id.js",
-  "_wdl-workflows-client.js",
+  ...Object.values(HOST_BINDING_MODULE_NAMES),
   "_wdl-host-wrapper-runtime.js",
   "_wdl-wrapper.js",
 ]);

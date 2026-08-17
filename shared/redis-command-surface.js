@@ -70,6 +70,11 @@ export class RedisCommandSurface {
     return /** @type {number} */ (await this._exec("PUBLISH", channel, message));
   }
 
+  /** @param {string} script @param {string[]} [keys] @param {RedisArg[]} [args] */
+  async eval(script, keys = [], args = []) {
+    return this._exec("EVAL", script, String(keys.length), ...keys, ...args);
+  }
+
   /** @param {string} cursor @param {string} match @param {number} [count] @returns {Promise<[string, string[]]>} */
   async scan(cursor, match, count = 100) {
     const result = /** @type {[Uint8Array, Uint8Array[]]} */ (
@@ -111,6 +116,26 @@ export class RedisCommandSurface {
       keys.map((key) => ["HGETALL", key])
     ));
     return replies.map(decodeHashObject);
+  }
+
+  /**
+   * @param {string[]} hashKeys
+   * @param {string[]} keyListHashes
+   */
+  async hGetAllManyAndHKeysMany(hashKeys, keyListHashes) {
+    const replies = /** @type {unknown[]} */ (await this._execPipeline(
+      "HGETALL_HKEYS_PIPELINE",
+      [
+        ...hashKeys.map((key) => ["HGETALL", key]),
+        ...keyListHashes.map((key) => ["HKEYS", key]),
+      ]
+    ));
+    return {
+      hashes: replies.slice(0, hashKeys.length)
+        .map((reply) => decodeHashObject(/** @type {unknown[] | null} */ (reply))),
+      keyLists: replies.slice(hashKeys.length)
+        .map((reply) => decodeStringArray(/** @type {unknown[] | null} */ (reply))),
+    };
   }
 
   /** @param {string} hashKey @param {string} stringKey */

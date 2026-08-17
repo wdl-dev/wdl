@@ -473,6 +473,24 @@ test("prepareBundle: r2 binding requires safe bucketName", () => {
   assert.equal(meta.bindings.BUCKET.bucketName, "uploads");
 });
 
+test("prepareBundle: ai binding accepts exactly one declaration-only binding", () => {
+  assert.doesNotThrow(() => prepareBundle("w.js", { "w.js": "x" }, {
+    bindings: { AI: { type: "ai" } },
+  }));
+  assert.throws(
+    () => prepareBundle("w.js", { "w.js": "x" }, {
+      bindings: { AI: { type: "ai", provider: "openai" } },
+    }),
+    /accepts only/
+  );
+  assert.throws(
+    () => prepareBundle("w.js", { "w.js": "x" }, {
+      bindings: { AI: { type: "ai" }, OTHER_AI: { type: "ai" } },
+    }),
+    /at most one ai binding/
+  );
+});
+
 test("prepareBundle: service binding requires worker-name-shaped 'service'", () => {
   assert.throws(
     () => prepareBundle("w.js", { "w.js": "x" }, { bindings: { AUTH: { type: "service" } } }),
@@ -1108,6 +1126,14 @@ test("parseControlRoute: known endpoints map to action", () => {
   assertAuthRoute("/ns/foo/r2/buckets/uploads/objects/dir/a.txt", "HEAD", { action: "r2.object.head", ns: "foo" });
   assertAuthRoute("/ns/foo/r2/buckets/uploads/objects/dir/a.txt", "DELETE", { action: "r2.object.delete", ns: "foo" });
 
+  // ai
+  assertAuthRoute("/ns/foo/ai/providers", "GET", { action: "ai.provider.read", ns: "foo" });
+  assertAuthRoute("/ns/foo/ai/providers/openai", "GET", { action: "ai.provider.read", ns: "foo" });
+  assertAuthRoute("/ns/foo/ai/providers/openai", "PUT", { action: "ai.provider.write", ns: "foo" });
+  assertAuthRoute("/ns/foo/ai/providers/openai", "DELETE", { action: "ai.provider.write", ns: "foo" });
+  assertAuthRoute("/ns/foo/ai/providers/openai/credential", "PUT", { action: "ai.provider.write", ns: "foo" });
+  assertAuthRoute("/ns/foo/ai/models", "GET", { action: "ai.model.list", ns: "foo" });
+
   // worker lifecycle
   assertAuthRoute("/ns/foo/worker/bar/deploy", "POST", { action: "worker.deploy", ns: "foo" });
   assertAuthRoute("/ns/foo/worker/bar/promote", "POST", { action: "worker.promote", ns: "foo" });
@@ -1173,6 +1199,13 @@ test("parseControlRoute: dispatch shape carries handler params", () => {
     ns: "foo",
     subPath: ["buckets", "uploads", "objects", "", ""],
     action: "r2.object.get",
+  });
+  assert.deepEqual(parseControlRoute("/ns/foo/ai/providers/openai/credential", "PUT"), {
+    kind: "ai",
+    scopeRoute: "ai",
+    ns: "foo",
+    subPath: ["providers", "openai", "credential"],
+    action: "ai.provider.write",
   });
   assert.deepEqual(parseControlRoute("/ns/foo/workflows/api/orders/instances/id-1/restart", "POST"), {
     kind: "workflows",

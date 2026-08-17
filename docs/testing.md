@@ -67,6 +67,7 @@ Targeted local integration is still useful before pushing a PR:
 | Gateway/admin routing or auth | `tests/integration/gateway.test.js`, `tests/integration/auth-worker.test.js`, or the integration file that tests the touched route |
 | Deploy, promote, delete, lifecycle, or S3 cleanup | deploy/delete/control lifecycle integration files that cover the changed path |
 | Runtime binding metadata or facade behavior | the binding's focused integration file plus runtime/load unit tests |
+| AI binding, provider resolution, streaming, or WebSockets | `tests/integration/ai-binding.test.js`, the AI host/client unit suites, and `cargo test --locked -p redis-proxy ai::` |
 | D1 or DO owner/state behavior | the focused D1/DO integration file, including multi-runtime profile tests when ownership changes |
 | DO actor residency or workerd eviction behavior | `tests/integration/durable-objects-eviction.test.js`; it verifies the default `true` and explicit `false` selections, exercises eviction and a multi-runtime owner round trip, then restores the resident default |
 | Scheduler, queues, cron, or workflows | the focused queue/cron/workflows integration file plus the touched Rust crate tests |
@@ -189,6 +190,7 @@ Prefer the narrow helper that matches the response or fixture source:
 | Unit control handler module graph | `createControlHandlerState(...)` / `importControlHandler(...)` from `tests/helpers/control-handler-harness.js` | Use for `control/handlers/*` tests that need `control-shared` state, logs, env, metrics, Redis, or backend service stubs. |
 | Unit Control shared module graph | `compileControlSharedGraph(...)` / `compileControlSharedDependencies(...)` from `tests/helpers/load-control-shared.js` | Use for tests of `control/shared.js` and synthetic shared stubs instead of rebuilding its production-backed dependency graph. |
 | Unit runtime R2 binding module graph | `makeR2Bucket(...)` and fetch installers from `tests/helpers/load-runtime-r2-binding.js` | Use for `runtime/bindings/r2.js` host-surface tests instead of rebuilding the R2 module replacement graph in each file. |
+| Unit runtime AI binding module graph | `tests/helpers/load-runtime-ai-binding.js` | Use for the `runtime/bindings/ai*.js` host lifecycle, provider forwarding, deadline, stream, and WebSocket tests. |
 | Unit D1/DO owner-client module graph | `loadD1OwnerClient(...)` / `loadDoOwnerClient(...)` from `tests/helpers/load-d1-owner-client.js` and `tests/helpers/load-do-owner-client.js` | Use for owner forwarding client tests instead of rebuilding the state, protocol, internal-auth, and owner-forwarder replacement graph in each file. |
 | Unit auth entrypoint harness state | `authMockState(...)`, `authLogs(...)`, and `lastAuthLog(...)` from `tests/helpers/load-auth-index.js` | Tests should not read or write `globalThis.__authMockState` directly; the global is private storage for the harness' inline module mocks. |
 | Unit/integration Redis command parity | `redisConformanceCases` from `tests/helpers/redis-conformance-cases.js` | Add a shared case when fake Redis and the real integration Redis wrapper must agree on command semantics. Run `tests/unit/fake-redis.test.js` and the focused Redis conformance integration file. |
@@ -321,12 +323,12 @@ Prefer the narrow helper that matches the response or fixture source:
   `before(ensureStackUp)` plus `beforeEach(resetStack)`. Keep explicit hooks
   only when the file adds one-time setup, skips per-test reset, or restarts
   services.
-- `test-workers/` contains fixture workers that integration tests deploy or
-  read directly. Two layouts coexist on purpose: a full Wrangler workspace
-  (`package.json + wrangler.toml + src/`) for tests that go through the
-  CLI deploy path, and `src/`-only for fixtures the test inlines via
-  `readFileSync(new URL("../../test-workers/<name>/src/index.js", ...))`.
-  Pick by usage; see `test-workers/README.md`.
+- `test-workers/` contains fixtures that integration tests deploy, read directly,
+  or embed as hermetic workerd services. Three layouts coexist on purpose: full
+  Wrangler workspaces, source-only workers, and embedded services with
+  `config.capnp`. Pick by usage; see `test-workers/README.md`. The `ai-binding`,
+  `ai-openai-sdk`, and `ai-provider` fixtures respectively own the tenant facade,
+  SDK compatibility, and local official-provider protocol simulation.
 - `examples/` contains manual demos and reference projects.
   Integration tests should not silently depend on them unless the fixture
   has intentionally moved under `test-workers/`.

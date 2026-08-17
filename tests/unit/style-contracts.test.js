@@ -17,6 +17,7 @@ import {
   yamlDocuments,
 } from "../helpers/style-contract-scanner.js";
 import { jsFiles, readRepoFile, rustFiles, sourceFiles, withoutLineComments } from "../helpers/source-scan.js";
+import { AI_RUNTIME_SETTINGS } from "../../shared/ai-runtime-config.js";
 
 const CONTROL_FILES = jsFiles("control");
 const GATEWAY_FILES = jsFiles("gateway");
@@ -25,6 +26,11 @@ const D1_RUNTIME_FILES = jsFiles("d1-runtime");
 const DO_RUNTIME_FILES = jsFiles("do-runtime");
 const AUTH_FILES = jsFiles("auth");
 const SHARED_FILES = jsFiles("shared");
+const SYSTEM_RUNTIME_AI_CAPACITY = Object.freeze({
+  AI_REQUEST_MAX_IN_FLIGHT: 32,
+  AI_STREAM_MAX_IN_FLIGHT: 16,
+  AI_WS_MAX_SESSIONS: 8,
+});
 const PRODUCTION_JS_FILES = [
   ...AUTH_FILES,
   ...CONTROL_FILES,
@@ -94,6 +100,7 @@ const METRIC_ALLOWED_LABEL_KEYS = new Set([
   "mode",
   "operation",
   "outcome",
+  "pool",
   "reason",
   "route",
   "scope",
@@ -275,6 +282,17 @@ test("runtime R2 bucket grammar matches shared control grammar", () => {
   );
 });
 
+// The tenant-realm facade is embedded standalone, so pin its combined model
+// reference grammar to the two control-owned identifier grammars.
+test("runtime AI model reference grammar matches shared control grammar", () => {
+  const provider = extractRegex("shared/ns-pattern.js", "AI_PROVIDER_NAME_RE");
+  const alias = extractRegex("shared/ns-pattern.js", "AI_MODEL_ALIAS_RE");
+  const reference = extractRegex("runtime/ai-client.js", "AI_MODEL_REFERENCE_RE");
+  /** @param {string} literal */
+  const body = (literal) => literal.slice(2, -2);
+  assert.equal(reference, `/^${body(provider)}\\/${body(alias)}$/`);
+});
+
 test("runtime workflow clients use the same backend base URL", () => {
   assert.equal(
     extractStringConst(readRepoFile("runtime/workflows-client.js"), "WORKFLOWS_BASE_URL"),
@@ -433,6 +451,21 @@ test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
   assert.match(js, /return `secrets:\$\{ns\}:\$\{worker\}`/);
   assert.match(rust, /format!\("secrets:\{\}", q\.ns\)/);
   assert.match(rust, /format!\("secrets:\{\}:\{\}", q\.ns, q\.worker\)/);
+});
+
+test("AI persisted and wire contracts share one JS and Rust fixture", () => {
+  const jsReader = readRepoFile("tests/unit/ai-contract.test.js");
+  const rustReader = readRepoFile("rust/redis-proxy/src/ai.rs");
+  const fixture = "tests/fixtures/ai-contract.json";
+
+  assert.match(jsReader, new RegExp(RegExp.escape(fixture)));
+  assert.match(rustReader, /include_str!\("\.\.\/\.\.\/\.\.\/tests\/fixtures\/ai-contract\.json"\)/);
+
+  const jsContract = readRepoFile("shared/ai-contract.js");
+  assert.match(jsContract, /return `ai:providers:\$\{ns\}`/);
+  assert.match(jsContract, /return `ai:provider-credentials:\$\{ns\}`/);
+  assert.match(rustReader, /format!\("ai:providers:\{ns\}"\)/);
+  assert.match(rustReader, /format!\("ai:provider-credentials:\{ns\}"\)/);
 });
 
 test("worker delete lock key stays aligned across control and workflows", () => {
@@ -1004,6 +1037,22 @@ test("gateway strips every client-supplied platform header it injects", () => {
 
   const websocket = withoutLineComments(readRepoFile("gateway/websocket.js"));
   assert.match(websocket, /deleteGatewayInternalHeaders\(out\)/);
+});
+
+test("WebSocket backend-reconnect policy has one shared contract owner", () => {
+  const contract = withoutLineComments(readRepoFile("shared/worker-contract.js"));
+  const gateway = withoutLineComments(readRepoFile("gateway/websocket.js"));
+  const ai = withoutLineComments(readRepoFile("runtime/bindings/ai.js"));
+  const header = extractStringConst(contract, "WEBSOCKET_RECONNECT_POLICY_HEADER");
+  const disabled = extractStringConst(contract, "WEBSOCKET_RECONNECT_POLICY_DISABLED");
+
+  assert.equal(header, "x-wdl-websocket-reconnect-policy");
+  assert.equal(disabled, "disabled");
+  for (const source of [gateway, ai]) {
+    assert.match(source, /\bWEBSOCKET_RECONNECT_POLICY_HEADER\b/);
+    assert.match(source, /\bWEBSOCKET_RECONNECT_POLICY_DISABLED\b/);
+    assert.doesNotMatch(source, /"x-wdl-websocket-reconnect-policy"/);
+  }
 });
 
 test("D1 owner protocol errors stay aligned with runtime stale-hint handling", () => {
@@ -2016,6 +2065,7 @@ test("tenant worker egress stays public-only at the workerd boundary", () => {
   const userLocal = withoutLineComments(readRepoFile("runtime/config-user-local.capnp"));
   const system = withoutLineComments(readRepoFile("runtime/config-system.capnp"));
   const doRuntime = withoutLineComments(readRepoFile("do-runtime/config.capnp"));
+  const doRuntimeEvictable = withoutLineComments(readRepoFile("do-runtime/config-evictable.capnp"));
   const doRuntimeLocal = withoutLineComments(readRepoFile("do-runtime/config-local.capnp"));
   const runtimeLoad = withoutLineComments(readRepoFile("runtime/load.js"));
   const doLoad = withoutLineComments(readRepoFile("do-runtime/load.js"));
@@ -2047,6 +2097,28 @@ test("tenant worker egress stays public-only at the workerd boundary", () => {
   );
   assert.match(runtimeLoad, /globalOutbound:\s*env\.PUBLIC_NETWORK/);
   assert.match(doLoad, /globalOutbound:\s*env\.PUBLIC_NETWORK/);
+
+  for (const [file, source] of [
+    ["runtime/config-user.capnp", user],
+    ["runtime/config-system.capnp", system],
+    ["do-runtime/config.capnp", doRuntime],
+    ["do-runtime/config-evictable.capnp", doRuntimeEvictable],
+  ]) {
+    const aiNetwork = networkBlock(source, "ai-public-network");
+    assert.match(aiNetwork, /allow = \["public"\]/, `${file} AI network must be public-only`);
+    assert.doesNotMatch(aiNetwork, /"private"/, `${file} AI network must not allow private egress`);
+  }
+  for (const [file, source] of [
+    ["runtime/config-user.capnp", user],
+    ["runtime/config-system.capnp", system],
+    ["do-runtime/config.capnp", doRuntime],
+  ]) {
+    assert.match(
+      source,
+      /\(name = "AI_NETWORK", service = "ai-public-network"\)/,
+      `${file} must bind the AI adapter to its public-only network`
+    );
+  }
 });
 
 test("Valkey 9 is the local and Terraform baseline when HFE commands are used", () => {
@@ -2145,8 +2217,9 @@ test("workflow instance state is owned by workflows DB2", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("host wrapper hides raw exports whenever internal Fetchers are injected", () => {
+test("host wrapper exposes only binding-scoped DO and Workflow capabilities", () => {
   const source = withoutLineComments(readRepoFile("runtime/load/wrapper-generate.js"));
+  const envBuild = withoutLineComments(readRepoFile("runtime/load/env-build.js"));
   const wrapper = source.slice(
     source.indexOf("function generateHostBindingWrapperModule"),
     source.length
@@ -2154,16 +2227,17 @@ test("host wrapper hides raw exports whenever internal Fetchers are injected", (
   assert.match(wrapper, /const hidesRawEnvExports = doBindings\.length \|\| Object\.keys\(workflowBindings\)\.length;/);
   assert.match(wrapper, /const starExport = hidesRawEnvExports\s*\?\s*"[^"]*only wrapped entrypoints are re-exported\."/);
 
-  const envPreparation = source.slice(
-    source.indexOf("function envTemplateState"),
-    source.indexOf("async function notifyWorkflowCallback")
-  );
-  for (const binding of [
-    "DO_BACKEND_BINDING",
-    "DO_OWNER_NETWORK_BINDING",
-    "WORKFLOWS_BACKEND_BINDING",
+  assert.match(source, /const INTERNAL_BINDING_RE = \/\^__WDL_/);
+  assert.match(source, /if \(__WdlHostRuntime__\.regexpTest\(INTERNAL_BINDING_RE, name\)\) delete template\[name\]/);
+  assert.match(envBuild, /ctx\.exports\.DurableObjectNamespace\(\{/);
+  assert.match(envBuild, /ctx\.exports\.WorkflowBinding\(\{/);
+  for (const privateBinding of [
+    "__WDL_DO_BACKEND__",
+    "__WDL_DO_OWNER_NETWORK__",
+    "__WDL_WORKFLOWS_BACKEND__",
   ]) {
-    assert.match(envPreparation, new RegExp(`delete template\\[${RegExp.escape(binding)}\\]`));
+    assert.doesNotMatch(envBuild, new RegExp(RegExp.escape(privateBinding)));
+    assert.doesNotMatch(source, new RegExp(RegExp.escape(privateBinding)));
   }
 });
 
@@ -2270,9 +2344,11 @@ test("S3 cleanup lifecycle literals stay in shared lifecycle helper", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("D1 and DO workerd env tunables are exposed through capnp bindings", () => {
+test("D1, DO, and AI workerd env tunables are exposed through capnp bindings", () => {
   const d1 = withoutLineComments(readRepoFile("d1-runtime/config.capnp"));
   const doRuntime = withoutLineComments(readRepoFile("do-runtime/config.capnp"));
+  const userRuntime = withoutLineComments(readRepoFile("runtime/config-user.capnp"));
+  const systemRuntime = withoutLineComments(readRepoFile("runtime/config-system.capnp"));
   const exposed = (/** @type {string} */ source, /** @type {string} */ name) => new RegExp(
     `\\(name = "${name}", fromEnvironment = "${name}"\\)`
   ).test(source);
@@ -2305,6 +2381,83 @@ test("D1 and DO workerd env tunables are exposed through capnp bindings", () => 
     "DO_DRAIN_IN_FLIGHT_TIMEOUT_MS",
   ]) {
     assert.equal(exposed(doRuntime, name), true, `${name} must reach do-runtime workerd env`);
+  }
+
+  for (const name of Object.keys(AI_RUNTIME_SETTINGS)) {
+    for (const [service, source] of [
+      ["user-runtime", userRuntime],
+      ["system-runtime", systemRuntime],
+      ["do-runtime", doRuntime],
+    ]) {
+      assert.equal(exposed(source, name), true, `${name} must reach ${service} workerd env`);
+    }
+  }
+
+  for (const [service, source] of [
+    ["user-runtime", userRuntime],
+    ["system-runtime", systemRuntime],
+    ["do-runtime", doRuntime],
+  ]) {
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-capacity", esModule = embed /,
+      `${service} must embed the AI capacity lifecycle module`
+    );
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-provider", esModule = embed /,
+      `${service} must embed the AI provider adapter module`
+    );
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-sse", esModule = embed /,
+      `${service} must embed the AI SSE framing module`
+    );
+    assert.match(
+      source,
+      /\(name = "runtime-bindings-ai-websocket", esModule = embed /,
+      `${service} must embed the AI WebSocket state machine`
+    );
+  }
+});
+
+test("AI runtime defaults and tier overrides stay aligned across delivery surfaces", () => {
+  const compose = readRepoFile("docker-compose.yml");
+  const terraform = readRepoFile("terraform/modules/compute/locals.tf");
+  const kubernetes = readRepoFile("deploy/kubernetes/overlays/local/kustomization.yaml");
+  const kubernetesSystem = readRepoFile("deploy/kubernetes/base/system-runtime.yaml");
+  const infra = readRepoFile("docs/modules/infra.md");
+  const infraZh = readRepoFile("docs/modules/infra.zh.md");
+
+  for (const [name, { defaultValue }] of Object.entries(AI_RUNTIME_SETTINGS)) {
+    assert.match(
+      compose,
+      new RegExp(`${name}: \\$\\{${name}:-${defaultValue}\\}`),
+      `${name} Compose default must match the runtime owner`
+    );
+    assert.match(
+      kubernetes,
+      new RegExp(`- ${name}=${defaultValue}`),
+      `${name} Kubernetes default must match the runtime owner`
+    );
+    for (const [language, source] of [["EN", infra], ["ZH", infraZh]]) {
+      assert.match(
+        source,
+        new RegExp("\\| `" + name + "` \\| `" + defaultValue + "`(?: ?[（(][^\\n]+[）)])? \\|"),
+        `${name} ${language} documentation default must match the runtime owner`
+      );
+    }
+  }
+
+  for (const [name, defaultValue] of Object.entries(SYSTEM_RUNTIME_AI_CAPACITY)) {
+    assert.match(compose, new RegExp(`${name}: "${defaultValue}"`));
+    assert.match(terraform, new RegExp(`name = "${name}", value = "${defaultValue}"`));
+    assert.match(
+      kubernetesSystem,
+      new RegExp(`name: ${name}\\s+value: "${defaultValue}"`)
+    );
+    assert.match(infra, new RegExp("`" + defaultValue + "` on system-runtime"));
+    assert.match(infraZh, new RegExp("system-runtime 为 `" + defaultValue + "`"));
   }
 });
 
@@ -2359,7 +2512,7 @@ test("D1 and DO deployments keep explicit runtime memory ceilings", () => {
   }
 });
 
-test("Terraform ECS services keep their Fargate placement and rollout classes", () => {
+test("Terraform ECS services keep Fargate placement and start-before-stop rollout", () => {
   const cluster = readRepoFile("terraform/modules/compute/cluster.tf");
   const locals = readRepoFile("terraform/modules/compute/locals.tf");
   const assertCapacityProviderDependency = (
@@ -2376,60 +2529,42 @@ test("Terraform ECS services keep their Fargate placement and rollout classes", 
   assert.match(cluster, /capacity_providers\s+=\s+\["FARGATE", "FARGATE_SPOT"\]/);
   assert.match(
     locals,
-    /zero_downtime_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/,
+    /start_before_stop_deployment\s+=\s+\{\s*maximum_percent\s+=\s+200\s*minimum_healthy_percent\s+=\s+100\s*\}/,
   );
-  assert.match(
-    locals,
-    /stop_before_start_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+0\s*\}/,
-  );
-  assert.match(
-    locals,
-    /sequential_replacement_deployment\s+=\s+\{\s*maximum_percent\s+=\s+100\s*minimum_healthy_percent\s+=\s+50\s*\}/,
-  );
+  assert.doesNotMatch(locals, /stop_before_start_deployment|sequential_replacement_deployment/);
 
-  for (const file of [
+  const statelessFiles = [
     "terraform/modules/compute/gateway_service.tf",
     "terraform/modules/compute/runtime_service.tf",
     "terraform/modules/compute/system_runtime_service.tf",
-  ]) {
-    const source = readRepoFile(file);
-    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_stateless_capacity_provider_strategies/);
-    assertCapacityProviderDependency(source, file);
-    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
-    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
-  }
-
-  for (const file of [
+  ];
+  const onDemandFiles = [
     "terraform/modules/compute/d1_runtime_service.tf",
     "terraform/modules/compute/do_runtime_service.tf",
-  ]) {
-    const source = readRepoFile(file);
-    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
-    assertCapacityProviderDependency(source, file);
-    assert.match(source, /deployment\s+=\s+local\.sequential_replacement_deployment/);
-    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
-  }
-
-  for (const file of [
     "terraform/modules/compute/scheduler_service.tf",
-  ]) {
+    "terraform/modules/compute/workflows_service.tf",
+  ];
+  const rebalancingDisabledFiles = new Set([
+    "terraform/modules/compute/d1_runtime_service.tf",
+    "terraform/modules/compute/do_runtime_service.tf",
+    "terraform/modules/compute/scheduler_service.tf",
+  ]);
+
+  for (const file of [...statelessFiles, ...onDemandFiles]) {
     const source = readRepoFile(file);
     assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
     assertCapacityProviderDependency(source, file);
-    assert.match(source, /deployment\s+=\s+local\.stop_before_start_deployment/);
-    assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
-  }
-
-  {
-    const source = readRepoFile("terraform/modules/compute/workflows_service.tf");
-    assert.match(source, /requires_compatibilities\s+=\s+\["FARGATE"\]/);
-    assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
-    assertCapacityProviderDependency(source, "terraform/modules/compute/workflows_service.tf");
-    assert.match(source, /deployment\s+=\s+local\.zero_downtime_deployment/);
-    assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+    assert.match(source, /deployment\s+=\s+local\.start_before_stop_deployment/);
+    if (statelessFiles.includes(file)) {
+      assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_stateless_capacity_provider_strategies/);
+    } else {
+      assert.match(source, /capacity_provider_strategies\s+=\s+local\.fargate_ondemand_capacity_provider_strategies/);
+    }
+    if (rebalancingDisabledFiles.has(file)) {
+      assert.match(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+    } else {
+      assert.doesNotMatch(source, /availability_zone_rebalancing\s+=\s+"DISABLED"/);
+    }
   }
 });
 
@@ -2526,15 +2661,17 @@ test("owner endpoint validation lives in a shared contract owner", () => {
     assert.match(config, /name = "runtime-owner-endpoint-source"/);
   }
   for (const config of [userConfig, systemConfig]) {
-    const doOwnerNetwork = /const doOwnerNetworkWorker[\s\S]*?\n\);/.exec(config)?.[0] || "";
-    assert.match(doOwnerNetwork, /name = "shared-owner-endpoint"/);
+    assert.doesNotMatch(config, /doOwnerNetworkWorker|DO_OWNER_NETWORK/);
   }
 });
 
 test("DO transport relative dependencies are registered in host and loaded-worker module graphs", () => {
   const codeBudget = readRepoFile("runtime/load/code-budget.js");
-  assert.match(codeBudget, /\["_wdl-request-id\.js", sources\.requestIdSource\]/);
-  assert.match(codeBudget, /\["_wdl-do-transport\.js", sources\.doTransportSource\]/);
+  const moduleRewrite = readRepoFile("runtime/load/module-rewrite.js");
+  assert.match(moduleRewrite, /requestId: "_wdl-request-id\.js"/);
+  assert.match(moduleRewrite, /doTransport: "_wdl-do-transport\.js"/);
+  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.requestId, sources\.requestIdSource\]/);
+  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doTransport, sources\.doTransportSource\]/);
 
   for (const file of [
     "runtime/config-user.capnp",
@@ -2545,6 +2682,27 @@ test("DO transport relative dependencies are registered in host and loaded-worke
     assert.match(source, /name = "runtime-do-transport", esModule = embed/);
     assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
     assert.match(source, /name = "runtime-request-id-source", text = embed/);
+  }
+});
+
+test("binding-scoped host Fetchers receive caller disconnect signals", () => {
+  for (const file of [
+    "runtime/config-user.capnp",
+    "runtime/config-system.capnp",
+  ]) {
+    const source = readRepoFile(file);
+    assert.match(
+      source,
+      /compatibilityFlags = \[[^\]]*"enable_request_signal"[^\]]*\]/,
+      file
+    );
+  }
+  const doRuntime = readRepoFile("do-runtime/config.capnp");
+  for (const worker of ["doRuntimeWorker", "doRuntimeEvictableWorker"]) {
+    const block = doRuntime.match(
+      new RegExp(`const ${worker}[^=]*= \\(([\\s\\S]*?)\\n\\);`)
+    )?.[1] ?? "";
+    assert.match(block, /compatibilityFlags = \[[^\]]*"enable_request_signal"[^\]]*\]/, worker);
   }
 });
 

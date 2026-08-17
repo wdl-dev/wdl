@@ -10,30 +10,6 @@ export class __WdlAbort__ extends WorkerEntrypoint {
 const DEFAULT_EXPORT_SOURCE_SNIPPET = "const source = Function.prototype.toString.call(raw);";
 const DEFAULT_EXPORT_CLASS_TEST_SOURCE = "/^\\s*class\\b/.test(source)";
 
-/**
- * @typedef {{ ns: string, worker: string, version: string }} RuntimeWorkerIdentity
- */
-
-/**
- * @param {Record<string, unknown>} workflowBindings
- * @param {RuntimeWorkerIdentity | null | undefined} workerIdentity
- */
-function identifiedWorkflowBindings(workflowBindings, workerIdentity) {
-  const entries = Object.entries(workflowBindings);
-  if (entries.length === 0) return workflowBindings;
-  const { ns, worker, version } = workerIdentity || {};
-  if (typeof ns !== "string" || !ns || typeof worker !== "string" || !worker ||
-      typeof version !== "string" || !version) {
-    throw new Error("Workflow binding wrapper requires worker identity");
-  }
-  return Object.fromEntries(entries.map(([binding, metadata]) => {
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-      throw new Error(`Workflow binding "${binding}" requires metadata`);
-    }
-    return [binding, { ...metadata, ns, worker, version }];
-  }));
-}
-
 export const HOST_BINDING_RUNTIME_MODULE_NAME = "_wdl-host-wrapper-runtime.js";
 export const HOST_BINDING_RUNTIME_SOURCE = `
 import { sanitizeRequestId } from "./_wdl-request-id.js";
@@ -159,49 +135,63 @@ export default wrappedDefault;
 
 /**
  * @param {string} userMainSpecifier
- * @param {string[]} d1Bindings
- * @param {string[]} r2Bindings
- * @param {string[]} doBindings
- * @param {Record<string, unknown>} workflowBindings
- * @param {string[]} entrypointNames
- * @param {RuntimeWorkerIdentity | null | undefined} [workerIdentity]
+ * @param {{
+ *   d1Bindings?: string[],
+ *   r2Bindings?: string[],
+ *   doBindings?: string[],
+ *   workflowBindings?: Record<string, unknown>,
+ *   entrypointNames?: string[],
+ *   aiBindings?: string[],
+ *   importableEnvDisabled?: boolean,
+ * }} [options]
  */
-export function generateHostBindingWrapperModule(userMainSpecifier, d1Bindings, r2Bindings, doBindings, workflowBindings, entrypointNames, workerIdentity = null) {
+export function generateHostBindingWrapperModule(userMainSpecifier, options = {}) {
+  const {
+    d1Bindings = [],
+    r2Bindings = [],
+    doBindings = [],
+    workflowBindings = {},
+    entrypointNames = [],
+    aiBindings = [],
+    importableEnvDisabled = false,
+  } = options;
   const userMain = JSON.stringify(`./${userMainSpecifier}`);
   const d1BindingJson = JSON.stringify(d1Bindings);
   const r2BindingJson = JSON.stringify(r2Bindings);
   const doBindingJson = JSON.stringify(doBindings);
-  const workflowBindingJson = JSON.stringify(
-    identifiedWorkflowBindings(workflowBindings, workerIdentity)
-  );
+  const aiBindingJson = JSON.stringify(aiBindings);
+  const workflowBindingJson = JSON.stringify(Object.keys(workflowBindings));
   // Host facade helper modules are only added to workerCode when bindings
   // exist; importing them unconditionally would 404 the resolver.
   const d1Import = d1Bindings.length ? `import { D1Database } from "./_wdl-d1-client.js";` : "";
   const r2Import = r2Bindings.length ? `import { R2Bucket } from "./_wdl-r2-client.js";` : "";
   const doImport = doBindings.length ? `import { DurableObjectNamespace } from "./_wdl-do-client.js";` : "";
+  const aiImport = aiBindings.length ? `import { Ai } from "./_wdl-ai-client.js";` : "";
   const workflowImport = Object.keys(workflowBindings).length ? `import { Workflow } from "./_wdl-workflows-client.js";` : "";
   const hidesRawEnvExports = doBindings.length || Object.keys(workflowBindings).length;
   const starExport = hidesRawEnvExports
-    ? "// Internal Fetcher bindings are present; only wrapped entrypoints are re-exported."
+    ? "// Host facades are required; only wrapped entrypoints are re-exported."
     : `export * from ${userMain};`;
   const namedEntrypoints = entrypointNames.map((/** @type {string} */ name, index) => `
 const __WdlWrappedEntrypoint${index}__ = ({
   [${JSON.stringify(name)}]: class extends __WdlUserModule__.${name} {
     constructor(ctx, env) {
       const requestContext = createRequestContext();
-      super(ctx, wrapEnv(env, requestContext));
-      return wrapClassInstance(this, requestContext);
+      const wrappedEnv = wrapEnv(env, requestContext);
+      withTenantEnv(wrappedEnv, () => super(ctx, wrappedEnv));
+      return wrapClassInstance(this, requestContext, wrappedEnv);
     }
   },
 })[${JSON.stringify(name)}];
 export { __WdlWrappedEntrypoint${index}__ as ${name} };
 `).join("");
   return `
-import { WorkerEntrypoint, abortIsolate } from "cloudflare:workers";
+import { WorkerEntrypoint, abortIsolate, withEnv } from "cloudflare:workers";
 import * as __WdlHostRuntime__ from "./${HOST_BINDING_RUNTIME_MODULE_NAME}";
 ${d1Import}
 ${r2Import}
 ${doImport}
+${aiImport}
 ${workflowImport}
 import * as __WdlUserModule__ from ${userMain};
 // Explicit aliases replace same-name star exports without declaring tenant
@@ -219,10 +209,10 @@ export class __WdlWorkflowNotify__ extends WorkerEntrypoint {
 const D1_BINDINGS = ${d1BindingJson};
 const R2_BINDINGS = ${r2BindingJson};
 const DO_BINDINGS = ${doBindingJson};
+const AI_BINDINGS = ${aiBindingJson};
 const WORKFLOW_BINDINGS = ${workflowBindingJson};
-const DO_BACKEND_BINDING = "__WDL_DO_BACKEND__";
-const DO_OWNER_NETWORK_BINDING = "__WDL_DO_OWNER_NETWORK__";
-const WORKFLOWS_BACKEND_BINDING = "__WDL_WORKFLOWS_BACKEND__";
+const IMPORTABLE_ENV_DISABLED = ${JSON.stringify(importableEnvDisabled)};
+const AI_CATALOG_SCOPE = {};
 const HOST_BINDINGS_WRAPPED = __WdlHostRuntime__.createPrivateSymbol("wdl.host-bindings-wrapped");
 const INTERNAL_BINDING_RE = /^__WDL_[A-Za-z0-9_]*__$/;
 
@@ -240,12 +230,10 @@ function requestIdOptions(requestIdOrContext) {
     : { requestId: requestIdOrContext };
 }
 
-function doOptions(requestIdOrContext, backend, ownerNetwork) {
-  return { ...requestIdOptions(requestIdOrContext), backend, ownerNetwork };
-}
-
-function workflowOptions(requestIdOrContext, backend) {
-  return { ...requestIdOptions(requestIdOrContext), backend };
+function withTenantEnv(env, callback) {
+  return IMPORTABLE_ENV_DISABLED
+    ? __WdlHostRuntime__.applyFunction(callback, undefined, [])
+    : withEnv(env, callback);
 }
 
 function withRequestContext(context, arg, fn) {
@@ -267,40 +255,34 @@ function withRequestContext(context, arg, fn) {
   }
 }
 
-function wrapClassInstance(instance, requestContext) {
+function wrapClassInstance(instance, requestContext, wrappedEnv) {
   return __WdlHostRuntime__.createProxy(instance, {
     get(target, prop) {
-      const value = __WdlHostRuntime__.reflectGet(target, prop, target);
-      if (typeof value !== "function") return value;
-      return function(...args) {
-        return withRequestContext(requestContext, args[0], () =>
-          __WdlHostRuntime__.applyFunction(value, target, args));
-      };
+      return withTenantEnv(wrappedEnv, () => {
+        const value = __WdlHostRuntime__.reflectGet(target, prop, target);
+        if (typeof value !== "function") return value;
+        return function(...args) {
+          return withTenantEnv(wrappedEnv, () =>
+            withRequestContext(requestContext, args[0], () =>
+              __WdlHostRuntime__.applyFunction(value, target, args)));
+        };
+      });
     },
   });
 }
 
 let lastRawEnv = null;
-let lastEnvTemplateState = null;
+let lastEnvTemplate = null;
 
-function envTemplateState(env) {
-  if (env === lastRawEnv && lastEnvTemplateState) return lastEnvTemplateState;
+function envTemplate(env) {
+  if (env === lastRawEnv && lastEnvTemplate) return lastEnvTemplate;
   const template = { ...env };
-  const state = {
-    template,
-    doBackend: template[DO_BACKEND_BINDING],
-    doOwnerNetwork: template[DO_OWNER_NETWORK_BINDING],
-    workflowsBackend: template[WORKFLOWS_BACKEND_BINDING],
-  };
-  delete template[DO_BACKEND_BINDING];
-  delete template[DO_OWNER_NETWORK_BINDING];
-  delete template[WORKFLOWS_BACKEND_BINDING];
   __WdlHostRuntime__.forEachArray(__WdlHostRuntime__.objectKeys(template), (name) => {
     if (__WdlHostRuntime__.regexpTest(INTERNAL_BINDING_RE, name)) delete template[name];
   });
   lastRawEnv = env;
-  lastEnvTemplateState = state;
-  return state;
+  lastEnvTemplate = template;
+  return template;
 }
 
 function wrapEnv(env, requestIdOrContext = null) {
@@ -308,8 +290,7 @@ function wrapEnv(env, requestIdOrContext = null) {
   // and default handlers may re-enter with an env already wrapped by this
   // module. A symbol marker cannot be forged by tenant vars/secrets.
   if (!env || env[HOST_BINDINGS_WRAPPED] === true) return env;
-  const { template, doBackend, doOwnerNetwork, workflowsBackend } = envTemplateState(env);
-  const out = { ...template };
+  const out = { ...envTemplate(env) };
   __WdlHostRuntime__.forEachArray(D1_BINDINGS, (name) => {
     if (out[name] !== undefined) out[name] = new D1Database(out[name], requestIdOptions(requestIdOrContext));
   });
@@ -318,11 +299,16 @@ function wrapEnv(env, requestIdOrContext = null) {
   });
   __WdlHostRuntime__.forEachArray(DO_BINDINGS, (name) => {
     if (out[name] !== undefined) {
-      out[name] = new DurableObjectNamespace(out[name], doOptions(requestIdOrContext, doBackend, doOwnerNetwork));
+      out[name] = new DurableObjectNamespace(out[name], requestIdOptions(requestIdOrContext));
     }
   });
-  __WdlHostRuntime__.forEachObjectEntry(WORKFLOW_BINDINGS, (name, metadata) => {
-    out[name] = new Workflow(metadata, workflowOptions(requestIdOrContext, workflowsBackend));
+  __WdlHostRuntime__.forEachArray(AI_BINDINGS, (name) => {
+    if (out[name] !== undefined) {
+      out[name] = new Ai(out[name], requestIdOptions(requestIdOrContext), AI_CATALOG_SCOPE);
+    }
+  });
+  __WdlHostRuntime__.forEachArray(WORKFLOW_BINDINGS, (name) => {
+    out[name] = new Workflow(out[name], requestIdOptions(requestIdOrContext));
   });
   __WdlHostRuntime__.defineProperty(out, HOST_BINDINGS_WRAPPED, { value: true });
   return out;
@@ -374,11 +360,9 @@ async function notifyWorkflowCallback(request, env) {
 
 function wrapHandler(owner, fn) {
   return function(arg1, env, ctx) {
-    return __WdlHostRuntime__.applyFunction(fn, owner, [
-      arg1,
-      wrapEnv(env, requestIdFromEventArg(arg1)),
-      ctx,
-    ]);
+    const wrappedEnv = wrapEnv(env, requestIdFromEventArg(arg1));
+    return withTenantEnv(wrappedEnv, () =>
+      __WdlHostRuntime__.applyFunction(fn, owner, [arg1, wrappedEnv, ctx]));
   };
 }
 
@@ -409,8 +393,9 @@ if (raw && typeof raw === "object") {
     wrappedDefault = class extends raw {
       constructor(ctx, env) {
         const requestContext = createRequestContext();
-        super(ctx, wrapEnv(env, requestContext));
-        return wrapClassInstance(this, requestContext);
+        const wrappedEnv = wrapEnv(env, requestContext);
+        withTenantEnv(wrappedEnv, () => super(ctx, wrappedEnv));
+        return wrapClassInstance(this, requestContext, wrappedEnv);
       }
     };
   } else {
