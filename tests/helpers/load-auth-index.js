@@ -15,7 +15,6 @@ import { CLOUDFLARE_WORKERS_URL } from "./mocks/cloudflare-workers.js";
 import { sharedRedisStubUrl } from "./mocks/fake-redis.js";
 
 const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
-const SHARED_AUTH_TOKEN_URL = repositoryFileUrl("shared/auth-token.js");
 const SHARED_HEX_URL = repositoryFileUrl("shared/hex.js");
 const SHARED_RANDOM_ID_URL = repositoryFileUrl("shared/random-id.js");
 const SHARED_REDIS_LOCK_URL = freshRepositoryModuleDataUrl("shared/redis-lock.js", [
@@ -331,7 +330,6 @@ export async function loadAuthIndex(opts = {}) {
   /** @type {Array<[RegExp | string, string]>} */
   const authLibReplacements = [
     [/from "shared-ns-pattern"/g, `from ${JSON.stringify(SHARED_NS_URL)}`],
-    [/from "shared-auth-token"/g, `from ${JSON.stringify(SHARED_AUTH_TOKEN_URL)}`],
     [/from "shared-auth-roles"/g, `from ${JSON.stringify(sharedAuthRolesUrl)}`],
     [/from "shared-hex"/g, `from ${JSON.stringify(SHARED_HEX_URL)}`],
     [/from "shared-random-id"/g, `from ${JSON.stringify(SHARED_RANDOM_ID_URL)}`],

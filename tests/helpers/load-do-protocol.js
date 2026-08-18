@@ -24,6 +24,10 @@ const DO_IDENTITY_URL = repositoryModuleDataUrl("do-runtime/protocol/identity.js
   [/from "shared-utf8";/g, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
 ]);
 
+export function doProtocolErrorsDataUrl() {
+  return DO_ERRORS_URL;
+}
+
 export function doProtocolDataUrl() {
   return repositoryModuleDataUrl("do-runtime/protocol.js", [
     ...importSpecifierReplacements({

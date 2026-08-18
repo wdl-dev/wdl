@@ -22,7 +22,7 @@ import {
   realRuntimeInjectionSources,
   stubRuntimeInjectionSourcesUrl,
 } from "../helpers/runtime-injection-sources.js";
-import { staticModuleSpecifiers } from "../helpers/source-scan.js";
+import { executableModuleSpecifiers } from "../helpers/source-scan.js";
 import { makeTempDir, removeTempDir, withTempDir } from "../helpers/temp-dir.js";
 
 const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
@@ -1551,8 +1551,8 @@ function workerCodeModuleBytes(workerCode) {
 }
 
 /** @param {string} source @param {string} [fileName] */
-function sortedStaticModuleSpecifiers(source, fileName) {
-  return [...new Set(staticModuleSpecifiers(source, fileName))].sort();
+function sortedExecutableModuleSpecifiers(source, fileName) {
+  return [...new Set(executableModuleSpecifiers(source, fileName))].sort();
 }
 
 test("runtime injection stubs mirror the real source dependency graph", () => {
@@ -1566,8 +1566,8 @@ test("runtime injection stubs mirror the real source dependency graph", () => {
   );
   for (const property of Object.keys(realSources)) {
     assert.deepEqual(
-      sortedStaticModuleSpecifiers(stubSources[property], `${property}-stub.js`),
-      sortedStaticModuleSpecifiers(realSources[property], `${property}.js`),
+      sortedExecutableModuleSpecifiers(stubSources[property], `${property}-stub.js`),
+      sortedExecutableModuleSpecifiers(realSources[property], `${property}.js`),
       property,
     );
   }
@@ -1593,7 +1593,7 @@ test("runtime injected source rewrites produce a closed module graph", () => {
   const moduleNames = new Set(Object.keys(workerCode.modules));
   const missing = [];
   for (const [name, source] of Object.entries(workerCode.modules)) {
-    for (const specifier of staticModuleSpecifiers(source, name)) {
+    for (const specifier of executableModuleSpecifiers(source, name)) {
       if (
         specifier.startsWith("/") ||
         specifier.startsWith("node:") ||
@@ -1607,11 +1607,11 @@ test("runtime injected source rewrites produce a closed module graph", () => {
   }
   assert.deepEqual(missing, []);
   assert.deepEqual(
-    staticModuleSpecifiers(workerCode.modules["_wdl-d1-params.js"]),
+    executableModuleSpecifiers(workerCode.modules["_wdl-d1-params.js"]),
     ["./_wdl-utf8.js"],
   );
   assert.deepEqual(
-    staticModuleSpecifiers(workerCode.modules["_wdl-d1-transport.js"]),
+    executableModuleSpecifiers(workerCode.modules["_wdl-d1-transport.js"]),
     ["./_wdl-d1-data-field.js"],
   );
 });
@@ -1744,11 +1744,11 @@ test("workerLoader code estimator does not rewrite CommonJS workflow strings", (
   );
 });
 
-test("wrapWorkerCodeForHostBindings rejects empty reserved module collisions", () => {
+test("wrapWorkerCodeForHostBindings rejects root WDL-reserved module names", () => {
   for (const reserved of [
     "_wdl-wrapper.js",
     "_wdl-host-wrapper-runtime.js",
-    "_wdl-ai-client.js",
+    "_wdl-tenant-owned.js",
   ]) {
     const workerCode = {
       mainModule: "worker.js",
@@ -1763,9 +1763,30 @@ test("wrapWorkerCodeForHostBindings rejects empty reserved module collisions", (
         mainModule: "worker.js",
         modules: { "worker.js": { type: "module" } },
       }, STUB_RUNTIME_INJECTION_SOURCES),
-      /reserved module names/
+      /reserves root module names beginning "_wdl-"/
     );
   }
+});
+
+test("wrapWorkerCodeForHostBindings allows WDL-like names below the module root", () => {
+  const workerCode = {
+    mainModule: "src/_wdl-worker.js",
+    modules: {
+      "src/_wdl-worker.js": "export default {};",
+      "src/_wdl-helper.js": "export const value = 1;",
+    },
+  };
+
+  injectRuntimeModulesForHostBindings(workerCode, {
+    mainModule: "src/_wdl-worker.js",
+    modules: {
+      "src/_wdl-worker.js": { type: "module" },
+      "src/_wdl-helper.js": { type: "module" },
+    },
+  }, STUB_RUNTIME_INJECTION_SOURCES);
+
+  assert.equal(workerCode.mainModule, "_wdl-wrapper.js");
+  assert.equal(workerCode.modules["src/_wdl-helper.js"], "export const value = 1;");
 });
 
 test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserves original main module", () => {
@@ -2104,7 +2125,7 @@ test("wrapWorkerCodeForHostBindings: workers without host facades get only the a
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-r2-client.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-client.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], undefined);
-  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-transport.js"], undefined);
+  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-scoped-request.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], undefined);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /class NonRetryableError extends Error/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const D1_BINDINGS/);
@@ -2306,9 +2327,9 @@ test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object 
   });
   assert.equal(workerCode.mainModule, "_wdl-wrapper.js");
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-do-client.js"], /class DurableObjectNamespace/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-do-transport.js"], /function scopedDoRequest/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-do-scoped-request.js"], /function scopedDoRequest/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
-  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-scoped-request.js"], undefined);
+  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-transport.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-owner-endpoint.js"], undefined);
   assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-owner-hint-cache.js"], undefined);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \["ROOMS"\];/);
@@ -2316,25 +2337,6 @@ test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object 
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Room/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from/);
-});
-
-test("wrapWorkerCodeForHostBindings: preserves the previously unreserved scoped-request module name", () => {
-  const historicalSource = "export const tenantModule = true;";
-  const workerCode = {
-    mainModule: "worker.js",
-    modules: {
-      "worker.js": "export class Room {}; export default {};",
-      "_wdl-do-scoped-request.js": historicalSource,
-    },
-  };
-
-  wrapWorkerCodeForHostBindings(workerCode, {
-    bindings: { ROOMS: { type: "do", className: "Room", doStorageId: "do_0123456789abcdef0123456789abcdef" } },
-  });
-
-  const modules = /** @type {Record<string, string>} */ (workerCode.modules);
-  assert.equal(modules["_wdl-do-scoped-request.js"], historicalSource);
-  assert.match(modules["_wdl-do-transport.js"], /function scopedDoRequest/);
 });
 
 test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps workflow class", () => {
@@ -2713,7 +2715,7 @@ test("wrapWorkerCodeForHostBindings: workflow wrappers hide internal backend fro
 });
 
 test("wrapWorkerCodeForHostBindings: rejects reserved wrapper module as mainModule", () => {
-  for (const mainModule of ["_wdl-wrapper.js", "_wdl-ai-client.js"]) {
+  for (const mainModule of ["_wdl-wrapper.js", "_wdl-tenant-main.js"]) {
     assert.throws(
       () => wrapWorkerCodeForHostBindings(
         {
@@ -2722,7 +2724,7 @@ test("wrapWorkerCodeForHostBindings: rejects reserved wrapper module as mainModu
         },
         { bindings: { DB: { type: "d1", databaseId: "main" } } }
       ),
-      /reserved module names/
+      /reserves root module names beginning "_wdl-"/
     );
   }
 });

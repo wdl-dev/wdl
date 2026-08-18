@@ -27,6 +27,32 @@ and `.mjs`); normal module resolution also checks the production source they imp
 Non-JS fixtures such as JSON payloads, Markdown, and Cap'n Proto fixture files stay
 outside TypeScript.
 
+## Unused-Code Analysis Boundaries
+
+`npm run lint:unused`, Rust compiler warnings, Clippy, and `cargo-deny` remain useful
+within their declared graphs, but a green result does not prove that every shipped
+surface is reachable. Reviews and repository-specific contracts must account for six
+known boundaries:
+
+| Gate | Boundary | Required supplement |
+| --- | --- | --- |
+| Knip | `ignoreExportsUsedInFile` deliberately treats an export used in its own file as live, even when no external consumer exists. | When changing a public surface or entrypoint module, verify its external consumers and keep a narrow surface contract where the exact export set matters. |
+| Knip | Imports from tests count as consumers, so a production export or path reached only by tests is still reported as used. | Check reachability from production roots and use the owning cold-load or integration path when runtime availability is the contract. |
+| Knip | A re-export chain can keep an otherwise unused barrel member live through its implementation owner. | Review barrel consumers directly; stable barrels with a bounded contract should have a value-level surface guard. |
+| Knip | Cap'n Proto `text = embed` modules and JavaScript held inside generated source strings are outside the ordinary static import graph. | Keep executable workerd module roots reverse-reachable, include string-literal dynamic imports in that graph, reject computed dynamic imports in WDL-owned embedded modules, validate rewritten injected-source dependencies, compile every affected config, and exercise the loaded-worker path. |
+| Rust compiler and Clippy | `dead_code` does not identify an unused public `pub` item as dead merely because the workspace has no consumer. | Verify public items from crate/deployable roots and retain behavior or surface tests for public contracts that must exist. |
+| `cargo-deny` | It checks advisories, licenses, sources, and bans, not whether a direct Cargo dependency is unused. | Reconcile touched manifests with current source and feature trees; `cargo machete --with-metadata` is a supplementary local check, not a substitute for that review. |
+
+These are coverage boundaries, not reasons to replace the existing gates. Add the
+narrowest derived check for a demonstrated blind spot instead of building a second
+general-purpose linter in repository tests.
+
+Regression tripwires must have a reachable failure mode. When adding or materially
+changing one, temporarily introduce the prohibited shape or alter one expected golden
+value and verify that the focused test fails, then revert the mutation before commit.
+Prefer assertions derived from parsed configuration or imported values over source-text
+spelling checks.
+
 ## Artifact Model
 
 All workerd paths boot from compiled `dist/workerd-configs/*.bin` artifacts:
@@ -166,8 +192,6 @@ may read them, but they should not be regular user knobs.
 | `WDL_INTEGRATION_SLOT_PREPPED=1` | Marks that a slot already paid the full startup/restart preparation. |
 | `WDL_GATEWAY_HOST_PORT` | Per-slot gateway host port injected by the runner. |
 | `WDL_S3MOCK_HOST_PORT` | Per-slot s3mock host port injected by the runner. |
-
-Regression tripwires must have a reachable failure mode. When adding or materially changing one, temporarily introduce the prohibited shape or alter one expected golden value and verify that the focused test fails, then revert the mutation before commit. Prefer assertions derived from parsed configuration or imported values over source-text spelling checks.
 
 ## Helpers And Fixtures
 

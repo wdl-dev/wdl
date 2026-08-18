@@ -329,8 +329,6 @@ const authWorker :Workerd.Worker = (
     (name = "errors.js",              esModule = embed "../shared/errors.js"),
     (name = "shared-observability",  esModule = embed "../shared/observability.js"),
     (name = "shared-ns-pattern",     esModule = embed "../shared/ns-pattern.js"),
-    (name = "shared-auth-token",     esModule = embed "../shared/auth-token.js"),
-    (name = "utf8.js",               esModule = embed "../shared/utf8.js"),
     (name = "shared-auth-roles",     esModule = embed "../shared/auth-roles.js"),
     (name = "shared-worker-contract",        esModule = embed "../shared/worker-contract.js"),
     (name = "shared-hex",            esModule = embed "../shared/hex.js"),

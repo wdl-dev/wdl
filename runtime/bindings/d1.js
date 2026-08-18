@@ -12,6 +12,8 @@ import {
   isD1QueryTimeoutError,
 } from "shared-d1-timeout";
 import {
+  D1_OWNER_HINT_HEADERS,
+  D1_OWNERSHIP_CODES,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   decodeD1QueryResponse,
@@ -25,29 +27,7 @@ import { withInternalAuth } from "shared-internal-auth";
 import { errorMessage } from "shared-errors";
 import { contentTypeEssence } from "shared-respond";
 
-const D1_OWNER_HINT_HEADERS = {
-  taskId: "x-wdl-d1-owner-task-id",
-  endpoint: "x-wdl-d1-owner-endpoint",
-  generation: "x-wdl-d1-owner-generation",
-};
-const OWNER_HINT_STALE_CODES = new Set([
-  "not-owner",
-  "owner-not-ready",
-  "owner-unavailable",
-  "owner-record-invalid",
-  "owner-endpoint-missing",
-  "owner-endpoint-invalid",
-  "forward-hop-exhausted",
-  "owner-claim-raced",
-  "owner-takeover-raced",
-  "owner-rebalance-raced",
-  "owner-release-raced",
-  "owner-renew-raced",
-  "owner-lease-expired",
-  "owner-lease-too-short",
-  "lease-budget-exhausted",
-  "task-draining",
-]);
+const OWNER_HINT_STALE_CODES = new Set(D1_OWNERSHIP_CODES);
 const OWNER_ENDPOINT_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 const ownerHintKeys = new WeakMap();
 const ownerHintCache = createOwnerHintCache({

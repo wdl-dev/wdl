@@ -7,7 +7,6 @@ import {
   extractExportedStringConst,
   extractRegex,
   extractStringConst,
-  extractStringSetConst,
   fixtureSourceFile,
   markdownFiles,
   objectJsonPayloads,
@@ -17,15 +16,28 @@ import {
   yamlDocuments,
 } from "../helpers/style-contract-scanner.js";
 import {
+  executableModuleSpecifiers,
   jsFiles,
   readRepoFile,
   rustFiles,
   sourceFiles,
-  staticModuleSpecifiers,
+  withoutCapnpLineComments,
   withoutLineComments,
 } from "../helpers/source-scan.js";
 import { AI_RUNTIME_SETTINGS } from "../../shared/ai-runtime-config.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
+import {
+  HOST_BINDING_MODULE_NAMES,
+  RUNTIME_WRAPPER_MODULE_NAME,
+  WDL_RESERVED_MODULE_PREFIX,
+  WORKFLOWS_MODULE_NAME,
+  isWdlReservedModuleName,
+} from "../../runtime/load/module-rewrite.js";
+import { HOST_BINDING_RUNTIME_MODULE_NAME } from "../../runtime/load/wrapper-generate.js";
+import {
+  DO_ALARM_SHIM_MODULE,
+  DO_RUNTIME_RESERVED_MODULE,
+} from "../../do-runtime/load-code-budget.js";
 
 const CONTROL_FILES = jsFiles("control");
 const GATEWAY_FILES = jsFiles("gateway");
@@ -212,7 +224,9 @@ test("source scanners ignore generated dependency directories", () => {
 
 test("shared Redis public barrel exposes only its cross-tier consumer surface", () => {
   const source = withoutLineComments(readRepoFile("shared/redis.js"));
-  const valueExports = [...source.matchAll(/export\s*\{([^}]+)\}\s*from/g)]
+  const reexportPattern = /export\s*\{([^}]+)\}\s*from\s*["'][^"']+["'];?/g;
+  const reexports = [...source.matchAll(reexportPattern)];
+  const valueExports = reexports
     .flatMap((match) => match[1].split(","))
     .map((name) => name.trim())
     .filter(Boolean)
@@ -233,6 +247,11 @@ test("shared Redis public barrel exposes only its cross-tier consumer surface", 
     "redisDbFromEnv",
   ]);
   assert.deepEqual(typeExports, ["RedisCommandEvent", "RedisSetOptions"]);
+  assert.doesNotMatch(
+    source.replace(reexportPattern, ""),
+    /\bexport\b/,
+    "shared/redis.js must remain a pure re-export barrel",
+  );
 });
 
 test("shared primitive owners stay canonical", () => {
@@ -336,46 +355,67 @@ test("runtime AI clients use the same virtual origin", () => {
   );
 });
 
-test("D1 owner-hint headers stay aligned across JS tiers", () => {
+test("D1 owner-hint headers have one shared wire owner", () => {
   const expected = [
     "x-wdl-d1-owner-endpoint",
     "x-wdl-d1-owner-generation",
     "x-wdl-d1-owner-task-id",
   ];
-  for (const file of [
-    "runtime/bindings/d1.js",
-    "d1-runtime/router.js",
-    "control/d1-runtime-client.js",
-  ]) {
-    const headers = [...readRepoFile(file).matchAll(/["'](x-wdl-d1-owner-[a-z-]+)["']/g)]
-      .map((match) => match[1])
-      .toSorted();
-    assert.deepEqual(headers, expected, file);
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(/["'](x-wdl-d1-owner-[a-z-]+)["']/g)) {
+      occurrences.push([match[1], file]);
+    }
   }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "shared/d1-query-wire.js"]),
+  );
 });
 
-test("DO owner-fence request headers have one server-side owner", () => {
+test("DO owner headers have one shared wire owner", () => {
   const expected = [
+    "x-wdl-do-owner-endpoint",
     "x-wdl-do-owner-generation",
+    "x-wdl-do-owner-hint",
     "x-wdl-do-owner-key",
     "x-wdl-do-owner-task-id",
   ];
-  /** @type {Map<string, string[]>} */
-  const occurrences = new Map(expected.map((header) => [header, []]));
-  for (const file of [
-    "do-runtime/protocol.js",
-    "do-runtime/index.js",
-    "do-runtime/owner-client.js",
-  ]) {
-    for (const match of readRepoFile(file).matchAll(
-      /["'](x-wdl-do-owner-(?:generation|key|task-id))["']/g
-    )) {
-      occurrences.get(match[1])?.push(file);
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(/["'](x-wdl-do-owner-[a-z-]+)["']/g)) {
+      occurrences.push([match[1], file]);
     }
   }
-  for (const header of expected) {
-    assert.deepEqual(occurrences.get(header), ["do-runtime/protocol.js"], header);
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "runtime/_wdl-do-scoped-request.js"]),
+  );
+});
+
+test("DO owner-control headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-do-accept-owner-hint",
+    "x-wdl-do-ownership-error",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-do-(?:accept-owner-hint|ownership-error))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
   }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "runtime/_wdl-do-scoped-request.js"]),
+  );
 });
 
 test("D1 object field setters stay shared across codecs and row normalization", () => {
@@ -590,6 +630,32 @@ test("cross-language Redis key owners share one fixture", () => {
       rustReader,
     );
   }
+});
+
+test("D1 and DO owner TTL readers share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/owner-ttl-env.json";
+  for (const jsReader of [
+    "tests/unit/d1-owner-registry.test.js",
+    "tests/unit/do-owner-registry.test.js",
+  ]) {
+    assert.match(readRepoFile(jsReader), new RegExp(RegExp.escape(fixture)), jsReader);
+  }
+  assert.match(
+    readRepoFile("rust/supervisor/src/config.rs"),
+    /include_str!\(\s*"\.\.\/\.\.\/\.\.\/tests\/fixtures\/owner-ttl-env\.json"\s*\)/,
+  );
+});
+
+test("D1 and DO drain timeout readers share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/owner-drain-timeout-env.json";
+  assert.match(
+    readRepoFile("tests/unit/d1-owner-registry.test.js"),
+    new RegExp(RegExp.escape(fixture)),
+  );
+  assert.match(
+    readRepoFile("rust/supervisor/src/config.rs"),
+    /include_str!\(\s*"\.\.\/\.\.\/\.\.\/tests\/fixtures\/owner-drain-timeout-env\.json"\s*\)/,
+  );
 });
 
 test("Workflow tick writer, reader, and integration share one response fixture", () => {
@@ -1208,16 +1274,6 @@ test("WebSocket backend-reconnect policy has one shared contract owner", () => {
   }
 });
 
-test("D1 owner protocol errors stay aligned with runtime stale-hint handling", () => {
-  const protocol = withoutLineComments(readRepoFile("d1-runtime/protocol.js"));
-  const runtimeBinding = withoutLineComments(readRepoFile("runtime/bindings/d1.js"));
-
-  assert.deepEqual(
-    extractStringSetConst(runtimeBinding, "OWNER_HINT_STALE_CODES"),
-    extractStringSetConst(protocol, "OWNERSHIP_CODES")
-  );
-});
-
 test("JS tiers do not hand-roll structured console JSON logs", () => {
   const offenders = [];
   for (const file of PRODUCTION_JS_FILES) {
@@ -1258,39 +1314,35 @@ test("Redis callback warnings use the shared logger and stay non-sensitive", () 
   assert.match(source, /error_message:/);
 });
 
-test("shared relative imports stay at the reviewed module-identity baseline", () => {
-  const imports = [];
-  for (const file of SHARED_FILES.filter((path) => !path.startsWith("shared/vendor/"))) {
-    const source = withoutLineComments(readRepoFile(file));
-    for (const specifier of staticModuleSpecifiers(source, file)) {
-      if (specifier.startsWith("./")) imports.push(`${file}:${specifier}`);
-    }
-  }
-  assert.deepEqual(imports.sort(), [
-    "shared/assets-token.js:./hex.js",
-    "shared/auth-token.js:./utf8.js",
-    "shared/d1-params.js:./utf8.js",
-    "shared/d1-timeout.js:./errors.js",
-    "shared/observability.js:./errors.js",
-    "shared/observability.js:./hex.js",
-    "shared/queue-keys.js:./ns-pattern.js",
-    "shared/random-id.js:./hex.js",
-    "shared/redis-command-client.js:./errors.js",
-    "shared/redis-resp.js:./errors.js",
-    "shared/redis-session.js:./errors.js",
-    "shared/s3-cleanup-lifecycle.js:./assets-token.js",
-    "shared/s3-cleanup-lifecycle.js:./base64.js",
-    "shared/s3-retry.js:./respond.js",
-    "shared/secret-envelope.js:./base64.js",
-    "shared/worker-id.js:./ns-pattern.js",
-    "shared/worker-id.js:./worker-contract.js",
-  ]);
+test("executable module scanning includes bounded dynamic imports", () => {
+  assert.deepEqual(
+    executableModuleSpecifiers(`
+      import "./static.js";
+      export { value } from "./exported.js";
+      async function load() { return import("./dynamic.js"); }
+      const source = 'import("./generated-text.js")';
+    `, "fixture.js"),
+    ["./static.js", "./exported.js", "./dynamic.js"],
+  );
+  assert.throws(
+    () => executableModuleSpecifiers("import(moduleName)", "non-literal.js"),
+    /non-literal\.js: dynamic import specifier must be a string literal/,
+  );
+});
+
+test("Cap'n Proto module scans ignore hash-commented embeds", () => {
+  const source = withoutCapnpLineComments(`
+    # (name = "missing", esModule = embed "missing.js"),
+    (name = "worker", esModule = embed "worker.js"),
+  `);
+  assert.doesNotMatch(source, /missing/);
+  assert.match(source, /worker\.js/);
 });
 
 test("embedded worker module graphs are closed and reachable from their roots", () => {
   const defects = [];
   for (const configFile of WORKER_MODULE_CONFIG_FILES) {
-    const blocks = moduleListBlocks(withoutLineComments(readRepoFile(configFile)));
+    const blocks = moduleListBlocks(withoutCapnpLineComments(readRepoFile(configFile)));
     for (const [blockIndex, block] of blocks.entries()) {
       const owner = `${configFile}#${blockIndex + 1}`;
       const entries = embeddedModuleEntries(configFile, block);
@@ -1313,7 +1365,10 @@ test("embedded worker module graphs are closed and reachable from their roots", 
           continue;
         }
         const resolved = [];
-        for (const specifier of staticModuleSpecifiers(readRepoFile(entry.sourcePath), entry.sourcePath)) {
+        for (const specifier of executableModuleSpecifiers(
+          readRepoFile(entry.sourcePath),
+          entry.sourcePath,
+        )) {
           if (
             specifier.startsWith("/") ||
             specifier.startsWith("node:") ||
@@ -2848,12 +2903,12 @@ test("DO host transport and scoped facade dependencies stay in their owning modu
   const doClient = readRepoFile("runtime/do-client.js");
   const moduleRewrite = readRepoFile("runtime/load/module-rewrite.js");
   assert.match(moduleRewrite, /requestId: "_wdl-request-id\.js"/);
-  assert.match(moduleRewrite, /doTransport: "_wdl-do-transport\.js"/);
-  assert.doesNotMatch(moduleRewrite, /doScopedRequest: "_wdl-do-scoped-request\.js"/);
+  assert.match(moduleRewrite, /doScopedRequest: "_wdl-do-scoped-request\.js"/);
+  assert.doesNotMatch(moduleRewrite, /doTransport: "_wdl-do-transport\.js"/);
   assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.requestId, sources\.requestIdSource\]/);
-  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doTransport, sources\.doScopedRequestSource\]/);
+  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doScopedRequest, sources\.doScopedRequestSource\]/);
   assert.doesNotMatch(codeBudget, /sources\.(?:doTransport|ownerEndpoint|ownerHintCache)Source/);
-  assert.match(doClient, /import \{ scopedDoRequest \} from "\.\/_wdl-do-transport\.js";/);
+  assert.match(doClient, /import \{ scopedDoRequest \} from "\.\/_wdl-do-scoped-request\.js";/);
 
   for (const file of [
     "runtime/config-user.capnp",
@@ -2870,8 +2925,26 @@ test("DO host transport and scoped facade dependencies stay in their owning modu
   }
 });
 
+test("runtime-generated root module names stay inside the WDL-reserved namespace", () => {
+  assert.equal(WDL_RESERVED_MODULE_PREFIX, "_wdl-");
+  for (const name of [
+    RUNTIME_WRAPPER_MODULE_NAME,
+    WORKFLOWS_MODULE_NAME,
+    HOST_BINDING_RUNTIME_MODULE_NAME,
+    DO_RUNTIME_RESERVED_MODULE,
+    DO_ALARM_SHIM_MODULE,
+    ...Object.values(HOST_BINDING_MODULE_NAMES),
+  ]) {
+    assert.equal(isWdlReservedModuleName(name), true, name);
+  }
+  const codeBudget = readRepoFile("runtime/load/code-budget.js");
+  assert.match(codeBudget, /out\.set\(\s*RUNTIME_WRAPPER_MODULE_NAME,/);
+  assert.match(codeBudget, /workerCode\.mainModule = RUNTIME_WRAPPER_MODULE_NAME/);
+  assert.equal(isWdlReservedModuleName("src/_wdl-helper.js"), false);
+});
+
 test("source maps cover the runtime injection registry's embedded source owners", () => {
-  const registrySpecifiers = staticModuleSpecifiers(
+  const registrySpecifiers = executableModuleSpecifiers(
     readRepoFile("runtime/load/injection-sources.js"),
     "runtime/load/injection-sources.js",
   );

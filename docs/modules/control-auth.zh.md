@@ -155,7 +155,7 @@ Auth 子合同：
 - `control/lib.js::parseBundleMeta()` 是 persisted bundle `__meta__` 的唯一 parser。它要求值是 JSON object，并通过 error factory 让 routing、workflows、delete、deploy 和 env-budget 保留各自的 catch boundary。Bundle 缺失的语义仍由具体 use site 持有：当 projection 变更、唯一性证明、lifecycle cleanup、workflow view 或 environment budget 必须消费 metadata 才能产生正确结果时，只要权威 route 或 index 仍指向该 bundle，缺失就 fail closed。Deploy discovery/link preflight 不把缺失归类为 `corrupt_meta`；watched commit 会以 `target_drift` 拒绝缺失的 pinned service target。
 - Delegated issue 的 409 reason 有不同 retry 语义：`delegated_issue_busy` 表示 issuer/template lock 清除后可重试；`active_quota_exceeded` 在已有 delegated credential 过期或 revoke 前不应重试；`namespace_collision` 表示 Auth 已耗尽 configured candidate retry budget。
 - Control 5xx response 使用 generic/safe message。Internal exception text、auth Redis diagnostic、backend message 和 provider error 应进入日志；除非 endpoint 明确拥有某个 diagnostic response field，否则不进入客户端 body。Structured coded-error diagnostic string 在写入日志前截断为最多 2,048 个字符。
-- Deploy 在最终 WorkerCode 会碰撞 WDL 注入的 runtime/do-runtime 保留模块名或缺少必要 bundle metadata 时返回 `worker_code_invalid`，在最终 WorkerCode（包含 runtime/do-runtime 注入模块和 workflow import rewrite）超过 workerd 64 MiB dynamic code limit 时返回 `worker_code_too_large`。Deploy 和 secret mutation 在估算的 `workerLoader` env 超过 WDL headroomed 1 MiB budget 时返回 `worker_env_too_large`。`worker_env_too_large` details 包含 `namespace`、可选 `worker`、`env_bytes`、`max_env_bytes`、`upstream_max_env_bytes` 和 `headroom_bytes`。Deploy 阶段的逐版本检查还会包含 `version`。Secret mutation 重新估算既有 version 时，details 还会包含 `source_version` 和 `estimated_version`。`source_version` 是 operator 应检查、删除或 redeploy 的已存版本；`estimated_version` 是本次预算估算使用的 tag，在 worker-secret bump 路径中就是已分配的精确 bump version。
+- Deploy 在最终 WorkerCode 使用以 WDL 保留前缀 `_wdl-` 开头的 root module name 或缺少必要 bundle metadata 时返回 `worker_code_invalid`，在最终 WorkerCode（包含 runtime/do-runtime 注入模块和 workflow import rewrite）超过 workerd 64 MiB dynamic code limit 时返回 `worker_code_too_large`。Deploy 和 secret mutation 在估算的 `workerLoader` env 超过 WDL headroomed 1 MiB budget 时返回 `worker_env_too_large`。`worker_env_too_large` details 包含 `namespace`、可选 `worker`、`env_bytes`、`max_env_bytes`、`upstream_max_env_bytes` 和 `headroom_bytes`。Deploy 阶段的逐版本检查还会包含 `version`。Secret mutation 重新估算既有 version 时，details 还会包含 `source_version` 和 `estimated_version`。`source_version` 是 operator 应检查、删除或 redeploy 的已存版本；`estimated_version` 是本次预算估算使用的 tag，在 worker-secret bump 路径中就是已分配的精确 bump version。
 - Control 不直接调用 gateway。它写 Redis 并 publish invalidation message。
 - Control 在进入 Redis mutation loop 前加密 secret PUT value。加密/provider 失败会返回 control error，不写 plaintext fallback。
 - Control 同样会在 watched revision-CAS loop 前加密 AI credential，并且 provider read/list API 永不返回 plaintext。
@@ -170,7 +170,7 @@ Auth 子合同：
 - Reserved namespace red line 在 route parsing 和 auth evaluation 中都执行。
 - `ops` 是全平面权限。`ops-observer`、`ns`、`platform`、`platform-observer` 和 `token-issuer` 范围更窄。
 - Platform double-pin 规则：platform role 要读跨 namespace 细节，必须同时满足 platform principal kind 和匹配的 platform-tier namespace。
-- `x-admin-token` sanitizer 在 control 和 auth 间共享。
+- Control 在调用 Auth 前清理 `x-admin-token`；Auth 通过 JSRPC 接收有界 token value，不解析 request header。
 - Control 不携带 token-shaped 环境变量。唯一 server-side token env 是 auth 的 `BOOTSTRAP_TOKEN`；control 只通过 `AUTH` binding 调 auth。
 
 ## 可观测性

@@ -6,6 +6,7 @@ import {
 } from "shared-d1-timeout";
 import { decodeD1TransportForJson } from "shared-d1-transport";
 import {
+  D1_OWNER_HINT_HEADERS,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   decodeD1QueryResponse,
@@ -21,12 +22,6 @@ import { validOwnerEndpointForService } from "shared-owner-endpoint";
  * @typedef {{ taskId: string | null, endpoint: string | null, generation: number | null }} D1OwnerHint
  * @typedef {{ ok: boolean, status: number, body: unknown, owner?: D1OwnerHint | null }} D1RuntimeResult
  */
-
-const D1_OWNER_HINT_HEADERS = Object.freeze({
-  taskId: "x-wdl-d1-owner-task-id",
-  endpoint: "x-wdl-d1-owner-endpoint",
-  generation: "x-wdl-d1-owner-generation",
-});
 
 /** @param {unknown} err */
 function d1RuntimeTransportPayload(err) {

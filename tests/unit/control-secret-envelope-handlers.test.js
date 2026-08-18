@@ -5,7 +5,7 @@ import {
   controlSharedHarnessUrl,
   installControlHandlerState,
 } from "../helpers/control-handler-harness.js";
-import { decryptSecretValue, encryptSecretValue, isSecretEnvelope } from "../../shared/secret-envelope.js";
+import { decryptSecretValue, encryptSecretValue } from "../../shared/secret-envelope.js";
 import {
   applyModuleReplacements,
   moduleDataUrl,
@@ -261,7 +261,6 @@ test("namespace secret PUT stores an envelope instead of plaintext", async () =>
     assert.equal(attempts.length, 1);
     assert.equal(attempts[0].field, "TOKEN");
     assert.equal(redis.hashes.get("secrets:demo")?.TOKEN, attempts[0].value);
-    assert.equal(isSecretEnvelope(attempts[0].value), true);
     assert.equal(attempts[0].value.includes("plain-secret"), false);
     assert.equal(
       await decryptSecretValue(attempts[0].value, {
@@ -870,7 +869,6 @@ test("worker secret PUT encrypts before WATCH retries and reuses the envelope", 
     assert.equal(attempts[0].field, "TOKEN");
     assert.equal(attempts[0].value, attempts[1].value);
     assert.equal(redis.hashes.get("secrets:demo:api")?.TOKEN, attempts[1].value);
-    assert.equal(isSecretEnvelope(attempts[1].value), true);
     assert.equal(attempts[1].value.includes("plain-secret"), false);
     assert.equal(
       await decryptSecretValue(attempts[1].value, {

@@ -37,6 +37,8 @@ const {
   encodeD1QueryRequest,
   decodeD1QueryResponse,
   encodeD1QueryResponse,
+  D1_OWNER_HINT_HEADERS,
+  D1_OWNERSHIP_CODES,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
 } = await loadD1QueryWire();
@@ -84,6 +86,8 @@ const stubSourceReplacements = [
     /import \{[^}]*\} from "shared-d1-query-wire";/g,
     `const D1_QUERY_CONTENT_TYPE = ${JSON.stringify(D1_QUERY_CONTENT_TYPE)};
    const D1_QUERY_RESPONSE_CONTENT_TYPE = ${JSON.stringify(D1_QUERY_RESPONSE_CONTENT_TYPE)};
+   const D1_OWNER_HINT_HEADERS = Object.freeze(${JSON.stringify(D1_OWNER_HINT_HEADERS)});
+   const D1_OWNERSHIP_CODES = Object.freeze(${JSON.stringify(D1_OWNERSHIP_CODES)});
    const decodeD1QueryResponse = globalThis.__decodeD1QueryResponse;
    const encodeD1QueryRequest = globalThis.__encodeD1QueryRequest;`,
   ],

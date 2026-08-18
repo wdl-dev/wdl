@@ -24,8 +24,6 @@ import {
 import { recordBindingOperation } from "runtime-metrics";
 import {
   acquireAiLease,
-  aiPoolStateForTest,
-  resetAiPoolStateForTest,
 } from "runtime-bindings-ai-capacity";
 import {
   AiProviderRequestError,
@@ -36,9 +34,6 @@ import {
 } from "runtime-bindings-ai-provider";
 import { createAiStreamingResponse } from "runtime-bindings-ai-sse";
 import {
-  AI_WS_FRAME_MAX_BYTES,
-  AI_WS_MAX_JSON_DEPTH,
-  AI_WS_MAX_BYTES,
   closeAiWebSocket,
   createAiWebSocketBridge,
 } from "runtime-bindings-ai-websocket";
@@ -52,8 +47,6 @@ export const AI_REQUEST_MAX_JSON_DEPTH = 128;
 export const AI_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 export const AI_STREAM_MAX_BYTES = 32 * 1024 * 1024;
 export const AI_STREAM_FRAME_MAX_BYTES = 1024 * 1024;
-export { AI_WS_FRAME_MAX_BYTES, AI_WS_MAX_JSON_DEPTH, AI_WS_MAX_BYTES };
-export { aiPoolStateForTest, resetAiPoolStateForTest };
 
 const AI_INTERNAL_RESPONSE_MAX_BYTES = 512 * 1024;
 const AI_RESOLVE_ATTEMPTS = 2;

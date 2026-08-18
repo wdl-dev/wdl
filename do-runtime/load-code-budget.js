@@ -23,11 +23,6 @@ function doRuntimeClassNames(meta) {
   return [...out];
 }
 
-/** @param {WorkerMeta} meta */
-export function hasDoRuntimeInjectedModules(meta) {
-  return doRuntimeClassNames(meta).length > 0;
-}
-
 /**
  * @param {string} userMainSpecifier
  * @param {string[]} classNames

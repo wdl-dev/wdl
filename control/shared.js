@@ -42,17 +42,13 @@ import {
 } from "control-workflows-client";
 import {
   ControlAbort,
-  controlAbortLogDetails,
   codedErrorLogFields,
   codedErrorResponse,
   controlAbortResponse,
   secretEnvelopeErrorResponse,
 } from "control-errors";
 import { runOptimistic, withOptimisticRetries } from "control-optimistic";
-import {
-  DEFAULT_JSON_BODY_MAX_BYTES,
-  readJsonBody,
-} from "control-json-body";
+import { readJsonBody } from "control-json-body";
 import {
   acquireTokenLock,
   createTokenLock,
@@ -99,14 +95,13 @@ let r2Initialized = false;
 export { errorMessage, formatError, internalErrorResponse, jsonError, jsonResponse };
 export {
   ControlAbort,
-  controlAbortLogDetails,
   codedErrorLogFields,
   codedErrorResponse,
   controlAbortResponse,
   secretEnvelopeErrorResponse,
 };
 export { runOptimistic, withOptimisticRetries };
-export { DEFAULT_JSON_BODY_MAX_BYTES, readJsonBody };
+export { readJsonBody };
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
@@ -284,7 +279,7 @@ export function authPolicyResponse(err, requestId, command) {
  * @param {string} scope
  * @param {string} requestId
  */
-export async function publishOne(channel, payload, scope, requestId) {
+async function publishOne(channel, payload, scope, requestId) {
   const startedAt = Date.now();
   const log = requireControlLog();
   try {

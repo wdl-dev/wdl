@@ -1,8 +1,10 @@
 import { prototypeGetter, validOwnerEndpointForService } from "./_wdl-owner-endpoint.js";
 import { sanitizeRequestId } from "./_wdl-request-id.js";
-import { encodeDoObjectNameHeader } from "./_wdl-do-scoped-request.js";
-
-export { scopedDoRequest } from "./_wdl-do-scoped-request.js";
+import {
+  DO_OWNER_CONTROL_HEADERS,
+  DO_OWNER_HEADERS,
+  encodeDoObjectNameHeader,
+} from "./_wdl-do-scoped-request.js";
 
 export const DO_INVOKE_URL = "http://do-runtime/internal/do/invoke";
 export const DO_CONNECT_URL = "http://do-runtime/internal/do/connect";
@@ -12,20 +14,13 @@ export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
 const REQUEST_HEADER_UTF8_SCRATCH_BYTES = 2 * 1024;
-export const DO_ACCEPT_OWNER_HINT_HEADER = "x-wdl-do-accept-owner-hint";
-export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
-export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
+export const DO_ACCEPT_OWNER_HINT_HEADER = DO_OWNER_CONTROL_HEADERS.acceptHint;
+export const DO_OWNER_HINT_CONTROL_HEADER = DO_OWNER_HEADERS.hint;
+export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = DO_OWNER_CONTROL_HEADERS.ownershipError;
 export const DO_OWNER_HINT_CODE = "do_owner_hint";
 export const INTERNAL_AUTH_HEADER = "x-wdl-internal-auth";
-const DO_OWNER_HINT_HEADERS = {
-  ownerKey: "x-wdl-do-owner-key",
-  taskId: "x-wdl-do-owner-task-id",
-  endpoint: "x-wdl-do-owner-endpoint",
-  generation: "x-wdl-do-owner-generation",
-};
 const DO_OWNER_HINT_STRIP_HEADERS = [
-  ...Object.values(DO_OWNER_HINT_HEADERS),
-  DO_OWNER_HINT_CONTROL_HEADER,
+  ...Object.values(DO_OWNER_HEADERS),
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
 ];
 const DO_FETCH_STRIP_HEADERS = [
@@ -605,7 +600,7 @@ function cloneJsonRpcData(value, field, seen = new IntrinsicWeakSet()) {
 }
 
 /** @param {unknown} method */
-export function assertRpcMethod(method) {
+function assertRpcMethod(method) {
   if (
     typeof method !== "string" ||
     !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(method)
@@ -832,12 +827,12 @@ function ownerRequestUrl(owner, pathname) {
  * @returns {Record<string, string>}
  */
 export function ownerHintHeaders(owner, { control = false } = {}) {
-  const headers = {
-    [DO_OWNER_HINT_HEADERS.ownerKey]: owner.ownerKey,
-    [DO_OWNER_HINT_HEADERS.taskId]: owner.taskId,
-    [DO_OWNER_HINT_HEADERS.endpoint]: owner.endpoint,
-    [DO_OWNER_HINT_HEADERS.generation]: String(owner.generation),
-  };
+  const headers = /** @type {Record<string, string>} */ ({
+    [DO_OWNER_HEADERS.ownerKey]: owner.ownerKey,
+    [DO_OWNER_HEADERS.taskId]: owner.taskId,
+    [DO_OWNER_HEADERS.endpoint]: owner.endpoint,
+    [DO_OWNER_HEADERS.generation]: String(owner.generation),
+  });
   if (control) headers[DO_OWNER_HINT_CONTROL_HEADER] = "1";
   return headers;
 }
@@ -847,10 +842,10 @@ export function ownerHintHeaders(owner, { control = false } = {}) {
  * @returns {DoOwnerHint | null}
  */
 export function ownerHintFromHeaders(headers) {
-  const ownerKey = headerValue(headers, DO_OWNER_HINT_HEADERS.ownerKey);
-  const taskId = headerValue(headers, DO_OWNER_HINT_HEADERS.taskId);
-  const endpoint = headerValue(headers, DO_OWNER_HINT_HEADERS.endpoint);
-  const rawGeneration = headerValue(headers, DO_OWNER_HINT_HEADERS.generation);
+  const ownerKey = headerValue(headers, DO_OWNER_HEADERS.ownerKey);
+  const taskId = headerValue(headers, DO_OWNER_HEADERS.taskId);
+  const endpoint = headerValue(headers, DO_OWNER_HEADERS.endpoint);
+  const rawGeneration = headerValue(headers, DO_OWNER_HEADERS.generation);
   if (rawGeneration == null || rawGeneration === "") return null;
   const generation = numberValue(rawGeneration);
   if (

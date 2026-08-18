@@ -3,11 +3,11 @@ import {
   bytesToBase64,
 } from "./base64.js";
 
-export const SECRET_ENVELOPE_PREFIX = "WDL-ENC:";
-export const SECRET_ENVELOPE_VERSION = 1;
-export const SECRET_ENVELOPE_ALG = "AES-256-GCM";
-export const SECRET_ENVELOPE_LOCAL_KEY_ENV = "SECRET_ENVELOPE_LOCAL_KEY_B64";
-export const SECRET_ENVELOPE_KID_ENV = "SECRET_ENVELOPE_KID";
+const SECRET_ENVELOPE_PREFIX = "WDL-ENC:";
+const SECRET_ENVELOPE_VERSION = 1;
+const SECRET_ENVELOPE_ALG = "AES-256-GCM";
+const SECRET_ENVELOPE_LOCAL_KEY_ENV = "SECRET_ENVELOPE_LOCAL_KEY_B64";
+const SECRET_ENVELOPE_KID_ENV = "SECRET_ENVELOPE_KID";
 
 const AES_GCM_TAG_BYTES = 16;
 const AES_GCM_IV_BYTES = 12;
@@ -54,8 +54,6 @@ function bytesToText(bytes) {
   return utf8FatalDecoder.decode(bytes);
 }
 
-export { bytesToBase64 };
-
 /** @param {Record<string, unknown>} envelope */
 function canonicalEnvelopeJson(envelope) {
   /** @type {Record<string, unknown>} */
@@ -70,7 +68,7 @@ function canonicalEnvelopeJson(envelope) {
  * @param {{ allowEmpty?: boolean }} [options]
  * @returns {Uint8Array}
  */
-export function base64ToBytes(value, fieldName = "base64 field", { allowEmpty = false } = {}) {
+function base64ToBytes(value, fieldName = "base64 field", { allowEmpty = false } = {}) {
   if (typeof value !== "string" || (!allowEmpty && value.length === 0)) {
     const requirement = allowEmpty ? "a base64 string" : "a non-empty base64 string";
     throw new SecretEnvelopeError("invalid_envelope", `${fieldName} must be ${requirement}`);
@@ -88,7 +86,7 @@ export function base64ToBytes(value, fieldName = "base64 field", { allowEmpty = 
 }
 
 /** @param {number} length @returns {Uint8Array} */
-export function randomBytes(length) {
+function randomBytes(length) {
   const out = new Uint8Array(length);
   crypto.getRandomValues(out);
   return out;
@@ -333,14 +331,6 @@ function parseEnvelope(value) {
     throw new SecretEnvelopeError("invalid_envelope", "secret envelope ct is missing");
   }
   return /** @type {SecretEnvelope} */ (envelope);
-}
-
-/**
- * @param {unknown} value
- * @returns {boolean}
- */
-export function isSecretEnvelope(value) {
-  return typeof value === "string" && value.startsWith(SECRET_ENVELOPE_PREFIX);
 }
 
 /**

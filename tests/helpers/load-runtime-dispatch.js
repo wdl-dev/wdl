@@ -1,5 +1,5 @@
-// Each downstream rewrite targets the same URL so tests can reset the owning
-// replay-cache module instance used by `dispatch.js`.
+// workflow-step and tests share one replay-cache module instance so tests can
+// reset the owning state.
 
 import {
   importRepositoryModule,
@@ -60,7 +60,6 @@ export async function loadRuntimeDispatch() {
         [/from "runtime-lib";/, `from ${JSON.stringify(RUNTIME_LIB_URL)};`],
         [/from "runtime-metrics";/, `from ${JSON.stringify(METRICS_MOCK_URL)};`],
         [/from "runtime-dispatch-workflow-json";/g, `from ${JSON.stringify(workflowJsonUrl)};`],
-        [/from "runtime-dispatch-workflow-replay-cache";/g, `from ${JSON.stringify(workflowReplayCacheUrl)};`],
         [/from "runtime-dispatch-workflow-step";/g, `from ${JSON.stringify(workflowStepUrl)};`],
         [/from "runtime-tail-forwarder";/, `from ${JSON.stringify(tailForwarderUrl)};`],
       ]),

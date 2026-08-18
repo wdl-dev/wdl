@@ -65,7 +65,9 @@ const aiProviderUrl = repositoryModuleDataUrl("runtime/bindings/ai-provider.js")
 const aiWebSocketUrl = repositoryModuleDataUrl("runtime/bindings/ai-websocket.js", [
   [/from "shared-utf8";/, `from ${JSON.stringify(repositoryFileUrl("shared/utf8.js"))};`],
 ]);
+const aiCapacity = await import(aiCapacityUrl);
 const aiProvider = await import(aiProviderUrl);
+const aiWebSocket = await import(aiWebSocketUrl);
 
 const mod = await importRepositoryModule("runtime/bindings/ai.js", [
   [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
@@ -93,12 +95,16 @@ export const {
   AI_RESPONSE_MAX_BYTES,
   AI_STREAM_FRAME_MAX_BYTES,
   AI_STREAM_MAX_BYTES,
+} = mod;
+export const {
   AI_WS_FRAME_MAX_BYTES,
   AI_WS_MAX_JSON_DEPTH,
   AI_WS_MAX_BYTES,
+} = aiWebSocket;
+export const {
   aiPoolStateForTest,
   resetAiPoolStateForTest,
-} = mod;
+} = aiCapacity;
 export const { aiProviderWebSocketRequest } = aiProvider;
 
 export function resetAiHostTestState() {

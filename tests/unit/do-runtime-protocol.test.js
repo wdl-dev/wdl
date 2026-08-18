@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
-import { loadDoProtocol } from "../helpers/load-do-protocol.js";
+import { doProtocolErrorsDataUrl, loadDoProtocol } from "../helpers/load-do-protocol.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import {
@@ -17,6 +17,8 @@ import {
   doOwnershipErrorHeaders,
 } from "../helpers/do-owner-hint.js";
 
+const { doErrorResponse } = await import(doProtocolErrorsDataUrl());
+
 const {
   DoRuntimeError,
   DO_INVOKE_CONTENT_TYPE,
@@ -28,7 +30,6 @@ const {
   buildRpcRequest,
   encodeDoInvokeRequest,
   buildLocalActorRequest,
-  doErrorResponse,
   doPlatformErrorResponse,
   hostIdForObject,
   hostIdForShard,

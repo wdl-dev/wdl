@@ -1,10 +1,10 @@
 import {
   DO_INVOKE_CONTENT_TYPE,
-  DO_OWNER_FENCE_HEADERS,
   DO_OWNERSHIP_CODE,
   DoRuntimeError,
   encodeDoInvokeRequest,
 } from "do-runtime-protocol";
+import { DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
 import {
   log,
   metrics,
@@ -106,9 +106,9 @@ export async function forwardConnectToOwner(request, invoke, env, owner, request
       const headers = new Headers(request.headers);
       headers.set("x-wdl-do-forwarded", "1");
       headers.set("x-wdl-do-hop-count", String(nextHopCount));
-      headers.set(DO_OWNER_FENCE_HEADERS.ownerKey, owner.ownerKey);
-      headers.set(DO_OWNER_FENCE_HEADERS.taskId, owner.taskId);
-      headers.set(DO_OWNER_FENCE_HEADERS.generation, String(owner.generation));
+      headers.set(DO_OWNER_HEADERS.ownerKey, owner.ownerKey);
+      headers.set(DO_OWNER_HEADERS.taskId, owner.taskId);
+      headers.set(DO_OWNER_HEADERS.generation, String(owner.generation));
       return headers;
     },
     logFields: () => ({

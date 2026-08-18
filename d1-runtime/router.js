@@ -18,6 +18,7 @@ import {
 import {
   createD1QueryDeadline,
 } from "shared-d1-timeout";
+import { D1_OWNER_HINT_HEADERS } from "shared-d1-query-wire";
 import {
   D1ReadCache,
   payloadChangedDb,
@@ -47,11 +48,6 @@ import {
 } from "d1-runtime-state";
 import { d1QueryBytesResponse, d1QueryResponse } from "d1-runtime-http";
 
-const D1_OWNER_HINT_HEADERS = Object.freeze({
-  taskId: "x-wdl-d1-owner-task-id",
-  endpoint: "x-wdl-d1-owner-endpoint",
-  generation: "x-wdl-d1-owner-generation",
-});
 const D1_OWNER_HINT_HEADER_NAMES = Object.values(D1_OWNER_HINT_HEADERS);
 const ROUTER_READ_CACHE_MAX_DBS = 10_000;
 

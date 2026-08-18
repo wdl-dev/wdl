@@ -17,13 +17,14 @@ import {
   shouldRenewOwnerLease,
 } from "../helpers/load-do-owner-registry.js";
 import { parseStoredJson } from "../helpers/json-payload.js";
-import { sharedModuleDataUrl } from "../helpers/load-shared-module.js";
+import { readRepositoryJson, sharedModuleDataUrl } from "../helpers/load-shared-module.js";
 import {
   sessionPolicyKey,
   encodeSessionPolicyProjection,
 } from "../../shared/worker-contract.js";
 
 const { ownerLeaseExpiresAt } = await import(sharedModuleDataUrl("shared/owner-lease.js"));
+const OWNER_TTL_CONTRACT = readRepositoryJson("tests/fixtures/owner-ttl-env.json");
 
 // Simulated Redis clock advancement between owner check and renew-time reads.
 const REDIS_TIME_INCREMENT_AFTER_RENEW_MS = 200;
@@ -302,15 +303,12 @@ test("DO owner registry: lease guard config bounds values and permits test disab
 });
 
 test("DO owner TTL parsing always composes with lease expiry", () => {
-  for (const value of ["120.5", "0.4", "0", "-1", "", "abc", undefined]) {
-    const ttl = ownerTtlSeconds({ DO_OWNER_TTL_SECONDS: value });
-    assert.equal(ttl, 120, String(value));
-    assert.doesNotThrow(() => ownerLeaseExpiresAt(10_000, ttl), String(value));
+  for (const { name, raw, expected } of OWNER_TTL_CONTRACT.cases) {
+    const ttl = ownerTtlSeconds({ DO_OWNER_TTL_SECONDS: raw });
+    assert.equal(ttl, expected, name);
+    assert.doesNotThrow(() => ownerLeaseExpiresAt(10_000, ttl), name);
   }
-
-  const ttl = ownerTtlSeconds({ DO_OWNER_TTL_SECONDS: "45" });
-  assert.equal(ttl, 45);
-  assert.equal(ownerLeaseExpiresAt(10_000, ttl), 55_000);
+  assert.equal(ownerLeaseExpiresAt(10_000, ownerTtlSeconds({ DO_OWNER_TTL_SECONDS: "45" })), 55_000);
 });
 
 test("DO owner registry: claim writes owner generation counter", async () => {
@@ -510,6 +508,21 @@ test("DO owner registry: renewal time base validation rejects invalid values", (
       /Owner lease renewal time base is invalid/
     );
   }
+});
+
+test("DO owner registry: maximum accepted TTL does not renew a fresh lease", () => {
+  const maxTtl = OWNER_TTL_CONTRACT.max;
+  const now = 1_700_000_000_000;
+  const owner = ownerRecord({
+    ownerKey: OWNER_KEY,
+    hostId: OWNER_KEY,
+    leaseExpiresAt: ownerLeaseExpiresAt(now, maxTtl),
+  });
+
+  assert.equal(
+    shouldRenewOwnerLease({ DO_OWNER_TTL_SECONDS: String(maxTtl) }, owner, now),
+    false,
+  );
 });
 
 test("DO owner registry: draining task returns a healthy remote owner", async () => {

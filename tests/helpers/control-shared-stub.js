@@ -23,7 +23,7 @@ const {
 const CONTROL_SHARED_BASE = `
 import { jsonError, jsonResponse, sanitizeJsonErrorDetails } from ${JSON.stringify(SHARED_RESPOND_URL)};
 import { createPostWorkflowsInternal } from ${JSON.stringify(CONTROL_WORKFLOWS_CLIENT_URL)};
-import { ControlAbort, controlAbortLogDetails, codedErrorLogFields, codedErrorResponse, controlAbortResponse, secretEnvelopeErrorResponse } from ${JSON.stringify(CONTROL_ERRORS_URL)};
+import { ControlAbort, codedErrorLogFields, codedErrorResponse, controlAbortResponse, secretEnvelopeErrorResponse } from ${JSON.stringify(CONTROL_ERRORS_URL)};
 import { runOptimistic, withOptimisticRetries } from ${JSON.stringify(CONTROL_OPTIMISTIC_URL)};
 import { readJsonBody } from ${JSON.stringify(CONTROL_JSON_BODY_URL)};
 import { errorMessage } from ${JSON.stringify(SHARED_ERRORS_URL)};
@@ -32,7 +32,6 @@ import { randomHex } from ${JSON.stringify(SHARED_RANDOM_ID_URL)};
 import { formatError } from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};
 export {
   ControlAbort,
-  controlAbortLogDetails,
   codedErrorLogFields,
   codedErrorResponse,
   controlAbortResponse,

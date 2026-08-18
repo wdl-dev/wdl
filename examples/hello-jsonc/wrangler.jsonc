@@ -5,7 +5,7 @@
   "compatibility_date": "2026-04-24",
 
   // Proves the deploy CLI handles wrangler.jsonc (comments + JSON) the same
-  // way it handles wrangler.toml. No bindings — this is the minimal demo.
+  // way it handles wrangler.toml. No bindings - this is the minimal demo.
   "vars": {
     "GREETING": "hello from jsonc"
   }

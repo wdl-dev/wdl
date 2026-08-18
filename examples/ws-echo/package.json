@@ -1,0 +1,8 @@
+{
+  "name": "ws-echo",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^4.101.0"
+  }
+}

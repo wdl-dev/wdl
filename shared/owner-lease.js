@@ -1,8 +1,9 @@
-import { envValueOr } from "shared-env";
+import { canonicalPositiveIntegerEnv, envValueOr } from "shared-env";
 import { withOptimisticRetries } from "shared-optimistic-retry";
 
 const utf8Decoder = new TextDecoder();
 const OWNER_GENERATION_COUNTER = /^(?:0|[1-9]\d*)$/;
+const OWNER_TTL_MAX_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
 
 /**
  * @typedef {{ leaseExpiresAt?: number | null }} OwnerLeaseRecord
@@ -89,11 +90,26 @@ export function ownerLeaseExpiresAt(nowMs, ttlSeconds) {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
     throw new Error("Owner lease time base is invalid");
   }
-  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds <= 0) {
+  if (
+    !Number.isSafeInteger(ttlSeconds) ||
+    ttlSeconds <= 0 ||
+    ttlSeconds > OWNER_TTL_MAX_SECONDS
+  ) {
     throw new Error("Owner lease TTL is invalid");
   }
   const ttlMs = ttlSeconds * 1000;
   return Math.min(Number.MAX_SAFE_INTEGER, nowMs + ttlMs);
+}
+
+/**
+ * Keep workerd and supervisor lease schedules on the same environment syntax.
+ * @param {Record<string, unknown> | null | undefined} env
+ * @param {string} name
+ * @param {number} fallback
+ * @returns {number}
+ */
+export function ownerTtlSecondsEnv(env, name, fallback) {
+  return canonicalPositiveIntegerEnv(env, name, fallback, OWNER_TTL_MAX_SECONDS);
 }
 
 /**

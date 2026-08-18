@@ -337,8 +337,8 @@ Auth-specific contract:
   diagnostics, backend messages, and provider errors belong in logs unless the endpoint
   explicitly owns a diagnostic response field. Structured coded-error diagnostic strings
   are truncated to 2,048 characters before log emission.
-- Deploy returns `worker_code_invalid` when final WorkerCode would collide with injected
-  WDL runtime/do-runtime reserved module names or lacks required bundle metadata, and
+- Deploy returns `worker_code_invalid` when final WorkerCode uses a root module name
+  beginning the WDL-reserved `_wdl-` prefix or lacks required bundle metadata, and
   `worker_code_too_large` when final WorkerCode, including runtime/do-runtime-injected
   modules and workflow import rewrites, exceeds workerd's 64 MiB dynamic code limit.
   Deploy and secret mutations return `worker_env_too_large` when the estimated
@@ -383,7 +383,8 @@ Auth-specific contract:
   `token-issuer` have narrower scopes.
 - Platform double-pin rule: platform role cross-namespace details require both platform
   principal kind and matching platform-tier namespace.
-- `x-admin-token` sanitization is shared between control and auth.
+- Control sanitizes `x-admin-token` before calling Auth; Auth receives the bounded token
+  value through JSRPC and does not parse request headers.
 - Control carries no token-shaped environment variable. The only server-side token env
   is auth's `BOOTSTRAP_TOKEN`; control reaches auth through the `AUTH` binding.
 

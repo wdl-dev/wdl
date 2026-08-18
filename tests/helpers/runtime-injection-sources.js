@@ -70,7 +70,7 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
   r2UtilsSource:
     "export const R2_OBJECT_MAX_BUFFER_BYTES = 26214400;",
   doClientSource: stubSource(
-    ["./_wdl-do-transport.js", "./_wdl-request-id.js"],
+    ["./_wdl-do-scoped-request.js", "./_wdl-request-id.js"],
     "export class DurableObjectNamespace { constructor(stub) { this.stub = stub; } }",
   ),
   doScopedRequestSource: stubSource(

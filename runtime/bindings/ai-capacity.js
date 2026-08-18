@@ -132,6 +132,7 @@ export function acquireAiLease(binding, pool, durationMs, onDeadline) {
   return { release, schedule, transfer, get released() { return released; } };
 }
 
+/** @lintignore data-URL unit tests import this hook from a rewritten module. */
 export function resetAiPoolStateForTest() {
   for (const state of Object.values(poolStates)) {
     state.inUse = 0;
@@ -139,6 +140,7 @@ export function resetAiPoolStateForTest() {
   }
 }
 
+/** @lintignore data-URL unit tests import this hook from a rewritten module. */
 export function aiPoolStateForTest() {
   return Object.fromEntries(Object.entries(poolStates).map(([name, state]) => [name, { ...state }]));
 }

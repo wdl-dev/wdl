@@ -205,7 +205,10 @@ different `doStorageId`.
   facade only packages the public request, canonical object name, and diagnostic
   request id into a binding-scoped call. The connect transport deliberately omits the
   invoke-only router fallback required to preserve owner-established WebSocket
-  upgrades.
+  upgrades. Host adapters in one loader isolate share a process-local 10,000-entry LRU
+  keyed by `doStorageId`, class, and object name. Eviction only removes a routing hint;
+  the next request returns to the router, so high-cardinality traffic can increase
+  misses for other tenants but cannot cross an object identity or ownership fence.
 - Runtime materializes one host adapter per declared DO binding. Immutable adapter props
   fix namespace, worker version, storage identity, and class before internal auth is
   attached; loaded-worker env never contains a generic DO router or owner-network
@@ -272,16 +275,17 @@ Owner resolution is the single-writer protocol:
    same-task, same-generation CAS renew; if renewal fails, it fails closed. This guard
    narrows the takeover window; it is not a per-SQL-call or SQLite commit-time fence.
 6. Supervisor renews local owned scopes through `127.0.0.1:8788`; `/internal/do/probe`
-   exposes task and owner state for diagnostics. Drain stops new ownership and waits up
-   to `DO_DRAIN_IN_FLIGHT_TIMEOUT_MS` (default `8000`) for host-actor dispatches to
-   finish before releasing matching generations. If drain succeeds, `do-supervisor`
-   kills workerd directly instead of relying on workerd's post-SIGTERM graceful window,
-   which otherwise leaves the listener half-dead and can create a takeover 504 window.
-   If drain times out, it returns 503 and keeps leases intact so failover waits for
-   normal lease expiry. In-flight handlers also have a lease-budget watchdog that
-   rechecks ownership `DO_OWNER_LEASE_GUARD_MS` before expiry, forgets the affected owner
-   scope, and aborts the affected facet if renewal stops or ownership moves; it does not
-   put the whole task into draining state.
+   exposes task and owner state for diagnostics. Supervisor allows the local drain HTTP
+   call up to `DO_DRAIN_TIMEOUT_MS` (default `10000`). Within that request, do-runtime
+   stops new ownership and waits up to `DO_DRAIN_IN_FLIGHT_TIMEOUT_MS` (default `8000`)
+   for host-actor dispatches to finish before releasing matching generations. If drain
+   succeeds, `do-supervisor` kills workerd directly instead of relying on workerd's
+   post-SIGTERM graceful window, which otherwise leaves the listener half-dead and can
+   create a takeover 504 window. If drain times out, it returns 503 and keeps leases
+   intact so failover waits for normal lease expiry. In-flight handlers also have a
+   lease-budget watchdog that rechecks ownership `DO_OWNER_LEASE_GUARD_MS` before
+   expiry, forgets the affected owner scope, and aborts the affected facet if renewal
+   stops or ownership moves; it does not put the whole task into draining state.
 
 The generation key is not a cache. It is the fence that makes stale owners fail later
 owner-side checks after an expired Redis owner record disappears and a different task
@@ -415,6 +419,14 @@ WebSocket recovery after the initial 101.
 - Drain and renew must target the local `127.0.0.1:8788` service. A Service Connect or
   Kubernetes service alias may hit a different task and cannot express local-owner
   release semantics.
+- `DO_OWNER_TTL_SECONDS` is a canonical positive decimal string no greater than
+  `9007199254740`, so conversion from seconds to milliseconds remains a safe integer.
+  Non-canonical or out-of-range values fall back to 120 seconds in both workerd and its
+  supervisor so claim and renew schedules cannot diverge.
+- Supervisor-side `DO_DRAIN_TIMEOUT_MS` is a canonical positive decimal string no
+  greater than `9007199254740991`; invalid values fall back to 10000 milliseconds. It
+  bounds the supervisor's local HTTP call and is distinct from do-runtime's
+  `DO_DRAIN_IN_FLIGHT_TIMEOUT_MS` host-actor wait.
 - Changing `DO_PREVENT_EVICTION` requires a do-runtime rollout. Keep the default `true`
   for workloads that use hibernatable WebSockets or require resident actor state. Use
   `false` only after accepting the documented cold-dispatch and in-flight WebSocket

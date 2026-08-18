@@ -1,7 +1,7 @@
 import { BodyTooLargeError, readBoundedText } from "shared-bounded-body";
 import { jsonError } from "shared-respond";
 
-export const DEFAULT_JSON_BODY_MAX_BYTES = 1024 * 1024;
+const DEFAULT_JSON_BODY_MAX_BYTES = 1024 * 1024;
 
 /**
  * @param {Request} request

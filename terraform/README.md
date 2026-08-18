@@ -275,7 +275,7 @@ Client tooling sends the token as `X-Admin-Token`, usually via `ADMIN_TOKEN`:
 
 ```sh
 export ADMIN_TOKEN=$(AWS_PROFILE=<profile> terraform -chdir=terraform output -raw admin_token)
-wdl deploy ./test-workers/hello-jsonc --ns demo --control-url https://api.wdl.dev
+wdl deploy ./examples/hello-jsonc --ns demo --control-url https://api.wdl.dev
 ```
 
 The ALB listener only checks that `X-Admin-Token` is present on the admin host.

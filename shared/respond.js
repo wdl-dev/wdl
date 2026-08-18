@@ -108,7 +108,7 @@ export function sanitizeJsonErrorDetails(value) {
  * @param {{ omitEmptyMessage?: boolean }} [options]
  * @returns {Record<string, unknown>}
  */
-export function jsonErrorBody(error, message, details = {}, { omitEmptyMessage = true } = {}) {
+function jsonErrorBody(error, message, details = {}, { omitEmptyMessage = true } = {}) {
   /** @type {Record<string, unknown>} */
   const body = { error };
   if (message) {

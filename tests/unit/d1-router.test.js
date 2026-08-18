@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
+import { d1QueryWireDataUrl } from "../helpers/load-d1-protocol.js";
 import { applyModuleReplacements, moduleDataUrl, readRepositoryFile } from "../helpers/load-shared-module.js";
 import { sharedOwnerForwarderUrl } from "../helpers/load-owner-harness.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
@@ -117,6 +118,7 @@ const src = applyModuleReplacements(readRepositoryFile("d1-runtime/router.js"), 
   [/from "d1-runtime-task-identity";/, `from ${JSON.stringify(taskIdentityUrl)};`],
   [/from "shared-observability";/, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};`],
   [/from "shared-d1-timeout";/, `from ${JSON.stringify(timeoutUrl)};`],
+  [/from "shared-d1-query-wire";/, `from ${JSON.stringify(d1QueryWireDataUrl())};`],
   [/from "d1-runtime-read-cache";/, `from ${JSON.stringify(readCacheUrl)};`],
   [/from "d1-runtime-test-hooks";/, `from ${JSON.stringify(testHooksUrl)};`],
   [/from "d1-runtime-owner-registry";/, `from ${JSON.stringify(ownerRegistryUrl)};`],

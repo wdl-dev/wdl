@@ -1,17 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { bytesToBase64 } from "../../shared/base64.js";
 
 import {
-  SECRET_ENVELOPE_PREFIX,
-  bytesToBase64,
   decryptSecretValue,
   encryptSecretValue,
-  isSecretEnvelope,
 } from "../../shared/secret-envelope.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
 
 const SECRET_ENVELOPE_PARITY = readRepositoryJson("tests/fixtures/secret-envelope-parity.json");
+const SECRET_ENVELOPE_PREFIX = "WDL-ENC:";
 const env = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: SECRET_ENVELOPE_PARITY.provider.localKeyB64,
   SECRET_ENVELOPE_KID: SECRET_ENVELOPE_PARITY.provider.kid,
@@ -36,7 +35,6 @@ test("secret envelope generation and decrypt match the shared parity vectors", a
     });
 
     assert.equal(envelope, vector.envelope, vector.name);
-    assert.equal(isSecretEnvelope(envelope), true, vector.name);
     if (vector.plaintext !== "") assert.equal(envelope.includes(vector.plaintext), false, vector.name);
     assert.equal(
       await decryptSecretValue(envelope, {

@@ -110,6 +110,13 @@ services. Runtime therefore treats bindings as adapters:
 - Service and platform bindings use workerd JSRPC/fetch machinery, but control metadata
   decides which worker, namespace, version, and entrypoint are allowed.
 
+Root module names beginning `_wdl-` are reserved for WDL-generated modules. Control
+rejects new bundles that use the prefix, and runtime/do-runtime fail closed when
+cold-loading a persisted version that contains one. Existing versions must rename the
+module and redeploy; WDL does not provide a compatibility alias. Generated module
+exports are implementation details and not a tenant import surface. The reservation is
+root-only: a path such as `src/_wdl-helper.js` remains a tenant module name.
+
 KV is the simplest example. The runtime exports `KV` as a named entrypoint and
 instantiates one object per binding with `{ ns, id }` props. `get`, `put`, `delete`,
 `list`, batch `get`, and metadata calls all go to redis-proxy DB 1. redis-proxy stores

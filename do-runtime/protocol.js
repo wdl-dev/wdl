@@ -27,10 +27,14 @@ import {
   SESSION_POLICY_PRESERVE,
   parseVersion,
 } from "shared-worker-contract";
-import { decodeDoObjectNameHeader } from "_wdl-do-scoped-request.js";
+import {
+  decodeDoObjectNameHeader,
+  DO_OWNER_CONTROL_HEADERS,
+  DO_OWNER_HEADERS,
+} from "_wdl-do-scoped-request.js";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
-export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
+export { DoRuntimeError } from "do-runtime-protocol-errors";
 export {
   hostIdForObject,
   hostIdForShard,
@@ -52,7 +56,7 @@ export const DO_OWNERSHIP_CODE = Object.freeze({
   FORWARD_HOP_EXHAUSTED: "forward_hop_exhausted",
   TASK_DRAINING: "task_draining",
 });
-export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
+export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = DO_OWNER_CONTROL_HEADERS.ownershipError;
 /** @type {Set<string>} */
 const DO_OWNERSHIP_CODES = new Set(Object.values(DO_OWNERSHIP_CODE));
 
@@ -76,11 +80,6 @@ const ALARM_INTERNAL_URL = "https://do.internal/__wdl_alarm";
 const ALARM_INTERNAL_HEADER = "x-wdl-do-internal-alarm";
 const RPC_INTERNAL_URL = "https://do.internal/__wdl_rpc";
 const RPC_INTERNAL_HEADER = "x-wdl-do-internal-rpc";
-export const DO_OWNER_FENCE_HEADERS = Object.freeze({
-  ownerKey: "x-wdl-do-owner-key",
-  taskId: "x-wdl-do-owner-task-id",
-  generation: "x-wdl-do-owner-generation",
-});
 const CONNECT_HEADERS = {
   ns: "x-wdl-do-ns",
   worker: "x-wdl-do-worker",
@@ -91,10 +90,8 @@ const CONNECT_HEADERS = {
   requestUrl: "x-wdl-do-request-url",
 };
 const OWNER_HINT_PROTOCOL_HEADERS = [
-  "x-wdl-do-accept-owner-hint",
-  ...Object.values(DO_OWNER_FENCE_HEADERS),
-  "x-wdl-do-owner-endpoint",
-  "x-wdl-do-owner-hint",
+  DO_OWNER_CONTROL_HEADERS.acceptHint,
+  ...Object.values(DO_OWNER_HEADERS),
 ];
 const CONNECT_INTERNAL_HEADER_NAMES = new Set([
   INTERNAL_AUTH_HEADER,
@@ -566,9 +563,9 @@ function decodeConnectObjectName(value) {
 export function normalizeDoConnectRequest(request) {
   const headers = request.headers;
   const hasOwnerFence =
-    headers.has(DO_OWNER_FENCE_HEADERS.ownerKey) ||
-    headers.has(DO_OWNER_FENCE_HEADERS.taskId) ||
-    headers.has(DO_OWNER_FENCE_HEADERS.generation);
+    headers.has(DO_OWNER_HEADERS.ownerKey) ||
+    headers.has(DO_OWNER_HEADERS.taskId) ||
+    headers.has(DO_OWNER_HEADERS.generation);
   const body = {
     ns: headers.get(CONNECT_HEADERS.ns),
     worker: headers.get(CONNECT_HEADERS.worker),
@@ -578,9 +575,9 @@ export function normalizeDoConnectRequest(request) {
     objectName: decodeConnectObjectName(headers.get(CONNECT_HEADERS.objectName)),
     owner: hasOwnerFence
       ? {
-          ownerKey: headers.get(DO_OWNER_FENCE_HEADERS.ownerKey),
-          taskId: headers.get(DO_OWNER_FENCE_HEADERS.taskId),
-          generation: headers.get(DO_OWNER_FENCE_HEADERS.generation),
+          ownerKey: headers.get(DO_OWNER_HEADERS.ownerKey),
+          taskId: headers.get(DO_OWNER_HEADERS.taskId),
+          generation: headers.get(DO_OWNER_HEADERS.generation),
         }
       : undefined,
     request: {

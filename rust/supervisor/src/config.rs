@@ -1,9 +1,11 @@
 use crate::log;
-use wdl_rust_common::env::positive_or;
+use wdl_rust_common::JS_MAX_SAFE_INTEGER;
+use wdl_rust_common::env::{positive_bounded_decimal_or, positive_or};
 
 pub(crate) const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 10_000;
 pub(crate) const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 15_000;
 pub(crate) const DEFAULT_OWNER_TTL_SECONDS: u64 = 120;
+const OWNER_TTL_MAX_SECONDS: u64 = JS_MAX_SAFE_INTEGER / 1000;
 pub(crate) const DEFAULT_RENEW_START_DELAY_MS: u64 = 1_000;
 pub(crate) const DEFAULT_RENEW_TIMEOUT_MS: u64 = 5_000;
 pub(crate) const DEFAULT_RENEW_ERROR_GRACE_MS: u64 = 10_000;
@@ -107,18 +109,20 @@ pub(crate) fn shutdown_timeout_ms(config: &SupervisorConfig) -> u64 {
 }
 
 pub(crate) fn drain_timeout_ms(config: &SupervisorConfig) -> u64 {
-    positive_int_env(
-        config.env_prefix,
-        "DRAIN_TIMEOUT_MS",
+    let key = format!("{}DRAIN_TIMEOUT_MS", config.env_prefix);
+    positive_bounded_decimal_or(
+        std::env::var(key).ok(),
         DEFAULT_DRAIN_TIMEOUT_MS,
+        JS_MAX_SAFE_INTEGER,
     )
 }
 
 pub(crate) fn owner_ttl_seconds(config: &SupervisorConfig) -> u64 {
-    positive_int_env(
-        config.env_prefix,
-        "OWNER_TTL_SECONDS",
+    let key = format!("{}OWNER_TTL_SECONDS", config.env_prefix);
+    positive_bounded_decimal_or(
+        std::env::var(key).ok(),
         DEFAULT_OWNER_TTL_SECONDS,
+        OWNER_TTL_MAX_SECONDS,
     )
 }
 
@@ -271,6 +275,18 @@ mod tests {
     use super::*;
     use wdl_rust_common::test_env::with_temp_env;
 
+    fn owner_ttl_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../tests/fixtures/owner-ttl-env.json"))
+            .expect("owner TTL fixture must be valid JSON")
+    }
+
+    fn owner_drain_timeout_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/owner-drain-timeout-env.json"
+        ))
+        .expect("owner drain timeout fixture must be valid JSON")
+    }
+
     #[test]
     fn positive_int_env_accepts_only_strict_positive_integer_strings() {
         with_temp_env("WDLTEST_VAL", None, || {
@@ -303,18 +319,53 @@ mod tests {
     }
 
     #[test]
-    fn owner_ttl_ms_saturates_extreme_env_values() {
-        with_temp_env(
-            "WDLTEST_OWNER_TTL_SECONDS",
-            Some("18446744073709552"),
-            || {
-                let config = SupervisorConfig {
-                    env_prefix: "WDLTEST_",
-                    ..D1_CONFIG
-                };
-                assert_eq!(owner_ttl_ms(&config), u64::MAX);
-            },
+    fn owner_ttl_uses_the_cross_language_contract() {
+        let config = SupervisorConfig {
+            env_prefix: "WDLTEST_",
+            ..D1_CONFIG
+        };
+        let fixture = owner_ttl_fixture();
+        assert_eq!(
+            fixture["fallback"].as_u64(),
+            Some(DEFAULT_OWNER_TTL_SECONDS)
         );
+        assert_eq!(fixture["max"].as_u64(), Some(OWNER_TTL_MAX_SECONDS));
+        for case in fixture["cases"].as_array().expect("cases") {
+            let raw = case["raw"].as_str();
+            let expected = case["expected"].as_u64().expect("expected");
+            with_temp_env("WDLTEST_OWNER_TTL_SECONDS", raw, || {
+                assert_eq!(
+                    owner_ttl_seconds(&config),
+                    expected,
+                    "{}",
+                    case["name"].as_str().expect("name")
+                );
+                assert_eq!(owner_ttl_ms(&config), expected * 1000);
+            });
+        }
+    }
+
+    #[test]
+    fn drain_timeout_uses_the_cross_language_contract() {
+        let fixture = owner_drain_timeout_fixture();
+        assert_eq!(fixture["fallback"].as_u64(), Some(DEFAULT_DRAIN_TIMEOUT_MS));
+        assert_eq!(fixture["max"].as_u64(), Some(JS_MAX_SAFE_INTEGER));
+        for config in [&D1_CONFIG, &DO_CONFIG] {
+            let key = format!("{}DRAIN_TIMEOUT_MS", config.env_prefix);
+            for case in fixture["cases"].as_array().expect("cases") {
+                let raw = case["raw"].as_str();
+                let expected = case["expected"].as_u64().expect("expected");
+                with_temp_env(&key, raw, || {
+                    assert_eq!(
+                        drain_timeout_ms(config),
+                        expected,
+                        "{}:{}",
+                        config.service,
+                        case["name"].as_str().expect("name")
+                    );
+                });
+            }
+        }
     }
 
     #[test]

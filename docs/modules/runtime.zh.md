@@ -48,6 +48,8 @@ workerd 提供 isolate、module evaluation、named entrypoint 和 JSRPC 机制�
 - ASSETS 是 deploy artifact URL helper：control 在 deploy 时把 assets 上传到 S3-compatible storage；runtime 读取 `__meta__.assets` 和 `ASSETS_CDN_BASE`，只暴露 `env.ASSETS.url(path)` 用来生成 tokenized CDN URL。
 - Service 和 platform binding 使用 workerd JSRPC/fetch 机制，但 control metadata 决定允许访问哪个 worker、namespace、version 和 entrypoint。
 
+以 `_wdl-` 开头的 root module name 由 WDL generated module 保留。Control 会拒绝使用该前缀的新 bundle，runtime/do-runtime 在 cold-load 包含该名称的 persisted version 时 fail closed。既有 version 必须重命名 module 并重新部署；WDL 不提供 compatibility alias。Generated module export 是实现细节，不属于 tenant import surface。该保留规则只作用于 root，`src/_wdl-helper.js` 这类路径仍是合法 tenant module name。
+
 KV 是最直接的例子。Runtime 把 `KV` 导出成 named entrypoint，并用 `{ ns, id }` props 为每个 binding 实例化一个对象。`get`、`put`、`delete`、`list`、batch `get` 和 metadata 调用都进入 redis-proxy DB 1。redis-proxy 把每个 namespace/id 拆成 32 个 hash bucket，key 形如 `kvh:<ns>:<id>:b:<bucket>`；value field 是 `v:<key>`，metadata field 是 `m:<key>`。Put 使用 `HSET`/`HSETEX` 和 hash-field expiration，delete 同时删除 value 和 metadata field，list 用 opaque cursor 扫 bucket field，batch/list metadata 路径会在 base64 response encoding 前检查 aggregate raw value/metadata byte budget。
 
 ## Binding Surface 合同

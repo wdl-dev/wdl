@@ -3,6 +3,7 @@ import {
   createOwnerClientHarness,
   importOwnerClientModule,
 } from "./load-owner-harness.js";
+import { repositoryFileUrl } from "./load-shared-module.js";
 
 export const protocolUrl = doProtocolDataUrl();
 const { DO_INVOKE_CONTENT_TYPE: invokeContentType } = await loadDoProtocol();
@@ -12,6 +13,7 @@ const ownerHarness = createOwnerClientHarness("__doOwnerClientTestState", "do-ru
 
 const doOwnerClientModule = await importOwnerClientModule("do-runtime/owner-client.js", {
   "do-runtime-protocol": protocolUrl,
+  "_wdl-do-scoped-request.js": repositoryFileUrl("runtime/_wdl-do-scoped-request.js"),
   "shared-internal-auth": ownerHarness.internalAuthUrl,
   "shared-owner-forwarder": ownerHarness.ownerForwarderUrl,
   "shared-owner-lease": ownerHarness.ownerLeaseUrl,

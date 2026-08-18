@@ -4,17 +4,14 @@ import {
   estimateWorkerLoaderUserCodeBytes,
 } from "runtime-load-code-budget";
 import { RUNTIME_INJECTION_SOURCES } from "runtime-load-injection-sources";
-import { HOST_BINDING_RESERVED_MODULE_NAMES } from "runtime-load-module-rewrite";
 import {
-  DO_ALARM_SHIM_MODULE,
-  DO_RUNTIME_RESERVED_MODULE,
-  estimateDoRuntimeInjectedCodeBytes,
-  hasDoRuntimeInjectedModules,
-} from "do-runtime-load-code-budget";
+  RUNTIME_WRAPPER_MODULE_NAME,
+  WDL_RESERVED_MODULE_PREFIX,
+  isWdlReservedModuleName,
+} from "runtime-load-module-rewrite";
+import { estimateDoRuntimeInjectedCodeBytes } from "do-runtime-load-code-budget";
 import { errorMessage } from "shared-errors";
 import { DO_ALARM_SHIM_SOURCE } from "do-runtime-alarm-shim-source";
-
-export { WORKER_LOADER_CODE_MAX_BYTES };
 
 export class WorkerCodeBudgetError extends Error {
   /**
@@ -52,30 +49,16 @@ function wrapWorkerCodeInvalid(err, details) {
 }
 
 /**
- * @param {{ mainModule?: unknown, [key: string]: unknown }} meta
- */
-function reservedModuleNamesForMeta(meta) {
-  const names = [...HOST_BINDING_RESERVED_MODULE_NAMES];
-  if (hasDoRuntimeInjectedModules(meta)) {
-    names.push(DO_ALARM_SHIM_MODULE, DO_RUNTIME_RESERVED_MODULE);
-  }
-  return names;
-}
-
-/**
  * @param {{
  *   mainModule: unknown,
- *   meta: { mainModule?: unknown, [key: string]: unknown },
  *   normalized: Array<[string, string | Uint8Array]>,
  *   ns?: string,
  *   worker?: string,
  *   version?: string,
  * }} args
  */
-function assertFinalWorkerCodeShape({ mainModule, meta, normalized, ns, worker, version }) {
+function assertFinalWorkerCodeShape({ mainModule, normalized, ns, worker, version }) {
   const label = ns && worker ? `${ns}/${worker}${version ? `@${version}` : ""}` : "worker";
-  const reservedModuleNames = reservedModuleNamesForMeta(meta);
-  const reservedModules = new Set(reservedModuleNames);
   if (typeof mainModule !== "string" || !mainModule) {
     throw workerCodeInvalid(`final WorkerCode for ${label} requires prepared meta.mainModule`, {
       ...(ns ? { namespace: ns } : {}),
@@ -83,23 +66,23 @@ function assertFinalWorkerCodeShape({ mainModule, meta, normalized, ns, worker, 
       ...(version ? { version } : {}),
     });
   }
-  if (reservedModules.has(mainModule)) {
-    throw workerCodeInvalid(`final WorkerCode for ${label} uses reserved mainModule ${mainModule}`, {
+  if (isWdlReservedModuleName(mainModule)) {
+    throw workerCodeInvalid(`final WorkerCode for ${label} uses WDL-reserved mainModule ${mainModule}`, {
       ...(ns ? { namespace: ns } : {}),
       ...(worker ? { worker } : {}),
       ...(version ? { version } : {}),
       module: mainModule,
-      reserved_modules: reservedModuleNames,
+      reserved_module_prefix: WDL_RESERVED_MODULE_PREFIX,
     });
   }
   for (const [name] of normalized) {
-    if (!reservedModules.has(name)) continue;
-    throw workerCodeInvalid(`final WorkerCode for ${label} uses reserved module name ${name}`, {
+    if (!isWdlReservedModuleName(name)) continue;
+    throw workerCodeInvalid(`final WorkerCode for ${label} uses WDL-reserved module name ${name}`, {
       ...(ns ? { namespace: ns } : {}),
       ...(worker ? { worker } : {}),
       ...(version ? { version } : {}),
       module: name,
-      reserved_modules: reservedModuleNames,
+      reserved_module_prefix: WDL_RESERVED_MODULE_PREFIX,
     });
   }
 }
@@ -122,7 +105,6 @@ function estimateWorkerLoaderCodeBytesWithContext(bundle, context) {
     const mainModule = bundle.meta.mainModule;
     assertFinalWorkerCodeShape({
       mainModule,
-      meta: bundle.meta,
       normalized: bundle.normalized,
       ns: context.ns,
       worker: context.worker,
@@ -143,7 +125,7 @@ function estimateWorkerLoaderCodeBytesWithContext(bundle, context) {
     // that second WorkerCode too.
     return {
       bytes: runtimeBytes + estimateDoRuntimeInjectedCodeBytes(
-        "_wdl-wrapper.js",
+        RUNTIME_WRAPPER_MODULE_NAME,
         bundle.meta,
         DO_ALARM_SHIM_SOURCE
       ),

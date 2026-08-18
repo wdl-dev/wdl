@@ -1,4 +1,4 @@
-import { scopedDoRequest } from "./_wdl-do-transport.js";
+import { scopedDoRequest } from "./_wdl-do-scoped-request.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
 const intrinsicReflectApply = Reflect.apply;

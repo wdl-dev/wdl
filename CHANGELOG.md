@@ -3,7 +3,9 @@
 ## Unreleased
 
 - Reported the exact root `VERSION` release through `/whoami`, including WDL-only `.N` patch counters, and declared CLI `1.8.0` as both the minimum supported and CI-qualified management client without adding request-time version enforcement.
-- Moved Durable Object owner routing, hint caching, retries, and invoke/connect framing exclusively into the binding-scoped host adapter, reducing generated tenant facade code without changing the public DO contract. Roll out user-runtime and do-runtime before system-runtime/Control, pausing Control mutations while the writer tier rolls, so the smaller generated-code budget is not observed by an old loader.
+- Moved Durable Object owner routing, hint caching, retries, and invoke/connect framing exclusively into the binding-scoped host adapter, reducing generated tenant facade code without changing the public DO contract. Before rolling the first user-runtime or do-runtime reader, pause Control mutations; keep them paused until user-runtime, do-runtime, system-runtime, and Control have all converged so an old loader does not observe the smaller generated-code budget.
+- Reserved every root module name beginning `_wdl-` for generated platform modules. Before rolling the first runtime reader, verify that existing immutable versions do not use the prefix; affected versions must rename the module and redeploy. New deploys using the prefix are rejected, and an unchanged existing version fails on cold load. WDL does not provide compatibility aliases for these internal names.
+- Restricted `D1_OWNER_TTL_SECONDS`, `DO_OWNER_TTL_SECONDS`, `D1_DRAIN_TIMEOUT_MS`, and supervisor-side `DO_DRAIN_TIMEOUT_MS` to canonical positive decimal strings within their documented bounds. Non-canonical or out-of-range TTL values now fall back to 120 seconds, and drain timeout values fall back to 10000 milliseconds.
 
 ## wdl.20260817.1 - 2026-08-17
 

@@ -1,7 +1,18 @@
 import { sanitizeRequestId } from "./_wdl-request-id.js";
 
-export const DO_BINDING_OBJECT_HEADER = "x-wdl-do-binding-object-name";
-export const DO_BINDING_REQUEST_ID_HEADER = "x-wdl-do-binding-request-id";
+const DO_BINDING_OBJECT_HEADER = "x-wdl-do-binding-object-name";
+const DO_BINDING_REQUEST_ID_HEADER = "x-wdl-do-binding-request-id";
+export const DO_OWNER_HEADERS = Object.freeze({
+  ownerKey: "x-wdl-do-owner-key",
+  taskId: "x-wdl-do-owner-task-id",
+  endpoint: "x-wdl-do-owner-endpoint",
+  generation: "x-wdl-do-owner-generation",
+  hint: "x-wdl-do-owner-hint",
+});
+export const DO_OWNER_CONTROL_HEADERS = Object.freeze({
+  acceptHint: "x-wdl-do-accept-owner-hint",
+  ownershipError: "x-wdl-do-ownership-error",
+});
 
 const IntrinsicHeaders = Headers;
 const IntrinsicRequest = Request;
