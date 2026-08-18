@@ -26,6 +26,17 @@ function generatedWrappers() {
   };
 }
 
+test("host wrapper runtime exports only helpers consumed by generated wrappers", () => {
+  const exported = [...HOST_BINDING_RUNTIME_SOURCE.matchAll(/^export function (\w+)\(/gm)]
+    .map((match) => match[1])
+    .toSorted();
+  const consumed = [...new Set(
+    [...generateHostBindingWrapperModule("worker.js").matchAll(/__WdlHostRuntime__\.(\w+)/g)]
+      .map((match) => match[1])
+  )].toSorted();
+  assert.deepEqual(exported, consumed);
+});
+
 /**
  * @param {string} source
  * @param {string} startMarker

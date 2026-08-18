@@ -31,6 +31,7 @@ const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_D1_TIMEOUT_URL = sharedModuleDataUrl("shared/d1-timeout.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const {
   decodeD1QueryRequest,
   encodeD1QueryRequest,
@@ -102,6 +103,7 @@ const stubSourceReplacements = [
   [/from "runtime-bindings-proxy";/g, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
   [/from "shared-internal-auth";/g, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
   [/from "shared-errors";/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
+  [/from "shared-respond";/g, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
 ];
 const stubSrc = applyModuleReplacements(
   readRepositoryFile("runtime/bindings/d1.js"),

@@ -19,7 +19,6 @@ path = "src/main.rs"
 aes-gcm = "0.11"
 axum = { workspace = true, features = ["http1", "json", "query", "tokio"] }
 base64 = "0.22"
-futures-util = { workspace = true, features = ["std"] }
 redis = { workspace = true, features = ["tokio-comp", "connection-manager"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

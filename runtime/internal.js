@@ -27,18 +27,6 @@ import {
   runtimeServiceAllowsNamespace,
 } from "runtime-state";
 
-// Capability adapters re-exported here so `ctx.exports.<Name>` works for
-// internal scheduled/queued/workflow dispatch cold-loads too.
-export { KV } from "runtime-bindings-kv";
-export { Assets } from "runtime-bindings-assets";
-export { ServiceBinding } from "runtime-bindings-service";
-export { QueueProducer } from "runtime-bindings-queue";
-export { D1Database } from "runtime-bindings-d1";
-export { R2Bucket } from "runtime-bindings-r2";
-export { AiBinding } from "runtime-bindings-ai";
-export { DurableObjectNamespace } from "runtime-bindings-do";
-export { WorkflowBinding } from "runtime-bindings-workflow";
-
 /**
  * @typedef {{ get(id: string, factory: () => Promise<unknown>): import("runtime-dispatch").LoadedWorkerStub }} RuntimeLoader
  * @typedef {{ LOADER: RuntimeLoader, [key: string]: unknown }} RuntimeInternalEnv

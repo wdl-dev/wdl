@@ -3,6 +3,7 @@ import { fnv1a32CodeUnits } from "shared-fnv1a32";
 import { BodyTooLargeError, readBoundedBytes as readRequestBoundedBytes } from "shared-bounded-body";
 import { errorMessage as sharedErrorMessage } from "shared-errors";
 import { D1_DATABASE_ID_RE, isValidRuntimeLoadNs } from "shared-ns-pattern";
+import { contentTypeEssence } from "shared-respond";
 import { utf8ByteLength } from "shared-utf8";
 import {
   D1_QUERY_CONTENT_TYPE,
@@ -234,7 +235,7 @@ export function normalizeQueryRequest(body) {
 /** @param {Request} request @param {{ maxBytes?: number }} [options] */
 export async function readD1QueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVELOPE_BYTES } = {}) {
   const contentType = request.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== D1_QUERY_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== D1_QUERY_CONTENT_TYPE) {
     throw new D1ProtocolError(
       415,
       "unsupported-media-type",
@@ -253,7 +254,7 @@ export async function readD1QueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVE
 /** @param {Response} response */
 export async function readD1QueryResponseWithBytes(response) {
   const contentType = response.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== D1_QUERY_RESPONSE_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== D1_QUERY_RESPONSE_CONTENT_TYPE) {
     throw new D1ProtocolError(
       502,
       "invalid-response",
@@ -337,7 +338,7 @@ function decodeActorEnvelope(bytes) {
 /** @param {Request} request @param {{ maxBytes?: number }} [options] */
 export async function readD1ActorQueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVELOPE_BYTES } = {}) {
   const contentType = request.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== D1_ACTOR_QUERY_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== D1_ACTOR_QUERY_CONTENT_TYPE) {
     throw new D1ProtocolError(
       415,
       "unsupported-media-type",

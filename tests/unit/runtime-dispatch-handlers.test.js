@@ -11,13 +11,13 @@ import {
 } from "../helpers/runtime-dispatch-fixtures.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
-const { runtimeDispatch } = await loadRuntimeDispatch();
+const { runtimeDispatch, runtimeDispatchWorkflowReplayCache } = await loadRuntimeDispatch();
 const {
-  _resetWorkflowReplayCacheForTest,
   handleFetchDispatch,
   handleQueuedDispatch,
   handleScheduledDispatch,
 } = runtimeDispatch;
+const { _resetWorkflowReplayCacheForTest } = runtimeDispatchWorkflowReplayCache;
 
 beforeEach(() => {
   _resetWorkflowReplayCacheForTest();

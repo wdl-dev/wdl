@@ -20,21 +20,15 @@ import {
   startTailEnvelope,
 } from "runtime-tail-forwarder";
 import {
-  _stringifyWorkflowBackendBodyForTest as stringifyWorkflowBackendBodyForTest,
-  _stringifyWorkflowJsonForTest as stringifyWorkflowJsonForTest,
   workflowJsonResponse,
   workflowStepError,
 } from "runtime-dispatch-workflow-json";
-export { _resetWorkflowReplayCacheForTest } from "runtime-dispatch-workflow-replay-cache";
 import {
   createStepController,
   isWorkflowSuspensionSignal,
   isWorkflowSuspended,
   workflowError,
 } from "runtime-dispatch-workflow-step";
-export const _stringifyWorkflowBackendBodyForTest = stringifyWorkflowBackendBodyForTest;
-export const _stringifyWorkflowJsonForTest = stringifyWorkflowJsonForTest;
-
 /**
  * @typedef {{ respond(response: Response): Response, markError(err: unknown): void, requestId: string }} DispatchScope
  * @typedef {{ fetch(request: Request): Promise<Response>, scheduled?(controller: unknown): Promise<unknown>, queue?(queueName: string, messages: unknown[]): Promise<unknown>, run?(event: unknown, step: unknown): Promise<unknown> }} LoadedEntrypoint

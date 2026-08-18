@@ -34,6 +34,7 @@ export function doProtocolDataUrl() {
       "shared-bounded-body": SHARED_BOUNDED_BODY_URL,
       "shared-internal-auth": SHARED_INTERNAL_AUTH_URL,
       "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+      "shared-respond": SHARED_RESPOND_URL,
       "shared-utf8": SHARED_UTF8_URL,
       "shared-worker-contract": WORKER_CONTRACT_URL,
       "_wdl-do-scoped-request.js": DO_SCOPED_REQUEST_URL,

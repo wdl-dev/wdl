@@ -320,19 +320,6 @@ export function stringifyWorkflowResult(value, kind) {
 }
 
 /**
- * @param {unknown} value
- * @param {number} [maxBytes]
- */
-export function _stringifyWorkflowJsonForTest(value, maxBytes = WORKFLOW_RESULT_BYTES_MAX) {
-  return stringifyWorkflowJson(value, "test value", maxBytes);
-}
-
-/** @param {string} path @param {unknown} body */
-export function _stringifyWorkflowBackendBodyForTest(path, body) {
-  return workflowBackendBody(path, body);
-}
-
-/**
  * @param {string} path
  * @param {unknown} body
  * @param {Map<string, string>} [capturedFields]

@@ -26,6 +26,7 @@ import {
   runD1ActorTestHook,
 } from "d1-runtime-test-hooks";
 import { fnv1a32Utf8 } from "shared-fnv1a32";
+import { contentTypeEssence } from "shared-respond";
 import { utf8ByteLength } from "shared-utf8";
 
 const DEFAULT_D1_MAX_RESULT_ROWS = 65_536;
@@ -252,7 +253,7 @@ export class D1DatabaseActor extends DurableObject {
       const contentType = request.headers.get("content-type") || "";
       /** @type {D1ActorQuery} */
       let body;
-      if (contentType.split(";", 1)[0].trim().toLowerCase() === "application/json") {
+      if (contentTypeEssence(contentType) === "application/json") {
         const control = /** @type {Record<string, unknown>} */ (await readD1ActorControlRequest(request));
         if (control.__control === "wait-until-idle") {
           await waitUntilActorIdle(this.env, request.signal);

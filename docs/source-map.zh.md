@@ -114,7 +114,7 @@
 | `rust/scheduler/` | Cron、queue、delayed queue、orphan migration 和 workflow tick scheduler。 |
 | `rust/workflows/` | Workflows service、DB 2 state machine 和 internal DO alarm backend jobs。 |
 | `rust/supervisor/` | D1/DO supervisor binaries，包括 workerd 启动前对 do-runtime actor-residency config 的严格选择。 |
-| `rust/common/` | worker-contract grammar 与 keys、time、logging、internal-auth matching、Redis connection primitives 和 metrics primitives 等共享 Rust utilities。 |
+| `rust/common/` | worker-contract grammar 与 keys、time、logging、internal-auth matching、Redis connection primitives、metrics primitives 和小型无行为 cross-service wire shape 等共享 Rust utilities。 |
 
 ## System Workers、Fixtures 和 Examples
 

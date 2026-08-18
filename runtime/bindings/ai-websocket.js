@@ -6,7 +6,7 @@ export const AI_WS_MAX_BYTES = 64 * 1024 * 1024;
 // Preserve a terminal protocol close that workerd dispatches after ErrorEvent.
 const AI_WS_ERROR_CLOSE_GRACE_MS = 100;
 
-/** @param {unknown} value */
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

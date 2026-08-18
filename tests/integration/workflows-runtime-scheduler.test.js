@@ -23,6 +23,7 @@ import {
   withServiceStopped,
   workflowReadyShard,
   workflowReadyToken,
+  workflowTickCount,
   workerMeta,
 } from "./helpers/workflows-scenarios.js";
 
@@ -138,7 +139,7 @@ test("later workflow ticks admit new runs while a slow run remains active", asyn
     const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
     const elapsedMs = performance.now() - startedAt;
     assert.equal(tick.status, 200, tick.body);
-    assert.equal(responseJson(tick).workflowAdmitted >= 1, true);
+    assert.equal(workflowTickCount(responseJson(tick), "workflowAdmitted") >= 1, true);
     assert.equal(elapsedMs < 3000, true, `tick waited ${elapsedMs}ms for the workflow run`);
 
     await waitUntil("slow admitted workflow enters running state", async () => {
@@ -155,7 +156,7 @@ test("later workflow ticks admit new runs while a slow run remains active", asyn
     );
     const nextTick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
     assert.equal(nextTick.status, 200, nextTick.body);
-    assert.equal(responseJson(nextTick).workflowAdmitted >= 1, true);
+    assert.equal(workflowTickCount(responseJson(nextTick), "workflowAdmitted") >= 1, true);
 
     await waitUntil("later tick completes fast workflow before the slow run", async () => {
       const status = await gatewayFetch(ns, "/shop/get?id=fast-admission");
@@ -264,8 +265,7 @@ test("sleep replay keeps waiting state and clears stale ready hints", async () =
       {},
     );
     assert.equal(tick.status, 200, tick.body);
-    const tickBody = responseJson(tick);
-    assert.equal(tickBody.workflowAdmitted >= 1, true);
+    assert.equal(workflowTickCount(responseJson(tick), "workflowAdmitted") >= 1, true);
     await waitUntil("sleep replay completes after tick admission", () =>
       redisWorkflowStateHGet(ns, workflowKey, instanceId, "status") === "waiting" &&
       redisWorkflowStateHGet(ns, workflowKey, instanceId, "runToken") === "" &&

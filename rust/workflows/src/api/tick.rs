@@ -1,7 +1,7 @@
-use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 use wdl_rust_common::redis_eval::StaticRedisScript;
+use wdl_rust_common::workflow_tick::WorkflowTickResponse;
 
 use crate::{
     AppState, DispatchTaskUnavailable, InstanceIdentity, LogLevel, Metrics,
@@ -28,18 +28,6 @@ use ready::{
     remove_ready_token_if_state_missing, remove_ready_token_if_terminal,
 };
 use retention::cleanup_retention;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TickResponse {
-    pub(crate) workflow_admitted: usize,
-    pub(crate) workflow_capacity_blocked: bool,
-    pub(crate) due_moved: usize,
-    pub(crate) retention_cleaned: usize,
-    pub(crate) do_alarm_due_moved: usize,
-    pub(crate) do_alarm_admitted: usize,
-    pub(crate) do_alarm_capacity_blocked: bool,
-}
 
 struct ClaimedWorkflowRun {
     identity: InstanceIdentity,
@@ -332,7 +320,7 @@ fn log_dispatch_error(app: &AppState, identity: &InstanceIdentity, err: &Workflo
 pub(crate) async fn tick_workflows(
     app: &AppState,
     request_id: Option<&str>,
-) -> WorkflowResult<TickResponse> {
+) -> WorkflowResult<WorkflowTickResponse> {
     let due_moved = move_due_tokens(app).await?;
     let retention_cleaned = cleanup_retention(app).await?;
     let workflow_admission = admit_ready_members(
@@ -381,7 +369,7 @@ pub(crate) async fn tick_workflows(
             due_moved as f64,
         );
     }
-    Ok(TickResponse {
+    Ok(WorkflowTickResponse {
         workflow_admitted: result.counters,
         workflow_capacity_blocked: result.capacity_blocked,
         due_moved,
@@ -503,7 +491,7 @@ mod tests {
     #[test]
     fn tick_response_serializes_admission_maintenance_and_capacity_pressure() {
         assert_eq!(
-            serde_json::to_value(TickResponse {
+            serde_json::to_value(WorkflowTickResponse {
                 workflow_admitted: 2,
                 workflow_capacity_blocked: true,
                 due_moved: 3,
@@ -513,15 +501,10 @@ mod tests {
                 do_alarm_capacity_blocked: false,
             })
             .unwrap(),
-            json!({
-                "workflowAdmitted": 2,
-                "workflowCapacityBlocked": true,
-                "dueMoved": 3,
-                "retentionCleaned": 4,
-                "doAlarmDueMoved": 5,
-                "doAlarmAdmitted": 6,
-                "doAlarmCapacityBlocked": false,
-            })
+            serde_json::from_str::<JsonValue>(include_str!(
+                "../../../../tests/fixtures/workflow-tick-response.json"
+            ))
+            .expect("workflow tick response fixture parses")
         );
     }
 

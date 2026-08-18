@@ -43,6 +43,15 @@ export async function discardResponseBody(message) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function contentTypeEssence(value) {
+  if (typeof value !== "string") return "";
+  return value.split(";", 1)[0].trim().toLowerCase();
+}
+
+/**
  * @param {number} status
  * @param {unknown} data
  * @param {HeadersInit} [extraHeaders]

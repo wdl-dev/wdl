@@ -1,34 +1,24 @@
 use serde_json::{Value as JsonValue, json};
+use wdl_rust_common::workflow_tick::WorkflowTickResponse;
 
 use crate::{AppState, LogLevel, SchedulerError, SchedulerResult, json_usize, log, now_ms};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct WorkflowTickSummary {
-    pub(crate) workflow_admitted: usize,
-    pub(crate) workflow_capacity_blocked: bool,
-    pub(crate) due_moved: usize,
-    pub(crate) retention_cleaned: usize,
-    pub(crate) do_alarm_due_moved: usize,
-    pub(crate) do_alarm_admitted: usize,
-    pub(crate) do_alarm_capacity_blocked: bool,
+fn workflow_tick_has_progress(summary: &WorkflowTickResponse) -> bool {
+    summary.workflow_admitted > 0
+        || summary.due_moved > 0
+        || summary.retention_cleaned > 0
+        || summary.do_alarm_due_moved > 0
+        || summary.do_alarm_admitted > 0
 }
 
-impl WorkflowTickSummary {
-    fn has_progress(self) -> bool {
-        self.workflow_admitted > 0
-            || self.due_moved > 0
-            || self.retention_cleaned > 0
-            || self.do_alarm_due_moved > 0
-            || self.do_alarm_admitted > 0
-    }
-
-    pub(crate) fn needs_active_poll(self) -> bool {
-        self.has_progress() || self.workflow_capacity_blocked || self.do_alarm_capacity_blocked
-    }
+pub(crate) fn workflow_tick_needs_active_poll(summary: &WorkflowTickResponse) -> bool {
+    workflow_tick_has_progress(summary)
+        || summary.workflow_capacity_blocked
+        || summary.do_alarm_capacity_blocked
 }
 
-fn workflow_tick_summary(body: &JsonValue) -> WorkflowTickSummary {
-    WorkflowTickSummary {
+fn workflow_tick_summary(body: &JsonValue) -> WorkflowTickResponse {
+    WorkflowTickResponse {
         workflow_admitted: json_usize(body.get("workflowAdmitted")),
         workflow_capacity_blocked: body
             .get("workflowCapacityBlocked")
@@ -45,9 +35,9 @@ fn workflow_tick_summary(body: &JsonValue) -> WorkflowTickSummary {
     }
 }
 
-pub(crate) async fn workflows_tick(state: AppState) -> SchedulerResult<WorkflowTickSummary> {
+pub(crate) async fn workflows_tick(state: AppState) -> SchedulerResult<WorkflowTickResponse> {
     let Some(response) = crate::post_workflow_tick(&state).await? else {
-        return Ok(WorkflowTickSummary::default());
+        return Ok(WorkflowTickResponse::default());
     };
     let status = response.status;
     let body = response.body;
@@ -56,7 +46,7 @@ pub(crate) async fn workflows_tick(state: AppState) -> SchedulerResult<WorkflowT
     let outcome = if status.is_success() { "ok" } else { "error" };
     log(
         &state,
-        if summary.has_progress() || !status.is_success() {
+        if workflow_tick_has_progress(&summary) || !status.is_success() {
             LogLevel::Info
         } else {
             LogLevel::Debug
@@ -92,69 +82,62 @@ mod tests {
 
     #[test]
     fn workflow_tick_summary_separates_progress_from_active_poll_pressure() {
-        assert!(!WorkflowTickSummary::default().has_progress());
-        assert!(!WorkflowTickSummary::default().needs_active_poll());
+        assert!(!workflow_tick_has_progress(&WorkflowTickResponse::default()));
+        assert!(!workflow_tick_needs_active_poll(
+            &WorkflowTickResponse::default()
+        ));
         for summary in [
-            WorkflowTickSummary {
+            WorkflowTickResponse {
                 workflow_admitted: 1,
-                ..WorkflowTickSummary::default()
+                ..WorkflowTickResponse::default()
             },
-            WorkflowTickSummary {
+            WorkflowTickResponse {
                 workflow_capacity_blocked: true,
-                ..WorkflowTickSummary::default()
+                ..WorkflowTickResponse::default()
             },
-            WorkflowTickSummary {
+            WorkflowTickResponse {
                 due_moved: 1,
-                ..WorkflowTickSummary::default()
+                ..WorkflowTickResponse::default()
             },
-            WorkflowTickSummary {
+            WorkflowTickResponse {
                 retention_cleaned: 1,
-                ..WorkflowTickSummary::default()
+                ..WorkflowTickResponse::default()
             },
-            WorkflowTickSummary {
+            WorkflowTickResponse {
                 do_alarm_due_moved: 1,
-                ..WorkflowTickSummary::default()
+                ..WorkflowTickResponse::default()
             },
-            WorkflowTickSummary {
+            WorkflowTickResponse {
                 do_alarm_admitted: 1,
-                ..WorkflowTickSummary::default()
+                ..WorkflowTickResponse::default()
             },
-            WorkflowTickSummary {
+            WorkflowTickResponse {
                 do_alarm_capacity_blocked: true,
-                ..WorkflowTickSummary::default()
+                ..WorkflowTickResponse::default()
             },
         ] {
-            assert!(summary.needs_active_poll());
+            assert!(workflow_tick_needs_active_poll(&summary));
         }
-        assert!(
-            WorkflowTickSummary {
-                workflow_admitted: 1,
-                ..WorkflowTickSummary::default()
-            }
-            .has_progress()
-        );
-        assert!(
-            !WorkflowTickSummary {
-                workflow_capacity_blocked: true,
-                ..WorkflowTickSummary::default()
-            }
-            .has_progress()
-        );
+        assert!(workflow_tick_has_progress(&WorkflowTickResponse {
+            workflow_admitted: 1,
+            ..WorkflowTickResponse::default()
+        }));
+        assert!(!workflow_tick_has_progress(&WorkflowTickResponse {
+            workflow_capacity_blocked: true,
+            ..WorkflowTickResponse::default()
+        }));
     }
 
     #[test]
     fn workflow_tick_summary_parses_the_admission_response_contract() {
         assert_eq!(
-            workflow_tick_summary(&json!({
-                "workflowAdmitted": 2,
-                "workflowCapacityBlocked": true,
-                "dueMoved": 3,
-                "retentionCleaned": 4,
-                "doAlarmDueMoved": 5,
-                "doAlarmAdmitted": 6,
-                "doAlarmCapacityBlocked": false,
-            })),
-            WorkflowTickSummary {
+            workflow_tick_summary(
+                &serde_json::from_str(include_str!(
+                    "../../../tests/fixtures/workflow-tick-response.json"
+                ))
+                .expect("workflow tick response fixture parses")
+            ),
+            WorkflowTickResponse {
                 workflow_admitted: 2,
                 workflow_capacity_blocked: true,
                 due_moved: 3,
@@ -177,7 +160,7 @@ mod tests {
                 "doAlarmDueMoved": 1.5,
                 "doAlarmCapacityBlocked": "true",
             })),
-            WorkflowTickSummary::default()
+            WorkflowTickResponse::default()
         );
     }
 }

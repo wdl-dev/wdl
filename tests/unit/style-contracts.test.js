@@ -25,6 +25,7 @@ import {
   withoutLineComments,
 } from "../helpers/source-scan.js";
 import { AI_RUNTIME_SETTINGS } from "../../shared/ai-runtime-config.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 
 const CONTROL_FILES = jsFiles("control");
 const GATEWAY_FILES = jsFiles("gateway");
@@ -209,17 +210,29 @@ test("source scanners ignore generated dependency directories", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("shared Redis public barrel does not expose RESP sibling-internal helpers", () => {
+test("shared Redis public barrel exposes only its cross-tier consumer surface", () => {
   const source = withoutLineComments(readRepoFile("shared/redis.js"));
-  for (const name of [
-    "buildHSetArgs",
-    "decodeHashObject",
-    "decodeStringArray",
-    "utf8Decoder",
-    "warnRedisCallback",
-  ]) {
-    assert.doesNotMatch(source, new RegExp(`\\b${RegExp.escape(name)}\\b`), name);
-  }
+  const valueExports = [...source.matchAll(/export\s*\{([^}]+)\}\s*from/g)]
+    .flatMap((match) => match[1].split(","))
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .toSorted();
+  const typeExports = [...source.matchAll(/@typedef\s+\{import\("[^"]+"\)\.([A-Za-z_$][\w$]*)\}/g)]
+    .map((match) => match[1])
+    .toSorted();
+
+  assert.deepEqual(valueExports, [
+    "RedisClient",
+    "RedisMulti",
+    "RedisReplyError",
+    "RedisSession",
+    "RedisSubscriber",
+    "WatchError",
+    "decodeBulk",
+    "defaultBackoff",
+    "redisDbFromEnv",
+  ]);
+  assert.deepEqual(typeExports, ["RedisCommandEvent", "RedisSetOptions"]);
 });
 
 test("shared primitive owners stay canonical", () => {
@@ -576,6 +589,26 @@ test("cross-language Redis key owners share one fixture", () => {
       /include_str!\(\s*"\.\.\/\.\.\/\.\.\/tests\/fixtures\/redis-key-parity\.json"\s*\)/,
       rustReader,
     );
+  }
+});
+
+test("Workflow tick writer, reader, and integration share one response fixture", () => {
+  const fixture = "tests/fixtures/workflow-tick-response.json";
+  assert.deepEqual(Object.keys(readRepositoryJson(fixture)).sort(), [
+    "doAlarmAdmitted",
+    "doAlarmCapacityBlocked",
+    "doAlarmDueMoved",
+    "dueMoved",
+    "retentionCleaned",
+    "workflowAdmitted",
+    "workflowCapacityBlocked",
+  ]);
+  for (const reader of [
+    "rust/workflows/src/api/tick.rs",
+    "rust/scheduler/src/workflows.rs",
+    "tests/integration/helpers/workflow-tick.js",
+  ]) {
+    assert.match(readRepoFile(reader), /workflow-tick-response\.json/, reader);
   }
 });
 
@@ -1034,6 +1067,15 @@ test("runtime internal entrypoint keeps worker-event dispatch in runtime/dispatc
     offenders.push("queued dispatch completion");
   }
   assert.deepEqual(offenders, []);
+});
+
+test("runtime internal leaves host binding entrypoint exports on the main module", () => {
+  const source = withoutLineComments(readRepoFile("runtime/internal.js"));
+  assert.doesNotMatch(source, /^export\s+\{[^}]+\}\s+from\s+"runtime-bindings-/m);
+});
+
+test("runtime dispatch does not forward test-only hooks", () => {
+  assert.doesNotMatch(readRepoFile("runtime/dispatch.js"), /\b\w*ForTest\b/);
 });
 
 test("log-level binding belongs to shared observability", () => {

@@ -23,6 +23,7 @@ import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { withInternalAuth } from "shared-internal-auth";
 import { errorMessage } from "shared-errors";
+import { contentTypeEssence } from "shared-respond";
 
 const D1_OWNER_HINT_HEADERS = {
   taskId: "x-wdl-d1-owner-task-id",
@@ -209,7 +210,7 @@ async function parseD1Payload(response) {
 
 /** @param {string} contentType */
 function d1PayloadContentType(contentType) {
-  return contentType.split(";", 1)[0].trim().toLowerCase() === D1_QUERY_RESPONSE_CONTENT_TYPE;
+  return contentTypeEssence(contentType) === D1_QUERY_RESPONSE_CONTENT_TYPE;
 }
 
 /** @param {Response} response */

@@ -7,7 +7,6 @@ import {
   readRepositoryFile,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
-import { RUNTIME_BINDING_STUB_SOURCE } from "../helpers/mocks/runtime-bindings.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
@@ -55,8 +54,6 @@ export function getLoadedWorkerStub() {
   throw new Error("unexpected worker load");
 }
 `);
-const emptyBindingUrl = moduleDataUrl(RUNTIME_BINDING_STUB_SOURCE);
-
 const IMPORT_STUBS = {
   "cloudflare:workers": workerEntrypointUrl,
   "shared-worker-id": repositoryFileUrl("shared/worker-id.js"),
@@ -65,15 +62,6 @@ const IMPORT_STUBS = {
   "runtime-dispatch": runtimeDispatchUrl,
   "runtime-load": runtimeLoadUrl,
   "runtime-state": runtimeStateUrl,
-  "runtime-bindings-kv": emptyBindingUrl,
-  "runtime-bindings-assets": emptyBindingUrl,
-  "runtime-bindings-service": emptyBindingUrl,
-  "runtime-bindings-queue": emptyBindingUrl,
-  "runtime-bindings-d1": emptyBindingUrl,
-  "runtime-bindings-r2": emptyBindingUrl,
-  "runtime-bindings-ai": emptyBindingUrl,
-  "runtime-bindings-do": emptyBindingUrl,
-  "runtime-bindings-workflow": emptyBindingUrl,
 };
 
 const src = applyModuleReplacements(

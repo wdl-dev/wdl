@@ -14,7 +14,7 @@ import {
 import { errorMessage } from "shared-errors";
 import { withInternalAuth } from "shared-internal-auth";
 import { ensureRequestId, logStructured } from "shared-observability";
-import { discardResponseBody, jsonError } from "shared-respond";
+import { contentTypeEssence, discardResponseBody, jsonError } from "shared-respond";
 import { utf8ByteLength } from "shared-utf8";
 import { aiRuntimeSetting } from "shared-ai-runtime-config";
 import {
@@ -87,7 +87,7 @@ function aiBinding(binding) {
   return /** @type {AiHostBinding} */ (/** @type {unknown} */ (binding));
 }
 
-/** @param {unknown} value */
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -124,7 +124,7 @@ function assertRequestJsonTextDepth(text) {
 
 /** @param {string | null} contentType @param {string} expected */
 function hasContentType(contentType, expected) {
-  return (contentType || "").split(";", 1)[0].trim().toLowerCase() === expected;
+  return contentTypeEssence(contentType) === expected;
 }
 
 /** @param {Request} request */

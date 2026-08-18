@@ -117,7 +117,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `rust/scheduler/` | Cron, queue, delayed queue, orphan migration, and workflow tick scheduler. |
 | `rust/workflows/` | Workflows service, DB 2 state machine, and internal DO alarm backend jobs. |
 | `rust/supervisor/` | D1/DO supervisor binaries, including strict do-runtime actor-residency config selection before workerd starts. |
-| `rust/common/` | Shared Rust utilities such as worker-contract grammar and keys, time, logging, internal-auth matching, Redis connection primitives, and metrics primitives. |
+| `rust/common/` | Shared Rust utilities such as worker-contract grammar and keys, time, logging, internal-auth matching, Redis connection primitives, metrics primitives, and small behavior-free cross-service wire shapes. |
 
 ## System Workers, Fixtures, And Examples
 

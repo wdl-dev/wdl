@@ -86,7 +86,7 @@ Crate root 和目录级 `mod` glue 可以保留既有的显式本地 prelude，�
 
 ## 共享代码
 
-`wdl-rust-common`（`rust/common/`）是仓库唯一的 shared Rust helper crate。它只拥有必须跨 crate 保持一致的小 primitive，例如环境变量数字解析、日志等级解析、HTTP health probe、shutdown/in-flight tracking、通用 JSON log-line emission、wall-clock millisecond helper、短 non-cryptographic random hex suffix、稳定 non-cryptographic hash、queue Redis key builders、worker version / bundle-key parsing、Prometheus metric storage/formatting、Prometheus text response、结构化错误字段合并、internal-auth token/header matching、Redis command construction helper、中立的 Redis connection execution wrapper，以及 UTF-8 安全的字符串截断。它不能变成 service 行为的杂物箱。Axum-facing 与 Redis-facing helper 分别放在 `axum` 与 `redis` feature 之后，因此 D1/DO supervisor binaries 这类 consumer 不会在不需要这些 helper 时通过 shared crate 拉入 Axum 或异步 Redis client。
+`wdl-rust-common`（`rust/common/`）是仓库唯一的 shared Rust helper crate。它只拥有必须跨 crate 保持一致的小 primitive，例如环境变量数字解析、日志等级解析、HTTP health probe、shutdown/in-flight tracking、通用 JSON log-line emission、wall-clock millisecond helper、短 non-cryptographic random hex suffix、稳定 non-cryptographic hash、queue Redis key builders、worker version / bundle-key parsing、Prometheus metric storage/formatting、Prometheus text response、结构化错误字段合并、internal-auth token/header matching、Redis command construction helper、中立的 Redis connection execution wrapper、小型无行为 cross-service wire shape，以及 UTF-8 安全的字符串截断。它不能变成 service 行为的杂物箱。Axum-facing 与 Redis-facing helper 分别放在 `axum` 与 `redis` feature 之后，因此 D1/DO supervisor binaries 这类 consumer 不会在不需要这些 helper 时通过 shared crate 拉入 Axum 或异步 Redis client。
 
 `test-support` feature 暴露 Rust service tests 共用的 process-environment override helper 和 RESP packed-command parser。Environment override 会在同一 test process 的 module 之间串行化，并在 unwind 时恢复全部值；production dependency build 不启用该 feature。
 
@@ -104,6 +104,7 @@ Crate root 和目录级 `mod` glue 可以保留既有的显式本地 prelude，�
 
 - 如果两个 crate 必须生成或解析同一个 Redis key shape，该 shape 应属于 `wdl-rust-common` 或一个明确命名的 owner。不要在多个 crate 中复制 FNV hash constants、queue key builders、worker bundle key parsing 或 version-tag grammar。
 - Shared helper 应保持语义中性。例如 64-bit random hex suffix helper 如果也用于 pending-create token，就不应命名成 scheduler 或 workflows 专属 instance id helper。
+- 两个 Rust service 作为同一 wire contract 共享的小型 response struct 可以放入 `wdl-rust-common`，前提是它只拥有字段和 serialization shape。Parsing tolerance、validation、error mapping、retry 和 lifecycle policy 仍由 writer/reader 拥有；serialization dependency 必须通过 feature gate 控制。
 - 不要把 service-specific lifecycle、retry、Redis transaction 或 protocol-response 行为放进 `wdl-rust-common`；这些逻辑应留在拥有该 state machine 的 service crate 中。
 - `wdl-rust-common` 中的 Redis helper 只能从显式 keys/args 构造命令，或针对显式 `ConnectionManager` 运行调用方传入的 closure。script body、选择哪条 connection、retry/timeout 行为、error mapping 和 state ownership 仍由 service crate 拥有。
 - `wdl-rust-common` 中的 HTTP framework helper 必须放在 crate 的 `axum` feature 后面，Redis connection/EVAL helper 必须放在 `redis` feature 后面。只使用基础 primitive 的 sidecar 应关闭 default features。

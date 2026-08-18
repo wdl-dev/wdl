@@ -1,6 +1,5 @@
-// Each downstream rewrite targets the same URL so cross-module imports share
-// one instance — `_resetWorkflowReplayCacheForTest` must reset the same cache
-// `dispatch.js` sees.
+// Each downstream rewrite targets the same URL so tests can reset the owning
+// replay-cache module instance used by `dispatch.js`.
 
 import {
   importRepositoryModule,

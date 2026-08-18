@@ -11,7 +11,7 @@ import {
   decodeD1QueryResponse,
   encodeD1QueryRequest,
 } from "shared-d1-query-wire";
-import { sanitizeJsonErrorDetails } from "shared-respond";
+import { contentTypeEssence, sanitizeJsonErrorDetails } from "shared-respond";
 import { withInternalAuth } from "shared-internal-auth";
 import { validOwnerEndpointForService } from "shared-owner-endpoint";
 
@@ -79,7 +79,7 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
   let body;
   let validResponse = true;
   const contentType = res.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() === D1_QUERY_RESPONSE_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) === D1_QUERY_RESPONSE_CONTENT_TYPE) {
     try {
       body = decodeD1QueryResponse(new Uint8Array(await res.arrayBuffer()));
     } catch (err) {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  contentTypeEssence,
   discardResponseBody,
   echoResponseWithRequestId,
   internalErrorResponse,
@@ -17,6 +18,15 @@ import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.j
 import { settlementWithin } from "../helpers/timing.js";
 
 const OBSERVABILITY_CONTRACT = readRepositoryJson("tests/fixtures/observability-contract.json");
+
+test("contentTypeEssence normalizes media types without retaining parameters", () => {
+  assert.equal(contentTypeEssence(" Application/JSON ; charset=utf-8"), "application/json");
+  assert.equal(contentTypeEssence("text/event-stream; charset=utf-8; version=1"), "text/event-stream");
+  assert.equal(contentTypeEssence("application/vnd.example+json"), "application/vnd.example+json");
+  assert.equal(contentTypeEssence(""), "");
+  assert.equal(contentTypeEssence(null), "");
+  assert.equal(contentTypeEssence(123), "");
+});
 
 test("discardResponseBody cancels response bodies", async () => {
   let cancelled = false;

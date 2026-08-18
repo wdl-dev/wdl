@@ -5,9 +5,9 @@
 //! health probes, shutdown/in-flight tracking, metric storage/formatting, FNV hashing,
 //! request-id sanitization, internal-auth constants/token matching, identity grammar,
 //! worker contract and queue-key helpers, Redis connection and EVAL command helpers, time
-//! helpers, structured error fields, test-only process-environment overrides, and
-//! UTF-8-safe text helpers. It should not own service protocols, Redis schemas,
-//! dispatch policy, or lifecycle behavior.
+//! helpers, structured error fields, small behavior-free cross-crate wire shapes,
+//! test-only process-environment overrides, and UTF-8-safe text helpers. It should not
+//! own service protocol behavior, Redis schemas, dispatch policy, or lifecycle behavior.
 
 /// Largest integer that round-trips exactly through a JavaScript `Number`.
 pub const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -34,6 +34,7 @@ pub mod test_support;
 pub mod text;
 pub mod time;
 pub mod worker_contract;
+pub mod workflow_tick;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures {

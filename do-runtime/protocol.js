@@ -21,6 +21,7 @@ import {
 } from "shared-bounded-body";
 import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 import { isValidRuntimeLoadNs, WORKER_NAME_RE } from "shared-ns-pattern";
+import { contentTypeEssence } from "shared-respond";
 import { utf8ByteLength } from "shared-utf8";
 import {
   SESSION_POLICY_PRESERVE,
@@ -739,7 +740,7 @@ function invokeWithEnvelopeBody(metadata, bodyBytes, envelopeName = "DO invoke e
  */
 export async function readDoInvokeRequest(request) {
   const contentType = request.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== DO_INVOKE_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== DO_INVOKE_CONTENT_TYPE) {
     throw new DoRuntimeError(
       415,
       "unsupported_media_type",
