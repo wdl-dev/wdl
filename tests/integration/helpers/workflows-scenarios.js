@@ -26,6 +26,7 @@ import {
   redisZScore,
 } from "./redis.js";
 import { delay, setupIntegrationSuite, waitUntil } from "./stack.js";
+import { workflowTickCount } from "./workflow-tick.js";
 import { fnv1a32Utf8 } from "../../../shared/fnv1a32.js";
 
 export {
@@ -52,6 +53,7 @@ export {
   setupIntegrationSuite,
   uniqueNs,
   waitUntil,
+  workflowTickCount,
   withServiceStopped,
   readIntegrationJson,
   responseJson,

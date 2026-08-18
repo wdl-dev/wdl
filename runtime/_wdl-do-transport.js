@@ -1,5 +1,10 @@
 import { prototypeGetter, validOwnerEndpointForService } from "./_wdl-owner-endpoint.js";
 import { sanitizeRequestId } from "./_wdl-request-id.js";
+import {
+  DO_OWNER_CONTROL_HEADERS,
+  DO_OWNER_HEADERS,
+  encodeDoObjectNameHeader,
+} from "./_wdl-do-scoped-request.js";
 
 export const DO_INVOKE_URL = "http://do-runtime/internal/do/invoke";
 export const DO_CONNECT_URL = "http://do-runtime/internal/do/connect";
@@ -9,23 +14,13 @@ export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
 const REQUEST_HEADER_UTF8_SCRATCH_BYTES = 2 * 1024;
-export const DO_ACCEPT_OWNER_HINT_HEADER = "x-wdl-do-accept-owner-hint";
-export const DO_OWNER_HINT_CONTROL_HEADER = "x-wdl-do-owner-hint";
-export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
+export const DO_ACCEPT_OWNER_HINT_HEADER = DO_OWNER_CONTROL_HEADERS.acceptHint;
+export const DO_OWNER_HINT_CONTROL_HEADER = DO_OWNER_HEADERS.hint;
+export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = DO_OWNER_CONTROL_HEADERS.ownershipError;
 export const DO_OWNER_HINT_CODE = "do_owner_hint";
 export const INTERNAL_AUTH_HEADER = "x-wdl-internal-auth";
-export const DO_BINDING_OBJECT_HEADER = "x-wdl-do-binding-object-name";
-export const DO_BINDING_REQUEST_ID_HEADER = "x-wdl-do-binding-request-id";
-
-const DO_OWNER_HINT_HEADERS = {
-  ownerKey: "x-wdl-do-owner-key",
-  taskId: "x-wdl-do-owner-task-id",
-  endpoint: "x-wdl-do-owner-endpoint",
-  generation: "x-wdl-do-owner-generation",
-};
 const DO_OWNER_HINT_STRIP_HEADERS = [
-  ...Object.values(DO_OWNER_HINT_HEADERS),
-  DO_OWNER_HINT_CONTROL_HEADER,
+  ...Object.values(DO_OWNER_HEADERS),
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
 ];
 const DO_FETCH_STRIP_HEADERS = [
@@ -72,8 +67,6 @@ const IntrinsicRequest = Request;
 const IntrinsicResponse = Response;
 const IntrinsicUint8Array = Uint8Array;
 const IntrinsicWeakSet = WeakSet;
-const intrinsicDecodeURIComponent = decodeURIComponent;
-const intrinsicEncodeURIComponent = encodeURIComponent;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicArrayIsArray = Array.isArray;
 const intrinsicAbortSignalAbortedGet = /** @type {(this: AbortSignal) => boolean} */ (
@@ -243,65 +236,6 @@ function copyHeaders(source) {
   return out;
 }
 
-/** @param {string} objectName */
-export function encodeDoObjectNameHeader(objectName) {
-  return intrinsicReflectApply(intrinsicEncodeURIComponent, undefined, [objectName]);
-}
-
-/** @param {string | null} encoded */
-export function decodeDoObjectNameHeader(encoded) {
-  if (!encoded) {
-    throw new TypeError("Durable Object transport requires an object name");
-  }
-  let objectName;
-  try {
-    objectName = intrinsicReflectApply(intrinsicDecodeURIComponent, undefined, [encoded]);
-  } catch {
-    throw new TypeError("Durable Object transport has an invalid object name");
-  }
-  if (!objectName || encodeDoObjectNameHeader(objectName) !== encoded) {
-    throw new TypeError("Durable Object transport has an invalid object name");
-  }
-  return objectName;
-}
-
-/**
- * Build the request sent through a binding-scoped WorkerEntrypoint.fetch().
- * The host adapter owns namespace/class identity; the tenant supplies only the
- * object name and original public request.
- *
- * @param {string} objectName
- * @param {Request} request
- * @param {string | null} requestId
- */
-export function scopedDoRequest(objectName, request, requestId) {
-  const headers = copyHeaders(intrinsicReflectApply(intrinsicRequestHeadersGet, request, []));
-  headerSet(headers, DO_BINDING_OBJECT_HEADER, encodeDoObjectNameHeader(objectName));
-  if (requestId) {
-    headerSet(headers, DO_BINDING_REQUEST_ID_HEADER, requestId);
-  } else {
-    headerDelete(headers, DO_BINDING_REQUEST_ID_HEADER);
-  }
-  return new IntrinsicRequest(request, { headers });
-}
-
-/** @param {Request} request */
-export function readScopedDoRequest(request) {
-  const sourceHeaders = intrinsicReflectApply(intrinsicRequestHeadersGet, request, []);
-  const objectName = decodeDoObjectNameHeader(headerValue(sourceHeaders, DO_BINDING_OBJECT_HEADER));
-  const requestId = sanitizeRequestId(
-    headerValue(sourceHeaders, DO_BINDING_REQUEST_ID_HEADER)
-  );
-  const headers = copyHeaders(sourceHeaders);
-  headerDelete(headers, DO_BINDING_OBJECT_HEADER);
-  headerDelete(headers, DO_BINDING_REQUEST_ID_HEADER);
-  return {
-    objectName,
-    requestId,
-    request: new IntrinsicRequest(request, { headers }),
-  };
-}
-
 /** @param {Headers} headers */
 function headerEntries(headers) {
   /** @type {[string, string][]} */
@@ -416,8 +350,7 @@ function cancelStreamReader(reader) {
 
 /** @param {Response} response */
 function cancelResponseBody(response) {
-  // This source is injected into loaded workers, so keep cleanup local rather
-  // than adding shared-respond as another injected facade module.
+  // Keep best-effort response cleanup local to the host transport.
   try {
     const body = responseBody(response);
     if (!body) return;
@@ -561,8 +494,7 @@ function boundedRequestHeaderByteLength(value, maxBytes) {
  * @returns {Promise<Uint8Array>}
  */
 async function readRequestBodyBytes(request, signal) {
-  // This source is injected into loaded workers, so keep the bounded reader
-  // local instead of importing a helper that would add another facade module.
+  // Body admission belongs to the binding-scoped host transport.
   const contentLength = headerValue(requestHeaders(request), "content-length");
   if (contentLength != null && contentLength !== "") {
     const declared = numberValue(contentLength);
@@ -668,7 +600,7 @@ function cloneJsonRpcData(value, field, seen = new IntrinsicWeakSet()) {
 }
 
 /** @param {unknown} method */
-export function assertRpcMethod(method) {
+function assertRpcMethod(method) {
   if (
     typeof method !== "string" ||
     !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(method)
@@ -895,12 +827,12 @@ function ownerRequestUrl(owner, pathname) {
  * @returns {Record<string, string>}
  */
 export function ownerHintHeaders(owner, { control = false } = {}) {
-  const headers = {
-    [DO_OWNER_HINT_HEADERS.ownerKey]: owner.ownerKey,
-    [DO_OWNER_HINT_HEADERS.taskId]: owner.taskId,
-    [DO_OWNER_HINT_HEADERS.endpoint]: owner.endpoint,
-    [DO_OWNER_HINT_HEADERS.generation]: String(owner.generation),
-  };
+  const headers = /** @type {Record<string, string>} */ ({
+    [DO_OWNER_HEADERS.ownerKey]: owner.ownerKey,
+    [DO_OWNER_HEADERS.taskId]: owner.taskId,
+    [DO_OWNER_HEADERS.endpoint]: owner.endpoint,
+    [DO_OWNER_HEADERS.generation]: String(owner.generation),
+  });
   if (control) headers[DO_OWNER_HINT_CONTROL_HEADER] = "1";
   return headers;
 }
@@ -910,10 +842,10 @@ export function ownerHintHeaders(owner, { control = false } = {}) {
  * @returns {DoOwnerHint | null}
  */
 export function ownerHintFromHeaders(headers) {
-  const ownerKey = headerValue(headers, DO_OWNER_HINT_HEADERS.ownerKey);
-  const taskId = headerValue(headers, DO_OWNER_HINT_HEADERS.taskId);
-  const endpoint = headerValue(headers, DO_OWNER_HINT_HEADERS.endpoint);
-  const rawGeneration = headerValue(headers, DO_OWNER_HINT_HEADERS.generation);
+  const ownerKey = headerValue(headers, DO_OWNER_HEADERS.ownerKey);
+  const taskId = headerValue(headers, DO_OWNER_HEADERS.taskId);
+  const endpoint = headerValue(headers, DO_OWNER_HEADERS.endpoint);
+  const rawGeneration = headerValue(headers, DO_OWNER_HEADERS.generation);
   if (rawGeneration == null || rawGeneration === "") return null;
   const generation = numberValue(rawGeneration);
   if (

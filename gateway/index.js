@@ -50,6 +50,7 @@ import {
   proxyGatewayWebSocket,
   webSocketProxyOptionsFromEnv,
 } from "gateway-websocket";
+import { SESSION_POLICY_RESTART } from "shared-worker-contract";
 import { formatWorkerId } from "shared-worker-id";
 
 /**
@@ -252,7 +253,7 @@ export default {
                   }
                   if (current.version !== runtimeVersion) return "restart";
                   if (current.restartSequence > observedLifecycle.restartSequence) {
-                    if (current.mode === "restart") return "restart";
+                    if (current.mode === SESSION_POLICY_RESTART) return "restart";
                     observedLifecycle = current;
                   }
                   return "continue";

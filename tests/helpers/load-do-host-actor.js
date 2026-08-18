@@ -148,6 +148,7 @@ const source = applyModuleReplacements(readRepositoryFile("do-runtime/actor.js")
   [/from "shared-errors";/g, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
   [/from "shared-observability";/g, `from ${JSON.stringify(OBSERVABILITY_NOOP_URL)};`],
   [/from "shared-respond";/g, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
+  [/from "shared-worker-contract";/g, `from ${JSON.stringify(repositoryFileUrl("shared/worker-contract.js"))};`],
 ]);
 
 /** @returns {DoHostActorHarnessState} */

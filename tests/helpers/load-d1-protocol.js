@@ -26,6 +26,7 @@ export function d1ProtocolDataUrl() {
     [/from "shared-bounded-body";/g, `from ${JSON.stringify(BOUNDED_BODY_URL)};`],
     [/from "shared-errors";/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
     [/from "shared-ns-pattern";/g, `from ${JSON.stringify(NS_PATTERN_URL)};`],
+    [/from "shared-respond";/g, `from ${JSON.stringify(RESPOND_URL)};`],
     [/from "shared-utf8";/g, `from ${JSON.stringify(UTF8_URL)};`],
     [/from "shared-d1-query-wire";/g, `from ${JSON.stringify(queryWireUrl)};`],
   ]);

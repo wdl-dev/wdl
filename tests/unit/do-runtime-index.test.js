@@ -115,6 +115,7 @@ export async function forwardToOwner() { throw new Error("unexpected forward"); 
 export async function forwardConnectToOwner() { throw new Error("unexpected connect forward"); }
 `);
 const doTransportUrl = repositoryFileUrl("runtime/_wdl-do-transport.js");
+const doScopedRequestUrl = repositoryFileUrl("runtime/_wdl-do-scoped-request.js");
 const emptyBindingUrl = stub(RUNTIME_BINDING_STUB_SOURCE);
 
 // do-runtime/index.js is intentionally tested as the real dispatcher with
@@ -138,6 +139,7 @@ const IMPORT_STUBS = {
   "do-runtime-owner-client": ownerClientUrl,
   "shared-owner-forwarder": sharedOwnerForwarderUrl(),
   "runtime-do-transport": doTransportUrl,
+  "_wdl-do-scoped-request.js": doScopedRequestUrl,
   "runtime-bindings-kv": emptyBindingUrl,
   "runtime-bindings-assets": emptyBindingUrl,
   "runtime-bindings-service": emptyBindingUrl,

@@ -3,6 +3,29 @@ import { setDataField } from "shared-d1-data-field";
 
 export const D1_QUERY_CONTENT_TYPE = "application/vnd.wdl.d1-query";
 export const D1_QUERY_RESPONSE_CONTENT_TYPE = "application/vnd.wdl.d1-query-response";
+export const D1_OWNER_HINT_HEADERS = Object.freeze({
+  taskId: "x-wdl-d1-owner-task-id",
+  endpoint: "x-wdl-d1-owner-endpoint",
+  generation: "x-wdl-d1-owner-generation",
+});
+export const D1_OWNERSHIP_CODES = Object.freeze([
+  "not-owner",
+  "owner-not-ready",
+  "owner-unavailable",
+  "owner-record-invalid",
+  "owner-endpoint-missing",
+  "owner-endpoint-invalid",
+  "forward-hop-exhausted",
+  "owner-claim-raced",
+  "owner-takeover-raced",
+  "owner-rebalance-raced",
+  "owner-release-raced",
+  "owner-renew-raced",
+  "owner-lease-expired",
+  "owner-lease-too-short",
+  "lease-budget-exhausted",
+  "task-draining",
+]);
 
 const WIRE_VARINT = 0;
 const WIRE_FIXED64 = 1;

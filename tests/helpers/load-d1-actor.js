@@ -132,6 +132,10 @@ const source = applyModuleReplacements(readRepositoryFile("d1-runtime/actor.js")
     /import \{ utf8ByteLength \} from "shared-utf8";/,
     `import { utf8ByteLength } from ${JSON.stringify(sharedModuleDataUrl("shared/utf8.js"))};`
   ],
+  [
+    /import \{ contentTypeEssence \} from "shared-respond";/,
+    `import { contentTypeEssence } from ${JSON.stringify(sharedModuleDataUrl("shared/respond.js"))};`
+  ],
 ]);
 
 /** @returns {Promise<any>} */

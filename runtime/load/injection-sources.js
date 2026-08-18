@@ -7,9 +7,7 @@ import D1_TRANSPORT_SOURCE from "runtime-d1-transport-source";
 import R2_CLIENT_SOURCE from "runtime-r2-client-source";
 import R2_UTILS_SOURCE from "runtime-r2-utils-source";
 import DO_CLIENT_SOURCE from "runtime-do-client-source";
-import DO_TRANSPORT_SOURCE from "runtime-do-transport-source";
-import OWNER_ENDPOINT_SOURCE from "runtime-owner-endpoint-source";
-import OWNER_HINT_CACHE_SOURCE from "runtime-owner-hint-cache-source";
+import DO_SCOPED_REQUEST_SOURCE from "runtime-do-scoped-request-source";
 import REQUEST_ID_SOURCE from "runtime-request-id-source";
 import WORKFLOWS_CLIENT_SOURCE from "runtime-workflows-client-source";
 import AI_CLIENT_SOURCE from "runtime-ai-client-source";
@@ -24,9 +22,7 @@ export const RUNTIME_INJECTION_SOURCES = Object.freeze({
   r2ClientSource: R2_CLIENT_SOURCE,
   r2UtilsSource: R2_UTILS_SOURCE,
   doClientSource: DO_CLIENT_SOURCE,
-  doTransportSource: DO_TRANSPORT_SOURCE,
-  ownerEndpointSource: OWNER_ENDPOINT_SOURCE,
-  ownerHintCacheSource: OWNER_HINT_CACHE_SOURCE,
+  doScopedRequestSource: DO_SCOPED_REQUEST_SOURCE,
   requestIdSource: REQUEST_ID_SOURCE,
   workflowsClientSource: WORKFLOWS_CLIENT_SOURCE,
   aiClientSource: AI_CLIENT_SOURCE,

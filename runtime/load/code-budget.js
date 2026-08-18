@@ -4,10 +4,11 @@ import {
 } from "shared-ns-pattern";
 import {
   HOST_BINDING_MODULE_NAMES,
-  HOST_BINDING_RESERVED_MODULES,
-  HOST_BINDING_RESERVED_MODULE_NAMES,
+  RUNTIME_WRAPPER_MODULE_NAME,
+  WDL_RESERVED_MODULE_PREFIX,
   WORKFLOWS_MODULE_NAME,
   WORKFLOWS_MODULE_SOURCE,
+  isWdlReservedModuleName,
   rewriteCloudflareWorkflowsImports,
 } from "runtime-load-module-rewrite";
 import {
@@ -58,9 +59,7 @@ const utf8Decoder = new TextDecoder();
  *   r2ClientSource: string,
  *   r2UtilsSource: string,
  *   doClientSource: string,
- *   doTransportSource: string,
- *   ownerEndpointSource: string,
- *   ownerHintCacheSource: string,
+ *   doScopedRequestSource: string,
  *   requestIdSource: string,
  *   workflowsClientSource: string,
  *   aiClientSource: string,
@@ -134,9 +133,7 @@ function runtimeModuleInjections(sources) {
   /** @type {RuntimeModuleInjection[]} */
   const doModuleInjections = [
     requestIdModuleInjection,
-    [HOST_BINDING_MODULE_NAMES.doTransport, sources.doTransportSource],
-    [HOST_BINDING_MODULE_NAMES.ownerEndpoint, sources.ownerEndpointSource],
-    [HOST_BINDING_MODULE_NAMES.ownerHintCache, sources.ownerHintCacheSource],
+    [HOST_BINDING_MODULE_NAMES.doScopedRequest, sources.doScopedRequestSource],
     [HOST_BINDING_MODULE_NAMES.doClient, sources.doClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */
@@ -321,7 +318,7 @@ function runtimeInjectedModuleSources(
   // `_wdl-wrapper.js` is always injected: host bindings use the larger wrapper,
   // and otherwise the abort shim still rewrites the user main module.
   out.set(
-    "_wdl-wrapper.js",
+    RUNTIME_WRAPPER_MODULE_NAME,
     plan.needsHostBindingWrapper
       ? generateHostBindingWrapperModule(
           mainModule,
@@ -358,15 +355,16 @@ export function injectRuntimeModulesForHostBindings(
   if (typeof originalMain !== "string" || !originalMain) {
     throw new Error("Host binding wrapper requires a string mainModule");
   }
-  rewriteCloudflareWorkflowsImports(workerCode);
-  if (
-    HOST_BINDING_RESERVED_MODULES.has(originalMain) ||
-    [...HOST_BINDING_RESERVED_MODULES].some((name) => Object.hasOwn(workerCode.modules, name))
-  ) {
+  const reservedName = isWdlReservedModuleName(originalMain)
+    ? originalMain
+    : Object.keys(workerCode.modules).find(isWdlReservedModuleName);
+  if (reservedName) {
     throw new Error(
-      `Host binding wrapper requires reserved module names ${HOST_BINDING_RESERVED_MODULE_NAMES.join(", ")}`
+      `WDL reserves root module names beginning ` +
+        `${JSON.stringify(WDL_RESERVED_MODULE_PREFIX)}; found ${JSON.stringify(reservedName)}`
     );
   }
+  rewriteCloudflareWorkflowsImports(workerCode);
   for (const [name, source] of runtimeInjectedModuleSources(
     originalMain,
     meta,
@@ -375,7 +373,7 @@ export function injectRuntimeModulesForHostBindings(
   )) {
     workerCode.modules[name] = source;
   }
-  workerCode.mainModule = "_wdl-wrapper.js";
+  workerCode.mainModule = RUNTIME_WRAPPER_MODULE_NAME;
   return workerCode;
 }
 

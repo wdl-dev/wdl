@@ -19,6 +19,23 @@
 
 两层 workerd typecheck 只使用 Workers ambient declarations 覆盖 runtime/control JavaScript tier。Node-only typecheck 覆盖 `tests/` 下的 JavaScript-like 测试源码（`.js`、`.cjs` 和 `.mjs`）以及 `scripts/` 下的维护脚本（`.js` 和 `.mjs`），并通过正常 module resolution 继续检查它们实际 import 的生产源码。JSON payload、Markdown、Cap'n Proto fixture 文件等非 JS fixture 不进入 TypeScript。
 
+## 无用代码分析边界
+
+`npm run lint:unused`、Rust compiler warning、Clippy 和 `cargo-deny` 在各自声明的图内仍然有用，但全部为绿色并不能证明每个随产物交付的 surface 都可达。Review 和仓库专用合同必须考虑六个已知边界：
+
+| Gate | 边界 | 必要补充 |
+| --- | --- | --- |
+| Knip | `ignoreExportsUsedInFile` 会有意把被本文件使用的 export 视为存活，即使它没有外部 consumer。 | 修改 public surface 或 entrypoint module 时核对外部 consumer；精确 export 集合本身是合同时，保留窄的 surface contract。 |
+| Knip | 测试 import 也算 consumer，因此只被测试触达的生产 export 或路径仍会显示为已使用。 | 从生产 root 检查可达性；runtime availability 是合同时，运行拥有该路径的 cold-load 或 integration gate。 |
+| Knip | re-export chain 可能通过实现 owner 让无人消费的 barrel member 保持存活。 | 直接核对 barrel consumer；有界的稳定 barrel 应使用值级 surface guard。 |
+| Knip | Cap'n Proto `text = embed` module 和生成源码字符串中的 JavaScript 不在普通静态 import graph 内。 | 保持 executable workerd module 从 root 反向可达，把 string-literal dynamic import 纳入该 graph，拒绝 WDL-owned embedded module 中的 computed dynamic import，验证 injected source 重写后的依赖，编译所有受影响 config，并执行 loaded-worker 路径。 |
+| Rust compiler 和 Clippy | `dead_code` 不会仅因 workspace 内没有 consumer 就把公开的 `pub` item 判为死代码。 | 从 crate/deployable root 核对公开项；必须存在的公开合同应保留行为或 surface 测试。 |
+| `cargo-deny` | 它检查 advisory、license、source 和 ban，不检查 direct Cargo dependency 是否未使用。 | 修改 manifest 时按当前源码和 feature tree 复核；`cargo machete --with-metadata` 是补充性的本地检查，不能替代该 review。 |
+
+这些是覆盖边界，不是替换既有 gate 的理由。对已证明的盲区增加最窄的派生检查，不要在仓库测试中再造一套通用 linter。
+
+回归 tripwire 必须具有可达的失败模式。新增或实质修改 tripwire 时，应临时引入被禁止的形状或改变一个预期 golden value，确认聚焦测试失败，再在提交前撤销该变异。优先使用从已解析配置或已导入值推导出的断言，不要固定源代码文本的拼写形状。
+
 ## Artifact 模型
 
 所有 workerd 路径都由已编译的 `dist/workerd-configs/*.bin` 引导启动：
@@ -132,7 +149,6 @@ npm install -g @wdl-dev/cli@1.8.0
 | `WDL_INTEGRATION_SLOT_PREPPED=1` | 标记该 slot 已经支付完整 startup/restart prepare 成本。 |
 | `WDL_GATEWAY_HOST_PORT` | runner 注入的每 slot gateway host port。 |
 | `WDL_S3MOCK_HOST_PORT` | runner 注入的每 slot s3mock host port。 |
-| `WDL_WORKERD_CONFIG_VARIANT=local` | 为 compose 选择本地编译的 workerd config 变体。 |
 
 ## Helper 与 Fixture
 

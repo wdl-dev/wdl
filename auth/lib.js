@@ -7,7 +7,6 @@ import {
   NS_PATTERN,
   RESERVED_TENANT_NS,
 } from "shared-ns-pattern";
-import { MAX_TOKEN_HEADER_BYTES, extractToken } from "shared-auth-token";
 import { bytesToHex } from "shared-hex";
 import { randomHex } from "shared-random-id";
 import {
@@ -23,11 +22,6 @@ import {
 // must never generate or accept this id; revoke() must reject it.
 export const BOOTSTRAP_TOKEN_ID = "bootstrap";
 const utf8Encoder = new TextEncoder();
-
-// Re-exported for tests that import through auth-lib; sanitizer itself lives in
-// shared-auth-token to keep it identical to the copy control uses before handing
-// tokens to AUTH.verify.
-export { MAX_TOKEN_HEADER_BYTES, extractToken };
 
 export { isValidTenantNs };
 export { randomHex };

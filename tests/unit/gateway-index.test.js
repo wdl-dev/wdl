@@ -194,6 +194,7 @@ const gatewayIndex = (await importRepositoryModule(
     "gateway-dispatch": dispatchUrl,
     "gateway-runtime": runtimeUrl,
     "gateway-websocket": websocketUrl,
+    "shared-worker-contract": repositoryFileUrl("shared/worker-contract.js"),
     "shared-worker-id": workerIdUrl,
   })
 )).default;

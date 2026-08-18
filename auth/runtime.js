@@ -62,7 +62,7 @@ import { withOptimisticRetries } from "shared-optimistic-retry";
  */
 
 export const TOKEN_KEY_PREFIX = "auth:token:";
-export const HASH_KEY_PREFIX = "auth:hash:";
+const HASH_KEY_PREFIX = "auth:hash:";
 const READ_TOKEN_BY_HASH_SCRIPT = `
 local token_id = redis.call("GET", KEYS[1])
 if not token_id then

@@ -4,6 +4,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import {
+  DOCKER_COMPOSE_BUILD_ARGS,
   ROOT,
   composeNoBuildArgs,
   resolveWdlCliBin,
@@ -31,6 +32,10 @@ const composeHelper = await importRepositoryModule(
 test("compose no-build args follow the integration environment", () => {
   assert.deepEqual(composeNoBuildArgs({ WDL_INTEGRATION_NO_BUILD: "1" }), ["--no-build"]);
   assert.deepEqual(composeNoBuildArgs({}), []);
+});
+
+test("integration preflight builds the shared image owners", () => {
+  assert.deepEqual(DOCKER_COMPOSE_BUILD_ARGS, ["compose", "build", "gateway", "workflows"]);
 });
 
 test("compose helpers consume the shared preflight no-build flag", async () => {

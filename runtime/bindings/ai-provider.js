@@ -42,7 +42,7 @@ export class AiProviderRequestError extends Error {
   }
 }
 
-/** @param {unknown} value */
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -68,7 +68,7 @@ function collectInputModalities(found, value) {
     return;
   }
   if (!isRecord(value)) return;
-  const record = /** @type {Record<string, unknown>} */ (value);
+  const record = value;
   const type = typeof record.type === "string" ? record.type : "";
   if (
     type === "text" ||
@@ -109,7 +109,7 @@ function collectInputModalities(found, value) {
   if (type === "shell_call_output" && Array.isArray(record.output)) {
     for (const output of record.output) {
       if (!isRecord(output)) continue;
-      const outputRecord = /** @type {Record<string, unknown>} */ (output);
+      const outputRecord = output;
       if (
         typeof outputRecord.stdout === "string" ||
         typeof outputRecord.stderr === "string"
@@ -121,7 +121,7 @@ function collectInputModalities(found, value) {
   if (type === "code_interpreter_call" && Array.isArray(record.outputs)) {
     for (const output of record.outputs) {
       if (!isRecord(output)) continue;
-      const outputRecord = /** @type {Record<string, unknown>} */ (output);
+      const outputRecord = output;
       if (outputRecord.type === "logs" && typeof outputRecord.logs === "string") {
         found.add("text");
       }
@@ -136,7 +136,7 @@ function collectInputModalities(found, value) {
   if (type === "file_search_call" && Array.isArray(record.results)) {
     for (const result of record.results) {
       if (!isRecord(result)) continue;
-      const resultRecord = /** @type {Record<string, unknown>} */ (result);
+      const resultRecord = result;
       if (typeof resultRecord.text === "string") found.add("text");
     }
   }
@@ -157,10 +157,10 @@ function requestedInputModalities(body, protocol) {
     else collectInputModalities(found, body.input);
   }
   if (protocol === "responses" && isRecord(body.prompt)) {
-    const prompt = /** @type {Record<string, unknown>} */ (body.prompt);
+    const prompt = body.prompt;
     const variables = prompt.variables;
     if (isRecord(variables)) {
-      const values = /** @type {Record<string, unknown>} */ (variables);
+      const values = variables;
       for (const value of Object.values(values)) {
         collectInputModalities(found, value);
       }
@@ -169,14 +169,14 @@ function requestedInputModalities(body, protocol) {
   if (Array.isArray(body.messages)) {
     for (const message of body.messages) {
       if (isRecord(message)) {
-        const record = /** @type {Record<string, unknown>} */ (message);
+        const record = message;
         collectInputModalities(found, record.content);
         if (protocol === "chat_completions") {
           if (typeof record.refusal === "string" && record.refusal.length > 0) {
             found.add("text");
           }
           if (isRecord(record.audio)) {
-            const audio = /** @type {Record<string, unknown>} */ (record.audio);
+            const audio = record.audio;
             if (typeof audio.id === "string" && audio.id.length > 0) found.add("audio");
           }
         }

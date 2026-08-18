@@ -1,25 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { normalizeD1Param } from "../../shared/d1-params.js";
 
-import { loadD1Protocol } from "../helpers/load-d1-protocol.js";
+import { loadD1Protocol, loadD1QueryWire } from "../helpers/load-d1-protocol.js";
+
+const {
+  D1_OWNERSHIP_CODES,
+  D1_QUERY_CONTENT_TYPE,
+  D1_QUERY_RESPONSE_CONTENT_TYPE,
+  encodeD1QueryRequest,
+  encodeD1QueryResponse,
+} = await loadD1QueryWire();
 
 const {
   classifyD1Error,
   D1_ACTOR_QUERY_CONTENT_TYPE,
-  D1_MAX_QUERY_ENVELOPE_BYTES,
-  D1_MAX_QUERY_PAYLOAD_BYTES,
-  D1_MAX_SQL_STATEMENT_BYTES,
-  D1_MAX_STATEMENTS,
-  D1_QUERY_CONTENT_TYPE,
-  D1_QUERY_RESPONSE_CONTENT_TYPE,
   D1ProtocolError,
   dbKeyOf,
   d1ErrorPayload,
   encodeD1ActorQueryRequest,
-  encodeD1QueryResponse,
-  encodeD1QueryRequest,
-  normalizeD1Param,
   normalizeQueryRequest,
   readD1QueryResponseWithBytes,
   readD1ActorControlRequest,
@@ -29,6 +29,10 @@ const {
   slotOf,
 } = await loadD1Protocol();
 
+const D1_QUERY_ENVELOPE_MAX_BYTES = 8 * 1024 * 1024;
+const D1_QUERY_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024;
+const D1_SQL_STATEMENT_MAX_BYTES = 100_000;
+const D1_STATEMENT_MAX_COUNT = 1000;
 const textEncoder = new TextEncoder();
 
 /** @param {Uint8Array} bytes */
@@ -64,6 +68,33 @@ function actorEnvelope(metadata, queryBytes) {
   return body;
 }
 
+/** @param {number} totalBytes */
+function unknownD1Envelope(totalBytes) {
+  const body = new Uint8Array(totalBytes);
+  body[0] = 0x7a; // Unknown field 15, length-delimited.
+  let payloadBytes = totalBytes - 5;
+  let offset = 1;
+  while (payloadBytes >= 0x80) {
+    body[offset++] = (payloadBytes & 0x7f) | 0x80;
+    payloadBytes >>>= 7;
+  }
+  body[offset++] = payloadBytes;
+  assert.equal(offset, 5);
+  return body;
+}
+
+/** @param {number} totalBytes */
+function statementsWithSqlBytes(totalBytes) {
+  const statements = [];
+  let remaining = totalBytes;
+  while (remaining > 0) {
+    const sqlBytes = Math.min(remaining, D1_SQL_STATEMENT_MAX_BYTES);
+    statements.push({ sql: "x".repeat(sqlBytes), params: [] });
+    remaining -= sqlBytes;
+  }
+  return statements;
+}
+
 test("D1 protocol: db key includes namespace and database id", () => {
   assert.equal(dbKeyOf("tenant-a", "main"), "tenant-a:main");
   assert.notEqual(dbKeyOf("tenant-a", "main"), dbKeyOf("tenant-b", "main"));
@@ -75,10 +106,17 @@ test("D1 protocol: db keys reject non-canonical runtime namespaces and database 
   assert.throws(() => dbKeyOf("tenant-a", "a".repeat(129)), /databaseId is invalid/);
 });
 
-test("D1 protocol: slot hash is stable and bounded", () => {
-  const slot = slotOf("tenant-a", "main", 128);
-  assert.equal(slot, slotOf("tenant-a", "main", 128));
-  assert.ok(slot >= 0 && slot < 128);
+test("D1 protocol: slot hash matches persisted golden vectors", () => {
+  assert.equal(slotOf("tenant-a", "main"), 770);
+  for (const [namespace, databaseId, slotCount, expected] of [
+    ["tenant-a", "main", 128, 2],
+    ["tenant-d", "main", 128, 67],
+    ["tenant-d", "main", 64, 3],
+    ["__platform__", "system-db", 128, 30],
+    ["tenant-123", "db_with-dashes", 1024, 248],
+  ]) {
+    assert.equal(slotOf(namespace, databaseId, slotCount), expected);
+  }
 });
 
 test("D1 protocol: normalizes D1 bind parameter types", () => {
@@ -189,6 +227,12 @@ test("D1 protocol: rejects unsupported bind parameter types", () => {
 });
 
 test("D1 protocol: enforces Cloudflare-aligned statement and parameter limits", () => {
+  assert.doesNotThrow(() => normalizeQueryRequest({
+    namespace: "tenant-a",
+    databaseId: "main",
+    statements: Array.from({ length: D1_STATEMENT_MAX_COUNT }, () => ({ sql: "select 1", params: [] })),
+  }));
+
   assert.throws(
     () => normalizeQueryRequest({
       namespace: "tenant-a",
@@ -221,7 +265,7 @@ test("D1 protocol: enforces Cloudflare-aligned statement and parameter limits", 
     () => normalizeQueryRequest({
       namespace: "tenant-a",
       databaseId: "main",
-      statements: Array.from({ length: D1_MAX_STATEMENTS + 1 }, () => ({ sql: "select 1", params: [] })),
+      statements: Array.from({ length: D1_STATEMENT_MAX_COUNT + 1 }, () => ({ sql: "select 1", params: [] })),
     }),
     (err) => isProtocolError(err, 413, "limit-exceeded")
   );
@@ -230,18 +274,20 @@ test("D1 protocol: enforces Cloudflare-aligned statement and parameter limits", 
     () => normalizeQueryRequest({
       namespace: "tenant-a",
       databaseId: "main",
-      statements: Array.from({ length: D1_MAX_STATEMENTS }, () => ({
-        sql: `select '${"x".repeat(90_000)}'`,
-        params: [],
-      })),
+      statements: statementsWithSqlBytes(D1_QUERY_PAYLOAD_MAX_BYTES + 1),
     }),
     (err) => isProtocolError(err, 413, "limit-exceeded")
   );
-  assert.equal(D1_MAX_QUERY_PAYLOAD_BYTES, D1_MAX_QUERY_ENVELOPE_BYTES);
+
+  assert.doesNotThrow(() => normalizeQueryRequest({
+    namespace: "tenant-a",
+    databaseId: "main",
+    statements: statementsWithSqlBytes(D1_QUERY_PAYLOAD_MAX_BYTES),
+  }));
 });
 
 test("D1 protocol: SQL statement cap counts exact UTF-8 bytes", () => {
-  const exact = "\u00e9".repeat(D1_MAX_SQL_STATEMENT_BYTES / 2);
+  const exact = "\u00e9".repeat(D1_SQL_STATEMENT_MAX_BYTES / 2);
   assert.doesNotThrow(() => normalizeQueryRequest({
     namespace: "tenant-a",
     databaseId: "main",
@@ -296,6 +342,26 @@ test("D1 protocol: query endpoint enforces a bounded binary body", async () => {
       headers: { "content-type": D1_QUERY_CONTENT_TYPE },
       body: new Uint8Array(5),
     }), { maxBytes: 4 }),
+    (err) => isProtocolError(err, 413, "limit-exceeded")
+  );
+});
+
+test("D1 protocol: query endpoint keeps the documented 8 MiB default body cap", async () => {
+  assert.deepEqual(
+    await readD1QueryRequest(new Request("http://d1/internal/d1/query", {
+      method: "POST",
+      headers: { "content-type": D1_QUERY_CONTENT_TYPE },
+      body: unknownD1Envelope(D1_QUERY_ENVELOPE_MAX_BYTES),
+    })),
+    { namespace: "", databaseId: "", binding: null, mode: undefined, statements: [] }
+  );
+
+  await assert.rejects(
+    () => readD1QueryRequest(new Request("http://d1/internal/d1/query", {
+      method: "POST",
+      headers: { "content-type": D1_QUERY_CONTENT_TYPE },
+      body: unknownD1Envelope(D1_QUERY_ENVELOPE_MAX_BYTES + 1),
+    })),
     (err) => isProtocolError(err, 413, "limit-exceeded")
   );
 });
@@ -438,7 +504,7 @@ test("D1 protocol: actor query endpoint normalizes decoded query shape", async (
       namespace: "tenant-a",
       databaseId: "main",
       mode: "all",
-      statements: Array.from({ length: D1_MAX_STATEMENTS + 1 }, () => ({ sql: "select 1", params: [] })),
+      statements: Array.from({ length: D1_STATEMENT_MAX_COUNT + 1 }, () => ({ sql: "select 1", params: [] })),
     })
   );
 
@@ -520,12 +586,25 @@ test("D1 protocol: invalid request shape throws protocol error", () => {
 });
 
 test("D1 protocol: classifies user-facing errors by category", () => {
-  for (const code of [
+  assert.deepEqual(D1_OWNERSHIP_CODES, [
+    "not-owner",
+    "owner-not-ready",
+    "owner-unavailable",
     "owner-record-invalid",
+    "owner-endpoint-missing",
     "owner-endpoint-invalid",
+    "forward-hop-exhausted",
+    "owner-claim-raced",
+    "owner-takeover-raced",
+    "owner-rebalance-raced",
+    "owner-release-raced",
+    "owner-renew-raced",
+    "owner-lease-expired",
     "owner-lease-too-short",
     "lease-budget-exhausted",
-  ]) {
+    "task-draining",
+  ]);
+  for (const code of D1_OWNERSHIP_CODES) {
     assert.deepEqual(
       classifyD1Error(new D1ProtocolError(503, code, "lease budget low")),
       {

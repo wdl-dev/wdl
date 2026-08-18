@@ -87,6 +87,27 @@ test("deploy rejects workerd 0701 unsupported bundle metadata before cold-load",
   assert.equal(python.json.error, "python_workers_unsupported");
 });
 
+test("deploy reserves root _wdl- module names without reserving nested paths", async () => {
+  const rejected = await adminPost("/ns/module-policy/worker/reserved/deploy", {
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": "export default {};",
+      "_wdl-tenant-owned.js": "export const value = 1;",
+    },
+  });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.json.error, "worker_code_invalid");
+
+  const accepted = await adminPost("/ns/module-policy/worker/nested/deploy", {
+    mainModule: "src/_wdl-worker.js",
+    modules: {
+      "src/_wdl-worker.js": "export default {};",
+      "src/_wdl-helper.js": "export const value = 1;",
+    },
+  });
+  assert.equal(accepted.status, 201);
+});
+
 test("deploy rejects invalid namespace", async () => {
   const d = await adminPost("/ns/Bad_NS/worker/x/deploy", { code: "x" });
   assert.equal(d.status, 400);

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  drainWaitTimeoutMs,
   normalizeDatabases,
   normalizeTarget,
   ownerGenerationKeyOf,
@@ -14,6 +15,11 @@ import {
   probeTimeoutMs,
   renewConcurrency,
 } from "../helpers/load-d1-owner-registry.js";
+import { readRepositoryJson, sharedModuleDataUrl } from "../helpers/load-shared-module.js";
+
+const { ownerLeaseExpiresAt } = await import(sharedModuleDataUrl("shared/owner-lease.js"));
+const OWNER_DRAIN_TIMEOUT_CONTRACT = readRepositoryJson("tests/fixtures/owner-drain-timeout-env.json");
+const OWNER_TTL_CONTRACT = readRepositoryJson("tests/fixtures/owner-ttl-env.json");
 
 test("D1 owner registry: config helpers keep bounded defaults", () => {
   assert.equal(ownerTtlSeconds({}), 120);
@@ -41,6 +47,22 @@ test("D1 owner registry: config helpers keep bounded defaults", () => {
   assert.equal(renewConcurrency({ D1_RENEW_CONCURRENCY: "0.5" }), 1);
   assert.equal(renewConcurrency({ D1_RENEW_CONCURRENCY: "3.9" }), 3);
   assert.equal(renewConcurrency({ D1_RENEW_CONCURRENCY: "1000" }), 64);
+});
+
+test("D1 owner TTL parsing always composes with lease expiry", () => {
+  for (const { name, raw, expected } of OWNER_TTL_CONTRACT.cases) {
+    const ttl = ownerTtlSeconds({ D1_OWNER_TTL_SECONDS: raw });
+    assert.equal(ttl, expected, name);
+    assert.doesNotThrow(() => ownerLeaseExpiresAt(10_000, ttl), name);
+  }
+  assert.equal(ownerLeaseExpiresAt(10_000, ownerTtlSeconds({ D1_OWNER_TTL_SECONDS: "45" })), 55_000);
+});
+
+test("D1 drain timeout parsing follows the cross-language contract", () => {
+  for (const { name, raw, expected } of OWNER_DRAIN_TIMEOUT_CONTRACT.cases) {
+    const env = raw === null ? {} : { D1_DRAIN_TIMEOUT_MS: raw };
+    assert.equal(drainWaitTimeoutMs(env), expected, name);
+  }
 });
 
 test("D1 owner registry: owner keys encode database keys safely", () => {

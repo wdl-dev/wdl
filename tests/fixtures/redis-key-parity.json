@@ -1,0 +1,6 @@
+{
+  "namespace": "tenant-a",
+  "worker": "worker-main",
+  "logTailStreamKey": "logs:tenant-a:worker-main:s",
+  "workflowDefinitionsKey": "wf:defs:tenant-a:worker-main"
+}

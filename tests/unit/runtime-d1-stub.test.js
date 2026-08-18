@@ -31,11 +31,14 @@ const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_D1_TIMEOUT_URL = sharedModuleDataUrl("shared/d1-timeout.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
+const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const {
   decodeD1QueryRequest,
   encodeD1QueryRequest,
   decodeD1QueryResponse,
   encodeD1QueryResponse,
+  D1_OWNER_HINT_HEADERS,
+  D1_OWNERSHIP_CODES,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
 } = await loadD1QueryWire();
@@ -83,6 +86,8 @@ const stubSourceReplacements = [
     /import \{[^}]*\} from "shared-d1-query-wire";/g,
     `const D1_QUERY_CONTENT_TYPE = ${JSON.stringify(D1_QUERY_CONTENT_TYPE)};
    const D1_QUERY_RESPONSE_CONTENT_TYPE = ${JSON.stringify(D1_QUERY_RESPONSE_CONTENT_TYPE)};
+   const D1_OWNER_HINT_HEADERS = Object.freeze(${JSON.stringify(D1_OWNER_HINT_HEADERS)});
+   const D1_OWNERSHIP_CODES = Object.freeze(${JSON.stringify(D1_OWNERSHIP_CODES)});
    const decodeD1QueryResponse = globalThis.__decodeD1QueryResponse;
    const encodeD1QueryRequest = globalThis.__encodeD1QueryRequest;`,
   ],
@@ -102,6 +107,7 @@ const stubSourceReplacements = [
   [/from "runtime-bindings-proxy";/g, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
   [/from "shared-internal-auth";/g, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
   [/from "shared-errors";/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
+  [/from "shared-respond";/g, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
 ];
 const stubSrc = applyModuleReplacements(
   readRepositoryFile("runtime/bindings/d1.js"),

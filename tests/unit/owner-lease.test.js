@@ -60,6 +60,10 @@ test("owner lease helpers derive lease expiry from Redis server time", async () 
   assert.throws(() => ownerLeaseExpiresAt(1.5, 30), /Owner lease time base is invalid/);
   assert.throws(() => ownerLeaseExpiresAt(10_000, 0.5), /Owner lease TTL is invalid/);
   assert.throws(() => ownerLeaseExpiresAt(10_000, 0), /Owner lease TTL is invalid/);
+  assert.throws(
+    () => ownerLeaseExpiresAt(10_000, Math.floor(Number.MAX_SAFE_INTEGER / 1000) + 1),
+    /Owner lease TTL is invalid/,
+  );
 });
 
 test("owner lease helpers derive monotonic owner generations from Redis counters", async () => {

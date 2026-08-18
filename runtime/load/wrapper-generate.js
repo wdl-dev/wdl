@@ -22,7 +22,6 @@ const IntrinsicSymbol = Symbol;
 const intrinsicArrayForEach = Array.prototype.forEach;
 const intrinsicFunctionToString = Function.prototype.toString;
 const intrinsicObjectDefineProperty = Object.defineProperty;
-const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectKeys = Object.keys;
 const intrinsicPromiseResolve = Promise.resolve;
 const intrinsicPromiseThen = Promise.prototype.then;
@@ -48,11 +47,6 @@ export function defineProperty(target, property, descriptor) {
 
 export function forEachArray(values, callback) {
   intrinsicReflectApply(intrinsicArrayForEach, values, [callback]);
-}
-
-export function forEachObjectEntry(record, callback) {
-  const entries = intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [record]);
-  forEachArray(entries, (entry) => callback(entry[0], entry[1]));
 }
 
 export function functionSource(fn) {

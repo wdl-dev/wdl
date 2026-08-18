@@ -29,6 +29,7 @@ import {
   nextOwnerGenerationFromSnapshot,
   ownerLeaseExpiresAt,
   ownerLeaseExpired,
+  ownerTtlSecondsEnv,
   parseOwnerGenerationCounter,
   parseOwnerRecord,
   withOwnerWatchRetries,
@@ -93,8 +94,7 @@ export function redisClient(env) {
 
 /** @param {DoEnv} env */
 export function ownerTtlSeconds(env) {
-  const raw = Number(envValueOr(env.DO_OWNER_TTL_SECONDS, DEFAULT_OWNER_TTL_SECONDS));
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_OWNER_TTL_SECONDS;
+  return ownerTtlSecondsEnv(env, "DO_OWNER_TTL_SECONDS", DEFAULT_OWNER_TTL_SECONDS);
 }
 
 /** @param {DoEnv} env */

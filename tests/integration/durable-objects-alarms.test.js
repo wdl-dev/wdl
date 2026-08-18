@@ -11,6 +11,7 @@ import {
   sh,
   serviceInternalPost,
   uniqueNs,
+  workflowTickCount,
   withDoMultiRuntimes,
   withServiceStopped,
   setupIntegrationSuite,
@@ -151,9 +152,9 @@ function waitForDoAlarmAdmission(description) {
       const elapsedMs = performance.now() - startedAt;
       assert.equal(response.status, 200, response.body);
       assert.equal(elapsedMs < 3000, true, `tick waited ${elapsedMs}ms for DO alarm delivery`);
-      return responseJson(response);
+      return workflowTickCount(responseJson(response), "doAlarmAdmitted");
     },
-    (body) => body.doAlarmAdmitted >= 1,
+    (admitted) => admitted >= 1,
     5000
   );
 }
@@ -785,8 +786,7 @@ test("stale ready hints do not claim alarms rescheduled into the future", async 
 
   const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
   assert.equal(tick.status, 200, tick.body);
-  const tickBody = responseJson(tick);
-  assert.equal(tickBody.doAlarmAdmitted, 0);
+  assert.equal(workflowTickCount(responseJson(tick), "doAlarmAdmitted"), 0);
 
   const record = redisGetDoAlarmJob(ns, "alarms", "AlarmCounter", "future");
   assert.equal(record.status, "waiting");
@@ -890,8 +890,7 @@ test("expired running DO alarm claims redeliver from the ready hint", async () =
 
     const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
     assert.equal(tick.status, 200, tick.body);
-    const tickBody = responseJson(tick);
-    assert.equal(tickBody.doAlarmAdmitted, 1);
+    assert.equal(workflowTickCount(responseJson(tick), "doAlarmAdmitted"), 1);
     await waitForJson(
       "expired running DO alarm background delivery",
       async () => {

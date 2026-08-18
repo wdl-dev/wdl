@@ -1,0 +1,9 @@
+{
+  "workflowAdmitted": 2,
+  "workflowCapacityBlocked": true,
+  "dueMoved": 3,
+  "retentionCleaned": 4,
+  "doAlarmDueMoved": 5,
+  "doAlarmAdmitted": 6,
+  "doAlarmCapacityBlocked": false
+}

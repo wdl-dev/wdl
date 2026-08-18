@@ -1,0 +1,23 @@
+{
+  "fallback": 120,
+  "max": 9007199254740,
+  "cases": [
+    { "name": "ordinary", "raw": "45", "expected": 45 },
+    { "name": "one", "raw": "1", "expected": 1 },
+    { "name": "max-safe-millisecond-duration", "raw": "9007199254740", "expected": 9007199254740 },
+    { "name": "above-safe-millisecond-duration", "raw": "9007199254741", "expected": 120 },
+    { "name": "zero", "raw": "0", "expected": 120 },
+    { "name": "negative", "raw": "-1", "expected": 120 },
+    { "name": "fraction", "raw": "2.0", "expected": 120 },
+    { "name": "exponent", "raw": "1e3", "expected": 120 },
+    { "name": "above-safe-integer", "raw": "9007199254740992", "expected": 120 },
+    { "name": "leading-zero", "raw": "045", "expected": 120 },
+    { "name": "leading-plus", "raw": "+45", "expected": 120 },
+    { "name": "surrounding-space", "raw": " 45 ", "expected": 120 },
+    { "name": "trailing-lf", "raw": "45\n", "expected": 120 },
+    { "name": "trailing-crlf", "raw": "45\r\n", "expected": 120 },
+    { "name": "non-string-number", "raw": 45, "expected": 120 },
+    { "name": "empty", "raw": "", "expected": 120 },
+    { "name": "missing", "raw": null, "expected": 120 }
+  ]
+}

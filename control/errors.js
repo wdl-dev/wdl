@@ -76,7 +76,7 @@ export class ControlAbort extends Error {
  * @param {ControlAbort} err
  * @returns {Record<string, string>}
  */
-export function controlAbortLogDetails(err) {
+function controlAbortLogDetails(err) {
   if (err.status < 500 || !isRecord(err.details)) return {};
   /** @type {Record<string, string>} */
   const out = {};

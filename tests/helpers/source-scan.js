@@ -1,9 +1,10 @@
-// Kept conservative — not full JS parsers, only enough for repo-wide
-// grep-style style-contract assertions.
+// Repository source-discovery helpers. Executable module specifiers use the
+// TypeScript AST; the remaining scanners stay intentionally narrow.
 
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -17,6 +18,43 @@ export function repoPath(rel) {
 /** @param {string} rel */
 export function readRepoFile(rel) {
   return readFileSync(repoPath(rel), "utf8");
+}
+
+/**
+ * Return executable static and string-literal dynamic module specifiers.
+ * JSDoc imports and import-looking text inside source strings stay excluded.
+ * @param {string} source
+ * @param {string} [fileName]
+ */
+export function executableModuleSpecifiers(source, fileName = "module.js") {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  /** @type {string[]} */
+  const specifiers = [];
+  /** @param {ts.Node} node */
+  const visit = (node) => {
+    if (
+      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+      node.moduleSpecifier &&
+      ts.isStringLiteralLike(node.moduleSpecifier)
+    ) {
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const [specifier] = node.arguments;
+      if (!specifier || !ts.isStringLiteralLike(specifier)) {
+        throw new Error(`${fileName}: dynamic import specifier must be a string literal`);
+      }
+      specifiers.push(specifier.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return specifiers;
 }
 
 /** @param {string} dir */
@@ -89,5 +127,12 @@ export function rustFiles(dir) {
 export function withoutLineComments(source) {
   return source.split("\n")
     .filter((line) => !line.trimStart().startsWith("//"))
+    .join("\n");
+}
+
+/** @param {string} source */
+export function withoutCapnpLineComments(source) {
+  return withoutLineComments(source).split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
     .join("\n");
 }

@@ -15,23 +15,27 @@ import { readJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const transportUrl = repositoryFileUrl("runtime/_wdl-do-transport.js");
+const scopedRequestUrl = repositoryFileUrl("runtime/_wdl-do-scoped-request.js");
 const internalAuthUrl = sharedInternalAuthUrl();
 const ownerHintCacheUrl = repositoryFileUrl("runtime/_wdl-owner-hint-cache.js");
 
 const { DurableObjectNamespace } = await importRepositoryModule("runtime/bindings/do.js", [
   [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
   [/from "runtime-do-transport";/, `from ${JSON.stringify(transportUrl)};`],
+  [/from "_wdl-do-scoped-request\.js";/, `from ${JSON.stringify(scopedRequestUrl)};`],
   [/from "runtime-owner-hint-cache";/, `from ${JSON.stringify(ownerHintCacheUrl)};`],
   [/from "shared-internal-auth";/, `from ${JSON.stringify(internalAuthUrl)};`],
 ]);
 const {
   connectHeaders,
-  decodeDoObjectNameHeader,
   ownerHintFromHeaders,
-  readScopedDoRequest,
   requestSpec,
-  scopedDoRequest,
 } = await import(transportUrl);
+const {
+  decodeDoObjectNameHeader,
+  readScopedDoRequest,
+  scopedDoRequest,
+} = await import(scopedRequestUrl);
 
 /** @param {any} backend */
 function bindingWithBackend(backend) {

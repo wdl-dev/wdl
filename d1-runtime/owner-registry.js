@@ -7,7 +7,7 @@ import {
   resolveTaskIdentity,
 } from "d1-runtime-task-identity";
 import { decodeBulk, WatchError } from "shared-redis";
-import { envValueOr } from "shared-env";
+import { canonicalPositiveIntegerEnv, envValueOr } from "shared-env";
 import { errorMessage } from "shared-errors";
 import { createRequiredRedisClient } from "shared-redis-client";
 import { validOwnerEndpointForService } from "shared-owner-endpoint";
@@ -17,6 +17,7 @@ import {
   nextOwnerGenerationFromSnapshot,
   ownerLeaseExpiresAt,
   ownerLeaseExpired,
+  ownerTtlSecondsEnv,
   parseOwnerRecord,
   redisServerTimeMs,
   withOwnerWatchRetries,
@@ -82,8 +83,7 @@ export function redisClient(env) {
 
 /** @param {D1Env} env */
 export function ownerTtlSeconds(env) {
-  const raw = Number(envValueOr(env.D1_OWNER_TTL_SECONDS, DEFAULT_OWNER_TTL_SECONDS));
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_OWNER_TTL_SECONDS;
+  return ownerTtlSecondsEnv(env, "D1_OWNER_TTL_SECONDS", DEFAULT_OWNER_TTL_SECONDS);
 }
 
 /** @param {D1Env} env */
@@ -333,8 +333,12 @@ async function repairGenerationCounterIfStale(client, owner) {
 
 /** @param {D1Env} env */
 function drainWaitTimeoutMs(env) {
-  const raw = Number(envValueOr(env.D1_DRAIN_TIMEOUT_MS, DEFAULT_DRAIN_WAIT_TIMEOUT_MS));
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DRAIN_WAIT_TIMEOUT_MS;
+  return canonicalPositiveIntegerEnv(
+    env,
+    "D1_DRAIN_TIMEOUT_MS",
+    DEFAULT_DRAIN_WAIT_TIMEOUT_MS,
+    Number.MAX_SAFE_INTEGER
+  );
 }
 
 /** @param {number} ms */

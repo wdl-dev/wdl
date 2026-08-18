@@ -1,5 +1,5 @@
 import { loadD1QueryWire, d1QueryWireDataUrl } from "./load-d1-protocol.js";
-import { moduleDataUrl } from "./load-shared-module.js";
+import { moduleDataUrl, repositoryFileUrl } from "./load-shared-module.js";
 import {
   createOwnerClientHarness,
   importOwnerClientModule,
@@ -43,6 +43,7 @@ const d1OwnerClientModule = await importOwnerClientModule("d1-runtime/owner-clie
   "shared-internal-auth": ownerHarness.internalAuthUrl,
   "shared-owner-forwarder": ownerHarness.ownerForwarderUrl,
   "shared-owner-endpoint": ownerHarness.ownerEndpointUrl,
+  "shared-respond": repositoryFileUrl("shared/respond.js"),
   "shared-owner-lease": ownerHarness.ownerLeaseUrl,
   "d1-runtime-state": ownerHarness.stateUrl,
 });

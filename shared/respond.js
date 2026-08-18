@@ -43,6 +43,15 @@ export async function discardResponseBody(message) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function contentTypeEssence(value) {
+  if (typeof value !== "string") return "";
+  return value.split(";", 1)[0].trim().toLowerCase();
+}
+
+/**
  * @param {number} status
  * @param {unknown} data
  * @param {HeadersInit} [extraHeaders]
@@ -99,7 +108,7 @@ export function sanitizeJsonErrorDetails(value) {
  * @param {{ omitEmptyMessage?: boolean }} [options]
  * @returns {Record<string, unknown>}
  */
-export function jsonErrorBody(error, message, details = {}, { omitEmptyMessage = true } = {}) {
+function jsonErrorBody(error, message, details = {}, { omitEmptyMessage = true } = {}) {
   /** @type {Record<string, unknown>} */
   const body = { error };
   if (message) {

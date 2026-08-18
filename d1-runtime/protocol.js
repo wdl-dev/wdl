@@ -3,8 +3,10 @@ import { fnv1a32CodeUnits } from "shared-fnv1a32";
 import { BodyTooLargeError, readBoundedBytes as readRequestBoundedBytes } from "shared-bounded-body";
 import { errorMessage as sharedErrorMessage } from "shared-errors";
 import { D1_DATABASE_ID_RE, isValidRuntimeLoadNs } from "shared-ns-pattern";
+import { contentTypeEssence } from "shared-respond";
 import { utf8ByteLength } from "shared-utf8";
 import {
+  D1_OWNERSHIP_CODES,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   decodeD1QueryRequest,
@@ -13,21 +15,14 @@ import {
   encodeD1QueryResponse,
 } from "shared-d1-query-wire";
 
-export {
-  D1_QUERY_CONTENT_TYPE,
-  D1_QUERY_RESPONSE_CONTENT_TYPE,
-  encodeD1QueryRequest,
-  encodeD1QueryResponse,
-} from "shared-d1-query-wire";
-
 export const D1_ACTOR_QUERY_CONTENT_TYPE = "application/vnd.wdl.d1-actor-query";
 const SLOT_COUNT = 4096;
 const QUERY_MODES = new Set(["all", "raw", "run", "exec", "batch"]);
-export const D1_MAX_QUERY_ENVELOPE_BYTES = 8 * 1024 * 1024;
-export const D1_MAX_QUERY_PAYLOAD_BYTES = 8 * 1024 * 1024;
-export const D1_MAX_STATEMENTS = 1000;
-export const D1_MAX_SQL_STATEMENT_BYTES = 100_000;
-export const D1_MAX_BOUND_PARAMS = 100;
+const D1_MAX_QUERY_ENVELOPE_BYTES = 8 * 1024 * 1024;
+const D1_MAX_QUERY_PAYLOAD_BYTES = 8 * 1024 * 1024;
+const D1_MAX_STATEMENTS = 1000;
+const D1_MAX_SQL_STATEMENT_BYTES = 100_000;
+const D1_MAX_BOUND_PARAMS = 100;
 
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
@@ -117,8 +112,6 @@ export function slotOf(namespace, databaseId, slotCount = SLOT_COUNT) {
   return fnv1a32CodeUnits(key) % slotCount;
 }
 
-export { normalizeD1Param };
-
 /** @param {unknown[]} params */
 export function sqliteBindParams(params) {
   return params.map((param) => Array.isArray(param) ? new Uint8Array(param) : param);
@@ -128,7 +121,7 @@ export function sqliteBindParams(params) {
  * @param {unknown} statement
  * @returns {NormalizedStatement}
  */
-export function normalizeStatement(statement) {
+function normalizeStatement(statement) {
   if (!statement || typeof statement !== "object" || Array.isArray(statement)) {
     throw new D1ProtocolError(400, "invalid-statement", "statement must be an object");
   }
@@ -234,7 +227,7 @@ export function normalizeQueryRequest(body) {
 /** @param {Request} request @param {{ maxBytes?: number }} [options] */
 export async function readD1QueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVELOPE_BYTES } = {}) {
   const contentType = request.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== D1_QUERY_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== D1_QUERY_CONTENT_TYPE) {
     throw new D1ProtocolError(
       415,
       "unsupported-media-type",
@@ -253,7 +246,7 @@ export async function readD1QueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVE
 /** @param {Response} response */
 export async function readD1QueryResponseWithBytes(response) {
   const contentType = response.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== D1_QUERY_RESPONSE_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== D1_QUERY_RESPONSE_CONTENT_TYPE) {
     throw new D1ProtocolError(
       502,
       "invalid-response",
@@ -337,7 +330,7 @@ function decodeActorEnvelope(bytes) {
 /** @param {Request} request @param {{ maxBytes?: number }} [options] */
 export async function readD1ActorQueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVELOPE_BYTES } = {}) {
   const contentType = request.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== D1_ACTOR_QUERY_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== D1_ACTOR_QUERY_CONTENT_TYPE) {
     throw new D1ProtocolError(
       415,
       "unsupported-media-type",
@@ -369,24 +362,7 @@ export async function readD1ActorControlRequest(request, { maxBytes = D1_MAX_QUE
   return readD1JsonObjectRequest(request, { maxBytes, label: "D1 actor control" });
 }
 
-const OWNERSHIP_CODES = new Set([
-  "not-owner",
-  "owner-not-ready",
-  "owner-unavailable",
-  "owner-record-invalid",
-  "owner-endpoint-missing",
-  "owner-endpoint-invalid",
-  "forward-hop-exhausted",
-  "owner-claim-raced",
-  "owner-takeover-raced",
-  "owner-rebalance-raced",
-  "owner-release-raced",
-  "owner-renew-raced",
-  "owner-lease-expired",
-  "owner-lease-too-short",
-  "lease-budget-exhausted",
-  "task-draining",
-]);
+const OWNERSHIP_CODES = new Set(D1_OWNERSHIP_CODES);
 
 /** @param {unknown} err */
 function errorMessage(err) {

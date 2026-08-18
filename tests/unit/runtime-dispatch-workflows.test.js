@@ -38,9 +38,6 @@ const workflowLimits = /** @type {{
   readRepositoryJson("tests/fixtures/workflow-limits.json")
 );
 const {
-  _resetWorkflowReplayCacheForTest,
-  _stringifyWorkflowBackendBodyForTest,
-  _stringifyWorkflowJsonForTest,
   handleWorkflowNotifyDispatch,
   handleWorkflowRunDispatch,
   readWorkflowNotifyDispatch,
@@ -52,9 +49,19 @@ const {
   workflowError,
 } = runtimeDispatchWorkflowStep;
 const {
+  _resetWorkflowReplayCacheForTest,
   getWorkflowReplayCache,
   WORKFLOW_REPLAY_CACHE_MAX_INSTANCES,
 } = runtimeDispatchWorkflowReplayCache;
+const {
+  stringifyWorkflowJson,
+  workflowBackendBody,
+} = workflowJson;
+
+/** @param {unknown} value @param {number} [maxBytes] */
+function stringifyWorkflowJsonForTest(value, maxBytes) {
+  return stringifyWorkflowJson(value, "test value", maxBytes);
+}
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 
@@ -90,7 +97,7 @@ test("workflow payload limits match the shared Rust/JS contract", () => {
     workflowLimits.payloadTooLargeCode
   );
   assert.throws(
-    () => workflowJson._stringifyWorkflowJsonForTest("x", 0),
+    () => stringifyWorkflowJsonForTest("x", 0),
     (err) => err instanceof Error && err.name === workflowLimits.payloadTooLargeCode
   );
 });
@@ -164,7 +171,7 @@ test("workflow bounded JSON serializer matches JSON.stringify for supported valu
     inherited,
   ];
   for (const value of cases) {
-    assert.equal(_stringifyWorkflowJsonForTest(value), JSON.stringify(value));
+    assert.equal(stringifyWorkflowJsonForTest(value), JSON.stringify(value));
   }
 });
 
@@ -175,10 +182,10 @@ test("workflow bounded JSON serializer rejects circular values and BigInt like J
   /** @type {any} */
   const numberToBigInt = new Number(3);
   numberToBigInt[Symbol.toPrimitive] = () => 4n;
-  assert.throws(() => _stringifyWorkflowJsonForTest(circular), /circular/i);
-  assert.throws(() => _stringifyWorkflowJsonForTest(1n), /BigInt/);
-  assert.throws(() => _stringifyWorkflowJsonForTest(Object(1n)), /BigInt/);
-  assert.throws(() => _stringifyWorkflowJsonForTest(numberToBigInt), /BigInt|Cannot convert/);
+  assert.throws(() => stringifyWorkflowJsonForTest(circular), /circular/i);
+  assert.throws(() => stringifyWorkflowJsonForTest(1n), /BigInt/);
+  assert.throws(() => stringifyWorkflowJsonForTest(Object(1n)), /BigInt/);
+  assert.throws(() => stringifyWorkflowJsonForTest(numberToBigInt), /BigInt|Cannot convert/);
 });
 
 test("runtime dispatch JSON reader rejects oversized bodies before parsing", async () => {
@@ -194,9 +201,9 @@ test("runtime dispatch JSON reader rejects oversized bodies before parsing", asy
 test("workflow bounded JSON serializer does not over-count split surrogate pairs", () => {
   const value = `${"a".repeat(8191)}😀`;
   const maxBytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
-  assert.equal(_stringifyWorkflowJsonForTest(value, maxBytes), JSON.stringify(value));
+  assert.equal(stringifyWorkflowJsonForTest(value, maxBytes), JSON.stringify(value));
   assert.throws(
-    () => _stringifyWorkflowJsonForTest(value, maxBytes - 1),
+    () => stringifyWorkflowJsonForTest(value, maxBytes - 1),
     /workflow_payload_too_large/
   );
 });
@@ -204,24 +211,24 @@ test("workflow bounded JSON serializer does not over-count split surrogate pairs
 test("workflow JSON writer matches the Rust Unicode and nesting domain", () => {
   for (const value of ["\ud800", "\udc00", { "\ud800": null }, { "\udc00": null }]) {
     assert.throws(
-      () => _stringifyWorkflowJsonForTest(value),
+      () => stringifyWorkflowJsonForTest(value),
       /unpaired UTF-16 surrogate/
     );
   }
 
   assert.equal(
-    _stringifyWorkflowJsonForTest(nestedArrays(workflowLimits.jsonContainerDepthMax)),
+    stringifyWorkflowJsonForTest(nestedArrays(workflowLimits.jsonContainerDepthMax)),
     JSON.stringify(nestedArrays(workflowLimits.jsonContainerDepthMax))
   );
   assert.throws(
-    () => _stringifyWorkflowJsonForTest(
+    () => stringifyWorkflowJsonForTest(
       nestedArrays(workflowLimits.jsonContainerDepthMax + 1)
     ),
     /JSON nesting limit/
   );
 
   const tenantDepthMax = workflowLimits.jsonContainerDepthMax - 1;
-  assert.doesNotThrow(() => _stringifyWorkflowBackendBodyForTest("claim-step", {
+  assert.doesNotThrow(() => workflowBackendBody("claim-step", {
     config: nestedArrays(tenantDepthMax),
   }));
   assert.doesNotThrow(() => workflowJson.stringifyWorkflowResult(
@@ -229,7 +236,7 @@ test("workflow JSON writer matches the Rust Unicode and nesting domain", () => {
     "output"
   ));
   assert.throws(
-    () => _stringifyWorkflowBackendBodyForTest("claim-step", {
+    () => workflowBackendBody("claim-step", {
       config: nestedArrays(tenantDepthMax + 1),
     }),
     /JSON nesting limit/
@@ -250,7 +257,7 @@ test("workflow backend body serializer enforces per-field result caps in one pas
     },
   };
   assert.throws(
-    () => _stringifyWorkflowBackendBodyForTest("commit-step-success", {
+    () => workflowBackendBody("commit-step-success", {
       ns: "demo",
       output,
     }),

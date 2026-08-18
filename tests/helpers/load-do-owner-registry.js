@@ -179,6 +179,7 @@ export const {
   ownerGenerationKeyOf,
   ownerLeaseGuardMs,
   ownerKeyOf,
+  ownerTtlSeconds,
   parseOwner,
   renewOwnedScopes,
   resolveDoOwner,

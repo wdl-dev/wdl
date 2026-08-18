@@ -1,11 +1,10 @@
-// HTTP + WebSocket + streaming smoke fixture; deployable against any env
-// to exercise the upgrade / streaming / cancel code paths live.
+// Manual HTTP, WebSocket, streaming, and cancellation smoke worker.
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
-    if (path === "/" || path === "") {
+    if (path === "/") {
       return Response.json({
         ok: true,
         worker: "ws-echo",
@@ -16,20 +15,20 @@ export default {
     }
 
     if (path === "/ws") {
-      if (request.headers.get("Upgrade") !== "websocket") {
+      if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") {
         return new Response("expected websocket upgrade", { status: 426 });
       }
       const pair = new WebSocketPair();
       const client = pair[0];
       const server = pair[1];
       server.accept();
-      server.addEventListener("message", (evt) => {
-        const data = typeof evt.data === "string" ? evt.data : "<binary>";
+      server.addEventListener("message", (event) => {
+        const data = typeof event.data === "string" ? event.data : "<binary>";
         if (data === "bye") {
           server.close(1000, "bye");
           return;
         }
-        server.send("echo:" + data);
+        server.send(`echo:${data}`);
       });
       server.addEventListener("close", () => {
         console.log("ws-echo: server close");
@@ -38,12 +37,12 @@ export default {
     }
 
     if (path === "/stream") {
-      const enc = new TextEncoder();
+      const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
-          for (let i = 0; i < 10; i++) {
-            controller.enqueue(enc.encode(`data: chunk ${i} @ ${Date.now()}\n\n`));
-            await new Promise((r) => setTimeout(r, 150));
+          for (let index = 0; index < 10; index += 1) {
+            controller.enqueue(encoder.encode(`data: chunk ${index} @ ${Date.now()}\n\n`));
+            await new Promise((resolve) => setTimeout(resolve, 150));
           }
           controller.close();
         },
@@ -57,26 +56,33 @@ export default {
     }
 
     if (path === "/wait") {
-      const enc = new TextEncoder();
+      const encoder = new TextEncoder();
       const { promise: outcome, resolve: resolveOutcome } = Promise.withResolvers();
-      // Register waitUntil up-front; scheduling from inside cancel races
-      // IoContext teardown and the side effect may not complete.
+      // Register up-front because scheduling from cancel races IoContext teardown.
       ctx.waitUntil((async () => {
         const state = await outcome;
         console.log(`ws-echo: /wait outcome=${state}`);
       })());
       const stream = new ReadableStream({
         async start(controller) {
-          controller.enqueue(enc.encode("ready\n"));
-          for (let i = 0; i < 600; i++) {
-            await new Promise((r) => setTimeout(r, 100));
-            try { controller.enqueue(enc.encode(`tick:${i}\n`)); }
-            catch { resolveOutcome("enqueue-threw"); return; }
+          controller.enqueue(encoder.encode("ready\n"));
+          for (let index = 0; index < 600; index += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            try {
+              controller.enqueue(encoder.encode(`tick:${index}\n`));
+            } catch {
+              resolveOutcome("enqueue-threw");
+              return;
+            }
           }
-          try { controller.close(); } catch {}
+          try {
+            controller.close();
+          } catch {}
           resolveOutcome("ended-normally");
         },
-        cancel() { resolveOutcome("cancel"); },
+        cancel() {
+          resolveOutcome("cancel");
+        },
       });
       return new Response(stream, { headers: { "content-type": "text/plain" } });
     }

@@ -21,15 +21,20 @@ import {
 } from "shared-bounded-body";
 import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 import { isValidRuntimeLoadNs, WORKER_NAME_RE } from "shared-ns-pattern";
+import { contentTypeEssence } from "shared-respond";
 import { utf8ByteLength } from "shared-utf8";
 import {
   SESSION_POLICY_PRESERVE,
   parseVersion,
 } from "shared-worker-contract";
-import { decodeDoObjectNameHeader } from "runtime-do-transport";
+import {
+  decodeDoObjectNameHeader,
+  DO_OWNER_CONTROL_HEADERS,
+  DO_OWNER_HEADERS,
+} from "_wdl-do-scoped-request.js";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
-export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
+export { DoRuntimeError } from "do-runtime-protocol-errors";
 export {
   hostIdForObject,
   hostIdForShard,
@@ -51,7 +56,7 @@ export const DO_OWNERSHIP_CODE = Object.freeze({
   FORWARD_HOP_EXHAUSTED: "forward_hop_exhausted",
   TASK_DRAINING: "task_draining",
 });
-export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = "x-wdl-do-ownership-error";
+export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = DO_OWNER_CONTROL_HEADERS.ownershipError;
 /** @type {Set<string>} */
 const DO_OWNERSHIP_CODES = new Set(Object.values(DO_OWNERSHIP_CODE));
 
@@ -83,17 +88,10 @@ const CONNECT_HEADERS = {
   className: "x-wdl-do-class-name",
   objectName: "x-wdl-do-object-name",
   requestUrl: "x-wdl-do-request-url",
-  ownerKey: "x-wdl-do-owner-key",
-  ownerTaskId: "x-wdl-do-owner-task-id",
-  ownerGeneration: "x-wdl-do-owner-generation",
 };
 const OWNER_HINT_PROTOCOL_HEADERS = [
-  "x-wdl-do-accept-owner-hint",
-  "x-wdl-do-owner-key",
-  "x-wdl-do-owner-task-id",
-  "x-wdl-do-owner-endpoint",
-  "x-wdl-do-owner-generation",
-  "x-wdl-do-owner-hint",
+  DO_OWNER_CONTROL_HEADERS.acceptHint,
+  ...Object.values(DO_OWNER_HEADERS),
 ];
 const CONNECT_INTERNAL_HEADER_NAMES = new Set([
   INTERNAL_AUTH_HEADER,
@@ -564,6 +562,10 @@ function decodeConnectObjectName(value) {
 /** @param {Request} request */
 export function normalizeDoConnectRequest(request) {
   const headers = request.headers;
+  const hasOwnerFence =
+    headers.has(DO_OWNER_HEADERS.ownerKey) ||
+    headers.has(DO_OWNER_HEADERS.taskId) ||
+    headers.has(DO_OWNER_HEADERS.generation);
   const body = {
     ns: headers.get(CONNECT_HEADERS.ns),
     worker: headers.get(CONNECT_HEADERS.worker),
@@ -571,11 +573,11 @@ export function normalizeDoConnectRequest(request) {
     doStorageId: headers.get(CONNECT_HEADERS.doStorageId),
     className: headers.get(CONNECT_HEADERS.className),
     objectName: decodeConnectObjectName(headers.get(CONNECT_HEADERS.objectName)),
-    owner: headers.has(CONNECT_HEADERS.ownerKey) || headers.has(CONNECT_HEADERS.ownerTaskId) || headers.has(CONNECT_HEADERS.ownerGeneration)
+    owner: hasOwnerFence
       ? {
-          ownerKey: headers.get(CONNECT_HEADERS.ownerKey),
-          taskId: headers.get(CONNECT_HEADERS.ownerTaskId),
-          generation: headers.get(CONNECT_HEADERS.ownerGeneration),
+          ownerKey: headers.get(DO_OWNER_HEADERS.ownerKey),
+          taskId: headers.get(DO_OWNER_HEADERS.taskId),
+          generation: headers.get(DO_OWNER_HEADERS.generation),
         }
       : undefined,
     request: {
@@ -735,7 +737,7 @@ function invokeWithEnvelopeBody(metadata, bodyBytes, envelopeName = "DO invoke e
  */
 export async function readDoInvokeRequest(request) {
   const contentType = request.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() !== DO_INVOKE_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) !== DO_INVOKE_CONTENT_TYPE) {
     throw new DoRuntimeError(
       415,
       "unsupported_media_type",

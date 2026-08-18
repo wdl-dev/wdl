@@ -199,6 +199,7 @@ const src = applyModuleReplacements(readRepositoryFile("d1-runtime/owner-registr
   [/from "shared-owner-protocol";/, `from ${JSON.stringify(SHARED_OWNER_PROTOCOL_URL)};`],
   [/from "shared-redis-client";/, `from ${JSON.stringify(redisClientUrl)};`],
   [/from "d1-runtime-state";/, `from ${JSON.stringify(stateUrl)};`],
+  [/function drainWaitTimeoutMs\(env\)/, "export function drainWaitTimeoutMs(env)"],
 ]);
 
 const registry = await import(moduleDataUrl(src));
@@ -207,6 +208,7 @@ export const {
   assertCurrentOwnerWithLeaseBudget,
   drainOwnedDbs,
   drainConcurrency,
+  drainWaitTimeoutMs,
   normalizeDatabases,
   normalizeTarget,
   ownerGenerationKeyOf,

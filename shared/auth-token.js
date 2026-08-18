@@ -1,12 +1,8 @@
-// Single source of truth for the `x-admin-token` header sanitizer.
-// Both auth (the verifier) and control (the caller that pre-extracts
-// before handing the token to AUTH.verify) must reject the same shapes
-// identically — drift between the two would let a sanitation bypass on
-// either side surface as an auth policy bug that's hard to correlate.
+// Canonical `x-admin-token` sanitizer used by Control before it calls Auth.
 
 import { utf8ByteLength } from "./utf8.js";
 
-export const MAX_TOKEN_HEADER_BYTES = 256;
+const MAX_TOKEN_HEADER_BYTES = 256;
 
 // Returns the cleaned token, or null if the header is missing / dirty
 // (caller treats both as 401 missing token).

@@ -12,7 +12,7 @@ use crate::queue::{
 };
 use crate::{
     AppState, LogLevel, SchedulerResult, error_fields, fields_with_error, log, now_ms,
-    panic_payload_message, scheduler_error_fields, workflows_tick,
+    panic_payload_message, scheduler_error_fields, workflow_tick_needs_active_poll, workflows_tick,
 };
 
 fn spawn_periodic<F, Fut>(
@@ -86,7 +86,7 @@ fn spawn_workflows_tick_loop(state: AppState) {
                     .catch_unwind()
                     .await
                 {
-                    Ok(Ok(summary)) => summary.needs_active_poll(),
+                    Ok(Ok(summary)) => workflow_tick_needs_active_poll(&summary),
                     Ok(Err(err)) => {
                         log(
                             &state,

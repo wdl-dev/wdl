@@ -1,4 +1,6 @@
 export const WORKFLOWS_MODULE_NAME = "_wdl-cloudflare-workflows.js";
+export const WDL_RESERVED_MODULE_PREFIX = "_wdl-";
+export const RUNTIME_WRAPPER_MODULE_NAME = "_wdl-wrapper.js";
 
 export const WORKFLOWS_MODULE_SOURCE = `
 export { WorkflowEntrypoint } from "cloudflare:workers";
@@ -21,21 +23,16 @@ export const HOST_BINDING_MODULE_NAMES = Object.freeze({
   r2Client: "_wdl-r2-client.js",
   r2Utils: "_wdl-r2-utils.js",
   doClient: "_wdl-do-client.js",
-  doTransport: "_wdl-do-transport.js",
-  ownerEndpoint: "_wdl-owner-endpoint.js",
-  ownerHintCache: "_wdl-owner-hint-cache.js",
+  doScopedRequest: "_wdl-do-scoped-request.js",
   requestId: "_wdl-request-id.js",
   workflowsClient: "_wdl-workflows-client.js",
   aiClient: "_wdl-ai-client.js",
 });
 
-export const HOST_BINDING_RESERVED_MODULE_NAMES = Object.freeze([
-  WORKFLOWS_MODULE_NAME,
-  ...Object.values(HOST_BINDING_MODULE_NAMES),
-  "_wdl-host-wrapper-runtime.js",
-  "_wdl-wrapper.js",
-]);
-export const HOST_BINDING_RESERVED_MODULES = new Set(HOST_BINDING_RESERVED_MODULE_NAMES);
+/** @param {unknown} name */
+export function isWdlReservedModuleName(name) {
+  return typeof name === "string" && name.startsWith(WDL_RESERVED_MODULE_PREFIX);
+}
 
 /**
  * @typedef {{ start: number, end: number, value: string }} Replacement

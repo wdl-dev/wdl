@@ -38,10 +38,11 @@ Every protocol shape needs one owning module and one current written source:
 | AI provider records and resolver snapshots | `docs/modules/ai.md`, `shared/ai-contract.js`, `control/handlers/ai.js`, `rust/redis-proxy/src/ai.rs`, `tests/fixtures/ai-contract.json` |
 | AI tenant/provider HTTP, SSE, WebSocket, and facade protocol | `docs/modules/ai.md`, `runtime/bindings/ai*.js`, `runtime/ai-client.js` |
 | Internal WebSocket backend reconnect policy | `docs/modules/gateway.md`, `shared/worker-contract.js`, `gateway/websocket.js` |
-| Durable Object invoke/connect protocol | `docs/modules/durable-objects.md`, `runtime/_wdl-do-transport.js`, `do-runtime/protocol.js` |
+| Durable Object invoke/connect protocol | `docs/modules/durable-objects.md`, `runtime/_wdl-do-scoped-request.js`, `runtime/_wdl-do-transport.js`, `do-runtime/protocol.js` |
 | Session policy projection and lifecycle notifications | `docs/modules/control-auth.md`, `docs/modules/gateway.md`, `shared/worker-contract.js`, `control/routing.js`, `control/handlers/delete-plan.js`, `gateway/runtime.js`, `gateway/websocket-lifecycle.js`, `do-runtime/owner-registry.js`, `rust/workflows/src/api/do_alarms/dispatch.rs` |
 | Queue, cron, and delayed queue records | `docs/modules/queues-cron.md`, `shared/queue-keys.js`, scheduler/proxy Rust modules |
 | Workflow definitions and instance state | `docs/modules/workflows.md`, `rust/workflows/`, runtime workflow dispatch |
+| Workflow tick response | `tests/fixtures/workflow-tick-response.json` and `rust/common/src/workflow_tick.rs` own the executable shape; `rust/workflows/` and `rust/scheduler/` consume it, while `docs/modules/workflows.md` documents the surrounding behavior. |
 | Observability event and metric shape | `docs/modules/log-tail-observability.md`, `shared/observability.js`, `wdl-rust-common` |
 
 If one tier writes a shape and another tier reads it, the same change must update the

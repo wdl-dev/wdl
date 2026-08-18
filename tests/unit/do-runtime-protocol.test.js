@@ -2,20 +2,22 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
-import { loadDoProtocol } from "../helpers/load-do-protocol.js";
+import { doProtocolErrorsDataUrl, loadDoProtocol } from "../helpers/load-do-protocol.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import {
-  encodeDoObjectNameHeader,
   dispatchDoInvokeWithHintCache,
   retryableOwnerRaceResponse,
   staleDoOwnerHintResponse,
 } from "../../runtime/_wdl-do-transport.js";
+import { encodeDoObjectNameHeader } from "../../runtime/_wdl-do-scoped-request.js";
 import { DO_HOST_SHARD_COUNT, MAX_ID_BYTES } from "../../do-runtime/protocol/wire-grammar.js";
 import {
   doOwnerHintHeaders,
   doOwnershipErrorHeaders,
 } from "../helpers/do-owner-hint.js";
+
+const { doErrorResponse } = await import(doProtocolErrorsDataUrl());
 
 const {
   DoRuntimeError,
@@ -28,7 +30,6 @@ const {
   buildRpcRequest,
   encodeDoInvokeRequest,
   buildLocalActorRequest,
-  doErrorResponse,
   doPlatformErrorResponse,
   hostIdForObject,
   hostIdForShard,

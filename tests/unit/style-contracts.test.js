@@ -7,7 +7,6 @@ import {
   extractExportedStringConst,
   extractRegex,
   extractStringConst,
-  extractStringSetConst,
   fixtureSourceFile,
   markdownFiles,
   objectJsonPayloads,
@@ -16,8 +15,29 @@ import {
   withoutStringAndTemplateLiterals,
   yamlDocuments,
 } from "../helpers/style-contract-scanner.js";
-import { jsFiles, readRepoFile, rustFiles, sourceFiles, withoutLineComments } from "../helpers/source-scan.js";
+import {
+  executableModuleSpecifiers,
+  jsFiles,
+  readRepoFile,
+  rustFiles,
+  sourceFiles,
+  withoutCapnpLineComments,
+  withoutLineComments,
+} from "../helpers/source-scan.js";
 import { AI_RUNTIME_SETTINGS } from "../../shared/ai-runtime-config.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
+import {
+  HOST_BINDING_MODULE_NAMES,
+  RUNTIME_WRAPPER_MODULE_NAME,
+  WDL_RESERVED_MODULE_PREFIX,
+  WORKFLOWS_MODULE_NAME,
+  isWdlReservedModuleName,
+} from "../../runtime/load/module-rewrite.js";
+import { HOST_BINDING_RUNTIME_MODULE_NAME } from "../../runtime/load/wrapper-generate.js";
+import {
+  DO_ALARM_SHIM_MODULE,
+  DO_RUNTIME_RESERVED_MODULE,
+} from "../../do-runtime/load-code-budget.js";
 
 const CONTROL_FILES = jsFiles("control");
 const GATEWAY_FILES = jsFiles("gateway");
@@ -58,6 +78,14 @@ const OFFICIAL_DOC_FILES = [
 // Intentionally empty: add paths here only when a documented active-doc
 // one-language exception is approved.
 const INTENTIONAL_ONE_LANGUAGE_ACTIVE_DOCS = new Set();
+const WORKER_MODULE_CONFIG_FILES = Object.freeze([
+  "gateway/config.capnp",
+  "runtime/config-user.capnp",
+  "runtime/config-system.capnp",
+  "d1-runtime/config.capnp",
+  "do-runtime/config.capnp",
+  "test-workers/ai-provider/config.capnp",
+]);
 
 function activeBilingualDocFiles() {
   const notesDirName = ["arch", "ive"].join("");
@@ -150,23 +178,24 @@ function embeddedSourcePath(configFile, embedPath) {
   return path.posix.normalize(path.posix.join(path.posix.dirname(configFile), embedPath));
 }
 
-/** @param {string} source */
-function bareModuleImports(source) {
-  const imports = new Set();
-  for (const match of source.matchAll(/\bfrom\s+"([^"]+)"/g)) {
-    imports.add(match[1]);
-  }
-  for (const match of source.matchAll(/\bimport\s+"([^"]+)"/g)) {
-    imports.add(match[1]);
-  }
-  return [...imports].filter((specifier) =>
-    // Exclude relative/absolute paths and runtime-provided built-in module
-    // namespaces that do not require explicit embedding in source bundles.
-    !specifier.startsWith(".") &&
-    !specifier.startsWith("/") &&
-    !specifier.startsWith("node:") &&
-    !specifier.startsWith("cloudflare:")
-  );
+/**
+ * @param {string} configFile
+ * @param {string} block
+ */
+function embeddedModuleEntries(configFile, block) {
+  return [...block.matchAll(
+    /\(name\s*=\s*"([^"]+)"\s*,\s*(esModule|text)\s*=\s*embed\s*"([^"]+)"/g
+  )].map((match) => ({
+    name: match[1],
+    kind: match[2],
+    sourcePath: embeddedSourcePath(configFile, match[3]),
+  }));
+}
+
+/** @param {string} ownerName @param {string} specifier */
+function resolveEmbeddedModuleSpecifier(ownerName, specifier) {
+  if (!specifier.startsWith(".")) return specifier;
+  return path.posix.normalize(path.posix.join(path.posix.dirname(ownerName), specifier));
 }
 
 test("control handlers parse JSON request bodies through readJsonBody", () => {
@@ -193,17 +222,36 @@ test("source scanners ignore generated dependency directories", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("shared Redis public barrel does not expose RESP sibling-internal helpers", () => {
+test("shared Redis public barrel exposes only its cross-tier consumer surface", () => {
   const source = withoutLineComments(readRepoFile("shared/redis.js"));
-  for (const name of [
-    "buildHSetArgs",
-    "decodeHashObject",
-    "decodeStringArray",
-    "utf8Decoder",
-    "warnRedisCallback",
-  ]) {
-    assert.doesNotMatch(source, new RegExp(`\\b${RegExp.escape(name)}\\b`), name);
-  }
+  const reexportPattern = /export\s*\{([^}]+)\}\s*from\s*["'][^"']+["'];?/g;
+  const reexports = [...source.matchAll(reexportPattern)];
+  const valueExports = reexports
+    .flatMap((match) => match[1].split(","))
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .toSorted();
+  const typeExports = [...source.matchAll(/@typedef\s+\{import\("[^"]+"\)\.([A-Za-z_$][\w$]*)\}/g)]
+    .map((match) => match[1])
+    .toSorted();
+
+  assert.deepEqual(valueExports, [
+    "RedisClient",
+    "RedisMulti",
+    "RedisReplyError",
+    "RedisSession",
+    "RedisSubscriber",
+    "WatchError",
+    "decodeBulk",
+    "defaultBackoff",
+    "redisDbFromEnv",
+  ]);
+  assert.deepEqual(typeExports, ["RedisCommandEvent", "RedisSetOptions"]);
+  assert.doesNotMatch(
+    source.replace(reexportPattern, ""),
+    /\bexport\b/,
+    "shared/redis.js must remain a pure re-export barrel",
+  );
 });
 
 test("shared primitive owners stay canonical", () => {
@@ -297,6 +345,76 @@ test("runtime workflow clients use the same backend base URL", () => {
   assert.equal(
     extractStringConst(readRepoFile("runtime/workflows-client.js"), "WORKFLOWS_BASE_URL"),
     extractStringConst(readRepoFile("runtime/dispatch/workflow-step.js"), "WORKFLOWS_BASE_URL")
+  );
+});
+
+test("runtime AI clients use the same virtual origin", () => {
+  assert.equal(
+    extractStringConst(readRepoFile("runtime/ai-client.js"), "AI_ORIGIN"),
+    extractStringConst(readRepoFile("runtime/bindings/ai.js"), "AI_VIRTUAL_ORIGIN"),
+  );
+});
+
+test("D1 owner-hint headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-d1-owner-endpoint",
+    "x-wdl-d1-owner-generation",
+    "x-wdl-d1-owner-task-id",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(/["'](x-wdl-d1-owner-[a-z-]+)["']/g)) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "shared/d1-query-wire.js"]),
+  );
+});
+
+test("DO owner headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-do-owner-endpoint",
+    "x-wdl-do-owner-generation",
+    "x-wdl-do-owner-hint",
+    "x-wdl-do-owner-key",
+    "x-wdl-do-owner-task-id",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(/["'](x-wdl-do-owner-[a-z-]+)["']/g)) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "runtime/_wdl-do-scoped-request.js"]),
+  );
+});
+
+test("DO owner-control headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-do-accept-owner-hint",
+    "x-wdl-do-ownership-error",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-do-(?:accept-owner-hint|ownership-error))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "runtime/_wdl-do-scoped-request.js"]),
   );
 });
 
@@ -492,6 +610,72 @@ test("AI persisted and wire contracts share one JS and Rust fixture", () => {
   assert.match(jsContract, /return `ai:provider-credentials:\$\{ns\}`/);
   assert.match(rustReader, /format!\("ai:providers:\{ns\}"\)/);
   assert.match(rustReader, /format!\("ai:provider-credentials:\{ns\}"\)/);
+});
+
+test("cross-language Redis key owners share one fixture", () => {
+  const fixture = "tests/fixtures/redis-key-parity.json";
+  for (const jsReader of [
+    "tests/unit/control-lib.test.js",
+    "tests/unit/control-logs-tail.test.js",
+  ]) {
+    assert.match(readRepoFile(jsReader), new RegExp(RegExp.escape(fixture)));
+  }
+  for (const rustReader of [
+    "rust/redis-proxy/src/logs.rs",
+    "rust/workflows/src/keys.rs",
+  ]) {
+    assert.match(
+      readRepoFile(rustReader),
+      /include_str!\(\s*"\.\.\/\.\.\/\.\.\/tests\/fixtures\/redis-key-parity\.json"\s*\)/,
+      rustReader,
+    );
+  }
+});
+
+test("D1 and DO owner TTL readers share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/owner-ttl-env.json";
+  for (const jsReader of [
+    "tests/unit/d1-owner-registry.test.js",
+    "tests/unit/do-owner-registry.test.js",
+  ]) {
+    assert.match(readRepoFile(jsReader), new RegExp(RegExp.escape(fixture)), jsReader);
+  }
+  assert.match(
+    readRepoFile("rust/supervisor/src/config.rs"),
+    /include_str!\(\s*"\.\.\/\.\.\/\.\.\/tests\/fixtures\/owner-ttl-env\.json"\s*\)/,
+  );
+});
+
+test("D1 and DO drain timeout readers share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/owner-drain-timeout-env.json";
+  assert.match(
+    readRepoFile("tests/unit/d1-owner-registry.test.js"),
+    new RegExp(RegExp.escape(fixture)),
+  );
+  assert.match(
+    readRepoFile("rust/supervisor/src/config.rs"),
+    /include_str!\(\s*"\.\.\/\.\.\/\.\.\/tests\/fixtures\/owner-drain-timeout-env\.json"\s*\)/,
+  );
+});
+
+test("Workflow tick writer, reader, and integration share one response fixture", () => {
+  const fixture = "tests/fixtures/workflow-tick-response.json";
+  assert.deepEqual(Object.keys(readRepositoryJson(fixture)).sort(), [
+    "doAlarmAdmitted",
+    "doAlarmCapacityBlocked",
+    "doAlarmDueMoved",
+    "dueMoved",
+    "retentionCleaned",
+    "workflowAdmitted",
+    "workflowCapacityBlocked",
+  ]);
+  for (const reader of [
+    "rust/workflows/src/api/tick.rs",
+    "rust/scheduler/src/workflows.rs",
+    "tests/integration/helpers/workflow-tick.js",
+  ]) {
+    assert.match(readRepoFile(reader), /workflow-tick-response\.json/, reader);
+  }
 });
 
 test("worker delete lock key stays aligned across control and workflows", () => {
@@ -951,6 +1135,15 @@ test("runtime internal entrypoint keeps worker-event dispatch in runtime/dispatc
   assert.deepEqual(offenders, []);
 });
 
+test("runtime internal leaves host binding entrypoint exports on the main module", () => {
+  const source = withoutLineComments(readRepoFile("runtime/internal.js"));
+  assert.doesNotMatch(source, /^export\s+\{[^}]+\}\s+from\s+"runtime-bindings-/m);
+});
+
+test("runtime dispatch does not forward test-only hooks", () => {
+  assert.doesNotMatch(readRepoFile("runtime/dispatch.js"), /\b\w*ForTest\b/);
+});
+
 test("log-level binding belongs to shared observability", () => {
   const files = [
     ...CONTROL_FILES,
@@ -1081,16 +1274,6 @@ test("WebSocket backend-reconnect policy has one shared contract owner", () => {
   }
 });
 
-test("D1 owner protocol errors stay aligned with runtime stale-hint handling", () => {
-  const protocol = withoutLineComments(readRepoFile("d1-runtime/protocol.js"));
-  const runtimeBinding = withoutLineComments(readRepoFile("runtime/bindings/d1.js"));
-
-  assert.deepEqual(
-    extractStringSetConst(runtimeBinding, "OWNER_HINT_STALE_CODES"),
-    extractStringSetConst(protocol, "OWNERSHIP_CODES")
-  );
-});
-
 test("JS tiers do not hand-roll structured console JSON logs", () => {
   const offenders = [];
   for (const file of PRODUCTION_JS_FILES) {
@@ -1131,79 +1314,94 @@ test("Redis callback warnings use the shared logger and stay non-sensitive", () 
   assert.match(source, /error_message:/);
 });
 
-test("shared relative imports used by embedded modules are embedded in the same module list", () => {
-  const configFiles = [
-    "gateway/config.capnp",
-    "gateway/config-local.capnp",
-    "runtime/config-user.capnp",
-    "runtime/config-user-local.capnp",
-    "runtime/config-system.capnp",
-    "runtime/config-system-local.capnp",
-    "d1-runtime/config.capnp",
-    "do-runtime/config.capnp",
-    "do-runtime/config-local.capnp",
-  ];
-  const relativeDepsBySharedFile = new Map();
-  for (const file of SHARED_FILES.filter((path) => !path.startsWith("shared/vendor/"))) {
-    const source = withoutLineComments(readRepoFile(file));
-    const deps = [...source.matchAll(/from "\.\/([^"]+\.js)"/g)].map((match) => match[1]);
-    if (deps.length) relativeDepsBySharedFile.set(file, deps);
-  }
-
-  const offenders = [];
-  for (const configFile of configFiles) {
-    const blocks = moduleListBlocks(withoutLineComments(readRepoFile(configFile)));
-    for (const block of blocks) {
-      for (const [file, deps] of relativeDepsBySharedFile) {
-        if (!block.includes(`embed "../${file}"`)) continue;
-        for (const dep of deps) {
-          const depPath = `../shared/${dep}`;
-          const depEntry = new RegExp(
-            `name\\s*=\\s*"${RegExp.escape(dep)}"[\\s\\S]*?embed\\s+"${RegExp.escape(depPath)}"`
-          );
-          if (!depEntry.test(block)) offenders.push(`${configFile}:${file}->${dep}`);
-        }
-      }
-    }
-  }
-  assert.deepEqual(offenders, []);
+test("executable module scanning includes bounded dynamic imports", () => {
+  assert.deepEqual(
+    executableModuleSpecifiers(`
+      import "./static.js";
+      export { value } from "./exported.js";
+      async function load() { return import("./dynamic.js"); }
+      const source = 'import("./generated-text.js")';
+    `, "fixture.js"),
+    ["./static.js", "./exported.js", "./dynamic.js"],
+  );
+  assert.throws(
+    () => executableModuleSpecifiers("import(moduleName)", "non-literal.js"),
+    /non-literal\.js: dynamic import specifier must be a string literal/,
+  );
 });
 
-test("bare imports used by embedded modules are embedded in the same worker module list", () => {
-  const configFiles = [
-    "gateway/config.capnp",
-    "gateway/config-local.capnp",
-    "runtime/config-user.capnp",
-    "runtime/config-user-local.capnp",
-    "runtime/config-system.capnp",
-    "runtime/config-system-local.capnp",
-    "d1-runtime/config.capnp",
-    "do-runtime/config.capnp",
-    "do-runtime/config-local.capnp",
-  ];
-  const offenders = [];
-  for (const configFile of configFiles) {
-    const blocks = moduleListBlocks(withoutLineComments(readRepoFile(configFile)));
-    for (const block of blocks) {
-      const moduleEntries = [...block.matchAll(
-        /\(name\s*=\s*"([^"]+)"\s*,\s*(?:esModule|text)\s*=\s*embed\s+"([^"]+)"/g
-      )];
-      const sourceEntries = [...block.matchAll(
-        /\(name\s*=\s*"([^"]+)"\s*,\s*esModule\s*=\s*embed\s+"([^"]+)"/g
-      )];
-      const moduleNames = new Set(moduleEntries.map((match) => match[1]));
-      for (const entry of sourceEntries) {
-        const sourcePath = embeddedSourcePath(configFile, entry[2]);
-        const imports = bareModuleImports(withoutLineComments(readRepoFile(sourcePath)));
-        for (const specifier of imports) {
-          if (!moduleNames.has(specifier)) {
-            offenders.push(`${configFile}:${entry[1]} imports ${specifier}`);
+test("Cap'n Proto module scans ignore hash-commented embeds", () => {
+  const source = withoutCapnpLineComments(`
+    # (name = "missing", esModule = embed "missing.js"),
+    (name = "worker", esModule = embed "worker.js"),
+  `);
+  assert.doesNotMatch(source, /missing/);
+  assert.match(source, /worker\.js/);
+});
+
+test("embedded worker module graphs are closed and reachable from their roots", () => {
+  const defects = [];
+  for (const configFile of WORKER_MODULE_CONFIG_FILES) {
+    const blocks = moduleListBlocks(withoutCapnpLineComments(readRepoFile(configFile)));
+    for (const [blockIndex, block] of blocks.entries()) {
+      const owner = `${configFile}#${blockIndex + 1}`;
+      const entries = embeddedModuleEntries(configFile, block);
+      const byName = new Map();
+      for (const entry of entries) {
+        if (byName.has(entry.name)) defects.push(`${owner}: duplicate module ${entry.name}`);
+        byName.set(entry.name, entry);
+      }
+      const root = byName.get("worker");
+      if (root?.kind !== "esModule") {
+        defects.push(`${owner}: missing executable worker root`);
+        continue;
+      }
+
+      /** @type {Map<string, string[]>} */
+      const dependencies = new Map();
+      for (const entry of entries) {
+        if (entry.kind !== "esModule") {
+          dependencies.set(entry.name, []);
+          continue;
+        }
+        const resolved = [];
+        for (const specifier of executableModuleSpecifiers(
+          readRepoFile(entry.sourcePath),
+          entry.sourcePath,
+        )) {
+          if (
+            specifier.startsWith("/") ||
+            specifier.startsWith("node:") ||
+            specifier.startsWith("cloudflare:")
+          ) continue;
+          const dependency = resolveEmbeddedModuleSpecifier(entry.name, specifier);
+          if (!byName.has(dependency)) {
+            defects.push(`${owner}: ${entry.name} imports missing ${dependency}`);
+            continue;
+          }
+          resolved.push(dependency);
+        }
+        dependencies.set(entry.name, resolved);
+      }
+
+      const reached = new Set(["worker"]);
+      const pending = ["worker"];
+      while (pending.length > 0) {
+        const name = pending.pop();
+        if (name === undefined) break;
+        for (const dependency of dependencies.get(name) || []) {
+          if (!reached.has(dependency)) {
+            reached.add(dependency);
+            pending.push(dependency);
           }
         }
       }
+      for (const entry of entries) {
+        if (!reached.has(entry.name)) defects.push(`${owner}: unreachable module ${entry.name}`);
+      }
     }
   }
-  assert.deepEqual(offenders, []);
+  assert.deepEqual(defects, [], defects.join("\n"));
 });
 
 test("Rust service logs use the shared JSON envelope emitter", () => {
@@ -1907,6 +2105,9 @@ test("local Compose routes private HTTP hops through Envoy", () => {
   const runtimeUserLocal = withoutLineComments(readRepoFile("runtime/config-user-local.capnp"));
   const runtimeSystemLocal = withoutLineComments(readRepoFile("runtime/config-system-local.capnp"));
   const doRuntimeLocal = withoutLineComments(readRepoFile("do-runtime/config-local.capnp"));
+  const doRuntimeLocalEvictable = withoutLineComments(
+    readRepoFile("do-runtime/config-local-evictable.capnp")
+  );
 
   assert.match(compose, /\n {2}envoy:\n\s+image: envoyproxy\/envoy:/);
   assert.match(compose, /RUNTIME_HOST: envoy/);
@@ -1916,6 +2117,11 @@ test("local Compose routes private HTTP hops through Envoy", () => {
   assert.match(compose, /REDIS_URL: redis:\/\/redis:6379/);
   assert.match(compose, /REDIS_ADDR: redis:6379/);
   assert.match(compose, /WDL_WORKERD_CONFIG_VARIANT: local/);
+  assert.equal(
+    composeConfig.services?.["system-runtime"]?.ports,
+    undefined,
+    "system-runtime control and loader sockets must not be host-published",
+  );
   const envoyHealthcheck = composeConfig.services?.envoy?.healthcheck;
   assert.ok(Array.isArray(envoyHealthcheck?.test), "Envoy healthcheck command must exist");
   assert.ok(
@@ -1940,6 +2146,7 @@ test("local Compose routes private HTTP hops through Envoy", () => {
   assert.match(runtimeUserLocal, /address = "envoy:18787"/);
   assert.match(runtimeSystemLocal, /address = "envoy:18787"/);
   assert.match(doRuntimeLocal, /address = "envoy:18787"/);
+  assert.match(doRuntimeLocalEvictable, /address = "envoy:18787"/);
 
   assert.match(envoy, /\badmin:\n\s+address:/);
   for (const port of ["18081", "18082", "18083", "18088", "18089", "18787", "18788"]) {
@@ -2339,7 +2546,7 @@ test("DO alarm internal ready shard constants stay aligned across Rust and integ
   assert.match(keys, /pub\(crate\) const DO_ALARM_READY_SHARDS: usize = 32;/);
   assert.match(keys, /% DO_ALARM_READY_SHARDS/);
   assert.match(integration, /const DO_ALARM_READY_SHARDS = 32;/);
-  assert.match(integration, /fnv1a32CodeUnits\(jobId\) % DO_ALARM_READY_SHARDS/);
+  assert.match(integration, /fnv1a32Utf8\(jobId\) % DO_ALARM_READY_SHARDS/);
 });
 
 test("KV hash field prefixes stay aligned across proxy and integration seeds", () => {
@@ -2684,20 +2891,24 @@ test("owner endpoint validation lives in a shared contract owner", () => {
   for (const config of [userConfig, systemConfig, doConfig]) {
     assert.match(config, /name = "shared-owner-endpoint"/);
     assert.match(config, /name = "_wdl-owner-endpoint\.js"/);
-    assert.match(config, /name = "runtime-owner-endpoint-source"/);
+    assert.doesNotMatch(config, /name = "runtime-owner-endpoint-source"/);
   }
   for (const config of [userConfig, systemConfig]) {
     assert.doesNotMatch(config, /doOwnerNetworkWorker|DO_OWNER_NETWORK/);
   }
 });
 
-test("DO transport relative dependencies are registered in host and loaded-worker module graphs", () => {
+test("DO host transport and scoped facade dependencies stay in their owning module graphs", () => {
   const codeBudget = readRepoFile("runtime/load/code-budget.js");
+  const doClient = readRepoFile("runtime/do-client.js");
   const moduleRewrite = readRepoFile("runtime/load/module-rewrite.js");
   assert.match(moduleRewrite, /requestId: "_wdl-request-id\.js"/);
-  assert.match(moduleRewrite, /doTransport: "_wdl-do-transport\.js"/);
+  assert.match(moduleRewrite, /doScopedRequest: "_wdl-do-scoped-request\.js"/);
+  assert.doesNotMatch(moduleRewrite, /doTransport: "_wdl-do-transport\.js"/);
   assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.requestId, sources\.requestIdSource\]/);
-  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doTransport, sources\.doTransportSource\]/);
+  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doScopedRequest, sources\.doScopedRequestSource\]/);
+  assert.doesNotMatch(codeBudget, /sources\.(?:doTransport|ownerEndpoint|ownerHintCache)Source/);
+  assert.match(doClient, /import \{ scopedDoRequest \} from "\.\/_wdl-do-scoped-request\.js";/);
 
   for (const file of [
     "runtime/config-user.capnp",
@@ -2706,8 +2917,69 @@ test("DO transport relative dependencies are registered in host and loaded-worke
   ]) {
     const source = readRepoFile(file);
     assert.match(source, /name = "runtime-do-transport", esModule = embed/);
+    assert.match(source, /name = "_wdl-do-scoped-request\.js", esModule = embed/);
     assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
+    assert.match(source, /name = "runtime-do-scoped-request-source", text = embed/);
     assert.match(source, /name = "runtime-request-id-source", text = embed/);
+    assert.doesNotMatch(source, /name = "runtime-(?:do-transport|owner-endpoint|owner-hint-cache)-source"/);
+  }
+});
+
+test("runtime-generated root module names stay inside the WDL-reserved namespace", () => {
+  assert.equal(WDL_RESERVED_MODULE_PREFIX, "_wdl-");
+  for (const name of [
+    RUNTIME_WRAPPER_MODULE_NAME,
+    WORKFLOWS_MODULE_NAME,
+    HOST_BINDING_RUNTIME_MODULE_NAME,
+    DO_RUNTIME_RESERVED_MODULE,
+    DO_ALARM_SHIM_MODULE,
+    ...Object.values(HOST_BINDING_MODULE_NAMES),
+  ]) {
+    assert.equal(isWdlReservedModuleName(name), true, name);
+  }
+  const codeBudget = readRepoFile("runtime/load/code-budget.js");
+  assert.match(codeBudget, /out\.set\(\s*RUNTIME_WRAPPER_MODULE_NAME,/);
+  assert.match(codeBudget, /workerCode\.mainModule = RUNTIME_WRAPPER_MODULE_NAME/);
+  assert.equal(isWdlReservedModuleName("src/_wdl-helper.js"), false);
+});
+
+test("source maps cover the runtime injection registry's embedded source owners", () => {
+  const registrySpecifiers = executableModuleSpecifiers(
+    readRepoFile("runtime/load/injection-sources.js"),
+    "runtime/load/injection-sources.js",
+  );
+  assert.ok(registrySpecifiers.length > 0);
+
+  /** @type {Map<string, string>} */
+  const sourcePathBySpecifier = new Map();
+  for (const configFile of [
+    "runtime/config-user.capnp",
+    "runtime/config-system.capnp",
+    "do-runtime/config.capnp",
+  ]) {
+    const textEntries = Array.from(
+      readRepoFile(configFile).matchAll(/\(name = "([^"]+)", text = embed "([^"]+)"\)/g),
+      (match) => ({ specifier: match[1], embeddedPath: match[2] }),
+    );
+    for (const specifier of registrySpecifiers) {
+      const matchingEntries = textEntries.filter((entry) => entry.specifier === specifier);
+      assert.ok(matchingEntries.length > 0, `${configFile} must embed ${specifier}`);
+      for (const { embeddedPath } of matchingEntries) {
+        const sourcePath = path.posix.normalize(
+          path.posix.join(path.posix.dirname(configFile), embeddedPath),
+        );
+        const established = sourcePathBySpecifier.get(specifier);
+        if (established) assert.equal(sourcePath, established, specifier);
+        else sourcePathBySpecifier.set(specifier, sourcePath);
+      }
+    }
+  }
+
+  for (const sourceMapFile of ["docs/source-map.md", "docs/source-map.zh.md"]) {
+    const sourceMap = readRepoFile(sourceMapFile);
+    for (const sourcePath of sourcePathBySpecifier.values()) {
+      assert.ok(sourceMap.includes(`\`${sourcePath}\``), `${sourceMapFile} must own ${sourcePath}`);
+    }
   }
 });
 
@@ -2756,7 +3028,6 @@ test("queue consumer projection caps stay aligned between Control and Scheduler"
 test("Docker images build from pinned public base images", () => {
   const workerdDockerfile = withoutLineComments(readRepoFile("Dockerfile.workerd"));
   const rustDockerfile = withoutLineComments(readRepoFile("Dockerfile.rust"));
-  const integrationEnvironment = withoutLineComments(readRepoFile("scripts/integration-environment.js"));
 
   assert.match(workerdDockerfile, /FROM rust:1-alpine AS supervisor-build/);
   assert.match(workerdDockerfile, /FROM node:24-slim AS build/);
@@ -2775,7 +3046,6 @@ test("Docker images build from pinned public base images", () => {
   assert.doesNotMatch(workerdDockerfile, /\bapt-get\b/);
   assert.doesNotMatch(workerdDockerfile, /\bwget\b/);
   assert.doesNotMatch(workerdDockerfile, /^FROM\s+\S+:latest\b/m);
-  assert.match(integrationEnvironment, /DOCKER_COMPOSE_BUILD_ARGS = \["compose", "build", "gateway", "workflows"\]/);
 });
 
 test("workerd deploy configs use the supervisor-owned health check binary", () => {

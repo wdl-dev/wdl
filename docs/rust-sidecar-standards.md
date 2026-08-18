@@ -152,10 +152,11 @@ non-cryptographic random hex suffixes, stable non-cryptographic hashes, queue Re
 builders, worker version / bundle-key parsing, Prometheus metric storage/formatting,
 Prometheus text responses, structured error field merging, internal-auth token/header
 matching, Redis command construction helpers, a neutral Redis connection execution
-wrapper, and UTF-8-safe string truncation. It must not become a dumping ground for
-service behavior. Axum-facing and Redis-facing helpers sit behind the `axum` and
-`redis` features so consumers such as the D1/DO supervisor binaries do not pull Axum
-or async Redis through the shared crate unless they need those helpers.
+wrapper, small behavior-free cross-service wire shapes, and UTF-8-safe string
+truncation. It must not become a dumping ground for service behavior. Axum-facing and
+Redis-facing helpers sit behind the `axum` and `redis` features so consumers such as
+the D1/DO supervisor binaries do not pull Axum or async Redis through the shared crate
+unless they need those helpers.
 
 The `test-support` feature exposes the process-environment override helper and the RESP
 packed-command parser shared by Rust service tests. Environment overrides are serialized
@@ -181,6 +182,10 @@ Rules for shared primitives:
 - Keep shared helpers semantically neutral. For example, a 64-bit random hex suffix
   helper should not be named after scheduler or workflows when it is also used for
   pending-create tokens.
+- A small response struct shared as one wire contract by Rust services may live in
+  `wdl-rust-common` when it owns only field and serialization shape. Parsing tolerance,
+  validation, error mapping, retry, and lifecycle policy remain with the writer or
+  reader; serialization dependencies must be feature-gated.
 - Do not add service-specific lifecycle, retry, Redis transaction, or protocol-response
   behavior to `wdl-rust-common`; keep those in the service crate that owns the state
   machine.

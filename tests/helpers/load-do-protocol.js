@@ -12,7 +12,7 @@ const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_UTF8_URL = repositoryFileUrl("shared/utf8.js");
 const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
-const DO_TRANSPORT_URL = repositoryFileUrl("runtime/_wdl-do-transport.js");
+const DO_SCOPED_REQUEST_URL = repositoryFileUrl("runtime/_wdl-do-scoped-request.js");
 const DO_WIRE_GRAMMAR_URL = repositoryFileUrl("do-runtime/protocol/wire-grammar.js");
 const DO_ERRORS_URL = repositoryModuleDataUrl("do-runtime/protocol/errors.js", [
   [/from "shared-respond";/g, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
@@ -24,6 +24,10 @@ const DO_IDENTITY_URL = repositoryModuleDataUrl("do-runtime/protocol/identity.js
   [/from "shared-utf8";/g, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
 ]);
 
+export function doProtocolErrorsDataUrl() {
+  return DO_ERRORS_URL;
+}
+
 export function doProtocolDataUrl() {
   return repositoryModuleDataUrl("do-runtime/protocol.js", [
     ...importSpecifierReplacements({
@@ -34,9 +38,10 @@ export function doProtocolDataUrl() {
       "shared-bounded-body": SHARED_BOUNDED_BODY_URL,
       "shared-internal-auth": SHARED_INTERNAL_AUTH_URL,
       "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+      "shared-respond": SHARED_RESPOND_URL,
       "shared-utf8": SHARED_UTF8_URL,
       "shared-worker-contract": WORKER_CONTRACT_URL,
-      "runtime-do-transport": DO_TRANSPORT_URL,
+      "_wdl-do-scoped-request.js": DO_SCOPED_REQUEST_URL,
     }),
   ]);
 }

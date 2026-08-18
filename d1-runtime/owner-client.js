@@ -22,6 +22,7 @@ import {
 import { withInternalAuth } from "shared-internal-auth";
 import { forwardOwnerRequest } from "shared-owner-forwarder";
 import { validOwnerEndpointForService } from "shared-owner-endpoint";
+import { contentTypeEssence } from "shared-respond";
 
 /**
  * @typedef {Record<string, unknown> & { D1_QUERY_TIMEOUT_MS?: unknown }} D1Env
@@ -35,7 +36,7 @@ const D1_OWNER_PORT = 8787;
 
 /** @param {Headers} headers */
 function isD1QueryResponse(headers) {
-  return String(headers.get("content-type") || "").toLowerCase().split(";")[0].trim() === D1_QUERY_RESPONSE_CONTENT_TYPE;
+  return contentTypeEssence(headers.get("content-type")) === D1_QUERY_RESPONSE_CONTENT_TYPE;
 }
 
 /** @param {Response} response */

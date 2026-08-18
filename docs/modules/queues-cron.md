@@ -101,6 +101,13 @@ Cron uses wall-clock minute slots:
    slot placement; scheduler uses Rust `croner` for repair and advancement. Worker
    hashes without canonical identity or metadata are skipped instead of reseeding
    invalid refs, and emit a bounded `invalid_identity` or `invalid_meta` reason.
+   Before the backfill marker exists, scheduler scans legacy `crons:*` hashes once and
+   seeds the discovery index. After that point, supported promotion and deletion writes
+   maintain the hash and index together in DB 0, so an empty index means no discovered
+   cron workers and does not trigger recurring keyspace scans. Queue discovery differs:
+   it spans independently mutable control-plane consumer hashes, data-plane streams and
+   delayed sets, plus Redis consumer-group state. Its periodic repair is therefore an
+   ongoing recovery contract rather than a legacy migration step.
 3. Cron refs carry the entry generation. At fire time scheduler reads
    `crons:<ns>:<worker>` and compares `gen`; missing metadata, corrupt JSON, or
    generation mismatch makes the ref stale and removes it from the slot.

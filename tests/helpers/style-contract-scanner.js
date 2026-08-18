@@ -184,16 +184,6 @@ export function extractStringConst(source, name) {
  * @param {string} source
  * @param {string} name
  */
-export function extractStringSetConst(source, name) {
-  const match = new RegExp(`const ${RegExp.escape(name)}\\s*=\\s*new Set\\(\\[([\\s\\S]*?)\\]\\);`).exec(source);
-  assert.ok(match, `${name} string set must be present`);
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]).toSorted();
-}
-
-/**
- * @param {string} source
- * @param {string} name
- */
 export function extractAssignedConstant(source, name) {
   const match = source.match(new RegExp(`${RegExp.escape(name)}\\s*=\\s*([^;\\n]+)`));
   assert.ok(match, `${name} must be defined`);

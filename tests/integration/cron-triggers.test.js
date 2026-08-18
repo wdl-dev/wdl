@@ -298,6 +298,16 @@ export default {
   },
 };`;
 
+const SCHEDULED_KV_RECORDER = `
+export default {
+  async fetch(_request, env) {
+    return new Response((await env.MARKER.get("last-cron")) ?? "missing");
+  },
+  async scheduled(controller, env) {
+    await env.MARKER.put("last-cron", controller.cron);
+  },
+};`;
+
 test("runtime POST /_scheduled invokes scheduled() and returns outcome:ok", async () => {
   const ns = uniqueNs("sched");
   const version = await deployAndPromote(ns, "w", { code: SCHEDULED_RECORDER });
@@ -311,6 +321,28 @@ test("runtime POST /_scheduled invokes scheduled() and returns outcome:ok", asyn
   const parsed = responseJson(res);
   assert.equal(parsed.outcome, "ok");
   assert.equal(typeof parsed.duration_ms, "number");
+});
+
+test("runtime internal scheduled dispatch cold-loads host bindings exported by the runtime root", async () => {
+  const ns = uniqueNs("schedbinding");
+  const version = await deployAndPromote(ns, "w", {
+    code: SCHEDULED_KV_RECORDER,
+    bindings: { MARKER: { type: "kv", id: "internal-dispatch" } },
+  });
+  const workerHeaders = {
+    "x-worker-id": gatewayWorkerId(ns, "w", version),
+  };
+
+  const fire = runtimeDispatchPost("/_scheduled", workerHeaders, {
+    scheduledTime: 1_800_000_030_000,
+    cron: "30 * * * *",
+  });
+  assert.equal(fire.status, 200, fire.body);
+  assert.equal(responseJson(fire).outcome, "ok");
+
+  const read = runtimeInternalPost("/", workerHeaders, "");
+  assert.equal(read.status, 200, read.body);
+  assert.equal(read.body, "30 * * * *");
 });
 
 test("runtime POST /_scheduled: controller carries scheduledTime + cron through to handler", async () => {

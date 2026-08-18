@@ -2,9 +2,8 @@ import { bytesToHex } from "shared-hex";
 import { D1_DATABASE_ID_RE } from "shared-ns-pattern";
 export { splitSqlStatements } from "shared-sql-splitter";
 
-export { D1_DATABASE_ID_RE };
-export const D1_DATABASE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-export const D1_MIGRATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,191}$/;
+const D1_DATABASE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const D1_MIGRATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,191}$/;
 export const EXECUTE_MODES = new Set(["all", "raw", "run", "exec"]);
 export const D1_DATABASE_STATE_PROVISIONAL = "provisional";
 export const D1_DATABASE_STATE_READY = "ready";
@@ -56,7 +55,7 @@ export function validateDatabaseName(databaseName) {
 }
 
 /** @param {unknown} id */
-export function validateMigrationId(id) {
+function validateMigrationId(id) {
   if (typeof id !== "string" || !D1_MIGRATION_ID_RE.test(id)) {
     throw new Error(`migration id must match ${D1_MIGRATION_ID_RE}, got ${JSON.stringify(id)}`);
   }

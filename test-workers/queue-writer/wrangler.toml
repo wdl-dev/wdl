@@ -1,7 +1,0 @@
-name = "queue-writer"
-main = "src/index.js"
-compatibility_date = "2026-04-24"
-
-[[queues.producers]]
-binding = "SMOKE_Q"
-queue   = "smoketest"

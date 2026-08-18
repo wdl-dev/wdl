@@ -110,6 +110,13 @@ services. Runtime therefore treats bindings as adapters:
 - Service and platform bindings use workerd JSRPC/fetch machinery, but control metadata
   decides which worker, namespace, version, and entrypoint are allowed.
 
+Root module names beginning `_wdl-` are reserved for WDL-generated modules. Control
+rejects new bundles that use the prefix, and runtime/do-runtime fail closed when
+cold-loading a persisted version that contains one. Existing versions must rename the
+module and redeploy; WDL does not provide a compatibility alias. Generated module
+exports are implementation details and not a tenant import surface. The reservation is
+root-only: a path such as `src/_wdl-helper.js` remains a tenant module name.
+
 KV is the simplest example. The runtime exports `KV` as a named entrypoint and
 instantiates one object per binding with `{ ns, id }` props. `get`, `put`, `delete`,
 `list`, batch `get`, and metadata calls all go to redis-proxy DB 1. redis-proxy stores
@@ -180,8 +187,9 @@ invocations, while positional env still receives generated facades.
 
 ASSETS is a deploy-artifact helper, not a full Cloudflare Pages asset pipeline. Control
 uploads files to `assets/<ns>/<worker>/<token>/<path>`, injects an `ASSETS` binding, and
-runtime exposes synchronous `env.ASSETS.url(path)`. The method is IO-free in runtime and
-returns a CDN-facing URL using `ASSETS_CDN_BASE`. Path segments are split on `/`, empty
+runtime exposes `env.ASSETS.url(path)`. Tenant code awaits the JSRPC result; the
+host-side URL construction is IO-free and returns a CDN-facing URL using
+`ASSETS_CDN_BASE`. Path segments are split on `/`, empty
 segments plus `.` and `..` are rejected, and each segment is percent-encoded. Version is
 bound at load time, so rollback flips asset URLs. If workers need auth or rewrite logic
 for static bytes, they should keep files in the bundle instead of using declared

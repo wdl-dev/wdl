@@ -16,6 +16,9 @@ import {
 } from "../../shared/workerd-compat-flags.js";
 
 const packageJson = /** @type {any} */ (readRepositoryJson("package.json"));
+const REDIS_KEY_PARITY = /** @type {{ namespace: string, worker: string, workflowDefinitionsKey: string }} */ (
+  readRepositoryJson("tests/fixtures/redis-key-parity.json")
+);
 const packageWorkerdDep = packageJson?.dependencies?.workerd;
 if (packageWorkerdDep == null) {
   throw new Error('Missing "dependencies.workerd" in package.json');
@@ -57,6 +60,7 @@ const {
   doObjectRegistryKey,
   referrersKey,
   workersIndexKey,
+  workflowDefsKey,
 } = controlLib;
 const {
   parseAllowedCallers,
@@ -286,6 +290,10 @@ test("control Redis key helpers match canonical schema", () => {
   assert.equal(d1DatabaseTombstoneKey("demo", "d1_main"), "d1:database-tombstone:demo:d1_main");
   assert.equal(d1DatabaseTombstonesKey("demo"), "d1:database-tombstones:demo");
   assert.equal(doObjectRegistryKey("do_abc"), "do:objects:do_abc");
+  assert.equal(
+    workflowDefsKey(REDIS_KEY_PARITY.namespace, REDIS_KEY_PARITY.worker),
+    REDIS_KEY_PARITY.workflowDefinitionsKey,
+  );
 });
 
 test("normalizeModule: string → module", () => {

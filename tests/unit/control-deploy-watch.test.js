@@ -306,10 +306,10 @@ const controlWorkerCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
   })
 ));
 const {
-  WORKER_LOADER_CODE_MAX_BYTES,
   WorkerCodeBudgetError,
   assertWorkerLoaderCodeBudget,
 } = await import(controlWorkerCodeBudgetUrl);
+const { WORKER_LOADER_CODE_MAX_BYTES } = await import(runtimeLoadCodeBudgetUrl);
 
 /**
  * @param {{ meta: Record<string, unknown>, normalized: Array<[string, string | Uint8Array]> }} bundle
@@ -381,22 +381,23 @@ test("worker code budget wraps runtime estimator validation failures as domain e
   );
 });
 
-test("worker code budget allows do-runtime reserved names when no DO wrapper is injected", () => {
-  assert.doesNotThrow(() => assertTestWorkerCodeBytes({
-    meta: {
-      mainModule: "worker.js",
-      modules: {
-        "worker.js": { type: "module" },
-        "_wdl-do-runtime-wrapper.js": { type: "module" },
-        "_wdl-do-alarm-shim.js": { type: "module" },
+test("worker code budget reserves root WDL module names without a matching binding", () => {
+  assert.throws(
+    () => assertTestWorkerCodeBytes({
+      meta: {
+        mainModule: "worker.js",
+        modules: {
+          "worker.js": { type: "module" },
+          "_wdl-do-runtime-wrapper.js": { type: "module" },
+        },
       },
-    },
-    normalized: [
-      ["worker.js", "export default {}"],
-      ["_wdl-do-runtime-wrapper.js", ""],
-      ["_wdl-do-alarm-shim.js", ""],
-    ],
-  }));
+      normalized: [
+        ["worker.js", "export default {}"],
+        ["_wdl-do-runtime-wrapper.js", ""],
+      ],
+    }),
+    /WDL-reserved module name _wdl-do-runtime-wrapper\.js/
+  );
 });
 
 function makeSession() {
@@ -1425,7 +1426,7 @@ test("deploy handler hides secret provider diagnostics and logs them", async () 
   }
 });
 
-test("deploy handler rejects runtime reserved module collisions before version allocation", async () => {
+test("deploy handler rejects root WDL-reserved module names before version allocation", async () => {
   /** @type {any} */ (globalThis).__controlDeployTestState.strings = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.hashes = new Map();
   /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = {
@@ -1433,12 +1434,12 @@ test("deploy handler rejects runtime reserved module collisions before version a
       mainModule: "worker.js",
       modules: {
         "worker.js": { type: "module" },
-        "_wdl-wrapper.js": { type: "module" },
+        "_wdl-tenant-owned.js": { type: "module" },
       },
     },
     normalized: [
       ["worker.js", "export default {}"],
-      ["_wdl-wrapper.js", ""],
+      ["_wdl-tenant-owned.js", ""],
     ],
   };
 
@@ -1467,7 +1468,7 @@ test("deploy handler rejects runtime reserved module collisions before version a
 
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_code_invalid");
-    assert.match(body.message, /reserved module name _wdl-wrapper\.js/);
+    assert.match(body.message, /WDL-reserved module name _wdl-tenant-owned\.js/);
     assert.equal(incrCalled, false);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
@@ -1518,12 +1519,28 @@ test("deploy handler rejects do-runtime reserved module collisions before versio
 
     const body = await readJsonResponse(response, 400);
     assert.equal(body.error, "worker_code_invalid");
-    assert.match(body.message, /reserved module name _wdl-do-runtime-wrapper\.js/);
+    assert.match(body.message, /WDL-reserved module name _wdl-do-runtime-wrapper\.js/);
     assert.equal(incrCalled, false);
   } finally {
     /** @type {any} */ (globalThis).__controlDeployTestState.redis = null;
     /** @type {any} */ (globalThis).__controlDeployTestState.preparedBundle = null;
   }
+});
+
+test("worker code budget allows WDL-like module names below the root", () => {
+  assert.doesNotThrow(() => assertTestWorkerCodeBytes({
+    meta: {
+      mainModule: "src/_wdl-worker.js",
+      modules: {
+        "src/_wdl-worker.js": { type: "module" },
+        "src/_wdl-helper.js": { type: "module" },
+      },
+    },
+    normalized: [
+      ["src/_wdl-worker.js", "export default {};"],
+      ["src/_wdl-helper.js", "export const value = 1;"],
+    ],
+  }));
 });
 
 test("deploy handler counts do-runtime wrapper code before allocating a version", async () => {

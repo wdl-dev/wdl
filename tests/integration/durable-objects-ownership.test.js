@@ -455,7 +455,7 @@ test("do-runtime replicas forward a sharded object owner scope instead of splitt
   });
 });
 
-test("runtime DO facade learns owner hints and skips the router on later calls", async () => {
+test("runtime DO host adapter learns owner hints and skips the router on later calls", async () => {
   const ns = uniqueNs("do-owner-hint");
   await deployAndPromote(ns, "counter", {
     mainModule: "worker.js",
@@ -504,7 +504,7 @@ test("runtime DO facade learns owner hints and skips the router on later calls",
   });
 });
 
-test("runtime DO RPC facade learns owner hints and skips the router on later calls", async () => {
+test("runtime DO RPC host adapter learns owner hints and skips the router on later calls", async () => {
   const ns = uniqueNs("do-rpc-owner-hint");
   await deployAndPromote(ns, "rooms", {
     mainModule: "worker.js",

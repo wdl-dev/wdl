@@ -9,7 +9,7 @@ import {
   requireRedisProxyBaseUrl,
   serviceNameFromEnv,
 } from "runtime-bindings-proxy";
-import { discardResponseBody } from "shared-respond";
+import { contentTypeEssence, discardResponseBody } from "shared-respond";
 import { formatWorkerId, parseRuntimeLoadWorkerId } from "shared-worker-id";
 import { evictSiblings, recordLoadedWorker } from "runtime-state";
 import {
@@ -66,8 +66,7 @@ const utf8Decoder = new TextDecoder();
 
 /** @param {unknown} contentType */
 export function runtimeLoadContentTypeMatches(contentType) {
-  if (typeof contentType !== "string") return false;
-  return contentType.split(";", 1)[0].trim().toLowerCase() === RUNTIME_LOAD_CONTENT_TYPE;
+  return contentTypeEssence(contentType) === RUNTIME_LOAD_CONTENT_TYPE;
 }
 
 /** @param {Uint8Array} bytes */

@@ -104,14 +104,14 @@ git clone https://github.com/wdl-dev/wdl.git
 cd wdl
 npm install -g @wdl-dev/cli@1.8.0
 npm ci
-npm install --ignore-scripts --prefix test-workers/hello-jsonc
+npm install --ignore-scripts --prefix examples/hello-jsonc
 npm run compile:workerd:local
 docker compose -f docker-compose.yml -f docker-compose.images.yml up -d --pull always --no-build --wait --wait-timeout 180
 export ADMIN_TOKEN=local-dev-token
 export CONTROL_URL=http://admin.test:8080
 export CONTROL_CONNECT_HOST=localhost
 
-wdl deploy test-workers/hello-jsonc --ns demo
+wdl deploy examples/hello-jsonc --ns demo
 ```
 
 通过 gateway 调 tenant worker：

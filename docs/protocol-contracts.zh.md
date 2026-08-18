@@ -29,10 +29,11 @@
 | AI provider record 和 resolver snapshot | `docs/modules/ai.zh.md`、`shared/ai-contract.js`、`control/handlers/ai.js`、`rust/redis-proxy/src/ai.rs`、`tests/fixtures/ai-contract.json` |
 | AI tenant/provider HTTP、SSE、WebSocket 和 facade protocol | `docs/modules/ai.zh.md`、`runtime/bindings/ai*.js`、`runtime/ai-client.js` |
 | 内部 WebSocket backend reconnect policy | `docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`gateway/websocket.js` |
-| Durable Object invoke/connect protocol | `docs/modules/durable-objects.zh.md`、`runtime/_wdl-do-transport.js`、`do-runtime/protocol.js` |
+| Durable Object invoke/connect protocol | `docs/modules/durable-objects.zh.md`、`runtime/_wdl-do-scoped-request.js`、`runtime/_wdl-do-transport.js`、`do-runtime/protocol.js` |
 | Session policy projection 和 lifecycle notification | `docs/modules/control-auth.zh.md`、`docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`control/routing.js`、`control/handlers/delete-plan.js`、`gateway/runtime.js`、`gateway/websocket-lifecycle.js`、`do-runtime/owner-registry.js`、`rust/workflows/src/api/do_alarms/dispatch.rs` |
 | Queue、cron、delayed queue record | `docs/modules/queues-cron.zh.md`、`shared/queue-keys.js`、scheduler/proxy Rust modules |
 | Workflow definition 和 instance state | `docs/modules/workflows.zh.md`、`rust/workflows/`、runtime workflow dispatch |
+| Workflow tick response | `tests/fixtures/workflow-tick-response.json` 与 `rust/common/src/workflow_tick.rs` 拥有 executable shape；`rust/workflows/` 和 `rust/scheduler/` 消费该 shape，`docs/modules/workflows.zh.md` 记录外围行为。 |
 | Observability event 和 metric shape | `docs/modules/log-tail-observability.zh.md`、`shared/observability.js`、`wdl-rust-common` |
 
 如果某个 shape 由一个 tier 写、另一个 tier 读，同一改动必须同时更新 writer、reader、owning doc 和能抓漂移的测试。除非存在外部 rollout 要求，不要增加第二套 parser 或 fallback reader。

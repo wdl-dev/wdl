@@ -6,12 +6,13 @@ import {
 } from "shared-d1-timeout";
 import { decodeD1TransportForJson } from "shared-d1-transport";
 import {
+  D1_OWNER_HINT_HEADERS,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   decodeD1QueryResponse,
   encodeD1QueryRequest,
 } from "shared-d1-query-wire";
-import { sanitizeJsonErrorDetails } from "shared-respond";
+import { contentTypeEssence, sanitizeJsonErrorDetails } from "shared-respond";
 import { withInternalAuth } from "shared-internal-auth";
 import { validOwnerEndpointForService } from "shared-owner-endpoint";
 
@@ -30,7 +31,7 @@ function d1RuntimeTransportPayload(err) {
 
 /** @param {Headers} headers */
 function d1OwnerGenerationFromHeaders(headers) {
-  const raw = headers.get("x-wdl-d1-owner-generation");
+  const raw = headers.get(D1_OWNER_HINT_HEADERS.generation);
   if (raw == null || raw === "") return null;
   const generation = Number(raw);
   return Number.isSafeInteger(generation) && generation > 0 ? generation : null;
@@ -73,7 +74,7 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
   let body;
   let validResponse = true;
   const contentType = res.headers.get("content-type") || "";
-  if (contentType.split(";", 1)[0].trim().toLowerCase() === D1_QUERY_RESPONSE_CONTENT_TYPE) {
+  if (contentTypeEssence(contentType) === D1_QUERY_RESPONSE_CONTENT_TYPE) {
     try {
       body = decodeD1QueryResponse(new Uint8Array(await res.arrayBuffer()));
     } catch (err) {
@@ -97,8 +98,8 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
     };
   }
   const owner = {
-    taskId: res.headers.get("x-wdl-d1-owner-task-id") || null,
-    endpoint: res.headers.get("x-wdl-d1-owner-endpoint") || null,
+    taskId: res.headers.get(D1_OWNER_HINT_HEADERS.taskId) || null,
+    endpoint: res.headers.get(D1_OWNER_HINT_HEADERS.endpoint) || null,
     generation: d1OwnerGenerationFromHeaders(res.headers),
   };
   return {
