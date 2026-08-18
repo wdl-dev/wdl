@@ -836,20 +836,22 @@ test("prepareBundle: compatibilityFlags preserved", () => {
 });
 
 test("prepareBundle: experimental workerd compatibility flags are rejected", () => {
-  assert.throws(
-    () => prepareBundle(
-      "w.js",
-      { "w.js": "x" },
-      { compatibilityFlags: ["nodejs_compat", "unsafe_module"] }
-    ),
-    (err) => {
-      if (!(err instanceof Error)) return false;
-      const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
-      return coded.code === "experimental_compat_flag_unsupported" &&
-        coded.status === 400 &&
-        /"unsafe_module"/.test(coded.message);
-    }
-  );
+  for (const flag of ["unsafe_module", "wasm_memory_discard"]) {
+    assert.throws(
+      () => prepareBundle(
+        "w.js",
+        { "w.js": "x" },
+        { compatibilityFlags: ["nodejs_compat", flag] }
+      ),
+      (err) => {
+        if (!(err instanceof Error)) return false;
+        const coded = /** @type {Error & { code?: unknown, status?: unknown }} */ (err);
+        return coded.code === "experimental_compat_flag_unsupported" &&
+          coded.status === 400 &&
+          coded.message.includes(JSON.stringify(flag));
+      }
+    );
+  }
   assert.doesNotThrow(() =>
     prepareBundle(
       "w.js",
@@ -987,7 +989,8 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unsafe_module"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_development"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("enable_nodejs_inspector_local_dev"));
-  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 37);
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("wasm_memory_discard"));
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 38);
   // `python_workers_20260610` graduated out of `$experimental` upstream, so tenants may set it.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_20260610"), false);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("allow_irrevocable_stub_storage"), false);
