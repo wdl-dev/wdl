@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Reported the exact root `VERSION` release through `/whoami`, including WDL-only `.N` patch counters, and declared CLI `1.8.0` as both the minimum supported and CI-qualified management client without adding request-time version enforcement.
+- Moved Durable Object owner routing, hint caching, retries, and invoke/connect framing exclusively into the binding-scoped host adapter, reducing generated tenant facade code without changing the public DO contract. Roll out user-runtime and do-runtime before system-runtime/Control, pausing Control mutations while the writer tier rolls, so the smaller generated-code budget is not observed by an old loader.
 
 ## wdl.20260817.1 - 2026-08-17
 

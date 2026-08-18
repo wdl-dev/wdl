@@ -6,11 +6,11 @@ import { loadDoProtocol } from "../helpers/load-do-protocol.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 import {
-  encodeDoObjectNameHeader,
   dispatchDoInvokeWithHintCache,
   retryableOwnerRaceResponse,
   staleDoOwnerHintResponse,
 } from "../../runtime/_wdl-do-transport.js";
+import { encodeDoObjectNameHeader } from "../../runtime/_wdl-do-scoped-request.js";
 import { DO_HOST_SHARD_COUNT, MAX_ID_BYTES } from "../../do-runtime/protocol/wire-grammar.js";
 import {
   doOwnerHintHeaders,

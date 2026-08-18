@@ -15,7 +15,8 @@ them as native facets through a host actor.
 
 Key files:
 
-- `runtime/do-client.js`, `runtime/bindings/do.js`
+- `runtime/do-client.js`, `runtime/_wdl-do-scoped-request.js`
+- `runtime/bindings/do.js`, `runtime/_wdl-do-transport.js`
 - `do-runtime/index.js`, `do-runtime/actor.js`, `do-runtime/load.js`
 - `do-runtime/owner-registry.js`, `do-runtime/owner-client.js`
 - `do-runtime/alarm*.js`
@@ -63,9 +64,9 @@ the runtime/DO client protocol, not a generic admin JSON parser. Unknown interna
 exceptions are still downgraded to safe `internal_error` / `Internal error` messages.
 Storage delete-worker may return HTTP 207 with `{ ok:false, deleted, errors }` for a
 partial batch result; that is a result envelope, not a generic JSON error envelope.
-Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime facade. The facade
-rejects an oversized `Content-Length` before reading, and streamed bodies are read
-incrementally so the cap is enforced before buffering the full body.
+Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime host adapter. The
+adapter rejects an oversized `Content-Length` before reading, and streamed bodies are
+read incrementally so the cap is enforced before buffering the full body.
 
 DO RPC method names use the JavaScript identifier grammar. The do-runtime protocol
 reader caps them at 256 ASCII bytes. RPC arguments are structural JSON data capped at
@@ -145,8 +146,8 @@ different `doStorageId`.
 
 - One task owns a class shard at a time.
 - Generation fencing prevents stale owners from committing after ownership moves.
-- `do-runtime/protocol.js` owns the DO ownership error vocabulary. The injected runtime
-  transport keeps its retry and stale-hint subsets private and pins them through
+- `do-runtime/protocol.js` owns the DO ownership error vocabulary. The binding-scoped
+  host transport keeps its retry and stale-hint subsets private and pins them through
   response-classification tests.
 - Facet identity is `className:objectName` inside stable `doStorageId`, so both session
   policy modes preserve SQLite object state.
@@ -199,10 +200,12 @@ different `doStorageId`.
   a 502/503/504 without either trusted marker, evicts the cached hint. Safe `GET`/`HEAD`
   requests may replay through the router; non-idempotent methods and RPC return
   `owner_unavailable` because the owner may already have applied the request.
-- The shared runtime transport owns owner-hint cache wiring, invoke race retry, and
-  response-header stripping for both the host binding and injected facade. Its connect
-  wrapper deliberately omits the invoke-only router fallback required to preserve
-  owner-established WebSocket upgrades.
+- The host adapter exclusively owns owner-hint cache wiring, invoke/connect framing,
+  race retry, direct-owner forwarding, and response-header stripping. The injected
+  facade only packages the public request, canonical object name, and diagnostic
+  request id into a binding-scoped call. The connect transport deliberately omits the
+  invoke-only router fallback required to preserve owner-established WebSocket
+  upgrades.
 - Runtime materializes one host adapter per declared DO binding. Immutable adapter props
   fix namespace, worker version, storage identity, and class before internal auth is
   attached; loaded-worker env never contains a generic DO router or owner-network
@@ -256,8 +259,8 @@ Owner resolution is the single-writer protocol:
    Its generation fence is carried by the owner record rather than a second
    generation-key read.
 3. If a live owner exists on another task, the router returns that owner or an
-   owner-hint header; the runtime facade may retry directly, but the owner task still
-   rechecks the fence.
+   owner-hint header; the runtime host adapter may retry directly, but the owner task
+   still rechecks the fence.
 4. If the owner is missing or expired, the claimant bumps the monotonic generation
    counter and writes a new owner record with TTL in one Redis transaction.
 5. Local dispatch checks `taskId`, `generation`, lease expiry, active `doStorageId`,
@@ -372,10 +375,12 @@ required.
 - Owner-hint and ownership-error defense is layered: tenant response bodies and
   tenant-supplied control headers are ignored, only do-runtime control headers are
   trusted, and endpoint grammar/acceptable-address checks must pass for hints.
-- The injected DO transport and shared D1/DO endpoint validator evaluate before tenant
-  modules and capture the intrinsics used for private-header stripping, request bounds,
-  invoke serialization, replay classification, and endpoint validation. Tenant prototype
-  mutation cannot rewrite a trusted target or replay policy after those checks.
+- The binding-scoped host adapter owns the DO transport and shared D1/DO endpoint
+  validation outside the tenant realm. It captures the intrinsics used for
+  private-header stripping, request bounds, invoke serialization, replay classification,
+  and endpoint validation. The injected tenant facade contains only public namespace/id/
+  stub behavior and the scoped-request codec; tenant prototype mutation cannot rewrite a
+  trusted target or replay policy.
 - The injected alarm shim also evaluates before the tenant module and captures the
   request, response, numeric, proxy, and reflection operations that classify internal
   alarms, update their SQLite state, and install the storage facade. Tenant top-level
@@ -435,6 +440,7 @@ WebSocket recovery after the initial 101.
 - `tests/unit/do-state.test.js`
 - `tests/unit/do-task-identity.test.js`
 - `tests/unit/runtime-do-client.test.js`
+- `tests/unit/runtime-do-transport.test.js`
 - `rust/supervisor/src/drain.rs`
 - `rust/supervisor/src/config.rs`
 - `rust/supervisor/src/renew.rs`

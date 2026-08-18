@@ -10,7 +10,8 @@ DO 执行被隔离在 `do-runtime`，这是监听 `:8788` 的独立 workerd serv
 
 关键文件：
 
-- `runtime/do-client.js`、`runtime/bindings/do.js`
+- `runtime/do-client.js`、`runtime/_wdl-do-scoped-request.js`
+- `runtime/bindings/do.js`、`runtime/_wdl-do-transport.js`
 - `do-runtime/index.js`、`do-runtime/actor.js`、`do-runtime/load.js`
 - `do-runtime/owner-registry.js`、`do-runtime/owner-client.js`
 - `do-runtime/alarm*.js`
@@ -35,7 +36,7 @@ WDL 会 shim `ctx.storage.setAlarm()`、`getAlarm()` 和 `deleteAlarm()`，因�
 Storage cleanup endpoint 是 native facet storage cleanup 和 worker storage cleanup 使用的私有平台接口，不是 tenant-facing API。它们预留给未来的平台 cleanup 流程，当前普通 worker lifecycle 路径尚未调用。
 
 DO protocol error 使用 `{ error, message, details? }`。不同于 admin HTTP 的 flat additive error shape，DO protocol detail 会嵌套在 `details` 下，因为消费者是 runtime/DO client protocol，不是通用 admin JSON parser。未知 internal exception 仍会降级成安全的 `internal_error` / `Internal error` message。Storage delete-worker 在 partial batch result 时可能返回 HTTP 207 和 `{ ok:false, deleted, errors }`；这是 result envelope，不是 generic JSON error envelope。
-Tenant-originated DO fetch body 在 runtime facade 中限制为 1 MiB。Facade 会在读取前拒绝超限的 `Content-Length`，streamed body 会增量读取，因此 limit 会在完整 buffering 前生效。
+Tenant-originated DO fetch body 在 runtime host adapter 中限制为 1 MiB。Adapter 会在读取前拒绝超限的 `Content-Length`，streamed body 会增量读取，因此 limit 会在完整 buffering 前生效。
 
 DO RPC method name 使用 JavaScript identifier grammar，do-runtime protocol reader 将其限制为最多 256 ASCII bytes。RPC 参数是最多 1 MiB 的 structural JSON data：接受 finite number、string、boolean、null、dense array 和 plain object。序列化不会调用 `toJSON()` hook；sparse array、circular structure、non-plain object 和 non-JSON value 会在 dispatch 前失败。
 
@@ -80,7 +81,7 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 
 - 同一时间只有一个 task 拥有一个 class shard。
 - Generation fence 防止 stale owner 在 ownership 移动后继续 commit。
-- `do-runtime/protocol.js` 持有 DO ownership error vocabulary。Injected runtime transport 将 retry 和 stale-hint 子集保持为私有策略，并通过 response-classification test pin 住。
+- `do-runtime/protocol.js` 持有 DO ownership error vocabulary。Binding-scoped host transport 将 retry 和 stale-hint 子集保持为私有策略，并通过 response-classification test pin 住。
 - Facet identity 是 stable `doStorageId` 内的 `className:objectName`，因此两种 session policy mode 都保留 SQLite object state。
 - Worker 级 session policy 合同——`sessionPolicy` bundle metadata 字段、route/projection 原子 promote commit、永久 sequence 分配、`session-policy:restart` publish 和公开 WebSocket reconciliation——由 `docs/modules/control-auth.zh.md` 与 `docs/modules/gateway.zh.md` 持有。本模块只消费已提交的 projection。
 - 字段缺失或显式 `preserve` 时保持既有 facet 行为：已构造的 native facet 会保留 class version，直到 host actor restart 或 facet deletion。`restart` 则改为 lazy 退役 stale facet。
@@ -93,7 +94,7 @@ workerd 2026-07-01 会大小写不敏感地拒绝 SQLite reserved `_cf_` namespa
 - Whole-worker delete 后 redeploy 会分配新的 `doStorageId`；旧 native storage tombstone 给后续 cleanup，而不是立即物理删除。
 - WebSocket upgrade 必须在 owner endpoint 上完成。Owner-hinted WebSocket direct retry 不能 fall back 到 router-established 101。
 - Ordinary fetch/RPC 在收到可信 owner-hint，或携带 do-runtime 私有 ownership-error control header 的明确 pre-dispatch stale-owner/owner-race response 后，可以进行一次 router rediscovery；这也适用于非幂等 method 和 RPC。Tenant response body 不能触发重放。无可信标记的 direct owner transport failure，或不带这两类可信标记的 502/503/504，会清除 cached hint。安全的 `GET`/`HEAD` request 可以通过 router 重放；非幂等 method 和 RPC 会返回 `owner_unavailable`，因为 owner 可能已经应用了该请求。
-- Shared runtime transport 统一持有 host binding 与 injected facade 的 owner-hint cache wiring、invoke race retry 和 response-header stripping。Connect wrapper 刻意不包含 invoke-only router fallback，以保留 owner-established WebSocket upgrade 语义。
+- Host adapter 独占 owner-hint cache wiring、invoke/connect framing、race retry、direct-owner forwarding 和 response-header stripping。Injected facade 只把 public request、canonical object name 和诊断 request id 打包成 binding-scoped call。Connect transport 刻意不包含 invoke-only router fallback，以保留 owner-established WebSocket upgrade 语义。
 - Runtime 为每个声明的 DO binding materialize 一个 host adapter。不可变 adapter props 会在附加 internal auth 前固定 namespace、worker version、storage identity 和 class；loaded-worker env 不包含通用 DO router 或 owner-network Fetcher。Module evaluation 可能观察到这个 scoped transport，但不能选择其它 DO binding identity。DO fetch 通过原生 `Fetcher.fetch()` 而不是自定义 Request RPC 进入 adapter。静态 host worker 启用 incoming request signal，因此显式可取消的 caller `Request` 被 abort 时，会在 owner dispatch 前取消有界 body 读取。结构化 DO RPC 仍以有界 JSON data 跨越自定义 RPC 边界，不传递 `Request`。
 - `WEBSOCKET_RECONNECT_DELAYS_MS` 和 `WEBSOCKET_MAX_BUFFERED_MESSAGES` 可以在不改代码的情况下调整 gateway backend reconnect budget 和 client-message buffer cap。
 - Alarm delivery 是 at-least-once。Scheduler 唤醒 Workflows；Workflows 把到期 internal alarm job promote 到 ready，在 DB 2 run token 下 claim，然后调用 do-runtime `/internal/do/alarms/dispatch`。do-runtime 构造 `DoInvoke{kind:"alarm"}` 请求，并走正常 owner router/fence 路径。
@@ -106,7 +107,7 @@ Owner resolution 是单写入协议：
 
 1. do-runtime 从 `doStorageId`、class name 和 shard 派生 owner scope。
 2. Owner resolution 会 WATCH owner record、generation key、worker delete lock、active worker storage pointer 和 active session policy projection。`whole` delete lock 会拒绝 ownership；`version` lock 仍属于 WATCH snapshot，但不会中断 active storage。`restart` projection 会拒绝旧 immutable version，并把 sequence 传给 target-version dispatch。这个 WATCH 会阻止 claim 在 whole-worker delete 或 session policy state 变化后提交。Renew 会先 pipeline 读取 owner/storage snapshot，再通过 Lua CAS 原子比较 owner 原始字节与 active storage pointer，然后刷新 TTL；generation fence 已包含在 owner record 中，不需要再次读取 generation key。
-3. 如果另一个 task 持有 live owner，router 返回该 owner 或 owner-hint header；runtime facade 可以直连重试，但 owner task 仍会重新检查 fence。
+3. 如果另一个 task 持有 live owner，router 返回该 owner 或 owner-hint header；runtime host adapter 可以直连重试，但 owner task 仍会重新检查 fence。
 4. 如果 owner 缺失或过期，claimant 在一个 Redis transaction 中递增 monotonic generation counter，并写入带 TTL 的 owner record。
 5. Local dispatch 使用 native facet 前检查 `taskId`、`generation`、lease expiry、active `doStorageId` 和剩余 lease budget。stale generation、expired lease 或 storage pointer 改变都会 fail closed。包括 `/delete-storage` 在内的每次 owner-side assertion 都在同一个 snapshot 中读取 owner record、active storage pointer 和 Redis time。剩余 lease 小于 `DO_OWNER_LEASE_GUARD_MS`（默认 `1000`）时，owner 会先尝试 same-task、same-generation CAS renew；如果 renew 失败，才 fail closed。这个 guard 缩窄 takeover window，但不是 per-SQL-call 或 SQLite commit-time fence。
 6. Supervisor 通过 `127.0.0.1:8788` renew 本地 owned scopes；`/internal/do/probe` 暴露 task 和 owner state 供诊断。Drain 停止新 ownership，并等待最多 `DO_DRAIN_IN_FLIGHT_TIMEOUT_MS`（默认 `8000`）让 host-actor dispatch 完成，然后释放匹配 generation。Drain 成功后，`do-supervisor` 会直接 kill workerd，而不是依赖 workerd 在 SIGTERM 后的 graceful window；后者会让 listener 处于 half-dead 状态，制造 takeover 504 窗口。Drain timeout 时返回 503 并保留 lease，让 failover 等正常 lease expiry。In-flight handler 还有 lease-budget watchdog：它会在 expiry 前 `DO_OWNER_LEASE_GUARD_MS` 重新检查 ownership；如果 renewal 停止或 ownership 移动，会 forget 受影响 owner scope 并 abort 受影响 facet；它不会把整个 task 标记为 draining。
@@ -143,7 +144,7 @@ Actor 重建边界如下：
 - Owner hint 只信任 do-runtime header，并且要通过 endpoint grammar validation。Owner hint 和 invoke fence 必须携带正的 JavaScript-safe-integer generation。
 - Task identity 和 persisted owner record 在写入和读取时都会校验。Persisted record 的 `ownerKey`、`hostId`、storage id、class 和 shard 必须能重建出读取它的 Redis scope；owner resolution 还必须在 do-runtime 读取 invoking bundle 的 active storage pointer 前，确认 record 的 canonical namespace 和 worker 与该 bundle 一致。Owner forwarding 只接受 8788 端口上的 DO service/headless DNS，或 RFC1918/100.64 私网 IPv4；非法记录在附加 internal auth 前 fail closed。
 - Owner-hint 与 ownership-error 防御是分层的：忽略 tenant response body 和 tenant-supplied control header，只信任 do-runtime control header；hint 还必须通过 endpoint grammar / acceptable-address 检查。
-- 注入的 DO transport 与共享 D1/DO endpoint validator 会在 tenant module 前执行，并捕获 private-header stripping、request bound、invoke serialization、replay classification 和 endpoint validation 使用的 intrinsic。Tenant prototype mutation 不能在校验后改写受信 target 或 replay policy。
+- Binding-scoped host adapter 在 tenant realm 外持有 DO transport 与共享 D1/DO endpoint validation，并捕获 private-header stripping、request bound、invoke serialization、replay classification 和 endpoint validation 使用的 intrinsic。注入 tenant 的 facade 只包含公开 namespace/id/stub 行为和 scoped-request codec；tenant prototype mutation 不能改写受信 target 或 replay policy。
 - 注入的 alarm shim 也会在 tenant module 前执行，并捕获 internal alarm 分类、SQLite 状态更新和 storage facade 安装依赖的 request、response、number、proxy 与 reflection 操作。Tenant 顶层对这些 intrinsic 的修改不能把 internal alarm 重定向到 tenant fetch handler，也不能阻止 facade 安装。
 - do-runtime supervisor 必须调用本地 `127.0.0.1:8788` drain/renew endpoint；Service Connect alias 可能打到其他 task。
 
@@ -181,6 +182,7 @@ do-runtime 围绕 actor residency 选择、owner resolution、session-policy fen
 - `tests/unit/do-state.test.js`
 - `tests/unit/do-task-identity.test.js`
 - `tests/unit/runtime-do-client.test.js`
+- `tests/unit/runtime-do-transport.test.js`
 - `rust/supervisor/src/drain.rs`
 - `rust/supervisor/src/config.rs`
 - `rust/supervisor/src/renew.rs`

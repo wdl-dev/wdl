@@ -21,9 +21,9 @@ export const HOST_BINDING_MODULE_NAMES = Object.freeze({
   r2Client: "_wdl-r2-client.js",
   r2Utils: "_wdl-r2-utils.js",
   doClient: "_wdl-do-client.js",
+  // Keep the compact codec in the historical slot rather than reserving a new
+  // name that an older immutable bundle could already contain.
   doTransport: "_wdl-do-transport.js",
-  ownerEndpoint: "_wdl-owner-endpoint.js",
-  ownerHintCache: "_wdl-owner-hint-cache.js",
   requestId: "_wdl-request-id.js",
   workflowsClient: "_wdl-workflows-client.js",
   aiClient: "_wdl-ai-client.js",

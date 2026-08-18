@@ -2238,14 +2238,35 @@ test("wrapWorkerCodeForHostBindings: injects local DO facade for Durable Object 
   });
   assert.equal(workerCode.mainModule, "_wdl-wrapper.js");
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-do-client.js"], /class DurableObjectNamespace/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-do-transport.js"], /function requestSpec/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-owner-endpoint.js"], /validOwnerEndpointForService/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-do-transport.js"], /function scopedDoRequest/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
+  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-do-scoped-request.js"], undefined);
+  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-owner-endpoint.js"], undefined);
+  assert.equal(/** @type {any} */ (workerCode.modules)["_wdl-owner-hint-cache.js"], undefined);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const DO_BINDINGS = \["ROOMS"\];/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new DurableObjectNamespace\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.Room/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from/);
+});
+
+test("wrapWorkerCodeForHostBindings: preserves the previously unreserved scoped-request module name", () => {
+  const historicalSource = "export const tenantModule = true;";
+  const workerCode = {
+    mainModule: "worker.js",
+    modules: {
+      "worker.js": "export class Room {}; export default {};",
+      "_wdl-do-scoped-request.js": historicalSource,
+    },
+  };
+
+  wrapWorkerCodeForHostBindings(workerCode, {
+    bindings: { ROOMS: { type: "do", className: "Room", doStorageId: "do_0123456789abcdef0123456789abcdef" } },
+  });
+
+  const modules = /** @type {Record<string, string>} */ (workerCode.modules);
+  assert.equal(modules["_wdl-do-scoped-request.js"], historicalSource);
+  assert.match(modules["_wdl-do-transport.js"], /function scopedDoRequest/);
 });
 
 test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps workflow class", () => {

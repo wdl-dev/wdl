@@ -72,9 +72,10 @@ const doRuntimeModules :List(Workerd.Worker.Module) = [
     (name = "runtime-bindings-workflow", esModule = embed "../runtime/bindings/workflow.js"),
     (name = "runtime-dispatch-workflow-json", esModule = embed "../runtime/dispatch/workflow-json.js"),
     (name = "runtime-do-transport", esModule = embed "../runtime/_wdl-do-transport.js"),
+    (name = "_wdl-do-scoped-request.js", esModule = embed "../runtime/_wdl-do-scoped-request.js"),
     (name = "_wdl-request-id.js", esModule = embed "../runtime/_wdl-request-id.js"),
     (name = "shared-owner-endpoint", esModule = embed "../shared/owner-endpoint.js"),
-    # Injected DO transport uses a relative module name; host modules use the
+    # Host DO transport uses this relative adapter; other host modules use the
     # shared bare name. Both resolve to the same shared contract owner.
     (name = "_wdl-owner-endpoint.js", esModule = embed "../shared/owner-endpoint.js"),
     (name = "runtime-owner-hint-cache", esModule = embed "../runtime/_wdl-owner-hint-cache.js"),
@@ -90,9 +91,7 @@ const doRuntimeModules :List(Workerd.Worker.Module) = [
     (name = "runtime-r2-client-source", text = embed "../runtime/r2-client.js"),
     (name = "runtime-r2-utils-source", text = embed "../runtime/r2-utils.js"),
     (name = "runtime-do-client-source", text = embed "../runtime/do-client.js"),
-    (name = "runtime-do-transport-source", text = embed "../runtime/_wdl-do-transport.js"),
-    (name = "runtime-owner-endpoint-source", text = embed "../shared/owner-endpoint.js"),
-    (name = "runtime-owner-hint-cache-source", text = embed "../runtime/_wdl-owner-hint-cache.js"),
+    (name = "runtime-do-scoped-request-source", text = embed "../runtime/_wdl-do-scoped-request.js"),
     (name = "runtime-request-id-source", text = embed "../runtime/_wdl-request-id.js"),
     (name = "runtime-workflows-client-source", text = embed "../runtime/workflows-client.js"),
     (name = "runtime-ai-client-source", text = embed "../runtime/ai-client.js"),

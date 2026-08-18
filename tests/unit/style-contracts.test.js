@@ -2684,20 +2684,24 @@ test("owner endpoint validation lives in a shared contract owner", () => {
   for (const config of [userConfig, systemConfig, doConfig]) {
     assert.match(config, /name = "shared-owner-endpoint"/);
     assert.match(config, /name = "_wdl-owner-endpoint\.js"/);
-    assert.match(config, /name = "runtime-owner-endpoint-source"/);
+    assert.doesNotMatch(config, /name = "runtime-owner-endpoint-source"/);
   }
   for (const config of [userConfig, systemConfig]) {
     assert.doesNotMatch(config, /doOwnerNetworkWorker|DO_OWNER_NETWORK/);
   }
 });
 
-test("DO transport relative dependencies are registered in host and loaded-worker module graphs", () => {
+test("DO host transport and scoped facade dependencies stay in their owning module graphs", () => {
   const codeBudget = readRepoFile("runtime/load/code-budget.js");
+  const doClient = readRepoFile("runtime/do-client.js");
   const moduleRewrite = readRepoFile("runtime/load/module-rewrite.js");
   assert.match(moduleRewrite, /requestId: "_wdl-request-id\.js"/);
   assert.match(moduleRewrite, /doTransport: "_wdl-do-transport\.js"/);
+  assert.doesNotMatch(moduleRewrite, /doScopedRequest: "_wdl-do-scoped-request\.js"/);
   assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.requestId, sources\.requestIdSource\]/);
-  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doTransport, sources\.doTransportSource\]/);
+  assert.match(codeBudget, /\[HOST_BINDING_MODULE_NAMES\.doTransport, sources\.doScopedRequestSource\]/);
+  assert.doesNotMatch(codeBudget, /sources\.(?:doTransport|ownerEndpoint|ownerHintCache)Source/);
+  assert.match(doClient, /import \{ scopedDoRequest \} from "\.\/_wdl-do-transport\.js";/);
 
   for (const file of [
     "runtime/config-user.capnp",
@@ -2706,8 +2710,11 @@ test("DO transport relative dependencies are registered in host and loaded-worke
   ]) {
     const source = readRepoFile(file);
     assert.match(source, /name = "runtime-do-transport", esModule = embed/);
+    assert.match(source, /name = "_wdl-do-scoped-request\.js", esModule = embed/);
     assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
+    assert.match(source, /name = "runtime-do-scoped-request-source", text = embed/);
     assert.match(source, /name = "runtime-request-id-source", text = embed/);
+    assert.doesNotMatch(source, /name = "runtime-(?:do-transport|owner-endpoint|owner-hint-cache)-source"/);
   }
 });
 

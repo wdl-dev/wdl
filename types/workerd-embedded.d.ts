@@ -53,17 +53,7 @@ declare module "runtime-do-client-source" {
   export default source;
 }
 
-declare module "runtime-do-transport-source" {
-  const source: string;
-  export default source;
-}
-
-declare module "runtime-owner-endpoint-source" {
-  const source: string;
-  export default source;
-}
-
-declare module "runtime-owner-hint-cache-source" {
+declare module "runtime-do-scoped-request-source" {
   const source: string;
   export default source;
 }

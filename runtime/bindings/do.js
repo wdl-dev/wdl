@@ -9,10 +9,10 @@ import {
   fetchInvokeInit,
   isWebSocketUpgrade,
   replayOwnerUnavailableForFetch,
-  readScopedDoRequest,
   rpcInvokeInit,
   rpcResultFromResponse,
 } from "runtime-do-transport";
+import { readScopedDoRequest } from "_wdl-do-scoped-request.js";
 import { createOwnerHintCache } from "runtime-owner-hint-cache";
 import { withInternalAuth } from "shared-internal-auth";
 

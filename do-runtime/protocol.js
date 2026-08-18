@@ -26,7 +26,7 @@ import {
   SESSION_POLICY_PRESERVE,
   parseVersion,
 } from "shared-worker-contract";
-import { decodeDoObjectNameHeader } from "runtime-do-transport";
+import { decodeDoObjectNameHeader } from "_wdl-do-scoped-request.js";
 
 export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";

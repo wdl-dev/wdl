@@ -58,9 +58,7 @@ const utf8Decoder = new TextDecoder();
  *   r2ClientSource: string,
  *   r2UtilsSource: string,
  *   doClientSource: string,
- *   doTransportSource: string,
- *   ownerEndpointSource: string,
- *   ownerHintCacheSource: string,
+ *   doScopedRequestSource: string,
  *   requestIdSource: string,
  *   workflowsClientSource: string,
  *   aiClientSource: string,
@@ -134,9 +132,7 @@ function runtimeModuleInjections(sources) {
   /** @type {RuntimeModuleInjection[]} */
   const doModuleInjections = [
     requestIdModuleInjection,
-    [HOST_BINDING_MODULE_NAMES.doTransport, sources.doTransportSource],
-    [HOST_BINDING_MODULE_NAMES.ownerEndpoint, sources.ownerEndpointSource],
-    [HOST_BINDING_MODULE_NAMES.ownerHintCache, sources.ownerHintCacheSource],
+    [HOST_BINDING_MODULE_NAMES.doTransport, sources.doScopedRequestSource],
     [HOST_BINDING_MODULE_NAMES.doClient, sources.doClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */

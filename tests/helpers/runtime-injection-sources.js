@@ -15,9 +15,7 @@ const REAL_RUNTIME_INJECTION_SOURCE_PATHS = Object.freeze({
   r2ClientSource: "runtime/r2-client.js",
   r2UtilsSource: "runtime/r2-utils.js",
   doClientSource: "runtime/do-client.js",
-  doTransportSource: "runtime/_wdl-do-transport.js",
-  ownerEndpointSource: "shared/owner-endpoint.js",
-  ownerHintCacheSource: "runtime/_wdl-owner-hint-cache.js",
+  doScopedRequestSource: "runtime/_wdl-do-scoped-request.js",
   requestIdSource: "runtime/_wdl-request-id.js",
   workflowsClientSource: "runtime/workflows-client.js",
   aiClientSource: "runtime/ai-client.js",
@@ -33,9 +31,7 @@ const RUNTIME_INJECTION_SOURCE_SPECIFIERS = Object.freeze({
   r2ClientSource: "runtime-r2-client-source",
   r2UtilsSource: "runtime-r2-utils-source",
   doClientSource: "runtime-do-client-source",
-  doTransportSource: "runtime-do-transport-source",
-  ownerEndpointSource: "runtime-owner-endpoint-source",
-  ownerHintCacheSource: "runtime-owner-hint-cache-source",
+  doScopedRequestSource: "runtime-do-scoped-request-source",
   requestIdSource: "runtime-request-id-source",
   workflowsClientSource: "runtime-workflows-client-source",
   aiClientSource: "runtime-ai-client-source",
@@ -60,12 +56,8 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
     "export const R2_OBJECT_MAX_BUFFER_BYTES = 26214400;",
   doClientSource:
     "export class DurableObjectNamespace { constructor(stub) { this.stub = stub; } }",
-  doTransportSource:
-    "export function requestSpec() {}",
-  ownerEndpointSource:
-    "export function validOwnerEndpointForService() { return true; }",
-  ownerHintCacheSource:
-    "export function createOwnerHintCache() { return {}; }",
+  doScopedRequestSource:
+    "export function scopedDoRequest(_objectName, request) { return request; }",
   requestIdSource:
     "export function requestIdFromOptions() { return null; } export function sanitizeRequestId() { return null; }",
   workflowsClientSource:
