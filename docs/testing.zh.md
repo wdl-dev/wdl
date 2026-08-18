@@ -132,7 +132,8 @@ npm install -g @wdl-dev/cli@1.8.0
 | `WDL_INTEGRATION_SLOT_PREPPED=1` | 标记该 slot 已经支付完整 startup/restart prepare 成本。 |
 | `WDL_GATEWAY_HOST_PORT` | runner 注入的每 slot gateway host port。 |
 | `WDL_S3MOCK_HOST_PORT` | runner 注入的每 slot s3mock host port。 |
-| `WDL_WORKERD_CONFIG_VARIANT=local` | 为 compose 选择本地编译的 workerd config 变体。 |
+
+回归 tripwire 必须具有可达的失败模式。新增或实质修改 tripwire 时，应临时引入被禁止的形状或改变一个预期 golden value，确认聚焦测试失败，再在提交前撤销该变异。优先使用从已解析配置或已导入值推导出的断言，不要固定源代码文本的拼写形状。
 
 ## Helper 与 Fixture
 

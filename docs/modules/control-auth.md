@@ -93,8 +93,9 @@ Control lifecycle operations are split so each critical transition has one autho
 
 - Deploy parses the supported Wrangler/JSONC shape, validates bindings and routes,
   allocates the next immutable version through `worker:<ns>:<worker>:next_version`,
-  writes bundle metadata/modules/assets, then enters the same promote path used by
-  explicit promotion. Before allocation, deploy estimates final WorkerCode under
+  and writes bundle metadata/modules/assets as an inactive version. Explicit promotion
+  is a separate request and the only active-route flip. Before allocation, deploy
+  estimates final WorkerCode under
   workerd's 64 MiB limit, including runtime/do-runtime-injected wrapper/client modules
   and workflow import rewrites. Materialized D1 ids, DO storage ids, Workflow keys, and
   version identity live in host props rather than generated source, so they do not

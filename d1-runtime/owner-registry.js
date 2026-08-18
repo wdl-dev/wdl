@@ -83,7 +83,7 @@ export function redisClient(env) {
 /** @param {D1Env} env */
 export function ownerTtlSeconds(env) {
   const raw = Number(envValueOr(env.D1_OWNER_TTL_SECONDS, DEFAULT_OWNER_TTL_SECONDS));
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_OWNER_TTL_SECONDS;
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : DEFAULT_OWNER_TTL_SECONDS;
 }
 
 /** @param {D1Env} env */

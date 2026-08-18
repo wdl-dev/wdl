@@ -168,7 +168,6 @@ const controlWorker :Workerd.Worker = (
     (name = "control-errors",        esModule = embed "../control/errors.js"),
     (name = "control-json-body",     esModule = embed "../control/json-body.js"),
     (name = "control-optimistic",    esModule = embed "../control/optimistic.js"),
-    (name = "shared-owner-lease",    esModule = embed "../shared/owner-lease.js"),
     (name = "shared-optimistic-retry", esModule = embed "../shared/optimistic-retry.js"),
     (name = "control-workflows-client", esModule = embed "../control/workflows-client.js"),
     (name = "control-lib",           esModule = embed "../control/lib.js"),

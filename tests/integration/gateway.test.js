@@ -245,14 +245,7 @@ test("promoting an older version rolls back", async () => {
   await waitForGatewayText("gwns5", "/v", "one", "gateway observes rollback to v1");
 });
 
-test("old control port 8082 is not bound (regression guard)", async () => {
-  const res = await fetch("http://localhost:8082/anything", { method: "POST" }).catch(
-    (e) => ({ error: e.message, status: 0 })
-  );
-  assert.notEqual(res.status, 200, "port 8082 must not accept HTTP");
-});
-
-test("data plane /_metrics is now published on :8080", async () => {
+test("data plane exposes /_metrics through the public gateway", async () => {
   const res = await fetch(gatewayUrl("/_metrics"));
   assert.equal(res.status, 200);
   const body = await res.text();

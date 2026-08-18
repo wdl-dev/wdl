@@ -27,6 +27,7 @@ import {
 } from "do-runtime-state";
 import { formatError } from "shared-observability";
 import { rebuildResponseWithHeaders } from "shared-respond";
+import { SESSION_POLICY_RESTART } from "shared-worker-contract";
 
 // Native facets are task-local while host SQLite is shared. Without an authoritative
 // native-container retirement signal, task rows cannot be TTL-pruned; facet_name leads
@@ -165,7 +166,7 @@ export class WdlDoHostActor extends DurableObject {
       );
     }
     const advanceFacet = existing && invoke.restartSequence > existing.restartSequence;
-    const restartFacet = advanceFacet && invoke.sessionPolicy === "restart";
+    const restartFacet = advanceFacet && invoke.sessionPolicy === SESSION_POLICY_RESTART;
     if (restartFacet) {
       this.ctx.facets.abort(
         facetName,

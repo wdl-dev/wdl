@@ -75,10 +75,16 @@ test("D1 protocol: db keys reject non-canonical runtime namespaces and database 
   assert.throws(() => dbKeyOf("tenant-a", "a".repeat(129)), /databaseId is invalid/);
 });
 
-test("D1 protocol: slot hash is stable and bounded", () => {
-  const slot = slotOf("tenant-a", "main", 128);
-  assert.equal(slot, slotOf("tenant-a", "main", 128));
-  assert.ok(slot >= 0 && slot < 128);
+test("D1 protocol: slot hash matches persisted golden vectors", () => {
+  for (const [namespace, databaseId, slotCount, expected] of [
+    ["tenant-a", "main", 128, 2],
+    ["tenant-d", "main", 128, 67],
+    ["tenant-d", "main", 64, 3],
+    ["__platform__", "system-db", 128, 30],
+    ["tenant-123", "db_with-dashes", 1024, 248],
+  ]) {
+    assert.equal(slotOf(namespace, databaseId, slotCount), expected);
+  }
 });
 
 test("D1 protocol: normalizes D1 bind parameter types", () => {

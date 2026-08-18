@@ -4,6 +4,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -17,6 +18,35 @@ export function repoPath(rel) {
 /** @param {string} rel */
 export function readRepoFile(rel) {
   return readFileSync(repoPath(rel), "utf8");
+}
+
+/**
+ * Return only static import/export declaration specifiers. Dynamic imports,
+ * JSDoc type imports, and import-looking text inside generated source strings
+ * are intentionally excluded from the executable module graph.
+ * @param {string} source
+ * @param {string} [fileName]
+ */
+export function staticModuleSpecifiers(source, fileName = "module.js") {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  /** @type {string[]} */
+  const specifiers = [];
+  for (const statement of sourceFile.statements) {
+    if (
+      (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteralLike(statement.moduleSpecifier)
+    ) {
+      specifiers.push(statement.moduleSpecifier.text);
+    }
+  }
+  return specifiers;
 }
 
 /** @param {string} dir */

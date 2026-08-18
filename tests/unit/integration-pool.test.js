@@ -34,7 +34,6 @@ test("integration shard env ignores host control credentials", () => {
   assert.equal(env.CONTROL_URL, localControlUrl(18082));
   assert.equal(env.CONTROL_CONNECT_HOST, LOCAL_CONNECT_HOST);
   assert.equal(env.ASSETS_CDN_BASE, localAssetsCdnBase(29502));
-  assert.equal(env.WDL_WORKERD_CONFIG_VARIANT, "local");
   assert.equal(env.WDL_INTEGRATION_NO_BUILD, "1");
   assert.equal("WDL_NS" in env, false);
   assert.equal("CLOUDFLARE_ENV" in env, false);

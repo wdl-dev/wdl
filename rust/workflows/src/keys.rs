@@ -315,6 +315,21 @@ mod tests {
     }
 
     #[test]
+    fn workflow_definition_key_matches_cross_language_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/redis-key-parity.json"
+        ))
+        .expect("Redis key parity fixture should parse");
+        assert_eq!(
+            workflow_defs_key(
+                fixture["namespace"].as_str().unwrap(),
+                fixture["worker"].as_str().unwrap(),
+            ),
+            fixture["workflowDefinitionsKey"].as_str().unwrap(),
+        );
+    }
+
+    #[test]
     fn do_alarm_keys_stay_in_internal_workflows_keyspace() {
         let keys = DoAlarmJobKeys::new("doa-abc");
 

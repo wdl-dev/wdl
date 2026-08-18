@@ -15,6 +15,7 @@ import { WdlDoHostActor } from "do-runtime-actor";
 import { handleAlarmDispatch } from "do-runtime-alarm-dispatch";
 import {
   buildLocalActorRequest,
+  DO_OWNER_FENCE_HEADERS,
   doPlatformErrorResponse,
   DoRuntimeError,
   hostIdForObject,
@@ -275,9 +276,9 @@ async function dispatchConnect(env, invoke, request, requestId = null, hopCount 
   const id = env.DO_HOSTS.idFromName(invoke.hostId);
   const stub = env.DO_HOSTS.get(id);
   const headers = new Headers(request.headers);
-  headers.set("x-wdl-do-owner-key", owner.ownerKey);
-  headers.set("x-wdl-do-owner-task-id", owner.taskId);
-  headers.set("x-wdl-do-owner-generation", String(owner.generation));
+  headers.set(DO_OWNER_FENCE_HEADERS.ownerKey, owner.ownerKey);
+  headers.set(DO_OWNER_FENCE_HEADERS.taskId, owner.taskId);
+  headers.set(DO_OWNER_FENCE_HEADERS.generation, String(owner.generation));
   const response = await recordDoWebSocketUpgrade(() => stub.fetch("https://do-runtime.internal/connect", {
     method: request.method,
     headers,

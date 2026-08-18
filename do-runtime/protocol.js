@@ -75,6 +75,11 @@ const ALARM_INTERNAL_URL = "https://do.internal/__wdl_alarm";
 const ALARM_INTERNAL_HEADER = "x-wdl-do-internal-alarm";
 const RPC_INTERNAL_URL = "https://do.internal/__wdl_rpc";
 const RPC_INTERNAL_HEADER = "x-wdl-do-internal-rpc";
+export const DO_OWNER_FENCE_HEADERS = Object.freeze({
+  ownerKey: "x-wdl-do-owner-key",
+  taskId: "x-wdl-do-owner-task-id",
+  generation: "x-wdl-do-owner-generation",
+});
 const CONNECT_HEADERS = {
   ns: "x-wdl-do-ns",
   worker: "x-wdl-do-worker",
@@ -83,16 +88,11 @@ const CONNECT_HEADERS = {
   className: "x-wdl-do-class-name",
   objectName: "x-wdl-do-object-name",
   requestUrl: "x-wdl-do-request-url",
-  ownerKey: "x-wdl-do-owner-key",
-  ownerTaskId: "x-wdl-do-owner-task-id",
-  ownerGeneration: "x-wdl-do-owner-generation",
 };
 const OWNER_HINT_PROTOCOL_HEADERS = [
   "x-wdl-do-accept-owner-hint",
-  "x-wdl-do-owner-key",
-  "x-wdl-do-owner-task-id",
+  ...Object.values(DO_OWNER_FENCE_HEADERS),
   "x-wdl-do-owner-endpoint",
-  "x-wdl-do-owner-generation",
   "x-wdl-do-owner-hint",
 ];
 const CONNECT_INTERNAL_HEADER_NAMES = new Set([
@@ -564,6 +564,10 @@ function decodeConnectObjectName(value) {
 /** @param {Request} request */
 export function normalizeDoConnectRequest(request) {
   const headers = request.headers;
+  const hasOwnerFence =
+    headers.has(DO_OWNER_FENCE_HEADERS.ownerKey) ||
+    headers.has(DO_OWNER_FENCE_HEADERS.taskId) ||
+    headers.has(DO_OWNER_FENCE_HEADERS.generation);
   const body = {
     ns: headers.get(CONNECT_HEADERS.ns),
     worker: headers.get(CONNECT_HEADERS.worker),
@@ -571,11 +575,11 @@ export function normalizeDoConnectRequest(request) {
     doStorageId: headers.get(CONNECT_HEADERS.doStorageId),
     className: headers.get(CONNECT_HEADERS.className),
     objectName: decodeConnectObjectName(headers.get(CONNECT_HEADERS.objectName)),
-    owner: headers.has(CONNECT_HEADERS.ownerKey) || headers.has(CONNECT_HEADERS.ownerTaskId) || headers.has(CONNECT_HEADERS.ownerGeneration)
+    owner: hasOwnerFence
       ? {
-          ownerKey: headers.get(CONNECT_HEADERS.ownerKey),
-          taskId: headers.get(CONNECT_HEADERS.ownerTaskId),
-          generation: headers.get(CONNECT_HEADERS.ownerGeneration),
+          ownerKey: headers.get(DO_OWNER_FENCE_HEADERS.ownerKey),
+          taskId: headers.get(DO_OWNER_FENCE_HEADERS.taskId),
+          generation: headers.get(DO_OWNER_FENCE_HEADERS.generation),
         }
       : undefined,
     request: {

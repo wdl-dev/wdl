@@ -14,6 +14,9 @@ import {
   probeTimeoutMs,
   renewConcurrency,
 } from "../helpers/load-d1-owner-registry.js";
+import { sharedModuleDataUrl } from "../helpers/load-shared-module.js";
+
+const { ownerLeaseExpiresAt } = await import(sharedModuleDataUrl("shared/owner-lease.js"));
 
 test("D1 owner registry: config helpers keep bounded defaults", () => {
   assert.equal(ownerTtlSeconds({}), 120);
@@ -41,6 +44,18 @@ test("D1 owner registry: config helpers keep bounded defaults", () => {
   assert.equal(renewConcurrency({ D1_RENEW_CONCURRENCY: "0.5" }), 1);
   assert.equal(renewConcurrency({ D1_RENEW_CONCURRENCY: "3.9" }), 3);
   assert.equal(renewConcurrency({ D1_RENEW_CONCURRENCY: "1000" }), 64);
+});
+
+test("D1 owner TTL parsing always composes with lease expiry", () => {
+  for (const value of ["120.5", "0.4", "0", "-1", "", "abc", undefined]) {
+    const ttl = ownerTtlSeconds({ D1_OWNER_TTL_SECONDS: value });
+    assert.equal(ttl, 120, String(value));
+    assert.doesNotThrow(() => ownerLeaseExpiresAt(10_000, ttl), String(value));
+  }
+
+  const ttl = ownerTtlSeconds({ D1_OWNER_TTL_SECONDS: "45" });
+  assert.equal(ttl, 45);
+  assert.equal(ownerLeaseExpiresAt(10_000, ttl), 55_000);
 });
 
 test("D1 owner registry: owner keys encode database keys safely", () => {

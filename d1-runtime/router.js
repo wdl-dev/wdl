@@ -47,11 +47,12 @@ import {
 } from "d1-runtime-state";
 import { d1QueryBytesResponse, d1QueryResponse } from "d1-runtime-http";
 
-const D1_OWNER_HINT_HEADERS = [
-  "x-wdl-d1-owner-task-id",
-  "x-wdl-d1-owner-endpoint",
-  "x-wdl-d1-owner-generation",
-];
+const D1_OWNER_HINT_HEADERS = Object.freeze({
+  taskId: "x-wdl-d1-owner-task-id",
+  endpoint: "x-wdl-d1-owner-endpoint",
+  generation: "x-wdl-d1-owner-generation",
+});
+const D1_OWNER_HINT_HEADER_NAMES = Object.values(D1_OWNER_HINT_HEADERS);
 const ROUTER_READ_CACHE_MAX_DBS = 10_000;
 
 /**
@@ -100,9 +101,9 @@ function invalidateRouterReadCache(dbKey, reason) {
 /** @param {D1Owner} owner */
 function ownerHeaders(owner) {
   return {
-    "x-wdl-d1-owner-task-id": String(owner.taskId || ""),
-    "x-wdl-d1-owner-endpoint": String(owner.endpoint || ""),
-    "x-wdl-d1-owner-generation": owner.generation == null ? "" : String(owner.generation),
+    [D1_OWNER_HINT_HEADERS.taskId]: String(owner.taskId || ""),
+    [D1_OWNER_HINT_HEADERS.endpoint]: String(owner.endpoint || ""),
+    [D1_OWNER_HINT_HEADERS.generation]: owner.generation == null ? "" : String(owner.generation),
   };
 }
 
@@ -110,7 +111,7 @@ function ownerHeaders(owner) {
 function copyOwnerHeaders(headers) {
   /** @type {Record<string, string>} */
   const out = {};
-  for (const name of D1_OWNER_HINT_HEADERS) {
+  for (const name of D1_OWNER_HINT_HEADER_NAMES) {
     const value = headers.get(name);
     if (value) out[name] = value;
   }

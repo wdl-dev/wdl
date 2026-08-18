@@ -29,6 +29,7 @@
 | `runtime/metrics.js` | Runtime Prometheus snapshot helpers 和 bounded metric aggregation。 |
 | `runtime/dispatch.js` 和 `runtime/dispatch/*` | Fetch、scheduled、queue、workflow dispatch、workflow step facade、replay cache 和 deterministic workflow JSON helpers。 |
 | `runtime/load.js` 和 `runtime/load/*` | Bundle decode、module rewrite、env construction、wrapper generation、runtime 注入源码 ownership 和 hidden binding stripping。`code-budget.js`、`injection-sources.js` 和 `wrapper-generate.js` 还负责让只声明 AI 的 bundle 生成并计入 AI facade。 |
+| `runtime/load/injection-sources.js` | 三份 runtime 基配置通过 Cap'n Proto text module 嵌入的 canonical tenant-source registry。它把 `runtime/d1-client.js`、`shared/d1-data-field.js`、`shared/d1-params.js`、`shared/utf8.js`、`shared/sql-splitter.js`、`shared/d1-transport.js`、`runtime/r2-client.js`、`runtime/r2-utils.js`、`runtime/do-client.js`、`runtime/_wdl-do-scoped-request.js`、`runtime/_wdl-request-id.js`、`runtime/workflows-client.js` 和 `runtime/ai-client.js` 作为 generated wrapper 输入；host-only DO routing 不属于该 registry。 |
 | `runtime/bindings/` | KV、D1、R2、Durable Objects、Workflows、ASSETS、service、queue 和 AI 的 host-side binding adapters。`runtime/bindings/do.js` 与 `runtime/bindings/workflow.js` 负责 binding-scoped identity/authenticated transport；`runtime/bindings/ai.js` 负责 AI admission、provider 解析、public-only forwarding 和协议编排；`runtime/bindings/ai-capacity.js` 负责进程内 pool 计数、lease transfer、metrics、deadline 和 watchdog cleanup；`runtime/bindings/ai-provider.js` 负责 official destination、provider request policy、携带 credential 的 header 和有界 response header；`runtime/bindings/ai-sse.js` 负责增量 SSE framing 和 terminal-event classification；`runtime/bindings/ai-websocket.js` 负责有界 frame forwarding、model rewrite、idle detection 和 close propagation。 |
 | `runtime/do-client.js`、`runtime/_wdl-do-scoped-request.js`、`runtime/bindings/do.js`、`runtime/_wdl-do-transport.js` | Tenant DO namespace/id/stub facade 及其 binding-scoped request envelope；host-only identity attachment、owner routing、invoke/connect framing、retry 和 response stripping。 |
 | `runtime/ai-client.js` | Tenant realm 的 AI facade source，负责 `run()`、`models()`、OpenAI-compatible fetch、streaming 和 WebSocket helper。 |
@@ -71,6 +72,7 @@
 | `shared/hex.js`、`shared/random-id.js`、`shared/errors.js` | byte-to-hex rendering、random hex ids 和 string-only error message extraction 的无依赖小 primitive。 |
 | `shared/observability.js` | JS tiers 的 structured logger、metrics registry、request-id helpers 和 log-level handling。 |
 | `shared/respond.js` | 共享 HTTP response、JSON error、Prometheus text、best-effort response body discard 和 `x-request-id` echo helpers。 |
+| `shared/request-scope.js` | JS services 的 HTTP request-scope owner，负责 request-id echo、response status、completion log/metrics 和有界 route/error context。 |
 | `shared/bounded-body.js` | 共享 bounded byte-stream 和 request-body readers；各 tier 自己把 limit error 映射为对应 contract。 |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar 与 platform-domain normalization，以及 namespace、worker、binding、queue、KV/D1/R2 id、AI provider/model alias、module path、reserved object-key 和 reserved namespace grammars。 |
 | `shared/ai-contract.js` | Control、各 runtime tier 的 AI host binding 与跨语言 contract tests 共用的 AI provider record、model descriptor、revision、provider kind、protocol、capability 和 DB 0 key canonical contract。 |
@@ -84,6 +86,10 @@
 | `shared/s3-query.js` | s3-cleanup system worker 使用的 S3 query encoder；runtime R2 在 `runtime/r2-utils.js` 保留同一套 standalone helper，因为该文件会作为 worker source 注入。 |
 | `shared/s3-retry.js` | runtime R2 与 s3-cleanup worker 共用的 idempotent S3 POST 有界瞬态重试策略。 |
 | `shared/s3-xml.js` | Control R2、runtime R2 和 system cleanup 路径共用的 S3 XML parsing helpers。 |
+| `shared/assets-token.js` | Control 与 cleanup validation 共用的 canonical ASSETS deploy token 和 object-prefix generation。 |
+| `shared/s3-cleanup-lifecycle.js` | Control 与 cleanup system worker 共用的 worker-delete S3 cleanup task id、queue fields、canonical ASSETS prefix、state 和 outcome。 |
+| `shared/task-identity.js` | D1/DO ownership tiers 共用的缓存式 env/ECS task identity 与 private endpoint resolution。 |
+| `shared/env.js` | Runtime configuration reader 共用的 empty/nullish env fallback primitive，并保留 numeric zero。 |
 | `shared/worker-id.js` | Gateway、runtime、DO runtime 和 tests 共用的 `x-worker-id` formatting、parsing 和 runtime-load identity grammar。 |
 | `shared/cron-time.js` | Control 侧 cron parsing 和 slot-alignment helpers；scheduler advancement 使用 Rust `croner`。 |
 | `shared/vendor/` | `npm run build:vendor` 重新生成的预打包第三方依赖。 |

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   importRepositoryModuleFresh,
+  readRepositoryJson,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { compileSharedAuthRoles } from "../helpers/load-auth-roles.js";
@@ -9,6 +10,9 @@ import { delay, waitUntil } from "../helpers/timing.js";
 
 const { sharedAuthRolesUrl } = await compileSharedAuthRoles();
 const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
+const REDIS_KEY_PARITY = /** @type {{ namespace: string, worker: string, logTailStreamKey: string }} */ (
+  readRepositoryJson("tests/fixtures/redis-key-parity.json")
+);
 
 /** @param {{ keepaliveMs?: number }} [options] */
 function loadLogsTailHandler(options = {}) {
@@ -130,6 +134,17 @@ async function readText(reader) {
 function utf8(value) {
   return new TextEncoder().encode(value);
 }
+
+test("RedisTailCursor uses the cross-language stream key contract", async () => {
+  resetTailState();
+  const { RedisTailCursor } = await loadLogsTailHandler();
+  const cursor = new RedisTailCursor({
+    ns: REDIS_KEY_PARITY.namespace,
+    workers: [REDIS_KEY_PARITY.worker],
+  });
+
+  assert.deepEqual(cursor.streamKeys, [REDIS_KEY_PARITY.logTailStreamKey]);
+});
 
 test("RedisTailCursor decodes stream batches and keeps per-worker cursors", async () => {
   resetTailState();

@@ -22,6 +22,12 @@ import { validOwnerEndpointForService } from "shared-owner-endpoint";
  * @typedef {{ ok: boolean, status: number, body: unknown, owner?: D1OwnerHint | null }} D1RuntimeResult
  */
 
+const D1_OWNER_HINT_HEADERS = Object.freeze({
+  taskId: "x-wdl-d1-owner-task-id",
+  endpoint: "x-wdl-d1-owner-endpoint",
+  generation: "x-wdl-d1-owner-generation",
+});
+
 /** @param {unknown} err */
 function d1RuntimeTransportPayload(err) {
   if (isD1QueryTimeoutError(err)) return d1QueryTimeoutPayload();
@@ -30,7 +36,7 @@ function d1RuntimeTransportPayload(err) {
 
 /** @param {Headers} headers */
 function d1OwnerGenerationFromHeaders(headers) {
-  const raw = headers.get("x-wdl-d1-owner-generation");
+  const raw = headers.get(D1_OWNER_HINT_HEADERS.generation);
   if (raw == null || raw === "") return null;
   const generation = Number(raw);
   return Number.isSafeInteger(generation) && generation > 0 ? generation : null;
@@ -97,8 +103,8 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
     };
   }
   const owner = {
-    taskId: res.headers.get("x-wdl-d1-owner-task-id") || null,
-    endpoint: res.headers.get("x-wdl-d1-owner-endpoint") || null,
+    taskId: res.headers.get(D1_OWNER_HINT_HEADERS.taskId) || null,
+    endpoint: res.headers.get(D1_OWNER_HINT_HEADERS.endpoint) || null,
     generation: d1OwnerGenerationFromHeaders(res.headers),
   };
   return {

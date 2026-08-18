@@ -32,6 +32,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `runtime/metrics.js` | Runtime Prometheus snapshot helpers and bounded metric aggregation. |
 | `runtime/dispatch.js` and `runtime/dispatch/*` | Fetch, scheduled, queue, workflow dispatch, workflow step facade, replay cache, and deterministic workflow JSON helpers. |
 | `runtime/load.js` and `runtime/load/*` | Bundle decode, module rewrite, env construction, wrapper generation, injected runtime source ownership, and hidden binding stripping. `code-budget.js`, `injection-sources.js`, and `wrapper-generate.js` also own generated AI facade inclusion for AI-only bundles. |
+| `runtime/load/injection-sources.js` | Canonical tenant-source registry embedded as Cap'n Proto text modules by the three base runtime configs. It owns `runtime/d1-client.js`, `shared/d1-data-field.js`, `shared/d1-params.js`, `shared/utf8.js`, `shared/sql-splitter.js`, `shared/d1-transport.js`, `runtime/r2-client.js`, `runtime/r2-utils.js`, `runtime/do-client.js`, `runtime/_wdl-do-scoped-request.js`, `runtime/_wdl-request-id.js`, `runtime/workflows-client.js`, and `runtime/ai-client.js` as generated-wrapper inputs. Host-only DO routing remains outside this registry. |
 | `runtime/bindings/` | Host-side binding adapters for KV, D1, R2, Durable Objects, Workflows, ASSETS, service, queue, and AI. `runtime/bindings/do.js` and `runtime/bindings/workflow.js` own binding-scoped identity/authenticated transports; `runtime/bindings/ai.js` owns AI admission, provider resolution, public-only forwarding, and protocol orchestration; `runtime/bindings/ai-capacity.js` owns process-local pool accounting, lease transfer, metrics, deadlines, and watchdog cleanup; `runtime/bindings/ai-provider.js` owns official destinations, provider request policy, credential-bearing headers, and bounded response headers; `runtime/bindings/ai-sse.js` owns incremental SSE framing and terminal-event classification; `runtime/bindings/ai-websocket.js` owns bounded frame forwarding, model rewriting, idle detection, and close propagation. |
 | `runtime/do-client.js`, `runtime/_wdl-do-scoped-request.js`, `runtime/bindings/do.js`, `runtime/_wdl-do-transport.js` | Tenant DO namespace/id/stub facade and its binding-scoped request envelope; host-only identity attachment, owner routing, invoke/connect framing, retries, and response stripping. |
 | `runtime/ai-client.js` | Tenant-realm AI facade source for `run()`, `models()`, OpenAI-compatible fetch, streaming, and WebSocket helpers. |
@@ -74,6 +75,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/hex.js`, `shared/random-id.js`, `shared/errors.js` | Small dependency-free primitives for byte-to-hex rendering, random hex ids, and string-only error message extraction. |
 | `shared/observability.js` | Structured logger, metrics registry, request-id helpers, and log-level handling for JS tiers. |
 | `shared/respond.js` | Shared HTTP response, JSON error, Prometheus text, best-effort response body discard, and `x-request-id` echo helpers. |
+| `shared/request-scope.js` | HTTP request-scope owner for request-id echo, response status, completion logs/metrics, and bounded route/error context across JS services. |
 | `shared/bounded-body.js` | Shared bounded byte-stream and request-body readers; each tier maps limit errors to its own contract. |
 | `shared/ns-pattern.js` | ASCII DNS hostname grammar and platform-domain normalization plus namespace, worker, binding, queue, KV/D1/R2 id, AI provider/model alias, module path, reserved object-key, and reserved namespace grammars. |
 | `shared/ai-contract.js` | Canonical AI provider record, model descriptor, revision, provider kind, protocol, capability, and DB 0 key contract used by Control, the AI host binding in every runtime tier, and cross-language contract tests. |
@@ -87,6 +89,10 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/s3-query.js` | S3 query encoder used by the s3-cleanup system worker; runtime R2 keeps the same standalone helper in `runtime/r2-utils.js` because that file is injected as worker source. |
 | `shared/s3-retry.js` | Bounded transient retry policy for idempotent S3 POST operations, shared by runtime R2 and the s3-cleanup worker. |
 | `shared/s3-xml.js` | Shared S3 XML parsing helpers used by control R2, runtime R2, and system cleanup paths. |
+| `shared/assets-token.js` | Canonical ASSETS deploy token and object-prefix generation shared by Control and cleanup validation. |
+| `shared/s3-cleanup-lifecycle.js` | Worker-delete S3 cleanup task ids, queue fields, canonical ASSETS prefixes, states, and outcomes shared by Control and the cleanup system worker. |
+| `shared/task-identity.js` | Cached env/ECS task identity and private endpoint resolution shared by D1 and DO ownership tiers. |
+| `shared/env.js` | Empty/nullish environment fallback primitive that preserves numeric zero for runtime configuration readers. |
 | `shared/worker-id.js` | Shared `x-worker-id` formatting, parsing, and runtime-load identity grammar used by gateway, runtime, DO runtime, and tests. |
 | `shared/cron-time.js` | Control-side cron parsing and slot-alignment helpers; scheduler advancement uses Rust `croner`. |
 | `shared/vendor/` | Pre-bundled third-party dependencies regenerated by `npm run build:vendor`. |

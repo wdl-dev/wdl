@@ -62,6 +62,7 @@ Cron 使用 wall-clock 分钟 slot：
 
 1. `wait_ms_until_next_slot()` 睡到下一个 UTC 分钟边界。tick loop 随后扫描当前 `cron-slot:<slot_ms>` bucket 和前一个 bucket。扫描前一个 bucket 是为了覆盖分钟 rollover 附近刚写入的 ref。
 2. 另一条 sweep/reconcile 路径从 `cron:index:workers` 读取 active cron hash，用 croner 和配置的 timezone 计算每个 entry 的下一次触发时间，再 round 到分钟 slot，并把 ref 写入 slot bucket。这个流程是 repair 逻辑，不是权威状态。Control 只在 promote-time 初始 slot placement 使用 JavaScript `croner`；scheduler repair 和 advance 使用 Rust `croner`。缺少 canonical identity 或 metadata 的 worker hash 会被跳过，不会重新播种非法 ref，并输出 bounded `invalid_identity` 或 `invalid_meta` reason。
+   Backfill marker 出现前，scheduler 会扫描一次 legacy `crons:*` hash 并填充 discovery index。此后，受支持的 promotion/delete 写入会在 DB 0 中同时维护 hash 和 index，因此空 index 表示没有已发现的 cron worker，不会触发周期 keyspace scan。Queue discovery 不同：它横跨可独立变化的 control-plane consumer hash、data-plane stream、delayed set 和 Redis consumer-group state，所以周期 repair 是长期恢复合同，不是一次 legacy migration。
 3. Cron ref 带 entry generation。真正 fire 前，scheduler 读取 `crons:<ns>:<worker>` 并比较 `gen`；metadata 缺失、JSON 损坏或 generation 不匹配都会让 ref 变成 stale，并从 slot 中移除。
 4. 原子 claim 会在取得 lease 或修改 slot 前再次精确比较 metadata 和 entry snapshot。并发配置变化会触发一次有界重读和重新计算；如果配置再次变化，scheduler 会保留 source ref 给后续 tick，并记录 `config_changed_deferred`。
 5. Scheduler 会先原子地 lease ref、从当前 slot 移除、加入下一个 slot，然后才调用 runtime。这个顺序保证每个 slot 只 fire 一次，并且 runtime/network 失败不会变成自动 cron retry。

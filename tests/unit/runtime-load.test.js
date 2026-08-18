@@ -19,8 +19,10 @@ import { assertJsonResponse } from "../helpers/response-json.js";
 import { runtimeProxyBindingStubUrl, sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 import {
   STUB_RUNTIME_INJECTION_SOURCES,
+  realRuntimeInjectionSources,
   stubRuntimeInjectionSourcesUrl,
 } from "../helpers/runtime-injection-sources.js";
+import { staticModuleSpecifiers } from "../helpers/source-scan.js";
 import { makeTempDir, removeTempDir, withTempDir } from "../helpers/temp-dir.js";
 
 const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
@@ -1547,6 +1549,72 @@ function workerCodeModuleBytes(workerCode) {
   }
   return total;
 }
+
+/** @param {string} source @param {string} [fileName] */
+function sortedStaticModuleSpecifiers(source, fileName) {
+  return [...new Set(staticModuleSpecifiers(source, fileName))].sort();
+}
+
+test("runtime injection stubs mirror the real source dependency graph", () => {
+  const realSources = realRuntimeInjectionSources();
+  const stubSources = /** @type {Readonly<Record<string, string>>} */ (
+    STUB_RUNTIME_INJECTION_SOURCES
+  );
+  assert.deepEqual(
+    Object.keys(stubSources).sort(),
+    Object.keys(realSources).sort(),
+  );
+  for (const property of Object.keys(realSources)) {
+    assert.deepEqual(
+      sortedStaticModuleSpecifiers(stubSources[property], `${property}-stub.js`),
+      sortedStaticModuleSpecifiers(realSources[property], `${property}.js`),
+      property,
+    );
+  }
+});
+
+test("runtime injected source rewrites produce a closed module graph", () => {
+  const meta = {
+    bindings: {
+      DB: { type: "d1" },
+      BUCKET: { type: "r2" },
+      OBJECTS: { type: "do", className: "Counter" },
+      AI: { type: "ai" },
+    },
+    workflows: [{ binding: "FLOW", className: "FlowHandler" }],
+  };
+  /** @type {{ mainModule: string, modules: Record<string, string> }} */
+  const workerCode = {
+    mainModule: "worker.js",
+    modules: { "worker.js": "export class Counter {} export class FlowHandler {}" },
+  };
+  injectRuntimeModulesForHostBindings(workerCode, meta, realRuntimeInjectionSources());
+
+  const moduleNames = new Set(Object.keys(workerCode.modules));
+  const missing = [];
+  for (const [name, source] of Object.entries(workerCode.modules)) {
+    for (const specifier of staticModuleSpecifiers(source, name)) {
+      if (
+        specifier.startsWith("/") ||
+        specifier.startsWith("node:") ||
+        specifier.startsWith("cloudflare:")
+      ) continue;
+      const resolved = specifier.startsWith(".")
+        ? path.posix.normalize(path.posix.join(path.posix.dirname(name), specifier))
+        : specifier;
+      if (!moduleNames.has(resolved)) missing.push(`${name} imports ${resolved}`);
+    }
+  }
+  assert.deepEqual(missing, []);
+  assert.deepEqual(
+    staticModuleSpecifiers(workerCode.modules["_wdl-d1-params.js"]),
+    ["./_wdl-utf8.js"],
+  );
+  assert.deepEqual(
+    staticModuleSpecifiers(workerCode.modules["_wdl-d1-transport.js"]),
+    ["./_wdl-d1-data-field.js"],
+  );
+});
 
 test("workerLoader code estimator matches runtime wrapper injection exactly", () => {
   const entrypoint = `Api${"A".repeat(1024)}`;

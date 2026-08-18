@@ -60,7 +60,7 @@ AI 最多接受一个 `{ type: "ai" }` binding。Generated wrapper 通过 positi
 
 Generated host-facade wrapper 保留 Worker 的 importable-env compatibility contract：只有未设置 `disallow_importable_env` 时才调用 workerd `withEnv()`。启用 importable env 时，tenant module 可以在 module scope 保存 imported env proxy，并在 invocation 中从 proxy 实时读取 binding；module evaluation 期间直接缓存单个 binding 不属于 facade contract，因为 module evaluation 早于 wrapper invocation，只可能观察到 binding-scoped raw host adapter。设置 `disallow_importable_env` 后，module scope 和 invocation 中的 imported env 都保持为空，positional env 仍然获得 generated facade。
 
-ASSETS 是 deploy-artifact helper，不是完整 Cloudflare Pages asset pipeline。Control 把文件上传到 `assets/<ns>/<worker>/<token>/<path>`，注入 `ASSETS` binding，runtime 暴露同步的 `env.ASSETS.url(path)`。该方法在 runtime 中不做 IO，并用 `ASSETS_CDN_BASE` 返回浏览器可访问的 CDN URL。Path 按 `/` 切段，空段、`.` 和 `..` 被拒绝，每段会 percent-encode。Version 在 load 时绑定，因此 rollback 会切换 asset URL。需要对静态文件做 auth 或 rewrite 的 worker 应把文件留在 bundle 里，而不是使用 declared `assets`。
+ASSETS 是 deploy-artifact helper，不是完整 Cloudflare Pages asset pipeline。Control 把文件上传到 `assets/<ns>/<worker>/<token>/<path>`，注入 `ASSETS` binding，runtime 暴露 `env.ASSETS.url(path)`。Tenant code 会 await 这次 JSRPC 调用；host 侧 URL 构造不做 IO，并用 `ASSETS_CDN_BASE` 返回浏览器可访问的 CDN URL。Path 按 `/` 切段，空段、`.` 和 `..` 被拒绝，每段会 percent-encode。Version 在 load 时绑定，因此 rollback 会切换 asset URL。需要对静态文件做 auth 或 rewrite 的 worker 应把文件留在 bundle 里，而不是使用 declared `assets`。
 
 R2 和 ASSETS 生命周期语义故意不同。ASSETS 是 deploy artifact，version/worker delete 会 stage `worker-delete-s3-cleanup` work。R2 是 tenant runtime data，worker delete 永远不删除 R2 object。
 

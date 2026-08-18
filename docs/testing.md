@@ -166,7 +166,8 @@ may read them, but they should not be regular user knobs.
 | `WDL_INTEGRATION_SLOT_PREPPED=1` | Marks that a slot already paid the full startup/restart preparation. |
 | `WDL_GATEWAY_HOST_PORT` | Per-slot gateway host port injected by the runner. |
 | `WDL_S3MOCK_HOST_PORT` | Per-slot s3mock host port injected by the runner. |
-| `WDL_WORKERD_CONFIG_VARIANT=local` | Selects the local compiled workerd config variant for compose. |
+
+Regression tripwires must have a reachable failure mode. When adding or materially changing one, temporarily introduce the prohibited shape or alter one expected golden value and verify that the focused test fails, then revert the mutation before commit. Prefer assertions derived from parsed configuration or imported values over source-text spelling checks.
 
 ## Helpers And Fixtures
 

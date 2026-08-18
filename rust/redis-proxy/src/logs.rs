@@ -178,6 +178,21 @@ mod tests {
     }
 
     #[test]
+    fn tail_stream_key_matches_cross_language_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/redis-key-parity.json"
+        ))
+        .expect("Redis key parity fixture should parse");
+        assert_eq!(
+            tail_stream_key(
+                fixture["namespace"].as_str().unwrap(),
+                fixture["worker"].as_str().unwrap(),
+            ),
+            fixture["logTailStreamKey"].as_str().unwrap(),
+        );
+    }
+
+    #[test]
     fn tail_event_json_size_limit_rejects_oversized_entries() {
         validate_tail_event_json(&"x".repeat(TAIL_EVENT_MAX_BYTES)).unwrap();
 

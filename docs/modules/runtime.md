@@ -180,8 +180,9 @@ invocations, while positional env still receives generated facades.
 
 ASSETS is a deploy-artifact helper, not a full Cloudflare Pages asset pipeline. Control
 uploads files to `assets/<ns>/<worker>/<token>/<path>`, injects an `ASSETS` binding, and
-runtime exposes synchronous `env.ASSETS.url(path)`. The method is IO-free in runtime and
-returns a CDN-facing URL using `ASSETS_CDN_BASE`. Path segments are split on `/`, empty
+runtime exposes `env.ASSETS.url(path)`. Tenant code awaits the JSRPC result; the
+host-side URL construction is IO-free and returns a CDN-facing URL using
+`ASSETS_CDN_BASE`. Path segments are split on `/`, empty
 segments plus `.` and `..` are rejected, and each segment is percent-encoded. Version is
 bound at load time, so rollback flips asset URLs. If workers need auth or rewrite logic
 for static bytes, they should keep files in the bundle instead of using declared

@@ -217,7 +217,6 @@ export function makeSlotEnv(idx, projectPrefix, basePort, s3PortBase, baseEnv = 
     COMPOSE_PROJECT_NAME: `${projectPrefix}-${idx}`,
     WDL_GATEWAY_HOST_PORT: String(gatewayPort),
     WDL_S3MOCK_HOST_PORT: String(s3mockPort),
-    WDL_WORKERD_CONFIG_VARIANT: "local",
     WDL_INTEGRATION_NO_BUILD: "1",
     ADMIN_TOKEN: LOCAL_ADMIN_TOKEN,
     CONTROL_URL: localControlUrl(gatewayPort),

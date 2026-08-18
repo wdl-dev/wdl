@@ -9,6 +9,7 @@ import {
   ownerGenerationKeyOf,
   ownerLeaseGuardMs,
   ownerKeyOf,
+  ownerTtlSeconds,
   parseOwner,
   renewOwnedScopes,
   resetDoOwnerRegistryTestState,
@@ -16,10 +17,13 @@ import {
   shouldRenewOwnerLease,
 } from "../helpers/load-do-owner-registry.js";
 import { parseStoredJson } from "../helpers/json-payload.js";
+import { sharedModuleDataUrl } from "../helpers/load-shared-module.js";
 import {
   sessionPolicyKey,
   encodeSessionPolicyProjection,
 } from "../../shared/worker-contract.js";
+
+const { ownerLeaseExpiresAt } = await import(sharedModuleDataUrl("shared/owner-lease.js"));
 
 // Simulated Redis clock advancement between owner check and renew-time reads.
 const REDIS_TIME_INCREMENT_AFTER_RENEW_MS = 200;
@@ -295,6 +299,18 @@ test("DO owner registry: lease guard config bounds values and permits test disab
   assert.equal(ownerLeaseGuardMs({ DO_OWNER_LEASE_GUARD_MS: "0" }), 0);
   assert.equal(ownerLeaseGuardMs({ DO_OWNER_LEASE_GUARD_MS: "250" }), 250);
   assert.equal(ownerLeaseGuardMs({ DO_OWNER_LEASE_GUARD_MS: "-1" }), 1000);
+});
+
+test("DO owner TTL parsing always composes with lease expiry", () => {
+  for (const value of ["120.5", "0.4", "0", "-1", "", "abc", undefined]) {
+    const ttl = ownerTtlSeconds({ DO_OWNER_TTL_SECONDS: value });
+    assert.equal(ttl, 120, String(value));
+    assert.doesNotThrow(() => ownerLeaseExpiresAt(10_000, ttl), String(value));
+  }
+
+  const ttl = ownerTtlSeconds({ DO_OWNER_TTL_SECONDS: "45" });
+  assert.equal(ttl, 45);
+  assert.equal(ownerLeaseExpiresAt(10_000, ttl), 55_000);
 });
 
 test("DO owner registry: claim writes owner generation counter", async () => {
