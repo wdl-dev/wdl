@@ -40,6 +40,17 @@ pub(crate) async fn apply_queue_outcome(
                         "error_message": reason,
                     }),
                 );
+            } else {
+                log(
+                    state,
+                    LogLevel::Warn,
+                    "queue_dispatch_handler_error",
+                    json!({
+                        "worker_id": consumer.worker_id,
+                        "queue": consumer.queue,
+                        "reason": reason,
+                    }),
+                );
             }
             let retry_all_count = messages.len();
             let retries = messages
@@ -122,7 +133,8 @@ fn queue_dispatch_request_id(
 }
 
 fn should_split_oversized_batch(res: &RuntimeResponse, batch_len: usize) -> bool {
-    res.error.is_none() && res.status == Some(413) && batch_len > 1
+    // Splitting depends on the authoritative status, not on retaining its response body.
+    res.status == Some(413) && batch_len > 1
 }
 
 fn split_oversized_batch(
@@ -300,6 +312,7 @@ mod tests {
         assert!(should_split_oversized_batch(&oversized, 2));
         assert!(!should_split_oversized_batch(&oversized, 1));
         assert!(!should_split_oversized_batch(&auth, 2));
-        assert!(!should_split_oversized_batch(&unread_oversized, 2));
+        assert!(should_split_oversized_batch(&unread_oversized, 2));
+        assert!(!should_split_oversized_batch(&unread_oversized, 1));
     }
 }

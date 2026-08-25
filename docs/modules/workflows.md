@@ -303,10 +303,16 @@ Scheduling is hint-based but state-authoritative:
    path instead of restoring the pre-run status. Replay-page prefetch is advisory: a
    prefetch failure falls back to the authoritative step operation, and only a failure
    on that path applies this 503 contract.
-   When parallel steps are in flight, Runtime closes new step admission and waits for
-   every tracked sibling to settle before selecting the run outcome. A host-branded
-   infrastructure failure takes precedence over an ordinary terminal step error, so a
-   late lost commit acknowledgement cannot be persisted as a deterministic failure.
+   When parallel steps are in flight, Runtime closes new step admission and waits within
+   the remaining Workflows-owned dispatch timeout, reserving one second to return the
+   response. A host-branded infrastructure failure observed during that bounded wait
+   takes precedence over an ordinary terminal step error, so a late lost commit
+   acknowledgement is not persisted as a deterministic failure. Exhausting the
+   authoritative dispatch budget is itself result-unknown and returns the same fixed 503
+   so Workflows releases the claim and replay can reconcile any late durable step commit.
+   Workflows computes and sends the absolute deadline before request serialization, so
+   transport, queueing, body parsing, tenant execution, and sibling settlement consume
+   the same budget.
    Deterministic step, fence, payload, and persisted-state errors remain terminal. A
    missing or unknown Runtime outcome, or a terminal variant missing its required
    payload field, is also a protocol error rather than an implicit failure result.
@@ -432,6 +438,10 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 - Cross-tier Workflow protocol changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes). The release changelog names
   the affected services.
+- The required runtime dispatch deadline is an explicit sender-first exception: roll and
+  drain all old Workflows tasks before rolling user-runtime and system-runtime. The old
+  Runtime ignores the additive field, while the new Runtime rejects an old sender that
+  omits it.
 - DB 2 is the workflow instance state boundary; do not add direct DB 2 writes from
   control/runtime/scheduler.
 - Workflows persists `wf:schema_version` in DB 2. Schema `2` stores DAG dependency edges

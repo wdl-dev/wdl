@@ -4,7 +4,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::RuntimeResponse;
 
-use super::super::{OutcomePlan, QueueMessage};
+use super::super::{MAX_QUEUE_DELAY_SECONDS, OutcomePlan, QueueMessage};
 
 struct QueueDecision {
     explicit_acks: HashSet<String>,
@@ -20,7 +20,7 @@ fn parse_delay_seconds(value: Option<&JsonValue>) -> Result<Option<i64>, ()> {
     let Some(delay) = value.as_i64() else {
         return Err(());
     };
-    if i32::try_from(delay).is_err() {
+    if !(0..=MAX_QUEUE_DELAY_SECONDS).contains(&delay) {
         return Err(());
     }
     Ok(Some(delay))
@@ -92,6 +92,16 @@ fn parse_queue_decision(
 }
 
 pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: Vec<QueueMessage>) -> OutcomePlan {
+    // The status is known before the bounded body read, so 413 remains authoritative
+    // even when its diagnostic body cannot be retained.
+    if let Some((kind, reason)) = terminal_failure(res) {
+        return OutcomePlan::TerminalAll {
+            kind,
+            reason,
+            messages,
+        };
+    }
+
     if res.error.is_some() {
         return OutcomePlan::RetryAll {
             kind: "transport_error",
@@ -100,14 +110,6 @@ pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: Vec<QueueMessage>)
                 .clone()
                 .or_else(|| res.text.clone())
                 .unwrap_or_else(|| "no response body".to_string()),
-            messages,
-        };
-    }
-
-    if let Some((kind, reason)) = terminal_failure(res) {
-        return OutcomePlan::TerminalAll {
-            kind,
-            reason,
             messages,
         };
     }
@@ -346,22 +348,6 @@ mod tests {
             _ => panic!("expected transport retry-all"),
         }
 
-        assert!(matches!(
-            decide_outcome(
-                &RuntimeResponse {
-                    status: Some(413),
-                    json: None,
-                    text: None,
-                    error: Some("runtime response body exceeds limit".to_string()),
-                },
-                messages.clone(),
-            ),
-            OutcomePlan::RetryAll {
-                kind: "transport_error",
-                ..
-            }
-        ));
-
         let outer = decide_outcome(
             &RuntimeResponse {
                 status: Some(200),
@@ -424,6 +410,12 @@ mod tests {
                 json: None,
                 text: Some("payload too large".to_string()),
                 error: None,
+            },
+            RuntimeResponse {
+                status: Some(413),
+                json: None,
+                text: None,
+                error: Some("runtime response body exceeds limit".to_string()),
             },
         ] {
             match decide_outcome(&response, messages.clone()) {
@@ -755,6 +747,25 @@ mod tests {
                 "invalid_retry_message_delay",
             ),
             (
+                "negative retry message delay",
+                queue_response_with(
+                    "retryMessages",
+                    json!([{ "msgId": "a", "delaySeconds": -1 }]),
+                ),
+                "invalid_retry_message_delay",
+            ),
+            (
+                "excessive retry message delay",
+                queue_response_with(
+                    "retryMessages",
+                    json!([{
+                        "msgId": "a",
+                        "delaySeconds": MAX_QUEUE_DELAY_SECONDS + 1
+                    }]),
+                ),
+                "invalid_retry_message_delay",
+            ),
+            (
                 "non-boolean batch retry",
                 queue_response_with("retryBatch", json!({ "retry": "true" })),
                 "invalid_retry_batch",
@@ -767,6 +778,22 @@ mod tests {
             (
                 "invalid batch retry delay",
                 queue_response_with("retryBatch", json!({ "retry": true, "delaySeconds": 1.5 })),
+                "invalid_retry_batch_delay",
+            ),
+            (
+                "negative batch retry delay",
+                queue_response_with("retryBatch", json!({ "retry": true, "delaySeconds": -1 })),
+                "invalid_retry_batch_delay",
+            ),
+            (
+                "excessive batch retry delay",
+                queue_response_with(
+                    "retryBatch",
+                    json!({
+                        "retry": true,
+                        "delaySeconds": MAX_QUEUE_DELAY_SECONDS + 1
+                    }),
+                ),
                 "invalid_retry_batch_delay",
             ),
         ] {

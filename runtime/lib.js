@@ -344,6 +344,13 @@ function requiredPositiveInteger(body, field) {
   return value;
 }
 
+/** @param {Record<string, unknown> | null} body @param {string} field */
+function requiredPositiveSafeInteger(body, field) {
+  const value = requiredPositiveInteger(body, field);
+  if (!Number.isSafeInteger(value)) throw new Error(`${field} must be a safe integer`);
+  return value;
+}
+
 /** @param {unknown} body */
 export function normalizeWorkflowRunBody(body) {
   const record = objectRecord(body);
@@ -358,6 +365,7 @@ export function normalizeWorkflowRunBody(body) {
     generation: requiredPositiveInteger(record, "generation"),
     createdAtMs: requiredPositiveInteger(record, "createdAtMs"),
     runToken: requiredString(record, "runToken"),
+    dispatchDeadlineMs: requiredPositiveSafeInteger(record, "dispatchDeadlineMs"),
     event: objectRecord(record?.event) ?? { payload: record?.params ?? null },
   };
 }

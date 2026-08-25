@@ -30,6 +30,7 @@ import {
   WORKFLOW_BACKEND_UNAVAILABLE_CODE,
   WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
   workflowError,
+  workflowInFlightSettleTimeoutError,
   workflowInfrastructureLogError,
 } from "runtime-dispatch-workflow-step";
 /**
@@ -39,7 +40,7 @@ import {
  * @typedef {{ namespace: string, workerName: string, workerId: string, requestId: string | null }} RuntimeIdentity
  * @typedef {{ waitUntil?(promise: Promise<unknown>): void }} RuntimeCtx
  * @typedef {{ WORKFLOWS_BACKEND?: { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> } | null, WDL_INTERNAL_AUTH_TOKEN?: unknown, [key: string]: unknown }} RuntimeEnv
- * @typedef {{ ns: string, worker: string, frozenVersion: string, workflowName: string, workflowKey: string, className: string, instanceId: string, generation: number, runToken: string, createdAtMs: number, event: unknown }} WorkflowRunDispatch
+ * @typedef {{ ns: string, worker: string, frozenVersion: string, workflowName: string, workflowKey: string, className: string, instanceId: string, generation: number, runToken: string, createdAtMs: number, dispatchDeadlineMs: number, event: unknown }} WorkflowRunDispatch
  * @typedef {{ request: Request, stub: LoadedWorkerStub, scope: DispatchScope, env: RuntimeEnv, ctx: RuntimeCtx, identity: RuntimeIdentity }} WorkerDispatchArgs
  */
 
@@ -48,6 +49,7 @@ const SMALL_DISPATCH_JSON_BODY_BYTES = 256 * 1024;
 // MAX_WORKFLOW_PARAMS_BYTES (1MiB), plus identity framing. Event notify uses a
 // separate smaller payload cap and stays on SMALL_DISPATCH_JSON_BODY_BYTES.
 const WORKFLOW_RUN_DISPATCH_JSON_BODY_BYTES = 2 * 1024 * 1024;
+const WORKFLOW_DISPATCH_RESPONSE_HEADROOM_MS = 1000;
 // Queue dispatch bodies carry base64-encoded message bodies. The scheduler may
 // dispatch up to 100 messages, each with a 128KB raw body, so this private
 // endpoint needs a larger cap than control-ish scheduled/workflow notify bodies.
@@ -214,6 +216,7 @@ export async function readWorkflowNotifyDispatch(request) {
 /** @param {{ run: WorkflowRunDispatch, stub: LoadedWorkerStub, scope: DispatchScope, env: RuntimeEnv, ctx: RuntimeCtx, identity: RuntimeIdentity }} args */
 export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, identity }) {
   const startedAt = Date.now();
+  const siblingSettleDeadlineMs = run.dispatchDeadlineMs - WORKFLOW_DISPATCH_RESPONSE_HEADROOM_MS;
   const fields = workflowTailFields(run);
   const startTailEvent = emitRuntimeTailEvent({
     env, ctx, identity,
@@ -264,8 +267,18 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
       step?.isSuspended() && isWorkflowSuspensionSignal(caught)
     );
     if (step?.hasInFlightSteps()) {
-      if (!caughtSuspended) step.closeForRunReturn();
-      await step.waitForInFlightSteps();
+      const caughtTrackedStepFailure = step.isTrackedStepFailure(caught);
+      if (caughtSuspended || caughtTrackedStepFailure) {
+        step.closeStepAdmission();
+      } else {
+        step.closeForRunReturn();
+      }
+      const settleBudgetMs = Math.max(0, siblingSettleDeadlineMs - Date.now());
+      const settled = await step.waitForInFlightSteps(settleBudgetMs);
+      if (!settled) {
+        step.closeForRunReturn();
+        caught = workflowInFlightSettleTimeoutError();
+      }
     }
     let terminalStepError = null;
     if (step?.hasTerminalStepFailure()) {

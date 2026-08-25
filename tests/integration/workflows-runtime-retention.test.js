@@ -80,6 +80,7 @@ test("stale workflow run cannot commit after restart generation changes", async 
         generation: 1,
         createdAtMs,
         runToken: "stale-generation-token",
+        dispatchDeadlineMs: Date.now() + 60_000,
         params: { source: "integration", id: "stale-1", dynamicStepName: "stale-overwrite" },
       }
     );

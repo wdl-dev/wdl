@@ -125,6 +125,12 @@ export function workflowInfrastructureLogError(err) {
   return logError;
 }
 
+export function workflowInFlightSettleTimeoutError() {
+  return workflowInfrastructureError(
+    "Workflow steps remained in flight until the runtime dispatch deadline"
+  );
+}
+
 /** @param {number} status */
 function retryableWorkflowBackendStatus(status) {
   return status === 502 || status === 503 || status === 504;
@@ -315,6 +321,7 @@ export function createStepController(run, backend, requestId = null) {
   let suspendingStepInFlight = false;
   let suspended = false;
   let runReturned = false;
+  let stepAdmissionClosed = false;
   let stepCallbackDepth = 0;
   /** @type {unknown} */
   let terminalStepFailure = null;
@@ -322,6 +329,7 @@ export function createStepController(run, backend, requestId = null) {
   let terminalStepError = null;
   let hasTerminalStepFailure = false;
   const activeStepPromises = new Set();
+  const trackedStepFailureReasons = new Set();
   const nameCounts = new Map();
   const dependencyFrontier = new Set();
   const replayCache = acquireWorkflowReplayCache(run);
@@ -378,7 +386,7 @@ export function createStepController(run, backend, requestId = null) {
   const assertCanStartStep = (options = {}) => {
     const activeRecords = activeBlockingStepRecords();
     const activeStepCount = activeRecords.length;
-    if (runReturned) {
+    if (runReturned || stepAdmissionClosed) {
       throw workflowStepError("workflow_invalid_step", "workflow step cannot start after the run returned");
     }
     if (suspended) {
@@ -475,9 +483,24 @@ export function createStepController(run, backend, requestId = null) {
     }
   }
 
-  const waitForInFlightSteps = async () => {
-    while (activeStepPromises.size > 0) {
-      await Promise.allSettled([...activeStepPromises]);
+  /** @param {number} timeoutMs */
+  const waitForInFlightSteps = async (timeoutMs) => {
+    const settle = async () => {
+      while (activeStepPromises.size > 0) {
+        await Promise.allSettled([...activeStepPromises]);
+      }
+    };
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timeout;
+    try {
+      return await Promise.race([
+        settle().then(() => true),
+        new Promise((resolve) => {
+          timeout = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
     }
   };
 
@@ -494,6 +517,7 @@ export function createStepController(run, backend, requestId = null) {
       try {
         return await promise;
       } catch (reason) {
+        trackedStepFailureReasons.add(reason);
         if (
           !isWorkflowSuspended(reason) &&
           (!runReturned || isWorkflowInfrastructureError(reason))
@@ -708,7 +732,7 @@ export function createStepController(run, backend, requestId = null) {
           }
           if (committed?.state === "failed") {
             cacheStep(identity, { status: "failed", attempt, error });
-          } else if (committed?.state !== "waiting") {
+          } else {
             throw unexpectedWorkflowBackendState("commit-step-error", committed?.state);
           }
           rememberTerminalStepFailure(err, error);
@@ -825,10 +849,18 @@ export function createStepController(run, backend, requestId = null) {
     hasTerminalStepFailure() {
       return hasTerminalStepFailure;
     },
+    /** @param {unknown} reason */
+    isTrackedStepFailure(reason) {
+      return trackedStepFailureReasons.has(reason);
+    },
     hasInFlightSteps() {
       return activeUnsettledStepCount() > 0;
     },
+    closeStepAdmission() {
+      stepAdmissionClosed = true;
+    },
     closeForRunReturn() {
+      stepAdmissionClosed = true;
       runReturned = true;
       if (!replayCacheReleased) {
         replayCacheReleased = true;

@@ -76,7 +76,7 @@ test("D1 actor: result materialization enforces a request byte cap", () => {
   );
 });
 
-test("D1 actor: result byte cap counts exact UTF-8 bytes", () => {
+test("D1 actor: result byte cap counts UTF-8 bytes plus conservative structure cost", () => {
   const cursor = {
     columnNames: ["x"],
     raw() {
@@ -84,13 +84,27 @@ test("D1 actor: result byte cap counts exact UTF-8 bytes", () => {
     },
   };
 
-  assert.deepEqual(resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 5), {
+  assert.deepEqual(resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 53), {
     columns: ["x"],
     rows: [["\ud83d\ude00"]],
   });
   assert.throws(
-    () => resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 4),
-    /maximum result bytes per request is 4/
+    () => resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 52),
+    /maximum result bytes per request is 52/
+  );
+});
+
+test("D1 actor: wide all-null results consume per-cell structure budget", () => {
+  const cursor = {
+    columnNames: Array(100).fill(""),
+    raw() {
+      return Array.from({ length: 1000 }, () => Array(100).fill(null));
+    },
+  };
+
+  assert.throws(
+    () => resultFromCursor(cursor, "ROWS_AND_COLUMNS", 1000, 1024),
+    /maximum result bytes per request is 1024/
   );
 });
 
@@ -145,7 +159,7 @@ test("D1 actor: fetch maps aggregate result byte-cap overflow to limit-exceeded 
         },
       },
     },
-  }, { D1_MAX_RESULT_BYTES: "17" });
+  }, { D1_MAX_RESULT_BYTES: "57" });
 
   const response = await actor.fetch(new Request("http://d1-actor/query", {
     method: "POST",
@@ -162,8 +176,9 @@ test("D1 actor: fetch maps aggregate result byte-cap overflow to limit-exceeded 
   await assertJsonResponse(response, 413, {
     success: false,
     error: "limit-exceeded",
-    message: "D1 limit exceeded: maximum result bytes per request is 17",
+    message: "D1 limit exceeded: maximum result bytes per request is 57",
   });
+  assert.equal(calls, 2);
 });
 
 test("D1 actor: wait-until-idle waits for an in-flight query request", async () => {
@@ -312,7 +327,7 @@ test("D1 actor: batch preserves result byte-cap overflow as limit-exceeded", asy
         return callback();
       },
     },
-  }, { D1_MAX_RESULT_BYTES: "17" });
+  }, { D1_MAX_RESULT_BYTES: "57" });
 
   const response = await actor.fetch(new Request("http://d1-actor/query", {
     method: "POST",
@@ -329,8 +344,9 @@ test("D1 actor: batch preserves result byte-cap overflow as limit-exceeded", asy
   await assertJsonResponse(response, 413, {
     success: false,
     error: "limit-exceeded",
-    message: "D1 limit exceeded: maximum result bytes per request is 17",
+    message: "D1 limit exceeded: maximum result bytes per request is 57",
   });
+  assert.equal(calls, 2);
 });
 
 test("D1 actor: fetch maps result row-cap overflow to limit-exceeded response", async () => {

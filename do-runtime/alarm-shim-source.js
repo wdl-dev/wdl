@@ -109,15 +109,22 @@ function enqueueAlarmMutation(owner, effect) {
   return result;
 }
 
-function alarmTransactionState(nested) {
+function alarmTransactionState(parentState) {
   return {
     effects: [],
     alarmReservation: null,
     baselineAlarmRow: null,
-    nested: nested ? true : false,
+    parentState,
+    nested: parentState !== null,
     rolledBack: false,
     closed: false,
   };
+}
+
+function restorableAlarmTransactionState(transactionState) {
+  let state = transactionState;
+  while (state?.closed) state = state.parentState;
+  return state;
 }
 
 function reserveAlarmMutation(transactionState, owner) {
@@ -573,7 +580,7 @@ function wrapStorage(
           const parentState = transactionContext.active;
           const previousState = parentState;
           assertAlarmTransactionOpen(parentState);
-          const txState = alarmTransactionState(parentState != null);
+          const txState = alarmTransactionState(parentState);
           const wrapped = typeof callback === "function"
             ? async (txn) => {
               txState.baselineAlarmRow = txState.nested
@@ -608,11 +615,15 @@ function wrapStorage(
               [wrapped, ...rest]
             );
           } catch (err) {
-            transactionContext.active = previousState;
+            if (transactionContext.active === txState) {
+              transactionContext.active = restorableAlarmTransactionState(previousState);
+            }
             if (!txState.nested) settleAlarmMutationReservation(txState);
             throw err;
           }
-          transactionContext.active = previousState;
+          if (transactionContext.active === txState) {
+            transactionContext.active = restorableAlarmTransactionState(previousState);
+          }
           try {
             if (!txState.nested) {
               if (txState.rolledBack) {
@@ -627,7 +638,9 @@ function wrapStorage(
             throw err;
           } finally {
             txState.closed = true;
-            if (transactionContext.active === txState) transactionContext.active = previousState;
+            if (transactionContext.active === txState) {
+              transactionContext.active = restorableAlarmTransactionState(previousState);
+            }
           }
         };
       }

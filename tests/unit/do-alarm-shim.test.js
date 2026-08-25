@@ -929,6 +929,49 @@ test("DO alarm shim: nested transaction rejects alarm APIs across every storage 
   assert.equal(state.row, null);
 });
 
+test("DO alarm shim: an unawaited nested transaction cannot restore a closed outer fence", async (t) => {
+  for (const outcome of ["resolved", "rejected"]) {
+    await t.test(outcome, async () => {
+      /** @type {unknown[][]} */
+      const calls = [];
+      const { storage, state, kv } = makeDoAlarmStorage();
+      const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+      const childStarted = Promise.withResolvers();
+      const releaseChild = Promise.withResolvers();
+      /** @type {Promise<string> | null} */
+      let childSettled = null;
+
+      await wrapped.transaction(async () => {
+        const child = wrapped.transaction(async () => {
+          childStarted.resolve(undefined);
+          await releaseChild.promise;
+          if (outcome === "rejected") throw new Error("nested transaction failed");
+        });
+        childSettled = child.then(
+          () => "resolved",
+          /** @param {unknown} err */
+          (err) => err instanceof Error ? err.message : String(err)
+        );
+        await childStarted.promise;
+      });
+
+      releaseChild.resolve(undefined);
+      assert.equal(
+        await childSettled,
+        outcome === "resolved" ? "resolved" : "nested transaction failed"
+      );
+      await wrapped.setAlarm(1000);
+      await wrapped.transaction(async (/** @type {any} */ txn) => {
+        await txn.put("after-nested", "ok");
+      });
+
+      assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+      assert.equal(state.row?.scheduled_time, 1000);
+      assert.equal(kv.get("after-nested"), "ok");
+    });
+  }
+});
+
 test("DO alarm shim: failed native rollback keeps queued alarm side effects", async () => {
   /** @type {unknown[][]} */
   const calls = [];
@@ -1819,6 +1862,61 @@ test("DO alarm shim: best-effort deleteAll preserves the raw WDL alarm row", asy
   assert.deepEqual(calls, []);
   assert.deepEqual(state.row, initial);
   assert.equal(kv.size, 0);
+});
+
+test("DO alarm shim: best-effort deleteAll ignores tenant-patched collection iteration", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  /** @type {string[]} */
+  const dropped = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "delete-all-intrinsic-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(initial);
+  const originalExec = storage.sql.exec;
+  /** @param {string} statement @param {...unknown} params */
+  storage.sql.exec = function exec(statement, ...params) {
+    if (statement.startsWith("SELECT type, name FROM sqlite_master")) {
+      return [
+        { type: "table", name: "tenant_table" },
+        { type: "table", name: "_wdl_do_alarms" },
+      ];
+    }
+    if (statement === 'DROP TABLE IF EXISTS "tenant_table"') {
+      dropped.push(statement);
+      return [];
+    }
+    return Reflect.apply(originalExec, this, [statement, ...params]);
+  };
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+  const originalIterator = Array.prototype[Symbol.iterator];
+
+  await withMockedProperty(Map.prototype, "keys", () => {
+    throw new Error("tenant Map.keys");
+  }, () => withMockedProperty(
+    Array.prototype,
+    Symbol.iterator,
+    /** @this {any[]} */ function hostileIterator() {
+      const first = this[0];
+      if (
+        (this.length === 1 && first?.deleteAlarm === false) ||
+        (first && typeof first === "object" && "type" in first)
+      ) {
+        return Reflect.apply(originalIterator, [], []);
+      }
+      return Reflect.apply(originalIterator, this, []);
+    },
+    async () => {
+      await wrapped.deleteAll({ deleteAlarm: false });
+    }
+  ));
+
+  assert.deepEqual(dropped, ['DROP TABLE IF EXISTS "tenant_table"']);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(state.row, initial);
 });
 
 test("DO alarm shim: best-effort deleteAll exposes partial failure", async () => {

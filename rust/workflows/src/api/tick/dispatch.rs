@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::{Value as JsonValue, json};
+use wdl_rust_common::JS_MAX_SAFE_INTEGER;
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::time::now_ms;
@@ -82,6 +83,13 @@ redis.call("SREM", KEYS[4], ARGV[7])
 redis.call("ZREM", KEYS[5], ARGV[7])
 return 1
 "#;
+
+fn runtime_dispatch_deadline_ms(now_ms: i64, timeout_ms: u64) -> i64 {
+    let timeout_ms = i64::try_from(timeout_ms).unwrap_or(i64::MAX);
+    now_ms
+        .saturating_add(timeout_ms)
+        .clamp(1, JS_MAX_SAFE_INTEGER as i64)
+}
 
 static COMMIT_RUNTIME_TERMINAL: StaticRedisScript =
     StaticRedisScript::new(COMMIT_RUNTIME_TERMINAL_SCRIPT);
@@ -292,6 +300,8 @@ pub(super) async fn dispatch_runtime(
     let url = runtime_endpoint(app, &identity.ns, "/internal/workflows/run");
     let generation = parse_positive_identity_i64(&identity.generation, "generation")?;
     let created_at_ms = parse_positive_identity_i64(&identity.created_at_ms, "createdAtMs")?;
+    let dispatch_deadline_ms =
+        runtime_dispatch_deadline_ms(now_ms(), app.config.dispatch_timeout_ms);
     let mut request = app
         .http
         .post(url)
@@ -315,6 +325,7 @@ pub(super) async fn dispatch_runtime(
             "generation": generation,
             "createdAtMs": created_at_ms,
             "runToken": run_token,
+            "dispatchDeadlineMs": dispatch_deadline_ms,
             "params": params,
         }))
         .send()
@@ -506,6 +517,15 @@ pub(super) async fn commit_runtime_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_dispatch_deadline_includes_sender_side_elapsed_time() {
+        assert_eq!(runtime_dispatch_deadline_ms(1_000, 60_000), 61_000);
+        assert_eq!(
+            runtime_dispatch_deadline_ms(i64::MAX - 1, u64::MAX),
+            JS_MAX_SAFE_INTEGER as i64
+        );
+    }
 
     #[test]
     fn runtime_response_outcome_accepts_only_the_terminal_protocol_values() {

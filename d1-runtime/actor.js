@@ -32,6 +32,9 @@ import { utf8ByteLength } from "shared-utf8";
 
 const DEFAULT_D1_MAX_RESULT_ROWS = 65_536;
 const DEFAULT_D1_MAX_RESULT_BYTES = 16 * 1024 * 1024;
+const D1_RESULT_VALUE_OVERHEAD_BYTES = 8;
+const D1_RESULT_CONTAINER_OVERHEAD_BYTES = 16;
+const D1_RESULT_OBJECT_ENTRY_OVERHEAD_BYTES = 8;
 const DEFAULT_D1_ACTOR_IDLE_WAIT_TIMEOUT_MS = 10_000;
 const D1_ACTOR_IDLE_WAIT_POLL_MS = 25;
 const SCHEMA_OBJECT_MEMO_MAX_ENTRIES = 1024;
@@ -155,23 +158,29 @@ function assertLeaseBudget(env, guard) {
 
 /** @param {unknown} value @returns {number} */
 function resultValueBytes(value) {
-  if (value == null) return 0;
-  if (typeof value === "boolean") return 1;
-  if (typeof value === "number" || typeof value === "bigint") return 8;
-  if (typeof value === "string") return utf8ByteLength(value);
-  if (value instanceof Uint8Array) return value.byteLength;
-  if (value instanceof ArrayBuffer) return value.byteLength;
-  if (ArrayBuffer.isView(value)) return value.byteLength;
+  if (value == null) return D1_RESULT_VALUE_OVERHEAD_BYTES;
+  if (typeof value === "boolean") return D1_RESULT_VALUE_OVERHEAD_BYTES + 1;
+  if (typeof value === "number" || typeof value === "bigint") {
+    return D1_RESULT_VALUE_OVERHEAD_BYTES + 8;
+  }
+  if (typeof value === "string") return D1_RESULT_VALUE_OVERHEAD_BYTES + utf8ByteLength(value);
+  if (value instanceof Uint8Array) return D1_RESULT_VALUE_OVERHEAD_BYTES + value.byteLength;
+  if (value instanceof ArrayBuffer) return D1_RESULT_VALUE_OVERHEAD_BYTES + value.byteLength;
+  if (ArrayBuffer.isView(value)) return D1_RESULT_VALUE_OVERHEAD_BYTES + value.byteLength;
   if (Array.isArray(value)) {
-    return value.reduce((sum, item) => sum + resultValueBytes(item), 0);
+    return D1_RESULT_CONTAINER_OVERHEAD_BYTES +
+      value.reduce((sum, item) => sum + resultValueBytes(item), 0);
   }
   if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    return Object.entries(value).reduce(
-      (sum, [key, item]) => sum + utf8ByteLength(key) + resultValueBytes(item),
+    return D1_RESULT_CONTAINER_OVERHEAD_BYTES + Object.entries(value).reduce(
+      (sum, [key, item]) => sum +
+        D1_RESULT_OBJECT_ENTRY_OVERHEAD_BYTES +
+        utf8ByteLength(key) +
+        resultValueBytes(item),
       0
     );
   }
-  return utf8ByteLength(String(value));
+  return D1_RESULT_VALUE_OVERHEAD_BYTES + utf8ByteLength(String(value));
 }
 
 /**
@@ -181,10 +190,13 @@ function resultValueBytes(value) {
  * @returns {number}
  */
 function resultRowBytes(row, columns, resultsFormat) {
-  let bytes = 0;
+  let bytes = D1_RESULT_CONTAINER_OVERHEAD_BYTES;
   for (const value of row) bytes += resultValueBytes(value);
   if (resultsFormat === "ARRAY_OF_OBJECTS") {
-    bytes += columns.reduce((sum, column) => sum + utf8ByteLength(column), 0);
+    bytes += columns.reduce(
+      (sum, column) => sum + D1_RESULT_OBJECT_ENTRY_OVERHEAD_BYTES + utf8ByteLength(column),
+      0
+    );
   }
   return bytes;
 }
@@ -208,7 +220,8 @@ export function resultFromCursor(
   const rows = [];
   consumeResultBudget(
     budget,
-    columns.reduce((sum, column) => sum + utf8ByteLength(column), 0)
+    D1_RESULT_CONTAINER_OVERHEAD_BYTES +
+      columns.reduce((sum, column) => sum + resultValueBytes(column), 0)
   );
   for (const row of cursor.raw()) {
     if (rows.length >= rowLimit) {
