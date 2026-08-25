@@ -15,7 +15,7 @@ import {
   setupIntegrationSuite,
   responseJson,
 } from "./helpers/index.js";
-import { redisSet } from "./helpers/redis.js";
+import { redisDel, redisSet, redisSetEx, redisSMembers } from "./helpers/redis.js";
 import {
   doInternalInvoke,
   doInternalInvokeAsync,
@@ -29,8 +29,22 @@ import {
   redisGetDoOwnerGeneration,
   redisSetDoOwner,
 } from "./helpers/durable-objects.js";
+import { parseCounters } from "./helpers/prometheus.js";
 
 setupIntegrationSuite();
+
+const DO_MULTI_RUNTIME_SERVICES = ["do-runtime-a", "do-runtime-b", "do-runtime-c"];
+
+function doOwnerResolutionCount() {
+  let total = 0;
+  for (const service of DO_MULTI_RUNTIME_SERVICES) {
+    const metrics = parseCounters(serviceInternalGet(service, 8788, "/_metrics").body);
+    for (const [key, value] of metrics) {
+      if (key.startsWith("wdl_do_owner_resolutions_total{")) total += value;
+    }
+  }
+  return total;
+}
 
 test("DO cold owner claim handles burst concurrency without surfacing owner races", async () => {
   const ns = uniqueNs("do-claim-burst");
@@ -468,6 +482,7 @@ test("runtime DO host adapter learns owner hints and skips the router on later c
   await withDoMultiRuntimes(async () => {
     await withServiceStopped("scheduler", async () => {
       const beforeDoRouter = envoyStat("cluster.do_router.upstream_rq_total");
+      const beforeOwnerResolutions = doOwnerResolutionCount();
 
       const first = await gatewayFetch(ns, "/counter?name=hinted");
       const firstText = await first.text();
@@ -479,9 +494,14 @@ test("runtime DO host adapter learns owner hints and skips the router on later c
         body: "from-worker",
       });
       const afterFirstRouter = envoyStat("cluster.do_router.upstream_rq_total");
+      const afterFirstOwnerResolutions = doOwnerResolutionCount();
       assert.ok(
         afterFirstRouter > beforeDoRouter,
         "first DO facade call should enter through the do-runtime router"
+      );
+      assert.ok(
+        afterFirstOwnerResolutions > beforeOwnerResolutions,
+        "first DO facade call should resolve an authoritative owner"
       );
       assert.equal(first.headers["x-wdl-do-owner-endpoint"], undefined);
 
@@ -499,7 +519,109 @@ test("runtime DO host adapter learns owner hints and skips the router on later c
         afterFirstRouter,
         "learned DO owner hint should make the next facade call reach the owner directly"
       );
+      assert.equal(
+        doOwnerResolutionCount(),
+        afterFirstOwnerResolutions,
+        "cached-direct DO calls should leave the actor as the only Redis owner assertion"
+      );
       assert.equal(second.headers["x-wdl-do-owner-endpoint"], undefined);
+    });
+  });
+});
+
+test("runtime DO host adapter shares owner hints across one canonical shard", async () => {
+  const ns = uniqueNs("do-shard-owner-hint");
+  await deployAndPromote(ns, "counter", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WORKER },
+    bindings: {
+      COUNTER: { type: "do", className: "Counter" },
+    },
+  });
+
+  await withDoMultiRuntimes(async () => {
+    await withServiceStopped("scheduler", async () => {
+      assert.equal(
+        doHostId(ns, "counter", "Counter", "hint-11"),
+        doHostId(ns, "counter", "Counter", "hint-4")
+      );
+      assert.notEqual(
+        doHostId(ns, "counter", "Counter", "hint-11"),
+        doHostId(ns, "counter", "Counter", "hint-9")
+      );
+      const beforeDoRouter = envoyStat("cluster.do_router.upstream_rq_total");
+
+      const first = await gatewayFetch(ns, "/counter?name=hint-11");
+      assert.equal(first.status, 200, await first.text());
+      const afterFirstRouter = envoyStat("cluster.do_router.upstream_rq_total");
+      assert.ok(afterFirstRouter > beforeDoRouter);
+
+      const sameShard = await gatewayFetch(ns, "/counter?name=hint-4");
+      assert.equal(sameShard.status, 200, await sameShard.text());
+      assert.equal(
+        envoyStat("cluster.do_router.upstream_rq_total"),
+        afterFirstRouter,
+        "a different object in the learned shard should reach the owner directly"
+      );
+
+      const differentShard = await gatewayFetch(ns, "/counter?name=hint-9");
+      assert.equal(differentShard.status, 200, await differentShard.text());
+      assert.ok(
+        envoyStat("cluster.do_router.upstream_rq_total") > afterFirstRouter,
+        "an object in another shard should still enter through the router"
+      );
+    });
+  });
+});
+
+test("cached-direct DO calls honor whole-worker and version delete locks", async () => {
+  const ns = uniqueNs("do-hint-delete-lock");
+  await deployAndPromote(ns, "counter", {
+    mainModule: "worker.js",
+    modules: { "worker.js": DO_WORKER },
+    bindings: {
+      COUNTER: { type: "do", className: "Counter" },
+    },
+  });
+  const doStorageId = redisGetDoStorageId(ns, "counter");
+  const registryKey = `do:objects:${encodeURIComponent(doStorageId)}`;
+  const deleteLockKey = `worker-delete-lock:${ns}:counter`;
+
+  await withDoMultiRuntimes(async () => {
+    await withServiceStopped("scheduler", async () => {
+      const first = await gatewayFetch(ns, "/counter?name=hint-11");
+      assert.equal(first.status, 200, await first.text());
+      assert.equal(redisSMembers(registryKey).length, 1);
+
+      try {
+        redisSetEx(deleteLockKey, "whole:integration-token", 30);
+        const blocked = await gatewayFetch(ns, "/counter?name=hint-4");
+        const blockedText = await blocked.text();
+        assert.equal(blocked.status, 503, blockedText);
+        assert.equal(responseJson({ body: blockedText }).error, "stale_owner_storage");
+        assert.equal(
+          redisSMembers(registryKey).length,
+          1,
+          "whole-worker delete must reject before registering a new object"
+        );
+
+        redisDel(deleteLockKey);
+        const rewarmed = await gatewayFetch(ns, "/counter?name=hint-11");
+        assert.equal(rewarmed.status, 200, await rewarmed.text());
+        const afterRewarmRouter = envoyStat("cluster.do_router.upstream_rq_total");
+
+        redisSetEx(deleteLockKey, "version:integration-token", 30);
+        const allowed = await gatewayFetch(ns, "/counter?name=hint-4");
+        assert.equal(allowed.status, 200, await allowed.text());
+        assert.equal(
+          envoyStat("cluster.do_router.upstream_rq_total"),
+          afterRewarmRouter,
+          "version delete lock should preserve the cached-direct owner path"
+        );
+        assert.equal(redisSMembers(registryKey).length, 2);
+      } finally {
+        redisDel(deleteLockKey);
+      }
     });
   });
 });

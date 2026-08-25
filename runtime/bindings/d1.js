@@ -15,10 +15,13 @@ import {
   D1_OWNER_HINT_HEADERS,
   D1_OWNERSHIP_CODES,
   D1_QUERY_CONTENT_TYPE,
+  D1_QUERY_NATIVE_VALUE_ENCODING,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
+  D1_QUERY_RESULT_HEADERS,
   decodeD1QueryResponse,
   encodeD1QueryRequest,
 } from "shared-d1-query-wire";
+import { decodeD1Transport } from "shared-d1-transport";
 import { metrics } from "runtime-metrics";
 import { createOwnerHintCache } from "runtime-owner-hint-cache";
 import { validOwnerEndpointForService } from "shared-owner-endpoint";
@@ -85,8 +88,8 @@ function ownerHintKey(props) {
  * @returns {never}
  */
 function throwD1Payload(payload, status) {
-  // D1 runtime/control/runtime ship in one image; this in-tree protocol has no
-  // rolling-version compatibility branch.
+  // D1 machine error codes are an in-tree contract. The additive binary-value
+  // encoding fallback is handled separately while parsing successful payloads.
   const machineCode = payload?.error || null;
   const code = machineCode ? ` [${machineCode}]` : "";
   const message = payload?.message || `backend status ${status}`;
@@ -182,7 +185,15 @@ async function parseD1Payload(response) {
     throw new Error(`D1_ERROR: D1 runtime returned unsupported content-type ${contentType || "none"}`);
   }
   try {
-    return /** @type {D1Payload} */ (Object(decodeD1QueryResponse(new Uint8Array(await response.arrayBuffer()))));
+    const payload = decodeD1QueryResponse(new Uint8Array(await response.arrayBuffer()));
+    const valueEncoding = response.headers.get(D1_QUERY_RESULT_HEADERS.valueEncoding);
+    if (valueEncoding === D1_QUERY_NATIVE_VALUE_ENCODING) {
+      return /** @type {D1Payload} */ (Object(payload));
+    }
+    if (valueEncoding === null) {
+      return /** @type {D1Payload} */ (Object(decodeD1Transport(payload)));
+    }
+    throw new Error(`unsupported D1 value encoding ${valueEncoding}`);
   } catch {
     throw new Error(`D1_ERROR: D1 runtime returned invalid binary status ${response.status}`);
   }

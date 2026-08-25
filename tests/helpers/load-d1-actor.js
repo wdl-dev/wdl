@@ -1,5 +1,11 @@
-import { applyModuleReplacements, readRepositoryFile, moduleDataUrl, sharedModuleDataUrl } from "./load-shared-module.js";
-import { d1ProtocolDataUrl } from "./load-d1-protocol.js";
+import {
+  applyModuleReplacements,
+  readRepositoryFile,
+  moduleDataUrl,
+  repositoryFileUrl,
+  sharedModuleDataUrl,
+} from "./load-shared-module.js";
+import { d1ProtocolDataUrl, d1QueryWireDataUrl } from "./load-d1-protocol.js";
 
 const protocolUrl = moduleDataUrl(`
 export function classifyD1Error(err) {
@@ -35,6 +41,7 @@ export async function readD1ActorControlRequest(request) {
 }
 `);
 const d1ProtocolUrl = d1ProtocolDataUrl();
+const d1QueryWireUrl = d1QueryWireDataUrl();
 
 const ownerRegistryUrl = moduleDataUrl(`
 export async function assertCurrentOwnerWithLeaseBudget(_env, owner) {
@@ -48,27 +55,29 @@ export async function assertCurrentOwnerWithLeaseBudget(_env, owner) {
 `);
 
 const httpUrl = moduleDataUrl(`
+import {
+  D1_QUERY_NATIVE_VALUE_ENCODING,
+  d1QuerySuccessHeaders,
+} from ${JSON.stringify(d1QueryWireUrl)};
 export function json(data, init = {}) {
   return Response.json(data, init);
 }
-export function d1QueryResponse(data, init = {}) {
-  return Response.json(data, init);
+export function d1QuerySuccessResponse(data, init = {}) {
+  const { changedDb = false, ...responseInit } = init;
+  const headers = new Headers(responseInit.headers);
+  for (const [name, value] of Object.entries(
+    d1QuerySuccessHeaders(changedDb, D1_QUERY_NATIVE_VALUE_ENCODING)
+  )) {
+    headers.set(name, value);
+  }
+  return Response.json(data, { ...responseInit, headers });
 }
 export function jsonError(status, error, message, extra = {}) {
   return json({ ...extra, error, message }, { status });
 }
 `);
 
-const readCacheUrl = moduleDataUrl(`
-export function parseIdempotentSchemaDdl(sql) {
-  const match = /^\\s*create\\s+(table|(?:unique\\s+)?index)\\s+if\\s+not\\s+exists\\s+([A-Za-z_][A-Za-z0-9_$]*)\\b/i.exec(sql);
-  if (!match) return null;
-  return { type: /\\bindex\\b/i.test(match[1]) ? "index" : "table", name: match[2] };
-}
-export function statementMayChangeDb(sql) {
-  return /\\b(?:insert|update|delete|replace|create|drop|alter|pragma|vacuum|attach|detach|reindex|begin|commit|rollback|savepoint|release|analyze)\\b/i.test(sql);
-}
-`);
+const readCacheUrl = repositoryFileUrl("d1-runtime/read-cache.js");
 
 const stateUrl = moduleDataUrl(`
 export const storageRecords = [];
@@ -107,12 +116,12 @@ const source = applyModuleReplacements(readRepositoryFile("d1-runtime/actor.js")
     `import { assertCurrentOwnerWithLeaseBudget } from ${JSON.stringify(ownerRegistryUrl)};`
   ],
   [
-    /import \{ d1QueryResponse, json, jsonError \} from "d1-runtime-http";/,
-    `import { d1QueryResponse, json, jsonError } from ${JSON.stringify(httpUrl)};`
+    /import \{ d1QuerySuccessResponse, json, jsonError \} from "d1-runtime-http";/,
+    `import { d1QuerySuccessResponse, json, jsonError } from ${JSON.stringify(httpUrl)};`
   ],
   [
-    /import \{\n {2}parseIdempotentSchemaDdl,\n {2}statementMayChangeDb,\n\} from "d1-runtime-read-cache";/,
-    `import { parseIdempotentSchemaDdl, statementMayChangeDb } from ${JSON.stringify(readCacheUrl)};`
+    /import \{\n {2}parseIdempotentSchemaDdl,\n {2}payloadChangedDb,\n {2}statementMayChangeDb,\n\} from "d1-runtime-read-cache";/,
+    `import { parseIdempotentSchemaDdl, payloadChangedDb, statementMayChangeDb } from ${JSON.stringify(readCacheUrl)};`
   ],
   // Keep these import rewrites exact so new actor dependencies force the test
   // stub to be reviewed instead of being swallowed by a broad lazy match.

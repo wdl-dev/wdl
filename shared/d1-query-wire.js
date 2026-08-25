@@ -1,4 +1,4 @@
-import { normalizeD1Param } from "shared-d1-params";
+import { normalizeD1WireParam } from "shared-d1-params";
 import { setDataField } from "shared-d1-data-field";
 
 export const D1_QUERY_CONTENT_TYPE = "application/vnd.wdl.d1-query";
@@ -8,6 +8,12 @@ export const D1_OWNER_HINT_HEADERS = Object.freeze({
   endpoint: "x-wdl-d1-owner-endpoint",
   generation: "x-wdl-d1-owner-generation",
 });
+export const D1_QUERY_RESULT_HEADERS = Object.freeze({
+  outcome: "x-wdl-d1-result",
+  changedDb: "x-wdl-d1-changed-db",
+  valueEncoding: "x-wdl-d1-value-encoding",
+});
+export const D1_QUERY_NATIVE_VALUE_ENCODING = "native-bytes-v1";
 export const D1_OWNERSHIP_CODES = Object.freeze([
   "not-owner",
   "owner-not-ready",
@@ -30,11 +36,43 @@ export const D1_OWNERSHIP_CODES = Object.freeze([
 const WIRE_VARINT = 0;
 const WIRE_FIXED64 = 1;
 const WIRE_LEN = 2;
+const D1_QUERY_RESULT_OK = "ok";
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 
 /**
- * @typedef {string | number | number[] | null} D1QueryParam
+ * @param {boolean} changedDb
+ * @param {string | null} [valueEncoding]
+ * @returns {Record<string, string>}
+ */
+export function d1QuerySuccessHeaders(changedDb, valueEncoding = null) {
+  /** @type {Record<string, string>} */
+  const headers = {
+    [D1_QUERY_RESULT_HEADERS.outcome]: D1_QUERY_RESULT_OK,
+    [D1_QUERY_RESULT_HEADERS.changedDb]: changedDb ? "1" : "0",
+  };
+  if (valueEncoding !== null) {
+    headers[D1_QUERY_RESULT_HEADERS.valueEncoding] = valueEncoding;
+  }
+  return headers;
+}
+
+/**
+ * @param {Headers} headers
+ * @returns {{ changedDb: boolean, valueEncoding: string | null } | null}
+ */
+export function readD1QuerySuccessHeaders(headers) {
+  if (headers.get(D1_QUERY_RESULT_HEADERS.outcome) !== D1_QUERY_RESULT_OK) return null;
+  const changedDb = headers.get(D1_QUERY_RESULT_HEADERS.changedDb);
+  const valueEncoding = headers.get(D1_QUERY_RESULT_HEADERS.valueEncoding);
+  if (valueEncoding !== null && valueEncoding !== D1_QUERY_NATIVE_VALUE_ENCODING) return null;
+  if (changedDb === "0") return { changedDb: false, valueEncoding };
+  if (changedDb === "1") return { changedDb: true, valueEncoding };
+  return null;
+}
+
+/**
+ * @typedef {string | number | Uint8Array<ArrayBufferLike> | null} D1QueryParam
  * @typedef {Uint8Array<ArrayBufferLike>} ByteArray
  * @typedef {{ sql?: unknown, params?: unknown[] }} D1QueryStatementInput
  * @typedef {{ sql: string, params: D1QueryParam[] }} D1QueryStatement
@@ -193,15 +231,15 @@ class WirePlan {
 
 /** @param {WirePlan} plan @param {unknown} value */
 function appendParam(plan, value) {
-  const normalized = normalizeD1Param(value);
+  const normalized = normalizeD1WireParam(value);
   if (normalized == null) {
     plan.varintField(1, 1);
   } else if (typeof normalized === "number") {
     plan.doubleField(2, normalized);
   } else if (typeof normalized === "string") {
     plan.stringField(3, normalized);
-  } else if (Array.isArray(normalized)) {
-    plan.bytesField(4, Uint8Array.from(normalized));
+  } else if (normalized instanceof Uint8Array) {
+    plan.bytesField(4, normalized);
   } else {
     throw new Error(`D1_TYPE_ERROR: Type '${typeof normalized}' not supported for query wire`);
   }
@@ -351,7 +389,7 @@ function decodeParam(reader) {
     } else if (field === 3 && wireType === WIRE_LEN) {
       value = reader.readString();
     } else if (field === 4 && wireType === WIRE_LEN) {
-      value = Array.from(reader.readLengthDelimited());
+      value = reader.readLengthDelimited();
     } else {
       reader.skip(wireType);
     }
@@ -509,7 +547,7 @@ function decodeValue(reader) {
     } else if (field === 5 && wireType === WIRE_LEN) {
       assertScalarCompatible(kind);
       kind = "scalar";
-      value = Array.from(reader.readLengthDelimited());
+      value = reader.readLengthDelimited().slice();
     } else if (field === 6 && wireType === WIRE_LEN) {
       if (kind === "unset") {
         kind = "array";

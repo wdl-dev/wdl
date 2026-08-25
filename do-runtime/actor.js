@@ -22,8 +22,6 @@ import {
   beginInFlightDispatch,
   endInFlightDispatch,
   log,
-  metrics,
-  SERVICE,
 } from "do-runtime-state";
 import { formatError } from "shared-observability";
 import { rebuildResponseWithHeaders } from "shared-respond";
@@ -36,6 +34,8 @@ const CREATE_FACET_SESSION_POLICY_TABLE =
   "CREATE TABLE IF NOT EXISTS wdl_facet_session_policy (" +
   "task_id TEXT NOT NULL, facet_name TEXT NOT NULL, restart_sequence INTEGER NOT NULL, " +
   "PRIMARY KEY (facet_name, task_id))";
+const FACET_REGISTRATION_CACHE_MAX_ENTRIES = 10_000;
+const OBJECT_REGISTRY_MEMO_MAX_ENTRIES = 10_000;
 
 /**
  * @typedef {{ LOADER: { get(key: string, loader: () => Promise<unknown>): DoWorkerStub } }} DoEnv
@@ -47,12 +47,8 @@ const CREATE_FACET_SESSION_POLICY_TABLE =
  */
 
 export class WdlDoHostActor extends DurableObject {
-  /** @type {Map<string, DoWorkerStub>} */
-  workers;
   /** @type {Map<string, FacetRegistration>} facet name -> registration */
   facetWorkers;
-  /** @type {number} */
-  facetHighWater;
   /** @type {Set<string>} */
   registeredObjectMembers;
   /** @type {boolean} */
@@ -64,12 +60,7 @@ export class WdlDoHostActor extends DurableObject {
    */
   constructor(ctx, env) {
     super(ctx, env);
-    // workerLoader owns isolate residency. This actor-local map only memoizes
-    // stubs; deleting entries during a facet restart would not evict a loader
-    // identity and must not add an all-facet scan to the dispatch path.
-    this.workers = new Map();
     this.facetWorkers = new Map();
-    this.facetHighWater = 0;
     this.registeredObjectMembers = new Set();
     this.facetSessionPolicyTableReady = false;
   }
@@ -79,9 +70,7 @@ export class WdlDoHostActor extends DurableObject {
    * @param {string | null} requestId
    */
   tenantWorker(invoke, requestId) {
-    const existing = this.workers.get(invoke.workerId);
-    if (existing) return existing;
-    const worker = this.env.LOADER.get(invoke.workerId, () => (
+    return this.env.LOADER.get(invoke.workerId, () => (
       loadDoWorkerCode(
         this.env,
         this.ctx,
@@ -89,8 +78,6 @@ export class WdlDoHostActor extends DurableObject {
         requestId
       )
     ));
-    this.workers.set(invoke.workerId, worker);
-    return worker;
   }
 
   ensureFacetSessionPolicyTable() {
@@ -103,10 +90,9 @@ export class WdlDoHostActor extends DurableObject {
   cacheFacetRegistration(facetName, restartSequence) {
     const registration = { restartSequence };
     this.facetWorkers.set(facetName, registration);
-    metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetWorkers.size);
-    if (this.facetWorkers.size > this.facetHighWater) {
-      this.facetHighWater = this.facetWorkers.size;
-      metrics.setGauge("do_host_actor_facet_high_water", { service: SERVICE }, this.facetHighWater);
+    if (this.facetWorkers.size > FACET_REGISTRATION_CACHE_MAX_ENTRIES) {
+      const oldest = this.facetWorkers.keys().next().value;
+      if (oldest !== undefined) this.facetWorkers.delete(oldest);
     }
     return registration;
   }
@@ -212,7 +198,10 @@ export class WdlDoHostActor extends DurableObject {
       return true;
     }
     this.registeredObjectMembers.add(member);
-    metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
+    if (this.registeredObjectMembers.size > OBJECT_REGISTRY_MEMO_MAX_ENTRIES) {
+      const oldest = this.registeredObjectMembers.values().next().value;
+      if (oldest !== undefined) this.registeredObjectMembers.delete(oldest);
+    }
     return true;
   }
 
@@ -228,11 +217,10 @@ export class WdlDoHostActor extends DurableObject {
         return await this.dispatchWithFence(invoke, async (owner) => {
           const requestId = request.headers.get("x-request-id") || null;
           const facetName = this.rememberFacet(invoke, owner.taskId);
-          const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
-            props: invoke.props,
-          });
           const facet = this.ctx.facets.get(facetName, () => ({
-            class: cls,
+            class: this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
+              props: invoke.props,
+            }),
             id: invoke.objectName,
           }));
           return await facet.fetch(buildForwardRequest(invoke.request));
@@ -240,25 +228,29 @@ export class WdlDoHostActor extends DurableObject {
       }
       if (url.pathname === "/delete-storage") {
         const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request));
-        await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
-        const facetName = buildFacetName(invoke);
-        this.ctx.facets.delete(facetName);
-        this.facetWorkers.delete(facetName);
-        this.deleteFacetRegistration(facetName);
-        this.registeredObjectMembers.delete(objectRegistryMember(invoke));
-        metrics.setGauge("do_host_actor_facet_count", { service: SERVICE }, this.facetWorkers.size);
-        metrics.setGauge("do_host_actor_object_registry_size", { service: SERVICE }, this.registeredObjectMembers.size);
-        return Response.json({ ok: true });
+        if (!beginInFlightDispatch()) {
+          throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.TASK_DRAINING, "DO task is draining");
+        }
+        try {
+          await assertCurrentOwnerWithLeaseBudget(this.env, invoke.owner, { storageScope: invoke });
+          const facetName = buildFacetName(invoke);
+          this.ctx.facets.delete(facetName);
+          this.facetWorkers.delete(facetName);
+          this.deleteFacetRegistration(facetName);
+          this.registeredObjectMembers.delete(objectRegistryMember(invoke));
+          return Response.json({ ok: true });
+        } finally {
+          endInFlightDispatch();
+        }
       }
       const invoke = /** @type {DoInvoke} */ (await readLocalActorInvokeRequest(request));
       return await this.dispatchWithFence(invoke, async (owner) => {
         const requestId = request.headers.get("x-request-id") || null;
         const facetName = this.rememberFacet(invoke, owner.taskId);
-        const cls = this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
-          props: invoke.props,
-        });
         const facet = this.ctx.facets.get(facetName, () => ({
-          class: cls,
+          class: this.tenantWorker(invoke, requestId).getDurableObjectClass(invoke.className, {
+            props: invoke.props,
+          }),
           id: invoke.objectName,
         }));
         if (invoke.kind === "alarm") {

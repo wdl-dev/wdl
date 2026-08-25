@@ -81,6 +81,11 @@ test("user-runtime exposes loader and bundle timing metrics", async () => {
   assert.match(body, /wdl_requests_total\{[^}]*service="user-runtime"/);
   assert.match(body, /wdl_loader_misses_total\{[^}]*service="user-runtime"/);
   assert.match(body, /wdl_bundle_load_duration_ms_count\{[^}]*service="user-runtime"/);
+  assert.match(
+    body,
+    /wdl_bundle_load_stage_duration_ms_count\{[^}]*service="user-runtime"[^}]*stage="redis_proxy_load"/
+  );
+  assert.doesNotMatch(body, /wdl_bundle_load_stage_duration_ms_[^{]+\{[^}]*stage="(?:decode_bundle|build_env)"/);
 });
 
 test("user-runtime exposes KV, R2, and queue binding operation metrics", async () => {

@@ -1,4 +1,4 @@
-import { normalizeD1Param } from "shared-d1-params";
+import { normalizeD1WireParam } from "shared-d1-params";
 import { fnv1a32CodeUnits } from "shared-fnv1a32";
 import { BodyTooLargeError, readBoundedBytes as readRequestBoundedBytes } from "shared-bounded-body";
 import { errorMessage as sharedErrorMessage } from "shared-errors";
@@ -28,7 +28,7 @@ const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 
 /**
- * @typedef {string | number | boolean | null | undefined | number[]} D1Param
+ * @typedef {string | number | boolean | null | undefined | Uint8Array<ArrayBufferLike>} D1Param
  * @typedef {{ sql: string, params: D1Param[] }} NormalizedStatement
  * @typedef {{
  *   namespace: string,
@@ -114,7 +114,7 @@ export function slotOf(namespace, databaseId, slotCount = SLOT_COUNT) {
 
 /** @param {unknown[]} params */
 export function sqliteBindParams(params) {
-  return params.map((param) => Array.isArray(param) ? new Uint8Array(param) : param);
+  return params;
 }
 
 /**
@@ -148,7 +148,7 @@ function normalizeStatement(statement) {
       `D1 limit exceeded: maximum bound parameters per query is ${D1_MAX_BOUND_PARAMS}`
     );
   }
-  return { sql, params: params.map(normalizeD1Param) };
+  return { sql, params: params.map(normalizeD1WireParam) };
 }
 
 /** @param {D1Param} value */
@@ -156,7 +156,7 @@ function paramPayloadBytes(value) {
   if (value == null) return 0;
   if (typeof value === "number" || typeof value === "boolean") return 8;
   if (typeof value === "string") return textBytes(value);
-  if (Array.isArray(value)) return value.length;
+  if (value instanceof Uint8Array) return value.byteLength;
   return 0;
 }
 
@@ -244,7 +244,7 @@ export async function readD1QueryRequest(request, { maxBytes = D1_MAX_QUERY_ENVE
 }
 
 /** @param {Response} response */
-export async function readD1QueryResponseWithBytes(response) {
+export async function readD1QueryResponseBytes(response) {
   const contentType = response.headers.get("content-type") || "";
   if (contentTypeEssence(contentType) !== D1_QUERY_RESPONSE_CONTENT_TYPE) {
     throw new D1ProtocolError(
@@ -254,7 +254,17 @@ export async function readD1QueryResponseWithBytes(response) {
     );
   }
   try {
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    return new Uint8Array(await response.arrayBuffer());
+  } catch (err) {
+    const message = sharedErrorMessage(err);
+    throw new D1ProtocolError(502, "invalid-response", `D1 query response is invalid: ${message}`);
+  }
+}
+
+/** @param {Response} response */
+export async function readD1QueryResponseWithBytes(response) {
+  const bytes = await readD1QueryResponseBytes(response);
+  try {
     return { bytes, payload: decodeD1QueryResponse(bytes) };
   } catch (err) {
     const message = sharedErrorMessage(err);

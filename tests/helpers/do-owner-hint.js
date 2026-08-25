@@ -26,12 +26,32 @@ export function doOwnerHintHeaders({
 }
 
 /**
+ * Final owner responses carry learnable metadata without the private handoff marker.
+ * @param {Parameters<typeof doOwnerHintHeaders>[0]} [options]
+ */
+export function doOwnerMetadataHeaders(options = {}) {
+  const headers = doOwnerHintHeaders(options);
+  Reflect.deleteProperty(headers, "x-wdl-do-owner-hint");
+  return headers;
+}
+
+/**
  * @param {Parameters<typeof doOwnerHintHeaders>[0]} [options]
  */
 export function doOwnerHintResponse(options = {}) {
-  return new Response(null, {
+  const headers = doOwnerHintHeaders(options);
+  return Response.json({
+    error: "do_owner_hint",
+    message: "Durable Object owner is remote; retry the owner endpoint",
+    owner: {
+      ownerKey: headers["x-wdl-do-owner-key"],
+      taskId: headers["x-wdl-do-owner-task-id"],
+      endpoint: headers["x-wdl-do-owner-endpoint"],
+      generation: Number(headers["x-wdl-do-owner-generation"]),
+    },
+  }, {
     status: 409,
-    headers: doOwnerHintHeaders(options),
+    headers,
   });
 }
 

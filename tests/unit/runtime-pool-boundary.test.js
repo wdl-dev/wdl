@@ -62,6 +62,10 @@ export function getLoadedWorkerStub({ env, ns, worker, version }) {
 `);
 const emptyBindingUrl = moduleDataUrl(RUNTIME_BINDING_STUB_SOURCE);
 const emptyInternalUrl = moduleDataUrl(`export default class RuntimeInternal {}`);
+const emptyMetricsPreparationUrl = moduleDataUrl(`
+export function prepareAiCapacityMetrics() {}
+export function prepareWorkflowReplayCacheMetrics() {}
+`);
 
 const IMPORT_STUBS = {
   "cloudflare:workers": workerEntrypointUrl,
@@ -69,6 +73,8 @@ const IMPORT_STUBS = {
   "shared-respond": repositoryFileUrl("shared/respond.js"),
   "shared-internal-auth": sharedInternalAuthUrl(),
   "runtime-dispatch": runtimeDispatchUrl,
+  "runtime-dispatch-workflow-replay-cache": emptyMetricsPreparationUrl,
+  "runtime-bindings-ai-capacity": emptyMetricsPreparationUrl,
   "runtime-load": runtimeLoadUrl,
   "runtime-state": runtimeStateUrl,
   "runtime-internal": emptyInternalUrl,

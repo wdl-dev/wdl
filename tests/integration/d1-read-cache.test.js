@@ -54,6 +54,9 @@ test("D1 runtime internal query returns row/column payloads for all-mode reads",
     ],
   });
   assertStatus(init, 200, "init");
+  assert.equal(init.headers["x-wdl-d1-result"], "ok");
+  assert.equal(init.headers["x-wdl-d1-changed-db"], "1");
+  assert.equal(init.headers["x-wdl-d1-value-encoding"], "native-bytes-v1");
 
   const read = d1RuntimeQueryRaw("d1-runtime", {
     namespace: ns,
@@ -63,6 +66,9 @@ test("D1 runtime internal query returns row/column payloads for all-mode reads",
   });
 
   assertStatus(read, 200, "read");
+  assert.equal(read.headers["x-wdl-d1-result"], "ok");
+  assert.equal(read.headers["x-wdl-d1-changed-db"], "0");
+  assert.equal(read.headers["x-wdl-d1-value-encoding"], "native-bytes-v1");
   assert.deepEqual(read.body.results, {
     columns: ["id", "body"],
     rows: [["r1", "raw"]],
@@ -105,8 +111,15 @@ test("D1 read cache serves repeated owner reads and invalidates after writes", a
     mode: "all",
     statements: [{ sql: "select count(*) as n from messages", params: [] }],
   };
-  assert.deepEqual(d1RuntimeQuery("d1-runtime", select).body.results, [{ n: 1 }]);
-  assert.deepEqual(d1RuntimeQuery("d1-runtime", select).body.results, [{ n: 1 }]);
+  const cacheMiss = d1RuntimeQuery("d1-runtime", select);
+  const cacheHit = d1RuntimeQuery("d1-runtime", select);
+  assert.deepEqual(cacheMiss.body.results, [{ n: 1 }]);
+  assert.deepEqual(cacheHit.body.results, [{ n: 1 }]);
+  for (const response of [cacheMiss, cacheHit]) {
+    assert.equal(response.headers["x-wdl-d1-result"], "ok");
+    assert.equal(response.headers["x-wdl-d1-changed-db"], "0");
+    assert.equal(response.headers["x-wdl-d1-value-encoding"], "native-bytes-v1");
+  }
 
   let metricsBody = serviceInternalGet("d1-runtime", 8787, "/_metrics").body;
   assert.equal(cacheMetric(metricsBody, "miss") - beforeMiss, 1);

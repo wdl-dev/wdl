@@ -11,7 +11,6 @@ const REAL_RUNTIME_INJECTION_SOURCE_PATHS = Object.freeze({
   d1ParamsSource: "shared/d1-params.js",
   utf8Source: "shared/utf8.js",
   sqlSplitterSource: "shared/sql-splitter.js",
-  d1TransportSource: "shared/d1-transport.js",
   r2ClientSource: "runtime/r2-client.js",
   r2UtilsSource: "runtime/r2-utils.js",
   doClientSource: "runtime/do-client.js",
@@ -27,7 +26,6 @@ const RUNTIME_INJECTION_SOURCE_SPECIFIERS = Object.freeze({
   d1ParamsSource: "runtime-d1-params-source",
   utf8Source: "runtime-utf8-source",
   sqlSplitterSource: "runtime-sql-splitter-source",
-  d1TransportSource: "runtime-d1-transport-source",
   r2ClientSource: "runtime-r2-client-source",
   r2UtilsSource: "runtime-r2-utils-source",
   doClientSource: "runtime-do-client-source",
@@ -47,7 +45,6 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
     [
       "./_wdl-sql-splitter.js",
       "./_wdl-d1-params.js",
-      "./_wdl-d1-transport.js",
       "./_wdl-d1-data-field.js",
       "./_wdl-request-id.js",
     ],
@@ -61,8 +58,6 @@ export const STUB_RUNTIME_INJECTION_SOURCES = Object.freeze({
     "export function utf8ByteLength(value) { return value.length; }",
   sqlSplitterSource:
     "export function splitSqlStatements(sql) { return [{ sql, params: [] }]; }",
-  d1TransportSource:
-    'import { setDataField } from "shared-d1-data-field"; export function decodeD1Transport(value) { setDataField({}, "ok", value); return value; }',
   r2ClientSource: stubSource(
     ["./_wdl-r2-utils.js", "./_wdl-request-id.js"],
     "const state = new WeakMap(); export class R2Bucket { constructor(stub) { state.set(this, { stub }); } }",

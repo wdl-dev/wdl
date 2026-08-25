@@ -138,6 +138,10 @@ whether a route changed.
   pub/sub messages are not durable.
 - Subscriber reconnects clear local caches, and the next request re-reads Redis; missed
   invalidations therefore degrade to bounded stale cache, not permanent drift.
+- Subscriber reconnect backoff resets only after Redis acknowledges every configured
+  subscription. TCP connects and partial acknowledgement sets continue the existing
+  bounded exponential sequence; a later disconnect after an established subscription
+  starts again at 100 ms.
 - Gateway also keeps a process-local registry of active public WebSocket sessions grouped
   by namespace and worker. A `session-policy:restart` event requests an authoritative
   reconciliation only for that worker; `worker:delete` does the same for a successful
@@ -239,6 +243,11 @@ whether a route changed.
 Gateway emits request logs with request id, route context, and outcome. Metrics use
 bounded labels only; namespace, worker, version, path details belong in logs, not metric
 labels.
+
+The process-local WebSocket connection and buffered-message counters are authoritative
+between scrapes. Connection lifecycle and enqueue/dequeue paths update those counters
+without rewriting the Prometheus registry per event; `prepareGatewayMetrics()` publishes
+their current values immediately before `/_metrics` renders.
 
 `/healthz` and `/_metrics` are served from the public gateway listener before host
 classification. This is intentional: load balancers need a route-independent health

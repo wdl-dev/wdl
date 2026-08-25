@@ -1,24 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  MAX_DO_INVOKE_ENVELOPE_BYTES,
-  MAX_DO_REQUEST_BODY_BYTES,
-  MAX_DO_REQUEST_HEADER_BYTES,
-  MAX_DO_REQUEST_HEADER_COUNT,
-  dispatchDoInvokeWithHintCache,
-  fetchInvokeInit,
-  isWebSocketUpgrade,
-  ownerHintFromHeaders,
-  replayOwnerUnavailableForFetch,
-  requestSpec,
-  rpcInvokeBody,
-} from "../../runtime/_wdl-do-transport.js";
+import { doTransportDataUrl, loadDoProtocol } from "../helpers/load-do-protocol.js";
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
-import { loadDoProtocol } from "../helpers/load-do-protocol.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   doOwnerHintHeaders,
   doOwnerHintResponse,
+  doOwnerMetadataHeaders,
   doOwnershipErrorHeaders,
 } from "../helpers/do-owner-hint.js";
 import {
@@ -27,7 +16,103 @@ import {
 } from "../helpers/mock-global.js";
 import { settlementWithin } from "../helpers/timing.js";
 
+const {
+  DO_INVOKE_CONTENT_TYPE,
+  MAX_DO_INVOKE_ENVELOPE_BYTES,
+  MAX_DO_REQUEST_BODY_BYTES,
+  MAX_DO_REQUEST_HEADER_BYTES,
+  MAX_DO_REQUEST_HEADER_COUNT,
+  dispatchDoConnectWithHintCache,
+  dispatchDoInvokeWithHintCache,
+  doOwnerHintCacheKey,
+  fetchInvokeInit,
+  isWebSocketUpgrade,
+  ownerHintFromHeaders,
+  replayOwnerUnavailableForFetch,
+  requestSpec,
+  rpcInvokeBody,
+} = await import(doTransportDataUrl());
 const { normalizeDoInvokeRequest } = await loadDoProtocol();
+const OWNER_KEY = "do_0123456789abcdef0123456789abcdef:Room:shard0";
+const doOwnerShardFixture = /** @type {any} */ (
+  readRepositoryJson("tests/fixtures/do-owner-shards.json")
+);
+
+/** @param {string} [code] @param {number} [status] */
+function privateOwnershipErrorResponse(code = "stale_owner_generation", status = 503) {
+  return Response.json({
+    error: code,
+    message: `DO scope ${OWNER_KEY} owner generation is stale`,
+    details: {
+      taskId: "task-private",
+      endpoint: "do-runtime-private:8788",
+    },
+  }, {
+    status,
+    headers: doOwnershipErrorHeaders(code),
+  });
+}
+
+test("DO owner hint keys match the canonical owner-shard fixture", () => {
+  for (const item of doOwnerShardFixture.cases) {
+    assert.equal(
+      doOwnerHintCacheKey(item, item.objectName),
+      `${item.doStorageId}:${item.className}:shard${item.shard}`
+    );
+  }
+});
+
+test("a stale owner response clears the shared shard hint", async () => {
+  const firstObject = doOwnerShardFixture.cases.find(
+    (/** @type {any} */ item) => item.objectName === "hint-11"
+  );
+  const secondObject = doOwnerShardFixture.cases.find(
+    (/** @type {any} */ item) => item.objectName === "hint-4"
+  );
+  assert.ok(firstObject);
+  assert.ok(secondObject);
+  const firstKey = doOwnerHintCacheKey(firstObject, firstObject.objectName);
+  const secondKey = doOwnerHintCacheKey(secondObject, secondObject.objectName);
+  assert.equal(firstKey, secondKey);
+  const hint = ownerHintFromHeaders(new Headers(doOwnerHintHeaders({ ownerKey: firstKey })));
+  assert.ok(hint);
+  const cache = new Map([[firstKey, hint]]);
+  let ownerCalls = 0;
+  let routerCalls = 0;
+
+  const response = await dispatchDoInvokeWithHintCache({
+    routerFetch: async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ init) => {
+      routerCalls += 1;
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("x-wdl-do-owner-key"), null);
+      assert.equal(headers.get("x-wdl-do-owner-task-id"), null);
+      assert.equal(headers.get("x-wdl-do-owner-generation"), null);
+      return new Response(null, { status: 204 });
+    },
+    routerUrl: "http://do-runtime/internal/do/invoke",
+    ownerFetch: async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ init) => {
+      ownerCalls += 1;
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("x-wdl-do-owner-key"), firstKey);
+      assert.equal(headers.get("x-wdl-do-owner-task-id"), "do-runtime-a");
+      assert.equal(headers.get("x-wdl-do-owner-endpoint"), "do-runtime-a:8788");
+      assert.equal(headers.get("x-wdl-do-owner-generation"), "3");
+      return Response.json({ error: "stale_owner_generation", message: "retry" }, {
+        status: 503,
+        headers: doOwnershipErrorHeaders("stale_owner_generation"),
+      });
+    },
+    ownerPath: "/internal/do/invoke",
+    init: { method: "POST" },
+    cache,
+    hintKey: secondKey,
+  });
+
+  assert.equal(response.status, 204);
+  assert.equal(ownerCalls, 1);
+  assert.equal(routerCalls, 1);
+  assert.equal(cache.size, 0);
+});
 
 /**
  * @param {Record<string, string>} props
@@ -583,8 +668,9 @@ test("DO invoke envelope uses captured typed-array getters", async () => {
 });
 
 test("DO owner-race router retry failures do not trigger another replay", async (t) => {
-  const ownerMetadata = new Headers(doOwnerHintHeaders());
-  ownerMetadata.delete("x-wdl-do-owner-hint");
+  const ownerMetadata = new Headers(doOwnerMetadataHeaders());
+  const cachedHint = ownerHintFromHeaders(new Headers(doOwnerHintHeaders()));
+  assert.ok(cachedHint);
   for (const { name, code, headers } of [
     { name: "fresh owner response without metadata", code: "owner_claim_raced", headers: undefined },
     { name: "fresh owner renew race with metadata", code: "owner_renew_raced", headers: ownerMetadata },
@@ -597,9 +683,7 @@ test("DO owner-race router retry failures do not trigger another replay", async 
         dispatchDoInvokeWithHintCache({
           routerFetch: async () => {
             routerCalls += 1;
-            if (routerCalls === 1) return doOwnerHintResponse();
-            if (routerCalls === 2) throw new Error("owner-race router retry failed");
-            return new Response("unexpected replay");
+            throw new Error("owner-race router retry failed");
           },
           routerUrl: "http://do-runtime/internal/do/invoke",
           ownerFetch: async () => {
@@ -611,14 +695,14 @@ test("DO owner-race router retry failures do not trigger another replay", async 
           },
           ownerPath: "/internal/do/invoke",
           init: { method: "POST" },
-          cache: new Map(),
-          hintKey: "room-a",
+          cache: new Map([[OWNER_KEY, cachedHint]]),
+          hintKey: OWNER_KEY,
           replayOwnerUnavailable: false,
         }),
         /owner-race router retry failed/
       );
       assert.equal(ownerCalls, 1);
-      assert.equal(routerCalls, 2);
+      assert.equal(routerCalls, 1);
     });
   }
 
@@ -626,7 +710,7 @@ test("DO owner-race router retry failures do not trigger another replay", async 
     const hint = ownerHintFromHeaders(doOwnerHintResponse().headers);
     assert.ok(hint);
     const cache = new Map();
-    cache.set("room-a", hint);
+    cache.set(OWNER_KEY, hint);
     let routerCalls = 0;
     let ownerCalls = 0;
 
@@ -651,7 +735,7 @@ test("DO owner-race router retry failures do not trigger another replay", async 
         ownerPath: "/internal/do/invoke",
         init: { method: "GET" },
         cache,
-        hintKey: "room-a",
+        hintKey: OWNER_KEY,
         replayOwnerUnavailable: true,
       }),
       /owner-race router retry failed/
@@ -659,6 +743,551 @@ test("DO owner-race router retry failures do not trigger another replay", async 
     assert.equal(ownerCalls, 1);
     assert.equal(routerCalls, 2);
   });
+});
+
+test("final trusted DO ownership errors are sanitized without private details", async (t) => {
+  await t.test("ordinary invoke sanitizes the second ownership response", async () => {
+    let routerCalls = 0;
+    const response = await dispatchDoInvokeWithHintCache({
+      routerFetch: async () => {
+        routerCalls += 1;
+        return privateOwnershipErrorResponse();
+      },
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerFetch: null,
+      ownerPath: "/internal/do/invoke",
+      init: { method: "POST" },
+      cache: new Map(),
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(routerCalls, 2);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "stale_owner_generation",
+      message: "Durable Object ownership is unavailable",
+    });
+    assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
+  });
+
+  await t.test("WebSocket dispatch sanitizes its first ownership response", async () => {
+    let routerCalls = 0;
+    const response = await dispatchDoConnectWithHintCache({
+      routerFetch: async () => {
+        routerCalls += 1;
+        return privateOwnershipErrorResponse();
+      },
+      routerUrl: "http://do-runtime/internal/do/connect",
+      ownerFetch: null,
+      ownerPath: "/internal/do/connect",
+      init: { method: "GET" },
+      cache: new Map(),
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(routerCalls, 1);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "stale_owner_generation",
+      message: "Durable Object ownership is unavailable",
+    });
+    assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
+  });
+
+  await t.test("unknown private codes fail closed to owner_unavailable", async () => {
+    let routerCalls = 0;
+    const response = await dispatchDoInvokeWithHintCache({
+      routerFetch: async () => {
+        routerCalls += 1;
+        return privateOwnershipErrorResponse("future_private_code");
+      },
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerFetch: null,
+      ownerPath: "/internal/do/invoke",
+      init: { method: "POST" },
+      cache: new Map(),
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(routerCalls, 1);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "owner_unavailable",
+      message: "Durable Object ownership is unavailable",
+    });
+    assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
+  });
+
+  for (const { name, status } of [
+    { name: "successful status", status: 200 },
+    { name: "unrecognized error status", status: 418 },
+  ]) {
+    await t.test(`${name} fails closed to a 503 owner_unavailable`, async () => {
+      const response = await dispatchDoInvokeWithHintCache({
+        routerFetch: async () => privateOwnershipErrorResponse("stale_owner_generation", status),
+        routerUrl: "http://do-runtime/internal/do/invoke",
+        ownerFetch: null,
+        ownerPath: "/internal/do/invoke",
+        init: { method: "POST" },
+        cache: new Map(),
+        hintKey: OWNER_KEY,
+      });
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), {
+        error: "owner_unavailable",
+        message: "Durable Object ownership is unavailable",
+      });
+      assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);
+    });
+  }
+
+  await t.test("WebSocket preserves a valid ownership code after router handoff", async () => {
+    let routerCalls = 0;
+    let ownerCalls = 0;
+    const response = await dispatchDoConnectWithHintCache({
+      routerFetch: async () => {
+        routerCalls += 1;
+        return doOwnerHintResponse();
+      },
+      routerUrl: "http://do-runtime/internal/do/connect",
+      ownerFetch: async () => {
+        ownerCalls += 1;
+        return privateOwnershipErrorResponse();
+      },
+      ownerPath: "/internal/do/connect",
+      init: { method: "GET" },
+      cache: new Map(),
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(routerCalls, 1);
+    assert.equal(ownerCalls, 1);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "stale_owner_generation",
+      message: "Durable Object ownership is unavailable",
+    });
+  });
+});
+
+test("cached broad DO ownership errors replay only idempotent fetches", async (t) => {
+  const cachedHint = ownerHintFromHeaders(new Headers(doOwnerHintHeaders()));
+  assert.ok(cachedHint);
+
+  for (const {
+    name,
+    dispatch,
+    method,
+    routerUrl,
+    ownerPath,
+    headers,
+    replay,
+    expectedRouterCalls,
+    expectedStatus,
+  } of [
+    {
+      name: "GET replays through the router",
+      dispatch: dispatchDoInvokeWithHintCache,
+      method: "GET",
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerPath: "/internal/do/invoke",
+      replay: true,
+      expectedRouterCalls: 1,
+      expectedStatus: 204,
+    },
+    {
+      name: "POST does not replay",
+      dispatch: dispatchDoInvokeWithHintCache,
+      method: "POST",
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerPath: "/internal/do/invoke",
+      replay: false,
+      expectedRouterCalls: 0,
+      expectedStatus: 503,
+    },
+    {
+      name: "RPC does not replay",
+      dispatch: dispatchDoInvokeWithHintCache,
+      method: "POST",
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerPath: "/internal/do/invoke",
+      headers: { "content-type": DO_INVOKE_CONTENT_TYPE },
+      replay: false,
+      expectedRouterCalls: 0,
+      expectedStatus: 503,
+    },
+    {
+      name: "WebSocket does not replay",
+      dispatch: dispatchDoConnectWithHintCache,
+      method: "GET",
+      routerUrl: "http://do-runtime/internal/do/connect",
+      ownerPath: "/internal/do/connect",
+      replay: false,
+      expectedRouterCalls: 0,
+      expectedStatus: 503,
+    },
+  ]) {
+    await t.test(name, async () => {
+      let routerCalls = 0;
+      const response = await dispatch({
+        routerFetch: async () => {
+          routerCalls += 1;
+          return new Response(null, { status: 204 });
+        },
+        routerUrl,
+        ownerFetch: async () => privateOwnershipErrorResponse("owner_unavailable"),
+        ownerPath,
+        init: { method, headers },
+        cache: new Map([[OWNER_KEY, cachedHint]]),
+        hintKey: OWNER_KEY,
+        replayOwnerUnavailable: replay,
+      });
+
+      assert.equal(routerCalls, expectedRouterCalls);
+      assert.equal(response.status, expectedStatus);
+      if (expectedStatus === 503) {
+        assert.deepEqual(await response.json(), {
+          error: "owner_unavailable",
+          message: "Durable Object ownership is unavailable",
+        });
+      }
+    });
+  }
+});
+
+test("DO owner hints must match the canonical shard key before use or caching", async (t) => {
+  const otherOwnerKey = OWNER_KEY.replace("shard0", "shard1");
+
+  await t.test("routed hint mismatch", async () => {
+    const cache = new Map();
+    let routerCalls = 0;
+    let ownerCalls = 0;
+    const response = await dispatchDoInvokeWithHintCache({
+      routerFetch: async () => {
+        routerCalls += 1;
+        return doOwnerHintResponse({ ownerKey: otherOwnerKey });
+      },
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerFetch: async () => {
+        ownerCalls += 1;
+        return new Response("unexpected owner call");
+      },
+      ownerPath: "/internal/do/invoke",
+      init: { method: "POST" },
+      cache,
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: "owner_unavailable",
+      message: "DO owner is unavailable; request outcome may be unknown",
+    });
+    assert.equal(routerCalls, 1);
+    assert.equal(ownerCalls, 0);
+    assert.equal(cache.size, 0);
+  });
+
+  await t.test("WebSocket routed hint mismatch does not expose owner metadata", async () => {
+    const cache = new Map();
+    let ownerCalls = 0;
+    const response = await dispatchDoConnectWithHintCache({
+      routerFetch: async () => doOwnerHintResponse({
+        ownerKey: otherOwnerKey,
+        taskId: "task-private",
+        endpoint: "do-runtime-private:8788",
+        generation: 9,
+      }),
+      routerUrl: "http://do-runtime/internal/do/connect",
+      ownerFetch: async () => {
+        ownerCalls += 1;
+        return new Response("unexpected owner call");
+      },
+      ownerPath: "/internal/do/connect",
+      init: { method: "GET" },
+      cache,
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(response.status, 503);
+    const body = await response.text();
+    assert.deepEqual(JSON.parse(body), {
+      error: "owner_unavailable",
+      message: "DO owner is unavailable; request outcome may be unknown",
+    });
+    assert.doesNotMatch(body, /task-private|do-runtime-private|shard1/);
+    assert.equal(ownerCalls, 0);
+    assert.equal(cache.size, 0);
+  });
+
+  await t.test("malformed WebSocket routed hint does not expose owner metadata", async () => {
+    const headers = new Headers(doOwnerHintHeaders({
+      taskId: "task-private",
+      endpoint: "do-runtime-private:8788",
+    }));
+    headers.delete("x-wdl-do-owner-generation");
+    let ownerCalls = 0;
+    const response = await dispatchDoConnectWithHintCache({
+      routerFetch: async () => Response.json({
+        owner: { taskId: "task-private", endpoint: "do-runtime-private:8788" },
+      }, { status: 409, headers }),
+      routerUrl: "http://do-runtime/internal/do/connect",
+      ownerFetch: async () => {
+        ownerCalls += 1;
+        return new Response("unexpected owner call");
+      },
+      ownerPath: "/internal/do/connect",
+      init: { method: "GET" },
+      cache: new Map(),
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(response.status, 503);
+    const body = await response.text();
+    assert.equal(JSON.parse(body).error, "owner_unavailable");
+    assert.doesNotMatch(body, /task-private|do-runtime-private/);
+    assert.equal(ownerCalls, 0);
+  });
+
+  await t.test("wrong-status WebSocket hint marker does not expose owner metadata", async () => {
+    let ownerCalls = 0;
+    const response = await dispatchDoConnectWithHintCache({
+      routerFetch: async () => Response.json({
+        owner: { taskId: "task-private", endpoint: "do-runtime-private:8788" },
+      }, {
+        status: 500,
+        headers: doOwnerHintHeaders({
+          taskId: "task-private",
+          endpoint: "do-runtime-private:8788",
+        }),
+      }),
+      routerUrl: "http://do-runtime/internal/do/connect",
+      ownerFetch: async () => {
+        ownerCalls += 1;
+        return new Response("unexpected owner call");
+      },
+      ownerPath: "/internal/do/connect",
+      init: { method: "GET" },
+      cache: new Map(),
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(response.status, 503);
+    const body = await response.text();
+    assert.equal(JSON.parse(body).error, "owner_unavailable");
+    assert.doesNotMatch(body, /task-private|do-runtime-private/);
+    assert.equal(ownerCalls, 0);
+  });
+
+  await t.test("malformed cached WebSocket owner hint does not expose owner metadata", async () => {
+    const cachedHint = ownerHintFromHeaders(new Headers(doOwnerHintHeaders()));
+    assert.ok(cachedHint);
+    const headers = new Headers(doOwnerHintHeaders({
+      taskId: "task-private",
+      endpoint: "do-runtime-private:8788",
+    }));
+    headers.delete("x-wdl-do-owner-generation");
+    let routerCalls = 0;
+    const cache = new Map([[OWNER_KEY, cachedHint]]);
+    const response = await dispatchDoConnectWithHintCache({
+      routerFetch: async () => {
+        routerCalls += 1;
+        return new Response("unexpected router call");
+      },
+      routerUrl: "http://do-runtime/internal/do/connect",
+      ownerFetch: async () => Response.json({
+        owner: { taskId: "task-private", endpoint: "do-runtime-private:8788" },
+      }, { status: 409, headers }),
+      ownerPath: "/internal/do/connect",
+      init: { method: "GET" },
+      cache,
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(response.status, 503);
+    const body = await response.text();
+    assert.equal(JSON.parse(body).error, "owner_unavailable");
+    assert.doesNotMatch(body, /task-private|do-runtime-private/);
+    assert.equal(routerCalls, 0);
+    assert.equal(cache.size, 0);
+  });
+
+  await t.test("ordinary invokes do not follow legacy router hints", async () => {
+    let ownerCalls = 0;
+    const response = await dispatchDoInvokeWithHintCache({
+      routerFetch: async () => doOwnerHintResponse(),
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerFetch: async () => {
+        ownerCalls += 1;
+        return new Response("unexpected owner call");
+      },
+      ownerPath: "/internal/do/invoke",
+      init: { method: "POST" },
+      cache: new Map(),
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error, "owner_unavailable");
+    assert.equal(ownerCalls, 0);
+  });
+
+  await t.test("safe replay does not expose a legacy router hint body", async () => {
+    const cachedHint = ownerHintFromHeaders(new Headers(doOwnerHintHeaders()));
+    assert.ok(cachedHint);
+    const response = await dispatchDoInvokeWithHintCache({
+      routerFetch: async () => doOwnerHintResponse({
+        taskId: "task-private",
+        endpoint: "do-runtime-private:8788",
+        generation: 9,
+      }),
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerFetch: async () => doOwnerHintResponse(),
+      ownerPath: "/internal/do/invoke",
+      init: { method: "GET" },
+      cache: new Map([[OWNER_KEY, cachedHint]]),
+      hintKey: OWNER_KEY,
+      replayOwnerUnavailable: true,
+    });
+
+    assert.equal(response.status, 503);
+    const body = await response.text();
+    assert.equal(JSON.parse(body).error, "owner_unavailable");
+    assert.doesNotMatch(body, /task-private|do-runtime-private/);
+  });
+
+  await t.test("cached hint mismatch", async () => {
+    const cache = new Map([[OWNER_KEY, ownerHintFromHeaders(new Headers(
+      doOwnerHintHeaders({ ownerKey: otherOwnerKey })
+    ))]]);
+    let ownerCalls = 0;
+    const response = await dispatchDoInvokeWithHintCache({
+      routerFetch: async () => new Response(null, { status: 204 }),
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerFetch: async () => {
+        ownerCalls += 1;
+        return new Response("unexpected owner call");
+      },
+      ownerPath: "/internal/do/invoke",
+      init: { method: "POST" },
+      cache,
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(response.status, 204);
+    assert.equal(ownerCalls, 0);
+    assert.equal(cache.size, 0);
+  });
+
+  await t.test("successful response metadata mismatch", async () => {
+    const cache = new Map();
+    const response = await dispatchDoInvokeWithHintCache({
+      routerFetch: async () => new Response("ok", {
+        headers: doOwnerMetadataHeaders({ ownerKey: otherOwnerKey }),
+      }),
+      routerUrl: "http://do-runtime/internal/do/invoke",
+      ownerFetch: null,
+      ownerPath: "/internal/do/invoke",
+      init: { method: "POST" },
+      cache,
+      hintKey: OWNER_KEY,
+    });
+
+    assert.equal(await response.text(), "ok");
+    assert.equal(cache.size, 0);
+  });
+});
+
+test("cached WebSocket owner hints trigger one router rediscovery", async () => {
+  const oldHint = ownerHintFromHeaders(new Headers(doOwnerHintHeaders({
+    endpoint: "do-runtime-a:8788",
+    generation: 3,
+  })));
+  assert.ok(oldHint);
+  const cache = new Map([[OWNER_KEY, oldHint]]);
+  const finalOwnerHeaders = new Headers(doOwnerMetadataHeaders({
+    endpoint: "do-runtime-b:8788",
+    generation: 4,
+  }));
+  /** @type {string[]} */
+  const ownerUrls = [];
+  let routerCalls = 0;
+
+  const response = await dispatchDoConnectWithHintCache({
+    routerFetch: async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ init) => {
+      routerCalls += 1;
+      assert.equal(new Headers(init?.headers).get("x-wdl-do-accept-owner-hint"), "1");
+      return doOwnerHintResponse({ endpoint: "do-runtime-b:8788", generation: 4 });
+    },
+    routerUrl: "http://do-runtime/internal/do/connect",
+    ownerFetch: async (/** @type {string} */ url) => {
+      ownerUrls.push(url);
+      return ownerUrls.length === 1
+        ? doOwnerHintResponse({ endpoint: "do-runtime-b:8788", generation: 4 })
+        : new Response("connected", { headers: finalOwnerHeaders });
+    },
+    ownerPath: "/internal/do/connect",
+    init: {
+      method: "GET",
+      headers: { "x-wdl-do-accept-owner-hint": "1" },
+    },
+    cache,
+    hintKey: OWNER_KEY,
+  });
+
+  assert.equal(await response.text(), "connected");
+  assert.equal(routerCalls, 1);
+  assert.deepEqual(ownerUrls, [
+    "http://do-runtime-a:8788/internal/do/connect",
+    "http://do-runtime-b:8788/internal/do/connect",
+  ]);
+  assert.equal(cache.get(OWNER_KEY)?.endpoint, "do-runtime-b:8788");
+});
+
+test("cached WebSocket pre-dispatch owner races trigger one router rediscovery", async () => {
+  const oldHint = ownerHintFromHeaders(new Headers(doOwnerHintHeaders({
+    endpoint: "do-runtime-a:8788",
+    generation: 3,
+  })));
+  assert.ok(oldHint);
+  const cache = new Map([[OWNER_KEY, oldHint]]);
+  const finalOwnerHeaders = new Headers(doOwnerMetadataHeaders({
+    endpoint: "do-runtime-b:8788",
+    generation: 4,
+  }));
+  /** @type {string[]} */
+  const ownerUrls = [];
+  let routerCalls = 0;
+
+  const response = await dispatchDoConnectWithHintCache({
+    routerFetch: async () => {
+      routerCalls += 1;
+      return doOwnerHintResponse({ endpoint: "do-runtime-b:8788", generation: 4 });
+    },
+    routerUrl: "http://do-runtime/internal/do/connect",
+    ownerFetch: async (/** @type {string} */ url) => {
+      ownerUrls.push(url);
+      return ownerUrls.length === 1
+        ? privateOwnershipErrorResponse("stale_owner_generation")
+        : new Response("connected", { headers: finalOwnerHeaders });
+    },
+    ownerPath: "/internal/do/connect",
+    init: {
+      method: "GET",
+      headers: { "x-wdl-do-accept-owner-hint": "1" },
+    },
+    cache,
+    hintKey: OWNER_KEY,
+  });
+
+  assert.equal(await response.text(), "connected");
+  assert.equal(routerCalls, 1);
+  assert.deepEqual(ownerUrls, [
+    "http://do-runtime-a:8788/internal/do/connect",
+    "http://do-runtime-b:8788/internal/do/connect",
+  ]);
+  assert.equal(cache.get(OWNER_KEY)?.endpoint, "do-runtime-b:8788");
 });
 
 test("DO owner-hint fallback preserves current-request replay safety", async (t) => {
@@ -690,62 +1319,34 @@ test("DO owner-hint fallback preserves current-request replay safety", async (t)
       expectedStatus: 503,
       expectedRouterCalls: 0,
     },
-    {
-      name: "trusted second owner hint reroutes POST",
-      method: "POST",
-      failure: "second-hint",
-      replay: false,
-      expectedStatus: 204,
-      expectedRouterCalls: 2,
-    },
   ]) {
     await t.test(name, async () => {
       const cache = new Map();
-      if (failure === "cached") cache.set("room-a", cachedHint);
+      if (failure === "cached") cache.set(OWNER_KEY, cachedHint);
       /** @type {RequestInit[]} */
       const routerCalls = [];
       let ownerCalls = 0;
       const response = await dispatchDoInvokeWithHintCache({
-        routerFetch: async (_url, requestInit) => {
+        routerFetch: async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ requestInit) => {
           assert.ok(requestInit);
           routerCalls.push(requestInit);
-          if (failure === "second-hint" && routerCalls.length === 1) {
-            return doOwnerHintResponse();
-          }
           return new Response(null, { status: 204 });
         },
         routerUrl: "http://do-runtime/internal/do/invoke",
         ownerFetch: async () => {
           ownerCalls += 1;
-          return failure === "cached"
-            ? new Response("owner timeout", { status: 504 })
-            : doOwnerHintResponse({
-              taskId: "do-runtime-b",
-              endpoint: "do-runtime-b:8788",
-              generation: 4,
-            });
+          return new Response("owner timeout", { status: 504 });
         },
         ownerPath: "/internal/do/invoke",
-        init: {
-          method,
-          headers: { "x-wdl-do-accept-owner-hint": "1" },
-        },
+        init: { method },
         cache,
-        hintKey: "room-a",
+        hintKey: OWNER_KEY,
         replayOwnerUnavailable: replay,
       });
 
       assert.equal(response.status, expectedStatus);
       assert.equal(ownerCalls, 1);
       assert.equal(routerCalls.length, expectedRouterCalls);
-      if (routerCalls.length > 0 && (failure === "cached" || routerCalls.length > 1)) {
-        const lastRouterCall = routerCalls[routerCalls.length - 1];
-        assert.ok(lastRouterCall);
-        assert.equal(
-          new Headers(lastRouterCall.headers).get("x-wdl-do-accept-owner-hint"),
-          null
-        );
-      }
       if (expectedStatus === 503) {
         assert.equal((await response.json()).error, "owner_unavailable");
       }

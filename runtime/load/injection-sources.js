@@ -3,7 +3,6 @@ import D1_DATA_FIELD_SOURCE from "runtime-d1-data-field-source";
 import D1_PARAMS_SOURCE from "runtime-d1-params-source";
 import UTF8_SOURCE from "runtime-utf8-source";
 import SQL_SPLITTER_SOURCE from "runtime-sql-splitter-source";
-import D1_TRANSPORT_SOURCE from "runtime-d1-transport-source";
 import R2_CLIENT_SOURCE from "runtime-r2-client-source";
 import R2_UTILS_SOURCE from "runtime-r2-utils-source";
 import DO_CLIENT_SOURCE from "runtime-do-client-source";
@@ -18,7 +17,6 @@ export const RUNTIME_INJECTION_SOURCES = Object.freeze({
   d1ParamsSource: D1_PARAMS_SOURCE,
   utf8Source: UTF8_SOURCE,
   sqlSplitterSource: SQL_SPLITTER_SOURCE,
-  d1TransportSource: D1_TRANSPORT_SOURCE,
   r2ClientSource: R2_CLIENT_SOURCE,
   r2UtilsSource: R2_UTILS_SOURCE,
   doClientSource: DO_CLIENT_SOURCE,

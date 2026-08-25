@@ -27,7 +27,7 @@ worker:session-policy-seq:<ns>:<name>
                                 String, 永久单调 session-policy restart event 序号分配器
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes + __meta__
-worker-delete-lock:<ns>:<name>  String EX 30, 每个 worker 的 delete critical-section lock；value 是 whole:<token> 或 version:<token>；DO first-owner claim 会 WATCH，且只有 whole 阻止 ownership
+worker-delete-lock:<ns>:<name>  String EX 30, 每个 worker 的 delete critical-section lock；value 是 whole:<token> 或 version:<token>；DO owner resolution/claim 与 actor dispatch/storage-delete assertion 都会读取，且只有 whole 会 fence active storage
 do:owner:scope:<encoded scope>  String EX, authoritative DO owner lease
 do:owner:scope:<encoded scope>:generation
                                 String, 单调 DO owner generation counter

@@ -37,7 +37,11 @@ Live tail is an activation-gated pipe, not a durable logging system:
 - `runtime/tail-forwarder.js` checks redis-proxy `/logs/tail/active` before append.
   Positive and negative active-set results are cached briefly. A fresh negative result
   suppresses envelope payload construction and background append work before the event
-  reaches redis-proxy.
+  reaches redis-proxy. The process-local negative cache retains at most 10,000 recently
+  observed worker keys. Expiry or oldest-observation eviction only causes the next event
+  for that exact key to repeat the authoritative active-set check. Tail workers still
+  clone and emit canonical structured stdout, but a fresh miss also skips constructing
+  the second live-forward payload.
 - Control authorizes each SSE tail session, writes/refreshes the worker gate in
   `logs:tail:active`, reads `logs:<ns>:<worker>:s`, and emits SSE frames. Reconnects
   re-enter normal auth. Gate renewal and admission share one atomic operation, so
@@ -227,7 +231,10 @@ Tail identity rules:
   metadata omitted by the clone budget with `error_info_omitted: true`. Live-tail exact
   serialization prioritizes the base console event: it tries the metadata, then the
   omitted marker, then the unchanged base message; only an oversized base event becomes
-  `tail_warning`.
+  `tail_warning`. Strings whose UTF-16 code-unit length already exceeds the remaining
+  clone budget and indexed binary views whose intrinsic length exceeds it are rejected
+  before proportional UTF-8 encoding or key enumeration. Other strings still undergo
+  bounded UTF-8 byte measurement.
 - `scheduled()` and `queue()` console events are JSRPC events without a request shape, so
   their console tail events omit `worker_id` and `request_id` instead of inventing
   `"unknown"` sentinels.

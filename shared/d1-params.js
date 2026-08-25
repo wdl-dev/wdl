@@ -14,14 +14,22 @@ function assertValueBytes(bytes, kind) {
 }
 
 /**
- * @typedef {string | number | null | undefined | number[]} NormalizedD1Param
+ * @typedef {string | number | null | undefined | Uint8Array<ArrayBuffer>} NormalizedD1Param
  */
+
+/** @param {Uint8Array<ArrayBufferLike>} bytes */
+function snapshotBytes(bytes) {
+  const snapshot = new Uint8Array(bytes.byteLength);
+  snapshot.set(bytes);
+  return snapshot;
+}
 
 /**
  * @param {unknown} value
+ * @param {boolean} snapshot
  * @returns {NormalizedD1Param}
  */
-export function normalizeD1Param(value) {
+function normalizeParam(value, snapshot) {
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
       throw new Error(`D1_TYPE_ERROR: Non-finite number '${value}' not supported`);
@@ -46,17 +54,40 @@ export function normalizeD1Param(value) {
   if (Array.isArray(value)) {
     if (value.every((b) => Number.isInteger(b) && b >= 0 && b <= 255)) {
       assertValueBytes(value.length, "BLOB");
-      return /** @type {number[]} */ (value);
+      return Uint8Array.from(value);
     }
+  }
+  if (value instanceof Uint8Array) {
+    assertValueBytes(value.byteLength, "BLOB");
+    return snapshot || !(value.buffer instanceof ArrayBuffer)
+      ? snapshotBytes(value)
+      : /** @type {Uint8Array<ArrayBuffer>} */ (value);
   }
   if (value instanceof ArrayBuffer) {
     assertValueBytes(value.byteLength, "BLOB");
-    return Array.from(new Uint8Array(value));
+    return snapshotBytes(new Uint8Array(value));
   }
   if (ArrayBuffer.isView(value)) {
     const view = /** @type {ArrayBufferView} */ (value);
     assertValueBytes(view.byteLength, "BLOB");
-    return Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    return snapshotBytes(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
   }
   throw new Error(`D1_TYPE_ERROR: Type '${typeof value}' not supported for value '${value}'`);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {NormalizedD1Param}
+ */
+export function normalizeD1Param(value) {
+  return normalizeParam(value, true);
+}
+
+/**
+ * Validate an already-owned internal wire value without recopying native bytes.
+ * @param {unknown} value
+ * @returns {NormalizedD1Param}
+ */
+export function normalizeD1WireParam(value) {
+  return normalizeParam(value, false);
 }

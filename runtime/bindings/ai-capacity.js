@@ -24,12 +24,14 @@ function poolLimit(env, pool) {
   return aiRuntimeSetting(env, "AI_WS_MAX_SESSIONS");
 }
 
-/** @param {AiCapacityEnv} env @param {AiPoolName} pool */
-function updatePoolGauge(env, pool) {
-  const state = poolStates[pool];
-  const labels = { service: serviceNameFromEnv(env), pool };
-  metrics.setGauge("ai_pool_in_use", labels, state.inUse);
-  metrics.setGauge("ai_pool_high_water", labels, state.highWater);
+/** @param {AiCapacityEnv} env */
+export function prepareAiCapacityMetrics(env) {
+  const service = serviceNameFromEnv(env);
+  for (const [pool, state] of Object.entries(poolStates)) {
+    const labels = { service, pool };
+    metrics.setGauge("ai_pool_in_use", labels, state.inUse);
+    metrics.setGauge("ai_pool_high_water", labels, state.highWater);
+  }
 }
 
 /**
@@ -52,7 +54,6 @@ export function acquireAiLease(binding, pool, durationMs, onDeadline) {
   }
   state.inUse += 1;
   state.highWater = Math.max(state.highWater, state.inUse);
-  updatePoolGauge(env, pool);
   metrics.increment("ai_pool_events", {
     service: serviceNameFromEnv(env), pool, outcome: "acquired",
   });
@@ -75,7 +76,6 @@ export function acquireAiLease(binding, pool, durationMs, onDeadline) {
     timer = null;
     const activeState = poolStates[activePool];
     activeState.inUse = Math.max(0, activeState.inUse - 1);
-    updatePoolGauge(env, activePool);
     metrics.increment("ai_pool_events", {
       service: serviceNameFromEnv(env), pool: activePool, outcome,
     });
@@ -97,7 +97,6 @@ export function acquireAiLease(binding, pool, durationMs, onDeadline) {
     const previousPool = activePool;
     const previousState = poolStates[previousPool];
     previousState.inUse = Math.max(0, previousState.inUse - 1);
-    updatePoolGauge(env, previousPool);
     metrics.increment("ai_pool_events", {
       service: serviceNameFromEnv(env), pool: previousPool, outcome: "transferred",
     });
@@ -105,7 +104,6 @@ export function acquireAiLease(binding, pool, durationMs, onDeadline) {
     activePool = nextPool;
     nextState.inUse += 1;
     nextState.highWater = Math.max(nextState.highWater, nextState.inUse);
-    updatePoolGauge(env, nextPool);
     metrics.increment("ai_pool_events", {
       service: serviceNameFromEnv(env), pool: nextPool, outcome: "acquired",
     });

@@ -46,7 +46,7 @@ export class RedisSubscriber {
     let attempt = 0;
     while (this._running) {
       try {
-        await this._run();
+        await this._run(() => { attempt = 0; });
       } catch (err) {
         this._safe(/** @type {((...args: unknown[]) => unknown) | null} */ (this.onError), err);
       }
@@ -61,7 +61,8 @@ export class RedisSubscriber {
     try { this._socket?.close?.(); } catch { /* closed */ }
   }
 
-  async _run() {
+  /** @param {() => void} onEstablished */
+  async _run(onEstablished) {
     const socket = this._connect(this.address);
     this._socket = socket;
     const writer = socket.writable.getWriter();
@@ -78,6 +79,7 @@ export class RedisSubscriber {
           throw new Error(`Unexpected SUBSCRIBE reply: ${JSON.stringify(ack)}`);
         }
       }
+      onEstablished();
       this._safe(/** @type {((...args: unknown[]) => unknown) | null} */ (this.onConnect));
       while (this._running) {
         const msg = await parser.parseOne();

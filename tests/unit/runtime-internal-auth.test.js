@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import assert from "node:assert/strict";
 
 import {
   applyModuleReplacements,
@@ -24,7 +25,7 @@ const runtimeStateUrl = moduleDataUrl(`
 export function bindRuntime() {
   return {
     serviceName: "runtime-internal",
-    metrics: null,
+    metrics: { renderPrometheus() { return "# HELP runtime_internal_test_metric\\n"; } },
     log() {},
     requestScope() {
       return {
@@ -40,6 +41,16 @@ export function bindRuntime() {
 export function evictSiblings() { return Promise.resolve(); }
 export function recordLoadedWorker() {}
 export function runtimeServiceAllowsNamespace() { return true; }
+`);
+const aiCapacityUrl = moduleDataUrl(`
+export function prepareAiCapacityMetrics(env) {
+  globalThis.__runtimeInternalPrepareAiMetrics.push(env);
+}
+`);
+const workflowReplayCacheUrl = moduleDataUrl(`
+export function prepareWorkflowReplayCacheMetrics() {
+  globalThis.__runtimeInternalPrepareWorkflowMetrics += 1;
+}
 `);
 const runtimeDispatchUrl = moduleDataUrl(`
 export async function handleQueuedDispatch() { throw new Error("unexpected queued dispatch"); }
@@ -60,6 +71,8 @@ const IMPORT_STUBS = {
   "shared-respond": repositoryFileUrl("shared/respond.js"),
   "shared-internal-auth": sharedInternalAuthUrl(),
   "runtime-dispatch": runtimeDispatchUrl,
+  "runtime-dispatch-workflow-replay-cache": workflowReplayCacheUrl,
+  "runtime-bindings-ai-capacity": aiCapacityUrl,
   "runtime-load": runtimeLoadUrl,
   "runtime-state": runtimeStateUrl,
 };
@@ -76,8 +89,23 @@ function runtimeInternal() {
     WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN,
     LOADER: { get() { throw new Error("unexpected loader access"); } },
   };
+  /** @type {any} */ (globalThis).__runtimeInternalPrepareAiMetrics = [];
+  /** @type {any} */ (globalThis).__runtimeInternalPrepareWorkflowMetrics = 0;
   return new RuntimeInternal();
 }
+
+test("runtime internal publishes derived gauges immediately before metrics render", async () => {
+  const runtime = runtimeInternal();
+  const response = await runtime.fetch(new Request("https://runtime.internal/_metrics"));
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "# HELP runtime_internal_test_metric\n");
+  assert.deepEqual(
+    /** @type {any} */ (globalThis).__runtimeInternalPrepareAiMetrics,
+    [/** @type {any} */ (globalThis).__runtimeInternalEnv]
+  );
+  assert.equal(/** @type {any} */ (globalThis).__runtimeInternalPrepareWorkflowMetrics, 1);
+});
 
 test("runtime internal rejects private dispatch without valid internal auth token", async () => {
   const runtime = runtimeInternal();

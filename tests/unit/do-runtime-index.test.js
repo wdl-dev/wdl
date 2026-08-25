@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 
-import { doProtocolDataUrl } from "../helpers/load-do-protocol.js";
+import { doProtocolDataUrl, doTransportDataUrl } from "../helpers/load-do-protocol.js";
 import { sharedOwnerForwarderUrl } from "../helpers/load-owner-harness.js";
 import { OBSERVABILITY_NOOP_URL } from "../helpers/mocks/observability.js";
 import { RUNTIME_BINDING_STUB_SOURCE } from "../helpers/mocks/runtime-bindings.js";
@@ -25,6 +25,9 @@ const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 /** @type {any} */ (globalThis).__doIndexProbeOwner = null;
 /** @type {any} */ (globalThis).__doIndexRenewResult = null;
 /** @type {any} */ (globalThis).__doIndexHostFetches = null;
+/** @type {any} */ (globalThis).__doIndexForwardCalls = null;
+/** @type {any} */ (globalThis).__doIndexForwardResponse = null;
+/** @type {any} */ (globalThis).__doIndexResolveCalls = null;
 
 /** @param {string} src */
 function stub(src) {
@@ -77,11 +80,17 @@ export function currentInFlightDispatches() {
 }
 export function isDraining() { return draining; }
 export function log() {}
+export function prepareDoRuntimeMetrics() { globalThis.__doIndexPrepareDoMetrics += 1; }
 export async function recordDoInvoke(_kind, fn) { return await fn(); }
 export async function recordDoWebSocketUpgrade(fn) { return await fn(); }
 export function setDraining(value) { draining = value === true; }
 export async function waitForInFlightDispatches() {
   return /** @type {any} */ (globalThis).__doIndexWaitForInFlightResult || { drained: true, inFlight: 0, waitedMs: 0 };
+}
+`);
+const aiCapacityUrl = stub(`
+export function prepareAiCapacityMetrics(env) {
+  globalThis.__doIndexPrepareAiMetrics.push(env);
 }
 `);
 const taskIdentityUrl = stub(`
@@ -101,6 +110,7 @@ export async function renewOwnedScopes() {
   return /** @type {any} */ (globalThis).__doIndexRenewResult || { draining: false, owned: 0, renewed: 0, lost: 0, errors: [] };
 }
 export async function resolveDoOwner(_env, invoke, options) {
+  globalThis.__doIndexResolveCalls += 1;
   /** @type {any} */ (globalThis).__doIndexOwnerOptions = options;
   if (/** @type {any} */ (globalThis).__doIndexOwnerError) throw /** @type {any} */ (globalThis).__doIndexOwnerError;
   const restartSequence = /** @type {any} */ (globalThis).__doIndexRestartSequence;
@@ -111,10 +121,13 @@ export async function resolveDoOwner(_env, invoke, options) {
 export { DoRuntimeError };
 `);
 const ownerClientUrl = stub(`
-export async function forwardToOwner() { throw new Error("unexpected forward"); }
+export async function forwardToOwner(...args) {
+  globalThis.__doIndexForwardCalls.push(args);
+  return globalThis.__doIndexForwardResponse || new Response("forwarded");
+}
 export async function forwardConnectToOwner() { throw new Error("unexpected connect forward"); }
 `);
-const doTransportUrl = repositoryFileUrl("runtime/_wdl-do-transport.js");
+const doTransportUrl = doTransportDataUrl();
 const doScopedRequestUrl = repositoryFileUrl("runtime/_wdl-do-scoped-request.js");
 const emptyBindingUrl = stub(RUNTIME_BINDING_STUB_SOURCE);
 
@@ -139,6 +152,7 @@ const IMPORT_STUBS = {
   "do-runtime-owner-client": ownerClientUrl,
   "shared-owner-forwarder": sharedOwnerForwarderUrl(),
   "runtime-do-transport": doTransportUrl,
+  "runtime-bindings-ai-capacity": aiCapacityUrl,
   "_wdl-do-scoped-request.js": doScopedRequestUrl,
   "runtime-bindings-kv": emptyBindingUrl,
   "runtime-bindings-assets": emptyBindingUrl,
@@ -166,6 +180,11 @@ beforeEach(() => {
   /** @type {any} */ (globalThis).__doIndexProbeOwner = null;
   /** @type {any} */ (globalThis).__doIndexRenewResult = null;
   /** @type {any} */ (globalThis).__doIndexHostFetches = [];
+  /** @type {any} */ (globalThis).__doIndexPrepareAiMetrics = [];
+  /** @type {any} */ (globalThis).__doIndexPrepareDoMetrics = 0;
+  /** @type {any} */ (globalThis).__doIndexForwardCalls = [];
+  /** @type {any} */ (globalThis).__doIndexForwardResponse = null;
+  /** @type {any} */ (globalThis).__doIndexResolveCalls = 0;
   /** @type {any} */ (globalThis).__doIndexCurrentInFlightDispatches = 0;
   /** @type {any} */ (globalThis).__doIndexWaitForInFlightResult = null;
   doState.ownedScopes.clear();
@@ -207,7 +226,8 @@ async function jsonBody(response) {
 }
 
 test("do-runtime metrics endpoint uses the shared Prometheus response contract", async () => {
-  const response = await app.fetch(new Request("https://do-runtime/_metrics"), env());
+  const runtimeEnv = env();
+  const response = await app.fetch(new Request("https://do-runtime/_metrics"), runtimeEnv);
 
   assert.equal(response.status, 200);
   assert.equal(
@@ -215,6 +235,8 @@ test("do-runtime metrics endpoint uses the shared Prometheus response contract",
     "text/plain; version=0.0.4; charset=utf-8"
   );
   assert.equal(await response.text(), "# HELP do_runtime_test_metric\n");
+  assert.deepEqual(/** @type {any} */ (globalThis).__doIndexPrepareAiMetrics, [runtimeEnv]);
+  assert.equal(/** @type {any} */ (globalThis).__doIndexPrepareDoMetrics, 1);
 });
 
 test("do-runtime rejects private routes without valid internal auth token", async () => {
@@ -505,13 +527,22 @@ test("do-runtime drain timeout reports owned scopes separately from in-flight di
   });
 });
 
-test("do-runtime returns owner hints instead of forwarding when caller accepts them", async () => {
+test("do-runtime forwards ordinary invokes despite legacy owner-hint opt-in", async () => {
   /** @type {any} */ (globalThis).__doIndexOwner = {
     ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
     taskId: "task-b",
     endpoint: "do-runtime-b:8788",
     generation: 9,
   };
+  /** @type {any} */ (globalThis).__doIndexForwardResponse = new Response("forwarded", {
+    status: 202,
+    headers: {
+      "x-wdl-do-owner-key": "do_0123456789abcdef0123456789abcdef:Room:shard0",
+      "x-wdl-do-owner-task-id": "task-b",
+      "x-wdl-do-owner-endpoint": "do-runtime-b:8788",
+      "x-wdl-do-owner-generation": "9",
+    },
+  });
 
   const response = await app.fetch(internalRequest("https://do-runtime/internal/do/invoke", {
     method: "POST",
@@ -530,6 +561,117 @@ test("do-runtime returns owner hints instead of forwarding when caller accepts t
     }),
   }), env());
 
+  assert.equal(response.status, 202);
+  assert.equal(response.headers.get("x-wdl-do-owner-hint"), null);
+  assert.equal(response.headers.get("x-wdl-do-owner-endpoint"), "do-runtime-b:8788");
+  assert.equal(await response.text(), "forwarded");
+  const forwardCalls = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexForwardCalls);
+  assert.equal(forwardCalls.length, 1);
+  assert.equal(forwardCalls[0][0].objectName, "room-a");
+  assert.equal(forwardCalls[0][2].taskId, "task-b");
+  assert.equal(forwardCalls[0][5], "/internal/do/invoke");
+});
+
+test("do-runtime lets the host actor validate a trusted local route fence", async () => {
+  /** @type {any} */ (globalThis).__doIndexHostResponse = new Response("actor-ok");
+  const ownerKey = "do_0123456789abcdef0123456789abcdef:Room:shard12";
+  doState.ownedScopes.set(ownerKey, {
+    ownerKey,
+    taskId: "task-a",
+    endpoint: "do-runtime-a:8788",
+    generation: 9,
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+  });
+
+  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/invoke", {
+    method: "POST",
+    headers: {
+      "content-type": DO_INVOKE_CONTENT_TYPE,
+      "x-wdl-do-owner-key": ownerKey,
+      "x-wdl-do-owner-task-id": "task-a",
+      "x-wdl-do-owner-endpoint": "do-runtime-a:8788",
+      "x-wdl-do-owner-generation": "9",
+    },
+    body: encodeDoInvokeRequest({
+      ns: "tenant",
+      worker: "chat",
+      version: "v1",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+      objectName: "room-a",
+      request: { method: "GET", url: "https://demo.workers.example/" },
+    }),
+  }), env());
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "actor-ok");
+  assert.equal(/** @type {any} */ (globalThis).__doIndexResolveCalls, 0);
+  assert.equal(response.headers.get("x-wdl-do-owner-key"), ownerKey);
+  assert.equal(response.headers.get("x-wdl-do-owner-task-id"), "task-a");
+  assert.equal(response.headers.get("x-wdl-do-owner-endpoint"), "do-runtime-a:8788");
+  assert.equal(response.headers.get("x-wdl-do-owner-generation"), "9");
+  assert.equal(
+    /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches).length,
+    1
+  );
+});
+
+test("do-runtime restores local owner lifecycle state before using a route fence", async () => {
+  const ownerKey = "do_0123456789abcdef0123456789abcdef:Room:shard12";
+  /** @type {any} */ (globalThis).__doIndexOwner = {
+    ownerKey,
+    taskId: "task-a",
+    endpoint: "do-runtime-a:8788",
+    generation: 9,
+    doStorageId: "do_0123456789abcdef0123456789abcdef",
+  };
+
+  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/invoke", {
+    method: "POST",
+    headers: {
+      "content-type": DO_INVOKE_CONTENT_TYPE,
+      "x-wdl-do-owner-key": ownerKey,
+      "x-wdl-do-owner-task-id": "task-a",
+      "x-wdl-do-owner-generation": "9",
+    },
+    body: encodeDoInvokeRequest({
+      ns: "tenant",
+      worker: "chat",
+      version: "v1",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+      objectName: "room-a",
+      request: { method: "GET", url: "https://demo.workers.example/" },
+    }),
+  }), env());
+
+  assert.equal(response.status, 200);
+  assert.equal(/** @type {any} */ (globalThis).__doIndexResolveCalls, 1);
+});
+
+test("do-runtime keeps owner-hint handoff for remote WebSocket connects", async () => {
+  /** @type {any} */ (globalThis).__doIndexOwner = {
+    ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard12",
+    taskId: "task-b",
+    endpoint: "do-runtime-b:8788",
+    generation: 9,
+  };
+
+  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/connect", {
+    method: "GET",
+    headers: {
+      "x-wdl-do-ns": "tenant",
+      "x-wdl-do-worker": "chat",
+      "x-wdl-do-version": "v1",
+      "x-wdl-do-storage-id": "do_0123456789abcdef0123456789abcdef",
+      "x-wdl-do-class-name": "Room",
+      "x-wdl-do-object-name": "room-a",
+      "x-wdl-do-request-url": "https://demo.workers.example/ws",
+      "x-wdl-do-accept-owner-hint": "1",
+      Upgrade: "websocket",
+    },
+  }), env());
+
   assert.equal(response.status, 409);
   assert.equal(response.headers.get("x-wdl-do-owner-hint"), "1");
   assert.equal(response.headers.get("x-wdl-do-owner-endpoint"), "do-runtime-b:8788");
@@ -537,7 +679,7 @@ test("do-runtime returns owner hints instead of forwarding when caller accepts t
     error: "do_owner_hint",
     message: "Durable Object owner is remote; retry the owner endpoint",
     owner: {
-      ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
+      ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard12",
       taskId: "task-b",
       endpoint: "do-runtime-b:8788",
       generation: 9,

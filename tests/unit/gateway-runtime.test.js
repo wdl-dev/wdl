@@ -1033,6 +1033,45 @@ test("resolveHostPatterns fills the host gate and pattern cache in one cold read
   ]]);
 });
 
+test("WebSocket connection and buffer gauges are published only when metrics are prepared", async () => {
+  /** @type {unknown[][]} */
+  const gaugeCalls = [];
+  /** @param {...unknown} args */
+  function recordGauge(...args) {
+    gaugeCalls.push(args);
+  }
+  gatewayTestGlobal.__observabilityNoopSetGauge = recordGauge;
+  try {
+    const {
+      adjustGatewayWebSocketProxyBufferedMessages,
+      adjustGatewayWebSocketProxyConnections,
+      prepareGatewayMetrics,
+    } = await loadGatewayRuntime();
+
+    adjustGatewayWebSocketProxyBufferedMessages(3);
+    adjustGatewayWebSocketProxyBufferedMessages(-1);
+    adjustGatewayWebSocketProxyConnections("active", 3);
+    adjustGatewayWebSocketProxyConnections("active", -1);
+    adjustGatewayWebSocketProxyConnections("detached", 1);
+    assert.equal(gaugeCalls.length, 0);
+
+    prepareGatewayMetrics();
+    assert.deepEqual(
+      gaugeCalls.filter(([name]) => name === "websocket_proxy_buffered_messages"),
+      [["websocket_proxy_buffered_messages", { service: "gateway" }, 2]]
+    );
+    assert.deepEqual(
+      gaugeCalls.filter(([name]) => name === "websocket_proxy_connections"),
+      [
+        ["websocket_proxy_connections", { service: "gateway", state: "active" }, 2],
+        ["websocket_proxy_connections", { service: "gateway", state: "detached" }, 1],
+      ]
+    );
+  } finally {
+    delete gatewayTestGlobal.__observabilityNoopSetGauge;
+  }
+});
+
 test("unrelated pattern invalidation does not restart a warm host read", async () => {
   const { ensureGatewaySubscriber, resolveHostPatterns } = await loadGatewayRuntime();
   let coldReads = 0;

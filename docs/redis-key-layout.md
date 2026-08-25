@@ -43,8 +43,9 @@ worker:session-policy-seq:<ns>:<name>
 worker-versions:<ns>:<name>     ZSET, score=int version, member="v<int>"
 worker:<ns>:<name>:v:<int>      Hash, bundle bytes plus __meta__
 worker-delete-lock:<ns>:<name>  String EX 30, per-worker delete critical-section lock;
-                               value is whole:<token> or version:<token>; DO first-owner
-                               claim WATCHes it and only whole fences ownership
+                               value is whole:<token> or version:<token>; DO owner
+                               resolution/claim and actor dispatch/storage-delete assertions
+                               read it, and only whole fences active storage
 do:owner:scope:<encoded scope>  String EX, authoritative DO owner lease
 do:owner:scope:<encoded scope>:generation
                                 String, monotonic DO owner generation counter

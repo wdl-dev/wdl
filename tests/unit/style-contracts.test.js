@@ -375,6 +375,28 @@ test("D1 owner-hint headers have one shared wire owner", () => {
   );
 });
 
+test("D1 query result headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-d1-changed-db",
+    "x-wdl-d1-result",
+    "x-wdl-d1-value-encoding",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-d1-(?:changed-db|result|value-encoding))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "shared/d1-query-wire.js"]),
+  );
+});
+
 test("DO owner headers have one shared wire owner", () => {
   const expected = [
     "x-wdl-do-owner-endpoint",
@@ -407,6 +429,32 @@ test("DO owner-control headers have one shared wire owner", () => {
   for (const file of PRODUCTION_JS_FILES) {
     for (const match of readRepoFile(file).matchAll(
       /["'](x-wdl-do-(?:accept-owner-hint|ownership-error))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "runtime/_wdl-do-scoped-request.js"]),
+  );
+});
+
+test("DO connect headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-do-class-name",
+    "x-wdl-do-ns",
+    "x-wdl-do-object-name",
+    "x-wdl-do-request-url",
+    "x-wdl-do-storage-id",
+    "x-wdl-do-version",
+    "x-wdl-do-worker",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-do-(?:class-name|ns|object-name|request-url|storage-id|version|worker))["']/g
     )) {
       occurrences.push([match[1], file]);
     }
@@ -2549,6 +2597,17 @@ test("DO alarm internal ready shard constants stay aligned across Rust and integ
   assert.match(integration, /fnv1a32Utf8\(jobId\) % DO_ALARM_READY_SHARDS/);
 });
 
+test("DO owner shard projections share one cross-language fixture", () => {
+  const fixture = "tests/fixtures/do-owner-shards.json";
+  for (const file of [
+    "tests/unit/do-runtime-protocol.test.js",
+    "tests/unit/runtime-do-transport.test.js",
+    "rust/workflows/src/api/do_alarms/model.rs",
+  ]) {
+    assert.ok(readRepoFile(file).includes(fixture), `${file} must consume ${fixture}`);
+  }
+});
+
 test("KV hash field prefixes stay aligned across proxy and integration seeds", () => {
   const kv = readRepoFile("rust/redis-proxy/src/kv.rs");
   const integration = readRepoFile("tests/integration/kv-binding.test.js");
@@ -2600,6 +2659,7 @@ test("D1, DO, and AI workerd env tunables are exposed through capnp bindings", (
     "D1_OBSERVED_OWNER_MAX_ENTRIES",
     "D1_READ_CACHE_TTL_MS",
     "D1_READ_CACHE_MAX_ENTRIES",
+    "D1_READ_CACHE_MAX_BYTES",
     "D1_TEST_HOOKS",
     "D1_OWNER_LEASE_GUARD_MS",
   ]) {
@@ -2917,6 +2977,8 @@ test("DO host transport and scoped facade dependencies stay in their owning modu
   ]) {
     const source = readRepoFile(file);
     assert.match(source, /name = "runtime-do-transport", esModule = embed/);
+    assert.match(source, /name = "do-runtime-protocol-wire-grammar", esModule = embed/);
+    assert.match(source, /name = "shared-fnv1a32", esModule = embed/);
     assert.match(source, /name = "_wdl-do-scoped-request\.js", esModule = embed/);
     assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
     assert.match(source, /name = "runtime-do-scoped-request-source", text = embed/);

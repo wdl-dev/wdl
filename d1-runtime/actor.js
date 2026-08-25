@@ -8,9 +8,10 @@ import {
   sqliteBindParams,
 } from "d1-runtime-protocol";
 import { assertCurrentOwnerWithLeaseBudget } from "d1-runtime-owner-registry";
-import { d1QueryResponse, json, jsonError } from "d1-runtime-http";
+import { d1QuerySuccessResponse, json, jsonError } from "d1-runtime-http";
 import {
   parseIdempotentSchemaDdl,
+  payloadChangedDb,
   statementMayChangeDb,
 } from "d1-runtime-read-cache";
 import {
@@ -33,6 +34,8 @@ const DEFAULT_D1_MAX_RESULT_ROWS = 65_536;
 const DEFAULT_D1_MAX_RESULT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_D1_ACTOR_IDLE_WAIT_TIMEOUT_MS = 10_000;
 const D1_ACTOR_IDLE_WAIT_POLL_MS = 25;
+const SCHEMA_OBJECT_MEMO_MAX_ENTRIES = 1024;
+const SCHEMA_OBJECT_MEMO_MAX_CODE_UNITS = 64 * 1024;
 const SCHEMA_MUTATION_SQL_RE = /\b(?:create|drop|alter|reindex|vacuum|attach|detach)\b/i;
 
 /**
@@ -241,6 +244,7 @@ export class D1DatabaseActor extends DurableObject {
     this.sql = this.state.storage.sql;
     /** @type {Set<string>} */
     this.schemaObjectExistsMemo = new Set();
+    this.schemaObjectExistsMemoCodeUnits = 0;
   }
 
   /** @param {Request} request */
@@ -274,19 +278,18 @@ export class D1DatabaseActor extends DurableObject {
       const ownerAssertion = await assertCurrentOwnerWithLeaseBudget(this.env, body.owner);
       const leaseGuard = createLeaseBudgetGuard(this.env, ownerAssertion);
       if (isD1ActorTestHook(body)) {
-        return d1QueryResponse(await runD1ActorTestHook(this, /** @type {D1ActorTestHookQuery} */ (body)));
+        const payload = await runD1ActorTestHook(this, /** @type {D1ActorTestHookQuery} */ (body));
+        return d1QuerySuccessResponse(payload, { changedDb: payloadChangedDb(payload) });
       }
       const resultBudget = createResultBudget(maxResultBytes(this.env));
       if (body.mode === "exec") {
         const execResult = this.execStatementsTransactionally(body.statements, body.owner, leaseGuard);
-        return d1QueryResponse(execResult.payload, {
-          headers: { "x-wdl-d1-changed-db": execResult.changedDb ? "1" : "0" },
-        });
+        return d1QuerySuccessResponse(execResult.payload, { changedDb: execResult.changedDb });
       }
       if (body.mode === "batch") {
         /** @type {unknown[]} */
         const batchResults = [];
-        this.transactionSyncWithSchemaMemoRollback(() => {
+        this.transactionSyncWithSchemaMemoReset(() => {
           for (let i = 0; i < body.statements.length; i += 1) {
             try {
               batchResults.push(this.runStatement(body.statements[i], "ROWS_AND_COLUMNS", body.owner, resultBudget, leaseGuard));
@@ -310,14 +313,14 @@ export class D1DatabaseActor extends DurableObject {
           return null;
         });
         recordPayloadStorageSize(body.owner?.dbKey, batchResults);
-        return d1QueryResponse(batchResults);
+        return d1QuerySuccessResponse(batchResults, { changedDb: payloadChangedDb(batchResults) });
       }
       const resultsFormat = body.mode === "run" ? "NONE" : "ROWS_AND_COLUMNS";
       const results = /** @type {D1Statement[]} */ (body.statements)
         .map((statement) => this.runStatement(statement, resultsFormat, body.owner, resultBudget, leaseGuard));
       const payload = results.length === 1 ? results[0] : results;
       recordPayloadStorageSize(body.owner?.dbKey, payload);
-      return d1QueryResponse(payload);
+      return d1QuerySuccessResponse(payload, { changedDb: payloadChangedDb(payload) });
     } catch (err) {
       return d1ErrorResponse(err);
     } finally {
@@ -329,17 +332,18 @@ export class D1DatabaseActor extends DurableObject {
   execStatementsTransactionally(statements, owner, leaseGuard = null) {
     if (statements.length <= 1) return this.execStatements(statements, owner, leaseGuard);
     return /** @type {{ changedDb: boolean, payload: { count: number, duration: number } }} */ (
-      this.transactionSyncWithSchemaMemoRollback(() => this.execStatements(statements, owner, leaseGuard))
+      this.transactionSyncWithSchemaMemoReset(() => this.execStatements(statements, owner, leaseGuard))
     );
   }
 
   /** @param {() => unknown} callback */
-  transactionSyncWithSchemaMemoRollback(callback) {
-    const memoBefore = new Set(this.ensureSchemaObjectExistsMemo());
+  transactionSyncWithSchemaMemoReset(callback) {
     try {
       return this.state.storage.transactionSync(callback);
     } catch (err) {
-      this.schemaObjectExistsMemo = memoBefore;
+      // SQLite rolled back any schema changes; dropping the advisory memo is
+      // cheaper than copying it before every transaction and remains correct.
+      this.clearSchemaObjectExistsMemo();
       throw err;
     }
   }
@@ -386,7 +390,7 @@ export class D1DatabaseActor extends DurableObject {
       leaseGuard
     );
     const exists = cursor.toArray().length > 0;
-    if (exists) this.ensureSchemaObjectExistsMemo().add(key);
+    if (exists) this.rememberSchemaObjectExists(key);
     return exists;
   }
 
@@ -394,11 +398,27 @@ export class D1DatabaseActor extends DurableObject {
     // Unit tests and helper paths may Object.create() the prototype without
     // running the constructor; keep memo access lazy for those direct calls.
     this.schemaObjectExistsMemo ||= new Set();
+    this.schemaObjectExistsMemoCodeUnits ??= 0;
     return this.schemaObjectExistsMemo;
+  }
+
+  /** @param {string} key */
+  rememberSchemaObjectExists(key) {
+    const memo = this.ensureSchemaObjectExistsMemo();
+    if (memo.has(key)) return;
+    if (
+      memo.size >= SCHEMA_OBJECT_MEMO_MAX_ENTRIES ||
+      this.schemaObjectExistsMemoCodeUnits + key.length > SCHEMA_OBJECT_MEMO_MAX_CODE_UNITS
+    ) {
+      return;
+    }
+    memo.add(key);
+    this.schemaObjectExistsMemoCodeUnits += key.length;
   }
 
   clearSchemaObjectExistsMemo() {
     this.schemaObjectExistsMemo?.clear();
+    this.schemaObjectExistsMemoCodeUnits = 0;
   }
 
   /** @param {string} sql @param {D1Ddl | null} ddl */

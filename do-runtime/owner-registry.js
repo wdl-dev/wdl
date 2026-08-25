@@ -298,6 +298,15 @@ function ownerStoragePointerMatches(raw, owner) {
     decodeBulk(raw) === owner.doStorageId;
 }
 
+/**
+ * @param {unknown} raw
+ * @returns {boolean}
+ */
+function deleteLockAllowsActiveStorage(raw) {
+  const token = decodeBulk(raw);
+  return token == null || parseDeleteLockKind(token) === VERSION_DELETE_LOCK_KIND;
+}
+
 /** @param {DoOwner | null | undefined} owner */
 function ownerHasStoragePointer(owner) {
   return Boolean(owner?.ns && owner.worker && owner.doStorageId);
@@ -398,11 +407,7 @@ export async function resolveDoOwner(env, invoke, options = {}) {
   );
   const [generationRaw, deleteLockRaw, storagePointerRaw, policyRaw] = relatedValues;
   applySessionPolicyFence(policyRaw, invoke, options.allowSupersededVersion);
-  const deleteLockToken = decodeBulk(deleteLockRaw);
-  if (
-    deleteLockToken != null &&
-    parseDeleteLockKind(deleteLockToken) !== VERSION_DELETE_LOCK_KIND
-  ) {
+  if (!deleteLockAllowsActiveStorage(deleteLockRaw)) {
     forgetOwnedScope(ownerKey);
     throw new DoRuntimeError(
       503,
@@ -452,11 +457,7 @@ export async function resolveDoOwner(env, invoke, options = {}) {
     );
     const [generationRaw, deleteLockRaw, storagePointerRaw, policyRaw] = relatedValues;
     applySessionPolicyFence(policyRaw, invoke, options.allowSupersededVersion);
-    const deleteLockToken = decodeBulk(deleteLockRaw);
-    if (
-      deleteLockToken != null &&
-      parseDeleteLockKind(deleteLockToken) !== VERSION_DELETE_LOCK_KIND
-    ) {
+    if (!deleteLockAllowsActiveStorage(deleteLockRaw)) {
       await session.unwatch();
       forgetOwnedScope(ownerKey);
       throw new DoRuntimeError(
@@ -556,7 +557,10 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options) {
     throw new Error("DO owner assertion requires a valid storage scope");
   }
   const sessionPolicyInvoke = options.sessionPolicyInvoke;
-  const relatedKeys = [doStorageIdKey(storageScope.ns, storageScope.worker)];
+  const relatedKeys = [
+    doStorageIdKey(storageScope.ns, storageScope.worker),
+    deleteLockKey(storageScope.ns, storageScope.worker),
+  ];
   if (sessionPolicyInvoke) {
     relatedKeys.push(sessionPolicyKey(storageScope.ns, storageScope.worker));
   }
@@ -568,9 +572,10 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options) {
   );
   const current = snapshot.owner;
   const nowMs = snapshot.nowMs;
+  const [storagePointerRaw, deleteLockRaw, policyRaw] = snapshot.relatedValues;
   const storagePointerCurrent =
     current?.doStorageId === storageScope.doStorageId &&
-    ownerStoragePointerMatches(snapshot.relatedValues[0], current);
+    ownerStoragePointerMatches(storagePointerRaw, current);
   if (!current || !ownerFenceMatches(current, owner)) {
     forgetOwnedScope(owner.ownerKey);
     throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_GENERATION, `DO scope ${owner.ownerKey} owner generation is stale`);
@@ -583,8 +588,16 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options) {
     forgetOwnedScope(owner.ownerKey);
     throw new DoRuntimeError(503, DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE, `DO scope ${owner.ownerKey} no longer matches active worker storage`);
   }
+  if (!deleteLockAllowsActiveStorage(deleteLockRaw)) {
+    forgetOwnedScope(owner.ownerKey);
+    throw new DoRuntimeError(
+      503,
+      DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE,
+      `DO scope ${owner.ownerKey} worker is being deleted`
+    );
+  }
   if (sessionPolicyInvoke) {
-    applySessionPolicyFence(snapshot.relatedValues[1], sessionPolicyInvoke);
+    applySessionPolicyFence(policyRaw, sessionPolicyInvoke);
   }
   const leaseRemainingMs = Number(current.leaseExpiresAt ?? 0) - nowMs;
   if (leaseRemainingMs < ownerLeaseGuardMs(env)) {

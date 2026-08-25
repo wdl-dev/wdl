@@ -114,6 +114,8 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 
 Runtime 为 loading、binding operation、AI pool state、`redis-proxy` call、workflow replay cache、loader eviction 和 dispatch envelope 输出日志/metrics。Tail worker 总是为 console/exception capture 输出结构化 stdout；只有匹配的 active tail session 存在时才转发到 `wdl tail`。
 
+Cold-load duration metric 使用 workerd request clock。因此 `bundle_load_stage_duration_ms` 只覆盖发生 await 的 `redis_proxy_load` 阶段。`bundle_load_duration_ms` 仍可表示 request 可观察的端到端 load latency，但两者都不用于分析连续执行的 bundle decode、env construction 或 wrapper generation CPU 时间；workerd 在这些同步阶段不会推进时钟。
+
 ## 部署 / Rollout 注意事项
 
 - Runtime/Control 合同变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程，不能依赖未协调的同时 rolling。

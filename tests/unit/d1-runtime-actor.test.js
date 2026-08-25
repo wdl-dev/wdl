@@ -653,6 +653,61 @@ test("D1 actor: memoizes existing idempotent schema objects until broad schema m
   assert.equal(objectReads, 3, "broad schema mutation should clear the memo before the next create");
 });
 
+test("D1 actor: bounds positive schema object memo entries and retained names", () => {
+  let objectReads = 0;
+  const actor = Object.create(D1DatabaseActor.prototype);
+  actor.env = {};
+  actor.sql = {
+    exec() {
+      objectReads += 1;
+      return { toArray: () => [{ found: 1 }] };
+    },
+  };
+
+  for (let i = 0; i < 1100; i += 1) {
+    assert.equal(actor.schemaObjectExists({ type: "table", name: `memo_${i}` }), true);
+  }
+  const readsAfterFill = objectReads;
+  assert.equal(actor.schemaObjectExists({ type: "table", name: "memo_0" }), true);
+  assert.equal(objectReads, readsAfterFill, "an early memo entry should remain cached");
+  assert.equal(actor.schemaObjectExists({ type: "table", name: "memo_1099" }), true);
+  assert.equal(objectReads, readsAfterFill + 1, "entries beyond the cap should be probed again");
+
+  const retainedNamesActor = Object.create(D1DatabaseActor.prototype);
+  let retainedNameReads = 0;
+  retainedNamesActor.env = {};
+  retainedNamesActor.sql = {
+    exec() {
+      retainedNameReads += 1;
+      return { toArray: () => [{ found: 1 }] };
+    },
+  };
+  const retainedNames = Array.from(
+    { length: 80 },
+    (_, index) => `memo_${index}_${"x".repeat(1024)}`
+  );
+  const lastRetainedName = retainedNames.at(-1);
+  assert.ok(lastRetainedName);
+  for (const name of retainedNames) {
+    assert.equal(retainedNamesActor.schemaObjectExists({ type: "table", name }), true);
+  }
+  const readsAfterNameBudget = retainedNameReads;
+  assert.equal(
+    retainedNamesActor.schemaObjectExists({ type: "table", name: retainedNames[0] }),
+    true
+  );
+  assert.equal(retainedNameReads, readsAfterNameBudget);
+  assert.equal(
+    retainedNamesActor.schemaObjectExists({ type: "table", name: lastRetainedName }),
+    true
+  );
+  assert.equal(
+    retainedNameReads,
+    readsAfterNameBudget + 1,
+    "names beyond the retained-name budget should be probed again"
+  );
+});
+
 test("D1 actor: exec broad schema mutation clears memo after earlier changed statement", () => {
   const actor = Object.create(D1DatabaseActor.prototype);
   let exists = true;
@@ -983,6 +1038,9 @@ test("D1 actor: lease budget guard does not retry-wrap committed single-statemen
     }));
 
     const body = await readJsonResponse(response, 200);
+    assert.equal(response.headers.get("x-wdl-d1-result"), "ok");
+    assert.equal(response.headers.get("x-wdl-d1-changed-db"), "1");
+    assert.equal(response.headers.get("x-wdl-d1-value-encoding"), "native-bytes-v1");
     assert.equal(body.success, true);
     assert.equal(body.meta.last_row_id, 1);
     assert.equal(body.meta.changed_db, true);
@@ -1036,7 +1094,9 @@ test("D1 actor: lease budget guard does not retry-wrap committed single-statemen
     }));
 
     const body = await readJsonResponse(response, 200);
+    assert.equal(response.headers.get("x-wdl-d1-result"), "ok");
     assert.equal(response.headers.get("x-wdl-d1-changed-db"), "1");
+    assert.equal(response.headers.get("x-wdl-d1-value-encoding"), "native-bytes-v1");
     assert.equal(body.count, 1);
     assert.equal(typeof body.duration, "number");
   });
@@ -1049,7 +1109,7 @@ test("D1 actor: lease budget guard does not retry-wrap committed single-statemen
   assert.equal(exists, true);
 });
 
-test("D1 actor: failed transaction restores schema object memo", async () => {
+test("D1 actor: failed transaction clears its advisory schema object memo", async () => {
   let exists = false;
   let objectReads = 0;
   const actor = new D1DatabaseActor({
@@ -1082,6 +1142,7 @@ test("D1 actor: failed transaction restores schema object memo", async () => {
       },
     },
   }, {});
+  actor.rememberSchemaObjectExists("table\0stable");
   const create = { sql: "create table if not exists inspections (id text primary key)", params: [] };
 
   const response = await actor.fetch(new Request("http://d1-actor/query", {
@@ -1098,6 +1159,7 @@ test("D1 actor: failed transaction restores schema object memo", async () => {
 
   assert.equal(response.status, 500);
   assert.equal(exists, false);
+  assert.equal(actor.schemaObjectExistsMemo.has("table\0stable"), false);
   assert.equal(actor.schemaObjectExistsMemo.has("table\0inspections"), false);
 
   const result = actor.runStatement(create, "ARRAY_OF_OBJECTS", { taskId: "task-a" }, { remaining: 1024, limit: 1024 });

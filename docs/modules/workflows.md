@@ -195,8 +195,9 @@ Key families:
   so tenant mutation cannot alter later claims. The module-level cross-request cache
   retains at most 16 MiB of serialized data per runtime isolate; oversized records are
   not cached and older caches are evicted under pressure. The
-  `workflow_replay_cache_bytes` gauge reports that cross-request retained size. Global
-  eviction stops cross-request retention; an in-flight controller keeps a bounded
+  `workflow_replay_cache_bytes` gauge reports that cross-request retained size and is
+  published from the authoritative counters when `/_metrics` renders. Global eviction
+  stops cross-request retention; an in-flight controller keeps a bounded
   controller-local replay working set so eviction cannot turn replay hits into fresh
   claims, then releases that detached working set when dispatch ends. A new claim
   reopens bounded paging so records committed by another isolate remain discoverable.

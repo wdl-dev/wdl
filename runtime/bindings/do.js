@@ -24,6 +24,11 @@ import { withInternalAuth } from "shared-internal-auth";
 
 const ownerHintCache = createOwnerHintCache();
 
+/** @lintignore data-URL unit tests reset the process-local cache at its owner. */
+export function clearDoOwnerHintsForTest() {
+  ownerHintCache.clearForTest();
+}
+
 /** @param {DurableObjectNamespace} binding @returns {DoBinding} */
 function doBinding(binding) {
   return /** @type {DoBinding} */ (/** @type {unknown} */ (binding));

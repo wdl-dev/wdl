@@ -475,6 +475,29 @@ mod tests {
     }
 
     #[test]
+    fn do_owner_shards_match_cross_language_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/do-owner-shards.json"
+        ))
+        .expect("DO owner shard fixture parses");
+        assert_eq!(
+            fixture["hostShardCount"].as_u64(),
+            Some(DO_HOST_SHARD_COUNT as u64)
+        );
+        for case in fixture["cases"]
+            .as_array()
+            .expect("DO owner shard fixture cases is an array")
+        {
+            let object_name = case["objectName"].as_str().expect("objectName is a string");
+            let expected = case["shard"].as_u64().expect("shard is an integer") as u32;
+            assert_eq!(
+                fnv1a32(object_name.as_bytes()) % DO_HOST_SHARD_COUNT,
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn do_alarm_job_state_requires_canonical_job_id() {
         let state = valid_job_state();
         let canonical = job_id_for_state(&state);

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Reset Redis subscription reconnect backoff after established subscriptions.
+- Bounded Runtime live-tail negative caching to 10,000 recently observed worker keys.
+- Skipped duplicate live-tail forwarding payload construction for fresh inactive workers.
+- Rejected code-unit-oversized Tail strings and oversized indexed binary views before proportional encoding or key enumeration.
+- Removed zero-valued synchronous cold-load stage metrics and documented Runtime load durations as request-clock latency rather than CPU profiling.
+- Deferred Gateway WebSocket connection/buffer, Runtime AI pool/Workflow replay-cache, and do-runtime in-flight gauge publication to metric scrapes.
+- Rejected unsupported AI input modalities as soon as their documented carrier is observed.
+- Forwarded successful D1 query responses as opaque bytes through routers using bounded internal result headers, while retaining decoded fallback for mixed-version and error responses.
+- Carried D1 BLOB parameters and results as native `Uint8Array` values across the tenant facade, host binding, binary wire, actor, and read cache while retaining tagged-response fallback for mixed-version rollout, bypassing oversized read-cache key materialization, and bounding aggregate router retained key-and-response bytes.
+- Roll D1 native-byte readers in user-runtime, system-runtime (including Control), and do-runtime first, wait for old reader tasks to drain, then roll d1-runtime last; reverse skew is unsupported because old readers decode BLOB fields as number arrays.
+- Shared Durable Object owner hints across object names in one canonical owner shard while retaining exact object identity and owner-actor authority.
+- Forwarded the first uncached Durable Object fetch/RPC through its router once and learned owner headers from the final response, while retaining direct-owner WebSocket upgrades.
+- Let forwarded and cached-direct Durable Object calls carry a route fence to the target host actor, removing one outer owner snapshot while preserving the actor's drain, Redis-time, whole-delete, storage, session-policy, and generation admission.
+- Sanitized terminal Durable Object ownership-control errors, preserving only allowlisted `503` codes and reducing every other private code/status combination to `503 owner_unavailable`.
+- Removed misleading per-actor Durable Object facet and object-registry gauges whose shared metric series did not represent process totals.
+
 ## wdl.20260818.1 - 2026-08-19
 
 - Updated workerd and Workers types to `1.20260818.1` and `5.20260818.1`, advanced the maximum compatibility date to `2026-08-25`, and rejected the new experimental `wasm_memory_discard` flag.

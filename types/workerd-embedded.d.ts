@@ -33,11 +33,6 @@ declare module "runtime-sql-splitter-source" {
   export default source;
 }
 
-declare module "runtime-d1-transport-source" {
-  const source: string;
-  export default source;
-}
-
 declare module "runtime-r2-client-source" {
   const source: string;
   export default source;

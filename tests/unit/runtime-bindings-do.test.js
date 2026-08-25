@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { beforeEach, test } from "node:test";
 import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-shared-module.js";
 import { decodeDoEnvelopeMetadata as decodeDoEnvelope } from "../helpers/do-envelope.js";
 import {
   doOwnerHintHeaders,
   doOwnerHintResponse,
+  doOwnerMetadataHeaders,
   doOwnershipErrorHeaders,
   tenantBodyDoOwnerHintResponse,
 } from "../helpers/do-owner-hint.js";
@@ -13,13 +14,14 @@ import { makeRecordingFetch, withRecordingFetch } from "../helpers/mock-fetch.js
 import { withMockedProperty } from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
+import { doTransportDataUrl } from "../helpers/load-do-protocol.js";
 
-const transportUrl = repositoryFileUrl("runtime/_wdl-do-transport.js");
+const transportUrl = doTransportDataUrl();
 const scopedRequestUrl = repositoryFileUrl("runtime/_wdl-do-scoped-request.js");
 const internalAuthUrl = sharedInternalAuthUrl();
 const ownerHintCacheUrl = repositoryFileUrl("runtime/_wdl-owner-hint-cache.js");
 
-const { DurableObjectNamespace } = await importRepositoryModule("runtime/bindings/do.js", [
+const { clearDoOwnerHintsForTest, DurableObjectNamespace } = await importRepositoryModule("runtime/bindings/do.js", [
   [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
   [/from "runtime-do-transport";/, `from ${JSON.stringify(transportUrl)};`],
   [/from "_wdl-do-scoped-request\.js";/, `from ${JSON.stringify(scopedRequestUrl)};`],
@@ -28,6 +30,7 @@ const { DurableObjectNamespace } = await importRepositoryModule("runtime/binding
 ]);
 const {
   connectHeaders,
+  doOwnerHintCacheKey,
   ownerHintFromHeaders,
   requestSpec,
 } = await import(transportUrl);
@@ -37,16 +40,25 @@ const {
   scopedDoRequest,
 } = await import(scopedRequestUrl);
 
+beforeEach(() => clearDoOwnerHintsForTest());
+
+const BINDING_PROPS = Object.freeze({
+  ns: "tenant",
+  worker: "chat",
+  version: "v1",
+  doStorageId: "do_0123456789abcdef0123456789abcdef",
+  className: "Room",
+});
+
+/** @param {string} objectName */
+function ownerKeyFor(objectName) {
+  return doOwnerHintCacheKey(BINDING_PROPS, objectName);
+}
+
 /** @param {any} backend */
 function bindingWithBackend(backend) {
   return new DurableObjectNamespace({
-    props: {
-      ns: "tenant",
-      worker: "chat",
-      version: "v1",
-      doStorageId: "do_0123456789abcdef0123456789abcdef",
-      className: "Room",
-    },
+    props: BINDING_PROPS,
   }, {
     DO_BACKEND: backend,
     WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
@@ -214,7 +226,7 @@ test("DO owner hint parser requires positive safe-integer owner generation", () 
   assert.equal(ownerHintFromHeaders(missingGeneration), null);
 });
 
-test("DO-to-DO fetch does not replay through router when direct owner hint retry fails", async () => {
+test("DO-to-DO fetch does not follow legacy router owner hints", async () => {
   /** @type {any[]} */
   const calls = [];
   /** @type {Array<{ url: string, init: RequestInit }>} */
@@ -222,7 +234,9 @@ test("DO-to-DO fetch does not replay through router when direct owner hint retry
   await withRecordingFetch(ownerCalls, async () => {
     const binding = bindingWithBackend({
       fetch: makeRecordingFetch(calls, {
-        response: () => calls.length === 1 ? doOwnerHintResponse() : new Response("router-ok"),
+        response: () => calls.length === 1
+          ? doOwnerHintResponse({ ownerKey: ownerKeyFor("room-a") })
+          : new Response("router-ok"),
       }),
     });
 
@@ -234,13 +248,9 @@ test("DO-to-DO fetch does not replay through router when direct owner hint retry
     const body = await readJsonResponse(response, 503);
     assert.equal(body.error, "owner_unavailable");
     assert.equal(calls.length, 1);
-    assert.equal(ownerCalls.length, 1);
+    assert.equal(ownerCalls.length, 0);
     assert.equal(calls[0].url, "http://do-runtime/internal/do/invoke");
-    assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), "1");
-  }, {
-    response: async () => {
-      throw new Error("owner unavailable");
-    },
+    assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), null);
   });
 });
 
@@ -251,21 +261,154 @@ test("DO-to-DO fetch caches owner hints and skips router on later calls", async 
   const ownerCalls = [];
   await withRecordingFetch(ownerCalls, async () => {
     const binding = bindingWithBackend({
-      fetch: makeRecordingFetch(calls, { response: doOwnerHintResponse() }),
+      fetch: makeRecordingFetch(calls, {
+        response: new Response("router-forwarded", {
+          headers: doOwnerMetadataHeaders({ ownerKey: ownerKeyFor("cached-room") }),
+        }),
+      }),
     });
 
     const first = await bindingFetch(binding, "cached-room", new Request("https://demo.workers.example/send"));
     const second = await bindingFetch(binding, "cached-room", new Request("https://demo.workers.example/send"));
 
-    assert.equal(await first.text(), "owner-ok");
+    assert.equal(await first.text(), "router-forwarded");
     assert.equal(await second.text(), "owner-ok");
     assert.equal(calls.length, 1);
-    assert.equal(ownerCalls.length, 2);
+    assert.equal(ownerCalls.length, 1);
     assert.equal(ownerCalls[0].url, "http://do-runtime-a:8788/internal/do/invoke");
-    assert.equal(ownerCalls[1].url, "http://do-runtime-a:8788/internal/do/invoke");
-    assert.equal(new Headers(ownerCalls[1].init.headers).get("x-wdl-internal-auth"), "test-internal-auth-token");
+    assert.equal(new Headers(ownerCalls[0].init.headers).get("x-wdl-internal-auth"), "test-internal-auth-token");
   }, {
-    response: new Response("owner-ok", { headers: doOwnerHintHeaders() }),
+    response: new Response("owner-ok", {
+      headers: doOwnerMetadataHeaders({ ownerKey: ownerKeyFor("cached-room") }),
+    }),
+  });
+});
+
+test("DO binding replays broad ownership errors only for GET and HEAD", async (t) => {
+  const cases = [
+    {
+      name: "GET",
+      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+        bindingFetch(binding, objectName, new Request("https://demo.workers.example/read")),
+      replay: true,
+    },
+    {
+      name: "HEAD",
+      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+        bindingFetch(binding, objectName, new Request("https://demo.workers.example/read", { method: "HEAD" })),
+      replay: true,
+    },
+    {
+      name: "POST",
+      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+        bindingFetch(binding, objectName, new Request("https://demo.workers.example/write", {
+          method: "POST",
+          body: "write",
+        })),
+      replay: false,
+    },
+    {
+      name: "RPC",
+      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+        binding.rpcObject(objectName, "addMessage", ["write"]),
+      replay: false,
+      rpc: true,
+    },
+    {
+      name: "WebSocket",
+      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+        bindingFetch(binding, objectName, new Request("https://demo.workers.example/ws", {
+          headers: {
+            Connection: "Upgrade",
+            Upgrade: "websocket",
+            "Sec-WebSocket-Key": "abc",
+          },
+        })),
+      replay: false,
+    },
+  ];
+
+  for (const { name, invoke, replay, rpc = false } of cases) {
+    await t.test(name, async () => {
+      clearDoOwnerHintsForTest();
+      const objectName = `broad-${name.toLowerCase()}`;
+      /** @type {any[]} */
+      const routerCalls = [];
+      /** @type {Array<{ url: string, init: RequestInit }>} */
+      const ownerCalls = [];
+      await withRecordingFetch(ownerCalls, async () => {
+        const binding = bindingWithBackend({
+          fetch: makeRecordingFetch(routerCalls, {
+            response: () => routerCalls.length === 1
+              ? new Response("primed", {
+                  headers: doOwnerMetadataHeaders({ ownerKey: ownerKeyFor(objectName) }),
+                })
+              : new Response(null, { status: 204 }),
+          }),
+        });
+        const prime = await bindingFetch(
+          binding,
+          objectName,
+          new Request("https://demo.workers.example/prime")
+        );
+        assert.equal(prime.status, 200);
+
+        if (rpc) {
+          await assert.rejects(
+            invoke(binding, objectName),
+            (err) => Reflect.get(/** @type {object} */ (err), "code") === "owner_unavailable"
+          );
+        } else {
+          const response = /** @type {Response} */ (await invoke(binding, objectName));
+          assert.equal(response.status, replay ? 204 : 503);
+          if (!replay) {
+            assert.equal((await response.json()).error, "owner_unavailable");
+          }
+        }
+
+        assert.equal(routerCalls.length, replay ? 2 : 1);
+        assert.equal(ownerCalls.length, 1);
+      }, {
+        response: Response.json({
+          error: "owner_unavailable",
+          message: "private owner state",
+        }, {
+          status: 503,
+          headers: doOwnershipErrorHeaders("owner_unavailable"),
+        }),
+      });
+    });
+  }
+});
+
+test("DO-to-DO fetch shares owner hints across object names in one shard", async () => {
+  const firstObject = "hint-11";
+  const secondObject = "hint-4";
+  assert.equal(ownerKeyFor(firstObject), ownerKeyFor(secondObject));
+  /** @type {any[]} */
+  const routerCalls = [];
+  /** @type {Array<{ url: string, init: RequestInit }>} */
+  const ownerCalls = [];
+  await withRecordingFetch(ownerCalls, async () => {
+    const binding = bindingWithBackend({
+      fetch: makeRecordingFetch(routerCalls, {
+        response: new Response("router-forwarded", {
+          headers: doOwnerMetadataHeaders({ ownerKey: ownerKeyFor(firstObject) }),
+        }),
+      }),
+    });
+
+    const first = await bindingFetch(binding, firstObject, new Request("https://demo.workers.example/send"));
+    const second = await bindingFetch(binding, secondObject, new Request("https://demo.workers.example/send"));
+
+    assert.equal(await first.text(), "router-forwarded");
+    assert.equal(await second.text(), "owner-ok");
+    assert.equal(routerCalls.length, 1);
+    assert.equal(ownerCalls.length, 1);
+  }, {
+    response: new Response("owner-ok", {
+      headers: doOwnerMetadataHeaders({ ownerKey: ownerKeyFor(firstObject) }),
+    }),
   });
 });
 
@@ -364,7 +507,7 @@ test("DO-to-DO fetch retries owner generation races without hint opt-in", async 
   assert.equal(calls[0].url, "http://do-runtime/internal/do/invoke");
   assert.equal(calls[1].url, "http://do-runtime/internal/do/invoke");
   assert.equal(calls[0].init.body, calls[1].init.body);
-  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), "1");
+  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), null);
   assert.equal(new Headers(calls[1].init.headers).get("x-wdl-do-accept-owner-hint"), null);
 });
 
@@ -381,7 +524,7 @@ test("DO-to-DO fetch ignores owner hints attached to race responses", async () =
               status: 503,
               headers: doOwnershipErrorHeaders(
                 "stale_owner_generation",
-                doOwnerHintResponse().headers
+                doOwnerHintResponse({ ownerKey: ownerKeyFor("room-a") }).headers
               ),
             })
           : new Response("retried"),
@@ -393,7 +536,7 @@ test("DO-to-DO fetch ignores owner hints attached to race responses", async () =
     assert.equal(await response.text(), "retried");
     assert.equal(calls.length, 2);
     assert.equal(ownerCalls.length, 0);
-    assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), "1");
+    assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), null);
     assert.equal(new Headers(calls[1].init.headers).get("x-wdl-do-accept-owner-hint"), null);
   }, {
     response: new Response("owner-should-not-be-called"),
@@ -421,7 +564,7 @@ test("DO-to-DO RPC retries owner claim races without hint opt-in", async () => {
   assert.equal(calls[0].url, "http://do-runtime/internal/do/invoke");
   assert.equal(calls[1].url, "http://do-runtime/internal/do/invoke");
   assert.equal(calls[0].init.body, calls[1].init.body);
-  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), "1");
+  assert.equal(new Headers(calls[0].init.headers).get("x-wdl-do-accept-owner-hint"), null);
   assert.equal(new Headers(calls[1].init.headers).get("x-wdl-do-accept-owner-hint"), null);
 });
 
@@ -474,7 +617,9 @@ test("DO-to-DO websocket does not fall back to router when direct owner hint ret
   const ownerCalls = [];
   await withRecordingFetch(ownerCalls, async () => {
     const binding = bindingWithBackend({
-      fetch: makeRecordingFetch(calls, { response: doOwnerHintResponse() }),
+      fetch: makeRecordingFetch(calls, {
+        response: doOwnerHintResponse({ ownerKey: ownerKeyFor("room-a") }),
+      }),
     });
 
     const response = await bindingFetch(binding, "room-a", new Request("https://demo.workers.example/ws", {
@@ -497,16 +642,12 @@ test("DO-to-DO websocket does not fall back to router when direct owner hint ret
   });
 });
 
-test("DO-to-DO websocket strips owner hint headers from successful upgrades", async () => {
+test("DO-to-DO websocket fails closed on an invalid successful ownership marker", async () => {
   const binding = bindingWithBackend({
     async fetch() {
       return new Response("upgrade", {
         headers: {
-          "x-wdl-do-owner-key": "do_0123456789abcdef0123456789abcdef:Room:shard0",
-          "x-wdl-do-owner-task-id": "do-runtime-a",
-          "x-wdl-do-owner-endpoint": "do-runtime-a:8788",
-          "x-wdl-do-owner-generation": "3",
-          "x-wdl-do-owner-hint": "1",
+          ...doOwnerMetadataHeaders(),
           "x-wdl-do-ownership-error": "owner_fence_missing",
         },
       });
@@ -521,7 +662,11 @@ test("DO-to-DO websocket strips owner hint headers from successful upgrades", as
     },
   }));
 
-  assert.equal(await response.text(), "upgrade");
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "owner_unavailable",
+    message: "Durable Object ownership is unavailable",
+  });
   assert.equal(response.headers.get("x-wdl-do-owner-key"), null);
   assert.equal(response.headers.get("x-wdl-do-owner-hint"), null);
   assert.equal(response.headers.get("x-wdl-do-ownership-error"), null);

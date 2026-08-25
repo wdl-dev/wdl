@@ -166,6 +166,8 @@ Pool state 只使用有界 label：
 - `wdl_ai_pool_high_water{service,pool}`
 - `wdl_ai_pool_events_total{service,pool,outcome}`
 
+Pool acquire、transfer 和 release path 只更新进程内权威 counter；`/_metrics` 在 render 前即时发布当前 in-use 与 high-water gauge。
+
 Host rejection 记录 `ai_binding_request_rejected`；被拒绝的 Control AI mutation 通过共享 Control request log 记录有界 structured event。Namespace、worker、version 和 raw error text 进入日志，不进入 metric label。
 
 ## 部署 / Rollout 注意事项

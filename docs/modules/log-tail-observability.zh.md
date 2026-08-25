@@ -28,7 +28,7 @@ Rust 服务（`scheduler`、`redis-proxy`、`workflows`、`supervisor`）使用�
 Live tail 是 activation-gated pipe，不是持久日志系统：
 
 - workerd tails 把 console、exception、fetch、scheduled 和 queue event 交给 runtime tail worker。Runtime 始终保留结构化 stdout 作为持久平台日志路径。
-- `runtime/tail-forwarder.js` append 前会检查 redis-proxy `/logs/tail/active`。Active-set 的命中和未命中都会短暂 cache；fresh miss 会在 event 到达 redis-proxy 前跳过 envelope payload 构造和后台 append work。
+- `runtime/tail-forwarder.js` append 前会检查 redis-proxy `/logs/tail/active`。Active-set 的命中和未命中都会短暂 cache；fresh miss 会在 event 到达 redis-proxy 前跳过 envelope payload 构造和后台 append work。进程内 negative cache 最多保留最近观察到的 10,000 个 worker key；过期或 oldest-observation eviction 只会让该精确 key 的下一个 event 重新执行权威 active-set check。Tail worker 仍会 clone 并输出 canonical structured stdout，但 fresh miss 也会跳过第二份 live-forward payload 的构造。
 - Control 为每个 SSE tail session 做授权，在 `logs:tail:active` 写入/刷新 worker gate，读取 `logs:<ns>:<worker>:s`，并输出 SSE frame。Gate 续期与 admission 共用一个原子操作，因此并发 session 不会突破 10,000-field active-gate 上限。Reconnect 会重新走正常 auth。
 - redis-proxy 写入有界 stream entry，使用 `MAXLEN ~ 500` 并刷新 TTL。这个 stream 用来衔接 live consumer，不用于保存历史。
 - 单 worker `wdl tail` 可以用 `Last-Event-ID` 在 stream 窗口内 resume。多 worker tail 是 fan-in session；reconnect 从新会话开始，因为单个 SSE cursor 无法表达每个 worker 一个 cursor。
@@ -119,7 +119,7 @@ Tail event families：
 Tail identity 规则：
 
 - fetch 请求的 `worker_console` identity 来自转发请求头，因为 workerd 对 `workerLoader` loaded worker 报告的 `scriptName=none`。
-- `worker_console.message` 保留 console argument 的位置。workerd 提供位置对应的 `Error` metadata 时，Runtime 会输出平行且有界的 `error_info` array，字段为 `name`、`message` 和可选 `stack`。结构化 stdout 在 metadata 超过 clone budget 时输出 `error_info_omitted: true`；live-tail 的精确序列化依次尝试 metadata、omitted marker 和不变的基础 message，只有基础 event 本身超限时才输出 `tail_warning`。
+- `worker_console.message` 保留 console argument 的位置。workerd 提供位置对应的 `Error` metadata 时，Runtime 会输出平行且有界的 `error_info` array，字段为 `name`、`message` 和可选 `stack`。结构化 stdout 在 metadata 超过 clone budget 时输出 `error_info_omitted: true`；live-tail 的精确序列化依次尝试 metadata、omitted marker 和不变的基础 message，只有基础 event 本身超限时才输出 `tail_warning`。UTF-16 code-unit length 已超过剩余 clone budget 的 string，以及 intrinsic length 超过该预算的 indexed binary view，会在按输入规模执行 UTF-8 encoding 或 key enumeration 前被拒绝；其它 string 仍执行有界的 UTF-8 byte measurement。
 - `scheduled()` 和 `queue()` 的 console event 是没有 request shape 的 JSRPC event，因此 console tail event 会省略 `worker_id` 和 `request_id`，而不是伪造 `"unknown"`。
 - Runtime 会在 invocation 边界输出显式的 `worker_fetch`、`worker_scheduled` 和 `worker_queue` start/finish event。`worker_fetch` 包含 method、worker-visible pathname、status/outcome 和 duration，不包含 host/query。
 - Control 生成的 `tail_warning` SSE event 没有 Redis stream id，因此不会污染单 worker resume cursor。

@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { d1TransportDataUrl } from "../helpers/load-d1-protocol.js";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
@@ -39,7 +38,6 @@ const d1ClientModule = await importRepositoryModule("runtime/d1-client.js", [
   ...importSpecifierReplacements({
     "./_wdl-sql-splitter.js": repositoryFileUrl("shared/sql-splitter.js"),
     "./_wdl-d1-params.js": repositoryFileUrl("shared/d1-params.js"),
-    "./_wdl-d1-transport.js": d1TransportDataUrl(),
     "./_wdl-d1-data-field.js": repositoryFileUrl("shared/d1-data-field.js"),
     "./_wdl-request-id.js": repositoryFileUrl("runtime/_wdl-request-id.js"),
   }),
@@ -84,32 +82,43 @@ test("D1 local client: bind normalizes ArrayBuffer and typed-array blob params",
   const bytes = new Uint8Array([0, 1, 2, 255]);
   const source = new Uint8Array([10, 20, 30, 40]);
 
-  await db.prepare("insert into blobs values (?, ?, ?)").bind(
+  const statement = db.prepare("insert into blobs values (?, ?, ?)").bind(
     bytes.buffer,
     source.subarray(1, 3),
     [7, 8, 9]
-  ).run();
+  );
+  bytes.fill(9);
+  source.fill(9);
+  await statement.run();
 
   assert.equal(calls[0].mode, "run");
   assert.deepEqual(calls[0].statements, [{
     sql: "insert into blobs values (?, ?, ?)",
-    params: [[0, 1, 2, 255], [20, 30], [7, 8, 9]],
+    params: [
+      new Uint8Array([0, 1, 2, 255]),
+      new Uint8Array([20, 30]),
+      new Uint8Array([7, 8, 9]),
+    ],
   }]);
+  for (const param of calls[0].statements[0].params) {
+    assert.ok(param instanceof Uint8Array);
+    assert.equal(param.buffer.byteLength, param.byteLength);
+  }
 });
 
-test("D1 local client: decodes tagged BLOB results for all() and raw()", async () => {
-  const tagged = { __wdl_d1_binary_v1: true, base64: "AAEC/w==" };
+test("D1 local client: preserves native BLOB results for all() and raw()", async () => {
+  const blob = new Uint8Array([0, 1, 2, 255]);
   const { db } = makeLocalDb((mode) => {
     if (mode === "raw") {
       return {
         success: true,
-        results: { columns: ["data"], rows: [[tagged]] },
+        results: { columns: ["data"], rows: [[blob]] },
         meta: { duration: 0 },
       };
     }
     return {
       success: true,
-      results: [{ data: tagged }],
+      results: [{ data: blob }],
       meta: { duration: 0 },
     };
   });
@@ -130,7 +139,10 @@ test("D1 local client: byte-array params reject fractional and out-of-range valu
   await db.prepare("select ?").bind([0, 255]).run();
 
   assert.equal(calls[0].mode, "run");
-  assert.deepEqual(calls[0].statements, [{ sql: "select ?", params: [[0, 255]] }]);
+  assert.deepEqual(calls[0].statements, [{
+    sql: "select ?",
+    params: [new Uint8Array([0, 255])],
+  }]);
 
   assert.throws(
     () => db.prepare("select ?").bind([1.5]).run(),

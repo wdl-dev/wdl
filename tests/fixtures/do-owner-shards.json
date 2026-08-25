@@ -1,0 +1,35 @@
+{
+  "hostShardCount": 16,
+  "cases": [
+    {
+      "doStorageId": "do_0123456789abcdef0123456789abcdef",
+      "className": "Room",
+      "objectName": "room-a",
+      "shard": 12
+    },
+    {
+      "doStorageId": "do_0123456789abcdef0123456789abcdef",
+      "className": "Room",
+      "objectName": "hint-11",
+      "shard": 1
+    },
+    {
+      "doStorageId": "do_0123456789abcdef0123456789abcdef",
+      "className": "Room",
+      "objectName": "hint-4",
+      "shard": 1
+    },
+    {
+      "doStorageId": "do_0123456789abcdef0123456789abcdef",
+      "className": "Room",
+      "objectName": "中文",
+      "shard": 5
+    },
+    {
+      "doStorageId": "do_0123456789abcdef0123456789abcdef",
+      "className": "Room",
+      "objectName": "🚀",
+      "shard": 10
+    }
+  ]
+}

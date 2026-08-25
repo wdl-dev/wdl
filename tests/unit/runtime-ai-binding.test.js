@@ -11,11 +11,13 @@ import {
   AI_WS_MAX_JSON_DEPTH,
   AI_WS_MAX_BYTES,
   AiBinding,
+  aiProviderHttpRequest,
   aiProviderWebSocketRequest,
   aiPoolStateForTest,
   makeAiBinding,
   modelList,
   openAiResolution,
+  prepareAiCapacityMetrics,
   resetAiHostTestState,
 } from "../helpers/load-runtime-ai-binding.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
@@ -205,6 +207,35 @@ test("AI host inspects only user content when enforcing input modalities", async
     assert.equal(response.status, 200);
   });
   assert.equal(providerBodies.length, 3);
+});
+
+test("AI modality admission stops at the first unsupported carrier", () => {
+  let trailingCarrierRead = false;
+  const trailingCarrier = {};
+  Object.defineProperty(trailingCarrier, "type", {
+    get() {
+      trailingCarrierRead = true;
+      return "input_text";
+    },
+  });
+
+  assert.throws(
+    () => aiProviderHttpRequest(
+      openAiResolution({ inputModalities: ["text"] }),
+      {
+        input: [
+          { type: "input_image", image_url: "https://images.example/input.png" },
+          trailingCarrier,
+        ],
+      },
+      false
+    ),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "ai_input_modality_unsupported");
+      return true;
+    }
+  );
+  assert.equal(trailingCarrierRead, false);
 });
 
 test("AI host counts non-empty Responses instructions as text input", async () => {
@@ -1337,12 +1368,34 @@ test("AI request pool saturates without a queue and recovers after completion", 
   }, async () => {
     const first = binding.fetch(request({ model: "openai/primary", input: "first" }));
     await delay(0);
+    assert.equal(
+      AI_HOST_TEST_STATE.metrics.some((entry) => entry.kind === "gauge"),
+      false
+    );
+    prepareAiCapacityMetrics(binding.env);
+    assert.deepEqual(
+      AI_HOST_TEST_STATE.metrics.filter((entry) =>
+        entry.kind === "gauge" && entry.labels.pool === "request"
+      ).map((entry) => [entry.name, entry.value]),
+      [["ai_pool_in_use", 1], ["ai_pool_high_water", 1]]
+    );
     const saturated = await binding.fetch(request({ model: "openai/primary", input: "second" }));
     assert.equal(saturated.status, 429);
     releaseResolver(Response.json(openAiResolution()));
     assert.equal((await first).status, 200);
   });
   assert.equal(aiPoolStateForTest().request.inUse, 0);
+  assert.equal(
+    AI_HOST_TEST_STATE.metrics.filter((entry) => entry.kind === "gauge").length,
+    6
+  );
+  prepareAiCapacityMetrics(binding.env);
+  assert.deepEqual(
+    AI_HOST_TEST_STATE.metrics.filter((entry) =>
+      entry.kind === "gauge" && entry.labels.pool === "request"
+    ).slice(-2).map((entry) => [entry.name, entry.value]),
+    [["ai_pool_in_use", 0], ["ai_pool_high_water", 1]]
+  );
   assert.ok(AI_HOST_TEST_STATE.metrics.some((entry) =>
     entry.name === "ai_pool_events" && entry.labels.outcome === "saturated"));
   const rejection = /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */ (

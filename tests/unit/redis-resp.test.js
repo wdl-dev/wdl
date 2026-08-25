@@ -340,6 +340,44 @@ test("RedisSubscriber: non-function backoff option falls back safely", async () 
   assert.deepEqual(delays, [defaultBackoff(0)]);
 });
 
+test("RedisSubscriber resets backoff only after every subscription is acknowledged", async () => {
+  const ackRoute = bytes("*3\r\n$9\r\nsubscribe\r\n$5\r\nroute\r\n:1\r\n");
+  const ackPatterns = bytes("*3\r\n$9\r\nsubscribe\r\n$8\r\npatterns\r\n:2\r\n");
+  const message = bytes("*3\r\n$7\r\nmessage\r\n$5\r\nroute\r\n$3\r\nnew\r\n");
+  const connections = [
+    fakeSocket([]),
+    fakeSocket([ackRoute]),
+    fakeSocket([ackRoute, ackPatterns, message]),
+  ];
+  /** @type {number[]} */
+  const attempts = [];
+  /** @type {string[]} */
+  const messages = [];
+  let connectionIndex = 0;
+  let established = 0;
+  const sub = new RedisSubscriber("x", ["route", "patterns"], {
+    connect: () => connections[connectionIndex++],
+    backoff: (/** @type {number} */ attempt) => {
+      attempts.push(attempt);
+      return 0;
+    },
+    sleep: async () => {
+      if (attempts.length === connections.length) sub.stop();
+    },
+    onConnect: () => { established += 1; },
+    onMessage: (/** @type {string} */ _channel, /** @type {Uint8Array} */ payload) => {
+      messages.push(new TextDecoder().decode(payload));
+    },
+    onError: () => {},
+  });
+
+  await sub.start();
+
+  assert.deepEqual(attempts, [0, 1, 0]);
+  assert.equal(established, 1);
+  assert.deepEqual(messages, ["new"]);
+});
+
 test("RedisSubscriber: callback errors do not tear down the reader loop", async () => {
   const scripted = [
     bytes("*3\r\n$9\r\nsubscribe\r\n$5\r\nroute\r\n:1\r\n"),

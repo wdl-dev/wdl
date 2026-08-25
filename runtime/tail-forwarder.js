@@ -14,6 +14,7 @@ import { utf8ByteLength } from "shared-utf8";
 // higher-level docs should describe behavior without restating these numbers.
 const ACTIVE_HIT_MAX_AGE_MS = 500;
 const ACTIVE_MISS_MAX_AGE_MS = 2_000;
+const ACTIVE_MISS_MAX_ENTRIES = 10_000;
 // 150 ms is generous headroom for the loopback hop while still keeping
 // a hung proxy from blocking request-side observability work.
 const ACTIVE_FETCH_TIMEOUT_MS = 150;
@@ -84,12 +85,24 @@ export function makeActiveSetCache() {
   /** @param {string} key */
   function isFreshMiss(key) {
     const seenAt = missSet.get(key);
-    return seenAt !== undefined && nowMonotonic() - seenAt < ACTIVE_MISS_MAX_AGE_MS;
+    if (seenAt === undefined) return false;
+    if (nowMonotonic() - seenAt < ACTIVE_MISS_MAX_AGE_MS) return true;
+    missSet.delete(key);
+    return false;
   }
 
   /** @param {string} key */
   function markMiss(key) {
-    missSet.set(key, nowMonotonic());
+    const now = nowMonotonic();
+    missSet.delete(key);
+    missSet.set(key, now);
+    // Map order tracks observation recency because refreshed keys move to the
+    // end. Drop expired entries first, then the oldest-observed fresh entries.
+    for (const [candidate, seenAt] of missSet) {
+      if (missSet.size <= ACTIVE_MISS_MAX_ENTRIES &&
+          now - seenAt < ACTIVE_MISS_MAX_AGE_MS) break;
+      missSet.delete(candidate);
+    }
   }
 
   /**
@@ -123,6 +136,11 @@ export function makeActiveSetCache() {
 }
 
 const activeSetCache = makeActiveSetCache();
+
+/** @param {string} ns @param {string} worker */
+export function isFreshTailInactive(ns, worker) {
+  return activeSetCache.isFreshInactive(`${ns}:${worker}`);
+}
 
 /** @param {Request} request */
 export function fetchTailFields(request) {

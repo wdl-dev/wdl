@@ -76,6 +76,7 @@ export function d1RuntimeQuery(service, body) {
   );
   return {
     status: res.status,
+    headers: res.headers,
     body: normalizeD1QueryBody(decodeD1QueryResponse(Buffer.from(res.bodyB64, "base64"))),
   };
 }
@@ -91,6 +92,7 @@ export function d1RuntimeQueryRaw(service, body) {
   );
   return {
     status: res.status,
+    headers: res.headers,
     body: decodeD1QueryResponse(Buffer.from(res.bodyB64, "base64")),
   };
 }
