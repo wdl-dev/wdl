@@ -15,16 +15,20 @@ import {
   D1_OWNER_HINT_HEADERS,
   D1_OWNERSHIP_CODES,
   D1_QUERY_CONTENT_TYPE,
+  D1_QUERY_NATIVE_VALUE_ENCODING,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
+  D1_QUERY_RESULT_HEADERS,
   decodeD1QueryResponse,
   encodeD1QueryRequest,
 } from "shared-d1-query-wire";
+import { decodeD1Transport } from "shared-d1-transport";
 import { metrics } from "runtime-metrics";
 import { createOwnerHintCache } from "runtime-owner-hint-cache";
 import { validOwnerEndpointForService } from "shared-owner-endpoint";
 import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { withInternalAuth } from "shared-internal-auth";
 import { errorMessage } from "shared-errors";
+import { logStructured } from "shared-observability";
 import { contentTypeEssence } from "shared-respond";
 
 const OWNER_HINT_STALE_CODES = new Set(D1_OWNERSHIP_CODES);
@@ -85,8 +89,8 @@ function ownerHintKey(props) {
  * @returns {never}
  */
 function throwD1Payload(payload, status) {
-  // D1 runtime/control/runtime ship in one image; this in-tree protocol has no
-  // rolling-version compatibility branch.
+  // D1 machine error codes are an in-tree contract. The additive binary-value
+  // encoding fallback is handled separately while parsing successful payloads.
   const machineCode = payload?.error || null;
   const code = machineCode ? ` [${machineCode}]` : "";
   const message = payload?.message || `backend status ${status}`;
@@ -174,18 +178,81 @@ function deleteOwnerHint(db) {
 
 /**
  * @param {Response} response
+ * @param {string} causeCode
+ * @param {unknown} [cause]
+ */
+function invalidD1ResponseError(response, causeCode, cause = null) {
+  const detail = cause == null ? "" : `: ${errorMessage(cause)}`;
+  return Object.assign(
+    new Error(`D1_ERROR: D1 runtime returned invalid response status ${response.status}${detail}`),
+    { causeCode }
+  );
+}
+
+/** @param {unknown} err */
+function invalidD1ResponseCauseCode(err) {
+  try {
+    const causeCode = /** @type {{ causeCode?: unknown }} */ (err)?.causeCode;
+    return typeof causeCode === "string" && causeCode ? causeCode : "invalid-response";
+  } catch {
+    return "invalid-response";
+  }
+}
+
+/**
+ * @param {D1Binding} db
+ * @param {Response} response
+ * @param {string | null} requestId
+ * @param {unknown} err
+ */
+function recordInvalidD1Response(db, response, requestId, err) {
+  logStructured(serviceName(db.env), "warn", "d1_runtime_response_invalid", {
+    request_id: requestId,
+    namespace: db.ctx.props.ns,
+    database_id: db.ctx.props.databaseId,
+    upstream_status: response.status,
+    upstream_cause_code: invalidD1ResponseCauseCode(err),
+  });
+}
+
+/**
+ * @param {Response} response
  * @returns {Promise<D1Payload>}
  */
 async function parseD1Payload(response) {
   const contentType = response.headers.get("content-type") || "";
   if (!d1PayloadContentType(contentType)) {
-    throw new Error(`D1_ERROR: D1 runtime returned unsupported content-type ${contentType || "none"}`);
+    throw invalidD1ResponseError(response, "unsupported-content-type");
   }
+  /** @type {Uint8Array} */
+  let bytes;
   try {
-    return /** @type {D1Payload} */ (Object(decodeD1QueryResponse(new Uint8Array(await response.arrayBuffer()))));
-  } catch {
-    throw new Error(`D1_ERROR: D1 runtime returned invalid binary status ${response.status}`);
+    bytes = new Uint8Array(await response.arrayBuffer());
+  } catch (err) {
+    throw invalidD1ResponseError(response, "response-body-read-failed", err);
   }
+  /** @type {unknown} */
+  let payload;
+  try {
+    payload = decodeD1QueryResponse(bytes);
+  } catch (err) {
+    throw invalidD1ResponseError(response, "binary-decode-failed", err);
+  }
+  const valueEncoding = response.headers.get(D1_QUERY_RESULT_HEADERS.valueEncoding);
+  if (valueEncoding === D1_QUERY_NATIVE_VALUE_ENCODING) {
+    return /** @type {D1Payload} */ (Object(payload));
+  }
+  if (valueEncoding === null) {
+    try {
+      return /** @type {D1Payload} */ (Object(decodeD1Transport(payload)));
+    } catch (err) {
+      const causeCode = Object(err)?.code === "unsupported-d1-transport-version"
+        ? "unsupported-d1-transport-version"
+        : "legacy-value-decode-failed";
+      throw invalidD1ResponseError(response, causeCode, err);
+    }
+  }
+  throw invalidD1ResponseError(response, "unsupported-value-encoding");
 }
 
 /** @param {string} contentType */
@@ -299,6 +366,7 @@ async function sendQuery(db, mode, statements, requestId = null) {
     try {
       payload = await parseD1Payload(response);
     } catch (err) {
+      recordInvalidD1Response(db, response, requestId, err);
       if (usedOwnerHint) {
         deleteOwnerHint(db);
         recordOwnerHintOutcome(db.env, "cleared");
@@ -322,6 +390,7 @@ async function sendQuery(db, mode, statements, requestId = null) {
       try {
         payload = await parseD1Payload(response);
       } catch (err) {
+        recordInvalidD1Response(db, response, requestId, err);
         throwD1TransportError(new D1ResultUnknownError(err));
       }
     }

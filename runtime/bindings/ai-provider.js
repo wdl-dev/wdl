@@ -57,14 +57,24 @@ export function expectedAiProviderDestination(kind, protocol, transport) {
   return `${websocket ? "wss" : "https"}://${host}${path}`;
 }
 
-/** @param {Set<string>} found @param {unknown} value */
-function collectInputModalities(found, value) {
+/** @param {string[]} supportedModalities @param {string} modality */
+function assertInputModalitySupported(supportedModalities, modality) {
+  if (!supportedModalities.includes(modality)) {
+    throw new AiProviderRequestError(
+      "ai_input_modality_unsupported",
+      `AI model does not support ${modality} input`
+    );
+  }
+}
+
+/** @param {string[]} supportedModalities @param {unknown} value */
+function enforceInputModalitiesInValue(supportedModalities, value) {
   if (typeof value === "string") {
-    found.add("text");
+    assertInputModalitySupported(supportedModalities, "text");
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) collectInputModalities(found, entry);
+    for (const entry of value) enforceInputModalitiesInValue(supportedModalities, entry);
     return;
   }
   if (!isRecord(value)) return;
@@ -76,36 +86,54 @@ function collectInputModalities(found, value) {
     type === "output_text" ||
     type === "refusal"
   ) {
-    found.add("text");
+    assertInputModalitySupported(supportedModalities, "text");
   }
-  if (type === "image_url" || type === "input_image") found.add("image");
-  if (type === "audio" || type === "input_audio") found.add("audio");
-  if (type === "file" || type === "input_file") found.add("file");
-  if (type === "computer_screenshot") found.add("image");
+  if (type === "image_url" || type === "input_image") {
+    assertInputModalitySupported(supportedModalities, "image");
+  }
+  if (type === "audio" || type === "input_audio") {
+    assertInputModalitySupported(supportedModalities, "audio");
+  }
+  if (type === "file" || type === "input_file") {
+    assertInputModalitySupported(supportedModalities, "file");
+  }
+  if (type === "computer_screenshot") {
+    assertInputModalitySupported(supportedModalities, "image");
+  }
 
   // Only documented message/content and replay-output carriers contribute
   // modalities. Tool schemas, arguments, IDs, and encrypted state remain opaque.
-  if (Object.hasOwn(record, "content")) collectInputModalities(found, record.content);
+  if (Object.hasOwn(record, "content")) {
+    enforceInputModalitiesInValue(supportedModalities, record.content);
+  }
   if (
     type === "function_call_output" ||
     type === "custom_tool_call_output" ||
     type === "computer_call_output"
   ) {
-    collectInputModalities(found, record.output);
+    enforceInputModalitiesInValue(supportedModalities, record.output);
   }
   if (
     type === "local_shell_call_output" ||
     type === "apply_patch_call_output" ||
     type === "mcp_call"
   ) {
-    if (typeof record.output === "string") found.add("text");
+    if (typeof record.output === "string") {
+      assertInputModalitySupported(supportedModalities, "text");
+    }
   }
-  if (type === "mcp_call" && typeof record.error === "string") found.add("text");
-  if (type === "mcp_list_tools" && typeof record.error === "string") found.add("text");
+  if (type === "mcp_call" && typeof record.error === "string") {
+    assertInputModalitySupported(supportedModalities, "text");
+  }
+  if (type === "mcp_list_tools" && typeof record.error === "string") {
+    assertInputModalitySupported(supportedModalities, "text");
+  }
   if (type === "mcp_approval_response" && typeof record.reason === "string") {
-    found.add("text");
+    assertInputModalitySupported(supportedModalities, "text");
   }
-  if (type === "program_output" && typeof record.result === "string") found.add("text");
+  if (type === "program_output" && typeof record.result === "string") {
+    assertInputModalitySupported(supportedModalities, "text");
+  }
   if (type === "shell_call_output" && Array.isArray(record.output)) {
     for (const output of record.output) {
       if (!isRecord(output)) continue;
@@ -114,7 +142,7 @@ function collectInputModalities(found, value) {
         typeof outputRecord.stdout === "string" ||
         typeof outputRecord.stderr === "string"
       ) {
-        found.add("text");
+        assertInputModalitySupported(supportedModalities, "text");
       }
     }
   }
@@ -123,46 +151,49 @@ function collectInputModalities(found, value) {
       if (!isRecord(output)) continue;
       const outputRecord = output;
       if (outputRecord.type === "logs" && typeof outputRecord.logs === "string") {
-        found.add("text");
+        assertInputModalitySupported(supportedModalities, "text");
       }
       if (outputRecord.type === "image" && typeof outputRecord.url === "string") {
-        found.add("image");
+        assertInputModalitySupported(supportedModalities, "image");
       }
     }
   }
   if (type === "image_generation_call" && typeof record.result === "string") {
-    found.add("image");
+    assertInputModalitySupported(supportedModalities, "image");
   }
   if (type === "file_search_call" && Array.isArray(record.results)) {
     for (const result of record.results) {
       if (!isRecord(result)) continue;
       const resultRecord = result;
-      if (typeof resultRecord.text === "string") found.add("text");
+      if (typeof resultRecord.text === "string") {
+        assertInputModalitySupported(supportedModalities, "text");
+      }
     }
   }
 }
 
-/** @param {Record<string, unknown>} body @param {string} protocol */
-function requestedInputModalities(body, protocol) {
-  const found = new Set();
+/** @param {Record<string, unknown>} body @param {AiResolved} resolved */
+function enforceInputModalities(body, resolved) {
+  const supportedModalities = resolved.inputModalities;
   if (
-    protocol === "responses" &&
+    resolved.protocol === "responses" &&
     typeof body.instructions === "string" &&
     body.instructions.length > 0
   ) {
-    found.add("text");
+    assertInputModalitySupported(supportedModalities, "text");
   }
   if (Object.hasOwn(body, "input")) {
-    if (protocol === "embeddings") found.add("text");
-    else collectInputModalities(found, body.input);
+    if (resolved.protocol === "embeddings") {
+      assertInputModalitySupported(supportedModalities, "text");
+    } else enforceInputModalitiesInValue(supportedModalities, body.input);
   }
-  if (protocol === "responses" && isRecord(body.prompt)) {
+  if (resolved.protocol === "responses" && isRecord(body.prompt)) {
     const prompt = body.prompt;
     const variables = prompt.variables;
     if (isRecord(variables)) {
       const values = variables;
       for (const value of Object.values(values)) {
-        collectInputModalities(found, value);
+        enforceInputModalitiesInValue(supportedModalities, value);
       }
     }
   }
@@ -170,20 +201,21 @@ function requestedInputModalities(body, protocol) {
     for (const message of body.messages) {
       if (isRecord(message)) {
         const record = message;
-        collectInputModalities(found, record.content);
-        if (protocol === "chat_completions") {
+        enforceInputModalitiesInValue(supportedModalities, record.content);
+        if (resolved.protocol === "chat_completions") {
           if (typeof record.refusal === "string" && record.refusal.length > 0) {
-            found.add("text");
+            assertInputModalitySupported(supportedModalities, "text");
           }
           if (isRecord(record.audio)) {
             const audio = record.audio;
-            if (typeof audio.id === "string" && audio.id.length > 0) found.add("audio");
+            if (typeof audio.id === "string" && audio.id.length > 0) {
+              assertInputModalitySupported(supportedModalities, "audio");
+            }
           }
         }
       }
     }
   }
-  return found;
 }
 
 /** @param {AiResolved} resolved @param {Record<string, unknown>} body */
@@ -194,14 +226,7 @@ function enforceProviderRequest(resolved, body) {
       "Background AI responses are not supported"
     );
   }
-  for (const modality of requestedInputModalities(body, resolved.protocol)) {
-    if (!resolved.inputModalities.includes(modality)) {
-      throw new AiProviderRequestError(
-        "ai_input_modality_unsupported",
-        `AI model does not support ${modality} input`
-      );
-    }
-  }
+  enforceInputModalities(body, resolved);
   if (body.previous_response_id != null && !resolved.capabilities.previousResponseId) {
     throw new AiProviderRequestError(
       "ai_continuation_unsupported",

@@ -103,9 +103,10 @@ export const {
 } = aiWebSocket;
 export const {
   aiPoolStateForTest,
+  prepareAiCapacityMetrics,
   resetAiPoolStateForTest,
 } = aiCapacity;
-export const { aiProviderWebSocketRequest } = aiProvider;
+export const { aiProviderHttpRequest, aiProviderWebSocketRequest } = aiProvider;
 
 export function resetAiHostTestState() {
   AI_HOST_TEST_STATE.metrics.length = 0;

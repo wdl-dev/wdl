@@ -60,7 +60,15 @@ test("wdl CLI exercises deploy, workers, secrets, and delete lifecycle", async (
   assertOk(deleteSecret);
   assert.match(deleteSecret.stdout, /kv-demo\/CLI_SMOKE_SECRET deleted .* promoted v2 .* v3/);
 
-  const deleteVersion = runWdlCli(["delete", "version", "--ns", ns, "kv-demo", "v1"]);
+  const deleteVersion = runWdlCli([
+    "delete",
+    "version",
+    "--ns",
+    ns,
+    "kv-demo",
+    "v1",
+    "--yes",
+  ]);
   assertOk(deleteVersion);
   assert.match(deleteVersion.stdout, new RegExp(`OK ${RegExp.escape(ns)}/kv-demo@v1 deleted`));
 

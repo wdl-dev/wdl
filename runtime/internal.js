@@ -21,6 +21,8 @@ import {
   readWorkflowNotifyDispatch,
   readWorkflowRunDispatch,
 } from "runtime-dispatch";
+import { prepareWorkflowReplayCacheMetrics } from "runtime-dispatch-workflow-replay-cache";
+import { prepareAiCapacityMetrics } from "runtime-bindings-ai-capacity";
 import { getLoadedWorkerStub } from "runtime-load";
 import {
   bindRuntime,
@@ -83,6 +85,8 @@ export default class RuntimeInternal extends WorkerEntrypoint {
 
       if (request.method === "GET" && pathname === "/_metrics") {
         scope.setRoute("metrics");
+        prepareAiCapacityMetrics(env);
+        prepareWorkflowReplayCacheMetrics();
         return scope.respond(prometheusResponse(runtime.metrics));
       }
 

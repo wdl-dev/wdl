@@ -32,6 +32,14 @@ impl WorkflowError {
         }
     }
 
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: "workflow_backend_unavailable",
+            message: message.into(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
     pub(crate) fn payload_missing(message: impl Into<String>) -> Self {
         Self {
             code: "workflow_payload_missing",

@@ -565,6 +565,10 @@ fn workflow_runtime_dispatch_timeout_releases_run_claim_unlike_do_alarm_dispatch
         "ordinary workflow runtime dispatch must keep using the explicit dispatch timeout boundary"
     );
     assert!(
+        runtime_dispatch_source.contains(r#""dispatchDeadlineMs": dispatch_deadline_ms"#),
+        "runtime must receive the sender-computed absolute dispatch deadline"
+    );
+    assert!(
         tick_source.contains("Err(err) => {\n            app.metrics")
             && tick_source
                 .contains("release_run_claim(app, &identity, &claim, &previous_status).await?;"),

@@ -253,8 +253,6 @@ test("DO runtime load: applies the host-binding wrapper before the alarm wrapper
   assert.deepEqual(loaded.compatibilityFlags, ["nodejs_compat", "delete_all_preserves_alarm"]);
   assert.doesNotMatch(loaded.modules["_wdl-wrapper.js"], /__wdlRunWithRequestContext/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function withoutInternalEnv/);
-  assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function deleteAllKvStorage/);
-  assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function deleteAllSqlStorage/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /export function wrapDurableObjectClass/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /delete out\[ALARMS_BINDING\];/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /const objectDefineProperty = Object\.defineProperty;/);

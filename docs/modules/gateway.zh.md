@@ -74,6 +74,7 @@ Control 写 Redis 并 publish invalidation。Gateway 不反向调用 control 查
 - Route cache 是 pull-triggered，并且能自愈。
 - Gateway 在 subscriber connect 和 disconnect 时清 route/pattern cache，因为 pub/sub 消息不持久。
 - Subscriber reconnect 会清本地 cache，下一次请求重新读 Redis；漏掉 invalidation 最多导致有界 stale cache，不会永久漂移。
+- Subscriber 只有在 Redis 确认全部已配置 subscription 后才重置 reconnect backoff。单纯 TCP connect 或只收到部分 acknowledgement 会继续原来的有界指数退避；已建立 subscription 后再次断开则从 100 ms 重新开始。
 - Gateway 还会按 namespace/worker 维护本进程 active public WebSocket session registry。`session-policy:restart` 只为 restart sequence 较旧的 session 请求一次对应 worker 的权威 reconciliation，`worker:delete` 对成功 whole-worker delete 做同样处理；两者都不会仅凭 event 内容关闭连接。Delete reconciliation 读取到 worker inactive 时，已建立 session 会以 `1012` 关闭；如果同名 worker 在一次成功的权威读取前已经完成重建，最新 projection 生效，当前状态无法证明中间发生过删除。完全消除这个已接受窗口需要 durable incarnation fence。Subscriber 只 settle 在 WebSocket request 中创建的 lifecycle signal，workerd 会先把 continuation 恢复到该 WebSocket 的 IoContext，再由 Gateway 操作两端 peer。Subscriber reconnect 时，Gateway 以有界并发重读全部本地 group；后续 `preserve` projection 会在同一 sequence 上覆盖尚未观察到的 restart。传输失败会保留健康 session，并按有界退避仅重试失败 group；只有畸形或回退的权威状态才会以 `1011` 关闭受影响 session。
 - Membership gate 读取会在该 gate 变化时重新开始。Gate 已就绪后，冷 route 或 pattern projection 读取由对应 namespace/host 与全量 reset generation 共同保护：同 key invalidation 或全量 reset 会丢弃回复，无关 key invalidation 不会。Per-key generation 只在读取进行期间存在。Gateway 最多尝试五个 snapshot，之后返回 `503 gateway_routing_unavailable`。
 - Namespace 之间的 pattern-host 重分配也有同样的非持久 hint window：普通 control writer 会 publish invalidation，但只有 gateway 丢弃或刷新本地 cache 后，Redis 权威状态才会生效。
@@ -100,6 +101,8 @@ Control 写 Redis 并 publish invalidation。Gateway 不反向调用 control 查
 ## 可观测性
 
 Gateway 输出包含 request id、route context 和 outcome 的 request log。Metrics 只使用有界 label；namespace、worker、version、path 细节进日志，不进 metric label。
+
+两次 scrape 之间以进程内 WebSocket connection 和 buffered-message counter 为权威值。Connection lifecycle 与 enqueue/dequeue path 只更新这些 counter，不逐 event 重写 Prometheus registry；`prepareGatewayMetrics()` 会在 `/_metrics` render 前立即发布其当前值。
 
 `/healthz` 和 `/_metrics` 会在公开 gateway listener 上、host 分类前返回。这是有意设计：load balancer 需要不依赖 route 的健康探针，而 gateway metrics 描述的是 ingress 进程，不是某个 tenant worker。这两个根路径是 gateway 全局保留路径，因此名为 `healthz` 或 `_metrics` 的 tenant worker 不能通过 subdomain routing 占用自己的根 fetch path；但另一个 worker 下的 `/app/_metrics` 这类路径仍是普通 tenant fetch。Gateway metrics 因此必须保持适合公开 data-plane socket：可以暴露有界的 service、route-stage、outcome、binding、websocket-state、Redis-command 和 cache size 信号，但不得暴露 namespace、worker、version、request path、token、secret、raw host、raw error text 或其它 tenant-controlled label。如果某个部署认为运营流量或 cache state 也敏感，应在 ingress、load balancer 或 service-mesh 层屏蔽 `/_metrics`，同时保留 `/healthz` 用于 readiness。
 

@@ -10,8 +10,6 @@ export const log = createLogger(SERVICE);
 /** @type {Map<string, import("do-runtime-owner-registry").DoOwner>} */
 export const ownedScopes = new Map();
 
-metrics.setGauge("do_in_flight_requests", { service: SERVICE }, 0);
-
 let draining = false;
 let inFlightRequests = 0;
 /** @type {Set<(value?: unknown) => void>} */
@@ -25,7 +23,7 @@ export function setDraining(value = true) {
   draining = value === true;
 }
 
-function updateInFlightGauge() {
+export function prepareDoRuntimeMetrics() {
   metrics.setGauge("do_in_flight_requests", { service: SERVICE }, inFlightRequests);
 }
 
@@ -100,13 +98,11 @@ function notifyInFlightWaiters() {
 export function beginInFlightDispatch() {
   if (draining) return false;
   inFlightRequests += 1;
-  updateInFlightGauge();
   return true;
 }
 
 export function endInFlightDispatch() {
   if (inFlightRequests > 0) inFlightRequests -= 1;
-  updateInFlightGauge();
   notifyInFlightWaiters();
 }
 

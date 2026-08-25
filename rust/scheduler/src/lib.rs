@@ -8,6 +8,7 @@ mod observability;
 mod queue;
 mod redis_scan;
 mod remote_tick;
+mod response_body;
 mod runtime_client;
 mod server;
 mod state;

@@ -23,8 +23,9 @@ import {
   readDoInvokeRequest,
   readJsonBody,
 } from "do-runtime-protocol";
-import { DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
+import { DO_FORWARD_HEADERS, DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
 import { json, jsonError } from "do-runtime-http";
+import { prepareAiCapacityMetrics } from "runtime-bindings-ai-capacity";
 import {
   parseObjectRegistryMember,
 } from "do-runtime-object-registry";
@@ -33,6 +34,7 @@ import {
   log,
   metrics,
   ownedScopes,
+  prepareDoRuntimeMetrics,
   recordDoInvoke,
   recordDoWebSocketUpgrade,
   SERVICE,
@@ -82,7 +84,7 @@ const STORAGE_DELETE_REQUEST = {
  * @typedef {Record<string, unknown> & { LOG_LEVEL?: unknown, REDIS_ADDR?: string, DO_HOSTS: DurableObjectNamespace, DO_DRAIN_IN_FLIGHT_TIMEOUT_MS?: unknown, DO_RENEW_INTERVAL_MS?: unknown }} DoEnv
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  * @typedef {{ ownerKey: string, hostId?: string, className?: string, ns: string, worker: string, doStorageId: string, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} DoOwner
- * @typedef {{ requestId?: string | null, hopCount?: number, forwardPath?: string, localUrl?: string, request?: { method: string, url: string, headers: Array<[string, string]> } | null, metricKind?: string | null, acceptOwnerHint?: boolean, allowSupersededVersion?: boolean }} DispatchOptions
+ * @typedef {{ requestId?: string | null, hopCount?: number, forwardPath?: string, localUrl?: string, request?: { method: string, url: string, headers: Array<[string, string]> } | null, metricKind?: string | null, allowSupersededVersion?: boolean }} DispatchOptions
  * @typedef {{ ns?: unknown, worker?: unknown, version?: unknown, doStorageId?: unknown, members?: unknown }} StorageDeleteInput
  */
 
@@ -125,6 +127,40 @@ function ownerFence(owner) {
     ownerKey: owner.ownerKey,
     taskId: owner.taskId,
     generation: owner.generation,
+  };
+}
+
+/**
+ * A trusted route fence may skip only the outer resolver. The host actor still
+ * owns drain admission and checks Redis owner, lease, delete lock, storage, and
+ * session policy after actor queuing.
+ *
+ * @param {DoInvoke} invoke
+ * @param {{ taskId: string, endpoint: string }} localTask
+ * @returns {DoOwner | null}
+ */
+function localOwnerFromFence(invoke, localTask) {
+  const owner = invoke.owner;
+  const observed = owner?.ownerKey ? ownedScopes.get(owner.ownerKey) : null;
+  if (
+    owner == null ||
+    owner.ownerKey !== invoke.hostId ||
+    owner.taskId !== localTask.taskId ||
+    observed == null ||
+    observed.taskId !== owner.taskId ||
+    observed.generation !== owner.generation ||
+    observed.doStorageId !== invoke.doStorageId
+  ) {
+    return null;
+  }
+  return {
+    ownerKey: owner.ownerKey,
+    taskId: owner.taskId,
+    endpoint: localTask.endpoint,
+    generation: owner.generation,
+    ns: invoke.ns,
+    worker: invoke.worker,
+    doStorageId: invoke.doStorageId,
   };
 }
 
@@ -175,10 +211,9 @@ function acceptsOwnerHint(request) {
  * @param {DoInvoke} invoke
  * @param {string | null} [requestId]
  * @param {number} [hopCount]
- * @param {boolean} [acceptOwnerHint]
  */
-async function dispatchInvoke(env, invoke, requestId = null, hopCount = 0, acceptOwnerHint = false) {
-  return await dispatchToOwner(env, invoke, { requestId, hopCount, metricKind: invoke.kind, acceptOwnerHint });
+async function dispatchInvoke(env, invoke, requestId = null, hopCount = 0) {
+  return await dispatchToOwner(env, invoke, { requestId, hopCount, metricKind: invoke.kind });
 }
 
 /**
@@ -204,15 +239,14 @@ async function dispatchToOwner(
     localUrl = "https://do-runtime.internal/invoke",
     request = null,
     metricKind = null,
-    acceptOwnerHint = false,
     allowSupersededVersion = false,
   } = {}
 ) {
-  const owner = await resolveDoOwner(env, invoke, { allowSupersededVersion });
   const localTask = await resolveTaskIdentity(env);
+  const owner = localOwnerFromFence(invoke, localTask) ??
+    await resolveDoOwner(env, invoke, { allowSupersededVersion });
   const dispatchPayload = withRequestOverride(invoke, request);
   if (owner.taskId !== localTask.taskId) {
-    if (acceptOwnerHint) return ownerHintResponse(owner);
     return await forwardToOwner(dispatchPayload, env, owner, requestId, hopCount, forwardPath);
   }
 
@@ -252,8 +286,7 @@ async function handleInvoke(request, env, requestId) {
     env,
     invoke,
     requestId,
-    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count")),
-    acceptsOwnerHint(request)
+    parseForwardHopCount(request.headers.get(DO_FORWARD_HEADERS.hopCount))
   );
 }
 
@@ -266,8 +299,8 @@ async function handleInvoke(request, env, requestId) {
  * @param {boolean} [acceptOwnerHint]
  */
 async function dispatchConnect(env, invoke, request, requestId = null, hopCount = 0, acceptOwnerHint = false) {
-  const owner = await resolveDoOwner(env, invoke);
   const localTask = await resolveTaskIdentity(env);
+  const owner = localOwnerFromFence(invoke, localTask) ?? await resolveDoOwner(env, invoke);
   if (owner.taskId !== localTask.taskId) {
     if (acceptOwnerHint) return ownerHintResponse(owner);
     return await forwardConnectToOwner(request, invoke, env, owner, requestId, hopCount);
@@ -298,7 +331,7 @@ async function handleConnect(request, env, requestId) {
     invoke,
     request,
     requestId,
-    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count")),
+    parseForwardHopCount(request.headers.get(DO_FORWARD_HEADERS.hopCount)),
     acceptsOwnerHint(request)
   );
 }
@@ -369,7 +402,7 @@ async function handleStorageDelete(request, env, requestId) {
     env,
     invoke,
     requestId,
-    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count"))
+    parseForwardHopCount(request.headers.get(DO_FORWARD_HEADERS.hopCount))
   );
 }
 
@@ -514,6 +547,8 @@ export default {
         return scope.respond(healthResponse(env));
       }
       if (request.method === "GET" && url.pathname === "/_metrics") {
+        prepareAiCapacityMetrics(env);
+        prepareDoRuntimeMetrics();
         return scope.respond(prometheusResponse(metrics));
       }
       if (!verifyInternalAuthHeaders(request.headers, env)) {

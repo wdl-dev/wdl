@@ -18,7 +18,6 @@ import { OBSERVABILITY_NOOP_URL } from "./mocks/observability.js";
  *   draining: boolean,
  *   inFlight: number,
  *   logs: any[],
- *   gaugeSamples: any[],
  *   assertCalls: number,
  *   forgottenOwners: string[],
  *   registryError?: unknown,
@@ -40,7 +39,6 @@ const DO_ACTOR_TEST_STATE = {
   draining: false,
   inFlight: 0,
   logs: [],
-  gaugeSamples: [],
   assertCalls: 0,
   forgottenOwners: [],
 };
@@ -81,7 +79,12 @@ export function buildFacetName(invoke) {
   return [invoke.className, invoke.objectName].join(":");
 }
 export function buildAlarmRequest() { throw new Error("unexpected alarm request"); }
-export function buildForwardRequest() { throw new Error("unexpected forward request"); }
+export function buildForwardRequest(request) {
+  return new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+  });
+}
 export function normalizeDoConnectRequest() { throw new Error("unexpected connect normalize"); }
 export async function readLocalActorInvokeRequest() {
   const next = globalThis.__doActorTestState.actorInvokes.shift();
@@ -131,11 +134,6 @@ export function setDraining(value = true) {
 export function log(level, event, fields = {}) {
   globalThis.__doActorTestState.logs.push({ level, event, fields });
 }
-export const metrics = {
-  setGauge(name, labels, value) {
-    globalThis.__doActorTestState.gaugeSamples.push({ name, labels, value });
-  },
-};
 `);
 
 const source = applyModuleReplacements(readRepositoryFile("do-runtime/actor.js"), [
@@ -167,7 +165,6 @@ export function resetDoHostActorHarness() {
   state.draining = false;
   state.inFlight = 0;
   state.logs = [];
-  state.gaugeSamples = [];
   state.assertCalls = 0;
   state.forgottenOwners = [];
   delete state.registryError;

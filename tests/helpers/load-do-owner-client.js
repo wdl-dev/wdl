@@ -8,6 +8,10 @@ import { repositoryFileUrl } from "./load-shared-module.js";
 export const protocolUrl = doProtocolDataUrl();
 const { DO_INVOKE_CONTENT_TYPE: invokeContentType } = await loadDoProtocol();
 export const DO_INVOKE_CONTENT_TYPE = invokeContentType;
+const { DO_FORWARD_HEADERS: forwardHeaders } = await import(
+  repositoryFileUrl("runtime/_wdl-do-scoped-request.js")
+);
+export const DO_FORWARD_HEADERS = forwardHeaders;
 
 const ownerHarness = createOwnerClientHarness("__doOwnerClientTestState", "do-runtime");
 

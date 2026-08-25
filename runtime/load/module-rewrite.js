@@ -19,7 +19,6 @@ export const HOST_BINDING_MODULE_NAMES = Object.freeze({
   d1Params: "_wdl-d1-params.js",
   utf8: "_wdl-utf8.js",
   sqlSplitter: "_wdl-sql-splitter.js",
-  d1Transport: "_wdl-d1-transport.js",
   r2Client: "_wdl-r2-client.js",
   r2Utils: "_wdl-r2-utils.js",
   doClient: "_wdl-do-client.js",

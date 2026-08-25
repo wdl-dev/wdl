@@ -55,7 +55,6 @@ const utf8Decoder = new TextDecoder();
  *   d1ParamsSource: string,
  *   utf8Source: string,
  *   sqlSplitterSource: string,
- *   d1TransportSource: string,
  *   r2ClientSource: string,
  *   r2UtilsSource: string,
  *   doClientSource: string,
@@ -110,10 +109,6 @@ function runtimeModuleInjections(sources) {
     '"./utf8.js"',
     `"./${HOST_BINDING_MODULE_NAMES.utf8}"`
   );
-  const d1TransportInjectedSource = sources.d1TransportSource.replace(
-    /from "shared-d1-data-field";/,
-    `from "./${HOST_BINDING_MODULE_NAMES.d1DataField}";`
-  );
   /** @type {RuntimeModuleInjection[]} */
   const d1ModuleInjections = [
     requestIdModuleInjection,
@@ -121,7 +116,6 @@ function runtimeModuleInjections(sources) {
     [HOST_BINDING_MODULE_NAMES.utf8, sources.utf8Source],
     [HOST_BINDING_MODULE_NAMES.d1Params, d1ParamsInjectedSource],
     [HOST_BINDING_MODULE_NAMES.sqlSplitter, sources.sqlSplitterSource],
-    [HOST_BINDING_MODULE_NAMES.d1Transport, d1TransportInjectedSource],
     [HOST_BINDING_MODULE_NAMES.d1Client, sources.d1ClientSource],
   ];
   /** @type {RuntimeModuleInjection[]} */

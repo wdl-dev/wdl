@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::{Value as JsonValue, json};
+use wdl_rust_common::JS_MAX_SAFE_INTEGER;
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::redis_eval::StaticRedisScript;
 use wdl_rust_common::time::now_ms;
@@ -83,6 +84,13 @@ redis.call("ZREM", KEYS[5], ARGV[7])
 return 1
 "#;
 
+fn runtime_dispatch_deadline_ms(now_ms: i64, timeout_ms: u64) -> i64 {
+    let timeout_ms = i64::try_from(timeout_ms).unwrap_or(i64::MAX);
+    now_ms
+        .saturating_add(timeout_ms)
+        .clamp(1, JS_MAX_SAFE_INTEGER as i64)
+}
+
 static COMMIT_RUNTIME_TERMINAL: StaticRedisScript =
     StaticRedisScript::new(COMMIT_RUNTIME_TERMINAL_SCRIPT);
 
@@ -91,6 +99,64 @@ pub(super) enum RuntimeCommitOutcome {
     Failed,
     Suspended,
     Fenced,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RuntimeResponseOutcome {
+    Completed(JsonValue),
+    Failed(JsonValue),
+    Suspended,
+}
+
+fn runtime_response_outcome(response: &JsonValue) -> WorkflowResult<RuntimeResponseOutcome> {
+    match response.get("outcome").and_then(JsonValue::as_str) {
+        Some("completed") => response
+            .get("output")
+            .cloned()
+            .map(RuntimeResponseOutcome::Completed)
+            .ok_or_else(|| {
+                WorkflowError::internal_error(
+                    "Workflow completed runtime response is missing output",
+                )
+            }),
+        Some("failed") => response
+            .get("error")
+            .cloned()
+            .map(RuntimeResponseOutcome::Failed)
+            .ok_or_else(|| {
+                WorkflowError::internal_error("Workflow failed runtime response is missing error")
+            }),
+        Some("suspended") => Ok(RuntimeResponseOutcome::Suspended),
+        Some(outcome) => Err(WorkflowError::internal_error(format!(
+            "Workflow runtime response has unknown outcome {outcome:?}"
+        ))),
+        None => Err(WorkflowError::internal_error(
+            "Workflow runtime response is missing outcome",
+        )),
+    }
+}
+
+fn current_runtime_response_outcome(
+    current: &HashMap<String, String>,
+    generation: &str,
+    run_token: &str,
+    response: &JsonValue,
+) -> WorkflowResult<Option<RuntimeResponseOutcome>> {
+    let current_status = current.get("status").map(String::as_str);
+    if current.get("generation").map(String::as_str) != Some(generation)
+        || current.get("runToken").map(String::as_str) != Some(run_token)
+        || matches!(
+            current_status,
+            Some("paused" | "completed" | "failed" | "terminated")
+        )
+    {
+        return Ok(None);
+    }
+    let outcome = runtime_response_outcome(response)?;
+    if outcome == RuntimeResponseOutcome::Suspended && current_status != Some("waiting") {
+        return Ok(None);
+    }
+    Ok(Some(outcome))
 }
 
 struct RuntimeTerminalCommit {
@@ -234,6 +300,8 @@ pub(super) async fn dispatch_runtime(
     let url = runtime_endpoint(app, &identity.ns, "/internal/workflows/run");
     let generation = parse_positive_identity_i64(&identity.generation, "generation")?;
     let created_at_ms = parse_positive_identity_i64(&identity.created_at_ms, "createdAtMs")?;
+    let dispatch_deadline_ms =
+        runtime_dispatch_deadline_ms(now_ms(), app.config.dispatch_timeout_ms);
     let mut request = app
         .http
         .post(url)
@@ -257,6 +325,7 @@ pub(super) async fn dispatch_runtime(
             "generation": generation,
             "createdAtMs": created_at_ms,
             "runToken": run_token,
+            "dispatchDeadlineMs": dispatch_deadline_ms,
             "params": params,
         }))
         .send()
@@ -335,7 +404,6 @@ pub(super) async fn commit_runtime_result(
     claim: &RunClaim,
     response: JsonValue,
 ) -> WorkflowResult<RuntimeCommitOutcome> {
-    let keys = InstanceRouteKeys::new(&identity.ns, &identity.workflow_key, &identity.instance_id);
     let current = read_state_by_id(
         app,
         &identity.ns,
@@ -343,38 +411,26 @@ pub(super) async fn commit_runtime_result(
         &identity.instance_id,
     )
     .await?;
-    let current_generation = current.get("generation").map(String::as_str);
-    let current_status = current.get("status").map(String::as_str);
-    if current_generation != Some(identity.generation.as_str())
-        || matches!(
-            current_status,
-            Some("paused" | "completed" | "failed" | "terminated")
-        )
-    {
+    let Some(outcome) =
+        current_runtime_response_outcome(&current, &identity.generation, &claim.token, &response)?
+    else {
         return Ok(RuntimeCommitOutcome::Fenced);
-    }
-    let outcome = response
-        .get("outcome")
-        .and_then(JsonValue::as_str)
-        .unwrap_or("failed");
+    };
+    let keys = InstanceRouteKeys::new(&identity.ns, &identity.workflow_key, &identity.instance_id);
     let now_ms = now_ms();
     let now = now_ms.to_string();
-    if outcome == "suspended" {
+    if outcome == RuntimeResponseOutcome::Suspended {
         return Ok(if clear_suspended_run_claim(app, identity, claim).await? {
             RuntimeCommitOutcome::Suspended
         } else {
             RuntimeCommitOutcome::Fenced
         });
     }
-    if current.get("runToken").map(String::as_str) != Some(claim.token.as_str()) {
-        return Ok(RuntimeCommitOutcome::Fenced);
-    }
-    if outcome == "completed" {
+    if let RuntimeResponseOutcome::Completed(output) = outcome {
         let retention_ms = terminal_retention_ms(&current, "completed")?;
         let retention_expires_at = now_ms.saturating_add(retention_ms).to_string();
         let error_retention_ms = terminal_retention_ms(&current, "failed")?;
         let error_retention_expires_at = now_ms.saturating_add(error_retention_ms).to_string();
-        let output = response.get("output").cloned().unwrap_or(JsonValue::Null);
         let output_json = match result_json(&output, "output") {
             Ok(output_json) => output_json,
             Err(err) if err.code == "request_too_large" => {
@@ -421,12 +477,9 @@ pub(super) async fn commit_runtime_result(
 
     let retention_ms = terminal_retention_ms(&current, "failed")?;
     let retention_expires_at = now_ms.saturating_add(retention_ms).to_string();
-    let error = response.get("error").cloned().unwrap_or_else(|| {
-        json!({
-            "name": "Error",
-            "message": "Workflow runtime failed"
-        })
-    });
+    let RuntimeResponseOutcome::Failed(error) = outcome else {
+        unreachable!("suspended and completed runtime outcomes returned above");
+    };
     let error_json = match result_json(&error, "error") {
         Ok(error_json) => error_json,
         Err(err) if err.code == "request_too_large" => {
@@ -459,4 +512,171 @@ pub(super) async fn commit_runtime_result(
     log_instance_event(app, "workflow_instance_failed", identity);
     spawn_progress_from_identity(app, identity, "workflow_instance_failed", "failed", None);
     Ok(RuntimeCommitOutcome::Failed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_dispatch_deadline_includes_sender_side_elapsed_time() {
+        assert_eq!(runtime_dispatch_deadline_ms(1_000, 60_000), 61_000);
+        assert_eq!(
+            runtime_dispatch_deadline_ms(i64::MAX - 1, u64::MAX),
+            JS_MAX_SAFE_INTEGER as i64
+        );
+    }
+
+    #[test]
+    fn runtime_response_outcome_accepts_only_the_terminal_protocol_values() {
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/workflow-runtime-response.json"
+        ))
+        .expect("workflow runtime response fixture parses");
+        let outcomes = &fixture["runtimeOutcomes"];
+        let payload_fields = &fixture["terminalPayloadFields"];
+        let completed_field = payload_fields["completed"]
+            .as_str()
+            .expect("completed payload field is a string");
+        let failed_field = payload_fields["failed"]
+            .as_str()
+            .expect("failed payload field is a string");
+        let mut completed = json!({ "outcome": outcomes["completed"] });
+        completed
+            .as_object_mut()
+            .expect("completed response is an object")
+            .insert(completed_field.to_string(), JsonValue::Null);
+        assert_eq!(
+            runtime_response_outcome(&completed).unwrap(),
+            RuntimeResponseOutcome::Completed(JsonValue::Null)
+        );
+        let mut failed = json!({ "outcome": outcomes["failed"] });
+        failed
+            .as_object_mut()
+            .expect("failed response is an object")
+            .insert(failed_field.to_string(), JsonValue::Null);
+        assert_eq!(
+            runtime_response_outcome(&failed).unwrap(),
+            RuntimeResponseOutcome::Failed(JsonValue::Null)
+        );
+        assert_eq!(
+            runtime_response_outcome(&json!({ "outcome": outcomes["suspended"] })).unwrap(),
+            RuntimeResponseOutcome::Suspended
+        );
+
+        for response in [
+            json!({}),
+            json!({ "outcome": null }),
+            json!({ "outcome": "error" }),
+            json!({ "outcome": 1 }),
+            json!({ "outcome": outcomes["completed"] }),
+            json!({ "outcome": outcomes["failed"] }),
+        ] {
+            let err = runtime_response_outcome(&response)
+                .expect_err("missing or unknown runtime outcomes must fail closed");
+            assert_eq!(err.code, "internal_error");
+        }
+
+        let retryable = &fixture["retryableBackendErrors"];
+        let redis_error = WorkflowError::from(redis::RedisError::from((
+            redis::ErrorKind::Io,
+            "test Redis failure",
+        )));
+        for (name, error) in [
+            (
+                "internal",
+                WorkflowError::internal_error("test internal failure"),
+            ),
+            ("redis", redis_error),
+            (
+                "unavailable",
+                WorkflowError::unavailable("test unavailable failure"),
+            ),
+        ] {
+            assert_eq!(retryable[name]["code"].as_str(), Some(error.code));
+            assert_eq!(
+                retryable[name]["status"].as_u64(),
+                Some(u64::from(error.status.as_u16()))
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_response_outcome_is_parsed_only_for_the_current_run() {
+        let malformed = json!({});
+        let current = HashMap::from([
+            ("generation".to_string(), "generation-1".to_string()),
+            ("runToken".to_string(), "run-token-1".to_string()),
+            ("status".to_string(), "running".to_string()),
+        ]);
+
+        assert!(
+            current_runtime_response_outcome(&current, "generation-1", "run-token-1", &malformed,)
+                .is_err()
+        );
+        for stale in [
+            HashMap::from([
+                ("generation".to_string(), "generation-2".to_string()),
+                ("runToken".to_string(), "run-token-1".to_string()),
+                ("status".to_string(), "running".to_string()),
+            ]),
+            HashMap::from([
+                ("generation".to_string(), "generation-1".to_string()),
+                ("runToken".to_string(), "run-token-2".to_string()),
+                ("status".to_string(), "running".to_string()),
+            ]),
+            HashMap::from([
+                ("generation".to_string(), "generation-1".to_string()),
+                ("runToken".to_string(), "run-token-1".to_string()),
+                ("status".to_string(), "paused".to_string()),
+            ]),
+        ] {
+            assert_eq!(
+                current_runtime_response_outcome(
+                    &stale,
+                    "generation-1",
+                    "run-token-1",
+                    &malformed,
+                )
+                .unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn suspended_runtime_response_requires_authoritative_waiting_state() {
+        let response = json!({ "outcome": "suspended" });
+        let mut current = HashMap::from([
+            ("generation".to_string(), "generation-1".to_string()),
+            ("runToken".to_string(), "run-token-1".to_string()),
+            (
+                "runLeaseExpiresAtMs".to_string(),
+                "9999999999999".to_string(),
+            ),
+            ("status".to_string(), "running".to_string()),
+        ]);
+
+        assert_eq!(
+            current_runtime_response_outcome(&current, "generation-1", "run-token-1", &response,)
+                .unwrap(),
+            None
+        );
+        assert_eq!(current.get("status").map(String::as_str), Some("running"));
+        assert_eq!(
+            current.get("runToken").map(String::as_str),
+            Some("run-token-1")
+        );
+        assert_eq!(
+            current.get("runLeaseExpiresAtMs").map(String::as_str),
+            Some("9999999999999")
+        );
+
+        current.insert("status".to_string(), "waiting".to_string());
+        assert_eq!(
+            current_runtime_response_outcome(&current, "generation-1", "run-token-1", &response,)
+                .unwrap(),
+            Some(RuntimeResponseOutcome::Suspended)
+        );
+    }
 }

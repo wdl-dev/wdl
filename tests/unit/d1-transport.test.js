@@ -33,6 +33,15 @@ test("D1 transport exposes binary values as JSON-safe admin API objects", () => 
   );
 });
 
+test("D1 transport preserves native bytes for runtime readers", () => {
+  const bytes = new Uint8Array([0, 1, 2, 255]);
+
+  assert.equal(/** @type {any} */ (decodeD1Transport({ data: bytes })).data, bytes);
+  assert.deepEqual(decodeD1TransportForJson({ data: bytes }), {
+    data: { type: "blob", base64: "AAEC/w==", byteLength: 4 },
+  });
+});
+
 test("D1 transport rejects unsupported binary tag versions", () => {
   assert.throws(
     () => decodeD1Transport({ __wdl_d1_binary_v2: true, base64: "AA==" }),

@@ -6,6 +6,7 @@ import {
   d1ErrorPayload,
   normalizeQueryRequest,
   readD1QueryRequest,
+  readD1QueryResponseBytes,
   readD1QueryResponseWithBytes,
 } from "d1-runtime-protocol";
 import {
@@ -18,12 +19,21 @@ import {
 import {
   createD1QueryDeadline,
 } from "shared-d1-timeout";
-import { D1_OWNER_HINT_HEADERS } from "shared-d1-query-wire";
 import {
+  d1QuerySuccessHeaders,
+  D1_FORWARD_HEADERS,
+  D1_OWNER_HINT_HEADERS,
+  D1_QUERY_RESULT_HEADERS,
+  readD1QuerySuccessHeaders,
+} from "shared-d1-query-wire";
+import {
+  cacheKeyStringsCouldFit,
   D1ReadCache,
+  isReadCacheableQuery,
   payloadChangedDb,
   statementMayBeIdempotentSchemaDdl,
   statementMayChangeDb,
+  readCacheConfig,
 } from "d1-runtime-read-cache";
 import {
   assertD1TestHooksEnabled,
@@ -48,50 +58,84 @@ import {
 } from "d1-runtime-state";
 import { d1QueryBytesResponse, d1QueryResponse } from "d1-runtime-http";
 
-const D1_OWNER_HINT_HEADER_NAMES = Object.values(D1_OWNER_HINT_HEADERS);
+const D1_FORWARDED_RESPONSE_HEADER_NAMES = Object.freeze([
+  ...Object.values(D1_OWNER_HINT_HEADERS),
+  ...Object.values(D1_QUERY_RESULT_HEADERS),
+]);
 const ROUTER_READ_CACHE_MAX_DBS = 10_000;
 
 /**
  * @typedef {Record<string, unknown>} AnyRecord
- * @typedef {Record<string, unknown> & { D1_DATABASES?: DurableObjectNamespace, D1_READ_CACHE_TTL_MS?: unknown, D1_READ_CACHE_MAX_ENTRIES?: unknown, D1_QUERY_TIMEOUT_MS?: unknown }} D1Env
+ * @typedef {Record<string, unknown> & { D1_DATABASES?: DurableObjectNamespace, D1_READ_CACHE_TTL_MS?: unknown, D1_READ_CACHE_MAX_ENTRIES?: unknown, D1_READ_CACHE_MAX_BYTES?: unknown, D1_QUERY_TIMEOUT_MS?: unknown }} D1Env
  * @typedef {import("d1-runtime-protocol").NormalizedStatement} D1Statement
+ * @typedef {import("d1-runtime-read-cache").ReadCacheToken} ReadCacheToken
  * @typedef {{ dbKey: string, namespace: string, databaseId: string, binding: string | null, mode: string, slot: number, statements: D1Statement[] }} D1Query
  * @typedef {{ taskId: string, endpoint: string, generation: number, dbKey: string }} D1Owner
- * @typedef {{ token: unknown, hit: boolean, bytes?: Uint8Array<ArrayBuffer>, preInvalidated?: boolean, mayHaveWrittenWithoutPreInvalidation?: boolean }} RouterRead
+ * @typedef {{ token: ReadCacheToken | null, hit: boolean, bytes?: Uint8Array<ArrayBuffer>, valueEncoding?: string | null, preInvalidated?: boolean, mayHaveWrittenWithoutPreInvalidation?: boolean }} RouterRead
  */
 
 /** @type {Map<string, D1ReadCache>} */
 const routerReadCaches = new Map();
+let routerReadCacheBytes = 0;
+
+/** @param {D1ReadCache} cache @param {number} previousBytes */
+function accountRouterReadCacheBytes(cache, previousBytes) {
+  routerReadCacheBytes += cache.retainedBytes - previousBytes;
+}
+
+/** @param {string} dbKey @param {string | null} [reason] */
+function removeRouterReadCache(dbKey, reason = null) {
+  const cache = routerReadCaches.get(dbKey);
+  if (!cache) return false;
+  const previousBytes = cache.retainedBytes;
+  if (reason !== null) cache.invalidate(reason);
+  cache.retire();
+  routerReadCacheBytes -= previousBytes;
+  routerReadCaches.delete(dbKey);
+  return true;
+}
+
+/** @param {number} maxBytes */
+function enforceRouterReadCacheByteBudget(maxBytes) {
+  while (routerReadCacheBytes > maxBytes) {
+    const oldestKey = routerReadCaches.keys().next().value;
+    if (oldestKey === undefined || !removeRouterReadCache(oldestKey)) break;
+  }
+}
 
 /** @param {D1Env} env @param {string} dbKey */
-function getRouterReadCache(env, dbKey) {
-  let cache = routerReadCaches.get(dbKey);
-  if (cache) {
+function routerReadCacheCandidate(env, dbKey) {
+  return routerReadCaches.get(dbKey) ??
+    new D1ReadCache(env, metrics, { service: SERVICE });
+}
+
+/** @param {string} dbKey @param {D1ReadCache} cache */
+function retainRouterReadCache(dbKey, cache) {
+  if (routerReadCaches.get(dbKey) === cache) {
     routerReadCaches.delete(dbKey);
     routerReadCaches.set(dbKey, cache);
-    return cache;
+    return;
   }
   while (routerReadCaches.size >= ROUTER_READ_CACHE_MAX_DBS) {
     const oldestKey = routerReadCaches.keys().next().value;
     if (oldestKey === undefined) break;
-    routerReadCaches.delete(oldestKey);
+    removeRouterReadCache(oldestKey);
   }
-  cache = new D1ReadCache(env, metrics, { service: SERVICE });
   routerReadCaches.set(dbKey, cache);
-  return cache;
 }
 
 /** @param {string} dbKey */
 function forgetRouterReadCache(dbKey) {
-  const cache = routerReadCaches.get(dbKey);
-  if (cache) cache.invalidate("owner-moved");
-  routerReadCaches.delete(dbKey);
+  removeRouterReadCache(dbKey, "owner-moved");
 }
 
 /** @param {string} dbKey @param {string} reason */
 function invalidateRouterReadCache(dbKey, reason) {
   const cache = routerReadCaches.get(dbKey);
-  if (cache) cache.invalidate(reason);
+  if (!cache) return;
+  const previousBytes = cache.retainedBytes;
+  cache.invalidate(reason);
+  accountRouterReadCacheBytes(cache, previousBytes);
 }
 
 /** @param {D1Owner} owner */
@@ -104,12 +148,12 @@ function ownerHeaders(owner) {
 }
 
 /** @param {Headers} headers */
-function copyOwnerHeaders(headers) {
+function copyForwardedResponseHeaders(headers) {
   /** @type {Record<string, string>} */
   const out = {};
-  for (const name of D1_OWNER_HINT_HEADER_NAMES) {
+  for (const name of D1_FORWARDED_RESPONSE_HEADER_NAMES) {
     const value = headers.get(name);
-    if (value) out[name] = value;
+    if (value !== null) out[name] = value;
   }
   return out;
 }
@@ -132,10 +176,10 @@ function mutatesDb(query) {
 
 /** @param {D1Query | null | undefined} query */
 function canDelayMutationInvalidation(query) {
-  return query?.mode === "exec" &&
-    Array.isArray(query.statements) &&
-    query.statements.length > 0 &&
-    query.statements.every((statement) => statementMayBeIdempotentSchemaDdl(statement?.sql));
+  const statements = query?.statements;
+  return Array.isArray(statements) &&
+    statements.length > 0 &&
+    statements.every((statement) => statementMayBeIdempotentSchemaDdl(statement?.sql));
 }
 
 /** @param {D1Query | null | undefined} query */
@@ -144,28 +188,46 @@ function queryMayChangeDb(query) {
     query.statements.some((statement) => statementMayChangeDb(statement?.sql));
 }
 
-/** @param {D1Query} query @param {D1Env} env @param {D1Owner} owner */
+/** @param {D1Query | null | undefined} query */
+function queryMayMutateDb(query) {
+  return mutatesDb(query) || queryMayChangeDb(query);
+}
+
+/** @param {D1Query} query @param {D1Env} env @param {D1Owner} owner @returns {Promise<RouterRead>} */
 async function beginRouterRead(query, env, owner) {
+  const mayMutateDb = queryMayMutateDb(query);
+  const delayedMutationInvalidation = mayMutateDb && canDelayMutationInvalidation(query);
+  const mayHaveWrittenWithoutPreInvalidation = mayMutateDb;
   const localTask = await resolveTaskIdentity(env);
   if (owner.taskId !== localTask.taskId) {
     forgetRouterReadCache(query.dbKey);
-    return { token: null, hit: false };
+    return { token: null, hit: false, mayHaveWrittenWithoutPreInvalidation };
   }
-  const cache = getRouterReadCache(env, query.dbKey);
-  const delayedMutationInvalidation = mutatesDb(query) && canDelayMutationInvalidation(query);
-  if (mutatesDb(query) && !delayedMutationInvalidation) {
-    cache.invalidate("write");
+  if (mayMutateDb && !delayedMutationInvalidation) {
+    invalidateRouterReadCache(query.dbKey, "write");
     return { token: null, hit: false, preInvalidated: true };
   }
-  const mayHaveWrittenWithoutPreInvalidation = delayedMutationInvalidation || queryMayChangeDb(query);
   if (query?.mode !== "all" && query?.mode !== "raw") {
     return { token: null, hit: false, preInvalidated: false, mayHaveWrittenWithoutPreInvalidation };
   }
+  const cacheConfig = readCacheConfig(env);
+  if (
+    !isReadCacheableQuery(query, cacheConfig) ||
+    !cacheKeyStringsCouldFit(query, owner, cacheConfig.maxBytes)
+  ) {
+    metrics.increment("d1_read_cache", { service: SERVICE, outcome: "bypass" });
+    return { token: null, hit: false, preInvalidated: false, mayHaveWrittenWithoutPreInvalidation };
+  }
+  const cache = routerReadCacheCandidate(cacheConfig, query.dbKey);
+  const previousBytes = cache.retainedBytes;
   const read = cache.beginRead(query, owner);
+  accountRouterReadCacheBytes(cache, previousBytes);
+  if (read.hit || read.token) retainRouterReadCache(query.dbKey, cache);
   return {
-    token: read.hit ? null : read.token,
+    token: read.hit ? null : read.token ?? null,
     hit: read.hit === true,
     bytes: read.hit ? read.bytes : undefined,
+    valueEncoding: read.hit ? read.valueEncoding : undefined,
     preInvalidated: false,
     mayHaveWrittenWithoutPreInvalidation,
   };
@@ -206,17 +268,19 @@ export async function handleQuery(
   requestId = requestId || ensureRequestId(request.headers);
   // Forwarding is not an authorization signal. It only suppresses duplicate
   // edge metrics; the receiver still resolves owner and the actor still fences.
-  const forwarded = request.headers.get("x-wdl-d1-forwarded") === "1";
-  const hopCount = parseForwardHopCount(request.headers.get("x-wdl-d1-hop-count"));
+  const forwarded = request.headers.get(D1_FORWARD_HEADERS.forwarded) === "1";
+  const hopCount = parseForwardHopCount(request.headers.get(D1_FORWARD_HEADERS.hopCount));
   /** @type {D1Query | null} */
   let query = null;
+  /** @type {RouterRead | null} */
+  let routerRead = null;
   let status;
   let code;
   let outcome;
   try {
     query = /** @type {D1Query} */ (normalize(await read(request)));
     const owner = await resolveDbOwner(env, query);
-    const routerRead = await beginRouterRead(query, env, owner);
+    routerRead = await beginRouterRead(query, env, owner);
     if (routerRead.hit) {
       status = 200;
       code = "ok";
@@ -226,7 +290,13 @@ export async function handleQuery(
       }
       return d1QueryBytesResponse(
         /** @type {Uint8Array<ArrayBuffer>} */ (routerRead.bytes),
-        { status, headers: ownerHeaders(owner) }
+        {
+          status,
+          headers: {
+            ...ownerHeaders(owner),
+            ...d1QuerySuccessHeaders(false, routerRead.valueEncoding ?? null),
+          },
+        }
       );
     }
     const response = await routeQueryToOwner(
@@ -238,28 +308,61 @@ export async function handleQuery(
       hopCount
     );
     status = response.status;
-    const { bytes, payload } = await readD1QueryResponseWithBytes(response);
-    const payloadRecord = /** @type {Record<string, unknown>} */ (Object(payload));
-    code = typeof payloadRecord.error === "string" ? payloadRecord.error : (response.ok ? "ok" : "internal-error");
-    outcome = response.ok && payloadRecord.success !== false ? "ok" : "error";
+    const responseValueEncoding = response.headers.get(D1_QUERY_RESULT_HEADERS.valueEncoding);
+    const successHeaders = response.ok ? readD1QuerySuccessHeaders(response.headers) : null;
+    /** @type {Uint8Array<ArrayBuffer>} */
+    let bytes;
+    /** @type {unknown} */
+    let payload = null;
+    if (successHeaders) {
+      bytes = await readD1QueryResponseBytes(response);
+      code = "ok";
+      outcome = "ok";
+    } else {
+      ({ bytes, payload } = await readD1QueryResponseWithBytes(response));
+      const payloadRecord = /** @type {Record<string, unknown>} */ (Object(payload));
+      code = typeof payloadRecord.error === "string" ? payloadRecord.error : (response.ok ? "ok" : "internal-error");
+      outcome = response.ok && payloadRecord.success !== false ? "ok" : "error";
+    }
     if (outcome === "ok") {
-      const responseChangedDb = response.headers.get("x-wdl-d1-changed-db") === "1" ||
-        payloadChangedDb(payload);
+      const responseChangedDb = successHeaders?.changedDb ??
+        (response.headers.get(D1_QUERY_RESULT_HEADERS.changedDb) === "1" || payloadChangedDb(payload));
       if (responseChangedDb && !routerRead.preInvalidated) {
         invalidateRouterReadCache(query.dbKey, "changed-db");
-      } else if (routerRead.token) {
-        const cache = getRouterReadCache(env, query.dbKey);
-        cache.finishRead(routerRead.token, bytes);
+      } else if (
+        routerRead.token &&
+        (responseValueEncoding === null || successHeaders?.valueEncoding === responseValueEncoding)
+      ) {
+        const cache = routerReadCaches.get(query.dbKey);
+        if (cache) {
+          const previousBytes = cache.retainedBytes;
+          const stored = cache.finishRead(
+            routerRead.token,
+            query,
+            owner,
+            bytes,
+            successHeaders?.valueEncoding ?? null
+          );
+          accountRouterReadCacheBytes(cache, previousBytes);
+          if (stored) {
+            routerReadCaches.delete(query.dbKey);
+            routerReadCaches.set(query.dbKey, cache);
+            enforceRouterReadCacheByteBudget(cache.config.maxBytes);
+          }
+        }
       }
     } else if (routerRead.mayHaveWrittenWithoutPreInvalidation) {
       invalidateRouterReadCache(query.dbKey, "write");
     }
-    const headers = copyOwnerHeaders(response.headers);
+    const headers = copyForwardedResponseHeaders(response.headers);
     if (!forwarded) {
       recordQueryComplete({ requestId, query, startedAt, status, code, outcome, forwarded });
     }
     return d1QueryBytesResponse(bytes, { status, headers });
   } catch (err) {
+    if (query && routerRead?.mayHaveWrittenWithoutPreInvalidation) {
+      invalidateRouterReadCache(query.dbKey, "write");
+    }
     const classified = classifyD1Error(err);
     status = classified.status;
     code = classified.code;
@@ -276,6 +379,10 @@ export async function handleQuery(
       ...formatError(err),
     });
     return d1QueryResponse(d1ErrorPayload(err), { status });
+  } finally {
+    if (query && routerRead?.preInvalidated) {
+      invalidateRouterReadCache(query.dbKey, "write");
+    }
   }
 }
 

@@ -85,10 +85,9 @@ export function _resetWorkflowReplayCacheForTest() {
   workflowReplayCacheSteps = 0;
   workflowReplayCacheBytes = 0;
   workflowReplayStepBytes = new WeakMap();
-  recordWorkflowReplayCacheSize();
 }
 
-function recordWorkflowReplayCacheSize() {
+export function prepareWorkflowReplayCacheMetrics() {
   metrics.setGauge("workflow_replay_cache_instances", {}, workflowReplayCaches.size);
   metrics.setGauge("workflow_replay_cache_steps", {}, workflowReplayCacheSteps);
   metrics.setGauge("workflow_replay_cache_bytes", {}, workflowReplayCacheBytes);
@@ -97,7 +96,6 @@ function recordWorkflowReplayCacheSize() {
 /** @param {string} outcome */
 export function recordWorkflowReplayCacheOutcome(outcome) {
   metrics.increment("workflow_replay_cache", { outcome });
-  recordWorkflowReplayCacheSize();
 }
 
 /** @param {{ ns: string, workflowKey: string, instanceId: string, generation: number, createdAtMs: number }} run */
@@ -206,7 +204,6 @@ export function getWorkflowReplayCache(run) {
   while (workflowReplayCaches.size > WORKFLOW_REPLAY_CACHE_MAX_INSTANCES) {
     evictOldestWorkflowReplayCache();
   }
-  recordWorkflowReplayCacheSize();
   return created;
 }
 
@@ -249,7 +246,6 @@ export function rememberWorkflowReplayStep(cache, ordinal, step) {
   if (cache.steps.has(ordinal)) deleteReplayStep(cache, ordinal);
   const bytes = serializedReplayStepBytes(storedStep);
   if (bytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
-    if (countInGlobalCache) recordWorkflowReplayCacheSize();
     return;
   }
   workflowReplayStepBytes.set(storedStep, bytes);
@@ -268,7 +264,6 @@ export function rememberWorkflowReplayStep(cache, ordinal, step) {
     while (workflowReplayCacheBytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
       evictOldestWorkflowReplayCache();
     }
-    recordWorkflowReplayCacheSize();
   }
 }
 

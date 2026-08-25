@@ -1,15 +1,25 @@
 import { prototypeGetter, validOwnerEndpointForService } from "./_wdl-owner-endpoint.js";
 import { sanitizeRequestId } from "./_wdl-request-id.js";
 import {
+  DO_CONNECT_HEADERS,
+  DO_FORWARD_HEADERS,
   DO_OWNER_CONTROL_HEADERS,
   DO_OWNER_HEADERS,
   encodeDoObjectNameHeader,
 } from "./_wdl-do-scoped-request.js";
+import {
+  DO_OWNERSHIP_CODE,
+  DO_OWNER_RACE_RETRY_CODES,
+  doHostShardForObjectName,
+  formatDoOwnerShardKey,
+} from "do-runtime-protocol-wire-grammar";
+import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 
 export const DO_INVOKE_URL = "http://do-runtime/internal/do/invoke";
 export const DO_CONNECT_URL = "http://do-runtime/internal/do/connect";
 export const DO_INVOKE_CONTENT_TYPE = "application/vnd.wdl.do-invoke";
 export const MAX_DO_REQUEST_BODY_BYTES = 1024 * 1024;
+export const MAX_DO_RPC_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
@@ -18,7 +28,6 @@ export const DO_ACCEPT_OWNER_HINT_HEADER = DO_OWNER_CONTROL_HEADERS.acceptHint;
 export const DO_OWNER_HINT_CONTROL_HEADER = DO_OWNER_HEADERS.hint;
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = DO_OWNER_CONTROL_HEADERS.ownershipError;
 export const DO_OWNER_HINT_CODE = "do_owner_hint";
-export const INTERNAL_AUTH_HEADER = "x-wdl-internal-auth";
 const DO_OWNER_HINT_STRIP_HEADERS = [
   ...Object.values(DO_OWNER_HEADERS),
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
@@ -27,44 +36,24 @@ const DO_FETCH_STRIP_HEADERS = [
   ...DO_OWNER_HINT_STRIP_HEADERS,
   DO_ACCEPT_OWNER_HINT_HEADER,
   INTERNAL_AUTH_HEADER,
-  "x-wdl-do-hop-count",
+  ...Object.values(DO_FORWARD_HEADERS),
 ];
 const DO_CONNECT_STRIP_HEADERS = [
   ...DO_FETCH_STRIP_HEADERS,
 ];
 const OWNER_ENDPOINT_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
-const OWNER_RACE_RETRY_CODES = new Set([
-  "stale_owner_generation",
-  "owner_claim_raced",
-  "owner_fence_missing",
-  "owner_lease_expired",
-  "stale_owner_storage",
-  "owner_lease_too_short",
-  "owner_renew_raced",
-  "task_draining",
-]);
-const OWNER_HINT_STALE_CODES = new Set([
-  "stale_owner_generation",
-  "owner_claim_raced",
-  "owner_fence_missing",
-  "owner_lease_expired",
-  "stale_owner_storage",
-  "owner_lease_too_short",
-  "owner_renew_raced",
-  "owner_release_raced",
-  "owner_unavailable",
-  "owner_endpoint_missing",
-  "forward_hop_exhausted",
-  "task_draining",
-]);
+const OWNER_RACE_RETRY_CODES = new Set(DO_OWNER_RACE_RETRY_CODES);
+const OWNER_HINT_STALE_CODES = new Set(Object.values(DO_OWNERSHIP_CODE));
 const IntrinsicArray = Array;
 const IntrinsicDataView = DataView;
+const IntrinsicError = Error;
 const IntrinsicHeaders = Headers;
 const IntrinsicJSON = JSON;
 const IntrinsicNumber = Number;
 const IntrinsicObject = Object;
 const IntrinsicRequest = Request;
 const IntrinsicResponse = Response;
+const IntrinsicTextDecoder = TextDecoder;
 const IntrinsicUint8Array = Uint8Array;
 const IntrinsicWeakSet = WeakSet;
 const intrinsicReflectApply = Reflect.apply;
@@ -81,10 +70,12 @@ const intrinsicHeadersDelete = Headers.prototype.delete;
 const intrinsicHeadersForEach = Headers.prototype.forEach;
 const intrinsicHeadersGet = Headers.prototype.get;
 const intrinsicHeadersSet = Headers.prototype.set;
+const intrinsicJsonParse = JSON.parse;
 const intrinsicJsonStringify = JSON.stringify;
 const intrinsicNumberIsFinite = Number.isFinite;
 const intrinsicNumberIsSafeInteger = Number.isSafeInteger;
 const intrinsicObjectCreate = Object.create;
+const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
@@ -101,6 +92,7 @@ const intrinsicSetHas = Set.prototype.has;
 const intrinsicStringCharCodeAt = String.prototype.charCodeAt;
 const intrinsicStringToLowerCase = String.prototype.toLowerCase;
 const intrinsicStringToUpperCase = String.prototype.toUpperCase;
+const intrinsicTextDecoderDecode = TextDecoder.prototype.decode;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
 const intrinsicTextEncoderEncodeInto = TextEncoder.prototype.encodeInto;
 const intrinsicUint8ArraySet = Uint8Array.prototype.set;
@@ -144,18 +136,10 @@ const intrinsicResponseWebSocketGet = /** @type {((this: Response) => WebSocket 
   prototypeGetter(Response.prototype, "webSocket")
 );
 const utf8Encoder = new TextEncoder();
+const utf8Decoder = new IntrinsicTextDecoder("utf-8", { fatal: true });
 /** @type {Uint8Array | undefined} */
 let requestHeaderUtf8Scratch;
 
-const DO_CONNECT_HEADERS = {
-  ns: "x-wdl-do-ns",
-  worker: "x-wdl-do-worker",
-  version: "x-wdl-do-version",
-  doStorageId: "x-wdl-do-storage-id",
-  className: "x-wdl-do-class-name",
-  objectName: "x-wdl-do-object-name",
-  requestUrl: "x-wdl-do-request-url",
-};
 const RPC_RESERVED_METHODS = new Set(["fetch", "alarm"]);
 
 /**
@@ -181,12 +165,16 @@ const RPC_RESERVED_METHODS = new Set(["fetch", "alarm"]);
 
 /** @param {DoBindingProps} props @param {string} objectName */
 export function doOwnerHintCacheKey(props, objectName) {
-  return `${props.doStorageId}:${props.className}:${objectName}`;
+  return formatDoOwnerShardKey(
+    props.doStorageId,
+    props.className,
+    doHostShardForObjectName(objectName)
+  );
 }
 
 /** @param {Response} response */
 export function staleDoOwnerHintResponse(response) {
-  if (responseStatus(response) < 400) return false;
+  if (responseStatus(response) !== 503) return false;
   const code = responseHeader(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER);
   return code !== null && setHas(OWNER_HINT_STALE_CODES, code);
 }
@@ -415,6 +403,26 @@ function jsonObject() {
 }
 
 /**
+ * @param {Error} error
+ * @param {string} name
+ * @param {unknown} value
+ * @param {boolean} [mutable]
+ */
+function defineErrorField(error, name, value, mutable = false) {
+  const descriptor = jsonObject();
+  descriptor.value = value;
+  if (mutable) {
+    descriptor.configurable = true;
+    descriptor.writable = true;
+  }
+  intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [
+    error,
+    name,
+    descriptor,
+  ]);
+}
+
+/**
  * @param {string} metadataJson
  * @param {Uint8Array | null} [bodyBytes]
  * @returns {Uint8Array}
@@ -540,6 +548,68 @@ async function readRequestBodyBytes(request, signal) {
   return body;
 }
 
+function rpcResultUnknownError() {
+  const err = new IntrinsicError("Durable Object RPC result is unavailable; request outcome may be unknown");
+  defineErrorField(err, "code", "do_rpc_result_unknown");
+  return err;
+}
+
+/**
+ * @param {Response} response
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function readRpcResponseEnvelope(response) {
+  const contentLength = responseHeader(response, "content-length");
+  if (contentLength != null && contentLength !== "") {
+    const declared = numberValue(contentLength);
+    if (
+      intrinsicReflectApply(intrinsicNumberIsFinite, IntrinsicNumber, [declared]) &&
+      declared > MAX_DO_RPC_RESPONSE_BYTES
+    ) {
+      cancelResponseBody(response);
+      throw new TypeError("Durable Object RPC response exceeds its byte limit");
+    }
+  }
+
+  const stream = responseBody(response);
+  if (!stream) throw new TypeError("Durable Object RPC response body is missing");
+  const reader = streamReader(stream);
+  /** @type {Uint8Array[]} */
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await readStreamChunk(reader);
+      if (done) break;
+      total += byteArrayLength(value);
+      if (total > MAX_DO_RPC_RESPONSE_BYTES) {
+        throw new TypeError("Durable Object RPC response exceeds its byte limit");
+      }
+      chunks[chunks.length] = value;
+    }
+  } catch (err) {
+    cancelStreamReader(reader);
+    throw err;
+  } finally {
+    releaseStreamReader(reader);
+  }
+
+  const bytes = new IntrinsicUint8Array(total);
+  let offset = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    setBytes(bytes, chunk, offset);
+    offset += byteArrayLength(chunk);
+  }
+  const text = intrinsicReflectApply(intrinsicTextDecoderDecode, utf8Decoder, [bytes]);
+  const body = intrinsicReflectApply(intrinsicJsonParse, IntrinsicJSON, [text]);
+  if (body === null || typeof body !== "object" || intrinsicArrayIsArray(body)) {
+    throw new TypeError("Durable Object RPC response envelope is invalid");
+  }
+  intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [body, null]);
+  return body;
+}
+
 /**
  * @param {unknown} value
  * @param {string} field
@@ -648,7 +718,6 @@ export function rpcInvokeBody(props, objectName, method, args) {
 function binaryInvokeHeaders(requestId) {
   return {
     "content-type": DO_INVOKE_CONTENT_TYPE,
-    [DO_ACCEPT_OWNER_HINT_HEADER]: "1",
     ...(requestId ? { "x-request-id": requestId } : {}),
   };
 }
@@ -696,15 +765,36 @@ export function rpcInvokeInit(props, objectName, method, args, requestId) {
 
 /** @param {Response} response */
 export async function rpcResultFromResponse(response) {
-  const body = await response.json().catch(() => null);
-  if (!response.ok) {
-    const err = new Error(body?.message || `Durable Object RPC failed with status ${responseStatus(response)}`);
-    if (body?.name) err.name = body.name;
-    if (body?.error) Object.defineProperty(err, "code", { value: body.error });
-    if (typeof body?.stack === "string" && body.stack) err.stack = body.stack;
+  let body;
+  try {
+    body = await readRpcResponseEnvelope(response);
+  } catch {
+    throw rpcResultUnknownError();
+  }
+  const status = responseStatus(response);
+  if (status < 200 || status >= 300) {
+    const message = typeof body.message === "string" && body.message
+      ? body.message
+      : `Durable Object RPC failed with status ${status}`;
+    const err = new IntrinsicError(message);
+    if (typeof body.name === "string" && body.name) {
+      defineErrorField(err, "name", body.name, true);
+    }
+    if (typeof body.error === "string" && body.error) {
+      defineErrorField(err, "code", body.error);
+    }
+    if (typeof body.stack === "string" && body.stack) {
+      defineErrorField(err, "stack", body.stack, true);
+    }
     throw err;
   }
-  return body?.result;
+  if (
+    !intrinsicReflectApply(intrinsicObjectHasOwn, undefined, [body, "ok"]) ||
+    body.ok !== true
+  ) {
+    throw rpcResultUnknownError();
+  }
+  return body.result;
 }
 
 /** @param {Response} response */
@@ -712,11 +802,6 @@ export function retryableOwnerRaceResponse(response) {
   if (responseStatus(response) !== 503) return false;
   const code = responseHeader(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER);
   return code !== null && setHas(OWNER_RACE_RETRY_CODES, code);
-}
-
-/** @param {Response} response */
-function retryableDirectOwnerResponse(response) {
-  return ownerHintFromResponse(response) !== null || retryableOwnerRaceResponse(response);
 }
 
 /**
@@ -859,12 +944,22 @@ export function ownerHintFromHeaders(headers) {
 
 /** @param {Response} response */
 function ownerHintFromResponse(response) {
-  if (responseStatus(response) !== 409) return null;
+  return validOwnerHintControlResponse(response)
+    ? ownerHintFromHeaders(responseHeaders(response))
+    : null;
+}
+
+/** @param {Response} response */
+function hasOwnerHintControlMarker(response) {
+  return headerValue(responseHeaders(response), DO_OWNER_HINT_CONTROL_HEADER) !== null;
+}
+
+/** @param {Response} response */
+function validOwnerHintControlResponse(response) {
+  if (responseStatus(response) !== 409) return false;
   // Only do-runtime-authored headers are trusted. Tenant DO code controls the
   // response body and may intentionally return a do_owner_hint-shaped 409.
-  const headers = responseHeaders(response);
-  if (headerValue(headers, DO_OWNER_HINT_CONTROL_HEADER) !== "1") return null;
-  return ownerHintFromHeaders(headers);
+  return headerValue(responseHeaders(response), DO_OWNER_HINT_CONTROL_HEADER) === "1";
 }
 
 /** @param {unknown} endpoint */
@@ -874,7 +969,30 @@ function validOwnerEndpoint(endpoint) {
 
 function ownerUnavailableResponse() {
   return intrinsicReflectApply(intrinsicResponseJson, IntrinsicResponse, [
-    { error: "owner_unavailable", message: "DO owner is unavailable; request outcome may be unknown" },
+    {
+      error: DO_OWNERSHIP_CODE.OWNER_UNAVAILABLE,
+      message: "DO owner is unavailable; request outcome may be unknown"
+    },
+    { status: 503 }
+  ]);
+}
+
+/** @param {Response} response */
+function hasOwnershipErrorControlMarker(response) {
+  return responseHeader(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER) !== null;
+}
+
+/** @param {Response} response */
+function publicOwnershipErrorResponse(response) {
+  const candidate = responseHeader(response, DO_OWNERSHIP_ERROR_CONTROL_HEADER);
+  const preserve = responseStatus(response) === 503 &&
+    candidate !== null && setHas(OWNER_HINT_STALE_CODES, candidate);
+  const code = preserve
+    ? candidate
+    : DO_OWNERSHIP_CODE.OWNER_UNAVAILABLE;
+  cancelResponseBody(response);
+  return intrinsicReflectApply(intrinsicResponseJson, IntrinsicResponse, [
+    { error: code, message: "Durable Object ownership is unavailable" },
     { status: 503 }
   ]);
 }
@@ -894,45 +1012,73 @@ async function dispatchDoWithHintCache({
   replayOwnerUnavailable = false,
 }, retryOwnerRace) {
   /** @param {DoOwnerHint} hint */
-  const rememberHint = (hint) => cache.set(hintKey, hint);
+  const rememberHint = (hint) => hint.ownerKey === hintKey && cache.set(hintKey, hint);
   const clearHint = () => cache.delete(hintKey);
   const replayOrUnavailable = async () => replayOwnerUnavailable
-    ? await routerFetch(routerUrl, withoutOwnerHintOptIn(init))
+    ? await routerFetch(routerUrl, init)
     : ownerUnavailableResponse();
   /** @param {Response} response */
   const finish = async (response) => {
     let result = response;
-    if (retryOwnerRace && retryableDirectOwnerResponse(result)) {
+    if (retryOwnerRace && retryableOwnerRaceResponse(result)) {
       cancelResponseBody(result);
       clearHint();
-      result = await routerFetch(routerUrl, withoutOwnerHintOptIn(init));
+      result = await routerFetch(routerUrl, init);
     }
+    if (hasOwnerHintControlMarker(result)) {
+      cancelResponseBody(result);
+      clearHint();
+      result = ownerUnavailableResponse();
+    }
+    if (hasOwnershipErrorControlMarker(result)) {
+      clearHint();
+      result = publicOwnershipErrorResponse(result);
+    }
+    const learned = ownerHintFromHeaders(responseHeaders(result));
+    if (learned) rememberHint(learned);
     return stripOwnerHintHeaders(result);
   };
 
-  const cachedHint = /** @type {DoOwnerHint | null} */ (cache.get(hintKey));
+  let cachedHint = /** @type {DoOwnerHint | null} */ (cache.get(hintKey));
+  if (cachedHint && cachedHint.ownerKey !== hintKey) {
+    clearHint();
+    cachedHint = null;
+  }
   if (cachedHint && typeof ownerFetch === "function") {
     /** @type {Response} */
     let direct;
     try {
-      direct = await ownerFetch(ownerRequestUrl(cachedHint, ownerPath), init);
+      direct = await ownerFetch(
+        ownerRequestUrl(cachedHint, ownerPath),
+        withOwnerFenceHeaders(init, cachedHint)
+      );
     } catch {
       clearHint();
       return await finish(await replayOrUnavailable());
     }
-    if (retryOwnerRace && retryableDirectOwnerResponse(direct)) {
-      return await finish(direct);
-    }
-    if (ownerHintFromResponse(direct) || staleDoOwnerHintResponse(direct)) {
+    if (retryableOwnerRaceResponse(direct)) {
+      if (retryOwnerRace) return await finish(direct);
       cancelResponseBody(direct);
       clearHint();
+    } else if (hasOwnerHintControlMarker(direct)) {
+      const movedOwner = ownerHintFromResponse(direct);
+      cancelResponseBody(direct);
+      clearHint();
+      if (!movedOwner || movedOwner.ownerKey !== hintKey || retryOwnerRace) {
+        return stripOwnerHintHeaders(ownerUnavailableResponse());
+      }
+      // A cached WebSocket owner can safely redirect only through one fresh
+      // router lookup; the final 101 must still come from the resolved owner.
+    } else if (hasOwnershipErrorControlMarker(direct)) {
+      const replay = replayOwnerUnavailable && staleDoOwnerHintResponse(direct);
+      clearHint();
+      if (!replay) return await finish(direct);
+      cancelResponseBody(direct);
     } else if (ownerEndpointUnavailableResponse(direct)) {
       cancelResponseBody(direct);
       clearHint();
       return await finish(await replayOrUnavailable());
     } else {
-      const learned = ownerHintFromHeaders(responseHeaders(direct));
-      if (learned) rememberHint(learned);
       return await finish(direct);
     }
   }
@@ -942,14 +1088,20 @@ async function dispatchDoWithHintCache({
     return await finish(routed);
   }
 
-  const hinted = ownerHintFromResponse(routed);
-  if (!hinted || typeof ownerFetch !== "function") {
-    if (hinted) rememberHint(hinted);
-    else {
-      const learned = ownerHintFromHeaders(responseHeaders(routed));
-      if (learned) rememberHint(learned);
-    }
+  const hasHintControl = hasOwnerHintControlMarker(routed);
+  const hinted = hasHintControl ? ownerHintFromResponse(routed) : null;
+  if (!hasHintControl) {
     return await finish(routed);
+  }
+  if (!hinted || hinted.ownerKey !== hintKey) {
+    cancelResponseBody(routed);
+    clearHint();
+    return stripOwnerHintHeaders(ownerUnavailableResponse());
+  }
+  if (retryOwnerRace || typeof ownerFetch !== "function") {
+    cancelResponseBody(routed);
+    clearHint();
+    return stripOwnerHintHeaders(ownerUnavailableResponse());
   }
 
   rememberHint(hinted);
@@ -957,9 +1109,12 @@ async function dispatchDoWithHintCache({
   /** @type {Response} */
   let direct;
   try {
-    direct = await ownerFetch(ownerRequestUrl(hinted, ownerPath), init);
+    direct = await ownerFetch(
+      ownerRequestUrl(hinted, ownerPath),
+      withOwnerFenceHeaders(init, hinted)
+    );
     if (ownerEndpointUnavailableResponse(direct) &&
-        !(retryOwnerRace && retryableDirectOwnerResponse(direct))) {
+        !(retryOwnerRace && retryableOwnerRaceResponse(direct))) {
       cancelResponseBody(direct);
       throw new Error(`DO owner endpoint returned ${responseStatus(direct)}`);
     }
@@ -967,16 +1122,14 @@ async function dispatchDoWithHintCache({
     clearHint();
     return await finish(await replayOrUnavailable());
   }
-  if (retryOwnerRace && retryableDirectOwnerResponse(direct)) {
+  if (retryOwnerRace && retryableOwnerRaceResponse(direct)) {
     return await finish(direct);
   }
-  if (ownerHintFromResponse(direct)) {
+  if (hasOwnerHintControlMarker(direct)) {
     cancelResponseBody(direct);
     clearHint();
-    return await finish(await replayOrUnavailable());
+    return stripOwnerHintHeaders(ownerUnavailableResponse());
   }
-  const learned = ownerHintFromHeaders(responseHeaders(direct));
-  if (learned) rememberHint(learned);
   return await finish(direct);
 }
 
@@ -996,15 +1149,20 @@ export async function dispatchDoConnectWithHintCache(options) {
 /** @param {Response} response */
 function ownerEndpointUnavailableResponse(response) {
   return setHas(OWNER_ENDPOINT_UNAVAILABLE_STATUSES, responseStatus(response)) &&
+    !hasOwnershipErrorControlMarker(response) &&
     !ownerHintFromHeaders(responseHeaders(response));
 }
 
-/** @param {RequestInit} init */
-function withoutOwnerHintOptIn(init) {
+/** @param {RequestInit} init @param {DoOwnerHint} owner */
+function withOwnerFenceHeaders(init, owner) {
   const headers = init.headers instanceof IntrinsicHeaders
     ? copyHeaders(init.headers)
     : new IntrinsicHeaders(init.headers || {});
-  headerDelete(headers, DO_ACCEPT_OWNER_HINT_HEADER);
+  for (const [name, value] of intrinsicReflectApply(intrinsicObjectEntries, IntrinsicObject, [
+    ownerHintHeaders(owner),
+  ])) {
+    headerSet(headers, name, value);
+  }
   return { ...init, headers };
 }
 

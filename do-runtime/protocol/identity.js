@@ -4,9 +4,10 @@ import {
   HOST_ID_RE,
   MAX_ID_BYTES,
   STORAGE_ID_RE,
+  doHostShardForObjectName,
+  formatDoOwnerShardKey,
 } from "do-runtime-protocol-wire-grammar";
 import { DoRuntimeError } from "do-runtime-protocol-errors";
-import { fnv1a32Utf8 } from "shared-fnv1a32";
 import { utf8ByteLength } from "shared-utf8";
 
 
@@ -56,7 +57,7 @@ export function shardForObjectName(objectName, shardCount = DO_HOST_SHARD_COUNT)
   if (!Number.isInteger(count) || count <= 0) {
     throw new DoRuntimeError(500, "invalid_shard_count", "DO host shard count must be a positive integer");
   }
-  return fnv1a32Utf8(objectName) % count;
+  return doHostShardForObjectName(objectName, count);
 }
 
 /**
@@ -71,7 +72,7 @@ export function hostIdForShard(doStorageId, className, shard) {
   }
   requireIdentityString(doStorageId, "doStorageId", STORAGE_ID_RE);
   requireIdentityString(className, "className", CLASS_NAME_RE);
-  const hostId = `${doStorageId}:${className}:shard${parsed}`;
+  const hostId = formatDoOwnerShardKey(doStorageId, className, parsed);
   requireIdentityString(hostId, "hostId", HOST_ID_RE);
   return hostId;
 }

@@ -11,8 +11,8 @@ const BASE64_CHUNK_SIZE = 0x8000;
  */
 function bytesToBase64(bytes) {
   let bin = "";
-  // This file is also injected as `_wdl-d1-transport.js` into loaded
-  // workers, so it cannot import shared-base64 without source rewriting.
+  // Keep this standalone for the Control JSON projection and tagged-response
+  // fallback during mixed-version rollout.
   for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_SIZE) {
     bin += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_SIZE));
   }
@@ -141,6 +141,7 @@ function walkD1Transport(value, objectLeaf) {
  */
 export function decodeD1Transport(value) {
   return walkD1Transport(value, (item) => {
+    if (item instanceof Uint8Array) return item;
     const record = /** @type {Record<string, unknown>} */ (item);
     if (isTaggedBinary(record)) return base64ToBytes(record.base64);
     assertSupportedBinaryTag(record);
@@ -154,6 +155,13 @@ export function decodeD1Transport(value) {
  */
 export function decodeD1TransportForJson(value) {
   return walkD1Transport(value, (item) => {
+    if (item instanceof Uint8Array) {
+      return {
+        type: PUBLIC_BINARY_TYPE,
+        base64: bytesToBase64(item),
+        byteLength: item.byteLength,
+      };
+    }
     const record = /** @type {Record<string, unknown>} */ (item);
     if (isTaggedBinary(record)) {
       return {

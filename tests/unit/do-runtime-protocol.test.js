@@ -2,28 +2,35 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { decodeDoEnvelope } from "../helpers/do-envelope.js";
-import { doProtocolErrorsDataUrl, loadDoProtocol } from "../helpers/load-do-protocol.js";
+import {
+  doProtocolErrorsDataUrl,
+  doTransportDataUrl,
+  doWireGrammarDataUrl,
+  loadDoProtocol,
+} from "../helpers/load-do-protocol.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
-import {
-  dispatchDoInvokeWithHintCache,
-  retryableOwnerRaceResponse,
-  staleDoOwnerHintResponse,
-} from "../../runtime/_wdl-do-transport.js";
 import { encodeDoObjectNameHeader } from "../../runtime/_wdl-do-scoped-request.js";
-import { DO_HOST_SHARD_COUNT, MAX_ID_BYTES } from "../../do-runtime/protocol/wire-grammar.js";
 import {
   doOwnerHintHeaders,
   doOwnershipErrorHeaders,
 } from "../helpers/do-owner-hint.js";
 
 const { doErrorResponse } = await import(doProtocolErrorsDataUrl());
+const {
+  dispatchDoInvokeWithHintCache,
+  retryableOwnerRaceResponse,
+  staleDoOwnerHintResponse,
+} = await import(doTransportDataUrl());
+const { DO_HOST_SHARD_COUNT, MAX_ID_BYTES } = await import(doWireGrammarDataUrl());
+const OWNER_KEY = "do_0123456789abcdef0123456789abcdef:Room:shard0";
 
 const {
   DoRuntimeError,
   DO_INVOKE_CONTENT_TYPE,
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   DO_OWNERSHIP_CODE,
+  DO_OWNER_RACE_RETRY_CODES,
   buildFacetName,
   buildAlarmRequest,
   buildForwardRequest,
@@ -43,20 +50,27 @@ const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 const doAlarmIdentityFixture = /** @type {any} */ (
   readRepositoryJson("tests/fixtures/do-alarm-identity.json")
 );
+const doOwnerShardFixture = /** @type {any} */ (
+  readRepositoryJson("tests/fixtures/do-owner-shards.json")
+);
 
 test("DO ownership errors stay aligned with runtime hint and retry handling", () => {
   const ownershipCodes = new Set(Object.values(DO_OWNERSHIP_CODE));
-  /** @type {Set<string>} */
   const ownerRaceRetryCodes = new Set([
-    DO_OWNERSHIP_CODE.STALE_OWNER_GENERATION,
-    DO_OWNERSHIP_CODE.OWNER_CLAIM_RACED,
-    DO_OWNERSHIP_CODE.OWNER_FENCE_MISSING,
-    DO_OWNERSHIP_CODE.OWNER_LEASE_EXPIRED,
-    DO_OWNERSHIP_CODE.STALE_OWNER_STORAGE,
-    DO_OWNERSHIP_CODE.OWNER_LEASE_TOO_SHORT,
-    DO_OWNERSHIP_CODE.OWNER_RENEW_RACED,
-    DO_OWNERSHIP_CODE.TASK_DRAINING,
+    "stale_owner_generation",
+    "owner_claim_raced",
+    "owner_fence_missing",
+    "owner_lease_expired",
+    "stale_owner_storage",
+    "owner_lease_too_short",
+    "owner_renew_raced",
+    "task_draining",
   ]);
+  assert.deepEqual(
+    [...DO_OWNER_RACE_RETRY_CODES].sort(),
+    [...ownerRaceRetryCodes].sort(),
+    "the production retry subset must match the independent pre-dispatch safety oracle"
+  );
   for (const code of ownershipCodes) {
     const untrusted = Response.json({ error: code }, { status: 503 });
     assert.equal(staleDoOwnerHintResponse(untrusted), false, code);
@@ -82,11 +96,10 @@ test("DO invoke dispatch does not cache hints carried by owner-race responses", 
   const cachedHints = [];
   const init = {
     method: "POST",
-    headers: { "x-wdl-do-accept-owner-hint": "1" },
   };
 
   const response = await dispatchDoInvokeWithHintCache({
-    async routerFetch(url, requestInit) {
+    async routerFetch(/** @type {string} */ url, /** @type {RequestInit | undefined} */ requestInit) {
       routerCalls.push({ url, init: requestInit });
       return routerCalls.length === 1
         ? Response.json({ error: "stale_owner_generation", message: "owner moved" }, {
@@ -105,18 +118,17 @@ test("DO invoke dispatch does not cache hints carried by owner-race responses", 
       get() {
         return null;
       },
-      set(_key, hint) {
+      set(/** @type {string} */ _key, /** @type {unknown} */ hint) {
         cachedHints.push(hint);
       },
       delete() {},
     },
-    hintKey: "room-a",
+    hintKey: OWNER_KEY,
   });
 
   assert.equal(await response.text(), "retried");
   assert.equal(routerCalls.length, 2);
   assert.deepEqual(cachedHints, []);
-  assert.equal(new Headers(routerCalls[1].init?.headers).get("x-wdl-do-accept-owner-hint"), null);
 });
 
 const DO_STORAGE_ID = "do_0123456789abcdef0123456789abcdef";
@@ -503,6 +515,44 @@ test("do invoke endpoint reads binary envelopes and rejects JSON", async () => {
   );
 });
 
+test("do invoke endpoint applies one complete owner fence from internal headers", async () => {
+  const headers = {
+    "content-type": DO_INVOKE_CONTENT_TYPE,
+    "x-wdl-do-owner-key": CHAT_ROOM_HOST_ID,
+    "x-wdl-do-owner-task-id": "task-a",
+    "x-wdl-do-owner-generation": "4",
+  };
+  const decoded = await readDoInvokeRequest(new Request("http://do-runtime/internal/do/invoke", {
+    method: "POST",
+    headers,
+    body: encodeDoInvokeRequest(normalizeDoInvokeRequest(BASE_BODY)),
+  }));
+  assert.deepEqual(decoded.owner, {
+    ownerKey: CHAT_ROOM_HOST_ID,
+    taskId: "task-a",
+    generation: 4,
+  });
+
+  await assert.rejects(
+    readDoInvokeRequest(new Request("http://do-runtime/internal/do/invoke", {
+      method: "POST",
+      headers,
+      body: encodeDoInvokeRequest({
+        ...normalizeDoInvokeRequest(BASE_BODY),
+        owner: {
+          ownerKey: CHAT_ROOM_HOST_ID,
+          taskId: "task-b",
+          generation: 5,
+        },
+      }),
+    })),
+    (err) => err instanceof DoRuntimeError &&
+      err.status === 400 &&
+      err.code === "invalid_request" &&
+      err.message === "DO invoke owner fences conflict"
+  );
+});
+
 test("do invoke endpoint rejects oversized binary envelopes before decoding", async () => {
   await assert.rejects(
     readDoInvokeRequest(new Request("http://do-runtime/internal/do/invoke", {
@@ -743,6 +793,16 @@ test("generated host ids honor the aggregate protocol size limit", () => {
 test("shards object names using UTF-8 bytes", () => {
   assert.equal(hostIdForObject(DO_STORAGE_ID, "ChatRoom", "中文"), `${DO_STORAGE_ID}:ChatRoom:shard5`);
   assert.equal(hostIdForObject(DO_STORAGE_ID, "ChatRoom", "🚀"), `${DO_STORAGE_ID}:ChatRoom:shard10`);
+});
+
+test("DO protocol host ids match the cross-tier owner-shard fixture", () => {
+  assert.equal(doOwnerShardFixture.hostShardCount, DO_HOST_SHARD_COUNT);
+  for (const item of doOwnerShardFixture.cases) {
+    assert.equal(
+      hostIdForObject(item.doStorageId, item.className, item.objectName),
+      `${item.doStorageId}:${item.className}:shard${item.shard}`
+    );
+  }
 });
 
 test("rejects request bodies in invoke metadata", () => {

@@ -42,10 +42,12 @@ async function loadReplayCacheModule() {
   const metricsUrl = freshModuleDataUrl(
     "export const metrics = globalThis.__workflowReplayCacheMetrics;"
   );
-  return await importRepositoryModuleFresh("runtime/dispatch/workflow-replay-cache.js", [
+  const mod = await importRepositoryModuleFresh("runtime/dispatch/workflow-replay-cache.js", [
     [/from "runtime-metrics";/, `from ${JSON.stringify(metricsUrl)};`],
     [/from "shared-utf8";/, `from ${JSON.stringify(repositoryFileUrl("shared/utf8.js"))};`],
   ]);
+  metricsState().prepare = mod.prepareWorkflowReplayCacheMetrics;
+  return mod;
 }
 
 const CREATED_AT_BASE_MS = 1700000000000;
@@ -73,6 +75,7 @@ function runWithToken(index, runToken) {
 
 /** @param {string} name */
 function latestGauge(name) {
+  metricsState().prepare();
   const entries = metricsState().gauges.filter((/** @type {any} */ entry) => entry.name === name);
   assert.ok(entries.length > 0, `missing ${name} gauge`);
   return entries.at(-1).value;
@@ -83,6 +86,7 @@ function latestGauge(name) {
  * @param {number} startIndex
  */
 function latestGaugeSince(name, startIndex) {
+  metricsState().prepare();
   const entries = metricsState().gauges
     .slice(startIndex)
     .filter((/** @type {any} */ entry) => entry.name === name);
@@ -107,9 +111,13 @@ test("workflow replay cache gauges track step count across replacement and evict
   const cache = acquireWorkflowReplayCache(run(0));
   const cacheHit = getWorkflowReplayCache(run(0));
   assert.equal(cacheHit, cache);
+  assert.equal(metricsState().gauges.length, 0);
   assert.equal(latestGauge("workflow_replay_cache_instances"), 1);
+  const gaugesBeforeMutation = metricsState().gauges.length;
   rememberWorkflowReplayStep(cache, 0, { status: "completed" });
   rememberWorkflowReplayStep(cache, 0, { status: "completed", output: "updated" });
+  assert.equal(metricsState().gauges.length, gaugesBeforeMutation);
+  const gaugeCountBeforeOutcomes = metricsState().gauges.length;
   recordWorkflowReplayCacheOutcome("hit");
   assert.equal(
     metricsState().increments.some((/** @type {any} */ entry) => entry.name === "workflow_replay_cache" && entry.labels?.outcome === "hit"),
@@ -120,6 +128,7 @@ test("workflow replay cache gauges track step count across replacement and evict
     metricsState().increments.some((/** @type {any} */ entry) => entry.name === "workflow_replay_cache" && entry.labels?.outcome === "miss"),
     true,
   );
+  assert.equal(metricsState().gauges.length, gaugeCountBeforeOutcomes);
   assert.equal(latestGauge("workflow_replay_cache_instances"), 1);
   assert.equal(latestGauge("workflow_replay_cache_steps"), 1);
   rememberWorkflowReplayStep(cache, 1, { status: "completed", output: "second-step" });

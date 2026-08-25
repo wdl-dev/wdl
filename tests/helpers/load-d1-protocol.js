@@ -19,8 +19,8 @@ const UTF8_URL = repositoryFileUrl("shared/utf8.js");
 export function d1ProtocolDataUrl() {
   const queryWireUrl = d1QueryWireDataUrl();
   return repositoryModuleDataUrl("d1-runtime/protocol.js", [
-    [/import \{ normalizeD1Param \} from "shared-d1-params";/g,
-      `import { normalizeD1Param } from ${JSON.stringify(PARAMS_URL)};`],
+    [/import \{ normalizeD1WireParam \} from "shared-d1-params";/g,
+      `import { normalizeD1WireParam } from ${JSON.stringify(PARAMS_URL)};`],
     [/import \{ fnv1a32CodeUnits \} from "shared-fnv1a32";/g,
       `import { fnv1a32CodeUnits } from ${JSON.stringify(FNV_URL)};`],
     [/from "shared-bounded-body";/g, `from ${JSON.stringify(BOUNDED_BODY_URL)};`],

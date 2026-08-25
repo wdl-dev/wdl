@@ -5,7 +5,11 @@ import {
 } from "../../do-runtime/alarm-shim-source.js";
 import { makeDoAlarmBinding, makeDoAlarmStorage } from "../helpers/do-alarm-shim-fixture.js";
 import { applyModuleReplacements, moduleDataUrl } from "../helpers/load-shared-module.js";
-import { withMockedGlobal, withMockedProperty } from "../helpers/mock-global.js";
+import {
+  withMockedGlobal,
+  withMockedProperty,
+  withMockedPropertyDescriptor,
+} from "../helpers/mock-global.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 
 const shimSource = applyModuleReplacements(DO_ALARM_SHIM_SOURCE, [
@@ -338,7 +342,7 @@ test("DO alarm shim: storage facade ignores tenant-patched proxy intrinsics", as
   });
 });
 
-test("DO alarm shim: transaction setAlarm then deleteAlarm flushes only the final delete", async () => {
+test("DO alarm shim: transaction setAlarm then deleteAlarm skips delete without a backend baseline", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   const { storage, state } = makeDoAlarmStorage();
@@ -349,9 +353,7 @@ test("DO alarm shim: transaction setAlarm then deleteAlarm flushes only the fina
     await txn.deleteAlarm();
   });
 
-  assert.deepEqual(calls.map(([kind]) => kind), ["delete"]);
-  assert.equal(typeof /** @type {any} */ (calls[0][1]).token, "string");
-  assert.notEqual(/** @type {any} */ (calls[0][1]).token, "");
+  assert.deepEqual(calls, []);
   assert.equal(state.row, null);
 });
 
@@ -377,6 +379,49 @@ test("DO alarm shim: transaction setAlarm then deleteAlarm deletes the baseline 
   assert.equal(state.row, null);
 });
 
+test("DO alarm shim: failed transaction delete restores and retries the backend baseline", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const baseline = {
+    scheduled_time: 500,
+    retry_count: 0,
+    in_flight: 0,
+    token: "transaction-delete-baseline-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(baseline);
+  let backendToken = /** @type {string | null} */ (baseline.token);
+  let attempts = 0;
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.deleteAlarmIndex = async (input) => {
+    calls.push(["delete", input]);
+    attempts += 1;
+    if (attempts === 1) throw new Error("delete failed before mutation");
+    if (backendToken === /** @type {{ token: string }} */ (input).token) backendToken = null;
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  await assert.rejects(
+    wrapped.transaction(async (/** @type {any} */ txn) => {
+      await wrapped.setAlarm(1000);
+      await txn.deleteAlarm();
+    }),
+    /delete failed before mutation/
+  );
+
+  assert.equal(state.row?.scheduled_time, baseline.scheduled_time);
+  assert.equal(state.row?.token, baseline.token);
+  assert.equal(backendToken, baseline.token);
+
+  await wrapped.deleteAlarm();
+
+  assert.deepEqual(calls, [
+    ["delete", { className: "Room", objectName: "alice", token: baseline.token }],
+    ["delete", { className: "Room", objectName: "alice", token: baseline.token }],
+  ]);
+  assert.equal(backendToken, null);
+  assert.equal(state.row, null);
+});
+
 test("DO alarm shim: failed non-transactional setAlarm rolls back the SQLite alarm row", async () => {
   /** @type {unknown[][]} */
   const calls = [];
@@ -392,6 +437,268 @@ test("DO alarm shim: failed non-transactional setAlarm rolls back the SQLite ala
 
   assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
   assert.equal(state.row, null);
+});
+
+test("DO alarm shim: a later successful setAlarm installs a replacement after backend rejection", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage({
+    scheduled_time: 500,
+    retry_count: 0,
+    in_flight: 0,
+    token: "baseline-token",
+  });
+  const alarmBinding = makeDoAlarmBinding(calls);
+  let attempts = 0;
+  alarmBinding.setAlarmIndex = async (input) => {
+    calls.push(["set", input]);
+    attempts += 1;
+    if (attempts === 1) throw new Error("backend unavailable");
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  await assert.rejects(wrapped.setAlarm(1000), /backend unavailable/);
+  const failedToken = /** @type {{ token: string }} */ (calls[0][1]).token;
+  assert.notEqual(state.row?.token, failedToken);
+
+  await wrapped.setAlarm(2000);
+
+  assert.deepEqual(calls.map(([kind]) => kind), ["set", "set"]);
+  assert.equal(state.row?.scheduled_time, 2000);
+  assert.equal(state.row?.token, /** @type {{ token: string }} */ (calls[1][1]).token);
+});
+
+test("DO alarm shim: overlapping setAlarm backend mutations preserve call order", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const firstStarted = Promise.withResolvers();
+  const releaseFirst = Promise.withResolvers();
+  /** @type {string | null} */
+  let backendToken = null;
+  let attempt = 0;
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.setAlarmIndex = async (rawInput) => {
+    const input = /** @type {{ scheduledTime: number, token: string }} */ (rawInput);
+    const index = attempt++;
+    calls.push(["set", rawInput]);
+    if (index === 0) {
+      firstStarted.resolve(undefined);
+      await releaseFirst.promise;
+    }
+    backendToken = input.token;
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  const first = wrapped.setAlarm(1000);
+  await firstStarted.promise;
+  const second = wrapped.setAlarm(2000);
+  const secondToken = state.row?.token;
+  assert.equal(calls.length, 1);
+
+  releaseFirst.resolve(undefined);
+  await Promise.all([first, second]);
+
+  assert.deepEqual(calls.map(([, input]) => (
+    /** @type {{ scheduledTime: number }} */ (input).scheduledTime
+  )), [1000, 2000]);
+  assert.equal(backendToken, secondToken);
+  assert.equal(state.row?.token, secondToken);
+});
+
+test("DO alarm shim: transaction backend effect waits for earlier queued mutation", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const firstStarted = Promise.withResolvers();
+  const releaseFirst = Promise.withResolvers();
+  /** @type {string | null} */
+  let backendToken = null;
+  let attempt = 0;
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.setAlarmIndex = async (rawInput) => {
+    const input = /** @type {{ scheduledTime: number, token: string }} */ (rawInput);
+    const index = attempt++;
+    calls.push(["set", rawInput]);
+    if (index === 0) {
+      firstStarted.resolve(undefined);
+      await releaseFirst.promise;
+    }
+    backendToken = input.token;
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  const first = wrapped.setAlarm(1000);
+  await firstStarted.promise;
+  const transaction = wrapped.transaction(async (/** @type {any} */ txn) => {
+    await txn.setAlarm(2000);
+  });
+  const transactionToken = state.row?.token;
+  await Promise.resolve();
+  const callsBeforeRelease = calls.map(([, input]) => (
+    /** @type {{ scheduledTime: number }} */ (input).scheduledTime
+  ));
+
+  releaseFirst.resolve(undefined);
+  await Promise.all([first, transaction]);
+
+  assert.deepEqual(callsBeforeRelease, [1000]);
+  assert.deepEqual(calls.map(([, input]) => (
+    /** @type {{ scheduledTime: number }} */ (input).scheduledTime
+  )), [1000, 2000]);
+  assert.equal(backendToken, transactionToken);
+  assert.equal(state.row?.token, transactionToken);
+});
+
+test("DO alarm shim: transaction fence remains until native transaction promise settles", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const nativeTransaction = storage.transaction;
+  const localCommitFinished = Promise.withResolvers();
+  const releaseTransaction = Promise.withResolvers();
+  storage.transaction = async (/** @type {(txn?: unknown) => unknown} */ callback) => {
+    const result = await nativeTransaction(callback);
+    localCommitFinished.resolve(undefined);
+    await releaseTransaction.promise;
+    return result;
+  };
+  /** @type {string | null} */
+  let backendToken = null;
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.setAlarmIndex = async (rawInput) => {
+    const input = /** @type {{ token: string }} */ (rawInput);
+    calls.push(["set", rawInput]);
+    backendToken = input.token;
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  const transaction = wrapped.transaction(async (/** @type {any} */ txn) => {
+    await txn.setAlarm(1000);
+  });
+  await localCommitFinished.promise;
+  try {
+    assert.throws(() => wrapped.setAlarm(2000), /after transaction completion/);
+    assert.equal(calls.length, 0);
+  } finally {
+    releaseTransaction.resolve(undefined);
+  }
+  await transaction;
+  const replacement = wrapped.setAlarm(2000);
+  const replacementToken = state.row?.token;
+  await replacement;
+
+  assert.deepEqual(calls.map(([, input]) => (
+    /** @type {{ scheduledTime: number }} */ (input).scheduledTime
+  )), [1000, 2000]);
+  assert.equal(backendToken, replacementToken);
+  assert.equal(state.row?.token, replacementToken);
+});
+
+test("DO alarm shim: transaction state ignores Array prototype metadata", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await withMockedPropertyDescriptor(
+    /** @type {any} */ (Array.prototype),
+    "alarmReservation",
+    { get() { throw new Error("polluted alarmReservation"); } },
+    () => withMockedPropertyDescriptor(
+      /** @type {any} */ (Array.prototype),
+      "nested",
+      { get() { throw new Error("polluted nested"); } },
+      async () => {
+        await wrapped.transaction(async (/** @type {any} */ txn) => {
+          await txn.setAlarm(1000);
+        });
+      }
+    )
+  );
+
+  assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+  assert.equal(state.row?.scheduled_time, 1000);
+});
+
+test("DO alarm shim: transaction reservation does not assimilate a function thenable", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await withMockedPropertyDescriptor(
+    /** @type {any} */ (Function.prototype),
+    "then",
+    { get() { throw new Error("polluted Function.prototype.then"); } },
+    async () => {
+      await wrapped.transaction(async (/** @type {any} */ txn) => {
+        await txn.setAlarm(1000);
+      });
+    }
+  );
+
+  assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+  assert.equal(state.row?.scheduled_time, 1000);
+});
+
+test("DO alarm shim: getAlarm repair cannot overwrite a later setAlarm", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage({
+    scheduled_time: 1000,
+    retry_count: 0,
+    in_flight: 0,
+    token: "repair-baseline-token",
+  });
+  const repairStarted = Promise.withResolvers();
+  const releaseRepair = Promise.withResolvers();
+  /** @type {string | null} */
+  let backendToken = null;
+  let attempt = 0;
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.setAlarmIndex = async (rawInput) => {
+    const input = /** @type {{ token: string }} */ (rawInput);
+    const index = attempt++;
+    calls.push(["set", rawInput]);
+    if (index === 0) {
+      repairStarted.resolve(undefined);
+      await releaseRepair.promise;
+    }
+    backendToken = input.token;
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  const repair = wrapped.getAlarm();
+  await repairStarted.promise;
+  const replacement = wrapped.setAlarm(2000);
+  const replacementToken = state.row?.token;
+  assert.equal(calls.length, 1);
+
+  releaseRepair.resolve(undefined);
+  await Promise.all([repair, replacement]);
+
+  assert.equal(backendToken, replacementToken);
+  assert.equal(state.row?.token, replacementToken);
+  assert.deepEqual(calls.map(([kind]) => kind), ["set", "set"]);
+});
+
+test("DO alarm shim: input validation failure preserves the previous alarm", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const initial = {
+    scheduled_time: 500,
+    retry_count: 0,
+    in_flight: 0,
+    token: "validation-baseline-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(initial);
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await assert.rejects(wrapped.setAlarm(0), /alarm time <= 0/);
+
+  assert.deepEqual(calls, []);
+  assert.deepEqual(state.row, initial);
 });
 
 test("DO alarm shim: scheduled alarms use distinct tokens from the pre-captured RNG", async () => {
@@ -469,14 +776,42 @@ test("DO alarm shim: transactionSync rejects deleteAlarm and rolls back the SQLi
   assert.deepEqual(state.row, initial);
 });
 
+test("DO alarm shim: transactionSync marker is shared across owning and callback proxies", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "shared-sync-transaction-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(initial);
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    assert.throws(
+      () => wrapped.transactionSync(() => txn.setAlarm(1000)),
+      /setAlarm\(\) cannot be used inside transactionSync\(\)/
+    );
+    assert.throws(
+      () => wrapped.transactionSync(() => txn.deleteAlarm()),
+      /deleteAlarm\(\) cannot be used inside transactionSync\(\)/
+    );
+  });
+
+  assert.deepEqual(calls, []);
+  assert.deepEqual(state.row, initial);
+});
+
 test("DO alarm shim: async transaction rollback does not flush alarm backend side effects", async () => {
   /** @type {unknown[][]} */
   const calls = [];
-  const { storage, state } = makeDoAlarmStorage();
+  const { storage, state, kv } = makeDoAlarmStorage();
   const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
 
   await assert.rejects(
     wrapped.transaction(async (/** @type {any} */ txn) => {
+      await txn.put("rolled-back-key", "rolled-back-value");
       await txn.setAlarm(1000);
       throw new Error("rollback");
     }),
@@ -485,9 +820,374 @@ test("DO alarm shim: async transaction rollback does not flush alarm backend sid
 
   assert.deepEqual(calls, []);
   assert.equal(state.row, null);
+  assert.equal(kv.has("rolled-back-key"), false);
 });
 
-test("DO alarm shim: async transaction deleteAll rollback does not cancel backend alarm", async () => {
+test("DO alarm shim: transaction getAlarm is local-only and explicit rollback discards setAlarm", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    await txn.setAlarm(1000);
+    assert.equal(await txn.getAlarm(), 1000);
+    txn.rollback();
+    assert.doesNotThrow(() => txn.rollback());
+    assert.throws(() => txn.getAlarm(), /after transaction rollback/);
+  });
+
+  assert.deepEqual(calls, []);
+  assert.equal(state.row, null);
+});
+
+test("DO alarm shim: class storage aliases share one alarm transaction context", async (t) => {
+  class StorageAliases {
+    /** @param {{ storage: any }} ctx */
+    constructor(ctx) {
+      this.ctx = ctx;
+      this.cachedStorage = ctx.storage;
+    }
+  }
+
+  await t.test("commit", async () => {
+    /** @type {unknown[][]} */
+    const calls = [];
+    const { storage, state } = makeDoAlarmStorage();
+    const Wrapped = wrapDurableObjectClass(StorageAliases, "Room");
+    const instance = new Wrapped(
+      { storage, id: "alice" },
+      { __WDL_DO_ALARMS__: makeDoAlarmBinding(calls) }
+    );
+    assert.equal(instance.cachedStorage, instance.ctx.storage);
+
+    await instance.cachedStorage.transaction(async (/** @type {any} */ txn) => {
+      await txn.setAlarm(1000);
+      await instance.ctx.storage.setAlarm(2000);
+    });
+
+    assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+    assert.equal(/** @type {{ scheduledTime: number }} */ (calls[0][1]).scheduledTime, 2000);
+    assert.equal(state.row?.scheduled_time, 2000);
+    assert.equal(state.row?.token, /** @type {{ token: string }} */ (calls[0][1]).token);
+  });
+
+  for (const outcome of ["rollback", "throw"]) {
+    await t.test(outcome, async () => {
+      /** @type {unknown[][]} */
+      const calls = [];
+      const initial = outcome === "rollback" ? {
+        scheduled_time: 500,
+        retry_count: 0,
+        in_flight: 0,
+        token: "class-alias-baseline-token",
+      } : null;
+      const { storage, state } = makeDoAlarmStorage(initial);
+      const Wrapped = wrapDurableObjectClass(StorageAliases, "Room");
+      const instance = new Wrapped(
+        { storage, id: "alice" },
+        { __WDL_DO_ALARMS__: makeDoAlarmBinding(calls) }
+      );
+      const operation = instance.cachedStorage.transaction(async (/** @type {any} */ txn) => {
+        if (outcome === "rollback") {
+          await instance.ctx.storage.deleteAlarm();
+          txn.rollback();
+          return;
+        }
+        await instance.ctx.storage.setAlarm(1000);
+        throw new Error("class alias transaction failed");
+      });
+
+      if (outcome === "throw") {
+        await assert.rejects(operation, /class alias transaction failed/);
+      } else {
+        await operation;
+      }
+      assert.deepEqual(calls, []);
+      assert.deepEqual(state.row, initial);
+    });
+  }
+});
+
+test("DO alarm shim: nested transaction rejects alarm APIs across every storage alias", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await wrapped.transaction(async (/** @type {any} */ outerTxn) => {
+    await outerTxn.setAlarm(1000);
+    await wrapped.transaction(async (/** @type {any} */ innerTxn) => {
+      for (const target of [innerTxn, outerTxn, wrapped]) {
+        assert.throws(() => target.setAlarm(2000), /inside nested transaction/);
+      }
+    });
+    outerTxn.rollback();
+  });
+
+  assert.deepEqual(calls, []);
+  assert.equal(state.row, null);
+});
+
+test("DO alarm shim: an unawaited nested transaction cannot restore a closed outer fence", async (t) => {
+  for (const outcome of ["resolved", "rejected"]) {
+    await t.test(outcome, async () => {
+      /** @type {unknown[][]} */
+      const calls = [];
+      const { storage, state, kv } = makeDoAlarmStorage();
+      const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+      const childStarted = Promise.withResolvers();
+      const releaseChild = Promise.withResolvers();
+      /** @type {Promise<string> | null} */
+      let childSettled = null;
+
+      await wrapped.transaction(async () => {
+        const child = wrapped.transaction(async () => {
+          childStarted.resolve(undefined);
+          await releaseChild.promise;
+          if (outcome === "rejected") throw new Error("nested transaction failed");
+        });
+        childSettled = child.then(
+          () => "resolved",
+          /** @param {unknown} err */
+          (err) => err instanceof Error ? err.message : String(err)
+        );
+        await childStarted.promise;
+      });
+
+      releaseChild.resolve(undefined);
+      assert.equal(
+        await childSettled,
+        outcome === "resolved" ? "resolved" : "nested transaction failed"
+      );
+      await wrapped.setAlarm(1000);
+      await wrapped.transaction(async (/** @type {any} */ txn) => {
+        await txn.put("after-nested", "ok");
+      });
+
+      assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+      assert.equal(state.row?.scheduled_time, 1000);
+      assert.equal(kv.get("after-nested"), "ok");
+    });
+  }
+});
+
+test("DO alarm shim: failed native rollback keeps queued alarm side effects", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+  const childStarted = Promise.withResolvers();
+  const releaseChild = Promise.withResolvers();
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    await txn.setAlarm(1000);
+    const child = wrapped.transaction(async () => {
+      childStarted.resolve(undefined);
+      await releaseChild.promise;
+    });
+    await childStarted.promise;
+    assert.throws(() => txn.rollback(), /nested transaction is active/);
+    releaseChild.resolve(undefined);
+    await child;
+  });
+
+  assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+  assert.equal(state.row?.scheduled_time, 1000);
+});
+
+test("DO alarm shim: owning storage shares transaction-local alarm context", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await wrapped.transaction(async () => {
+    await wrapped.setAlarm(1000);
+    assert.equal(await wrapped.getAlarm(), 1000);
+    assert.deepEqual(calls, []);
+  });
+
+  assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+  assert.equal(state.row?.scheduled_time, 1000);
+});
+
+test("DO alarm shim: same-event owning-storage alarm follows native transaction rollback", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+  const transactionStarted = Promise.withResolvers();
+  const releaseTransaction = Promise.withResolvers();
+
+  const transaction = wrapped.transaction(async (/** @type {any} */ txn) => {
+    await txn.setAlarm(1000);
+    transactionStarted.resolve(undefined);
+    await releaseTransaction.promise;
+    txn.rollback();
+  });
+  await transactionStarted.promise;
+
+  await wrapped.setAlarm(2000);
+  releaseTransaction.resolve(undefined);
+  await transaction;
+
+  assert.deepEqual(calls, []);
+  assert.equal(state.row, null);
+});
+
+test("DO alarm shim: callback reaction cannot cross native transaction settlement", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, state } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+  const callbackEntered = Promise.withResolvers();
+  const callbackResult = Promise.withResolvers();
+
+  const transaction = wrapped.transaction(() => {
+    callbackEntered.resolve(undefined);
+    return callbackResult.promise;
+  });
+  await callbackEntered.promise;
+  const outsideReaction = callbackResult.promise.catch(() => {
+    try {
+      wrapped.setAlarm(2000);
+      return "fulfilled";
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  });
+
+  callbackResult.reject(new Error("transaction rollback"));
+  await assert.rejects(transaction, /transaction rollback/);
+
+  assert.match(await outsideReaction, /after transaction completion/);
+  assert.deepEqual(calls, []);
+  assert.equal(state.row, null);
+});
+
+test("DO alarm shim: explicit rollback discards outer-storage delete side effects", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "rollback-deleteAlarm-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(initial);
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    await wrapped.deleteAlarm();
+    txn.rollback();
+    assert.throws(() => wrapped.setAlarm(2000), /after transaction rollback/);
+  });
+
+  assert.deepEqual(calls, []);
+  assert.deepEqual(state.row, initial);
+});
+
+test("DO alarm shim: escaped transaction proxy rejects alarm operations after completion", async () => {
+  const { storage } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding([]), "Room", "alice");
+  /** @type {any} */
+  let escapedTxn;
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    escapedTxn = txn;
+  });
+
+  for (const operation of ["setAlarm", "getAlarm", "deleteAlarm"]) {
+    assert.throws(
+      () => operation === "setAlarm" ? escapedTxn[operation](1000) : escapedTxn[operation](),
+      /after transaction completion/
+    );
+  }
+  assert.equal(escapedTxn.deleteAll, undefined);
+  assert.throws(() => escapedTxn.rollback(), /completed/);
+});
+
+test("DO alarm shim: escaped rolled-back transaction keeps rollback idempotent", async () => {
+  const { storage } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding([]), "Room", "alice");
+  /** @type {any} */
+  let escapedTxn;
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    escapedTxn = txn;
+    txn.rollback();
+  });
+
+  assert.doesNotThrow(() => escapedTxn.rollback());
+});
+
+test("DO alarm shim: later transactions cannot reactivate an escaped transaction proxy", async (t) => {
+  for (const outcome of ["committed", "rolled back"]) {
+    await t.test(outcome, async () => {
+      /** @type {unknown[][]} */
+      const calls = [];
+      const { storage, state } = makeDoAlarmStorage();
+      const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+      /** @type {any} */
+      let escapedTxn;
+
+      await wrapped.transaction(async (/** @type {any} */ txn) => {
+        escapedTxn = txn;
+        if (outcome === "rolled back") txn.rollback();
+      });
+
+      await wrapped.transaction(async () => {
+        const expected = outcome === "rolled back" ? /after transaction rollback/ : /after transaction completion/;
+        assert.throws(() => escapedTxn.setAlarm(1000), expected);
+        assert.throws(() => escapedTxn.deleteAlarm(), expected);
+        assert.throws(
+          () => wrapped.transactionSync(() => escapedTxn.getAlarm()),
+          expected
+        );
+      });
+
+      assert.deepEqual(calls, []);
+      assert.equal(state.row, null);
+    });
+  }
+});
+
+test("DO alarm shim: callback transaction does not synthesize storage-only methods", async () => {
+  const { storage } = makeDoAlarmStorage();
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding([]), "Room", "alice");
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    assert.equal(txn.transaction, undefined);
+    assert.equal(txn.transactionSync, undefined);
+    assert.equal(txn.deleteAll, undefined);
+  });
+});
+
+test("DO alarm shim: transactional backend rejection leaves other committed storage writes intact", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const { storage, kv } = makeDoAlarmStorage();
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.setAlarmIndex = async (input) => {
+    calls.push(["set", input]);
+    throw new Error("backend unavailable");
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  await assert.rejects(
+    wrapped.transaction(async (/** @type {any} */ txn) => {
+      await txn.put("committed-key", "committed-value");
+      await txn.setAlarm(1000);
+    }),
+    /backend unavailable/
+  );
+
+  assert.deepEqual(calls.map(([kind]) => kind), ["set"]);
+  assert.equal(kv.get("committed-key"), "committed-value");
+});
+
+test("DO alarm shim: async transaction rejects deleteAll before local or backend mutation", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   const initial = {
@@ -500,16 +1200,18 @@ test("DO alarm shim: async transaction deleteAll rollback does not cancel backen
   kv.set("kv-key", "kv-value");
   const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
 
-  await assert.rejects(
-    wrapped.transaction(async (/** @type {any} */ txn) => {
-      await txn.deleteAll();
-      throw new Error("rollback");
-    }),
-    /rollback/
-  );
+  await wrapped.transaction(async (/** @type {any} */ txn) => {
+    assert.equal(txn.deleteAll, undefined);
+    assert.throws(
+      () => wrapped.deleteAll(),
+      /deleteAll\(\) cannot be used inside transaction\(\)/
+    );
+    txn.rollback();
+  });
 
   assert.deepEqual(calls, []);
   assert.deepEqual(state.row, initial);
+  assert.equal(kv.get("kv-key"), "kv-value");
 });
 
 test("DO alarm shim: transactionSync rejects async deleteAll", () => {
@@ -526,7 +1228,7 @@ test("DO alarm shim: transactionSync rejects async deleteAll", () => {
 
   assert.throws(
     () => wrapped.transactionSync(() => wrapped.deleteAll()),
-    /deleteAll\(\) cannot be used inside transactionSync\(\); use transaction\(\)/
+    /deleteAll\(\) cannot be used inside transactionSync\(\); call it outside the transaction/
   );
 
   assert.deepEqual(calls, []);
@@ -586,6 +1288,283 @@ test("DO alarm shim: deleteAlarm backend failure restores the SQLite alarm row",
     ["delete", { className: "Room", objectName: "alice", token: "delete-token" }],
   ]);
   assert.deepEqual(state.row, { ...initial, last_error: null });
+});
+
+test("DO alarm shim: delete fence does not validate unrelated persisted alarm fields", async (t) => {
+  for (const row of [{
+    scheduled_time: 0,
+    retry_count: 0,
+    in_flight: 0,
+    token: "corrupt-scheduled-time-token",
+  }, {
+    scheduled_time: 1234,
+    retry_count: -1,
+    in_flight: 0,
+    token: "corrupt-retry-count-token",
+  }]) {
+    await t.test(row.token, async () => {
+      /** @type {unknown[][]} */
+      const calls = [];
+      const { storage, state } = makeDoAlarmStorage(row);
+      const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+      await wrapped.deleteAlarm();
+
+      assert.deepEqual(calls, [
+        ["delete", { className: "Room", objectName: "alice", token: row.token }],
+      ]);
+      assert.equal(state.row, null);
+    });
+  }
+});
+
+test("DO alarm shim: stale delete compensation cannot overwrite a concurrent alarm", async (t) => {
+  for (const transactional of [false, true]) {
+    await t.test(transactional ? "transaction post-commit" : "non-transactional", async () => {
+      /** @type {unknown[][]} */
+      const calls = [];
+      const initial = {
+        scheduled_time: 1234,
+        retry_count: 0,
+        in_flight: 0,
+        token: "concurrent-delete-baseline-token",
+      };
+      const { storage, state } = makeDoAlarmStorage(initial);
+      const deleteStarted = Promise.withResolvers();
+      const releaseDelete = Promise.withResolvers();
+      const alarmBinding = makeDoAlarmBinding(calls);
+      alarmBinding.deleteAlarmIndex = async (input) => {
+        calls.push(["delete", input]);
+        deleteStarted.resolve(undefined);
+        await releaseDelete.promise;
+        throw new Error("stale delete failed");
+      };
+      const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+      const deletion = transactional
+        ? wrapped.transaction(async (/** @type {any} */ txn) => txn.deleteAlarm())
+        : wrapped.deleteAlarm();
+      await deleteStarted.promise;
+      assert.notEqual(state.row?.token, initial.token);
+      assert.equal(state.row?.in_flight, 1);
+      assert.equal(await wrapped.getAlarm(), null);
+
+      const replacement = wrapped.setAlarm(2000);
+      const replacementToken = state.row?.token;
+      assert.equal(typeof replacementToken, "string");
+      assert.notEqual(replacementToken, initial.token);
+
+      const rejected = assert.rejects(deletion, /stale delete failed/);
+      releaseDelete.resolve(undefined);
+      await rejected;
+      await replacement;
+
+      assert.equal(state.row?.scheduled_time, 2000);
+      assert.equal(state.row?.token, replacementToken);
+      assert.deepEqual(calls.map(([kind]) => kind), ["delete", "set"]);
+      assert.equal(/** @type {{ token: string }} */ (calls[0][1]).token, initial.token);
+      assert.equal(/** @type {{ token: string }} */ (calls[1][1]).token, replacementToken);
+    });
+  }
+});
+
+test("DO alarm shim: concurrent deletes converge when either backend delete succeeds", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "concurrent-delete-lineage-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(initial);
+  const started = [Promise.withResolvers(), Promise.withResolvers()];
+  const release = [Promise.withResolvers(), Promise.withResolvers()];
+  let attempt = 0;
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.deleteAlarmIndex = async (input) => {
+    const index = attempt++;
+    calls.push(["delete", input]);
+    started[index].resolve(undefined);
+    await release[index].promise;
+    if (index === 1) throw new Error("second delete failed");
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  const firstDelete = wrapped.deleteAlarm();
+  await started[0].promise;
+  const secondDelete = wrapped.deleteAlarm();
+
+  release[0].resolve(undefined);
+  await firstDelete;
+  assert.equal(state.row, null);
+  await started[1].promise;
+
+  const secondRejected = assert.rejects(secondDelete, /second delete failed/);
+  release[1].resolve(undefined);
+  await secondRejected;
+
+  assert.equal(state.row, null);
+  assert.deepEqual(calls, [
+    ["delete", { className: "Room", objectName: "alice", token: initial.token }],
+    ["delete", { className: "Room", objectName: "alice", token: initial.token }],
+  ]);
+});
+
+test("DO alarm shim: alarm completion wins over a failed concurrent delete", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const token = "alarm-completion-delete-lineage-token";
+  const { storage, state } = makeDoAlarmStorage({
+    scheduled_time: Date.now() - 1000,
+    retry_count: 0,
+    in_flight: 0,
+    token,
+  });
+  const alarmStarted = Promise.withResolvers();
+  const releaseAlarm = Promise.withResolvers();
+  const deleteStarted = Promise.withResolvers();
+  const releaseDelete = Promise.withResolvers();
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.deleteAlarmIndex = async (input) => {
+    calls.push(["delete", input]);
+    deleteStarted.resolve(undefined);
+    await releaseDelete.promise;
+    throw new Error("concurrent delete failed");
+  };
+  class SlowAlarm {
+    async alarm() {
+      alarmStarted.resolve(undefined);
+      await releaseAlarm.promise;
+    }
+  }
+  const Wrapped = wrapDurableObjectClass(SlowAlarm, "Room");
+  const instance = new Wrapped({ storage, id: "alice" }, { __WDL_DO_ALARMS__: alarmBinding });
+  const delivery = instance.fetch(new Request("https://do.internal/__wdl_alarm", {
+    method: "POST",
+    headers: { "x-wdl-do-internal-alarm": "1" },
+    body: JSON.stringify({ token, retryCount: 0 }),
+  }));
+  await alarmStarted.promise;
+
+  const deletion = wrapStorage(storage, alarmBinding, "Room", "alice").deleteAlarm();
+  await deleteStarted.promise;
+  const deleteRejected = assert.rejects(deletion, /concurrent delete failed/);
+
+  releaseAlarm.resolve(undefined);
+  await assertJsonResponse(await delivery, 200, { ok: true });
+  assert.equal(state.row, null);
+
+  releaseDelete.resolve(undefined);
+  await deleteRejected;
+  assert.equal(state.row, null);
+});
+
+test("DO alarm shim: getAlarm attempts best-effort repair after a lost delete acknowledgement", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "lost-delete-ack-token",
+  };
+  const { storage, state } = makeDoAlarmStorage(initial);
+  /** @type {null | { className: string, objectName: string, scheduledTime: number, retryCount: number, token: string }} */
+  let backendAlarm = {
+    className: "Room",
+    objectName: "alice",
+    scheduledTime: initial.scheduled_time,
+    retryCount: initial.retry_count,
+    token: initial.token,
+  };
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.deleteAlarmIndex = async (input) => {
+    calls.push(["delete", input]);
+    backendAlarm = null;
+    throw new Error("delete acknowledgement lost");
+  };
+  alarmBinding.setAlarmIndex = async (rawInput) => {
+    calls.push(["set", rawInput]);
+    const input = /** @type {{ className: string, objectName: string, scheduledTime: number, retryCount: number, token: string }} */ (
+      rawInput
+    );
+    backendAlarm = { ...input };
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  await assert.rejects(wrapped.deleteAlarm(), /delete acknowledgement lost/);
+  assert.equal(backendAlarm, null);
+  assert.equal(state.row?.token, initial.token);
+
+  assert.equal(await wrapped.getAlarm(), initial.scheduled_time);
+  assert.deepEqual(backendAlarm, {
+    className: "Room",
+    objectName: "alice",
+    scheduledTime: initial.scheduled_time,
+    retryCount: initial.retry_count,
+    token: initial.token,
+  });
+  assert.deepEqual(calls.map(([kind]) => kind), ["delete", "set"]);
+});
+
+test("DO alarm shim: a later deleteAlarm completes a transactional delete after a lost acknowledgement", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "transaction-lost-delete-ack-token",
+  };
+  const { storage, state, kv } = makeDoAlarmStorage(initial);
+  let backendToken = /** @type {string | null} */ (initial.token);
+  let deleteAttempts = 0;
+  const alarmBinding = makeDoAlarmBinding(calls);
+  alarmBinding.deleteAlarmIndex = async (input) => {
+    calls.push(["delete", input]);
+    backendToken = null;
+    deleteAttempts += 1;
+    if (deleteAttempts === 1) throw new Error("delete acknowledgement lost");
+  };
+  const wrapped = wrapStorage(storage, alarmBinding, "Room", "alice");
+
+  await assert.rejects(
+    wrapped.transaction(async (/** @type {any} */ txn) => {
+      await txn.put("committed-key", "committed-value");
+      await txn.deleteAlarm();
+    }),
+    /delete acknowledgement lost/
+  );
+
+  assert.equal(kv.get("committed-key"), "committed-value");
+  assert.equal(state.row?.token, initial.token);
+  assert.equal(backendToken, null);
+
+  await wrapped.deleteAlarm();
+  assert.equal(state.row, null);
+  assert.equal(backendToken, null);
+  assert.deepEqual(calls.map(([kind]) => kind), ["delete", "delete"]);
+});
+
+test("DO alarm shim: transaction delete unwraps a persisted delete fence", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const backendToken = "persisted-transaction-delete-token";
+  const { storage, state } = makeDoAlarmStorage({
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 1,
+    token: `delete:persisted-fence:${backendToken}`,
+  });
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await wrapped.transaction(async (/** @type {any} */ txn) => txn.deleteAlarm());
+
+  assert.deepEqual(calls, [
+    ["delete", { className: "Room", objectName: "alice", token: backendToken }],
+  ]);
+  assert.equal(state.row, null);
 });
 
 test("DO alarm shim: getAlarm repairs backend schedule from SQLite row token", async () => {
@@ -789,7 +1768,7 @@ test("DO alarm shim: retry dispatch reclaims an already in-flight row", async ()
   assert.equal(state.row, null);
 });
 
-test("DO alarm shim: deleteAll clears alarm row and cancels backend schedule by default", async () => {
+test("DO alarm shim: best-effort deleteAll clears storage and backend alarm", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   const { storage, state, kv } = makeDoAlarmStorage({
@@ -810,7 +1789,25 @@ test("DO alarm shim: deleteAll clears alarm row and cancels backend schedule by 
   assert.equal(kv.size, 0);
 });
 
-test("DO alarm shim: deleteAll skips _cf_ reserved SQL objects case-insensitively", async () => {
+test("DO alarm shim: best-effort deleteAll bounds KV batches to 128 keys", async () => {
+  const { storage, kv } = makeDoAlarmStorage();
+  for (let i = 0; i < 129; i += 1) kv.set(`key-${i.toString().padStart(3, "0")}`, i);
+  /** @type {number[]} */
+  const batchSizes = [];
+  const fixtureDelete = storage.delete;
+  storage.delete = async (/** @type {string[] | string} */ keys) => {
+    batchSizes.push(Array.isArray(keys) ? keys.length : 1);
+    await fixtureDelete(keys);
+  };
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding([]), "Room", "alice");
+
+  await wrapped.deleteAll({ deleteAlarm: false });
+
+  assert.deepEqual(batchSizes, [128, 1]);
+  assert.equal(kv.size, 0);
+});
+
+test("DO alarm shim: best-effort deleteAll skips _cf_ SQL names case-insensitively", async () => {
   /** @type {string[]} */
   const dropped = [];
   const storage = {
@@ -846,14 +1843,15 @@ test("DO alarm shim: deleteAll skips _cf_ reserved SQL objects case-insensitivel
   assert.deepEqual(dropped, ['DROP TABLE IF EXISTS "tenant_table"']);
 });
 
-test("DO alarm shim: deleteAll deleteAlarm false preserves alarm row without backend cancel", async () => {
+test("DO alarm shim: best-effort deleteAll preserves the raw WDL alarm row", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   const initial = {
-    scheduled_time: 1234,
-    retry_count: 0,
-    in_flight: 0,
-    token: "preserve-token",
+    scheduled_time: 0,
+    retry_count: -1,
+    in_flight: 1,
+    token: "preserved-delete-all-token",
+    last_error: "legacy-error",
   };
   const { storage, state, kv } = makeDoAlarmStorage(initial);
   kv.set("kv-key", "kv-value");
@@ -862,11 +1860,11 @@ test("DO alarm shim: deleteAll deleteAlarm false preserves alarm row without bac
   await wrapped.deleteAll({ deleteAlarm: false });
 
   assert.deepEqual(calls, []);
-  assert.deepEqual(state.row, { ...initial, last_error: null });
+  assert.deepEqual(state.row, initial);
   assert.equal(kv.size, 0);
 });
 
-test("DO alarm shim: deleteAll ignores tenant-patched array iteration", async () => {
+test("DO alarm shim: best-effort deleteAll ignores tenant-patched collection iteration", async () => {
   /** @type {unknown[][]} */
   const calls = [];
   /** @type {string[]} */
@@ -875,7 +1873,7 @@ test("DO alarm shim: deleteAll ignores tenant-patched array iteration", async ()
     scheduled_time: 1234,
     retry_count: 0,
     in_flight: 0,
-    token: "preserve-token",
+    token: "delete-all-intrinsic-token",
   };
   const { storage, state } = makeDoAlarmStorage(initial);
   const originalExec = storage.sql.exec;
@@ -918,5 +1916,29 @@ test("DO alarm shim: deleteAll ignores tenant-patched array iteration", async ()
 
   assert.deepEqual(dropped, ['DROP TABLE IF EXISTS "tenant_table"']);
   assert.deepEqual(calls, []);
-  assert.deepEqual(state.row, { ...initial, last_error: null });
+  assert.deepEqual(state.row, initial);
+});
+
+test("DO alarm shim: best-effort deleteAll exposes partial failure", async () => {
+  /** @type {unknown[][]} */
+  const calls = [];
+  const initial = {
+    scheduled_time: 1234,
+    retry_count: 0,
+    in_flight: 0,
+    token: "partial-delete-all-token",
+  };
+  const { storage, state, kv } = makeDoAlarmStorage(initial);
+  kv.set("kv-key", "kv-value");
+  storage.delete = async () => {
+    kv.clear();
+    throw new Error("KV delete failed after partial mutation");
+  };
+  const wrapped = wrapStorage(storage, makeDoAlarmBinding(calls), "Room", "alice");
+
+  await assert.rejects(wrapped.deleteAll(), /KV delete failed after partial mutation/);
+
+  assert.deepEqual(calls, []);
+  assert.deepEqual(state.row, initial);
+  assert.equal(kv.size, 0);
 });

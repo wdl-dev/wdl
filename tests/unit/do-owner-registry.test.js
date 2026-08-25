@@ -232,6 +232,44 @@ test("DO owner registry: actor dispatch refreshes the active restart sequence", 
   assert.equal(request.restartSequence, 8);
 });
 
+test("DO owner registry: actor fence rejects a whole-worker delete lock", async () => {
+  const owner = ownerRecord();
+  setStoragePointer();
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), JSON.stringify(owner));
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(DELETE_LOCK_KEY, "whole:delete-token");
+  DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.set(OWNER_KEY, owner);
+
+  await assert.rejects(
+    assertCurrentOwnerWithLeaseBudget(
+      { REDIS_ADDR: "redis:6379" },
+      { ownerKey: OWNER_KEY, taskId: owner.taskId, generation: owner.generation },
+      { storageScope: invoke() }
+    ),
+    (err) => {
+      assert.equal(/** @type {{ code?: unknown }} */ (err).code, "stale_owner_storage");
+      assert.match(/** @type {Error} */ (err).message, /worker is being deleted/);
+      return true;
+    }
+  );
+
+  assert.equal(DO_OWNER_REGISTRY_TEST_STATE.ownedScopes.has(OWNER_KEY), false);
+  assert.deepEqual(doOwnerRegistryWriteCommands(), []);
+});
+
+test("DO owner registry: actor fence allows a version delete lock", async () => {
+  const owner = ownerRecord();
+  setStoragePointer();
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(ownerKeyOf(OWNER_KEY), JSON.stringify(owner));
+  DO_OWNER_REGISTRY_TEST_STATE.store.set(DELETE_LOCK_KEY, "version:delete-token");
+
+  const result = await assertCurrentOwnerWithLeaseBudget(
+    { REDIS_ADDR: "redis:6379" },
+    { ownerKey: OWNER_KEY, taskId: owner.taskId, generation: owner.generation },
+    { storageScope: invoke() }
+  );
+  assert.deepEqual(result.owner, owner);
+});
+
 test("DO owner registry: preserve projection allows an older loaded version", async () => {
   setStoragePointer();
   setPolicy("v2", "preserve", 7);
@@ -788,7 +826,7 @@ test("DO owner registry: actor fence returns Redis-time lease budget", async () 
   );
   assert.deepEqual(
     DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.filter((command) => command[0] === "getManyWithTime"),
-    [["getManyWithTime", [ownerKeyOf(ownerKey), STORAGE_POINTER_KEY]]]
+    [["getManyWithTime", [ownerKeyOf(ownerKey), STORAGE_POINTER_KEY, DELETE_LOCK_KEY]]]
   );
   assert.equal(
     DO_OWNER_REGISTRY_TEST_STATE.redisState.commands.some((command) => command[0] === "get"),

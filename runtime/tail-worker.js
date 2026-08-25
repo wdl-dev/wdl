@@ -3,6 +3,7 @@ import { utf8ByteLength } from "shared-utf8";
 import {
   TAIL_EVENT_MAX_BYTES,
   forwardTailEntries,
+  isFreshTailInactive,
   tailEventTooLargePayload,
 } from "runtime-tail-forwarder";
 
@@ -40,12 +41,26 @@ function loggerLevel(consoleLevel) {
 }
 
 const TAIL_MESSAGE_MAX_DEPTH = 64;
+const TAIL_BIGINT_POSITIVE_LIMIT = 10n ** BigInt(TAIL_EVENT_MAX_BYTES);
+const TAIL_BIGINT_NEGATIVE_LIMIT = -TAIL_BIGINT_POSITIVE_LIMIT;
+const typedArrayLengthGetter = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype),
+  "length"
+)?.get;
+if (typeof typedArrayLengthGetter !== "function") {
+  throw new TypeError("TypedArray length getter is unavailable");
+}
+const TYPED_ARRAY_LENGTH_GETTER = /** @type {() => number} */ (typedArrayLengthGetter);
 
 class TailEventTooLarge extends Error {}
 
 /** @param {{ remaining: number }} budget @param {unknown} value */
 function chargeBudget(budget, value) {
-  budget.remaining -= utf8ByteLength(String(value));
+  const text = typeof value === "string" ? value : String(value);
+  if (text.length > budget.remaining) {
+    throw new TailEventTooLarge("tail event too large");
+  }
+  budget.remaining -= utf8ByteLength(text);
   if (budget.remaining < 0) throw new TailEventTooLarge("tail event too large");
 }
 
@@ -116,6 +131,9 @@ function safeMessageInner(value, budget, seen, depth) {
     return value;
   }
   if (typeof value === "bigint") {
+    if (value >= TAIL_BIGINT_POSITIVE_LIMIT || value <= TAIL_BIGINT_NEGATIVE_LIMIT) {
+      throw new TailEventTooLarge("tail event too large");
+    }
     const out = value.toString() + "n";
     chargeBudget(budget, out);
     return out;
@@ -133,6 +151,17 @@ function safeMessageInner(value, budget, seen, depth) {
   if (seen.has(value)) {
     chargeBudget(budget, "[Circular]");
     return "[Circular]";
+  }
+  if (ArrayBuffer.isView(value)) {
+    let indexedLength = 0;
+    try {
+      indexedLength = Reflect.apply(TYPED_ARRAY_LENGTH_GETTER, value, []);
+    } catch {
+      // DataView has no indexed elements; preserve any own enumerable fields below.
+    }
+    if (indexedLength > budget.remaining) {
+      throw new TailEventTooLarge("tail event too large");
+    }
   }
   seen.add(value);
   if (Array.isArray(value)) {
@@ -242,6 +271,10 @@ export default {
       if (!event) continue;
       const { workerId, requestId } = readHeaders(event);
       const nsName = parseNsName(workerId);
+      const forwardTarget = ctx?.waitUntil && nsName &&
+        !isFreshTailInactive(nsName.ns, nsName.name)
+        ? nsName
+        : null;
 
       const tailEvent = /** @type {{ logs?: Array<{ level?: unknown, message?: unknown, errorInfo?: unknown }>, exceptions?: Array<{ message?: unknown, stack?: unknown, name?: unknown }> }} */ (
         event && typeof event === "object" ? event : {}
@@ -265,13 +298,13 @@ export default {
             consoleLevel,
           });
           log("warn", "worker_console_dropped", dropped);
-          pushDroppedWarning(forwardEntries, nsName, dropped);
+          pushDroppedWarning(forwardEntries, forwardTarget, dropped);
           continue;
         }
         if (workerId) fields.worker_id = workerId;
         if (requestId) fields.request_id = requestId;
         log(loggerLevel(consoleLevel), "worker_console", fields);
-        if (nsName) {
+        if (forwardTarget) {
           const payload = {
             event: "worker_console",
             console_level: consoleLevel,
@@ -283,8 +316,8 @@ export default {
             ...(requestId ? { request_id: requestId } : {}),
           };
           forwardEntries.push({
-            ns: nsName.ns,
-            worker: nsName.name,
+            ns: forwardTarget.ns,
+            worker: forwardTarget.name,
             payload,
           });
         }
@@ -310,16 +343,16 @@ export default {
             requestId,
           });
           log("warn", "worker_exception_dropped", dropped);
-          pushDroppedWarning(forwardEntries, nsName, dropped);
+          pushDroppedWarning(forwardEntries, forwardTarget, dropped);
           continue;
         }
         if (workerId)  fields.worker_id = workerId;
         if (requestId) fields.request_id = requestId;
         log("error", "worker_exception", fields);
-        if (nsName) {
+        if (forwardTarget) {
           forwardEntries.push({
-            ns: nsName.ns,
-            worker: nsName.name,
+            ns: forwardTarget.ns,
+            worker: forwardTarget.name,
             payload: { event: "worker_exception", ts: nowMs, ...fields },
           });
         }

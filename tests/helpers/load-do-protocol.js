@@ -12,20 +12,39 @@ const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_UTF8_URL = repositoryFileUrl("shared/utf8.js");
 const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
+const OWNER_ENDPOINT_URL = repositoryFileUrl("shared/owner-endpoint.js");
+const REQUEST_ID_URL = repositoryFileUrl("runtime/_wdl-request-id.js");
 const DO_SCOPED_REQUEST_URL = repositoryFileUrl("runtime/_wdl-do-scoped-request.js");
-const DO_WIRE_GRAMMAR_URL = repositoryFileUrl("do-runtime/protocol/wire-grammar.js");
+const DO_WIRE_GRAMMAR_URL = repositoryModuleDataUrl("do-runtime/protocol/wire-grammar.js", [
+  [/from "shared-fnv1a32";/g, `from ${JSON.stringify(SHARED_FNV_URL)};`],
+]);
 const DO_ERRORS_URL = repositoryModuleDataUrl("do-runtime/protocol/errors.js", [
   [/from "shared-respond";/g, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
 ]);
 const DO_IDENTITY_URL = repositoryModuleDataUrl("do-runtime/protocol/identity.js", [
   [/from "do-runtime-protocol-wire-grammar";/g, `from ${JSON.stringify(DO_WIRE_GRAMMAR_URL)};`],
   [/from "do-runtime-protocol-errors";/g, `from ${JSON.stringify(DO_ERRORS_URL)};`],
-  [/from "shared-fnv1a32";/g, `from ${JSON.stringify(SHARED_FNV_URL)};`],
   [/from "shared-utf8";/g, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
 ]);
 
 export function doProtocolErrorsDataUrl() {
   return DO_ERRORS_URL;
+}
+
+export function doWireGrammarDataUrl() {
+  return DO_WIRE_GRAMMAR_URL;
+}
+
+export function doTransportDataUrl() {
+  return repositoryModuleDataUrl("runtime/_wdl-do-transport.js", [
+    ...importSpecifierReplacements({
+      "./_wdl-owner-endpoint.js": OWNER_ENDPOINT_URL,
+      "./_wdl-request-id.js": REQUEST_ID_URL,
+      "./_wdl-do-scoped-request.js": DO_SCOPED_REQUEST_URL,
+      "do-runtime-protocol-wire-grammar": DO_WIRE_GRAMMAR_URL,
+      "shared-internal-auth": SHARED_INTERNAL_AUTH_URL,
+    }),
+  ]);
 }
 
 export function doProtocolDataUrl() {

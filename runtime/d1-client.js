@@ -4,7 +4,6 @@
 
 import { splitSqlStatements } from "./_wdl-sql-splitter.js";
 import { normalizeD1Param } from "./_wdl-d1-params.js";
-import { decodeD1Transport } from "./_wdl-d1-transport.js";
 import { setDataField } from "./_wdl-d1-data-field.js";
 import { requestIdFromOptions } from "./_wdl-request-id.js";
 
@@ -16,7 +15,7 @@ const intrinsicWeakMapHas = WeakMap.prototype.has;
 const intrinsicWeakMapSet = WeakMap.prototype.set;
 
 /**
- * @typedef {string | number | null | undefined | number[]} D1Param
+ * @typedef {string | number | null | undefined | Uint8Array<ArrayBuffer>} D1Param
  * @typedef {{ sql: string, params: D1Param[] }} SerializedStatement
  * @typedef {Record<string, unknown>} D1Row
  * @typedef {{ columns: string[], rows: unknown[][] }} RawD1Rows
@@ -186,7 +185,7 @@ async function sendFor(dbOrSession, mode, statements) {
     category: "invalid-request",
   });
   try {
-    return decodeD1Transport(await state.stub.query(mode, statements, requestIdFor(db)));
+    return await state.stub.query(mode, statements, requestIdFor(db));
   } catch (err) {
     if (err instanceof D1Error) throw err;
     const message = err instanceof Error ? err.message : String(err);

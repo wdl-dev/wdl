@@ -1,3 +1,4 @@
+use crate::response_body::read_bounded_response_text;
 use crate::{DRAIN_RETRY_DELAY_MS, SupervisorConfig, drain_timeout_ms, log, truncate_chars};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -35,35 +36,50 @@ pub(crate) async fn drain(
         match request.send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                let body = resp.text().await.unwrap_or_default();
-                let body_short = truncate_chars(&body, 500);
-                let drain_payload = parse_drain_payload(&body);
-                let mut fields = json!({
-                    "signal": signal_name,
-                    "attempt": attempt,
-                    "status": status,
-                    "body": body_short,
-                });
-                if let Some(rid) = request_id.as_deref() {
-                    fields["request_id"] = json!(rid);
+                match read_bounded_response_text(resp).await {
+                    Ok(body) => {
+                        let body_short = truncate_chars(&body, 500);
+                        let drain_payload = parse_drain_payload(&body);
+                        let mut fields = json!({
+                            "signal": signal_name,
+                            "attempt": attempt,
+                            "status": status,
+                            "body": body_short,
+                        });
+                        if let Some(rid) = request_id.as_deref() {
+                            fields["request_id"] = json!(rid);
+                        }
+                        if let Err(err) = &drain_payload {
+                            fields["parse_error"] = json!(*err);
+                        }
+                        let success = (200..300).contains(&status)
+                            && drain_payload
+                                .as_ref()
+                                .map(|payload| {
+                                    payload.owned == 0
+                                        && (!config.drain_failure_on_errors_field
+                                            || payload.errors_len == 0)
+                                })
+                                .unwrap_or(false);
+                        if success {
+                            log::info(config.service, config.drain_complete_event, fields);
+                            return true;
+                        }
+                        last_failure = Some(fields);
+                    }
+                    Err(error_message) => {
+                        let mut fields = json!({
+                            "signal": signal_name,
+                            "attempt": attempt,
+                            "status": status,
+                            "error_message": error_message,
+                        });
+                        if let Some(rid) = request_id.as_deref() {
+                            fields["request_id"] = json!(rid);
+                        }
+                        last_failure = Some(fields);
+                    }
                 }
-                if let Err(err) = &drain_payload {
-                    fields["parse_error"] = json!(*err);
-                }
-                let success = (200..300).contains(&status)
-                    && drain_payload
-                        .as_ref()
-                        .map(|payload| {
-                            payload.owned == 0
-                                && (!config.drain_failure_on_errors_field
-                                    || payload.errors_len == 0)
-                        })
-                        .unwrap_or(false);
-                if success {
-                    log::info(config.service, config.drain_complete_event, fields);
-                    return true;
-                }
-                last_failure = Some(fields);
             }
             Err(err) => {
                 let mut fields = json!({

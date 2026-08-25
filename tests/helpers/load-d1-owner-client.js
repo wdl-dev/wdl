@@ -8,6 +8,7 @@ import {
 const wire = await loadD1QueryWire();
 export const {
   decodeD1QueryRequest,
+  D1_FORWARD_HEADERS,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
 } = wire;

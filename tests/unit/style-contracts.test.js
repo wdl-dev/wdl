@@ -375,6 +375,49 @@ test("D1 owner-hint headers have one shared wire owner", () => {
   );
 });
 
+test("D1 forwarding headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-d1-forwarded",
+    "x-wdl-d1-hop-count",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-d1-(?:forwarded|hop-count))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "shared/d1-query-wire.js"]),
+  );
+});
+
+test("D1 query result headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-d1-changed-db",
+    "x-wdl-d1-result",
+    "x-wdl-d1-value-encoding",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-d1-(?:changed-db|result|value-encoding))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "shared/d1-query-wire.js"]),
+  );
+});
+
 test("DO owner headers have one shared wire owner", () => {
   const expected = [
     "x-wdl-do-owner-endpoint",
@@ -397,6 +440,27 @@ test("DO owner headers have one shared wire owner", () => {
   );
 });
 
+test("DO forwarding headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-do-forwarded",
+    "x-wdl-do-hop-count",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-do-(?:forwarded|hop-count))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "runtime/_wdl-do-scoped-request.js"]),
+  );
+});
+
 test("DO owner-control headers have one shared wire owner", () => {
   const expected = [
     "x-wdl-do-accept-owner-hint",
@@ -407,6 +471,32 @@ test("DO owner-control headers have one shared wire owner", () => {
   for (const file of PRODUCTION_JS_FILES) {
     for (const match of readRepoFile(file).matchAll(
       /["'](x-wdl-do-(?:accept-owner-hint|ownership-error))["']/g
+    )) {
+      occurrences.push([match[1], file]);
+    }
+  }
+  assert.deepEqual(
+    occurrences.toSorted(([leftHeader, leftFile], [rightHeader, rightFile]) =>
+      leftHeader.localeCompare(rightHeader) || leftFile.localeCompare(rightFile)),
+    expected.map((header) => [header, "runtime/_wdl-do-scoped-request.js"]),
+  );
+});
+
+test("DO connect headers have one shared wire owner", () => {
+  const expected = [
+    "x-wdl-do-class-name",
+    "x-wdl-do-ns",
+    "x-wdl-do-object-name",
+    "x-wdl-do-request-url",
+    "x-wdl-do-storage-id",
+    "x-wdl-do-version",
+    "x-wdl-do-worker",
+  ];
+  /** @type {Array<[string, string]>} */
+  const occurrences = [];
+  for (const file of PRODUCTION_JS_FILES) {
+    for (const match of readRepoFile(file).matchAll(
+      /["'](x-wdl-do-(?:class-name|ns|object-name|request-url|storage-id|version|worker))["']/g
     )) {
       occurrences.push([match[1], file]);
     }
@@ -675,6 +765,82 @@ test("Workflow tick writer, reader, and integration share one response fixture",
     "tests/integration/helpers/workflow-tick.js",
   ]) {
     assert.match(readRepoFile(reader), /workflow-tick-response\.json/, reader);
+  }
+});
+
+test("Workflow Runtime results and Workflow-owned retryable backend errors share one fixture", () => {
+  const fixture = "tests/fixtures/workflow-runtime-response.json";
+  const contract = /** @type {{
+   *   runtimeOutcomes: Record<string, unknown>,
+   *   terminalPayloadFields: Record<string, unknown>,
+   *   retryableBackendErrors: Record<string, { code?: unknown, status?: unknown }>,
+   * }} */ (readRepositoryJson(fixture));
+  assert.deepEqual(Object.keys(contract).sort(), [
+    "retryableBackendErrors",
+    "runtimeOutcomes",
+    "terminalPayloadFields",
+  ]);
+  assert.deepEqual(Object.keys(contract.runtimeOutcomes).sort(), [
+    "completed",
+    "failed",
+    "suspended",
+  ]);
+  for (const outcome of Object.values(contract.runtimeOutcomes)) {
+    assert.equal(typeof outcome, "string");
+  }
+  assert.deepEqual(Object.keys(contract.terminalPayloadFields).sort(), [
+    "completed",
+    "failed",
+  ]);
+  for (const field of Object.values(contract.terminalPayloadFields)) {
+    assert.equal(typeof field, "string");
+  }
+  assert.deepEqual(Object.keys(contract.retryableBackendErrors).sort(), [
+    "internal",
+    "redis",
+    "unavailable",
+  ]);
+  for (const error of Object.values(contract.retryableBackendErrors)) {
+    assert.deepEqual(Object.keys(error).sort(), ["code", "status"]);
+    assert.equal(typeof error.code, "string");
+    assert.equal(typeof error.status, "number");
+  }
+  for (const reader of [
+    "tests/unit/runtime-dispatch-workflows.test.js",
+    "rust/workflows/src/api/tick/dispatch.rs",
+  ]) {
+    assert.match(readRepoFile(reader), /workflow-runtime-response\.json/, reader);
+  }
+});
+
+test("Queue Runtime outcomes share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/queue-runtime-response.json";
+  const contract = /** @type {{
+   *   outerOutcomes: Record<string, unknown>,
+   *   innerOutcomes: Record<string, unknown>,
+   *   requiredResultFields: unknown[],
+   * }} */ (readRepositoryJson(fixture));
+  assert.deepEqual(Object.keys(contract).sort(), [
+    "innerOutcomes",
+    "outerOutcomes",
+    "requiredResultFields",
+  ]);
+  assert.deepEqual(Object.keys(contract.outerOutcomes).sort(), ["error", "ok"]);
+  assert.deepEqual(Object.keys(contract.innerOutcomes).sort(), ["exception", "ok"]);
+  for (const outcome of [
+    ...Object.values(contract.outerOutcomes),
+    ...Object.values(contract.innerOutcomes),
+  ]) {
+    assert.equal(typeof outcome, "string");
+  }
+  assert.ok(contract.requiredResultFields.length > 0);
+  assert.equal(new Set(contract.requiredResultFields).size, contract.requiredResultFields.length);
+  for (const field of contract.requiredResultFields) assert.equal(typeof field, "string");
+  for (const reader of [
+    "tests/unit/runtime-dispatch-handlers.test.js",
+    "rust/scheduler/src/queue/delivery/outcome.rs",
+  ]) {
+    assert.match(readRepoFile(reader), /queue-runtime-response\.json/, reader);
   }
 });
 
@@ -2549,6 +2715,17 @@ test("DO alarm internal ready shard constants stay aligned across Rust and integ
   assert.match(integration, /fnv1a32Utf8\(jobId\) % DO_ALARM_READY_SHARDS/);
 });
 
+test("DO owner shard projections share one cross-language fixture", () => {
+  const fixture = "tests/fixtures/do-owner-shards.json";
+  for (const file of [
+    "tests/unit/do-runtime-protocol.test.js",
+    "tests/unit/runtime-do-transport.test.js",
+    "rust/workflows/src/api/do_alarms/model.rs",
+  ]) {
+    assert.ok(readRepoFile(file).includes(fixture), `${file} must consume ${fixture}`);
+  }
+});
+
 test("KV hash field prefixes stay aligned across proxy and integration seeds", () => {
   const kv = readRepoFile("rust/redis-proxy/src/kv.rs");
   const integration = readRepoFile("tests/integration/kv-binding.test.js");
@@ -2600,6 +2777,7 @@ test("D1, DO, and AI workerd env tunables are exposed through capnp bindings", (
     "D1_OBSERVED_OWNER_MAX_ENTRIES",
     "D1_READ_CACHE_TTL_MS",
     "D1_READ_CACHE_MAX_ENTRIES",
+    "D1_READ_CACHE_MAX_BYTES",
     "D1_TEST_HOOKS",
     "D1_OWNER_LEASE_GUARD_MS",
   ]) {
@@ -2917,6 +3095,8 @@ test("DO host transport and scoped facade dependencies stay in their owning modu
   ]) {
     const source = readRepoFile(file);
     assert.match(source, /name = "runtime-do-transport", esModule = embed/);
+    assert.match(source, /name = "do-runtime-protocol-wire-grammar", esModule = embed/);
+    assert.match(source, /name = "shared-fnv1a32", esModule = embed/);
     assert.match(source, /name = "_wdl-do-scoped-request\.js", esModule = embed/);
     assert.match(source, /name = "_wdl-request-id\.js", esModule = embed/);
     assert.match(source, /name = "runtime-do-scoped-request-source", text = embed/);

@@ -1,5 +1,7 @@
 import { encodeD1Transport } from "shared-d1-transport";
 import {
+  d1QuerySuccessHeaders,
+  D1_QUERY_NATIVE_VALUE_ENCODING,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   encodeD1QueryResponse,
 } from "shared-d1-query-wire";
@@ -32,7 +34,18 @@ export function d1QueryBytesResponse(bytes, init = {}) {
  * @param {ResponseInit} [init]
  */
 export function d1QueryResponse(data, init = {}) {
-  return d1QueryBytesResponse(encodeD1QueryResponse(encodeD1Transport(data)), init);
+  return d1QueryBytesResponse(encodeD1QueryResponse(data), init);
+}
+
+/**
+ * @param {unknown} data
+ * @param {ResponseInit & { changedDb?: boolean }} [init]
+ */
+export function d1QuerySuccessResponse(data, init = {}) {
+  const { changedDb = false, ...responseInit } = init;
+  const headers = Object.fromEntries(new Headers(responseInit.headers));
+  Object.assign(headers, d1QuerySuccessHeaders(changedDb, D1_QUERY_NATIVE_VALUE_ENCODING));
+  return d1QueryResponse(data, { ...responseInit, headers });
 }
 
 /**

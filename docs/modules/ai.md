@@ -336,6 +336,10 @@ Pool state uses bounded labels only:
 - `wdl_ai_pool_high_water{service,pool}`
 - `wdl_ai_pool_events_total{service,pool,outcome}`
 
+Pool acquire, transfer, and release paths update only their process-local counters;
+`/_metrics` publishes the current in-use and high-water gauges immediately before it
+renders.
+
 Rejected host calls emit `ai_binding_request_rejected`; rejected Control AI mutations
 emit bounded structured events through the shared Control request log. Namespace,
 worker, version, and raw error text stay in logs rather than metric labels.

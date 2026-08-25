@@ -8,7 +8,9 @@ import { decodeD1TransportForJson } from "shared-d1-transport";
 import {
   D1_OWNER_HINT_HEADERS,
   D1_QUERY_CONTENT_TYPE,
+  D1_QUERY_NATIVE_VALUE_ENCODING,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
+  D1_QUERY_RESULT_HEADERS,
   decodeD1QueryResponse,
   encodeD1QueryRequest,
 } from "shared-d1-query-wire";
@@ -74,7 +76,11 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
   let body;
   let validResponse = true;
   const contentType = res.headers.get("content-type") || "";
-  if (contentTypeEssence(contentType) === D1_QUERY_RESPONSE_CONTENT_TYPE) {
+  const valueEncoding = res.headers.get(D1_QUERY_RESULT_HEADERS.valueEncoding);
+  if (
+    contentTypeEssence(contentType) === D1_QUERY_RESPONSE_CONTENT_TYPE &&
+    (valueEncoding === null || valueEncoding === D1_QUERY_NATIVE_VALUE_ENCODING)
+  ) {
     try {
       body = decodeD1QueryResponse(new Uint8Array(await res.arrayBuffer()));
     } catch (err) {
@@ -91,10 +97,14 @@ export async function d1RuntimeQuery(env, ns, databaseId, mode, statements, requ
     validResponse = false;
     body = {
       error: "invalid_d1_runtime_response",
-      message: `unsupported d1-runtime response content-type ${contentType || "none"}`,
+      message: valueEncoding !== null && valueEncoding !== D1_QUERY_NATIVE_VALUE_ENCODING
+        ? `unsupported d1-runtime value encoding ${valueEncoding}`
+        : `unsupported d1-runtime response content-type ${contentType || "none"}`,
       category: "invalid-response",
       retryable: false,
-      causeCode: "unsupported-content-type",
+      causeCode: valueEncoding !== null && valueEncoding !== D1_QUERY_NATIVE_VALUE_ENCODING
+        ? "unsupported-value-encoding"
+        : "unsupported-content-type",
     };
   }
   const owner = {

@@ -13,7 +13,9 @@ export { formatError, sanitizeRequestId };
 export class MetricsRegistry {
   increment() {}
   observe() {}
-  setGauge() {}
+  setGauge(...args) {
+    globalThis.__observabilityNoopSetGauge?.(...args);
+  }
 }
 export function createLogger() {
   return function log() {};

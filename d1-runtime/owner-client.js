@@ -2,6 +2,7 @@ import {
   D1ProtocolError,
 } from "d1-runtime-protocol";
 import {
+  D1_FORWARD_HEADERS,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   encodeD1QueryRequest,
@@ -109,8 +110,8 @@ export async function forwardToOwner(query, env, owner, requestId = null, hopCou
       logEvent: "d1_forward_complete",
       buildHeaders: (nextHopCount) => ({
         "content-type": D1_QUERY_CONTENT_TYPE,
-        "x-wdl-d1-forwarded": "1",
-        "x-wdl-d1-hop-count": String(nextHopCount),
+        [D1_FORWARD_HEADERS.forwarded]: "1",
+        [D1_FORWARD_HEADERS.hopCount]: String(nextHopCount),
       }),
       logFields: () => ({
         namespace: query.namespace,

@@ -214,6 +214,57 @@ export class AlarmCounter extends DurableObject {
         pending: typeof snapshot.alarm === "number",
       });
     }
+    if (url.pathname === "/delete-all-transaction") {
+      await this.seedDeleteAllState();
+      let rejected = false;
+      let message = null;
+      await this.ctx.storage.transaction(async (txn) => {
+        try {
+          await this.ctx.storage.deleteAll();
+        } catch (error) {
+          rejected = true;
+          message = error instanceof Error ? error.message : String(error);
+        }
+        txn.rollback();
+      });
+      const snapshot = await this.deleteAllSnapshot();
+      return Response.json({
+        rejected,
+        message,
+        kv: snapshot.kv,
+        sqlTableExists: snapshot.sqlTableExists,
+        pending: typeof snapshot.alarm === "number",
+      });
+    }
+    if (url.pathname === "/transaction-reaction-window") {
+      const callbackEntered = Promise.withResolvers();
+      const callbackResult = Promise.withResolvers();
+      const transaction = this.ctx.storage.transaction(() => {
+        callbackEntered.resolve();
+        return callbackResult.promise;
+      });
+      await callbackEntered.promise;
+      const outsideReaction = callbackResult.promise.catch(() => {
+        try {
+          this.ctx.storage.setAlarm(Date.now() + 60000);
+          return "fulfilled";
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      });
+      callbackResult.reject(new Error("transaction rollback"));
+      let transactionMessage = null;
+      try {
+        await transaction;
+      } catch (error) {
+        transactionMessage = error instanceof Error ? error.message : String(error);
+      }
+      return Response.json({
+        transactionMessage,
+        outsideOutcome: await outsideReaction,
+        alarm: await this.ctx.storage.getAlarm(),
+      });
+    }
     if (url.pathname === "/delete-all-sql-edges") {
       this.seedDeleteAllSqlEdges();
       await this.ctx.storage.deleteAll();

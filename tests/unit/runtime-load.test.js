@@ -1210,6 +1210,66 @@ test("createLoaderCallback: attaches configured tail worker and always wraps mai
   );
 });
 
+test("createLoaderCallback records only request-clock cold-load timings", async () => {
+  /** @type {Array<{ name: string, labels: Record<string, unknown>, value: number }>} */
+  const observations = [];
+  const env = {
+    SERVICE_NAME: "user-runtime",
+    REDIS_PROXY_URL: "http://redis-proxy.local",
+    WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
+    PUBLIC_NETWORK: { kind: "public-network" },
+  };
+
+  await withMockedFetch(
+    async () => new Response(encodeRuntimeLoadPayload({
+      bundle: {
+        "__meta__": JSON.stringify({
+          mainModule: "worker.js",
+          modules: { "worker.js": { type: "module" } },
+        }),
+        "worker.js": "export default {};",
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": RUNTIME_LOAD_CONTENT_TYPE },
+    }),
+    async () => {
+      await createLoaderCallback({
+        requestId: "rid-timing",
+        env,
+        ctx: makeCtx(),
+        ns: "demo",
+        worker: "app",
+        version: "v1",
+        workerId: "demo:app:v1",
+        metrics: {
+          increment() {},
+          observe(
+            /** @type {string} */ name,
+            /** @type {Record<string, unknown>} */ labels,
+            /** @type {number} */ value
+          ) {
+            observations.push({ name, labels, value });
+          },
+        },
+      })();
+    }
+  );
+
+  assert.deepEqual(
+    observations.map(({ name, labels }) => [name, labels.stage ?? null]),
+    [
+      ["bundle_load_stage_duration_ms", "redis_proxy_load"],
+      ["bundle_load_duration_ms", null],
+    ]
+  );
+  for (const observation of observations) {
+    assert.equal(observation.labels.service, "user-runtime");
+    assert.ok(Number.isFinite(observation.value));
+    assert.ok(observation.value >= 0);
+  }
+});
+
 test("getLoadedWorkerStub records cache misses before scheduling active-version eviction", async () => {
   /** @type {Array<{ id: string, factory: () => Promise<unknown> }>} */
   const loaderCalls = [];
@@ -1610,10 +1670,6 @@ test("runtime injected source rewrites produce a closed module graph", () => {
     executableModuleSpecifiers(workerCode.modules["_wdl-d1-params.js"]),
     ["./_wdl-utf8.js"],
   );
-  assert.deepEqual(
-    executableModuleSpecifiers(workerCode.modules["_wdl-d1-transport.js"]),
-    ["./_wdl-d1-data-field.js"],
-  );
 });
 
 test("workerLoader code estimator matches runtime wrapper injection exactly", () => {
@@ -1818,8 +1874,6 @@ test("wrapWorkerCodeForHostBindings: injects local D1 client wrapper and preserv
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-params.js"], /normalizeD1Param/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-params.js"], /from "\.\/_wdl-utf8\.js";/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-sql-splitter.js"], /splitSqlStatements/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-transport.js"], /decodeD1Transport/);
-  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-transport.js"], /from "\.\/_wdl-d1-data-field\.js";/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-request-id.js"], /requestIdFromOptions/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-d1-client.js"], /class D1Database/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-host-wrapper-runtime.js"], /intrinsicArrayForEach/);

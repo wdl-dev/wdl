@@ -25,9 +25,13 @@ import {
 } from "runtime-dispatch-workflow-json";
 import {
   createStepController,
+  isWorkflowInfrastructureError,
   isWorkflowSuspensionSignal,
-  isWorkflowSuspended,
+  WORKFLOW_BACKEND_UNAVAILABLE_CODE,
+  WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
   workflowError,
+  workflowInFlightSettleTimeoutError,
+  workflowInfrastructureLogError,
 } from "runtime-dispatch-workflow-step";
 /**
  * @typedef {{ respond(response: Response): Response, markError(err: unknown): void, requestId: string }} DispatchScope
@@ -36,7 +40,7 @@ import {
  * @typedef {{ namespace: string, workerName: string, workerId: string, requestId: string | null }} RuntimeIdentity
  * @typedef {{ waitUntil?(promise: Promise<unknown>): void }} RuntimeCtx
  * @typedef {{ WORKFLOWS_BACKEND?: { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> } | null, WDL_INTERNAL_AUTH_TOKEN?: unknown, [key: string]: unknown }} RuntimeEnv
- * @typedef {{ ns: string, worker: string, frozenVersion: string, workflowName: string, workflowKey: string, className: string, instanceId: string, generation: number, runToken: string, createdAtMs: number, event: unknown }} WorkflowRunDispatch
+ * @typedef {{ ns: string, worker: string, frozenVersion: string, workflowName: string, workflowKey: string, className: string, instanceId: string, generation: number, runToken: string, createdAtMs: number, dispatchDeadlineMs: number, event: unknown }} WorkflowRunDispatch
  * @typedef {{ request: Request, stub: LoadedWorkerStub, scope: DispatchScope, env: RuntimeEnv, ctx: RuntimeCtx, identity: RuntimeIdentity }} WorkerDispatchArgs
  */
 
@@ -45,6 +49,7 @@ const SMALL_DISPATCH_JSON_BODY_BYTES = 256 * 1024;
 // MAX_WORKFLOW_PARAMS_BYTES (1MiB), plus identity framing. Event notify uses a
 // separate smaller payload cap and stays on SMALL_DISPATCH_JSON_BODY_BYTES.
 const WORKFLOW_RUN_DISPATCH_JSON_BODY_BYTES = 2 * 1024 * 1024;
+const WORKFLOW_DISPATCH_RESPONSE_HEADROOM_MS = 1000;
 // Queue dispatch bodies carry base64-encoded message bodies. The scheduler may
 // dispatch up to 100 messages, each with a 128KB raw body, so this private
 // endpoint needs a larger cap than control-ish scheduled/workflow notify bodies.
@@ -69,16 +74,48 @@ function workflowBackendForStep(env) {
 
 /** @param {unknown} result */
 function queueDispatchResult(result) {
-  const record = result && typeof result === "object"
-    ? /** @type {Record<string, unknown>} */ (result)
-    : {};
+  if (
+    result === null ||
+    typeof result !== "object" ||
+    Array.isArray(result)
+  ) {
+    throw new TypeError("queue handler returned an invalid result envelope");
+  }
+  const record = /** @type {Record<string, unknown>} */ (result);
   /** @type {Record<string, unknown>} */
   const out = {};
-  if (typeof record.outcome === "string") out.outcome = record.outcome;
-  if (typeof record.ackAll === "boolean") out.ackAll = record.ackAll;
-  if (Array.isArray(record.explicitAcks)) out.explicitAcks = record.explicitAcks;
-  if (Array.isArray(record.retryMessages)) out.retryMessages = record.retryMessages;
-  if (record.retryBatch && typeof record.retryBatch === "object") out.retryBatch = record.retryBatch;
+  if (!Object.hasOwn(record, "outcome") || typeof record.outcome !== "string") {
+    throw new TypeError("queue handler returned an invalid outcome");
+  }
+  out.outcome = record.outcome;
+  if (Object.hasOwn(record, "ackAll")) {
+    if (typeof record.ackAll !== "boolean") {
+      throw new TypeError("queue handler returned an invalid ackAll value");
+    }
+    out.ackAll = record.ackAll;
+  }
+  if (Object.hasOwn(record, "explicitAcks")) {
+    if (!Array.isArray(record.explicitAcks)) {
+      throw new TypeError("queue handler returned invalid explicitAcks");
+    }
+    out.explicitAcks = record.explicitAcks;
+  }
+  if (Object.hasOwn(record, "retryMessages")) {
+    if (!Array.isArray(record.retryMessages)) {
+      throw new TypeError("queue handler returned invalid retryMessages");
+    }
+    out.retryMessages = record.retryMessages;
+  }
+  if (Object.hasOwn(record, "retryBatch")) {
+    if (
+      record.retryBatch === null ||
+      typeof record.retryBatch !== "object" ||
+      Array.isArray(record.retryBatch)
+    ) {
+      throw new TypeError("queue handler returned an invalid retryBatch");
+    }
+    out.retryBatch = record.retryBatch;
+  }
   return out;
 }
 
@@ -179,6 +216,7 @@ export async function readWorkflowNotifyDispatch(request) {
 /** @param {{ run: WorkflowRunDispatch, stub: LoadedWorkerStub, scope: DispatchScope, env: RuntimeEnv, ctx: RuntimeCtx, identity: RuntimeIdentity }} args */
 export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, identity }) {
   const startedAt = Date.now();
+  const siblingSettleDeadlineMs = run.dispatchDeadlineMs - WORKFLOW_DISPATCH_RESPONSE_HEADROOM_MS;
   const fields = workflowTailFields(run);
   const startTailEvent = emitRuntimeTailEvent({
     env, ctx, identity,
@@ -228,20 +266,52 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
     const caughtSuspended = Boolean(
       step?.isSuspended() && isWorkflowSuspensionSignal(caught)
     );
-    if (step?.hasInFlightSteps() && !caughtSuspended) {
-      step.closeForRunReturn();
-    }
-    if (step?.hasInFlightSteps() && caughtSuspended) {
-      const settled = await step.waitForInFlightSteps();
-      const terminalFailure = settled.find((result) => (
-        result.status === "rejected" && !isWorkflowSuspended(result.reason)
-      ));
-      if (terminalFailure?.status === "rejected") caught = terminalFailure.reason;
+    if (step?.hasInFlightSteps()) {
+      const caughtTrackedStepFailure = step.isTrackedStepFailure(caught);
+      if (caughtSuspended || caughtTrackedStepFailure) {
+        step.closeStepAdmission();
+      } else {
+        step.closeForRunReturn();
+      }
+      const settleBudgetMs = Math.max(0, siblingSettleDeadlineMs - Date.now());
+      const settled = await step.waitForInFlightSteps(settleBudgetMs);
+      if (!settled) {
+        step.closeForRunReturn();
+        caught = workflowInFlightSettleTimeoutError();
+      }
     }
     let terminalStepError = null;
     if (step?.hasTerminalStepFailure()) {
-      caught = step.terminalStepFailure();
-      terminalStepError = step.terminalStepError();
+      const recordedFailure = step.terminalStepFailure();
+      if (
+        isWorkflowInfrastructureError(recordedFailure) ||
+        !isWorkflowInfrastructureError(caught)
+      ) {
+        caught = recordedFailure;
+        terminalStepError = step.terminalStepError();
+      }
+    }
+    if (isWorkflowInfrastructureError(caught)) {
+      const durationMs = Date.now() - startedAt;
+      scope.markError(workflowInfrastructureLogError(caught));
+      emitRuntimeTailEvent({
+        env, ctx, identity,
+        event: "worker_workflow",
+        phase: "finish",
+        after: startTailEvent,
+        fields: {
+          ...fields,
+          outcome: "error",
+          error: WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
+          duration_ms: durationMs,
+        },
+      });
+      return scope.respond(internalErrorResponse(
+        503,
+        WORKFLOW_BACKEND_UNAVAILABLE_CODE,
+        WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
+        scope.requestId
+      ));
     }
     if (
       !terminalStepError &&

@@ -1,0 +1,17 @@
+{
+  "outerOutcomes": {
+    "error": "error",
+    "ok": "ok"
+  },
+  "innerOutcomes": {
+    "exception": "exception",
+    "ok": "ok"
+  },
+  "requiredResultFields": [
+    "ackAll",
+    "explicitAcks",
+    "outcome",
+    "retryBatch",
+    "retryMessages"
+  ]
+}

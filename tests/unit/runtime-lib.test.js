@@ -114,6 +114,7 @@ function workflowBody(overrides = {}) {
     generation: 1,
     createdAtMs: 1,
     runToken: "run-token",
+    dispatchDeadlineMs: 2_000_000_000_000,
     event: { payload: { ok: true } },
     callback: { url: "https://callback.workers.example" },
     progress: { event: "step" },
@@ -133,6 +134,7 @@ test("normalizeWorkflowRunBody validates persisted identity integers", () => {
     generation: 1,
     createdAtMs: 1,
     runToken: "run-token",
+    dispatchDeadlineMs: 2_000_000_000_000,
     event: { payload: { ok: true } },
   });
   assert.throws(() => normalizeWorkflowRunBody(workflowBody({ generation: "0" })), /generation/);
@@ -140,6 +142,12 @@ test("normalizeWorkflowRunBody validates persisted identity integers", () => {
   assert.throws(() => normalizeWorkflowRunBody(workflowBody({ generation: -1 })), /generation/);
   assert.throws(() => normalizeWorkflowRunBody(workflowBody({ createdAtMs: 0 })), /createdAtMs/);
   assert.throws(() => normalizeWorkflowRunBody(workflowBody({ createdAtMs: "123" })), /createdAtMs/);
+  assert.throws(() => normalizeWorkflowRunBody(workflowBody({ dispatchDeadlineMs: undefined })), /dispatchDeadlineMs/);
+  assert.throws(() => normalizeWorkflowRunBody(workflowBody({ dispatchDeadlineMs: 0 })), /dispatchDeadlineMs/);
+  assert.throws(
+    () => normalizeWorkflowRunBody(workflowBody({ dispatchDeadlineMs: Number.MAX_SAFE_INTEGER + 1 })),
+    /dispatchDeadlineMs/
+  );
 });
 
 test("normalizeWorkflowRunBody validates route worker identity grammar", () => {

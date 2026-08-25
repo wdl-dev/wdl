@@ -9,9 +9,10 @@ async function blobParams(env) {
     .bind("array-buffer", new Uint8Array([0, 1, 2, 127, 255]).buffer)
     .run();
   const source = new Uint8Array([10, 20, 30, 40]);
-  await env.DB.prepare("insert into blobs (id, data) values (?, ?)")
-    .bind("typed-array", source.subarray(1, 3))
-    .run();
+  const typedArrayInsert = env.DB.prepare("insert into blobs (id, data) values (?, ?)")
+    .bind("typed-array", source.subarray(1, 3));
+  source.fill(99);
+  await typedArrayInsert.run();
 
   const rows = await env.DB.prepare(`
     select id, hex(data) as hex, length(data) as size

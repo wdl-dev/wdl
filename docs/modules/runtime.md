@@ -319,6 +319,13 @@ Runtime emits request logs and metrics for loading, binding operations, AI pool 
 emits structured stdout for console/exception capture and forwards to `wdl tail` only
 when a matching active tail session exists.
 
+Cold-load duration metrics use workerd's request clock. The
+`bundle_load_stage_duration_ms` series therefore covers only the awaited
+`redis_proxy_load` stage. `bundle_load_duration_ms` remains useful for end-to-end
+request-visible load latency, but neither metric profiles uninterrupted bundle decode,
+env construction, or wrapper generation CPU time; workerd does not advance the clock
+during those synchronous stages.
+
 ## Deployment / Rollout Notes
 
 - Runtime/Control contract changes follow the reader-before-writer procedure in the

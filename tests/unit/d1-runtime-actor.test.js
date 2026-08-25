@@ -76,7 +76,7 @@ test("D1 actor: result materialization enforces a request byte cap", () => {
   );
 });
 
-test("D1 actor: result byte cap counts exact UTF-8 bytes", () => {
+test("D1 actor: result byte cap counts UTF-8 bytes plus conservative structure cost", () => {
   const cursor = {
     columnNames: ["x"],
     raw() {
@@ -84,13 +84,27 @@ test("D1 actor: result byte cap counts exact UTF-8 bytes", () => {
     },
   };
 
-  assert.deepEqual(resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 5), {
+  assert.deepEqual(resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 53), {
     columns: ["x"],
     rows: [["\ud83d\ude00"]],
   });
   assert.throws(
-    () => resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 4),
-    /maximum result bytes per request is 4/
+    () => resultFromCursor(cursor, "ROWS_AND_COLUMNS", 10, 52),
+    /maximum result bytes per request is 52/
+  );
+});
+
+test("D1 actor: wide all-null results consume per-cell structure budget", () => {
+  const cursor = {
+    columnNames: Array(100).fill(""),
+    raw() {
+      return Array.from({ length: 1000 }, () => Array(100).fill(null));
+    },
+  };
+
+  assert.throws(
+    () => resultFromCursor(cursor, "ROWS_AND_COLUMNS", 1000, 1024),
+    /maximum result bytes per request is 1024/
   );
 });
 
@@ -145,7 +159,7 @@ test("D1 actor: fetch maps aggregate result byte-cap overflow to limit-exceeded 
         },
       },
     },
-  }, { D1_MAX_RESULT_BYTES: "17" });
+  }, { D1_MAX_RESULT_BYTES: "57" });
 
   const response = await actor.fetch(new Request("http://d1-actor/query", {
     method: "POST",
@@ -162,8 +176,9 @@ test("D1 actor: fetch maps aggregate result byte-cap overflow to limit-exceeded 
   await assertJsonResponse(response, 413, {
     success: false,
     error: "limit-exceeded",
-    message: "D1 limit exceeded: maximum result bytes per request is 17",
+    message: "D1 limit exceeded: maximum result bytes per request is 57",
   });
+  assert.equal(calls, 2);
 });
 
 test("D1 actor: wait-until-idle waits for an in-flight query request", async () => {
@@ -312,7 +327,7 @@ test("D1 actor: batch preserves result byte-cap overflow as limit-exceeded", asy
         return callback();
       },
     },
-  }, { D1_MAX_RESULT_BYTES: "17" });
+  }, { D1_MAX_RESULT_BYTES: "57" });
 
   const response = await actor.fetch(new Request("http://d1-actor/query", {
     method: "POST",
@@ -329,8 +344,9 @@ test("D1 actor: batch preserves result byte-cap overflow as limit-exceeded", asy
   await assertJsonResponse(response, 413, {
     success: false,
     error: "limit-exceeded",
-    message: "D1 limit exceeded: maximum result bytes per request is 17",
+    message: "D1 limit exceeded: maximum result bytes per request is 57",
   });
+  assert.equal(calls, 2);
 });
 
 test("D1 actor: fetch maps result row-cap overflow to limit-exceeded response", async () => {
@@ -651,6 +667,61 @@ test("D1 actor: memoizes existing idempotent schema objects until broad schema m
   const recreate = actor.runStatement(create, "ARRAY_OF_OBJECTS", owner, { remaining: 1024, limit: 1024 });
   assert.equal(recreate.meta.changed_db, true);
   assert.equal(objectReads, 3, "broad schema mutation should clear the memo before the next create");
+});
+
+test("D1 actor: bounds positive schema object memo entries and retained names", () => {
+  let objectReads = 0;
+  const actor = Object.create(D1DatabaseActor.prototype);
+  actor.env = {};
+  actor.sql = {
+    exec() {
+      objectReads += 1;
+      return { toArray: () => [{ found: 1 }] };
+    },
+  };
+
+  for (let i = 0; i < 1100; i += 1) {
+    assert.equal(actor.schemaObjectExists({ type: "table", name: `memo_${i}` }), true);
+  }
+  const readsAfterFill = objectReads;
+  assert.equal(actor.schemaObjectExists({ type: "table", name: "memo_0" }), true);
+  assert.equal(objectReads, readsAfterFill, "an early memo entry should remain cached");
+  assert.equal(actor.schemaObjectExists({ type: "table", name: "memo_1099" }), true);
+  assert.equal(objectReads, readsAfterFill + 1, "entries beyond the cap should be probed again");
+
+  const retainedNamesActor = Object.create(D1DatabaseActor.prototype);
+  let retainedNameReads = 0;
+  retainedNamesActor.env = {};
+  retainedNamesActor.sql = {
+    exec() {
+      retainedNameReads += 1;
+      return { toArray: () => [{ found: 1 }] };
+    },
+  };
+  const retainedNames = Array.from(
+    { length: 80 },
+    (_, index) => `memo_${index}_${"x".repeat(1024)}`
+  );
+  const lastRetainedName = retainedNames.at(-1);
+  assert.ok(lastRetainedName);
+  for (const name of retainedNames) {
+    assert.equal(retainedNamesActor.schemaObjectExists({ type: "table", name }), true);
+  }
+  const readsAfterNameBudget = retainedNameReads;
+  assert.equal(
+    retainedNamesActor.schemaObjectExists({ type: "table", name: retainedNames[0] }),
+    true
+  );
+  assert.equal(retainedNameReads, readsAfterNameBudget);
+  assert.equal(
+    retainedNamesActor.schemaObjectExists({ type: "table", name: lastRetainedName }),
+    true
+  );
+  assert.equal(
+    retainedNameReads,
+    readsAfterNameBudget + 1,
+    "names beyond the retained-name budget should be probed again"
+  );
 });
 
 test("D1 actor: exec broad schema mutation clears memo after earlier changed statement", () => {
@@ -983,6 +1054,9 @@ test("D1 actor: lease budget guard does not retry-wrap committed single-statemen
     }));
 
     const body = await readJsonResponse(response, 200);
+    assert.equal(response.headers.get("x-wdl-d1-result"), "ok");
+    assert.equal(response.headers.get("x-wdl-d1-changed-db"), "1");
+    assert.equal(response.headers.get("x-wdl-d1-value-encoding"), "native-bytes-v1");
     assert.equal(body.success, true);
     assert.equal(body.meta.last_row_id, 1);
     assert.equal(body.meta.changed_db, true);
@@ -1036,7 +1110,9 @@ test("D1 actor: lease budget guard does not retry-wrap committed single-statemen
     }));
 
     const body = await readJsonResponse(response, 200);
+    assert.equal(response.headers.get("x-wdl-d1-result"), "ok");
     assert.equal(response.headers.get("x-wdl-d1-changed-db"), "1");
+    assert.equal(response.headers.get("x-wdl-d1-value-encoding"), "native-bytes-v1");
     assert.equal(body.count, 1);
     assert.equal(typeof body.duration, "number");
   });
@@ -1049,7 +1125,7 @@ test("D1 actor: lease budget guard does not retry-wrap committed single-statemen
   assert.equal(exists, true);
 });
 
-test("D1 actor: failed transaction restores schema object memo", async () => {
+test("D1 actor: failed transaction clears its advisory schema object memo", async () => {
   let exists = false;
   let objectReads = 0;
   const actor = new D1DatabaseActor({
@@ -1082,6 +1158,7 @@ test("D1 actor: failed transaction restores schema object memo", async () => {
       },
     },
   }, {});
+  actor.rememberSchemaObjectExists("table\0stable");
   const create = { sql: "create table if not exists inspections (id text primary key)", params: [] };
 
   const response = await actor.fetch(new Request("http://d1-actor/query", {
@@ -1098,6 +1175,7 @@ test("D1 actor: failed transaction restores schema object memo", async () => {
 
   assert.equal(response.status, 500);
   assert.equal(exists, false);
+  assert.equal(actor.schemaObjectExistsMemo.has("table\0stable"), false);
   assert.equal(actor.schemaObjectExistsMemo.has("table\0inspections"), false);
 
   const result = actor.runStatement(create, "ARRAY_OF_OBJECTS", { taskId: "task-a" }, { remaining: 1024, limit: 1024 });

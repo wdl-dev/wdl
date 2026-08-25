@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { loadD1QueryWire } from "../helpers/load-d1-protocol.js";
+import { d1TransportDataUrl, loadD1QueryWire } from "../helpers/load-d1-protocol.js";
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { makeRecordingFetch, withMockedFetch } from "../helpers/mock-fetch.js";
 import {
@@ -32,6 +32,11 @@ const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
 const SHARED_D1_TIMEOUT_URL = sharedModuleDataUrl("shared/d1-timeout.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const SHARED_OBSERVABILITY_URL = moduleDataUrl(`
+export function logStructured(service, level, event, fields) {
+  globalThis.__d1RuntimeStubTestState.logs.push({ service, level, event, fields });
+}
+`);
 const {
   decodeD1QueryRequest,
   encodeD1QueryRequest,
@@ -40,7 +45,9 @@ const {
   D1_OWNER_HINT_HEADERS,
   D1_OWNERSHIP_CODES,
   D1_QUERY_CONTENT_TYPE,
+  D1_QUERY_NATIVE_VALUE_ENCODING,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
+  D1_QUERY_RESULT_HEADERS,
 } = await loadD1QueryWire();
 globalThis.__encodeD1QueryRequest = encodeD1QueryRequest;
 globalThis.__decodeD1QueryResponse = decodeD1QueryResponse;
@@ -53,12 +60,14 @@ globalThis.__decodeD1QueryResponse = decodeD1QueryResponse;
 
 /**
  * @typedef {{
- *   metricIncrements: MetricIncrementEntry[]
+ *   metricIncrements: MetricIncrementEntry[],
+ *   logs: Array<{ service: string, level: string, event: string, fields: Record<string, unknown> }>,
  * }} D1RuntimeStubTestState
  */
 /** @type {D1RuntimeStubTestState} */
 const D1_RUNTIME_STUB_TEST_STATE = {
   metricIncrements: [],
+  logs: [],
 };
 
 /** @type {typeof globalThis & { __d1RuntimeStubTestState?: D1RuntimeStubTestState }} */
@@ -85,7 +94,9 @@ const stubSourceReplacements = [
   [
     /import \{[^}]*\} from "shared-d1-query-wire";/g,
     `const D1_QUERY_CONTENT_TYPE = ${JSON.stringify(D1_QUERY_CONTENT_TYPE)};
+   const D1_QUERY_NATIVE_VALUE_ENCODING = ${JSON.stringify(D1_QUERY_NATIVE_VALUE_ENCODING)};
    const D1_QUERY_RESPONSE_CONTENT_TYPE = ${JSON.stringify(D1_QUERY_RESPONSE_CONTENT_TYPE)};
+   const D1_QUERY_RESULT_HEADERS = Object.freeze(${JSON.stringify(D1_QUERY_RESULT_HEADERS)});
    const D1_OWNER_HINT_HEADERS = Object.freeze(${JSON.stringify(D1_OWNER_HINT_HEADERS)});
    const D1_OWNERSHIP_CODES = Object.freeze(${JSON.stringify(D1_OWNERSHIP_CODES)});
    const decodeD1QueryResponse = globalThis.__decodeD1QueryResponse;
@@ -105,8 +116,10 @@ const stubSourceReplacements = [
     `import { validOwnerEndpointForService } from ${JSON.stringify(OWNER_ENDPOINT_URL)};`,
   ],
   [/from "runtime-bindings-proxy";/g, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
+  [/from "shared-d1-transport";/g, `from ${JSON.stringify(d1TransportDataUrl())};`],
   [/from "shared-internal-auth";/g, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
   [/from "shared-errors";/g, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
+  [/from "shared-observability";/g, `from ${JSON.stringify(SHARED_OBSERVABILITY_URL)};`],
   [/from "shared-respond";/g, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
 ];
 const stubSrc = applyModuleReplacements(
@@ -123,6 +136,7 @@ const {
 
 beforeEach(() => {
   D1_RUNTIME_STUB_TEST_STATE.metricIncrements = [];
+  D1_RUNTIME_STUB_TEST_STATE.logs = [];
   clearD1OwnerHintsForTest();
 });
 
@@ -140,14 +154,20 @@ function metricOutcomes(name) {
 /**
  * @param {any} body
  * @param {ResponseInit} [init]
+ * @param {{ valueEncoding?: string | null }} [options]
  */
-function d1Response(body, init = {}) {
+function d1Response(body, init = {}, { valueEncoding = D1_QUERY_NATIVE_VALUE_ENCODING } = {}) {
+  /** @type {Record<string, string>} */
+  const headers = {
+    "content-type": D1_QUERY_RESPONSE_CONTENT_TYPE,
+    .../** @type {Record<string, string>} */ (init.headers || {}),
+  };
+  if (valueEncoding !== null) {
+    headers[D1_QUERY_RESULT_HEADERS.valueEncoding] = valueEncoding;
+  }
   return new Response(encodeD1QueryResponse(body), {
     ...init,
-    headers: {
-      "content-type": D1_QUERY_RESPONSE_CONTENT_TYPE,
-      .../** @type {Record<string, string>} */ (init.headers || {}),
-    },
+    headers,
   });
 }
 
@@ -228,6 +248,98 @@ test("D1 runtime stub: query sends platform identity and mode to backend", async
   assert.equal(calls[0].mode, "all");
   assert.ok(calls[0].signal instanceof AbortSignal);
   assert.deepEqual(calls[0].statements, [{ sql: "select ? as ok", params: [1] }]);
+});
+
+test("D1 runtime stub preserves native response bytes", async () => {
+  const { db } = makeRuntimeDb(() => d1Response({
+    success: true,
+    results: [{ data: new Uint8Array([0, 1, 2, 255]) }],
+  }));
+
+  const result = await db.query("all", [{ sql: "select data from blobs", params: [] }]);
+
+  assert.ok(result.results[0].data instanceof Uint8Array);
+  assert.deepEqual(Array.from(result.results[0].data), [0, 1, 2, 255]);
+  assert.equal(result.results[0].data.byteOffset, 0);
+  assert.equal(result.results[0].data.buffer.byteLength, 4);
+});
+
+test("D1 runtime stub decodes tagged responses from an older actor", async () => {
+  const { db } = makeRuntimeDb(() => d1Response({
+    success: true,
+    results: [{ data: { __wdl_d1_binary_v1: true, base64: "AAEC/w==" } }],
+  }, {}, { valueEncoding: null }));
+
+  const result = await db.query("all", [{ sql: "select data from blobs", params: [] }]);
+
+  assert.ok(result.results[0].data instanceof Uint8Array);
+  assert.deepEqual(Array.from(result.results[0].data), [0, 1, 2, 255]);
+});
+
+test("D1 runtime stub preserves native bytes when an older router drops the encoding header", async () => {
+  const { db } = makeRuntimeDb(() => d1Response({
+    success: true,
+    results: [{ data: new Uint8Array([0, 1, 2, 255]) }],
+  }, {}, { valueEncoding: null }));
+
+  const result = await db.query("all", [{ sql: "select data from blobs", params: [] }]);
+
+  assert.ok(result.results[0].data instanceof Uint8Array);
+  assert.deepEqual(Array.from(result.results[0].data), [0, 1, 2, 255]);
+});
+
+test("D1 runtime stub rejects unknown response value encodings", async () => {
+  const { db } = makeRuntimeDb(() => d1Response({
+    success: true,
+    results: [],
+  }, {}, { valueEncoding: "future-v2" }));
+
+  await assert.rejects(
+    () => db.query("all", [{ sql: "select 1", params: [] }], "rid-encoding"),
+    (err) => err instanceof Error &&
+      err.name === "D1_ERROR" &&
+      /** @type {any} */ (err).code === "result-unknown" &&
+      /** @type {any} */ (err).retryable === false
+  );
+  assert.deepEqual(D1_RUNTIME_STUB_TEST_STATE.logs, [{
+    service: "user-runtime",
+    level: "warn",
+    event: "d1_runtime_response_invalid",
+    fields: {
+      request_id: "rid-encoding",
+      namespace: "tenant-a",
+      database_id: "main-db",
+      upstream_status: 200,
+      upstream_cause_code: "unsupported-value-encoding",
+    },
+  }]);
+});
+
+test("D1 runtime stub reports unsupported legacy transport versions", async () => {
+  const { db } = makeRuntimeDb(() => d1Response({
+    success: true,
+    results: [{ data: { __wdl_d1_binary_v2: true, base64: "AA==" } }],
+  }, {}, { valueEncoding: null }));
+
+  await assert.rejects(
+    () => db.query("all", [{ sql: "select data from blobs", params: [] }], "rid-version"),
+    (err) => err instanceof Error &&
+      err.name === "D1_ERROR" &&
+      /** @type {any} */ (err).code === "result-unknown"
+  );
+  assert.equal(D1_RUNTIME_STUB_TEST_STATE.logs.length, 1);
+  assert.deepEqual(D1_RUNTIME_STUB_TEST_STATE.logs[0], {
+    service: "user-runtime",
+    level: "warn",
+    event: "d1_runtime_response_invalid",
+    fields: {
+      request_id: "rid-version",
+      namespace: "tenant-a",
+      database_id: "main-db",
+      upstream_status: 200,
+      upstream_cause_code: "unsupported-d1-transport-version",
+    },
+  });
 });
 
 test("D1 runtime stub: forwards request id header to backend", async () => {
@@ -626,6 +738,18 @@ test("D1 runtime stub: direct owner body read failures are result-unknown and cl
 
     assert.equal(directCalls.length, 1);
     assert.equal(calls.length, 1);
+    assert.deepEqual(D1_RUNTIME_STUB_TEST_STATE.logs, [{
+      service: "user-runtime",
+      level: "warn",
+      event: "d1_runtime_response_invalid",
+      fields: {
+        request_id: "rid-d1",
+        namespace: "tenant-a",
+        database_id: "main-db",
+        upstream_status: 200,
+        upstream_cause_code: "response-body-read-failed",
+      },
+    }]);
     const recovered = await db.query("all", [{ sql: "select 2", params: [] }], "rid-d1");
     assert.deepEqual(recovered.results, [{ via: "router" }]);
     assert.equal(directCalls.length, 1);

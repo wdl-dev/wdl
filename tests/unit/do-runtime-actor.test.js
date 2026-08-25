@@ -6,7 +6,7 @@ import {
   resetDoHostActorHarness,
 } from "../helpers/load-do-host-actor.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
-import { delay } from "../helpers/timing.js";
+import { delay, waitUntil } from "../helpers/timing.js";
 
 const { WdlDoHostActor, dispatchRpc } = await loadDoHostActor();
 const harness = doHostActorHarnessState();
@@ -55,6 +55,9 @@ function actor(env = {}, facetRegistrations = new Map()) {
   const ctx = {
     storage: { sql: facetRegistrationSql(facetRegistrations) },
     facets: {
+      get() {
+        throw new Error("unexpected facet lookup");
+      },
       abort(/** @type {string} */ name, /** @type {unknown} */ reason) {
         harness.aborts.push({ name, reason });
         harness.abortReject?.(reason);
@@ -96,6 +99,110 @@ function registerFacet(host, facetName, restartSequence = 0) {
 function markObjectRegistered(host) {
   host.registeredObjectMembers.add("Room:alice");
 }
+
+test("DO host actor bounds facet registration metadata with SQLite fallback", () => {
+  const facetRegistrations = new Map();
+  const host = actor({}, facetRegistrations);
+  for (let index = 0; index < 10_000; index += 1) {
+    const facetName = `Room:room-${index}`;
+    facetRegistrations.set(facetRegistrationKey("task-a", facetName), index);
+    host.cacheFacetRegistration(facetName, index);
+  }
+
+  host.cacheFacetRegistration("Room:room-10000", 10_000);
+  assert.equal(host.facetWorkers.size, 10_000);
+  assert.equal(host.facetWorkers.has("Room:room-0"), false);
+
+  assert.equal(host.readFacetRegistration("task-a", "Room:room-0")?.restartSequence, 0);
+  assert.equal(host.facetWorkers.size, 10_000);
+});
+
+test("DO host actor bounds object registry memo and repeats evicted idempotent writes", async () => {
+  const host = actor();
+  for (let index = 0; index < 10_000; index += 1) {
+    assert.equal(await host.rememberObject(invoke({ objectName: `room-${index}` })), true);
+  }
+
+  assert.equal(await host.rememberObject(invoke({ objectName: "room-10000" })), true);
+  assert.equal(host.registeredObjectMembers.size, 10_000);
+  assert.equal(host.registeredObjectMembers.has("Room:room-0"), false);
+
+  assert.equal(await host.rememberObject(invoke({ objectName: "room-0" })), true);
+  assert.equal(harness.remembered.length, 10_002);
+  assert.equal(host.registeredObjectMembers.size, 10_000);
+});
+
+test("DO host actor resolves a worker class only when the native facet starts", async () => {
+  let loaderGets = 0;
+  let classGets = 0;
+  let facetLookups = 0;
+  /** @type {unknown} */
+  let facetStartup = null;
+  const facet = {
+    async fetch() {
+      return new Response("ok");
+    },
+  };
+  const host = actor({
+    LOADER: {
+      get(/** @type {string} */ key, /** @type {() => Promise<unknown>} */ loader) {
+        loaderGets += 1;
+        assert.equal(key, "tenant:chat:v1");
+        assert.equal(typeof loader, "function");
+        return {
+          getDurableObjectClass(
+            /** @type {string} */ className,
+            /** @type {{ props: Record<string, unknown> }} */ options
+          ) {
+            classGets += 1;
+            assert.equal(className, "Room");
+            assert.deepEqual(options, { props: {} });
+            return class Room {};
+          },
+        };
+      },
+    },
+  });
+  host.ctx.facets.get = (
+    /** @type {string} */ name,
+    /** @type {() => { class: unknown, id: string }} */ start
+  ) => {
+    facetLookups += 1;
+    assert.equal(name, "Room:alice");
+    facetStartup ??= start();
+    return facet;
+  };
+  markObjectRegistered(host);
+  const request = invoke({
+    kind: "fetch",
+    props: {},
+    request: {
+      method: "GET",
+      url: "https://tenant.example/room",
+      headers: [],
+    },
+  });
+  const owner = {
+    ...request.owner,
+    leaseExpiresAt: Date.now() + 60_000,
+    leaseRemainingMs: 60_000,
+  };
+  harness.actorInvokes = [request, request];
+  harness.assertResponses = [owner, owner];
+
+  for (const requestId of ["request-a", "request-b"]) {
+    const response = await host.fetch(new Request("http://actor.test/invoke", {
+      method: "POST",
+      headers: { "x-request-id": requestId },
+    }));
+    assert.equal(await response.text(), "ok");
+  }
+
+  assert.equal(facetLookups, 2);
+  assert.equal(loaderGets, 1);
+  assert.equal(classGets, 1);
+  assert.ok(facetStartup);
+});
 
 test("DO host actor: RPC dispatch passes request id through the internal wrapper boundary", async () => {
   /** @type {Array<{ url: string, header: string | null, requestId: string | null, body: unknown }>} */
@@ -293,6 +400,55 @@ test("DO host actor: delete-storage validates owner and active storage in one sc
   assert.equal(facetRegistrations.has(facetRegistrationKey("task-b", "Room:alice")), false);
   assert.equal(facetRegistrations.get(facetRegistrationKey("task-b", "Room:bob")), 2);
   assert.equal(host.registeredObjectMembers.has("Room:alice"), false);
+  assert.equal(harness.inFlight, 0);
+});
+
+test("DO host actor: delete-storage rejects admission after drain starts", async () => {
+  const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  harness.actorInvokes = [invoke()];
+  harness.draining = true;
+
+  const response = await host.fetch(new Request("http://actor.test/delete-storage", {
+    method: "POST",
+  }));
+
+  await assertJsonResponse(response, 503, {
+    error: "task_draining",
+    message: "DO task is draining",
+  });
+  assert.equal(harness.assertCalls, 0);
+  assert.deepEqual(harness.deletedFacets, []);
+  assert.equal(harness.inFlight, 0);
+});
+
+test("DO host actor: drain observes an admitted delete-storage operation", async () => {
+  const host = actor({ DO_OWNER_LEASE_GUARD_MS: 0 });
+  const owner = {
+    ...invoke().owner,
+    leaseExpiresAt: Date.now() + 60_000,
+  };
+  const assertion = Promise.withResolvers();
+  harness.actorInvokes = [invoke()];
+  harness.assertResponses = [assertion.promise];
+
+  const responsePromise = host.fetch(new Request("http://actor.test/delete-storage", {
+    method: "POST",
+  }));
+  await waitUntil(
+    "delete-storage owner assertion",
+    () => harness.assertCalls === 1,
+    { timeoutMs: 1000, intervalMs: 1 }
+  );
+  assert.equal(harness.assertCalls, 1);
+  assert.equal(harness.inFlight, 1);
+
+  harness.draining = true;
+  assertion.resolve(owner);
+  const response = await responsePromise;
+
+  await assertJsonResponse(response, 200, { ok: true });
+  assert.deepEqual(harness.deletedFacets, ["Room:alice"]);
+  assert.equal(harness.inFlight, 0);
 });
 
 test("DO host actor: a preserve session policy keeps an existing facet on its loaded version", () => {

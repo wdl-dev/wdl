@@ -157,6 +157,7 @@ export function dispatchWorkflowReplay(ns, workflowKey, version, instanceId, run
       generation: 1,
       createdAtMs,
       runToken,
+      dispatchDeadlineMs: Date.now() + 60_000,
       params,
     }
   );

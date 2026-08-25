@@ -93,6 +93,7 @@ const d1RuntimeWorker :Workerd.Worker = (
     (name = "D1_OBSERVED_OWNER_MAX_ENTRIES", fromEnvironment = "D1_OBSERVED_OWNER_MAX_ENTRIES"),
     (name = "D1_READ_CACHE_TTL_MS", fromEnvironment = "D1_READ_CACHE_TTL_MS"),
     (name = "D1_READ_CACHE_MAX_ENTRIES", fromEnvironment = "D1_READ_CACHE_MAX_ENTRIES"),
+    (name = "D1_READ_CACHE_MAX_BYTES", fromEnvironment = "D1_READ_CACHE_MAX_BYTES"),
     (name = "D1_TEST_HOOKS", fromEnvironment = "D1_TEST_HOOKS"),
     (name = "LOG_LEVEL", fromEnvironment = "LOG_LEVEL"),
   ],

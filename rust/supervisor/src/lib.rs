@@ -3,6 +3,7 @@ mod drain;
 mod log;
 mod process;
 mod renew;
+mod response_body;
 
 pub(crate) use config::*;
 pub(crate) use wdl_rust_common::text::truncate_chars;

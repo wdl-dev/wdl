@@ -36,7 +36,10 @@ lives in object SQLite; Workflows owns the backend due/retry/discard job state i
 Alarm writes are supported inside async `ctx.storage.transaction()` callbacks, where the
 shim can flush backend side effects after the transaction commits. `transactionSync()`
 cannot await those side effects, so `setAlarm()` and `deleteAlarm()` throw when called
-from a synchronous transaction callback.
+from a synchronous transaction callback. `deleteAll()` is supported only outside a
+transaction through WDL's best-effort storage shim. Alarm APIs are also unsupported
+inside a nested async transaction because releasing a child savepoint is not a backend
+commit boundary.
 
 ## Interfaces
 
@@ -73,6 +76,11 @@ reader caps them at 256 ASCII bytes. RPC arguments are structural JSON data capp
 1 MiB: finite numbers, strings, booleans, null, dense arrays, and plain objects are
 accepted. Serialization does not invoke `toJSON()` hooks; sparse arrays, circular
 structures, non-plain objects, and non-JSON values fail before dispatch.
+The host adapter also reads RPC response envelopes under a 1 MiB cap, rejecting an
+oversized `Content-Length` before buffering and cancelling a streamed body as soon as
+it crosses the cap. A body read, UTF-8 decode, JSON parse, or successful-envelope
+validation failure throws `do_rpc_result_unknown`; the method may already have run, so
+the caller must not blindly replay it.
 
 do-runtime invokes tenant alarm and RPC methods through private fetch dispatches
 intercepted by the generated wrapper. Those requests carry the outer request id so the
@@ -128,27 +136,90 @@ delete against stale backend delivery; Workflows run tokens fence dispatch retry
 completion inside DB 2.
 
 workerd 2026-07-01 rejects SQLite object names under the reserved `_cf_` namespace
-case-insensitively. `ctx.storage.deleteAll()` skips those names case-insensitively as
-well, so old storage created before the stricter check with variants such as `_CF_*`
-does not make cleanup fail. Those legacy reserved-name objects remain inaccessible to
-tenant SQL and should be treated as upgrade debris, not application tables.
+case-insensitively. WDL's best-effort `ctx.storage.deleteAll()` skips those names as well,
+so old variants such as `_CF_*` remain inaccessible upgrade debris until the private
+do-runtime facet-deletion owner removes the complete database.
 
-`getAlarm()` performs alarm-scoped read repair: if SQLite has a pending alarm row but
-the Workflows DB 2 due index is missing, it idempotently rewrites the backend due index
-without adding Redis IO to ordinary DO fetches. Under `preserve`, active and retained
-alarms keep their scheduled worker version. A `restart` promotion retargets a superseded
-alarm to the active version even while the old version remains retained; deleting a
-retained version does the same. Both transitions require the `doStorageId` to remain
-unchanged. Alarms self-clean when the logical worker is gone or now points at a
-different `doStorageId`.
+Pinned stock workerd's native SQLite reset path assumes a root actor while recursively
+deleting child facets, but WDL tenant objects are facets. WDL therefore implements the
+historical `deleteAll()` surface through public storage operations: list/delete KV, drop
+tenant SQL objects, then update the Workflows alarm index. KV list/delete work runs in
+pages of at most 128 keys so neither values nor a delete call become unbounded. This path
+is deliberately not atomic across KV, SQLite, and DB 2. A rejection can leave a partial
+result, and callers must not race `deleteAll()` with any other storage or alarm mutation.
+The WDL-specific `deleteAlarm:false` option preserves the local/backend alarm; omitted or
+`true` requests best-effort alarm cancellation. Other native `deleteAll()` options do not
+strengthen this contract. Private facet deletion remains the authoritative platform
+cleanup path.
+
+`getAlarm()` performs best-effort alarm-scoped read repair: if SQLite has a pending alarm
+row but the Workflows DB 2 due index is missing, it attempts an idempotent backend rewrite
+without adding Redis IO to ordinary DO fetches. Repair failure is logged and swallowed;
+the returned timestamp confirms only the local SQLite row, not the backend job. Inside an
+async storage transaction, `getAlarm()` reads only that local transactional state and
+does not attempt backend repair. Under `preserve`, active and retained alarms keep their
+scheduled worker version. A `restart` promotion retargets a superseded alarm to the active
+version even while the old version remains retained; deleting a retained version does the
+same. Both transitions require the `doStorageId` to remain unchanged. Alarms self-clean
+when the logical worker is gone or now points at a different `doStorageId`.
+All Workflows alarm-index mutations for one object, including best-effort read repair,
+share one process-local promise tail. Concurrent requests therefore reach the backend in
+API order. Mutating API failures are reported to their caller; best-effort read-repair
+failures are logged and swallowed. Neither case blocks later mutations. A top-level
+transaction reserves its position on this tail at the first alarm mutation and fills
+that position with the final coalesced effect only after native commit, so a later
+non-transactional mutation cannot overtake it.
+
+Alarm mutation crosses object SQLite and Workflows DB 2 and is intentionally not a
+distributed transaction. A successfully completed `setAlarm()` enters the at-least-once
+delivery contract. Input validation fails before either store is mutated and preserves
+the current alarm. Once backend index mutation begins, a rejected `setAlarm()` has an
+unknown final state; a replacement attempt may also leave the previous alarm unable to
+fire. A caller that still requires an alarm must call `setAlarm()` again. `getAlarm()`
+repair applies only while a SQLite alarm row remains and does not confirm a failed set
+mutation. A rejected `deleteAlarm()` after backend mutation begins is also
+outcome-unknown: token-fenced compensation may restore the SQLite row after the backend
+job was already removed. A caller that still requires deletion must call `deleteAlarm()`
+again. A caller that requires the alarm to remain must call `setAlarm(desiredTime)` again
+and observe success; `getAlarm()` may expose a surviving local time and trigger
+best-effort repair, but neither a timestamp nor `null` confirms backend state. Async
+`ctx.storage.transaction()` commits its local writes before the post-commit backend alarm
+flush. If a transactional `setAlarm()` or `deleteAlarm()` flush rejects, other tenant
+storage writes from the callback remain committed while the alarm row undergoes its
+operation-specific compensation and retains the unknown-state semantics above. Callers
+must not blindly rerun the complete transaction callback. The transaction callback
+captures its entry alarm row as the backend baseline. A final delete fences, sends, and
+compensates only that baseline; when no baseline exists, `setAlarm()` followed by
+`deleteAlarm()` stays local and sends no backend delete. Explicit `txn.rollback()` drops
+all queued alarm side effects, and subsequent shim alarm operations on that transaction
+throw. On SQLite-backed workerd, alarm calls through owning `ctx.storage` aliases share
+the same native transaction as calls through the callback `txn` object; same-event
+branches running before callback settlement therefore participate in that transaction and
+must observe the outer transaction result. The shim keeps its active transaction fence
+until native commit/rollback settles. A Promise reaction after callback settlement sees
+the closed transaction and cannot enqueue a backend alarm before native rollback.
+Transaction-local `getAlarm()` never performs backend repair. The constructor-visible
+storage alias and later `this.ctx.storage` reuse one proxy/context. Rollback bookkeeping
+changes only after native rollback succeeds; a failed rollback leaves queued effects
+intact, while repeated successful rollback calls retain native no-op behavior.
+
+A pending delete row stores an internal fence token with `in_flight=1`. The in-flight bit
+is a same-service rolling reader fence: an older do-runtime does not understand the token
+prefix, but it skips `getAlarm()` repair and rejects delivery of the original backend
+token as a mismatch, so it cannot execute the tombstone as a tenant alarm. During mixed
+versions an old mutator may still send the fence token as an ineffective backend CAS;
+current readers always unwrap it before deletion.
+Creating the fence updates only `token` and `in_flight` under the current token; it does
+not revalidate unrelated scheduled-time or retry fields, so corrupt/legacy rows remain
+deletable.
 
 ## Ownership / Concurrency / Failure Semantics
 
 - One task owns a class shard at a time.
 - Generation fencing prevents stale owners from committing after ownership moves.
-- `do-runtime/protocol.js` owns the DO ownership error vocabulary. The binding-scoped
-  host transport keeps its retry and stale-hint subsets private and pins them through
-  response-classification tests.
+- `do-runtime/protocol/wire-grammar.js` owns the DO ownership error vocabulary consumed
+  by the producer and binding-scoped host transport, plus the host's
+  pre-dispatch-safe retry subset.
 - Facet identity is `className:objectName` inside stable `doStorageId`, so both session
   policy modes preserve SQLite object state.
 - The worker-level session policy contract — the `sessionPolicy` bundle metadata
@@ -183,6 +254,13 @@ different `doStorageId`.
   one small row for every task that dispatched it until storage cleanup. This long-term
   storage cost is accepted to avoid pruning a fence that a still-live task needs on a
   later owner return.
+- The actor-local facet-registration cache and successful object-registry memo are each
+  bounded to 10,000 advisory entries. Facet metadata eviction reloads the authoritative
+  SQLite row; object memo eviction repeats the idempotent Redis `SADD`. These bounds do not
+  prune the persistent session-policy ledger, object registry, native facet, or loaded
+  worker isolate. The `workerLoader` binding remains the sole worker-stub factory and owns
+  native isolate residency; the host actor does not mirror worker ids. Worker/class
+  resolution runs only in the native facet startup callback, not on warm-facet dispatch.
 - Storage cleanup is scoped to stable `doStorageId`, not an immutable worker version. It
   may dispatch through an owner while its requested version is superseded, but still
   enforces whole-worker delete exclusion, the active storage pointer, owner generation,
@@ -191,24 +269,55 @@ different `doStorageId`.
   interrupted by the promotion; they converge when the facet is next dispatched.
 - Whole-worker delete assigns a new `doStorageId` on redeploy; old native storage is
   tombstoned for cleanup rather than immediately purged.
-- WebSocket upgrades must complete on the owner endpoint. Owner-hinted WebSocket direct
-  retry cannot fall back to a router-established 101.
-- Ordinary fetch/RPC can perform one router rediscovery after a trusted owner-hint or an
-  explicit pre-dispatch stale-owner/owner-race response carrying do-runtime's private
-  ownership-error control header, including for non-idempotent methods and RPC. Tenant
-  response bodies cannot opt into replay. An unmarked direct owner transport failure, or
-  a 502/503/504 without either trusted marker, evicts the cached hint. Safe `GET`/`HEAD`
-  requests may replay through the router; non-idempotent methods and RPC return
-  `owner_unavailable` because the owner may already have applied the request.
+- WebSocket upgrades must complete on the owner endpoint. A valid trusted owner hint from a
+  cached endpoint clears the cache and permits one router rediscovery before connecting to
+  the newly resolved owner. A response carrying the private hint marker but using the
+  wrong status, marker value, metadata, or shard fails as sanitized `owner_unavailable`;
+  a transport failure after router handoff does not fall back to a router-established 101.
+- An uncached ordinary fetch/RPC enters one router. If another task owns the shard, that
+  router forwards the bounded invoke once and returns the owner's final response with
+  trusted owner headers; the host learns the hint without uploading the invoke again.
+  Legacy invoke hint opt-in is ignored, while WebSocket connect retains the hint-only
+  handoff above.
+- A forwarded or cached-direct call carries its trusted route fence to the target task.
+  When that fence matches the receiving task's process-local owner record and canonical
+  owner shard, do-runtime skips only its outer owner-resolution snapshot and queues the
+  call to the host actor. The actor still reads Redis time, exact owner/generation,
+  the worker delete lock, active storage, and the complete session-policy projection
+  before tenant dispatch. Actor dispatch and storage deletion also enter the shared
+  in-flight admission before mutation, so task drain rejects new work and waits for
+  admitted work before releasing ownership.
+  Missing local lifecycle state or a mismatched task falls back to normal resolution; a
+  stale fence produces the same trusted pre-dispatch ownership error and one host-side
+  router rediscovery. Old senders omit the fence and old readers ignore it, so rolling
+  deployment retains the full-resolution path.
+- Ordinary fetch/RPC can perform one router rediscovery after an explicit pre-dispatch
+  stale-owner/owner-race response carrying do-runtime's private ownership-error control
+  header, including for non-idempotent methods and RPC. Current routers forward ordinary
+  invokes, so the host does not follow a legacy owner-hint response or upload the invoke
+  a second time. Tenant response bodies cannot opt into replay. An unmarked direct owner
+  transport failure, or a 502/503/504 without a trusted marker, evicts the cached hint.
+  Safe `GET`/`HEAD` requests may replay through the router; non-idempotent methods and RPC
+  return `owner_unavailable` because the owner may already have applied the request.
+  Broad trusted ownership errors such as `owner_unavailable` use the same split:
+  `GET`/`HEAD` may rediscover, while non-idempotent methods and RPC terminate.
 - The host adapter exclusively owns owner-hint cache wiring, invoke/connect framing,
   race retry, direct-owner forwarding, and response-header stripping. The injected
   facade only packages the public request, canonical object name, and diagnostic
-  request id into a binding-scoped call. The connect transport deliberately omits the
-  invoke-only router fallback required to preserve owner-established WebSocket
-  upgrades. Host adapters in one loader isolate share a process-local 10,000-entry LRU
-  keyed by `doStorageId`, class, and object name. Eviction only removes a routing hint;
-  the next request returns to the router, so high-cardinality traffic can increase
-  misses for other tenants but cannot cross an object identity or ownership fence.
+  request id into a binding-scoped call. The connect transport permits rediscovery only
+  after a valid trusted owner-hint control response or a narrow pre-dispatch ownership
+  race; it does not replay broad ownership errors or unmarked transport failures through
+  the router. Host adapters in one loader isolate share a process-local
+  10,000-entry LRU keyed by `doStorageId`, class, and canonical owner shard. Different
+  object names in one shard reuse only its routing hint; the authenticated invoke still
+  carries the exact object name, and the owner actor remains authoritative. A trusted
+  returned `ownerKey` must match the locally projected shard before it can be cached or
+  followed, and an explicit stale-owner response clears that shard entry. Any malformed,
+  wrong-status, or mismatched WebSocket hint control response is discarded and reduced to
+  `owner_unavailable`, so task identity and private endpoints cannot cross the tenant
+  response boundary. Eviction only removes a routing hint; the next request returns to the
+  router, so high-cardinality traffic can increase misses for other tenants but cannot
+  cross an object identity or ownership fence.
 - Runtime materializes one host adapter per declared DO binding. Immutable adapter props
   fix namespace, worker version, storage identity, and class before internal auth is
   attached; loaded-worker env never contains a generic DO router or owner-network
@@ -261,16 +370,21 @@ Owner resolution is the single-writer protocol:
    compare the exact owner bytes and active storage pointer before refreshing the TTL.
    Its generation fence is carried by the owner record rather than a second
    generation-key read.
-3. If a live owner exists on another task, the router returns that owner or an
-   owner-hint header; the runtime host adapter may retry directly, but the owner task
-   still rechecks the fence.
+3. If a live owner exists on another task, the router forwards ordinary fetch/RPC once
+   and returns the final response with owner headers. The runtime host adapter caches
+   those headers for later direct calls. Forwarded and cached-direct calls carry the
+   route fence into the owner actor, which remains the authoritative admission layer;
+   the target task may therefore omit its otherwise redundant outer snapshot. WebSocket
+   connect instead receives an owner hint and establishes its `101` directly with that
+   endpoint. In every path the owner actor rechecks the complete fence.
 4. If the owner is missing or expired, the claimant bumps the monotonic generation
    counter and writes a new owner record with TTL in one Redis transaction.
-5. Local dispatch checks `taskId`, `generation`, lease expiry, active `doStorageId`,
-   and remaining lease budget before using a native facet. A stale generation, expired
-   lease, or changed storage pointer fails closed. Every owner-side assertion, including
-   `/delete-storage`, reads the owner record, active storage pointer, and Redis time in
-   one snapshot. If less than
+5. Local dispatch checks `taskId`, `generation`, lease expiry, the worker delete lock,
+   active `doStorageId`, and remaining lease budget before using a native facet. A
+   `whole` lock, stale generation, expired lease, or changed storage pointer fails
+   closed; a `version` lock does not interrupt active storage. Every owner-side
+   assertion, including `/delete-storage`, reads the owner record, delete lock, active
+   storage pointer, and Redis time in one snapshot. If less than
    `DO_OWNER_LEASE_GUARD_MS` remains (default `1000`), the owner first tries a
    same-task, same-generation CAS renew; if renewal fails, it fails closed. This guard
    narrows the takeover window; it is not a per-SQL-call or SQLite commit-time fence.
@@ -278,11 +392,13 @@ Owner resolution is the single-writer protocol:
    exposes task and owner state for diagnostics. Supervisor allows the local drain HTTP
    call up to `DO_DRAIN_TIMEOUT_MS` (default `10000`). Within that request, do-runtime
    stops new ownership and waits up to `DO_DRAIN_IN_FLIGHT_TIMEOUT_MS` (default `8000`)
-   for host-actor dispatches to finish before releasing matching generations. If drain
-   succeeds, `do-supervisor` kills workerd directly instead of relying on workerd's
-   post-SIGTERM graceful window, which otherwise leaves the listener half-dead and can
-   create a takeover 504 window. If drain times out, it returns 503 and keeps leases
-   intact so failover waits for normal lease expiry. In-flight handlers also have a
+   for host-actor dispatches and storage deletions to finish before releasing matching
+   generations. Drain and renew response bodies are streamed under a 256 KiB cap before
+   JSON parsing or diagnostic truncation. If drain succeeds, `do-supervisor` kills
+   workerd directly instead of relying on workerd's post-SIGTERM graceful window, which
+   otherwise leaves the listener half-dead and can create a takeover 504 window. If
+   drain times out, it returns 503 and keeps leases intact so failover waits for normal
+   lease expiry. In-flight handlers also have a
    lease-budget watchdog that rechecks ownership `DO_OWNER_LEASE_GUARD_MS` before
    expiry, forgets the affected owner scope, and aborts the affected facet if renewal
    stops or ownership moves; it does not put the whole task into draining state.
@@ -378,7 +494,10 @@ required.
   closed before internal auth is attached.
 - Owner-hint and ownership-error defense is layered: tenant response bodies and
   tenant-supplied control headers are ignored, only do-runtime control headers are
-  trusted, and endpoint grammar/acceptable-address checks must pass for hints.
+  trusted, and endpoint grammar/acceptable-address checks must pass for hints. A final
+  trusted ownership-control error preserves its code only for an allowlisted `503`;
+  every other code/status combination becomes `503 owner_unavailable`. The host always
+  replaces its message and drops private details before returning it to tenant code.
 - The binding-scoped host adapter owns the DO transport and shared D1/DO endpoint
   validation outside the tenant realm. It captures the intrinsics used for
   private-header stripping, request bounds, invoke serialization, replay classification,
@@ -399,8 +518,9 @@ do-runtime emits structured logs around actor residency selection, owner resolut
 session-policy fences, lazy facet restart, dispatch, alarm execution, drain, renew, and
 WebSocket handling. Through `do_alarm_dispatches`, Workflows emits backend alarm
 delivery, retry, discard, and in-flight-unknown outcomes; do-runtime metrics cover
-runtime operations. Gateway request logs do not measure the lifetime of backend
-WebSocket recovery after the initial 101.
+runtime operations. Dispatch admission updates only the process-local in-flight
+counter; `/_metrics` publishes its gauge immediately before rendering. Gateway request
+logs do not measure the lifetime of backend WebSocket recovery after the initial 101.
 
 ## Deployment / Rollout Notes
 
@@ -467,11 +587,12 @@ WebSocket recovery after the initial 101.
   fenced to the deleted `doStorageId`, so a same-name redeploy with a new storage id is
   not swept by the old delete. If best-effort cleanup fails, a far-future residual alarm
   job can remain in DB 2 until it becomes due; it then self-discards because the storage
-  pointer is gone. First owner claim watches the same per-worker delete lock and storage
-  pointer; only the `whole` lock kind rejects ownership, so deleting an inactive version
-  does not interrupt the active worker. A whole-worker delete therefore cannot miss
-  owner/generation state created after its final owner scan. `do:objects:<doStorageId>`
-  remains a tombstone for future platform cleanup.
+  pointer is gone. Owner claim watches the same per-worker delete lock and storage
+  pointer, while every actor-side dispatch assertion reads that lock with the owner and
+  storage snapshot. Only the `whole` lock kind rejects active storage, so deleting an
+  inactive version does not interrupt the active worker. A whole-worker delete therefore
+  cannot miss owner/generation or object-registry state created after its final scan.
+  `do:objects:<doStorageId>` remains a tombstone for future platform cleanup.
 - DO object registry writes are best-effort. Dispatch continues if the registry write
   fails, so the tombstone set may be incomplete; future cleanup must tolerate missing
   members and treat the active storage pointer plus owner/alarm state as the stronger
@@ -489,13 +610,15 @@ WebSocket recovery after the initial 101.
   before a backend facet is created. Client messages queued under an older backend
   reconnect epoch may be discarded without per-frame ack/nack when the gateway resets
   that epoch.
-- Owner-hinted WebSocket direct retry failures do not fall back to the router, because
-  the final 101 must come from the owner endpoint.
+- A cached WebSocket owner may trigger one router rediscovery only through a valid trusted
+  same-shard owner hint or a narrow pre-dispatch ownership race. Broad ownership errors
+  and unmarked transport failures do not fall back because the final 101 must come from
+  the owner endpoint.
 - Unmarked ordinary fetch/RPC direct failures only fall back to the router for safe
   `GET`/`HEAD` requests. Non-idempotent methods and RPC return `owner_unavailable` when
-  the outcome may be unknown. A trusted owner-hint or explicit stale-owner/owner-race
-  response remains retryable once for every method because it proves dispatch did not
-  reach tenant code.
+  the outcome may be unknown. Only an explicit trusted stale-owner/owner-race response
+  remains retryable once for every method because it proves dispatch did not reach tenant
+  code. Ordinary invoke owner hints are sanitized rather than followed.
 - Renamed/deleted migrations are deferred.
 - Long handlers still need user-level care; lease-budget watchdogs protect platform
   ownership and narrow failover races, not every storage call or the final SQLite

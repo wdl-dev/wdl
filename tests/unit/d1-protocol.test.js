@@ -6,11 +6,14 @@ import { normalizeD1Param } from "../../shared/d1-params.js";
 import { loadD1Protocol, loadD1QueryWire } from "../helpers/load-d1-protocol.js";
 
 const {
+  d1QuerySuccessHeaders,
   D1_OWNERSHIP_CODES,
+  D1_QUERY_NATIVE_VALUE_ENCODING,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   encodeD1QueryRequest,
   encodeD1QueryResponse,
+  readD1QuerySuccessHeaders,
 } = await loadD1QueryWire();
 
 const {
@@ -21,6 +24,7 @@ const {
   d1ErrorPayload,
   encodeD1ActorQueryRequest,
   normalizeQueryRequest,
+  readD1QueryResponseBytes,
   readD1QueryResponseWithBytes,
   readD1ActorControlRequest,
   readD1ActorQueryRequest,
@@ -127,8 +131,14 @@ test("D1 protocol: normalizes D1 bind parameter types", () => {
   assert.equal(normalizeD1Param(true), 1);
   assert.equal(normalizeD1Param(false), 0);
   assert.equal(normalizeD1Param(null), null);
-  assert.deepEqual(normalizeD1Param(new Uint8Array([1, 2])), [1, 2]);
-  assert.deepEqual(normalizeD1Param(new Uint8Array([3, 4]).buffer), [3, 4]);
+  assert.deepEqual(normalizeD1Param([1, 2]), new Uint8Array([1, 2]));
+  assert.deepEqual(normalizeD1Param(new Uint8Array([3, 4]).buffer), new Uint8Array([3, 4]));
+
+  const backing = new Uint8Array([9, 8, 7, 6]);
+  const snapshot = normalizeD1Param(backing.subarray(1, 3));
+  backing.fill(0);
+  assert.deepEqual(snapshot, new Uint8Array([8, 7]));
+  assert.equal(snapshot.buffer.byteLength, snapshot.byteLength);
 });
 
 test("D1 query wire bytes remain stable across representative and varint-boundary payloads", () => {
@@ -214,9 +224,10 @@ test("D1 query wire bytes remain stable across representative and varint-boundar
 });
 
 test("D1 protocol: restores wire byte arrays for SQLite binding", () => {
-  const params = sqliteBindParams(["x", 7, null, [0, 127, 255]]);
+  const blob = new Uint8Array([0, 127, 255]);
+  const params = sqliteBindParams(["x", 7, null, blob]);
   assert.deepEqual(params.slice(0, 3), ["x", 7, null]);
-  assert.deepEqual(params[3], new Uint8Array([0, 127, 255]));
+  assert.equal(params[3], blob);
 });
 
 test("D1 protocol: rejects unsupported bind parameter types", () => {
@@ -332,7 +343,10 @@ test("D1 protocol: decodes binary query wire requests", async () => {
   })));
   assert.equal(req.dbKey, "tenant-a:main");
   assert.equal(req.binding, "DB");
-  assert.deepEqual(req.statements, [{ sql: "select ? as blob, ? as n", params: [[1, 2], 1] }]);
+  assert.deepEqual(req.statements, [{
+    sql: "select ? as blob, ? as n",
+    params: [new Uint8Array([1, 2]), 1],
+  }]);
 });
 
 test("D1 protocol: query endpoint enforces a bounded binary body", async () => {
@@ -417,6 +431,63 @@ test("D1 protocol: can decode a query response while retaining its exact wire by
 
   assert.deepEqual(result.payload, { success: true, results: ["ok"], meta: {} });
   assert.deepEqual(result.bytes, body);
+});
+
+test("D1 protocol: success headers require a complete exact classification", () => {
+  for (const changedDb of [false, true]) {
+    const headers = new Headers(d1QuerySuccessHeaders(changedDb));
+    assert.deepEqual(readD1QuerySuccessHeaders(headers), { changedDb, valueEncoding: null });
+    const nativeHeaders = new Headers(
+      d1QuerySuccessHeaders(changedDb, D1_QUERY_NATIVE_VALUE_ENCODING),
+    );
+    assert.deepEqual(readD1QuerySuccessHeaders(nativeHeaders), {
+      changedDb,
+      valueEncoding: D1_QUERY_NATIVE_VALUE_ENCODING,
+    });
+  }
+  for (const headers of [
+    new Headers(),
+    new Headers({ "x-wdl-d1-result": "ok" }),
+    new Headers({ "x-wdl-d1-result": "error", "x-wdl-d1-changed-db": "0" }),
+    new Headers({ "x-wdl-d1-result": "ok", "x-wdl-d1-changed-db": "false" }),
+    new Headers({
+      "x-wdl-d1-result": "ok",
+      "x-wdl-d1-changed-db": "0",
+      "x-wdl-d1-value-encoding": "unknown-v2",
+    }),
+  ]) {
+    assert.equal(readD1QuerySuccessHeaders(headers), null);
+  }
+});
+
+test("D1 protocol: response byte values decode as exact owned Uint8Arrays", async () => {
+  const body = encodeD1QueryResponse({
+    success: true,
+    results: [{ blob: new Uint8Array([0, 1, 127, 255]) }],
+    meta: {},
+  });
+  const payload = await readD1QueryResponse(new Response(body, {
+    headers: { "content-type": D1_QUERY_RESPONSE_CONTENT_TYPE },
+  }));
+  const blob = payload.results[0].blob;
+
+  assert.ok(blob instanceof Uint8Array);
+  assert.deepEqual(blob, new Uint8Array([0, 1, 127, 255]));
+  assert.equal(blob.byteOffset, 0);
+  assert.equal(blob.buffer.byteLength, blob.byteLength);
+});
+
+test("D1 protocol: can retain opaque response bytes without decoding payload values", async () => {
+  const body = new TextEncoder().encode("not-a-D1-response-value");
+  const response = () => new Response(body, {
+    headers: { "content-type": D1_QUERY_RESPONSE_CONTENT_TYPE },
+  });
+
+  assert.deepEqual(await readD1QueryResponseBytes(response()), body);
+  await assert.rejects(
+    () => readD1QueryResponseWithBytes(response()),
+    (err) => isProtocolError(err, 502, "invalid-response"),
+  );
 });
 
 test("D1 protocol: query response preserves magic object keys as data fields", async () => {

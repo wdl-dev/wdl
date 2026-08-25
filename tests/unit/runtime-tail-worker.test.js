@@ -39,9 +39,21 @@ const tailWorkerRawSrc = applyModuleReplacements(readRepositoryFile("runtime/tai
   [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
 ]);
 
-/** @param {string} tag */
-function tailWorkerSrc(tag) {
-  const forwarderUrl = moduleDataUrl(`${forwarderSrc}\n// ${tag}-forwarder`);
+/** @param {string} tag @param {{ captureForwardEntries?: boolean }} [options] */
+function tailWorkerSrc(tag, { captureForwardEntries = false } = {}) {
+  const baseForwarderUrl = moduleDataUrl(`${forwarderSrc}\n// ${tag}-forwarder`);
+  const forwarderUrl = captureForwardEntries
+    ? moduleDataUrl(`
+import * as forwarder from ${JSON.stringify(baseForwarderUrl)};
+export const TAIL_EVENT_MAX_BYTES = forwarder.TAIL_EVENT_MAX_BYTES;
+export const isFreshTailInactive = forwarder.isFreshTailInactive;
+export const tailEventTooLargePayload = forwarder.tailEventTooLargePayload;
+export async function forwardTailEntries(env, ctx, entries) {
+  globalThis.__runtimeTailForwardEntryCounts.push(entries.length);
+  return await forwarder.forwardTailEntries(env, ctx, entries);
+}
+`)
+    : baseForwarderUrl;
   return applyModuleReplacements(tailWorkerRawSrc, [
     [/from "runtime-tail-forwarder";/, `from ${JSON.stringify(forwarderUrl)};`],
   ]);
@@ -49,6 +61,7 @@ function tailWorkerSrc(tag) {
 
 /** @type {any} */ (globalThis).__runtimeTailLogs = [];
 /** @type {any} */ (globalThis).__runtimeTailLevels = [];
+/** @type {any} */ (globalThis).__runtimeTailForwardEntryCounts = [];
 let restoreFetch = () => {};
 
 // `__runtimeTailLogs`/`__runtimeTailLevels` are shared across all tests
@@ -59,6 +72,7 @@ beforeEach(() => {
   restoreFetch = () => {};
   /** @type {any} */ (globalThis).__runtimeTailLogs.length = 0;
   /** @type {any} */ (globalThis).__runtimeTailLevels.length = 0;
+  /** @type {any} */ (globalThis).__runtimeTailForwardEntryCounts.length = 0;
 });
 
 afterEach(() => {
@@ -369,10 +383,15 @@ function fakeCtx() {
   };
 }
 
-/** @param {string} tag */
-async function freshTailHandler(tag) {
-  const m = await import(moduleDataUrl(tailWorkerSrc(tag)));
+/** @param {string} tag @param {{ captureForwardEntries?: boolean }} [options] */
+async function freshTailHandler(tag, options) {
+  const m = await import(moduleDataUrl(tailWorkerSrc(tag, options)));
   return m.default;
+}
+
+/** @param {string} tag */
+async function freshTailForwarder(tag) {
+  return await import(moduleDataUrl(`${forwarderSrc}\n// ${tag}`));
 }
 
 /**
@@ -609,6 +628,105 @@ test("tail-worker: oversized console events are dropped whole with a metadata wa
   assert.equal(json.includes("x".repeat(100)), false);
 });
 
+test("tail-worker: rejects oversized strings before UTF-8 allocation", async () => {
+  const message = "x".repeat(6 * 1024);
+  const nativeEncode = TextEncoder.prototype.encode;
+
+  await withMockedProperty(
+    TextEncoder.prototype,
+    "encode",
+    /** @this {TextEncoder} @param {string} value */
+    function guardedEncode(value) {
+      if (value === message) throw new Error("oversized string reached TextEncoder");
+      return Reflect.apply(nativeEncode, this, [value]);
+    },
+    () => handler.tail([
+      fetchEvent({
+        workerId: "demo:x:v1",
+        requestId: "r-string-preflight",
+        logs: [{ level: "log", message }],
+      }),
+    ], TAIL_ENV)
+  );
+
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs[0].event, "worker_console_dropped");
+});
+
+test("tail-worker: rejects oversized typed arrays before indexed-key enumeration", async () => {
+  const message = new Uint8Array(6 * 1024);
+  Object.defineProperty(message, "length", { value: 0 });
+  const nativeKeys = Object.keys;
+  let keysCalled = false;
+
+  await withMockedProperty(
+    Object,
+    "keys",
+    function guardedKeys(value) {
+      if (value === message) keysCalled = true;
+      return Reflect.apply(nativeKeys, Object, [value]);
+    },
+    () => handler.tail([
+      fetchEvent({
+        workerId: "demo:x:v1",
+        requestId: "r-view-preflight",
+        logs: [{ level: "log", message }],
+      }),
+    ], TAIL_ENV)
+  );
+
+  assert.equal(keysCalled, false);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs[0].event, "worker_console_dropped");
+});
+
+test("tail-worker: rejects oversized BigInt before decimal conversion", async () => {
+  const message = 10n ** 10_000n;
+  const nativeToString = BigInt.prototype.toString;
+  let toStringCalled = false;
+
+  await withMockedProperty(
+    BigInt.prototype,
+    "toString",
+    /** @this {bigint} */
+    function guardedToString(...args) {
+      toStringCalled = true;
+      return Reflect.apply(nativeToString, this, args);
+    },
+    () => handler.tail([
+      fetchEvent({
+        workerId: "demo:x:v1",
+        requestId: "r-bigint-preflight",
+        logs: [{ level: "log", message }],
+      }),
+    ], TAIL_ENV)
+  );
+
+  assert.equal(toStringCalled, false);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs[0].event, "worker_console_dropped");
+});
+
+test("tail-worker: preserves enumerable fields on non-indexed binary objects", () => {
+  const buffer = /** @type {ArrayBuffer & { label?: string }} */ (new ArrayBuffer(6 * 1024));
+  const view = /** @type {DataView & { label?: string }} */ (new DataView(buffer));
+  buffer.label = "buffer";
+  view.label = "view";
+
+  handler.tail([
+    fetchEvent({
+      workerId: "demo:x:v1",
+      requestId: "r-non-indexed-view",
+      logs: [{ level: "log", message: [buffer, view] }],
+    }),
+  ], TAIL_ENV);
+
+  assert.deepEqual(/** @type {any} */ (globalThis).__runtimeTailLogs[0].fields.message, [
+    { label: "buffer" },
+    { label: "view" },
+  ]);
+});
+
 test("tail-worker: nested oversized console objects are dropped before JSON stringify", async () => {
   /** @type {any} */ (globalThis).__runtimeTailLogs.length = 0;
   const calls = makeFetchSpy({ activeSequence: [["demo:x"]] });
@@ -741,6 +859,45 @@ test("tail-worker: fresh miss cache suppresses repeated active probes", async ()
   assert.equal(activeFetches.length, 1,
     `expected fresh miss cache to avoid a second active probe; got ${activeFetches.length}`);
   assert.equal(appendFetches.length, 0);
+});
+
+test("tail-worker: fresh miss skips duplicate live-forward payload construction", async () => {
+  /** @type {any} */ (globalThis).__runtimeTailLogs.length = 0;
+  const calls = makeFetchSpy({ activeSequence: [[]] });
+  const handler = await freshTailHandler("active-set-miss-payload", {
+    captureForwardEntries: true,
+  });
+  const event = fetchEvent({
+    workerId: "demo:x:v1",
+    requestId: "r-payload",
+    logs: [{ level: "log", message: "visible on stdout" }],
+  });
+
+  const primeCtx = fakeCtx();
+  await handler.tail([event], TAIL_PROXY_ENV, primeCtx);
+  await Promise.all(primeCtx.tasks);
+
+  const cachedCtx = fakeCtx();
+  await handler.tail([event], TAIL_PROXY_ENV, cachedCtx);
+  await Promise.all(cachedCtx.tasks);
+
+  assert.deepEqual(/** @type {any} */ (globalThis).__runtimeTailForwardEntryCounts, [1, 0]);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs.length, 2);
+  assert.equal(calls.filter((call) => call.url.endsWith("/logs/tail/active")).length, 1);
+  assert.equal(calls.filter((call) => call.url.endsWith("/logs/tail/append")).length, 0);
+});
+
+test("tail-worker: miss cache evicts the oldest-observed key at its 10,000-key bound", async () => {
+  const { makeActiveSetCache } = await freshTailForwarder("active-set-miss-capacity");
+  const cache = makeActiveSetCache();
+
+  for (let i = 0; i <= 10_000; i += 1) {
+    cache.markMiss(`demo:w${i}`);
+  }
+
+  assert.equal(cache.isFreshInactive("demo:w0"), false);
+  assert.equal(cache.isFreshInactive("demo:w1"), true);
+  assert.equal(cache.isFreshInactive("demo:w10000"), true);
 });
 
 test("tail-worker: fresh miss cache expires instead of sliding forever", async () => {

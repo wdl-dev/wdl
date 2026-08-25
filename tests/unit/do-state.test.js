@@ -41,6 +41,7 @@ const {
   beginInFlightDispatch,
   currentInFlightDispatches,
   endInFlightDispatch,
+  prepareDoRuntimeMetrics,
   recordDoInvoke,
   recordDoWebSocketUpgrade,
   setDraining,
@@ -72,6 +73,8 @@ afterEach(() => {
 test("DO state: in-flight waits resolve after active dispatches finish", async () => {
   assert.equal(beginInFlightDispatch(), true);
   assert.equal(currentInFlightDispatches(), 1);
+  assert.deepEqual(/** @type {any} */ (globalThis).__doStateGaugeSamples, []);
+  prepareDoRuntimeMetrics();
 
   const waiting = waitForInFlightDispatches(1000);
   endInFlightDispatch();
@@ -80,6 +83,11 @@ test("DO state: in-flight waits resolve after active dispatches finish", async (
   assert.equal(result.drained, true);
   assert.equal(result.inFlight, 0);
   assert.equal(currentInFlightDispatches(), 0);
+  assert.deepEqual(
+    /** @type {any} */ (globalThis).__doStateGaugeSamples.map((/** @type {any} */ sample) => sample.value),
+    [1]
+  );
+  prepareDoRuntimeMetrics();
   assert.deepEqual(
     /** @type {any} */ (globalThis).__doStateGaugeSamples.map((/** @type {any} */ sample) => sample.value),
     [1, 0]

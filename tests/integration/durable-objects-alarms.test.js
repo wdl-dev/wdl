@@ -288,6 +288,18 @@ test("do-runtime shim supports storage alarms on SQLite-backed Durable Objects",
   assert.equal(rolledBackStatus.status, 200, rolledBackStatusText);
   assert.equal(responseJson({ body: rolledBackStatusText }).alarms, 0);
 
+  const reaction = await gatewayFetch(ns, "/alarms/transaction-reaction-window?name=reaction");
+  const reactionText = await reaction.text();
+  assert.equal(reaction.status, 200, reactionText);
+  assert.deepEqual(responseJson({ body: reactionText }), {
+    transactionMessage: "transaction rollback",
+    outsideOutcome: "Alarm storage operations cannot be used after transaction completion",
+    alarm: null,
+  });
+  const reactionJobId = doAlarmJobId(ns, "alarms", "AlarmCounter", "reaction");
+  assert.equal(redisDoAlarmJobExists(ns, "alarms", "AlarmCounter", "reaction"), false);
+  assert.equal(redisDoAlarmDueIncludes(reactionJobId), false);
+
   const shortDeleted = await gatewayFetch(ns, "/alarms/schedule-short-delete?name=shortdelete");
   const shortDeletedText = await shortDeleted.text();
   assert.equal(shortDeleted.status, 200, shortDeletedText);
@@ -564,7 +576,7 @@ test("late DO alarm writes after worker delete do not recreate Workflows alarm j
   assert.equal(redisDoAlarmDueIncludes(jobId), false);
 });
 
-test("deleteAll defaults to clearing Durable Object alarms while deleteAlarm:false preserves them", async () => {
+test("best-effort deleteAll clears storage by default and can preserve alarms", async () => {
   const ns = uniqueNs("do-delete-all-alarm");
   await deployAndPromote(ns, "alarms", {
     mainModule: "worker.js",
@@ -605,9 +617,23 @@ test("deleteAll defaults to clearing Durable Object alarms while deleteAlarm:fal
   const keepJobId = doAlarmJobId(ns, "alarms", "AlarmCounter", "keep");
   await waitForDoAlarmJob(ns, "alarms", "AlarmCounter", "keep");
   assert.equal(redisDoAlarmDueIncludes(keepJobId), true);
+
+  const transactionRejected = await gatewayFetch(ns, "/alarms/delete-all-transaction?name=transaction");
+  const transactionRejectedText = await transactionRejected.text();
+  assert.equal(transactionRejected.status, 200, transactionRejectedText);
+  assert.deepEqual(responseJson({ body: transactionRejectedText }), {
+    rejected: true,
+    message: "deleteAll() cannot be used inside transaction(); call it outside the transaction",
+    kv: "kv-value",
+    sqlTableExists: true,
+    pending: true,
+  });
+  const transactionJobId = doAlarmJobId(ns, "alarms", "AlarmCounter", "transaction");
+  await waitForDoAlarmJob(ns, "alarms", "AlarmCounter", "transaction");
+  assert.equal(redisDoAlarmDueIncludes(transactionJobId), true);
 });
 
-test("deleteAll clears common Durable Object SQL object types", async () => {
+test("best-effort deleteAll clears common Durable Object SQL object types", async () => {
   const ns = uniqueNs("do-delete-all-sql");
   await deployAndPromote(ns, "alarms", {
     mainModule: "worker.js",

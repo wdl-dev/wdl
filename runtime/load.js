@@ -262,14 +262,9 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
       throw new Error(`Bundle for ${workerId} not found in Redis`);
     }
 
-    const decodeStartedAt = Date.now();
     const { meta, ...codeBase } = bundleToWorkerCode(hash);
     const metaPlan = analyzeRuntimeMeta(meta);
-    maybeMetric((m) => m.observe("bundle_load_stage_duration_ms", {
-      service: serviceName, stage: "decode_bundle",
-    }, Date.now() - decodeStartedAt));
 
-    const envStartedAt = Date.now();
     const runtimeCtx = /** @type {RuntimeContext} */ (ctx);
     const workerEnv = buildWorkerEnv(
       meta, nsSecrets, workerSecrets, ns, worker, version,
@@ -279,9 +274,6 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
         workflows: metaPlan.workflows,
       }
     );
-    maybeMetric((m) => m.observe("bundle_load_stage_duration_ms", {
-      service: serviceName, stage: "build_env",
-    }, Date.now() - envStartedAt));
 
     // Loaded workers must not inherit runtime's private-reaching
     // outbound; pin them to PUBLIC_NETWORK.

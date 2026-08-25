@@ -10,8 +10,7 @@ use crate::{
 };
 
 use super::super::{
-    Consumer, MAX_QUEUE_DELAY_SECONDS, QUEUE_DELAYED_INDEX_KEY, QueueMessage, RetryAction,
-    queue_delayed_key, queue_dlq_key,
+    Consumer, QUEUE_DELAYED_INDEX_KEY, QueueMessage, RetryAction, queue_delayed_key, queue_dlq_key,
 };
 
 const MILLIS_PER_SECOND: i64 = 1_000;
@@ -206,11 +205,7 @@ pub(crate) fn decide_retry_action(
 }
 
 fn retry_visible_at_ms(now: i64, delay_secs: i64) -> i64 {
-    now.saturating_add(
-        delay_secs
-            .clamp(0, MAX_QUEUE_DELAY_SECONDS)
-            .saturating_mul(MILLIS_PER_SECOND),
-    )
+    now.saturating_add(delay_secs.saturating_mul(MILLIS_PER_SECOND))
 }
 
 fn parse_next_attempts(raw: &str) -> i64 {
@@ -728,59 +723,13 @@ mod tests {
     }
 
     #[test]
-    fn decide_retry_action_clamps_large_delays_and_saturates_visible_time() {
-        match decide_retry_action(&msg("a", "1-0", "0"), i64::MAX, 3, None, "jobs", 1_000_000) {
-            RetryAction::Delay { visible_at_ms, .. } => {
-                assert_eq!(
-                    visible_at_ms,
-                    1_000_000 + MAX_QUEUE_DELAY_SECONDS * MILLIS_PER_SECOND
-                );
-            }
-            _ => panic!("expected oversized delay to be clamped into delayed retry"),
-        }
-
+    fn decide_retry_action_saturates_visible_time() {
         match decide_retry_action(&msg("a", "1-0", "0"), 5, 3, None, "jobs", i64::MAX - 1) {
             RetryAction::Delay { visible_at_ms, .. } => {
                 assert_eq!(visible_at_ms, i64::MAX);
             }
             _ => panic!("expected visible_at_ms to saturate at i64::MAX"),
         }
-
-        match decide_retry_action(&msg("a", "1-0", "0"), -1, 3, None, "jobs", 1_000_000) {
-            RetryAction::Immediate { .. } => {}
-            _ => panic!("expected negative delay to remain immediate retry"),
-        }
-    }
-
-    #[test]
-    fn retry_batch_plan_clamps_worker_controlled_retry_delays() {
-        let consumer = Consumer {
-            ns: "demo".to_string(),
-            queue: "jobs".to_string(),
-            max_batch_size: 10,
-            max_batch_timeout_ms: 5000,
-            max_retries: 3,
-            retry_delay_secs: 0,
-            dead_letter_queue: None,
-            worker_id: "demo:worker:v1".to_string(),
-        };
-        let plan = build_retry_batch_plan(
-            vec![(msg("huge", "9-0", "0"), i64::MAX)],
-            "queue:demo:jobs:s",
-            &consumer,
-            99,
-            1_000_000,
-        )
-        .unwrap();
-
-        let commands = parse_packed_commands(&plan.pipe.get_packed_pipeline());
-        assert_eq!(commands.len(), 1);
-        let (_, args) = eval_parts(&commands[0]);
-        assert_eq!(args[0], TRANSITION_DELAY);
-        assert_eq!(
-            args[3],
-            (1_000_000 + MAX_QUEUE_DELAY_SECONDS * MILLIS_PER_SECOND).to_string()
-        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ import {
   STORAGE_ID_RE,
   HOST_ID_RE,
   DO_HOST_SHARD_COUNT,
+  DO_OWNERSHIP_CODE,
   MAX_ID_BYTES,
 } from "do-runtime-protocol-wire-grammar";
 import { DoRuntimeError, doErrorResponse } from "do-runtime-protocol-errors";
@@ -28,12 +29,18 @@ import {
   parseVersion,
 } from "shared-worker-contract";
 import {
+  DO_CONNECT_HEADERS,
   decodeDoObjectNameHeader,
+  DO_FORWARD_HEADERS,
   DO_OWNER_CONTROL_HEADERS,
   DO_OWNER_HEADERS,
 } from "_wdl-do-scoped-request.js";
 
-export { DO_HOST_SHARD_COUNT } from "do-runtime-protocol-wire-grammar";
+export {
+  DO_HOST_SHARD_COUNT,
+  DO_OWNERSHIP_CODE,
+  DO_OWNER_RACE_RETRY_CODES,
+} from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError } from "do-runtime-protocol-errors";
 export {
   hostIdForObject,
@@ -42,20 +49,6 @@ export {
   shardForObjectName,
 } from "do-runtime-protocol-identity";
 
-export const DO_OWNERSHIP_CODE = Object.freeze({
-  OWNER_CLAIM_RACED: "owner_claim_raced",
-  OWNER_FENCE_MISSING: "owner_fence_missing",
-  STALE_OWNER_GENERATION: "stale_owner_generation",
-  OWNER_LEASE_EXPIRED: "owner_lease_expired",
-  STALE_OWNER_STORAGE: "stale_owner_storage",
-  OWNER_LEASE_TOO_SHORT: "owner_lease_too_short",
-  OWNER_RENEW_RACED: "owner_renew_raced",
-  OWNER_RELEASE_RACED: "owner_release_raced",
-  OWNER_UNAVAILABLE: "owner_unavailable",
-  OWNER_ENDPOINT_MISSING: "owner_endpoint_missing",
-  FORWARD_HOP_EXHAUSTED: "forward_hop_exhausted",
-  TASK_DRAINING: "task_draining",
-});
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = DO_OWNER_CONTROL_HEADERS.ownershipError;
 /** @type {Set<string>} */
 const DO_OWNERSHIP_CODES = new Set(Object.values(DO_OWNERSHIP_CODE));
@@ -80,15 +73,6 @@ const ALARM_INTERNAL_URL = "https://do.internal/__wdl_alarm";
 const ALARM_INTERNAL_HEADER = "x-wdl-do-internal-alarm";
 const RPC_INTERNAL_URL = "https://do.internal/__wdl_rpc";
 const RPC_INTERNAL_HEADER = "x-wdl-do-internal-rpc";
-const CONNECT_HEADERS = {
-  ns: "x-wdl-do-ns",
-  worker: "x-wdl-do-worker",
-  version: "x-wdl-do-version",
-  doStorageId: "x-wdl-do-storage-id",
-  className: "x-wdl-do-class-name",
-  objectName: "x-wdl-do-object-name",
-  requestUrl: "x-wdl-do-request-url",
-};
 const OWNER_HINT_PROTOCOL_HEADERS = [
   DO_OWNER_CONTROL_HEADERS.acceptHint,
   ...Object.values(DO_OWNER_HEADERS),
@@ -96,10 +80,9 @@ const OWNER_HINT_PROTOCOL_HEADERS = [
 const CONNECT_INTERNAL_HEADER_NAMES = new Set([
   INTERNAL_AUTH_HEADER,
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
-  ...Object.values(CONNECT_HEADERS),
+  ...Object.values(DO_CONNECT_HEADERS),
   ...OWNER_HINT_PROTOCOL_HEADERS,
-  "x-wdl-do-forwarded",
-  "x-wdl-do-hop-count",
+  ...Object.values(DO_FORWARD_HEADERS),
   RPC_INTERNAL_HEADER,
 ]);
 const LOCAL_ACTOR_ENVELOPE_HEADER = "x-wdl-do-local-envelope";
@@ -444,6 +427,27 @@ function normalizeOwnerFence(value) {
   };
 }
 
+/** @param {Headers} headers */
+function ownerFenceFromHeaders(headers) {
+  const hasOwnerFence =
+    headers.has(DO_OWNER_HEADERS.ownerKey) ||
+    headers.has(DO_OWNER_HEADERS.taskId) ||
+    headers.has(DO_OWNER_HEADERS.generation);
+  if (!hasOwnerFence) return null;
+  return normalizeOwnerFence({
+    ownerKey: headers.get(DO_OWNER_HEADERS.ownerKey),
+    taskId: headers.get(DO_OWNER_HEADERS.taskId),
+    generation: headers.get(DO_OWNER_HEADERS.generation),
+  });
+}
+
+/** @param {OwnerFence} left @param {OwnerFence} right */
+function ownerFencesEqual(left, right) {
+  return left.ownerKey === right.ownerKey &&
+    left.taskId === right.taskId &&
+    left.generation === right.generation;
+}
+
 /**
  * @param {unknown} value
  * @returns {{ hostId: string, doStorageId: string, className: string, shard: number }}
@@ -562,27 +566,17 @@ function decodeConnectObjectName(value) {
 /** @param {Request} request */
 export function normalizeDoConnectRequest(request) {
   const headers = request.headers;
-  const hasOwnerFence =
-    headers.has(DO_OWNER_HEADERS.ownerKey) ||
-    headers.has(DO_OWNER_HEADERS.taskId) ||
-    headers.has(DO_OWNER_HEADERS.generation);
   const body = {
-    ns: headers.get(CONNECT_HEADERS.ns),
-    worker: headers.get(CONNECT_HEADERS.worker),
-    version: headers.get(CONNECT_HEADERS.version),
-    doStorageId: headers.get(CONNECT_HEADERS.doStorageId),
-    className: headers.get(CONNECT_HEADERS.className),
-    objectName: decodeConnectObjectName(headers.get(CONNECT_HEADERS.objectName)),
-    owner: hasOwnerFence
-      ? {
-          ownerKey: headers.get(DO_OWNER_HEADERS.ownerKey),
-          taskId: headers.get(DO_OWNER_HEADERS.taskId),
-          generation: headers.get(DO_OWNER_HEADERS.generation),
-        }
-      : undefined,
+    ns: headers.get(DO_CONNECT_HEADERS.ns),
+    worker: headers.get(DO_CONNECT_HEADERS.worker),
+    version: headers.get(DO_CONNECT_HEADERS.version),
+    doStorageId: headers.get(DO_CONNECT_HEADERS.doStorageId),
+    className: headers.get(DO_CONNECT_HEADERS.className),
+    objectName: decodeConnectObjectName(headers.get(DO_CONNECT_HEADERS.objectName)),
+    owner: ownerFenceFromHeaders(headers) ?? undefined,
     request: {
       method: request.method,
-      url: headers.get(CONNECT_HEADERS.requestUrl) || "https://do.internal/",
+      url: headers.get(DO_CONNECT_HEADERS.requestUrl) || "https://do.internal/",
       headers: visibleConnectHeaders(headers),
     },
   };
@@ -745,7 +739,13 @@ export async function readDoInvokeRequest(request) {
     );
   }
   const { metadata, bodyBytes } = decodeInvokeEnvelope(await readBoundedBytes(request, MAX_INVOKE_ENVELOPE_BYTES));
-  return invokeWithEnvelopeBody(metadata, bodyBytes);
+  const invoke = invokeWithEnvelopeBody(metadata, bodyBytes);
+  const headerOwner = ownerFenceFromHeaders(request.headers);
+  if (headerOwner == null) return invoke;
+  if (invoke.owner != null && !ownerFencesEqual(invoke.owner, headerOwner)) {
+    throw new DoRuntimeError(400, "invalid_request", "DO invoke owner fences conflict");
+  }
+  return { ...invoke, owner: headerOwner };
 }
 
 /** @param {EnvelopeInvoke} invoke */

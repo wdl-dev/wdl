@@ -186,6 +186,26 @@ test("control D1 runtime client query treats unsupported response content-type a
   });
 });
 
+test("control D1 runtime client query rejects unknown value encodings", async () => {
+  const result = await d1RuntimeQuery(withInternalAuthEnv({
+    D1_BACKEND: {
+      async fetch() {
+        return d1Response(
+          { success: true, results: [] },
+          { headers: { "x-wdl-d1-value-encoding": "future-v2" } }
+        );
+      },
+    },
+  }), "tenant-a", "db1", "all", [{ sql: "select 1", params: [] }]);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 502);
+  assert.equal(result.body.error, "invalid_d1_runtime_response");
+  assert.match(result.body.message, /unsupported d1-runtime value encoding/);
+  assert.equal(result.body.causeCode, "unsupported-value-encoding");
+  assert.equal(result.owner, null);
+});
+
 test("control D1 runtime client query treats undecodable binary response as upstream failure", async () => {
   const result = await d1RuntimeQuery(withInternalAuthEnv({
     D1_BACKEND: {
@@ -261,6 +281,19 @@ test("control D1 runtime client public result exposes tagged BLOB as JSON-safe o
     d1RuntimePublicResult({
       success: true,
       results: [{ data: { __wdl_d1_binary_v1: true, base64: "AAEC/w==" } }],
+    }),
+    {
+      success: true,
+      results: [{ data: { type: "blob", base64: "AAEC/w==", byteLength: 4 } }],
+    }
+  );
+});
+
+test("control D1 runtime client public result exposes native BLOB as JSON-safe object", () => {
+  assert.deepEqual(
+    d1RuntimePublicResult({
+      success: true,
+      results: [{ data: new Uint8Array([0, 1, 2, 255]) }],
     }),
     {
       success: true,

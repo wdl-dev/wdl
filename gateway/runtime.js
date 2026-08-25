@@ -551,25 +551,14 @@ export function recordGatewayWebSocketSessionLifetime(durationMs, outcome) {
 export function adjustGatewayWebSocketProxyConnections(state, delta) {
   if (state === "active") {
     websocketProxyActiveConnections = Math.max(0, websocketProxyActiveConnections + delta);
-    metrics.setGauge("websocket_proxy_connections", {
-      service: "gateway",
-      state: "active",
-    }, websocketProxyActiveConnections);
     return;
   }
   if (state === "detached") {
     websocketProxyDetachedConnections = Math.max(0, websocketProxyDetachedConnections + delta);
-    metrics.setGauge("websocket_proxy_connections", {
-      service: "gateway",
-      state: "detached",
-    }, websocketProxyDetachedConnections);
   }
 }
 
 /** @param {number} delta */
 export function adjustGatewayWebSocketProxyBufferedMessages(delta) {
   websocketProxyBufferedMessages = Math.max(0, websocketProxyBufferedMessages + delta);
-  metrics.setGauge("websocket_proxy_buffered_messages", {
-    service: "gateway",
-  }, websocketProxyBufferedMessages);
 }

@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  WDL_CLI_PACKAGE: "@wdl-dev/cli@1.8.0"
+  WDL_CLI_PACKAGE: "@wdl-dev/cli@1.8.1"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

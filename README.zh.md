@@ -102,7 +102,7 @@ Clone 仓库，安装 standalone `wdl` CLI 和仓库依赖，编译本地 worker
 ```bash
 git clone https://github.com/wdl-dev/wdl.git
 cd wdl
-npm install -g @wdl-dev/cli@1.8.0
+npm install -g @wdl-dev/cli@1.8.1
 npm ci
 npm install --ignore-scripts --prefix examples/hello-jsonc
 npm run compile:workerd:local

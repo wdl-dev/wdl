@@ -1,5 +1,6 @@
 import { beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
+import { withMockedProperty } from "../helpers/mock-global.js";
 
 import {
   D1ReadCache,
@@ -62,8 +63,12 @@ test("D1 read cache: only conservative single-statement reads are cacheable", ()
   assert.equal(isReadCacheableQuery(query("savepoint s1")), false);
   assert.equal(isReadCacheableQuery(query("select 1", { mode: "run" }), env), false);
   assert.equal(isReadCacheableQuery(query("select 1", { statements: [{ sql: "select 1" }, { sql: "select 2" }] }), env), false);
+  assert.equal(isReadCacheableQuery(query("select ?", {
+    statements: [{ sql: "select ?", params: [Uint8Array.of(0xff)] }],
+  }), env), false);
   assert.equal(isReadCacheableQuery(query("select 1"), { ...env, D1_READ_CACHE_TTL_MS: "0" }), false);
   assert.equal(isReadCacheableQuery(query("select 1"), { ...env, D1_READ_CACHE_MAX_ENTRIES: "0" }), false);
+  assert.equal(isReadCacheableQuery(query("select 1"), { ...env, D1_READ_CACHE_MAX_BYTES: "0" }), false);
 });
 
 test("D1 read cache: write-looking SQL classifier is shared with actor changed_db", () => {
@@ -101,7 +106,7 @@ test("D1 read cache: stores by router cache instance and owner generation", () =
 
   const miss = c.beginRead(q, owner);
   assert.equal(miss.hit, false);
-  assert.equal(c.finishRead(miss.token, bytes), true);
+  assert.equal(c.finishRead(miss.token, q, owner, bytes), true);
   assert.deepEqual(c.beginRead(q, owner).bytes, bytes);
   assert.equal(c.beginRead(q, { ...owner, generation: 8 }).hit, false);
 });
@@ -112,7 +117,12 @@ test("D1 read cache: keys include database identity", () => {
     statements: [{ sql: "select body from messages where id = ?", params: ["m1"] }],
   });
   const read = c.beginRead(q, owner);
-  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: [{ body: "db-a" }], meta: {} })), true);
+  assert.equal(c.finishRead(
+    read.token,
+    q,
+    owner,
+    wireBytes({ success: true, results: [{ body: "db-a" }], meta: {} })
+  ), true);
 
   const otherDb = c.beginRead({ ...q, dbKey: "tenant-b:d1_main" }, { ...owner, dbKey: "tenant-b:d1_main" });
 
@@ -131,12 +141,89 @@ test("D1 read cache: non-cacheable reads record bypass", () => {
   ]);
 });
 
+test("D1 read cache: native BLOB parameters bypass cache-key materialization", () => {
+  const c = cache();
+  const read = c.beginRead(query("select body from messages where data = ?", {
+    statements: [{
+      sql: "select body from messages where data = ?",
+      params: [new Uint8Array(2_000_000)],
+    }],
+  }), owner);
+
+  assert.equal(read.hit, false);
+  assert.equal(read.token, null);
+  assert.deepEqual(observed, [
+    { name: "d1_read_cache", labels: { service: "d1-runtime", outcome: "bypass" } },
+  ]);
+});
+
+test("D1 read cache: worst-case escaped string keys bypass before JSON materialization", async () => {
+  const c = cache({ ttlMs: 1000, maxEntries: 10, maxBytes: 4096 });
+  const q = query("select ?", {
+    statements: [{ sql: "select ?", params: ["\0".repeat(1000)] }],
+  });
+
+  await withMockedProperty(JSON, "stringify", () => {
+    throw new Error("oversized cache key reached JSON.stringify");
+  }, () => {
+    const read = c.beginRead(q, owner);
+    assert.equal(read.hit, false);
+    assert.equal(read.token, null);
+  });
+
+  assert.deepEqual(observed, [
+    { name: "d1_read_cache", labels: { service: "d1-runtime", outcome: "bypass" } },
+  ]);
+});
+
+test("D1 read cache: miss tokens retain only scalar fences", () => {
+  const c = cache({ ttlMs: 1000, maxEntries: 10, maxBytes: 4096 });
+  const q = query("select ?", {
+    statements: [{ sql: "select ?", params: ["x".repeat(300)] }],
+  });
+
+  const read = c.beginRead(q, owner);
+
+  assert.ok(read.token);
+  assert.equal(
+    Object.values(read.token).every((value) =>
+      typeof value === "number" || typeof value === "symbol"
+    ),
+    true
+  );
+});
+
+test("D1 read cache: retirement releases entries and invalidates pending reads", () => {
+  const c = cache();
+  const storedQuery = query("select * from messages where id = 'stored'");
+  const storedRead = c.beginRead(storedQuery, owner);
+  assert.equal(c.finishRead(
+    storedRead.token,
+    storedQuery,
+    owner,
+    wireBytes({ success: true, results: ["stored"], meta: {} })
+  ), true);
+  const pendingQuery = query("select * from messages where id = 'pending'");
+  const pendingRead = c.beginRead(pendingQuery, owner);
+
+  c.retire();
+
+  assert.equal(c.entries.size, 0);
+  assert.equal(c.retainedBytes, 0);
+  assert.equal(c.finishRead(
+    pendingRead.token,
+    pendingQuery,
+    owner,
+    wireBytes({ success: true, results: ["pending"], meta: {} })
+  ), false);
+});
+
 test("D1 read cache: evicts oldest entry per cache instance", () => {
   const c = cache();
   for (const id of ["a", "b", "c"]) {
     const q = query(`select * from messages where id = '${id}'`);
     const read = c.beginRead(q, owner);
-    c.finishRead(read.token, wireBytes({ success: true, results: [id], meta: {} }));
+    c.finishRead(read.token, q, owner, wireBytes({ success: true, results: [id], meta: {} }));
   }
 
   assert.equal(c.beginRead(query("select * from messages where id = 'a'"), owner).hit, false);
@@ -150,16 +237,60 @@ test("D1 read cache: evicts oldest entry per cache instance", () => {
   );
 });
 
+test("D1 read cache: bounds retained keys and responses and bypasses oversized entries", () => {
+  const maxBytes = 2048;
+  const c = cache({ ttlMs: 1000, maxEntries: 10, maxBytes });
+  const first = query("select * from messages where id = 'bytes-a'");
+  const second = query("select * from messages where id = 'bytes-b'");
+  const oversized = query("select * from messages where id = 'bytes-large'");
+  const firstRead = c.beginRead(first, owner);
+  const secondRead = c.beginRead(second, owner);
+  assert.ok(firstRead.token);
+  assert.ok(secondRead.token);
+  const responseBytes = 1200;
+
+  assert.equal(c.finishRead(firstRead.token, first, owner, new Uint8Array(responseBytes)), true);
+  assert.ok(c.retainedBytes > responseBytes && c.retainedBytes <= maxBytes);
+  assert.equal(c.finishRead(secondRead.token, second, owner, new Uint8Array(responseBytes)), true);
+  assert.ok(c.retainedBytes > responseBytes && c.retainedBytes <= maxBytes);
+  assert.equal(c.beginRead(first, owner).hit, false);
+  assert.equal(c.beginRead(second, owner).hit, true);
+  const retainedAfterSecond = c.retainedBytes;
+
+  const oversizedRead = c.beginRead(oversized, owner);
+  assert.ok(oversizedRead.token);
+  assert.equal(
+    c.finishRead(
+      oversizedRead.token,
+      oversized,
+      owner,
+      new Uint8Array(maxBytes)
+    ),
+    false
+  );
+  assert.equal(c.retainedBytes, retainedAfterSecond);
+  assert.equal(c.beginRead(oversized, owner).hit, false);
+
+  c.invalidate("write");
+  assert.equal(c.retainedBytes, 0);
+});
+
 test("D1 read cache: expired entries are purged before lookup", () => {
   const c = cache({ ttlMs: 1000, maxEntries: 2 });
   const q = query("select * from messages where id = 'expired'");
   const read = c.beginRead(q, owner);
   /** @type {any} */ (read.token).expiresAt = 0;
-  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: ["expired"], meta: {} })), true);
+  assert.equal(c.finishRead(
+    read.token,
+    q,
+    owner,
+    wireBytes({ success: true, results: ["expired"], meta: {} })
+  ), true);
 
   const reread = c.beginRead(q, owner);
 
   assert.equal(reread.hit, false);
+  assert.equal(c.retainedBytes, 0);
   assert.deepEqual(observed.map((entry) => entry.labels.outcome), ["miss", "store", "miss"]);
 });
 
@@ -168,7 +299,12 @@ test("D1 read cache: mutation version prevents stale read store after write", ()
   const q = query("select * from messages");
   const read = c.beginRead(q, owner);
   c.invalidate("write");
-  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: [], meta: {} })), false);
+  assert.equal(c.finishRead(
+    read.token,
+    q,
+    owner,
+    wireBytes({ success: true, results: [], meta: {} })
+  ), false);
   assert.equal(c.beginRead(q, owner).hit, false);
 });
 
@@ -176,8 +312,14 @@ test("D1 read cache: invalidation only records a reason when entries existed", (
   const c = cache();
   c.invalidate("write");
 
-  const read = c.beginRead(query("select * from messages"), owner);
-  assert.equal(c.finishRead(read.token, wireBytes({ success: true, results: [], meta: {} })), true);
+  const q = query("select * from messages");
+  const read = c.beginRead(q, owner);
+  assert.equal(c.finishRead(
+    read.token,
+    q,
+    owner,
+    wireBytes({ success: true, results: [], meta: {} })
+  ), true);
   c.invalidate("changed-db");
 
   assert.deepEqual(
@@ -204,9 +346,10 @@ test("D1 read cache: stores opaque query wire bytes", () => {
   const q = query("select body from messages where id = 'm1'");
   const bytes = Uint8Array.from([0x48, 0x01, 0x3a, 0x03, 0xff, 0x00, 0x7f]);
   const read = c.beginRead(q, owner);
-  assert.equal(c.finishRead(read.token, bytes), true);
+  assert.equal(c.finishRead(read.token, q, owner, bytes, "native-bytes-v1"), true);
 
   const hit = c.beginRead(q, owner);
   assert.equal(hit.hit, true);
   assert.deepEqual(hit.bytes, bytes);
+  assert.equal(hit.valueEncoding, "native-bytes-v1");
 });

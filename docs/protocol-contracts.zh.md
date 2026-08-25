@@ -29,10 +29,12 @@
 | AI provider record 和 resolver snapshot | `docs/modules/ai.zh.md`、`shared/ai-contract.js`、`control/handlers/ai.js`、`rust/redis-proxy/src/ai.rs`、`tests/fixtures/ai-contract.json` |
 | AI tenant/provider HTTP、SSE、WebSocket 和 facade protocol | `docs/modules/ai.zh.md`、`runtime/bindings/ai*.js`、`runtime/ai-client.js` |
 | 内部 WebSocket backend reconnect policy | `docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`gateway/websocket.js` |
-| Durable Object invoke/connect protocol | `docs/modules/durable-objects.zh.md`、`runtime/_wdl-do-scoped-request.js`、`runtime/_wdl-do-transport.js`、`do-runtime/protocol.js` |
+| Durable Object invoke/connect 和 owner-shard protocol | `docs/modules/durable-objects.zh.md`、`runtime/_wdl-do-scoped-request.js`、`runtime/_wdl-do-transport.js`、`do-runtime/protocol.js`、`do-runtime/protocol/wire-grammar.js`、`tests/fixtures/do-owner-shards.json` |
 | Session policy projection 和 lifecycle notification | `docs/modules/control-auth.zh.md`、`docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`control/routing.js`、`control/handlers/delete-plan.js`、`gateway/runtime.js`、`gateway/websocket-lifecycle.js`、`do-runtime/owner-registry.js`、`rust/workflows/src/api/do_alarms/dispatch.rs` |
 | Queue、cron、delayed queue record | `docs/modules/queues-cron.zh.md`、`shared/queue-keys.js`、scheduler/proxy Rust modules |
+| Queue Runtime outcome | `tests/fixtures/queue-runtime-response.json` 拥有 Runtime dispatch 与 Rust Scheduler 消费的跨语言 outer/inner outcome literal 和 required result field；`rust/scheduler/src/queue/delivery/outcome.rs` 负责 destructive acknowledge 前的 Queue decision grammar validation。 |
 | Workflow definition 和 instance state | `docs/modules/workflows.zh.md`、`rust/workflows/`、runtime workflow dispatch |
+| Workflow Runtime result 和 Workflow 自有的 retryable backend error | `tests/fixtures/workflow-runtime-response.json` 拥有 Runtime dispatch 与 Rust Workflows 消费的跨语言 outcome literal、必需 terminal payload field 和 Workflow 自有 retryable error literal；internal-auth failure 使用共享的 `shared/internal-auth.js` 与 `tests/fixtures/internal-auth-contract.json` 合同。 |
 | Workflow tick response | `tests/fixtures/workflow-tick-response.json` 与 `rust/common/src/workflow_tick.rs` 拥有 executable shape；`rust/workflows/` 和 `rust/scheduler/` 消费该 shape，`docs/modules/workflows.zh.md` 记录外围行为。 |
 | Observability event 和 metric shape | `docs/modules/log-tail-observability.zh.md`、`shared/observability.js`、`wdl-rust-common` |
 
