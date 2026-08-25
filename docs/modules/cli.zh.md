@@ -58,7 +58,7 @@ CLI 可以展示：
 
 | WDL source line | 最低支持 CLI | CI-qualified CLI |
 | --- | --- | --- |
-| 当前 `main` / 下一次 release | `1.8.0` | `1.8.0` |
+| 当前 `main` / 下一次 release | `1.8.0` | `1.8.1` |
 
 最低版本是对完整 CLI surface 的支持声明；CI-qualified 版本是 WDL CLI integration job 使用的精确已发布 package。两者都不是 request negotiation 或执行门禁：普通 CLI 命令不会预检 `/whoami`，Control 也不会按 CLI 版本拒绝请求。`whoami` 和 `doctor` 可以比较当前 CLI 与 `minCliVersion` 并报告兼容结果；每个请求仍由服务端执行 canonical validation。
 

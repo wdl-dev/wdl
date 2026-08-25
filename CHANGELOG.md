@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Qualified CLI integration against `@wdl-dev/cli@1.8.1` while retaining `1.8.0` as the minimum supported CLI.
 - Reset Redis subscription reconnect backoff after established subscriptions.
 - Bounded Runtime live-tail negative caching to 10,000 recently observed worker keys.
 - Skipped duplicate live-tail forwarding payload construction for fresh inactive workers.

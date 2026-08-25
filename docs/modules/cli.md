@@ -94,7 +94,7 @@ The maintained compatibility declaration for current `main` and its next release
 
 | WDL source line | Minimum supported CLI | CI-qualified CLI |
 | --- | --- | --- |
-| Current `main` / next release | `1.8.0` | `1.8.0` |
+| Current `main` / next release | `1.8.0` | `1.8.1` |
 
 The minimum is a support declaration for the full CLI surface. The CI-qualified version
 is the exact published package used by WDL's CLI integration job. These values are not
