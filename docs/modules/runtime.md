@@ -345,16 +345,22 @@ during those synchronous stages.
 - At compatibility date `2026-08-04` or later, workerd enables both `nodejs_compat` and
   `nodejs_compat_v2` by default. A tenant that needs neither surface must specify both
   `no_nodejs_compat` and `no_nodejs_compat_v2`.
+- WDL preserves explicit positive compatibility flags even when the selected date already
+  enables them. Workerd 2026-08-25 accepts that redundant spelling because it produces the
+  same compiled flag set; WDL does not duplicate upstream's date-to-flag table.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
-  `allow_irrevocable_stub_storage` and `streams_disable_constructors` deny policy at
-  deploy; runtime rejects retained metadata containing either class. Static host workers
-  also omit the irrevocable-stub flag. Disable-style flags such as `no_*` are not part of
-  the experimental mirror unless WDL explicitly rejects them or upstream marks the enable
-  flag itself experimental.
+  `allow_irrevocable_stub_storage`, `new_module_registry`, and
+  `streams_disable_constructors` deny policy at deploy; runtime rejects retained metadata
+  containing either class. The new module registry graduated upstream, but WDL keeps it
+  disabled because every dynamic Worker runs through `_wdl-wrapper.js`, which would make
+  tenant `import.meta.main` false. Static host workers also omit the irrevocable-stub
+  flag. Disable-style flags such as `no_*` are not part of the experimental mirror unless
+  WDL explicitly rejects them or upstream marks the enable flag itself experimental.
 - Python Workers modules are not supported. Upstream's `python_workers_20260610` flag is
-  no longer experimental, but Control still rejects new `py` module manifests and
-  runtime/do-runtime reject retained metadata that contains them instead of letting
-  workerd bootstrap Pyodide during cold load.
+  no longer experimental and is no longer implied by date; `python_workers_20260817` is
+  experimental. Control still rejects new `py` module manifests and runtime/do-runtime
+  reject retained metadata that contains them instead of letting workerd bootstrap
+  Pyodide during cold load.
 - Since WDL's 2026-07-01 workerd pin, runtime processes have used process-level
   `--experimental` because upstream gates `workerLoader` bindings on that switch.
   Do not add the `experimental` compatibility flag or `allowExperimental` to loaded

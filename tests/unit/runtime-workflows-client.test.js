@@ -195,6 +195,28 @@ test("Workflow.create forwards explicit non-null retention", async () => {
   assert.equal(capturedBody.retention, "30d");
 });
 
+test("Workflow create APIs reject unsupported location hints before backend dispatch", async () => {
+  let fetchCalls = 0;
+  const workflow = createWorkflowForTest({
+    backend: {
+      async fetch() {
+        fetchCalls += 1;
+        return Response.json({ id: "unreachable" });
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => workflow.create({ id: "inst-1", locationHint: "weur" }),
+    /Workflow create options locationHint is not supported by WDL/
+  );
+  await assert.rejects(
+    () => workflow.createBatch([{ id: "inst-1", locationHint: "weur" }]),
+    /Workflow createBatch entry locationHint is not supported by WDL/
+  );
+  assert.equal(fetchCalls, 0);
+});
+
 test("Workflow.createBatch rejects backend response entries without ids", async () => {
   const workflow = createWorkflowForTest({
     backend: {

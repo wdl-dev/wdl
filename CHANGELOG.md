@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Updated the bundled workerd and Workers types pins to `1.20260825.1` and
+  `5.20260825.1`, raising the maximum tenant compatibility date to `2026-09-01`.
+  Workerd now preserves in-flight hibernatable WebSocket auto-response state across
+  actor revival; WDL's separate in-flight application send/close caveat remains.
+  Explicit positive compatibility flags already enabled by date no longer make dynamic
+  Worker cold-load fail when they compile to the same flag set.
+- Kept `new_module_registry` disabled as an explicit WDL policy after its upstream
+  graduation because the platform-owned dynamic wrapper is the actual loader main
+  module and cannot preserve tenant `import.meta.main`. Refreshed the experimental flag
+  mirror for `python_workers_20260817`; Python modules remain unsupported.
+- Rejected the newly typed Workflow `locationHint` before backend I/O instead of
+  silently ignoring it. Native Durable Object `ctx.abort(..., { retryAlarm: false })`
+  does not suppress retries for WDL's Workflows-backed alarm dispatch.
 - Qualified CLI integration against `@wdl-dev/cli@1.8.1` while retaining `1.8.0` as the minimum supported CLI.
 - Kept transient Workflow backend and Redis failures retryable instead of committing them as terminal tenant failures, including parallel-step failures observed while waiting within the Workflows-owned dispatch deadline; exhausting that deadline is result-unknown and releases the claim for replay. Preserved authoritative waiting state when error release follows a committed suspension; required tagged terminal payloads and an authoritative waiting-state fence for suspension; and sanitized Workflows service 5xx diagnostics.
 - Roll Workflows first and wait for every old sender task to drain before rolling user-runtime and system-runtime for the required absolute Workflow dispatch-deadline field; old Runtime readers ignore the additive field, while new Runtime readers reject old senders that omit it.

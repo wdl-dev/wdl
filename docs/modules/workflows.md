@@ -227,6 +227,9 @@ Key families:
   retention. Both retention classes default to 8 hours for newly created instances and
   may be overridden with
   `create({ retention: { successRetention, errorRetention } })`.
+- The bundled Workers types expose a best-effort `locationHint` create option. WDL has
+  no regional Workflow placement plane, so `create()` and `createBatch()` reject an own
+  `locationHint` field before backend I/O instead of silently discarding it.
 - `Workflow.createBatch()` accepts at most 100 entries per call. Runtime prevalidation
   and Rust admission share this pinned limit. Rust reads the deduplicated instance-state
   snapshot in one bounded pipeline and shares the mutation preflight across entries;

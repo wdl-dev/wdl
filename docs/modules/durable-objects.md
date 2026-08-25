@@ -203,6 +203,12 @@ storage alias and later `this.ctx.storage` reuse one proxy/context. Rollback boo
 changes only after native rollback succeeds; a failed rollback leaves queued effects
 intact, while repeated successful rollback calls retain native no-op behavior.
 
+Bundled workerd exposes `ctx.abort(reason, { retryAlarm: false })` for its native alarm
+scheduler. WDL invokes tenant `alarm()` through an authenticated owner-fenced fetch and
+uses Workflows DB 2 for retry state, so workerd does not classify that dispatch as a
+native alarm event. The option still aborts the facet but does not suppress WDL alarm
+retries; WDL does not silently claim the new native retry-control contract.
+
 A pending delete row stores an internal fence token with `in_flight=1`. The in-flight bit
 is a same-service rolling reader fence: an older do-runtime does not understand the token
 prefix, but it skips `getAlarm()` repair and rejects delivery of the original backend
@@ -443,9 +449,10 @@ Actor reconstruction has the following boundaries:
 
 - SQLite storage, object identity, and a quiescent hibernatable WebSocket's attachment,
   tags, and native socket survive. Current workerd's legacy hibernation manager has known
-  actor-eviction races: an in-flight send or close can be silently lost, and an in-flight
-  auto-response can leave a blocked send that breaks the revived socket pump. The
-  resident default avoids exposing existing deployments to those races. Set
+  actor-eviction races in which an in-flight application send or close can be silently
+  lost. Workerd 2026-08-25 preserves in-flight auto-response state across revival and
+  protects that state from GC, removing the prior blocked auto-response caveat. The
+  resident default avoids exposing existing deployments to the remaining races. Set
   `DO_PREVENT_EVICTION=false` only for a workload that does not require this in-flight
   boundary and has passed the focused eviction gate.
 - JavaScript instance fields, actor-held worker/class references, in-memory caches, and

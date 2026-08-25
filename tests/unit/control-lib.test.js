@@ -990,12 +990,17 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_development"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("enable_nodejs_inspector_local_dev"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("wasm_memory_discard"));
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_20260817"));
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 38);
+  // The new module registry graduated upstream, but WDL's generated wrapper is
+  // the actual loader main module and cannot preserve tenant import.meta.main.
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("new_module_registry"), false);
   // `python_workers_20260610` graduated out of `$experimental` upstream, so tenants may set it.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_20260610"), false);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("allow_irrevocable_stub_storage"), false);
   assert.deepEqual(WDL_UNSUPPORTED_COMPAT_FLAGS, [
     "allow_irrevocable_stub_storage",
+    "new_module_registry",
     "streams_disable_constructors",
   ]);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unique_ctx_per_invocation"), false);
