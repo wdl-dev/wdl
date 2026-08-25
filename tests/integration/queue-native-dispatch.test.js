@@ -9,6 +9,7 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   deployAndPromote,
   assertStatus,
@@ -27,6 +28,32 @@ const CONSUMER = readFileSync(
   new URL("../../test-workers/queue-native-consumer/src/index.js", import.meta.url),
   "utf8"
 );
+/** @type {{ outerOutcomes: { ok: string }, innerOutcomes: { ok: string, exception: string }, requiredResultFields: string[] }} */
+const QUEUE_RUNTIME_RESPONSE_CONTRACT = readRepositoryJson(
+  "tests/fixtures/queue-runtime-response.json"
+);
+
+/** @param {any} out @param {string} [expectedInnerOutcome] */
+function assertNativeQueueResult(
+  out,
+  expectedInnerOutcome = QUEUE_RUNTIME_RESPONSE_CONTRACT.innerOutcomes.ok
+) {
+  assert.equal(out.outcome, QUEUE_RUNTIME_RESPONSE_CONTRACT.outerOutcomes.ok);
+  assert.ok(out.result && typeof out.result === "object" && !Array.isArray(out.result));
+  for (const field of QUEUE_RUNTIME_RESPONSE_CONTRACT.requiredResultFields) {
+    assert.equal(Object.hasOwn(out.result, field), true, `queue result must include ${field}`);
+  }
+  assert.equal(out.result.outcome, expectedInnerOutcome);
+  assert.equal(typeof out.result.ackAll, "boolean");
+  assert.ok(Array.isArray(out.result.explicitAcks));
+  assert.ok(Array.isArray(out.result.retryMessages));
+  assert.ok(
+    out.result.retryBatch &&
+    typeof out.result.retryBatch === "object" &&
+    !Array.isArray(out.result.retryBatch)
+  );
+  assert.equal(typeof out.result.retryBatch.retry, "boolean");
+}
 
 /** @param {string} workerId @param {string} queue @param {any[]} messages */
 function postQueued(workerId, queue, messages) {
@@ -45,9 +72,9 @@ test("/_queued: stub.queue() dispatches natively, ackAll() surfaces on response"
     queueStreamMessage({ id: "m2", body: { hello: "again" }, contentType: "json" }),
   ]);
 
-  assert.equal(out.outcome, "ok");
+  assertNativeQueueResult(out);
   assert.equal(out.result.ackAll, true);
-  assert.deepEqual(out.result.explicitAcks ?? [], []);
+  assert.deepEqual(out.result.explicitAcks, []);
 });
 
 test("/_queued: per-message ack() and retry({delaySeconds}) round-trip via native response", async () => {
@@ -61,7 +88,7 @@ test("/_queued: per-message ack() and retry({delaySeconds}) round-trip via nativ
     queueStreamMessage({ id: "untouched", body: "c", contentType: "text" }),
   ]);
 
-  assert.equal(out.outcome, "ok");
+  assertNativeQueueResult(out);
   assert.equal(out.result.ackAll, false);
   assert.deepEqual(out.result.explicitAcks, ["ack-me"]);
   assert.equal(out.result.retryMessages.length, 1);
@@ -120,8 +147,7 @@ export default {
     queueStreamMessage({ id: "m1", body: "x", contentType: "text" }),
   ]);
 
-  assert.equal(out.outcome, "ok", "outer outcome is ok — stub.queue() itself doesn't throw");
-  assert.equal(out.result.outcome, "exception");
+  assertNativeQueueResult(out, QUEUE_RUNTIME_RESPONSE_CONTRACT.innerOutcomes.exception);
   assert.equal(out.result.retryBatch.retry, false,
     "retryBatch.retry stays false — platform must check result.outcome for throw");
 });

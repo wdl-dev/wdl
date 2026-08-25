@@ -3,6 +3,7 @@ import { beforeEach, afterEach, test } from "node:test";
 
 import { decodeDoEnvelopeMetadata as decodeDoEnvelope } from "../helpers/do-envelope.js";
 import {
+  DO_FORWARD_HEADERS,
   DO_INVOKE_CONTENT_TYPE,
   doOwnerClientHarnessState,
   loadDoOwnerClient,
@@ -79,7 +80,8 @@ test("DO owner client forwards invoke requests with owner fence and hop headers"
   const call = DO_OWNER_CLIENT_TEST_STATE.fetches[0];
   assert.equal(call.url, "http://do-runtime-b:8788/internal/do/storage/delete");
   assert.equal(new Headers(call.init.headers).get("x-request-id"), "req-1");
-  assert.equal(new Headers(call.init.headers).get("x-wdl-do-hop-count"), "2");
+  assert.equal(new Headers(call.init.headers).get(DO_FORWARD_HEADERS.forwarded), null);
+  assert.equal(new Headers(call.init.headers).get(DO_FORWARD_HEADERS.hopCount), "2");
   assert.equal(new Headers(call.init.headers).get("x-wdl-internal-auth"), TEST_INTERNAL_AUTH_TOKEN);
   assert.equal(new Headers(call.init.headers).get("content-type"), DO_INVOKE_CONTENT_TYPE);
   const body = decodeDoEnvelope(call.init.body);
@@ -173,7 +175,8 @@ test("DO owner client forwards WebSocket connect requests with owner headers", a
   const call = DO_OWNER_CLIENT_TEST_STATE.fetches[0];
   assert.equal(call.url, "http://do-runtime-b:8788/internal/do/connect");
   assert.equal(call.init.headers.get("x-request-id"), "req-4");
-  assert.equal(call.init.headers.get("x-wdl-do-hop-count"), "1");
+  assert.equal(call.init.headers.get(DO_FORWARD_HEADERS.forwarded), null);
+  assert.equal(call.init.headers.get(DO_FORWARD_HEADERS.hopCount), "1");
   assert.equal(call.init.headers.get("x-wdl-do-owner-key"), OWNER_KEY);
   assert.equal(call.init.headers.get("x-wdl-do-owner-task-id"), "task-b");
   assert.equal(call.init.headers.get("x-wdl-do-owner-generation"), "4");

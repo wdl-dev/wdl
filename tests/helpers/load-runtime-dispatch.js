@@ -39,6 +39,7 @@ export async function loadRuntimeDispatch() {
       [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
     ]);
     const workflowStepUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-step.js", [
+      [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
       [/from "runtime-dispatch-workflow-json";/g, `from ${JSON.stringify(workflowJsonUrl)};`],
       [/from "runtime-dispatch-workflow-replay-cache";/g, `from ${JSON.stringify(workflowReplayCacheUrl)};`],
     ]);

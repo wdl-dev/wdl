@@ -129,6 +129,11 @@ Cron therefore follows Cloudflare-style best-effort scheduled events: minute ali
 catch-up replay, overlap allowed, and user-handler failure reported as an outcome rather
 than retried by scheduler.
 
+Scheduler streams both cron and queue Runtime responses through a fixed 256 KiB body
+limit before JSON parsing. A response over that limit is a cron dispatch error or a
+Queue retry-all transport failure; tenant error text cannot make Scheduler buffer an
+unbounded response.
+
 Queue dispatch is stream-driven rather than wall-clock driven:
 
 1. Producers write message envelopes into DB 1 streams, or into delayed ZSETs when
@@ -180,6 +185,17 @@ Queue dispatch is stream-driven rather than wall-clock driven:
    retrying the same bytes, such as queue-message decode failures or invalid queue
    dispatch bodies, go directly to DLQ without consuming the retry budget. Aggregate
    request-body-too-large responses are split and retried with smaller batches first.
+   Only a successful HTTP response with outer `outcome: "ok"` and an object `result`
+   can reach ack/retry resolution. After the permanent 400 classification and 413
+   split-or-terminal handling above, every other non-success status, missing or unknown
+   outer outcome, non-object result, or unknown inner outcome retries the complete
+   batch rather than implicitly acknowledging an unrecognized protocol state. Before
+   any destructive acknowledgement, Scheduler requires the complete workerd result:
+   inner `outcome`, `ackAll`, `explicitAcks`, `retryMessages`, and
+   `retryBatch.retry`. It validates their nested ids, booleans, and integer delays and
+   requires every decision id to belong to the current batch; missing or malformed
+   decisions, including the same message appearing in both explicit ack and retry
+   sets, retry the complete batch.
 5. The delayed loop wakes from `queue-delayed-wake` and from wall-clock sleeps until the
    next due delayed member. Each pass reads authoritative consumer projections and
    lightweight delayed head scores in bounded pipelines. Eligible queues in each

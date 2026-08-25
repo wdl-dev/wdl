@@ -25,9 +25,12 @@ import {
 } from "runtime-dispatch-workflow-json";
 import {
   createStepController,
+  isWorkflowInfrastructureError,
   isWorkflowSuspensionSignal,
-  isWorkflowSuspended,
+  WORKFLOW_BACKEND_UNAVAILABLE_CODE,
+  WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
   workflowError,
+  workflowInfrastructureLogError,
 } from "runtime-dispatch-workflow-step";
 /**
  * @typedef {{ respond(response: Response): Response, markError(err: unknown): void, requestId: string }} DispatchScope
@@ -69,16 +72,48 @@ function workflowBackendForStep(env) {
 
 /** @param {unknown} result */
 function queueDispatchResult(result) {
-  const record = result && typeof result === "object"
-    ? /** @type {Record<string, unknown>} */ (result)
-    : {};
+  if (
+    result === null ||
+    typeof result !== "object" ||
+    Array.isArray(result)
+  ) {
+    throw new TypeError("queue handler returned an invalid result envelope");
+  }
+  const record = /** @type {Record<string, unknown>} */ (result);
   /** @type {Record<string, unknown>} */
   const out = {};
-  if (typeof record.outcome === "string") out.outcome = record.outcome;
-  if (typeof record.ackAll === "boolean") out.ackAll = record.ackAll;
-  if (Array.isArray(record.explicitAcks)) out.explicitAcks = record.explicitAcks;
-  if (Array.isArray(record.retryMessages)) out.retryMessages = record.retryMessages;
-  if (record.retryBatch && typeof record.retryBatch === "object") out.retryBatch = record.retryBatch;
+  if (!Object.hasOwn(record, "outcome") || typeof record.outcome !== "string") {
+    throw new TypeError("queue handler returned an invalid outcome");
+  }
+  out.outcome = record.outcome;
+  if (Object.hasOwn(record, "ackAll")) {
+    if (typeof record.ackAll !== "boolean") {
+      throw new TypeError("queue handler returned an invalid ackAll value");
+    }
+    out.ackAll = record.ackAll;
+  }
+  if (Object.hasOwn(record, "explicitAcks")) {
+    if (!Array.isArray(record.explicitAcks)) {
+      throw new TypeError("queue handler returned invalid explicitAcks");
+    }
+    out.explicitAcks = record.explicitAcks;
+  }
+  if (Object.hasOwn(record, "retryMessages")) {
+    if (!Array.isArray(record.retryMessages)) {
+      throw new TypeError("queue handler returned invalid retryMessages");
+    }
+    out.retryMessages = record.retryMessages;
+  }
+  if (Object.hasOwn(record, "retryBatch")) {
+    if (
+      record.retryBatch === null ||
+      typeof record.retryBatch !== "object" ||
+      Array.isArray(record.retryBatch)
+    ) {
+      throw new TypeError("queue handler returned an invalid retryBatch");
+    }
+    out.retryBatch = record.retryBatch;
+  }
   return out;
 }
 
@@ -228,20 +263,42 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
     const caughtSuspended = Boolean(
       step?.isSuspended() && isWorkflowSuspensionSignal(caught)
     );
-    if (step?.hasInFlightSteps() && !caughtSuspended) {
-      step.closeForRunReturn();
-    }
-    if (step?.hasInFlightSteps() && caughtSuspended) {
-      const settled = await step.waitForInFlightSteps();
-      const terminalFailure = settled.find((result) => (
-        result.status === "rejected" && !isWorkflowSuspended(result.reason)
-      ));
-      if (terminalFailure?.status === "rejected") caught = terminalFailure.reason;
+    if (step?.hasInFlightSteps()) {
+      if (!caughtSuspended) step.closeForRunReturn();
+      await step.waitForInFlightSteps();
     }
     let terminalStepError = null;
     if (step?.hasTerminalStepFailure()) {
-      caught = step.terminalStepFailure();
-      terminalStepError = step.terminalStepError();
+      const recordedFailure = step.terminalStepFailure();
+      if (
+        isWorkflowInfrastructureError(recordedFailure) ||
+        !isWorkflowInfrastructureError(caught)
+      ) {
+        caught = recordedFailure;
+        terminalStepError = step.terminalStepError();
+      }
+    }
+    if (isWorkflowInfrastructureError(caught)) {
+      const durationMs = Date.now() - startedAt;
+      scope.markError(workflowInfrastructureLogError(caught));
+      emitRuntimeTailEvent({
+        env, ctx, identity,
+        event: "worker_workflow",
+        phase: "finish",
+        after: startTailEvent,
+        fields: {
+          ...fields,
+          outcome: "error",
+          error: WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
+          duration_ms: durationMs,
+        },
+      });
+      return scope.respond(internalErrorResponse(
+        503,
+        WORKFLOW_BACKEND_UNAVAILABLE_CODE,
+        WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
+        scope.requestId
+      ));
     }
     if (
       !terminalStepError &&

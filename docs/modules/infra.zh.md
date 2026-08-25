@@ -105,7 +105,7 @@ Stateful storage：
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
 - 除了 Fargate task memory limit，D1 和 DO 的 workerd container 还会设置显式 container memory hard limit。DO 还会给本地 redis-proxy sidecar 保留内存。
 - do-runtime 的 `DO_PREVENT_EVICTION` 默认是 `true`，会让 host actor resident，避免当前 workerd 的 actor eviction 中断在途 hibernatable WebSocket 操作。显式 `false` 会为已经验证的 workload 启用 eviction；它不能替代 container memory hard limit。
-- 所有 Terraform Fargate service 都使用 start-before-stop rolling replacement：`maximum_percent = 200`、`minimum_healthy_percent = 100`。D1/DO 可以安全重叠 router task，由 owner lease、generation fence 和 supervisor drain 控制状态交接；scheduler 的重叠由各 dispatch path 的 Redis claim/fence 保护。
+- 所有 Terraform Fargate service 都使用 start-before-stop rolling replacement：`maximum_percent = 200`、`minimum_healthy_percent = 100`。Wire-compatible D1/DO release 可以安全重叠 router task，由 owner lease、generation fence 和 supervisor drain 控制状态交接；wire transition 无法安全重叠时，以 release Changelog 的额外 gate 覆盖该默认策略。scheduler 的重叠由各 dispatch path 的 Redis claim/fence 保护。
 - D1/DO 和 scheduler 继续关闭 Availability Zone rebalancing，避免 ECS 在显式 deployment 之外主动迁移 owner 或 control loop；该设置不会串行化显式 rolling deployment。
 
 ## 安全边界

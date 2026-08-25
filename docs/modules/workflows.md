@@ -140,7 +140,9 @@ Key families:
 - Workflows lifecycle checks reject malformed referrer members instead of treating
   them as absent.
 - Scheduler only wakes workflows; workflows owns admission, fairness, shard ticks,
-  ready/due movement, and runtime dispatch.
+  ready/due movement, and runtime dispatch. Scheduler reads the tick response under a
+  64 KiB cap and requires a valid JSON object root; individual missing or unknown fields
+  remain forward-compatible and default to no reported progress.
 - Scheduler also wakes Workflows-owned internal DO alarm jobs through the same
   `/internal/workflows/tick` endpoint; scheduler never reads or writes DO alarm state
   directly.
@@ -177,6 +179,11 @@ Key families:
   admission, or pending work blocked on either dispatch pool; otherwise it uses
   `WORKFLOWS_TICK_INTERVAL_MS` (default 1 second).
 - Ready tokens are deduplicated hints; instance hash state is authority.
+- Runtime terminal responses are tagged variants: `completed` requires an `output` field
+  and `failed` requires an `error` field, while an explicit JSON `null` remains a valid
+  payload. A `suspended` response clears its run claim only after the authoritative step
+  backend has already moved the same generation and run token to `waiting`; an otherwise
+  well-formed but out-of-order response is a fenced no-op.
 - Execution commits are fenced by `generation`, `runToken`, active instance status, and
   an unexpired run lease. Step commits/registers accept the same-run `running` or
   `waiting` state so parallel siblings can finish after another sibling schedules
@@ -238,8 +245,8 @@ Key families:
 - Workflows semantic request caps use `request_too_large`; this is distinct from
   HTTP-body parser `request_body_too_large` in control/runtime protocols. Workflow
   errors otherwise use the platform `{ error, message }` envelope on HTTP boundaries.
-  Client-facing proxies should treat workflows 5xx as backend/platform failure and not
-  rely on raw backend diagnostic messages in the response body.
+  Workflows service 5xx responses retain their stable error code but use a fixed public
+  message; the raw diagnostic remains available only to service-side request logs.
 
 Workflow execution uses two channels:
 
@@ -286,12 +293,27 @@ Scheduling is hint-based but state-authoritative:
 4. Claim validates status, generation, and lease state from the instance hash. Duplicate
    or stale ready/due tokens self-clean and do not execute user code.
 5. A tracked Workflows task owns each admitted runtime dispatch plus its fenced result
-   commit. The dispatch is bounded by `WORKFLOWS_DISPATCH_TIMEOUT_MS`. On runtime
-   dispatch error or timeout, workflows releases the ordinary run claim so a later tick
-   can retry. Generation/run-token fences prevent double durable commits, but external
-   side effects in user code may repeat; workflow code and step callbacks should be
-   idempotent. `WORKFLOWS_RUN_LEASE_MS` is clamped above the dispatch timeout and acts
-   as a stale-claim backstop, not the normal long-run timeout knob.
+   commit. The dispatch is bounded by `WORKFLOWS_DISPATCH_TIMEOUT_MS`. On authoritative
+   step backend operations, transport failures, a missing backend binding,
+   `internal_auth_failed`, `502`/`503`/`504`, and explicit `internal_error` or
+   `redis_error` responses make Runtime return a fixed 503 instead of a terminal
+   workflow result. Workflows then releases the ordinary run claim so a later tick can
+   replay. If that same run already committed authoritative `waiting` state before the
+   response failed, release preserves `waiting` and uses the suspended-claim cleanup
+   path instead of restoring the pre-run status. Replay-page prefetch is advisory: a
+   prefetch failure falls back to the authoritative step operation, and only a failure
+   on that path applies this 503 contract.
+   When parallel steps are in flight, Runtime closes new step admission and waits for
+   every tracked sibling to settle before selecting the run outcome. A host-branded
+   infrastructure failure takes precedence over an ordinary terminal step error, so a
+   late lost commit acknowledgement cannot be persisted as a deterministic failure.
+   Deterministic step, fence, payload, and persisted-state errors remain terminal. A
+   missing or unknown Runtime outcome, or a terminal variant missing its required
+   payload field, is also a protocol error rather than an implicit failure result.
+   Generation/run-token fences prevent double durable commits, but
+   external side effects in user code may repeat; workflow code and step callbacks
+   should be idempotent. `WORKFLOWS_RUN_LEASE_MS` is clamped above the dispatch timeout
+   and acts as a stale-claim backstop, not the normal long-run timeout knob.
 
 The step facade implements durable replay:
 
@@ -339,6 +361,8 @@ Fence model:
   a same-run `waiting` state created by an invalid unawaited suspending step while the
   run lease is still valid. If that lease already expired, workflows only restores the
   ready hint so the next claim can replay under a fresh lease.
+- A Runtime `suspended` result only releases its run claim when the same authoritative
+  state is already `waiting`; Runtime cannot create a waiting state by assertion alone.
 - Initial run claims and expired-run requeues, lifecycle commits (`pause`, `resume`,
   `restart`, `terminate`), `sendEvent`, and retention cleanup compare both `generation`
   and the persisted `createdAtMs` incarnation field. Lifecycle paths rotate `generation`

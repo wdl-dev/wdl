@@ -1,3 +1,4 @@
+import { INTERNAL_AUTH_FAILURE_CODE } from "shared-internal-auth";
 import {
   workflowBackendBody,
   workflowStepSuccessBackendBody,
@@ -89,8 +90,60 @@ function persistedStepErrorRecord(error) {
 }
 
 const WORKFLOWS_BASE_URL = "http://workflows/internal/workflows";
+export const WORKFLOW_BACKEND_UNAVAILABLE_CODE = "workflow_backend_unavailable";
+export const WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE = "Workflow backend is unavailable";
 export const MAX_WORKFLOW_STARTED_STEPS_PER_RUN_TURN = 1000;
 export const MAX_WORKFLOW_ACTIVE_STEPS_PER_RUN_TURN = 1000;
+
+const workflowInfrastructureDiagnostics = new WeakMap();
+
+/** @param {string} diagnostic */
+function workflowInfrastructureError(diagnostic) {
+  const err = new Error(WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE);
+  err.name = WORKFLOW_BACKEND_UNAVAILABLE_CODE;
+  workflowInfrastructureDiagnostics.set(err, diagnostic);
+  return err;
+}
+
+/** @param {unknown} err */
+export function isWorkflowInfrastructureError(err) {
+  return (
+    err !== null &&
+    (typeof err === "object" || typeof err === "function") &&
+    workflowInfrastructureDiagnostics.has(/** @type {object} */ (err))
+  );
+}
+
+/** @param {unknown} err */
+export function workflowInfrastructureLogError(err) {
+  const diagnostic = err !== null &&
+    (typeof err === "object" || typeof err === "function")
+    ? workflowInfrastructureDiagnostics.get(/** @type {object} */ (err))
+    : undefined;
+  const logError = new Error(diagnostic || WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE);
+  logError.name = WORKFLOW_BACKEND_UNAVAILABLE_CODE;
+  return logError;
+}
+
+/** @param {number} status */
+function retryableWorkflowBackendStatus(status) {
+  return status === 502 || status === 503 || status === 504;
+}
+
+/** @param {string | null} code */
+function retryableWorkflowBackendCode(code) {
+  return code === INTERNAL_AUTH_FAILURE_CODE ||
+    code === "internal_error" ||
+    code === "redis_error" ||
+    code === WORKFLOW_BACKEND_UNAVAILABLE_CODE;
+}
+
+/** @param {string} path @param {unknown} state */
+function unexpectedWorkflowBackendState(path, state) {
+  return workflowInfrastructureError(
+    `Workflow backend ${path} returned invalid state ${JSON.stringify(state)}`
+  );
+}
 
 class WorkflowSuspended extends Error {
   constructor(message = "Workflow run suspended") {
@@ -171,29 +224,58 @@ async function workflowBackendCall(backend, path, body, requestId = null) {
  */
 async function workflowBackendRequest(backend, path, body, requestId = null) {
   if (!backend || typeof backend.fetch !== "function") {
-    throw workflowStepError("workflow_backend_unavailable", "Workflow backend binding is not configured");
+    throw workflowInfrastructureError("Workflow backend binding is not configured");
   }
   /** @type {Record<string, string>} */
   const headers = { "content-type": "application/json" };
   if (requestId) headers["x-request-id"] = requestId;
-  const response = await backend.fetch(`${WORKFLOWS_BASE_URL}/${path}`, {
-    method: "POST",
-    headers,
-    body,
-  });
+  let response;
+  try {
+    response = await backend.fetch(`${WORKFLOWS_BASE_URL}/${path}`, {
+      method: "POST",
+      headers,
+      body,
+    });
+  } catch (err) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} request failed: ${workflowError(err).message}`
+    );
+  }
   let parsed;
   try {
     parsed = await response.json();
   } catch {
-    parsed = {};
-  }
-  if (!response.ok) {
-    throw workflowStepError(
-      parsed?.error || "workflow_step_failed",
-      parsed?.message || `Workflow step backend returned HTTP ${response.status}`
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} returned invalid JSON with HTTP ${response.status}`
     );
   }
-  return /** @type {Record<string, unknown>} */ (parsed);
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? /** @type {Record<string, unknown>} */ (parsed)
+    : null;
+  if (!record) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} returned a non-object response with HTTP ${response.status}`
+    );
+  }
+  if (!response.ok) {
+    const code = typeof record.error === "string" ? record.error : null;
+    if (
+      retryableWorkflowBackendStatus(response.status) ||
+      retryableWorkflowBackendCode(code) ||
+      (response.status >= 500 && code === null)
+    ) {
+      throw workflowInfrastructureError(
+        `Workflow backend ${path} returned HTTP ${response.status}${code ? ` ${code}` : ""}`
+      );
+    }
+    throw workflowStepError(
+      code || "workflow_step_failed",
+      typeof record.message === "string"
+        ? record.message
+        : `Workflow step backend returned HTTP ${response.status}`
+    );
+  }
+  return record;
 }
 
 /**
@@ -251,7 +333,15 @@ export function createStepController(run, backend, requestId = null) {
 
   /** @param {unknown} reason @param {{ name: string, message: string } | null} [error] */
   const rememberTerminalStepFailure = (reason, error = null) => {
-    if (hasTerminalStepFailure) return;
+    if (
+      hasTerminalStepFailure &&
+      (
+        !isWorkflowInfrastructureError(reason) ||
+        isWorkflowInfrastructureError(terminalStepFailure)
+      )
+    ) {
+      return;
+    }
     terminalStepFailure = reason;
     terminalStepError = error ?? workflowError(reason);
     hasTerminalStepFailure = true;
@@ -348,7 +438,6 @@ export function createStepController(run, backend, requestId = null) {
    *   identity: StepIdentity & WorkflowRun & { startedAtMs: number },
    *   action: "register-sleep" | "register-wait",
    *   dueAtMs: number | null,
-   *   invalidStatePrefix: string,
    *   returnsOutput?: boolean,
    * }} step
    */
@@ -376,10 +465,7 @@ export function createStepController(run, backend, requestId = null) {
         return step.returnsOutput ? registered.output ?? null : undefined;
       }
       if (registered?.state !== "waiting") {
-        throw workflowStepError(
-          "workflow_invalid_step",
-          `${step.invalidStatePrefix} ${JSON.stringify(registered?.state)}`
-        );
+        throw unexpectedWorkflowBackendState(step.action, registered?.state);
       }
       cacheStep(step.identity, { status: "waiting", attempt: 1, dueAtMs: step.dueAtMs });
       suspended = true;
@@ -390,11 +476,9 @@ export function createStepController(run, backend, requestId = null) {
   }
 
   const waitForInFlightSteps = async () => {
-    const settled = [];
     while (activeStepPromises.size > 0) {
-      settled.push(...await Promise.allSettled([...activeStepPromises]));
+      await Promise.allSettled([...activeStepPromises]);
     }
-    return settled;
   };
 
   /**
@@ -410,7 +494,12 @@ export function createStepController(run, backend, requestId = null) {
       try {
         return await promise;
       } catch (reason) {
-        if (!isWorkflowSuspended(reason)) rememberTerminalStepFailure(reason);
+        if (
+          !isWorkflowSuspended(reason) &&
+          (!runReturned || isWorkflowInfrastructureError(reason))
+        ) {
+          rememberTerminalStepFailure(reason);
+        }
         throw reason;
       } finally {
         activeStepRecords.delete(record);
@@ -589,7 +678,7 @@ export function createStepController(run, backend, requestId = null) {
           throw persistedStepError(persistedStepErrorRecord(claim.error), "Workflow step failed");
         }
         if (claim?.state !== "run") {
-          throw workflowStepError("workflow_invalid_step", `workflow step claim returned invalid state ${JSON.stringify(claim?.state)}`);
+          throw unexpectedWorkflowBackendState("claim-step", claim?.state);
         }
         const attempt = typeof claim.attempt === "number" && Number.isInteger(claim.attempt) && claim.attempt > 0
           ? claim.attempt
@@ -619,6 +708,8 @@ export function createStepController(run, backend, requestId = null) {
           }
           if (committed?.state === "failed") {
             cacheStep(identity, { status: "failed", attempt, error });
+          } else if (committed?.state !== "waiting") {
+            throw unexpectedWorkflowBackendState("commit-step-error", committed?.state);
           }
           rememberTerminalStepFailure(err, error);
           throw err;
@@ -628,12 +719,15 @@ export function createStepController(run, backend, requestId = null) {
           attempt,
           output: output ?? null,
         });
-        await workflowBackendRequest(
+        const committed = await workflowBackendRequest(
           backend,
           "commit-step-success",
           committedStep.bodyJson,
           requestId
         );
+        if (committed?.state !== "complete") {
+          throw unexpectedWorkflowBackendState("commit-step-success", committed?.state);
+        }
         cacheStep(identity, {
           status: "completed",
           attempt,
@@ -660,7 +754,6 @@ export function createStepController(run, backend, requestId = null) {
           identity,
           action: "register-sleep",
           dueAtMs,
-          invalidStatePrefix: "workflow sleep returned invalid state",
         });
       })());
     },
@@ -684,7 +777,6 @@ export function createStepController(run, backend, requestId = null) {
           identity,
           action: "register-sleep",
           dueAtMs: dueAtMsCeil,
-          invalidStatePrefix: "workflow sleepUntil returned invalid state",
         });
       })());
     },
@@ -713,7 +805,6 @@ export function createStepController(run, backend, requestId = null) {
           identity,
           action: "register-wait",
           dueAtMs: dueAtMs == null ? null : Math.ceil(dueAtMs),
-          invalidStatePrefix: "workflow waitForEvent returned invalid state",
           returnsOutput: true,
         });
       })());

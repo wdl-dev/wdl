@@ -41,6 +41,8 @@ function loggerLevel(consoleLevel) {
 }
 
 const TAIL_MESSAGE_MAX_DEPTH = 64;
+const TAIL_BIGINT_POSITIVE_LIMIT = 10n ** BigInt(TAIL_EVENT_MAX_BYTES);
+const TAIL_BIGINT_NEGATIVE_LIMIT = -TAIL_BIGINT_POSITIVE_LIMIT;
 const typedArrayLengthGetter = Object.getOwnPropertyDescriptor(
   Object.getPrototypeOf(Uint8Array.prototype),
   "length"
@@ -129,6 +131,9 @@ function safeMessageInner(value, budget, seen, depth) {
     return value;
   }
   if (typeof value === "bigint") {
+    if (value >= TAIL_BIGINT_POSITIVE_LIMIT || value <= TAIL_BIGINT_NEGATIVE_LIMIT) {
+      throw new TailEventTooLarge("tail event too large");
+    }
     const out = value.toString() + "n";
     chargeBudget(budget, out);
     return out;

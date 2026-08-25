@@ -62,7 +62,7 @@ test("DO owner hint keys match the canonical owner-shard fixture", () => {
   }
 });
 
-test("a stale owner response clears the shared shard hint", async () => {
+test("a stale owner response relearns the final shared shard hint", async () => {
   const firstObject = doOwnerShardFixture.cases.find(
     (/** @type {any} */ item) => item.objectName === "hint-11"
   );
@@ -79,39 +79,57 @@ test("a stale owner response clears the shared shard hint", async () => {
   const cache = new Map([[firstKey, hint]]);
   let ownerCalls = 0;
   let routerCalls = 0;
-
-  const response = await dispatchDoInvokeWithHintCache({
-    routerFetch: async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ init) => {
-      routerCalls += 1;
-      const headers = new Headers(init?.headers);
-      assert.equal(headers.get("x-wdl-do-owner-key"), null);
-      assert.equal(headers.get("x-wdl-do-owner-task-id"), null);
-      assert.equal(headers.get("x-wdl-do-owner-generation"), null);
-      return new Response(null, { status: 204 });
-    },
+  const routerFetch = async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ init) => {
+    routerCalls += 1;
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("x-wdl-do-owner-key"), null);
+    assert.equal(headers.get("x-wdl-do-owner-task-id"), null);
+    assert.equal(headers.get("x-wdl-do-owner-generation"), null);
+    return new Response(null, {
+      status: 204,
+      headers: doOwnerMetadataHeaders({
+        ownerKey: firstKey,
+        taskId: "do-runtime-b",
+        endpoint: "do-runtime-b:8788",
+        generation: 4,
+      }),
+    });
+  };
+  const ownerFetch = async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ init) => {
+    ownerCalls += 1;
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("x-wdl-do-owner-key"), firstKey);
+    assert.equal(headers.get("x-wdl-do-owner-task-id"), ownerCalls === 1 ? "do-runtime-a" : "do-runtime-b");
+    assert.equal(headers.get("x-wdl-do-owner-endpoint"), ownerCalls === 1 ? "do-runtime-a:8788" : "do-runtime-b:8788");
+    assert.equal(headers.get("x-wdl-do-owner-generation"), ownerCalls === 1 ? "3" : "4");
+    return ownerCalls === 1
+      ? Response.json({ error: "stale_owner_generation", message: "retry" }, {
+          status: 503,
+          headers: doOwnershipErrorHeaders("stale_owner_generation"),
+        })
+      : new Response(null, { status: 204 });
+  };
+  const options = {
+    routerFetch,
     routerUrl: "http://do-runtime/internal/do/invoke",
-    ownerFetch: async (/** @type {string} */ _url, /** @type {RequestInit | undefined} */ init) => {
-      ownerCalls += 1;
-      const headers = new Headers(init?.headers);
-      assert.equal(headers.get("x-wdl-do-owner-key"), firstKey);
-      assert.equal(headers.get("x-wdl-do-owner-task-id"), "do-runtime-a");
-      assert.equal(headers.get("x-wdl-do-owner-endpoint"), "do-runtime-a:8788");
-      assert.equal(headers.get("x-wdl-do-owner-generation"), "3");
-      return Response.json({ error: "stale_owner_generation", message: "retry" }, {
-        status: 503,
-        headers: doOwnershipErrorHeaders("stale_owner_generation"),
-      });
-    },
+    ownerFetch,
     ownerPath: "/internal/do/invoke",
     init: { method: "POST" },
     cache,
     hintKey: secondKey,
-  });
+  };
+
+  const response = await dispatchDoInvokeWithHintCache(options);
 
   assert.equal(response.status, 204);
   assert.equal(ownerCalls, 1);
   assert.equal(routerCalls, 1);
-  assert.equal(cache.size, 0);
+  assert.equal(cache.get(firstKey)?.taskId, "do-runtime-b");
+
+  const nextResponse = await dispatchDoInvokeWithHintCache(options);
+  assert.equal(nextResponse.status, 204);
+  assert.equal(ownerCalls, 2);
+  assert.equal(routerCalls, 1);
 });
 
 /**

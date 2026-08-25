@@ -201,9 +201,11 @@ Stateful storage:
   operations. Explicit `false` enables eviction for validated workloads but is not a
   replacement for the container memory hard limit.
 - All Terraform Fargate services use start-before-stop rolling replacement with
-  `maximum_percent = 200` and `minimum_healthy_percent = 100`. D1/DO safely overlap
-  router tasks while owner lease, generation fencing, and supervisor drain control
-  state handoff; scheduler overlap is covered by per-path Redis claims and fences.
+  `maximum_percent = 200` and `minimum_healthy_percent = 100`. Wire-compatible D1/DO
+  releases safely overlap router tasks while owner lease, generation fencing, and
+  supervisor drain control state handoff; release Changelog gates override this default
+  when a wire transition cannot safely overlap. Scheduler overlap is covered by per-path
+  Redis claims and fences.
 - D1/DO and scheduler keep Availability Zone rebalancing disabled so ECS does not
   initiate unrelated owner or control-loop relocation. This setting does not serialize
   an explicit deployment.

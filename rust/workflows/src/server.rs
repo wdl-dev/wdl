@@ -34,16 +34,23 @@ use wdl_rust_common::request_id::request_id_from_headers;
 use wdl_rust_common::shutdown::shutdown_signal;
 use wdl_rust_common::time::duration_ms_for_log;
 
+const WORKFLOW_SERVER_ERROR_MESSAGE: &str = "Workflow service request failed";
+
 impl IntoResponse for WorkflowError {
     fn into_response(self) -> Response {
         let code = self.code;
         let message = self.message;
         let status = self.status;
+        let response_message = if status.is_server_error() {
+            WORKFLOW_SERVER_ERROR_MESSAGE
+        } else {
+            message.as_str()
+        };
         let mut response = (
             status,
             Json(json!({
                 "error": code,
-                "message": message,
+                "message": response_message,
             })),
         )
             .into_response();
@@ -393,7 +400,7 @@ async fn track_request(
     }
     let Some(_guard) = state.begin_in_flight() else {
         let response =
-            WorkflowError::internal_error("Workflows service is shutting down").into_response();
+            WorkflowError::unavailable("Workflows service is shutting down").into_response();
         let error = response_error(&response);
         record_request_complete(
             &state,
@@ -583,6 +590,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::http::{HeaderValue, Method};
     use serde::ser;
 
@@ -649,6 +657,44 @@ mod tests {
                 .get::<ResponseError>()
                 .map(|err| err.message.as_str()),
             Some("step changed")
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_server_error_response_hides_internal_diagnostics() {
+        let response = WorkflowError::internal_error("private Redis diagnostic").into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response
+                .extensions()
+                .get::<ResponseError>()
+                .map(|err| err.message.as_str()),
+            Some("private Redis diagnostic")
+        );
+
+        let bytes = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("workflow error body reads");
+        let body: JsonValue = serde_json::from_slice(&bytes).expect("workflow error body is JSON");
+        assert_eq!(
+            body,
+            json!({
+                "error": "internal_error",
+                "message": WORKFLOW_SERVER_ERROR_MESSAGE,
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_unavailable_error_is_retryable_service_failure() {
+        let response = WorkflowError::unavailable("service is draining").into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .extensions()
+                .get::<ResponseError>()
+                .map(|err| err.code),
+            Some("workflow_backend_unavailable")
         );
     }
 

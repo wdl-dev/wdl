@@ -1,0 +1,25 @@
+{
+  "runtimeOutcomes": {
+    "completed": "completed",
+    "failed": "failed",
+    "suspended": "suspended"
+  },
+  "terminalPayloadFields": {
+    "completed": "output",
+    "failed": "error"
+  },
+  "retryableBackendErrors": {
+    "internal": {
+      "code": "internal_error",
+      "status": 500
+    },
+    "redis": {
+      "code": "redis_error",
+      "status": 500
+    },
+    "unavailable": {
+      "code": "workflow_backend_unavailable",
+      "status": 503
+    }
+  }
+}

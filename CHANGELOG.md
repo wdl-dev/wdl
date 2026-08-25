@@ -3,21 +3,30 @@
 ## Unreleased
 
 - Qualified CLI integration against `@wdl-dev/cli@1.8.1` while retaining `1.8.0` as the minimum supported CLI.
+- Kept transient Workflow backend and Redis failures retryable instead of committing them as terminal tenant failures, including late failures from parallel steps; preserved authoritative waiting state when error release follows a committed suspension; required tagged terminal payloads and an authoritative waiting-state fence for suspension; and sanitized Workflows service 5xx diagnostics.
+- Retried complete Queue batches on incomplete, malformed, or non-success Runtime outcome and decision envelopes except for the existing specified permanent 400 errors and 413 split/terminal handling.
+- Bounded Scheduler cron and Queue Runtime response bodies to 256 KiB before JSON parsing.
+- Bounded Scheduler Workflow tick responses to 64 KiB and rejected malformed JSON or non-object response roots while preserving field-level forward compatibility.
+- Bounded D1/DO supervisor drain and renew response bodies to 256 KiB before parsing or log truncation.
 - Reset Redis subscription reconnect backoff after established subscriptions.
 - Bounded Runtime live-tail negative caching to 10,000 recently observed worker keys.
 - Skipped duplicate live-tail forwarding payload construction for fresh inactive workers.
-- Rejected code-unit-oversized Tail strings and oversized indexed binary views before proportional encoding or key enumeration.
+- Rejected oversized Tail strings, BigInts beyond a fixed full-event magnitude guard, and oversized indexed binary views before proportional conversion, encoding, or indexed-key enumeration.
 - Removed zero-valued synchronous cold-load stage metrics and documented Runtime load durations as request-clock latency rather than CPU profiling.
 - Deferred Gateway WebSocket connection/buffer, Runtime AI pool/Workflow replay-cache, and do-runtime in-flight gauge publication to metric scrapes.
 - Rejected unsupported AI input modalities as soon as their documented carrier is observed.
 - Forwarded successful D1 query responses as opaque bytes through routers using bounded internal result headers, while retaining decoded fallback for mixed-version and error responses.
 - Carried D1 BLOB parameters and results as native `Uint8Array` values across the tenant facade, host binding, binary wire, actor, and read cache while retaining tagged-response fallback for mixed-version rollout, bypassing oversized read-cache key materialization, and bounding aggregate router retained key-and-response bytes.
-- Roll D1 native-byte readers in user-runtime, system-runtime (including Control), and do-runtime first, wait for old reader tasks to drain, then roll d1-runtime last; reverse skew is unsupported because old readers decode BLOB fields as number arrays.
+- Created per-database D1 read caches only after request-side cacheability and key-budget admission, so write-only and admission-bypassed databases cannot evict useful cache state.
+- Invalidated ordinary D1 mutations before dispatch and again when the local request settles, including write SQL sent through `all`, `raw`, or facade `first()`, preventing racing reads from repopulating stale data after observed actor completion, and conservatively invalidated caches rebuilt after owner takeover when delayed idempotent schema writes lost their result before `changed_db` was known.
+- Roll D1 native-byte readers in user-runtime, system-runtime (including Control), and do-runtime first and wait for old reader tasks to drain. Headerless fallback preserves response semantics, but an old d1-runtime router still classifies the response by expanding native BLOB values into number arrays, so this native-writer transition must not overlap old and new d1-runtime tasks: scale d1-runtime to zero, wait for old tasks, targets, and in-flight requests to exit, then start the new tasks. D1 is unavailable during this window; normal rolling may resume after every deployed tier uses the native-byte wire.
 - Shared Durable Object owner hints across object names in one canonical owner shard while retaining exact object identity and owner-actor authority.
 - Forwarded the first uncached Durable Object fetch/RPC through its router once and learned owner headers from the final response, while retaining direct-owner WebSocket upgrades.
 - Let forwarded and cached-direct Durable Object calls carry a route fence to the target host actor, removing one outer owner snapshot while preserving the actor's drain, Redis-time, whole-delete, storage, session-policy, and generation admission.
+- Bounded Durable Object RPC response bodies to 1 MiB in the host adapter and failed closed with `do_rpc_result_unknown` when a successful response could not be read or validated.
 - Sanitized terminal Durable Object ownership-control errors, preserving only allowlisted `503` codes and reducing every other private code/status combination to `503 owner_unavailable`.
 - Removed misleading per-actor Durable Object facet and object-registry gauges whose shared metric series did not represent process totals.
+- Made Durable Object alarm deletion lineage-fenced and ordered every per-object backend alarm mutation, including best-effort repair and transaction reservations, so concurrent set/delete/completion paths converge. Callback transaction proxies and owning storage aliases share native SQLite transaction state; the shim retains its closed-state fence until native commit/rollback settles, native rollback semantics govern side-effect discard, and alarm APIs in nested transactions are rejected. Retained the historical transaction-free, best-effort `deleteAll()` shim because pinned stock workerd's native SQLite reset asserts on WDL facets; KV deletion now uses bounded 128-key pages, preserved alarms are not rewritten, the KV/SQL/Workflows sequence remains explicitly non-atomic, and private facet deletion remains the platform cleanup owner. Pending tombstones update only token/in-flight, protect mixed-version readers, and remain deletable with corrupt payload fields. Cross-store failures remain outcome-unknown.
 
 ## wdl.20260818.1 - 2026-08-19
 

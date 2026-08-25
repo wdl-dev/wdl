@@ -10,6 +10,7 @@ import {
   tailAppendPayloads,
 } from "../helpers/runtime-dispatch-fixtures.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 
 const { runtimeDispatch, runtimeDispatchWorkflowReplayCache } = await loadRuntimeDispatch();
 const {
@@ -18,6 +19,23 @@ const {
   handleScheduledDispatch,
 } = runtimeDispatch;
 const { _resetWorkflowReplayCacheForTest } = runtimeDispatchWorkflowReplayCache;
+const queueRuntimeResponse = /** @type {{
+ *   outerOutcomes: { error: string, ok: string },
+ *   innerOutcomes: { exception: string, ok: string },
+ *   requiredResultFields: string[],
+ * }} */ (readRepositoryJson("tests/fixtures/queue-runtime-response.json"));
+
+/** @param {Record<string, unknown>} [overrides] */
+function queueResult(overrides = {}) {
+  return {
+    outcome: queueRuntimeResponse.innerOutcomes.ok,
+    ackAll: true,
+    explicitAcks: [],
+    retryMessages: [],
+    retryBatch: { retry: false },
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   _resetWorkflowReplayCacheForTest();
@@ -437,25 +455,28 @@ test("handleQueuedDispatch decodes queue messages before JSRPC dispatch", async 
     stub: makeStub({
       async queue(/** @type {string} */ queueName, /** @type {any[]} */ messages) {
         calls.push({ queueName, messages });
-        return {
+        return queueResult({
           ackAll: false,
           explicitAcks: ["m1"],
-          retryMessages: [],
-          retryBatch: { retry: false },
           extra: "not part of QueueResponse",
-        };
+        });
       },
     }),
   });
 
   const responseBody = await readJsonResponse(res, 200);
-  assert.equal(responseBody.outcome, "ok");
+  assert.equal(responseBody.outcome, queueRuntimeResponse.outerOutcomes.ok);
   assert.deepEqual(responseBody.result, {
+    outcome: queueRuntimeResponse.innerOutcomes.ok,
     ackAll: false,
     explicitAcks: ["m1"],
     retryMessages: [],
     retryBatch: { retry: false },
   });
+  assert.deepEqual(
+    Object.keys(responseBody.result).sort(),
+    queueRuntimeResponse.requiredResultFields
+  );
   assert.equal(calls[0].queueName, "jobs");
   assert.deepEqual(calls[0].messages[0].body, { ok: true });
   assert.equal(calls[0].messages[0].timestamp.getTime(), 123);
@@ -490,9 +511,87 @@ test("handleQueuedDispatch records service_binding_extra_handlers exception outc
   });
 
   const body = await readJsonResponse(response, 200);
-  assert.equal(body.outcome, "ok");
-  assert.equal(body.result.outcome, "exception");
+  assert.equal(body.outcome, queueRuntimeResponse.outerOutcomes.ok);
+  assert.equal(body.result.outcome, queueRuntimeResponse.innerOutcomes.exception);
   assert.deepEqual(scope.errors, ["queue handler threw"]);
+});
+
+test("handleQueuedDispatch accepts structural queue results without a specific prototype", async () => {
+  const result = Object.assign(Object.create(null), {
+    outcome: queueRuntimeResponse.innerOutcomes.ok,
+    ackAll: true,
+    explicitAcks: [],
+    retryMessages: [],
+    retryBatch: { retry: false },
+  });
+  const scope = makeScope();
+  const response = await handleQueuedDispatch({
+    request: jsonRequest({
+      queue: "jobs",
+      messages: [{
+        id: "m1",
+        first_seen_ms: "123",
+        attempts: "0",
+        body_b64: btoa("payload"),
+        content_type: "text",
+      }],
+    }),
+    scope,
+    stub: makeStub({
+      async queue() {
+        return result;
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.outcome, queueRuntimeResponse.outerOutcomes.ok);
+  assert.deepEqual(body.result, { ...result });
+  assert.deepEqual(scope.errors, []);
+});
+
+test("handleQueuedDispatch fails closed on malformed queue handler results", async () => {
+  /** @type {Array<{ name: string, result: unknown }>} */
+  const cases = [
+    { name: "null result", result: null },
+    { name: "array result", result: [] },
+    { name: "empty result", result: {} },
+    { name: "missing outcome", result: { ackAll: true } },
+    { name: "non-string outcome", result: { outcome: 1 } },
+    {
+      name: "non-boolean ackAll",
+      result: queueResult({ ackAll: "yes" }),
+    },
+    {
+      name: "array retryBatch",
+      result: queueResult({ retryBatch: [] }),
+    },
+  ];
+  for (const { name, result } of cases) {
+    const scope = makeScope();
+    const response = await handleQueuedDispatch({
+      request: jsonRequest({
+        queue: "jobs",
+        messages: [{
+          id: "m1",
+          first_seen_ms: "123",
+          attempts: "0",
+          body_b64: btoa("payload"),
+          content_type: "text",
+        }],
+      }),
+      scope,
+      stub: makeStub({
+        async queue() {
+          return result;
+        },
+      }),
+    });
+
+    const body = await readJsonResponse(response, 200, name);
+    assert.equal(body.outcome, queueRuntimeResponse.outerOutcomes.error, name);
+    assert.equal(scope.errors.length, 1, name);
+  }
 });
 
 test("handleQueuedDispatch preserves falsey thrown values", async () => {
@@ -519,7 +618,7 @@ test("handleQueuedDispatch preserves falsey thrown values", async () => {
 
     const body = await readJsonResponse(res, 200, String(thrown));
     assert.deepEqual(scope.errors, [thrown]);
-    assert.equal(body.outcome, "error");
+    assert.equal(body.outcome, queueRuntimeResponse.outerOutcomes.error);
     assert.equal(body.error, String(thrown));
   }
 });
@@ -542,7 +641,7 @@ test("handleQueuedDispatch maps invalid base64 to a permanent decode failure", a
     stub: makeStub({
       async queue() {
         dispatchCalls += 1;
-        return { ackAll: true };
+        return queueResult();
       },
     }),
   });
@@ -584,7 +683,7 @@ test("handleQueuedDispatch accepts legal queue batches above the small dispatch 
     stub: makeStub({
       async queue(/** @type {string} */ queueName, /** @type {any[]} */ messages) {
         calls.push({ queueName, messages });
-        return { acked: messages.length };
+        return queueResult();
       },
     }),
   });
@@ -623,7 +722,7 @@ test("handleQueuedDispatch emits start and finish tail events with queue batch m
       },
       stub: makeStub({
         async queue() {
-          return { ackAll: true };
+          return queueResult();
         },
       }),
     });

@@ -36,7 +36,10 @@ lives in object SQLite; Workflows owns the backend due/retry/discard job state i
 Alarm writes are supported inside async `ctx.storage.transaction()` callbacks, where the
 shim can flush backend side effects after the transaction commits. `transactionSync()`
 cannot await those side effects, so `setAlarm()` and `deleteAlarm()` throw when called
-from a synchronous transaction callback.
+from a synchronous transaction callback. `deleteAll()` is supported only outside a
+transaction through WDL's best-effort storage shim. Alarm APIs are also unsupported
+inside a nested async transaction because releasing a child savepoint is not a backend
+commit boundary.
 
 ## Interfaces
 
@@ -73,6 +76,11 @@ reader caps them at 256 ASCII bytes. RPC arguments are structural JSON data capp
 1 MiB: finite numbers, strings, booleans, null, dense arrays, and plain objects are
 accepted. Serialization does not invoke `toJSON()` hooks; sparse arrays, circular
 structures, non-plain objects, and non-JSON values fail before dispatch.
+The host adapter also reads RPC response envelopes under a 1 MiB cap, rejecting an
+oversized `Content-Length` before buffering and cancelling a streamed body as soon as
+it crosses the cap. A body read, UTF-8 decode, JSON parse, or successful-envelope
+validation failure throws `do_rpc_result_unknown`; the method may already have run, so
+the caller must not blindly replay it.
 
 do-runtime invokes tenant alarm and RPC methods through private fetch dispatches
 intercepted by the generated wrapper. Those requests carry the outer request id so the
@@ -128,19 +136,82 @@ delete against stale backend delivery; Workflows run tokens fence dispatch retry
 completion inside DB 2.
 
 workerd 2026-07-01 rejects SQLite object names under the reserved `_cf_` namespace
-case-insensitively. `ctx.storage.deleteAll()` skips those names case-insensitively as
-well, so old storage created before the stricter check with variants such as `_CF_*`
-does not make cleanup fail. Those legacy reserved-name objects remain inaccessible to
-tenant SQL and should be treated as upgrade debris, not application tables.
+case-insensitively. WDL's best-effort `ctx.storage.deleteAll()` skips those names as well,
+so old variants such as `_CF_*` remain inaccessible upgrade debris until the private
+do-runtime facet-deletion owner removes the complete database.
 
-`getAlarm()` performs alarm-scoped read repair: if SQLite has a pending alarm row but
-the Workflows DB 2 due index is missing, it idempotently rewrites the backend due index
-without adding Redis IO to ordinary DO fetches. Under `preserve`, active and retained
-alarms keep their scheduled worker version. A `restart` promotion retargets a superseded
-alarm to the active version even while the old version remains retained; deleting a
-retained version does the same. Both transitions require the `doStorageId` to remain
-unchanged. Alarms self-clean when the logical worker is gone or now points at a
-different `doStorageId`.
+Pinned stock workerd's native SQLite reset path assumes a root actor while recursively
+deleting child facets, but WDL tenant objects are facets. WDL therefore implements the
+historical `deleteAll()` surface through public storage operations: list/delete KV, drop
+tenant SQL objects, then update the Workflows alarm index. KV list/delete work runs in
+pages of at most 128 keys so neither values nor a delete call become unbounded. This path
+is deliberately not atomic across KV, SQLite, and DB 2. A rejection can leave a partial
+result, and callers must not race `deleteAll()` with any other storage or alarm mutation.
+The WDL-specific `deleteAlarm:false` option preserves the local/backend alarm; omitted or
+`true` requests best-effort alarm cancellation. Other native `deleteAll()` options do not
+strengthen this contract. Private facet deletion remains the authoritative platform
+cleanup path.
+
+`getAlarm()` performs best-effort alarm-scoped read repair: if SQLite has a pending alarm
+row but the Workflows DB 2 due index is missing, it attempts an idempotent backend rewrite
+without adding Redis IO to ordinary DO fetches. Repair failure is logged and swallowed;
+the returned timestamp confirms only the local SQLite row, not the backend job. Inside an
+async storage transaction, `getAlarm()` reads only that local transactional state and
+does not attempt backend repair. Under `preserve`, active and retained alarms keep their
+scheduled worker version. A `restart` promotion retargets a superseded alarm to the active
+version even while the old version remains retained; deleting a retained version does the
+same. Both transitions require the `doStorageId` to remain unchanged. Alarms self-clean
+when the logical worker is gone or now points at a different `doStorageId`.
+All Workflows alarm-index mutations for one object, including best-effort read repair,
+share one process-local promise tail. Concurrent requests therefore reach the backend in
+API order. Mutating API failures are reported to their caller; best-effort read-repair
+failures are logged and swallowed. Neither case blocks later mutations. A top-level
+transaction reserves its position on this tail at the first alarm mutation and fills
+that position with the final coalesced effect only after native commit, so a later
+non-transactional mutation cannot overtake it.
+
+Alarm mutation crosses object SQLite and Workflows DB 2 and is intentionally not a
+distributed transaction. A successfully completed `setAlarm()` enters the at-least-once
+delivery contract. Input validation fails before either store is mutated and preserves
+the current alarm. Once backend index mutation begins, a rejected `setAlarm()` has an
+unknown final state; a replacement attempt may also leave the previous alarm unable to
+fire. A caller that still requires an alarm must call `setAlarm()` again. `getAlarm()`
+repair applies only while a SQLite alarm row remains and does not confirm a failed set
+mutation. A rejected `deleteAlarm()` after backend mutation begins is also
+outcome-unknown: token-fenced compensation may restore the SQLite row after the backend
+job was already removed. A caller that still requires deletion must call `deleteAlarm()`
+again. A caller that requires the alarm to remain must call `setAlarm(desiredTime)` again
+and observe success; `getAlarm()` may expose a surviving local time and trigger
+best-effort repair, but neither a timestamp nor `null` confirms backend state. Async
+`ctx.storage.transaction()` commits its local writes before the post-commit backend alarm
+flush. If a transactional `setAlarm()` or `deleteAlarm()` flush rejects, other tenant
+storage writes from the callback remain committed while the alarm row undergoes its
+operation-specific compensation and retains the unknown-state semantics above. Callers
+must not blindly rerun the complete transaction callback. The transaction callback
+captures its entry alarm row as the backend baseline. A final delete fences, sends, and
+compensates only that baseline; when no baseline exists, `setAlarm()` followed by
+`deleteAlarm()` stays local and sends no backend delete. Explicit `txn.rollback()` drops
+all queued alarm side effects, and subsequent shim alarm operations on that transaction
+throw. On SQLite-backed workerd, alarm calls through owning `ctx.storage` aliases share
+the same native transaction as calls through the callback `txn` object; same-event
+branches running before callback settlement therefore participate in that transaction and
+must observe the outer transaction result. The shim keeps its active transaction fence
+until native commit/rollback settles. A Promise reaction after callback settlement sees
+the closed transaction and cannot enqueue a backend alarm before native rollback.
+Transaction-local `getAlarm()` never performs backend repair. The constructor-visible
+storage alias and later `this.ctx.storage` reuse one proxy/context. Rollback bookkeeping
+changes only after native rollback succeeds; a failed rollback leaves queued effects
+intact, while repeated successful rollback calls retain native no-op behavior.
+
+A pending delete row stores an internal fence token with `in_flight=1`. The in-flight bit
+is a same-service rolling reader fence: an older do-runtime does not understand the token
+prefix, but it skips `getAlarm()` repair and rejects delivery of the original backend
+token as a mismatch, so it cannot execute the tombstone as a tenant alarm. During mixed
+versions an old mutator may still send the fence token as an ineffective backend CAS;
+current readers always unwrap it before deletion.
+Creating the fence updates only `token` and `in_flight` under the current token; it does
+not revalidate unrelated scheduled-time or retry fields, so corrupt/legacy rows remain
+deletable.
 
 ## Ownership / Concurrency / Failure Semantics
 
@@ -322,11 +393,12 @@ Owner resolution is the single-writer protocol:
    call up to `DO_DRAIN_TIMEOUT_MS` (default `10000`). Within that request, do-runtime
    stops new ownership and waits up to `DO_DRAIN_IN_FLIGHT_TIMEOUT_MS` (default `8000`)
    for host-actor dispatches and storage deletions to finish before releasing matching
-   generations. If drain succeeds, `do-supervisor` kills workerd directly instead of
-   relying on workerd's post-SIGTERM graceful window, which otherwise leaves the
-   listener half-dead and can create a takeover 504 window. If drain times out, it
-   returns 503 and keeps leases
-   intact so failover waits for normal lease expiry. In-flight handlers also have a
+   generations. Drain and renew response bodies are streamed under a 256 KiB cap before
+   JSON parsing or diagnostic truncation. If drain succeeds, `do-supervisor` kills
+   workerd directly instead of relying on workerd's post-SIGTERM graceful window, which
+   otherwise leaves the listener half-dead and can create a takeover 504 window. If
+   drain times out, it returns 503 and keeps leases intact so failover waits for normal
+   lease expiry. In-flight handlers also have a
    lease-budget watchdog that rechecks ownership `DO_OWNER_LEASE_GUARD_MS` before
    expiry, forgets the affected owner scope, and aborts the affected facet if renewal
    stops or ownership moves; it does not put the whole task into draining state.

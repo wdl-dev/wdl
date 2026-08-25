@@ -1,3 +1,4 @@
+use crate::response_body::read_bounded_response_text;
 use crate::{
     SupervisorConfig, log, renew_error_grace_ms, renew_interval_ms, renew_start_delay_ms,
     renew_timeout_ms, truncate_chars,
@@ -94,7 +95,18 @@ async fn renew_once(
     match request.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body = match read_bounded_response_text(resp).await {
+                Ok(body) => body,
+                Err(error_message) => {
+                    log_renew_error(
+                        config,
+                        state,
+                        config.renew_error_event,
+                        json!({ "status": status, "error_message": error_message }),
+                    );
+                    return;
+                }
+            };
             let body_short = truncate_chars(&body, 500);
             if !(200..300).contains(&status) {
                 log_renew_error(

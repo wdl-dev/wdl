@@ -680,6 +680,33 @@ test("tail-worker: rejects oversized typed arrays before indexed-key enumeration
   assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs[0].event, "worker_console_dropped");
 });
 
+test("tail-worker: rejects oversized BigInt before decimal conversion", async () => {
+  const message = 10n ** 10_000n;
+  const nativeToString = BigInt.prototype.toString;
+  let toStringCalled = false;
+
+  await withMockedProperty(
+    BigInt.prototype,
+    "toString",
+    /** @this {bigint} */
+    function guardedToString(...args) {
+      toStringCalled = true;
+      return Reflect.apply(nativeToString, this, args);
+    },
+    () => handler.tail([
+      fetchEvent({
+        workerId: "demo:x:v1",
+        requestId: "r-bigint-preflight",
+        logs: [{ level: "log", message }],
+      }),
+    ], TAIL_ENV)
+  );
+
+  assert.equal(toStringCalled, false);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs.length, 1);
+  assert.equal(/** @type {any} */ (globalThis).__runtimeTailLogs[0].event, "worker_console_dropped");
+});
+
 test("tail-worker: preserves enumerable fields on non-indexed binary objects", () => {
   const buffer = /** @type {ArrayBuffer & { label?: string }} */ (new ArrayBuffer(6 * 1024));
   const view = /** @type {DataView & { label?: string }} */ (new DataView(buffer));

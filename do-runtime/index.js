@@ -23,7 +23,7 @@ import {
   readDoInvokeRequest,
   readJsonBody,
 } from "do-runtime-protocol";
-import { DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
+import { DO_FORWARD_HEADERS, DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
 import { json, jsonError } from "do-runtime-http";
 import { prepareAiCapacityMetrics } from "runtime-bindings-ai-capacity";
 import {
@@ -286,7 +286,7 @@ async function handleInvoke(request, env, requestId) {
     env,
     invoke,
     requestId,
-    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count"))
+    parseForwardHopCount(request.headers.get(DO_FORWARD_HEADERS.hopCount))
   );
 }
 
@@ -331,7 +331,7 @@ async function handleConnect(request, env, requestId) {
     invoke,
     request,
     requestId,
-    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count")),
+    parseForwardHopCount(request.headers.get(DO_FORWARD_HEADERS.hopCount)),
     acceptsOwnerHint(request)
   );
 }
@@ -402,7 +402,7 @@ async function handleStorageDelete(request, env, requestId) {
     env,
     invoke,
     requestId,
-    parseForwardHopCount(request.headers.get("x-wdl-do-hop-count"))
+    parseForwardHopCount(request.headers.get(DO_FORWARD_HEADERS.hopCount))
   );
 }
 

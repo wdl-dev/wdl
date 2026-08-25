@@ -4,7 +4,7 @@ import {
   DoRuntimeError,
   encodeDoInvokeRequest,
 } from "do-runtime-protocol";
-import { DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
+import { DO_FORWARD_HEADERS, DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
 import {
   log,
   metrics,
@@ -53,8 +53,7 @@ export async function forwardToOwner(invoke, env, owner, requestId = null, hopCo
     logEvent: "do_forward_complete",
     buildHeaders: (nextHopCount) => ({
       "content-type": DO_INVOKE_CONTENT_TYPE,
-      "x-wdl-do-forwarded": "1",
-      "x-wdl-do-hop-count": String(nextHopCount),
+      [DO_FORWARD_HEADERS.hopCount]: String(nextHopCount),
     }),
     logFields: () => ({
       namespace: "ns" in invoke ? invoke.ns : undefined,
@@ -104,8 +103,8 @@ export async function forwardConnectToOwner(request, invoke, env, owner, request
     logEvent: "do_connect_forward_complete",
     buildHeaders: (nextHopCount) => {
       const headers = new Headers(request.headers);
-      headers.set("x-wdl-do-forwarded", "1");
-      headers.set("x-wdl-do-hop-count", String(nextHopCount));
+      headers.delete(DO_FORWARD_HEADERS.forwarded);
+      headers.set(DO_FORWARD_HEADERS.hopCount, String(nextHopCount));
       headers.set(DO_OWNER_HEADERS.ownerKey, owner.ownerKey);
       headers.set(DO_OWNER_HEADERS.taskId, owner.taskId);
       headers.set(DO_OWNER_HEADERS.generation, String(owner.generation));

@@ -150,7 +150,7 @@ function readCacheKey(query, owner) {
  * @param {ReadCacheOwner} owner
  * @param {number} maxBytes
  */
-function cacheKeyStringsCouldFit(query, owner, maxBytes) {
+export function cacheKeyStringsCouldFit(query, owner, maxBytes) {
   let remaining = Math.floor(maxBytes / MAX_JSON_KEY_RETAINED_BYTES_PER_CODE_UNIT);
   /** @param {unknown} value */
   const consume = (value) => {

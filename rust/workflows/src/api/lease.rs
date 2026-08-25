@@ -30,9 +30,16 @@ return 1
 "#;
 
 const RELEASE_RUN_SCRIPT: &str = r#"
+local status = redis.call("HGET", KEYS[1], "status")
 local generation = redis.call("HGET", KEYS[1], "generation")
 local token = redis.call("HGET", KEYS[1], "runToken")
 if generation ~= ARGV[1] or token ~= ARGV[2] then
+  return 0
+end
+if status == "waiting" then
+  return 2
+end
+if status ~= "running" then
   return 0
 end
 redis.call("HSET", KEYS[1], "status", ARGV[3], "updatedAtMs", ARGV[4])
@@ -41,9 +48,10 @@ return 1
 "#;
 
 const CLEAR_SUSPENDED_RUN_SCRIPT: &str = r#"
+local status = redis.call("HGET", KEYS[1], "status")
 local generation = redis.call("HGET", KEYS[1], "generation")
 local token = redis.call("HGET", KEYS[1], "runToken")
-if generation ~= ARGV[1] or token ~= ARGV[2] then
+if status ~= "waiting" or generation ~= ARGV[1] or token ~= ARGV[2] then
   return 0
 end
 redis.call("HSET", KEYS[1], "status", "waiting", "updatedAtMs", ARGV[4])
@@ -160,6 +168,9 @@ pub(super) async fn release_run_claim(
         &[&generation, &token, &status, &now],
     )
     .await?;
+    if released == 2 {
+        return clear_suspended_run_claim(app, identity, claim).await;
+    }
     Ok(released == 1)
 }
 
@@ -220,6 +231,7 @@ mod tests {
 
     #[test]
     fn suspended_claim_clear_removes_ready_token_inside_fenced_script() {
+        assert!(CLEAR_SUSPENDED_RUN_SCRIPT.contains(r#"status ~= "waiting""#));
         assert!(CLEAR_SUSPENDED_RUN_SCRIPT.contains("generation ~= ARGV[1]"));
         assert!(CLEAR_SUSPENDED_RUN_SCRIPT.contains("token ~= ARGV[2]"));
         assert!(CLEAR_SUSPENDED_RUN_SCRIPT.contains(
@@ -244,6 +256,18 @@ mod tests {
                     .find(r#"redis.call("SREM", KEYS[2], ARGV[3])"#)
                     .expect("ready token removal")
         );
+    }
+
+    #[test]
+    fn ordinary_release_preserves_authoritative_waiting_state() {
+        let waiting_branch = RELEASE_RUN_SCRIPT
+            .find(r#"if status == "waiting" then"#)
+            .expect("waiting classification");
+        let running_restore = RELEASE_RUN_SCRIPT
+            .find(r#"redis.call("HSET", KEYS[1], "status", ARGV[3]"#)
+            .expect("running status restoration");
+        assert!(waiting_branch < running_restore);
+        assert!(RELEASE_RUN_SCRIPT.contains(r#"if status ~= "running" then"#));
     }
 
     #[test]

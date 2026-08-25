@@ -232,9 +232,13 @@ Tail identity rules:
   serialization prioritizes the base console event: it tries the metadata, then the
   omitted marker, then the unchanged base message; only an oversized base event becomes
   `tail_warning`. Strings whose UTF-16 code-unit length already exceeds the remaining
-  clone budget and indexed binary views whose intrinsic length exceeds it are rejected
-  before proportional UTF-8 encoding or key enumeration. Other strings still undergo
-  bounded UTF-8 byte measurement.
+  clone budget, BigInts above a fixed full-event decimal-magnitude guard, and indexed
+  binary views whose intrinsic length exceeds the budget are rejected before proportional
+  conversion, UTF-8 encoding, or indexed-key enumeration. A BigInt that passes the fixed
+  guard can still be converted and then rejected against the remaining budget; that
+  conversion is bounded to roughly one full event. Other strings still undergo bounded
+  UTF-8 byte measurement. The final clone budget limits emitted bytes but does not make
+  generic JavaScript own-key discovery independent of object width.
 - `scheduled()` and `queue()` console events are JSRPC events without a request shape, so
   their console tail events omit `worker_id` and `request_id` instead of inventing
   `"unknown"` sentinels.

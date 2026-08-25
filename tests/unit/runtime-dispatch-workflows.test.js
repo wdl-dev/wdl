@@ -15,7 +15,7 @@ import {
   makeWorkflowBackend,
 } from "../helpers/runtime-dispatch-fixtures.js";
 import { readJsonResponse } from "../helpers/response-json.js";
-import { delay } from "../helpers/timing.js";
+import { delay, settlementWithin } from "../helpers/timing.js";
 
 const {
   runtimeDispatch,
@@ -36,6 +36,18 @@ const workflowLimits = /** @type {{
  *   payloadTooLargeCode: string,
  * }} */ (
   readRepositoryJson("tests/fixtures/workflow-limits.json")
+);
+const workflowRuntimeResponse = /** @type {{
+ *   runtimeOutcomes: { completed: string, failed: string, suspended: string },
+ *   terminalPayloadFields: { completed: string, failed: string },
+ *   retryableBackendErrors: Record<string, { code: string, status: number }>,
+ * }} */ (
+  readRepositoryJson("tests/fixtures/workflow-runtime-response.json")
+);
+const internalAuthContract = /** @type {{
+ *   failure: { status: number, error: string, message: string },
+ * }} */ (
+  readRepositoryJson("tests/fixtures/internal-auth-contract.json")
 );
 const {
   handleWorkflowNotifyDispatch,
@@ -382,11 +394,15 @@ test("handleWorkflowRunDispatch invokes named workflow run with step.do facade",
   });
 
   const body = await readJsonResponse(res, 200);
+  assert.equal(
+    Object.hasOwn(body, workflowRuntimeResponse.terminalPayloadFields.completed),
+    true
+  );
   assert.deepEqual({
     outcome: body.outcome,
     output: body.output,
   }, {
-    outcome: "completed",
+    outcome: workflowRuntimeResponse.runtimeOutcomes.completed,
     output: { charged: 123, attempt: 2 },
   });
   assert.equal(typeof body.duration_ms, "number");
@@ -434,6 +450,244 @@ test("handleWorkflowRunDispatch invokes named workflow run with step.do facade",
   ]);
   assert.equal(backend.calls[2].body.attempt, 2);
   assert.deepEqual(scope.errors, []);
+});
+
+test("handleWorkflowRunDispatch returns retryable transport errors for backend infrastructure failures", async (t) => {
+  const cases = [
+    {
+      name: "missing backend binding",
+      backend: null,
+    },
+    {
+      name: "backend transport rejection",
+      backend: makeWorkflowBackend(async () => {
+        throw new Error("private-transport-diagnostic");
+      }),
+    },
+    {
+      name: "internal auth failure",
+      backend: makeWorkflowBackend(async () => Response.json(
+        {
+          error: internalAuthContract.failure.error,
+          message: internalAuthContract.failure.message,
+        },
+        { status: internalAuthContract.failure.status }
+      )),
+    },
+    ...Object.entries(workflowRuntimeResponse.retryableBackendErrors).map(([
+      name,
+      { code, status },
+    ]) => ({
+      name: `${name} backend failure`,
+      backend: makeWorkflowBackend(async () => Response.json(
+        { error: code, message: `private-${name}-diagnostic` },
+        { status }
+      )),
+    })),
+    ...[502, 503, 504].map((status) => ({
+      name: `upstream HTTP ${status}`,
+      backend: makeWorkflowBackend(async () => Response.json(
+        { error: "upstream_failure", message: "private-upstream-diagnostic" },
+        { status }
+      )),
+    })),
+    {
+      name: "malformed success response",
+      backend: makeWorkflowBackend(async () => Response.json([])),
+    },
+    {
+      name: "unknown claim state",
+      backend: makeWorkflowBackend(async () => Response.json({ state: "unknown" })),
+    },
+  ];
+
+  for (const testCase of cases) {
+    await t.test(testCase.name, async () => {
+      const scope = makeScope();
+      scope.requestId = "rid-infrastructure";
+      /** @type {unknown} */
+      let tenantObservedError = null;
+      const response = await handleWorkflowRunDispatch({
+        run: {
+          ns: "demo",
+          worker: "shop",
+          frozenVersion: "v1",
+          workflowName: "orders",
+          workflowKey: "wf_abc",
+          className: "OrderWorkflow",
+          instanceId: `inst-${testCase.name}`,
+          generation: 1,
+          createdAtMs: 12345,
+          runToken: "run-1",
+          event: { payload: {} },
+        },
+        scope,
+        env: workflowEnv(testCase.backend),
+        stub: makeStub({
+          entrypoints: {
+            OrderWorkflow: {
+              async run(/** @type {any} */ _event, /** @type {any} */ step) {
+                try {
+                  await step.do("charge", async () => "charged");
+                } catch (err) {
+                  tenantObservedError = err;
+                  return "tenant-swallowed-backend-error";
+                }
+              },
+            },
+          },
+        }),
+      });
+
+      const body = await readJsonResponse(response, 503);
+      assert.deepEqual(body, {
+        request_id: "rid-infrastructure",
+        error: "workflow_backend_unavailable",
+        message: "Workflow backend is unavailable",
+      });
+      assert.equal(scope.errors.length, 1);
+      assert.equal(/** @type {Error} */ (scope.errors[0]).name, "workflow_backend_unavailable");
+      assert.equal(
+        /** @type {Error} */ (tenantObservedError).name,
+        "workflow_backend_unavailable"
+      );
+      assert.equal(
+        /** @type {Error} */ (tenantObservedError).message,
+        "Workflow backend is unavailable"
+      );
+      assert.equal(
+        Object.hasOwn(/** @type {object} */ (tenantObservedError), "cause"),
+        false
+      );
+      for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(
+        /** @type {object} */ (tenantObservedError)
+      ))) {
+        if ("value" in descriptor && typeof descriptor.value === "string") {
+          assert.doesNotMatch(descriptor.value, /private-/);
+        }
+      }
+      if (testCase.name === "backend transport rejection") {
+        assert.match(
+          /** @type {Error} */ (scope.errors[0]).message,
+          /private-transport-diagnostic/
+        );
+      }
+      assert.doesNotMatch(JSON.stringify(body), /private-|tenant-swallowed/);
+    });
+  }
+});
+
+test("handleWorkflowRunDispatch keeps deterministic backend state errors terminal", async () => {
+  const scope = makeScope();
+  const backend = makeWorkflowBackend(async () => Response.json(
+    {
+      error: "workflow_invalid_state",
+      message: "Workflow service request failed",
+    },
+    { status: 500 }
+  ));
+
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_abc",
+      className: "OrderWorkflow",
+      instanceId: "inst-invalid-state",
+      generation: 1,
+      createdAtMs: 12345,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope,
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            return await step.do("charge", async () => "charged");
+          },
+        },
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(
+    Object.hasOwn(body, workflowRuntimeResponse.terminalPayloadFields.failed),
+    true
+  );
+  assert.equal(body.outcome, workflowRuntimeResponse.runtimeOutcomes.failed);
+  assert.deepEqual(body.error, {
+    name: "workflow_invalid_state",
+    message: "Workflow service request failed",
+  });
+});
+
+test("handleWorkflowRunDispatch does not commit a lost step-success acknowledgement as failure", async () => {
+  const scope = makeScope();
+  scope.requestId = "rid-lost-commit";
+  let callbackCalls = 0;
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
+    if (url.endsWith("/commit-step-success")) {
+      return Response.json(
+        { error: "redis_error", message: "private-commit-diagnostic" },
+        { status: 500 }
+      );
+    }
+    throw new Error(`unexpected backend call ${url}`);
+  });
+
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_abc",
+      className: "OrderWorkflow",
+      instanceId: "inst-lost-commit",
+      generation: 1,
+      createdAtMs: 12345,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope,
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            try {
+              return await step.do("charge", async () => {
+                callbackCalls += 1;
+                return "charged";
+              });
+            } catch {
+              return "tenant-swallowed-backend-error";
+            }
+          },
+        },
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(response, 503);
+  assert.equal(body.error, "workflow_backend_unavailable");
+  assert.equal(body.message, "Workflow backend is unavailable");
+  assert.equal(callbackCalls, 1);
+  assert.deepEqual(backend.calls.map((call) => call.url), [
+    "http://workflows/internal/workflows/replay-steps",
+    "http://workflows/internal/workflows/claim-step",
+    "http://workflows/internal/workflows/commit-step-success",
+  ]);
+  assert.equal(
+    backend.calls.some((call) => call.url.endsWith("/commit-step-error")),
+    false
+  );
 });
 
 test("handleWorkflowRunDispatch rejects oversized terminal output before response construction", async () => {
@@ -2032,7 +2286,7 @@ test("handleWorkflowRunDispatch closes in-flight step.do when the run throws", a
     if (url.endsWith("/commit-step-error")) return Response.json({ state: "failed" });
     return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
   });
-  const res = await handleWorkflowRunDispatch({
+  const dispatch = handleWorkflowRunDispatch({
     run: {
       ns: "demo",
       worker: "shop",
@@ -2063,11 +2317,11 @@ test("handleWorkflowRunDispatch closes in-flight step.do when the run throws", a
     }),
   });
 
-  const body = await readJsonResponse(res, 200);
+  assert.equal((await settlementWithin(dispatch, 10)).status, "pending");
+  slow.resolve(undefined);
+  const body = await readJsonResponse(await dispatch, 200);
   assert.equal(body.outcome, "failed");
   assert.equal(body.error.message, "run failed");
-  slow.resolve(undefined);
-  await delay(0);
   assert.equal(backend.calls.some((call) => call.url.endsWith("/commit-step-success")), false);
   assert.equal(backend.calls.some((call) => call.url.endsWith("/commit-step-error")), false);
 });
@@ -2318,13 +2572,52 @@ test("workflowError falls back when throwable conversion throws", () => {
   });
 });
 
-test("workflow internal error codes cannot be forged with Error.name", async () => {
+test("workflowError preserves throwable names and messages", async () => {
   const forged = new Error("not internal");
   forged.name = "workflow_invalid_step";
   assert.deepEqual(workflowError(forged), {
     name: "workflow_invalid_step",
     message: "not internal",
   });
+});
+
+test("handleWorkflowRunDispatch does not trust a forged infrastructure error name", async () => {
+  const scope = makeScope();
+  const forged = new Error("tenant failure");
+  forged.name = workflowRuntimeResponse.retryableBackendErrors.unavailable.code;
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_abc",
+      className: "OrderWorkflow",
+      instanceId: "inst-forged-infrastructure",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope,
+    env: workflowEnv(null),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run() {
+            throw forged;
+          },
+        },
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.outcome, workflowRuntimeResponse.runtimeOutcomes.failed);
+  assert.deepEqual(body.error, {
+    name: workflowRuntimeResponse.retryableBackendErrors.unavailable.code,
+    message: "tenant failure",
+  });
+  assert.deepEqual(scope.errors, [forged]);
 });
 
 test("handleWorkflowRunDispatch does not trust a forged WorkflowSuspended name", async () => {
@@ -2458,7 +2751,7 @@ test("handleWorkflowRunDispatch suspends when failed step.do is retryable", asyn
   });
 
   const body = await readJsonResponse(res, 200);
-  assert.equal(body.outcome, "suspended");
+  assert.equal(body.outcome, workflowRuntimeResponse.runtimeOutcomes.suspended);
   assert.equal(backend.calls[2].body.attempt, 1);
   assert.deepEqual(backend.calls[2].body.config, { retries: { limit: 2, delayMs: 1, backoff: "constant" } });
   assert.equal(backend.calls[2].body.nonRetryable, false);
@@ -2632,6 +2925,79 @@ test("handleWorkflowRunDispatch does not let retry suspension hide parallel term
   assert.deepEqual(body.error, {
     name: "TypeError",
     message: "fatal",
+  });
+  assert.equal(scope.errors.length, 1);
+});
+
+test("handleWorkflowRunDispatch lets a late fan-out infrastructure failure override terminal failure", async () => {
+  const scope = makeScope();
+  scope.requestId = "rid-parallel-infrastructure";
+  const terminalCommitted = Promise.withResolvers();
+  const successCommitStarted = Promise.withResolvers();
+  const releaseSuccessCommit = Promise.withResolvers();
+  let sideEffects = 0;
+  const backend = makeWorkflowBackend(async (url, body) => {
+    if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
+    if (url.endsWith("/commit-step-error")) {
+      assert.equal(body.stepName, "terminal");
+      terminalCommitted.resolve(undefined);
+      return Response.json({ state: "failed" });
+    }
+    if (url.endsWith("/commit-step-success")) {
+      assert.equal(body.stepName, "side-effect");
+      successCommitStarted.resolve(undefined);
+      await releaseSuccessCommit.promise;
+      return Response.json(
+        { error: "redis_error", message: "private commit diagnostic" },
+        { status: 500 }
+      );
+    }
+    return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
+  });
+  const dispatch = handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_abc",
+      className: "OrderWorkflow",
+      instanceId: "inst-parallel-late-infrastructure",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope,
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            await Promise.all([
+              step.do("terminal", async () => {
+                throw new TypeError("fatal");
+              }),
+              step.do("side-effect", async () => {
+                sideEffects += 1;
+                return "committed externally";
+              }),
+            ]);
+          },
+        },
+      },
+    }),
+  });
+
+  await Promise.all([terminalCommitted.promise, successCommitStarted.promise]);
+  assert.equal(sideEffects, 1);
+  assert.equal((await settlementWithin(dispatch, 10)).status, "pending");
+  releaseSuccessCommit.resolve(undefined);
+
+  const body = await readJsonResponse(await dispatch, 503);
+  assert.deepEqual(body, {
+    error: "workflow_backend_unavailable",
+    message: "Workflow backend is unavailable",
+    request_id: scope.requestId,
   });
   assert.equal(scope.errors.length, 1);
 });

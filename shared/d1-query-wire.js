@@ -8,6 +8,10 @@ export const D1_OWNER_HINT_HEADERS = Object.freeze({
   endpoint: "x-wdl-d1-owner-endpoint",
   generation: "x-wdl-d1-owner-generation",
 });
+export const D1_FORWARD_HEADERS = Object.freeze({
+  forwarded: "x-wdl-d1-forwarded",
+  hopCount: "x-wdl-d1-hop-count",
+});
 export const D1_QUERY_RESULT_HEADERS = Object.freeze({
   outcome: "x-wdl-d1-result",
   changedDb: "x-wdl-d1-changed-db",

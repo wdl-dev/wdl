@@ -31,6 +31,7 @@ import {
 import {
   DO_CONNECT_HEADERS,
   decodeDoObjectNameHeader,
+  DO_FORWARD_HEADERS,
   DO_OWNER_CONTROL_HEADERS,
   DO_OWNER_HEADERS,
 } from "_wdl-do-scoped-request.js";
@@ -81,8 +82,7 @@ const CONNECT_INTERNAL_HEADER_NAMES = new Set([
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
   ...Object.values(DO_CONNECT_HEADERS),
   ...OWNER_HINT_PROTOCOL_HEADERS,
-  "x-wdl-do-forwarded",
-  "x-wdl-do-hop-count",
+  ...Object.values(DO_FORWARD_HEADERS),
   RPC_INTERNAL_HEADER,
 ]);
 const LOCAL_ACTOR_ENVELOPE_HEADER = "x-wdl-do-local-envelope";

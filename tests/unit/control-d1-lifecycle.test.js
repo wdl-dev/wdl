@@ -2,7 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { controlSharedStubUrl } from "../helpers/control-shared-stub.js";
 import { controlD1RuntimeClientDataUrl } from "../helpers/load-d1-protocol.js";
-import { applyModuleReplacements, moduleDataUrl, readRepositoryFile } from "../helpers/load-shared-module.js";
+import {
+  applyModuleReplacements,
+  moduleDataUrl,
+  readRepositoryFile,
+  repositoryFileUrl,
+  repositoryModuleDataUrl,
+} from "../helpers/load-shared-module.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 const controlSharedUrl = controlSharedStubUrl(`
@@ -22,8 +28,16 @@ const controlLibUrl = moduleDataUrl(`
 export function d1DatabasesKey(ns) { return "d1:databases:" + ns; }
 `);
 
+const productionModelUrl = repositoryModuleDataUrl("control/d1-model.js", [
+  [
+    /export \{ splitSqlStatements \} from "shared-sql-splitter";/,
+    `export { splitSqlStatements } from ${JSON.stringify(repositoryFileUrl("shared/sql-splitter.js"))};`
+  ],
+  [/from "shared-hex";/, `from ${JSON.stringify(repositoryFileUrl("shared/hex.js"))};`],
+  [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
+]);
 const modelUrl = moduleDataUrl(`
-export const EXECUTE_MODES = new Set(["all", "raw", "run", "exec", "batch"]);
+export { EXECUTE_MODES } from ${JSON.stringify(productionModelUrl)};
 export const MIGRATIONS_TABLE_SQL = "create table if not exists _wdl_d1_migrations (id text)";
 export function splitSqlStatements(sql) { return [{ sql, params: [] }]; }
 export function validateDatabaseName() {}

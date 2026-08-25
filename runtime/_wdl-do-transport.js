@@ -2,6 +2,7 @@ import { prototypeGetter, validOwnerEndpointForService } from "./_wdl-owner-endp
 import { sanitizeRequestId } from "./_wdl-request-id.js";
 import {
   DO_CONNECT_HEADERS,
+  DO_FORWARD_HEADERS,
   DO_OWNER_CONTROL_HEADERS,
   DO_OWNER_HEADERS,
   encodeDoObjectNameHeader,
@@ -12,11 +13,13 @@ import {
   doHostShardForObjectName,
   formatDoOwnerShardKey,
 } from "do-runtime-protocol-wire-grammar";
+import { INTERNAL_AUTH_HEADER } from "shared-internal-auth";
 
 export const DO_INVOKE_URL = "http://do-runtime/internal/do/invoke";
 export const DO_CONNECT_URL = "http://do-runtime/internal/do/connect";
 export const DO_INVOKE_CONTENT_TYPE = "application/vnd.wdl.do-invoke";
 export const MAX_DO_REQUEST_BODY_BYTES = 1024 * 1024;
+export const MAX_DO_RPC_RESPONSE_BYTES = 1024 * 1024;
 export const MAX_DO_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 export const MAX_DO_REQUEST_HEADER_COUNT = 128;
 export const MAX_DO_REQUEST_HEADER_BYTES = 64 * 1024;
@@ -25,7 +28,6 @@ export const DO_ACCEPT_OWNER_HINT_HEADER = DO_OWNER_CONTROL_HEADERS.acceptHint;
 export const DO_OWNER_HINT_CONTROL_HEADER = DO_OWNER_HEADERS.hint;
 export const DO_OWNERSHIP_ERROR_CONTROL_HEADER = DO_OWNER_CONTROL_HEADERS.ownershipError;
 export const DO_OWNER_HINT_CODE = "do_owner_hint";
-export const INTERNAL_AUTH_HEADER = "x-wdl-internal-auth";
 const DO_OWNER_HINT_STRIP_HEADERS = [
   ...Object.values(DO_OWNER_HEADERS),
   DO_OWNERSHIP_ERROR_CONTROL_HEADER,
@@ -34,7 +36,7 @@ const DO_FETCH_STRIP_HEADERS = [
   ...DO_OWNER_HINT_STRIP_HEADERS,
   DO_ACCEPT_OWNER_HINT_HEADER,
   INTERNAL_AUTH_HEADER,
-  "x-wdl-do-hop-count",
+  ...Object.values(DO_FORWARD_HEADERS),
 ];
 const DO_CONNECT_STRIP_HEADERS = [
   ...DO_FETCH_STRIP_HEADERS,
@@ -44,12 +46,14 @@ const OWNER_RACE_RETRY_CODES = new Set(DO_OWNER_RACE_RETRY_CODES);
 const OWNER_HINT_STALE_CODES = new Set(Object.values(DO_OWNERSHIP_CODE));
 const IntrinsicArray = Array;
 const IntrinsicDataView = DataView;
+const IntrinsicError = Error;
 const IntrinsicHeaders = Headers;
 const IntrinsicJSON = JSON;
 const IntrinsicNumber = Number;
 const IntrinsicObject = Object;
 const IntrinsicRequest = Request;
 const IntrinsicResponse = Response;
+const IntrinsicTextDecoder = TextDecoder;
 const IntrinsicUint8Array = Uint8Array;
 const IntrinsicWeakSet = WeakSet;
 const intrinsicReflectApply = Reflect.apply;
@@ -66,10 +70,12 @@ const intrinsicHeadersDelete = Headers.prototype.delete;
 const intrinsicHeadersForEach = Headers.prototype.forEach;
 const intrinsicHeadersGet = Headers.prototype.get;
 const intrinsicHeadersSet = Headers.prototype.set;
+const intrinsicJsonParse = JSON.parse;
 const intrinsicJsonStringify = JSON.stringify;
 const intrinsicNumberIsFinite = Number.isFinite;
 const intrinsicNumberIsSafeInteger = Number.isSafeInteger;
 const intrinsicObjectCreate = Object.create;
+const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectEntries = Object.entries;
 const intrinsicObjectGetOwnPropertySymbols = Object.getOwnPropertySymbols;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
@@ -86,6 +92,7 @@ const intrinsicSetHas = Set.prototype.has;
 const intrinsicStringCharCodeAt = String.prototype.charCodeAt;
 const intrinsicStringToLowerCase = String.prototype.toLowerCase;
 const intrinsicStringToUpperCase = String.prototype.toUpperCase;
+const intrinsicTextDecoderDecode = TextDecoder.prototype.decode;
 const intrinsicTextEncoderEncode = TextEncoder.prototype.encode;
 const intrinsicTextEncoderEncodeInto = TextEncoder.prototype.encodeInto;
 const intrinsicUint8ArraySet = Uint8Array.prototype.set;
@@ -129,6 +136,7 @@ const intrinsicResponseWebSocketGet = /** @type {((this: Response) => WebSocket 
   prototypeGetter(Response.prototype, "webSocket")
 );
 const utf8Encoder = new TextEncoder();
+const utf8Decoder = new IntrinsicTextDecoder("utf-8", { fatal: true });
 /** @type {Uint8Array | undefined} */
 let requestHeaderUtf8Scratch;
 
@@ -395,6 +403,26 @@ function jsonObject() {
 }
 
 /**
+ * @param {Error} error
+ * @param {string} name
+ * @param {unknown} value
+ * @param {boolean} [mutable]
+ */
+function defineErrorField(error, name, value, mutable = false) {
+  const descriptor = jsonObject();
+  descriptor.value = value;
+  if (mutable) {
+    descriptor.configurable = true;
+    descriptor.writable = true;
+  }
+  intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [
+    error,
+    name,
+    descriptor,
+  ]);
+}
+
+/**
  * @param {string} metadataJson
  * @param {Uint8Array | null} [bodyBytes]
  * @returns {Uint8Array}
@@ -517,6 +545,68 @@ async function readRequestBodyBytes(request, signal) {
     setBytes(body, chunk, offset);
     offset += byteArrayLength(chunk);
   }
+  return body;
+}
+
+function rpcResultUnknownError() {
+  const err = new IntrinsicError("Durable Object RPC result is unavailable; request outcome may be unknown");
+  defineErrorField(err, "code", "do_rpc_result_unknown");
+  return err;
+}
+
+/**
+ * @param {Response} response
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function readRpcResponseEnvelope(response) {
+  const contentLength = responseHeader(response, "content-length");
+  if (contentLength != null && contentLength !== "") {
+    const declared = numberValue(contentLength);
+    if (
+      intrinsicReflectApply(intrinsicNumberIsFinite, IntrinsicNumber, [declared]) &&
+      declared > MAX_DO_RPC_RESPONSE_BYTES
+    ) {
+      cancelResponseBody(response);
+      throw new TypeError("Durable Object RPC response exceeds its byte limit");
+    }
+  }
+
+  const stream = responseBody(response);
+  if (!stream) throw new TypeError("Durable Object RPC response body is missing");
+  const reader = streamReader(stream);
+  /** @type {Uint8Array[]} */
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await readStreamChunk(reader);
+      if (done) break;
+      total += byteArrayLength(value);
+      if (total > MAX_DO_RPC_RESPONSE_BYTES) {
+        throw new TypeError("Durable Object RPC response exceeds its byte limit");
+      }
+      chunks[chunks.length] = value;
+    }
+  } catch (err) {
+    cancelStreamReader(reader);
+    throw err;
+  } finally {
+    releaseStreamReader(reader);
+  }
+
+  const bytes = new IntrinsicUint8Array(total);
+  let offset = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    setBytes(bytes, chunk, offset);
+    offset += byteArrayLength(chunk);
+  }
+  const text = intrinsicReflectApply(intrinsicTextDecoderDecode, utf8Decoder, [bytes]);
+  const body = intrinsicReflectApply(intrinsicJsonParse, IntrinsicJSON, [text]);
+  if (body === null || typeof body !== "object" || intrinsicArrayIsArray(body)) {
+    throw new TypeError("Durable Object RPC response envelope is invalid");
+  }
+  intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [body, null]);
   return body;
 }
 
@@ -675,15 +765,36 @@ export function rpcInvokeInit(props, objectName, method, args, requestId) {
 
 /** @param {Response} response */
 export async function rpcResultFromResponse(response) {
-  const body = await response.json().catch(() => null);
-  if (!response.ok) {
-    const err = new Error(body?.message || `Durable Object RPC failed with status ${responseStatus(response)}`);
-    if (body?.name) err.name = body.name;
-    if (body?.error) Object.defineProperty(err, "code", { value: body.error });
-    if (typeof body?.stack === "string" && body.stack) err.stack = body.stack;
+  let body;
+  try {
+    body = await readRpcResponseEnvelope(response);
+  } catch {
+    throw rpcResultUnknownError();
+  }
+  const status = responseStatus(response);
+  if (status < 200 || status >= 300) {
+    const message = typeof body.message === "string" && body.message
+      ? body.message
+      : `Durable Object RPC failed with status ${status}`;
+    const err = new IntrinsicError(message);
+    if (typeof body.name === "string" && body.name) {
+      defineErrorField(err, "name", body.name, true);
+    }
+    if (typeof body.error === "string" && body.error) {
+      defineErrorField(err, "code", body.error);
+    }
+    if (typeof body.stack === "string" && body.stack) {
+      defineErrorField(err, "stack", body.stack, true);
+    }
     throw err;
   }
-  return body?.result;
+  if (
+    !intrinsicReflectApply(intrinsicObjectHasOwn, undefined, [body, "ok"]) ||
+    body.ok !== true
+  ) {
+    throw rpcResultUnknownError();
+  }
+  return body.result;
 }
 
 /** @param {Response} response */
@@ -923,6 +1034,8 @@ async function dispatchDoWithHintCache({
       clearHint();
       result = publicOwnershipErrorResponse(result);
     }
+    const learned = ownerHintFromHeaders(responseHeaders(result));
+    if (learned) rememberHint(learned);
     return stripOwnerHintHeaders(result);
   };
 
@@ -966,8 +1079,6 @@ async function dispatchDoWithHintCache({
       clearHint();
       return await finish(await replayOrUnavailable());
     } else {
-      const learned = ownerHintFromHeaders(responseHeaders(direct));
-      if (learned) rememberHint(learned);
       return await finish(direct);
     }
   }
@@ -980,8 +1091,6 @@ async function dispatchDoWithHintCache({
   const hasHintControl = hasOwnerHintControlMarker(routed);
   const hinted = hasHintControl ? ownerHintFromResponse(routed) : null;
   if (!hasHintControl) {
-    const learned = ownerHintFromHeaders(responseHeaders(routed));
-    if (learned) rememberHint(learned);
     return await finish(routed);
   }
   if (!hinted || hinted.ownerKey !== hintKey) {
@@ -1021,8 +1130,6 @@ async function dispatchDoWithHintCache({
     clearHint();
     return stripOwnerHintHeaders(ownerUnavailableResponse());
   }
-  const learned = ownerHintFromHeaders(responseHeaders(direct));
-  if (learned) rememberHint(learned);
   return await finish(direct);
 }
 

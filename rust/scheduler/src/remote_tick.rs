@@ -3,8 +3,11 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use serde_json::{Value as JsonValue, json};
 
+use crate::response_body::read_bounded_response_text;
 use crate::{AppState, Config, SchedulerError, SchedulerResult, now_ms};
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
+
+const MAX_WORKFLOW_TICK_RESPONSE_BYTES: usize = 64 * 1024;
 
 pub(crate) struct RemoteTickResponse {
     pub(crate) request_id: String,
@@ -41,12 +44,34 @@ async fn read_remote_tick_text(
     failure_message: &str,
 ) -> SchedulerResult<String> {
     let status = response.status();
-    response.text().await.map_err(|err| {
+    read_bounded_response_text(
+        response,
+        MAX_WORKFLOW_TICK_RESPONSE_BYTES,
+        "workflow tick response body",
+    )
+    .await
+    .map_err(|err| {
         SchedulerError::internal_error(format!(
             "{failure_message} while reading HTTP {} response body: {err}",
             status.as_u16()
         ))
     })
+}
+
+fn parse_workflow_tick_body(text: &str, status: StatusCode) -> SchedulerResult<JsonValue> {
+    let body = serde_json::from_str::<JsonValue>(text).map_err(|_| {
+        SchedulerError::internal_error(format!(
+            "Workflow tick returned invalid JSON with HTTP {}",
+            status.as_u16()
+        ))
+    })?;
+    if !body.is_object() {
+        return Err(SchedulerError::internal_error(format!(
+            "Workflow tick returned a non-object body with HTTP {}",
+            status.as_u16()
+        )));
+    }
+    Ok(body)
 }
 
 pub(crate) async fn post_workflow_tick(
@@ -67,7 +92,11 @@ pub(crate) async fn post_workflow_tick(
         .map_err(|err| SchedulerError::internal_error(format!("Workflow tick failed: {err}")))?;
     let status = response.status();
     let text = read_remote_tick_text(response, "Workflow tick failed").await?;
-    let body = serde_json::from_str::<JsonValue>(&text).unwrap_or_else(|_| json!({}));
+    let body = match parse_workflow_tick_body(&text, status) {
+        Ok(body) => body,
+        Err(err) if status.is_success() => return Err(err),
+        Err(_) => json!({}),
+    };
     Ok(Some(RemoteTickResponse {
         request_id,
         started_at_ms,
@@ -108,6 +137,16 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn workflow_tick_body_requires_json_object_root() {
+        assert!(parse_workflow_tick_body("{}", StatusCode::OK).is_ok());
+        for body in ["not-json", "null", "[]", "1", "\"text\""] {
+            let err = parse_workflow_tick_body(body, StatusCode::OK)
+                .expect_err("malformed and non-object tick bodies must fail closed");
+            assert_eq!(err.code, "internal_error");
+        }
     }
 
     #[tokio::test]

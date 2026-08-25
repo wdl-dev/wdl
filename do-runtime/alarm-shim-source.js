@@ -3,6 +3,8 @@ const ALARM_HEADER = "x-wdl-do-internal-alarm";
 const RPC_HEADER = "x-wdl-do-internal-rpc";
 const ALARMS_BINDING = "__WDL_DO_ALARMS__";
 const ALARM_TABLE = "_wdl_do_alarms";
+const ALARM_DELETE_FENCE_PREFIX = "delete:";
+const DELETE_ALL_KV_BATCH_SIZE = 128;
 
 // This module is evaluated before tenant code. Keep the small set of intrinsics
 // that controls alarm classification, state transitions, and facade installation
@@ -27,12 +29,16 @@ const numberIsFinite = Number.isFinite;
 const numberIsInteger = Number.isInteger;
 const objectDefineProperty = Object.defineProperty;
 const promiseResolve = Promise.resolve;
+const promiseThen = Promise.prototype.then;
+const promiseWithResolvers = Promise.withResolvers;
 const reflectApply = Reflect.apply;
 const reflectGet = Reflect.get;
 const requestHeadersGetter = Object.getOwnPropertyDescriptor(Request.prototype, "headers").get;
 const requestJson = Request.prototype.json;
 const responseJson = Response.json;
+const stringIndexOf = String.prototype.indexOf;
 const stringReplaceAll = String.prototype.replaceAll;
+const stringSlice = String.prototype.slice;
 const stringStartsWith = String.prototype.startsWith;
 const stringToLowerCase = String.prototype.toLowerCase;
 
@@ -78,6 +84,73 @@ function alarmFieldsFromRow(row) {
 
 function alarmToken() {
   return reflectApply(cryptoRandomUUID, nativeCrypto, []);
+}
+
+function isAlarmDeleteFenceToken(value) {
+  return reflectApply(stringStartsWith, NativeString(value), [ALARM_DELETE_FENCE_PREFIX]);
+}
+
+function alarmTokenBeforeDelete(value) {
+  const token = NativeString(value);
+  if (!isAlarmDeleteFenceToken(token)) return token;
+  const separator = reflectApply(stringIndexOf, token, [":", ALARM_DELETE_FENCE_PREFIX.length]);
+  if (separator < 0) return token;
+  const baseline = reflectApply(stringSlice, token, [separator + 1]);
+  return baseline || token;
+}
+
+function alarmDeleteFenceToken(token) {
+  return ALARM_DELETE_FENCE_PREFIX + alarmToken() + ":" + NativeString(token);
+}
+
+function enqueueAlarmMutation(owner, effect) {
+  const result = reflectApply(promiseThen, owner.tail, [effect]);
+  owner.tail = reflectApply(promiseThen, result, [() => undefined, () => undefined]);
+  return result;
+}
+
+function alarmTransactionState(nested) {
+  return {
+    effects: [],
+    alarmReservation: null,
+    baselineAlarmRow: null,
+    nested: nested ? true : false,
+    rolledBack: false,
+    closed: false,
+  };
+}
+
+function reserveAlarmMutation(transactionState, owner) {
+  if (transactionState.alarmReservation !== null) return;
+  const deferred = reflectApply(promiseWithResolvers, NativePromise, []);
+  const reservation = {
+    effect: null,
+    resolve: deferred.resolve,
+    result: null,
+    settled: false,
+  };
+  reservation.result = enqueueAlarmMutation(owner, () => reflectApply(
+    promiseThen,
+    deferred.promise,
+    [() => reservation.effect ? reflectApply(reservation.effect, undefined, []) : undefined]
+  ));
+  transactionState.alarmReservation = reservation;
+}
+
+function appendAlarmSideEffect(transactionState, owner, effect) {
+  reserveAlarmMutation(transactionState, owner);
+  reflectApply(arrayPush, transactionState.effects, [effect]);
+}
+
+function settleAlarmMutationReservation(transactionState, effect = null) {
+  const reservation = transactionState.alarmReservation;
+  if (!reservation) return null;
+  if (!reservation.settled) {
+    reservation.settled = true;
+    reservation.effect = effect;
+    reflectApply(reservation.resolve, undefined, [undefined]);
+  }
+  return reservation.result;
 }
 
 function safeErrorField(err, field) {
@@ -177,14 +250,54 @@ function deleteAlarmRow(storage, token = null) {
   storage.sql.exec("DELETE FROM " + ALARM_TABLE + " WHERE id = 1 AND token = ?", NativeString(token));
 }
 
-async function flushAlarmSideEffects(sideEffects) {
-  // One object has one alarm row. Transactional alarm updates coalesce to the
-  // final SQLite row, so only the final backend index side effect should run.
-  const finalEffect = reflectApply(arrayAt, sideEffects, [-1]);
-  if (finalEffect) await finalEffect();
+function deleteAlarmRowIfLineage(storage, token) {
+  const row = readAlarmRow(storage);
+  if (!row || alarmTokenBeforeDelete(row.token) !== NativeString(token)) return;
+  deleteAlarmRow(storage, row.token);
 }
 
-async function setStorageAlarm(storage, alarmBinding, className, objectName, scheduledTime, sideEffects = null) {
+function writeAlarmDeleteFence(storage, expectedToken, fenceToken) {
+  ensureAlarmTable(storage);
+  storage.sql.exec(
+    "UPDATE " + ALARM_TABLE + " SET token = ?, in_flight = 1 WHERE id = 1 AND token = ?",
+    NativeString(fenceToken),
+    NativeString(expectedToken)
+  );
+}
+
+function restoreAlarmRowIfDeleteFence(storage, fenceToken, row, token) {
+  ensureAlarmTable(storage);
+  storage.sql.exec(
+    "UPDATE " + ALARM_TABLE + " SET " +
+      "scheduled_time = ?, retry_count = ?, in_flight = ?, token = ?, last_error = ? " +
+      "WHERE id = 1 AND token = ?",
+    row.scheduled_time,
+    row.retry_count,
+    row.in_flight,
+    NativeString(token),
+    null,
+    NativeString(fenceToken)
+  );
+}
+
+async function flushAlarmSideEffects(transactionState) {
+  // One object has one alarm row. Transactional alarm updates coalesce to the
+  // final SQLite row, so only the final backend index side effect should run.
+  const finalEffect = reflectApply(arrayAt, transactionState.effects, [-1]);
+  const queued = settleAlarmMutationReservation(transactionState, finalEffect);
+  if (queued) await queued;
+  else if (finalEffect) await finalEffect();
+}
+
+async function setStorageAlarm(
+  storage,
+  alarmBinding,
+  className,
+  objectName,
+  scheduledTime,
+  transactionState,
+  alarmMutations
+) {
   const alarmTime = scheduledTimeFromInput(scheduledTime);
   const token = alarmToken();
   writeAlarmRow(storage, {
@@ -200,100 +313,119 @@ async function setStorageAlarm(storage, alarmBinding, className, objectName, sch
     retryCount: 0,
     token,
   });
-  if (sideEffects) {
-    reflectApply(arrayPush, sideEffects, [async () => {
-      try {
-        await effect();
-      } catch (err) {
-        // Transaction flushes only the final alarm side effect, so this rollback
-        // is token-exact for the only setAlarm attempt that reached the backend.
-        deleteAlarmRow(storage, token);
-        throw err;
-      }
-    }]);
-  } else {
+  const commit = async () => {
     try {
       await effect();
     } catch (err) {
-      // Non-transactional setAlarm writes the backend immediately; token-scoped
-      // rollback preserves a newer alarm if user code raced another update.
+      // Token-exact rollback preserves a newer alarm if user code raced
+      // another mutation while this backend request was in flight.
       deleteAlarmRow(storage, token);
       throw err;
     }
+  };
+  if (transactionState) {
+    appendAlarmSideEffect(transactionState, alarmMutations, commit);
+  } else {
+    await enqueueAlarmMutation(alarmMutations, commit);
   }
 }
 
-async function deleteStorageAlarm(storage, alarmBinding, className, objectName, sideEffects = null) {
-  const row = readAlarmRow(storage);
-  deleteAlarmRow(storage);
-  const token = sideEffects?.baselineAlarmToken != null
-    ? sideEffects.baselineAlarmToken
-    : row?.token == null ? null : NativeString(row.token);
+async function deleteStorageAlarm(
+  storage,
+  alarmBinding,
+  className,
+  objectName,
+  transactionState,
+  alarmMutations
+) {
+  const currentRow = readAlarmRow(storage);
+  const row = transactionState ? transactionState.baselineAlarmRow : currentRow;
+  const rowToken = row?.token == null ? null : alarmTokenBeforeDelete(row.token);
+  const fenceToken = rowToken == null ? null : alarmDeleteFenceToken(rowToken);
+  if (row && fenceToken) {
+    // Keep a tokenized tombstone across backend I/O. Any later alarm mutation replaces
+    // it, so this delete can neither commit nor compensate over newer local state. Only
+    // token/in-flight change: deleting a corrupt legacy row must not validate its payload.
+    if (currentRow?.token != null) writeAlarmDeleteFence(storage, currentRow.token, fenceToken);
+  } else {
+    deleteAlarmRow(storage);
+  }
+  const token = rowToken;
   const effect = () => token
     ? alarmBinding.deleteAlarmIndex({ className, objectName, token })
     : reflectApply(promiseResolve, NativePromise, ["skipped"]);
-  if (sideEffects) {
-    reflectApply(arrayPush, sideEffects, [async () => {
-      try {
-        await effect();
-      } catch (err) {
-        if (row) {
-          writeAlarmRow(storage, {
-            scheduledTime: row.scheduled_time,
-            retryCount: row.retry_count,
-            inFlight: NativeNumber(row.in_flight) === 1,
-            token: row.token,
-          });
-        }
-        throw err;
-      }
-    }]);
-  } else {
+  const commit = async () => {
     try {
       await effect();
+      if (rowToken != null) deleteAlarmRowIfLineage(storage, rowToken);
     } catch (err) {
-      if (row) {
-        writeAlarmRow(storage, {
-          scheduledTime: row.scheduled_time,
-          retryCount: row.retry_count,
-          inFlight: NativeNumber(row.in_flight) === 1,
-          token: row.token,
-        });
+      if (row && fenceToken && rowToken != null) {
+        restoreAlarmRowIfDeleteFence(storage, fenceToken, row, row.token);
       }
       throw err;
     }
+  };
+  if (transactionState) {
+    appendAlarmSideEffect(transactionState, alarmMutations, commit);
+  } else {
+    await enqueueAlarmMutation(alarmMutations, commit);
   }
 }
 
-async function getStorageAlarm(storage, alarmBinding, className, objectName) {
+async function getStorageAlarm(
+  storage,
+  alarmBinding,
+  className,
+  objectName,
+  repairBackend,
+  alarmMutations
+) {
   const row = readAlarmRow(storage);
-  if (!row || NativeNumber(row.in_flight) === 1) return null;
+  if (!row || isAlarmDeleteFenceToken(row.token) || NativeNumber(row.in_flight) === 1) return null;
   const fields = alarmFieldsFromRow(row);
   if (!fields) {
     deleteAlarmRow(storage);
     return null;
   }
-  try {
-    await alarmBinding.setAlarmIndex({
-      className,
-      objectName,
-      scheduledTime: fields.scheduledTime,
-      retryCount: fields.retryCount,
-      token: NativeString(row.token),
-    });
-  } catch (err) {
-    logStructured("warn", "do_alarm_index_repair_failed", {
-      class_name: className,
-      object_name: objectName,
-      ...formatWrappedError(err),
-    });
+  if (repairBackend) {
+    try {
+      await enqueueAlarmMutation(alarmMutations, () => alarmBinding.setAlarmIndex({
+        className,
+        objectName,
+        scheduledTime: fields.scheduledTime,
+        retryCount: fields.retryCount,
+        token: NativeString(row.token),
+      }));
+    } catch (err) {
+      logStructured("warn", "do_alarm_index_repair_failed", {
+        class_name: className,
+        object_name: objectName,
+        ...formatWrappedError(err),
+      });
+    }
   }
   return fields.scheduledTime;
 }
 
+function assertAlarmTransactionOpen(transactionState) {
+  if (transactionState?.rolledBack) {
+    throw new TypeError("Alarm storage operations cannot be used after transaction rollback()");
+  }
+  if (transactionState?.closed) {
+    throw new TypeError("Alarm storage operations cannot be used after transaction completion");
+  }
+}
+
+function assertAlarmTransactionActive(transactionState) {
+  assertAlarmTransactionOpen(transactionState);
+  if (transactionState?.nested) {
+    throw new TypeError("Alarm storage operations cannot be used inside nested transaction()");
+  }
+}
+
 function claimStorageAlarm(storage, alarm) {
   const row = readAlarmRow(storage);
-  if (!row) return null;
+  if (!row || isAlarmDeleteFenceToken(row.token)) return null;
   const fields = alarmFieldsFromRow(row);
   if (!fields) {
     deleteAlarmRow(storage);
@@ -314,7 +446,7 @@ function claimStorageAlarm(storage, alarm) {
 }
 
 function completeStorageAlarm(storage, token) {
-  deleteAlarmRow(storage, token);
+  deleteAlarmRowIfLineage(storage, token);
 }
 
 function quoteSqlIdentifier(name) {
@@ -337,12 +469,15 @@ function sqlObjectDropStatement(row) {
 }
 
 async function deleteAllKvStorage(storage) {
-  const entries = await storage.list();
-  const keys = [];
-  reflectApply(mapForEach, entries, [(_value, key) => {
-    reflectApply(arrayPush, keys, [key]);
-  }]);
-  if (keys.length) await storage.delete(keys);
+  while (true) {
+    const entries = await storage.list({ limit: DELETE_ALL_KV_BATCH_SIZE });
+    const keys = [];
+    reflectApply(mapForEach, entries, [(_value, key) => {
+      reflectApply(arrayPush, keys, [key]);
+    }]);
+    if (!keys.length) return;
+    await storage.delete(keys);
+  }
 }
 
 function deleteAllSqlStorage(storage, deleteAlarm) {
@@ -352,8 +487,6 @@ function deleteAllSqlStorage(storage, deleteAlarm) {
       "ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 WHEN 'table' THEN 2 ELSE 3 END"
   );
   const rows = arrayIsArray(result) ? result : [...result];
-  // workerd permits this connection-level PRAGMA; integration coverage pins it
-  // because database-level PRAGMA writes are not part of the public DO SQL API.
   storage.sql.exec("PRAGMA foreign_keys = OFF");
   try {
     for (let i = 0; i < rows.length; i += 1) {
@@ -367,97 +500,191 @@ function deleteAllSqlStorage(storage, deleteAlarm) {
   }
 }
 
-function wrapStorage(storage, alarmBinding, className, objectName, sideEffects = null, alarmStorage = storage) {
+function wrapStorage(
+  storage,
+  alarmBinding,
+  className,
+  objectName,
+  transactionState = null,
+  alarmStorage = storage,
+  sharedTransactionContext = null,
+  sharedAlarmMutations = null
+) {
   if (!storage || !alarmBinding) return storage;
-  let syncTransactionSideEffects = null;
-  const activeSideEffects = () => syncTransactionSideEffects || sideEffects;
+  const transactionContext = sharedTransactionContext || { active: transactionState, syncDepth: 0 };
+  const alarmMutations = sharedAlarmMutations || {
+    tail: reflectApply(promiseResolve, NativePromise, [undefined]),
+  };
+  const activeTransactionState = () => {
+    if (transactionState?.rolledBack || transactionState?.closed) return transactionState;
+    return transactionContext.active || transactionState;
+  };
   return new NativeProxy(storage, {
     get(target, prop, receiver) {
       if (prop === "setAlarm") {
         return (scheduledTime, _options = undefined) => {
-          if (syncTransactionSideEffects) {
+          assertAlarmTransactionActive(activeTransactionState());
+          if (transactionContext.syncDepth > 0) {
             throw new TypeError("setAlarm() cannot be used inside transactionSync(); use transaction()");
           }
-          return setStorageAlarm(alarmStorage, alarmBinding, className, objectName, scheduledTime, activeSideEffects());
+          return setStorageAlarm(
+            alarmStorage,
+            alarmBinding,
+            className,
+            objectName,
+            scheduledTime,
+            activeTransactionState(),
+            alarmMutations
+          );
         };
       }
       if (prop === "getAlarm") {
-        return (_options = undefined) => (
-          getStorageAlarm(alarmStorage, alarmBinding, className, objectName)
-        );
+        return (_options = undefined) => {
+          const activeState = activeTransactionState();
+          assertAlarmTransactionActive(activeState);
+          return getStorageAlarm(
+            alarmStorage,
+            alarmBinding,
+            className,
+            objectName,
+            transactionContext.syncDepth === 0 && !activeState,
+            alarmMutations
+          );
+        };
       }
       if (prop === "deleteAlarm") {
         return (_options = undefined) => {
-          if (syncTransactionSideEffects) {
+          assertAlarmTransactionActive(activeTransactionState());
+          if (transactionContext.syncDepth > 0) {
             throw new TypeError("deleteAlarm() cannot be used inside transactionSync(); use transaction()");
           }
-          return deleteStorageAlarm(alarmStorage, alarmBinding, className, objectName, activeSideEffects());
+          return deleteStorageAlarm(
+            alarmStorage,
+            alarmBinding,
+            className,
+            objectName,
+            activeTransactionState(),
+            alarmMutations
+          );
         };
       }
-      if (prop === "transaction") {
+      if (prop === "transaction" && !transactionState) {
         return async (callback, ...rest) => {
-          const txSideEffects = [];
-          const baselineAlarm = readAlarmRow(alarmStorage);
-          txSideEffects.baselineAlarmToken = baselineAlarm?.token == null ? null : NativeString(baselineAlarm.token);
+          const parentState = transactionContext.active;
+          const previousState = parentState;
+          assertAlarmTransactionOpen(parentState);
+          const txState = alarmTransactionState(parentState != null);
           const wrapped = typeof callback === "function"
-            ? (txn) => callback(wrapStorage(txn, alarmBinding, className, objectName, txSideEffects, target))
+            ? async (txn) => {
+              txState.baselineAlarmRow = txState.nested
+                ? null
+                : readAlarmRow(alarmStorage);
+              // SQLite-backed workerd transactions include owning ctx.storage calls.
+              // Keep this fence through native commit/rollback, not only callback settle.
+              transactionContext.active = txState;
+              try {
+                return await callback(
+                  wrapStorage(
+                    txn,
+                    alarmBinding,
+                    className,
+                    objectName,
+                    txState,
+                    target,
+                    transactionContext,
+                    alarmMutations
+                  )
+                );
+              } finally {
+                txState.closed = true;
+              }
+            }
             : callback;
-          const result = await reflectApply(reflectGet(target, prop, receiver), target, [wrapped, ...rest]);
-          await flushAlarmSideEffects(txSideEffects);
-          return result;
+          let result;
+          try {
+            result = await reflectApply(
+              reflectGet(target, prop, receiver),
+              target,
+              [wrapped, ...rest]
+            );
+          } catch (err) {
+            transactionContext.active = previousState;
+            if (!txState.nested) settleAlarmMutationReservation(txState);
+            throw err;
+          }
+          transactionContext.active = previousState;
+          try {
+            if (!txState.nested) {
+              if (txState.rolledBack) {
+                settleAlarmMutationReservation(txState);
+              } else {
+                await flushAlarmSideEffects(txState);
+              }
+            }
+            return result;
+          } catch (err) {
+            if (!txState.nested) settleAlarmMutationReservation(txState);
+            throw err;
+          } finally {
+            txState.closed = true;
+            if (transactionContext.active === txState) transactionContext.active = previousState;
+          }
         };
       }
-      if (prop === "transactionSync") {
+      if (prop === "transactionSync" && !transactionState) {
         return (callback, ...rest) => {
-          const previousSideEffects = syncTransactionSideEffects;
           const wrapped = typeof callback === "function" ? () => {
-            syncTransactionSideEffects = true;
+            transactionContext.syncDepth += 1;
             try {
               // workerd transactionSync() invokes closure() without a txn
               // parameter; storage operations on this proxy are the txn surface.
               return callback();
             } finally {
-              syncTransactionSideEffects = previousSideEffects;
+              transactionContext.syncDepth -= 1;
             }
           } : callback;
           const result = reflectApply(reflectGet(target, prop, receiver), target, [wrapped, ...rest]);
           return result;
         };
       }
-      if (prop === "deleteAll") {
+      if (prop === "deleteAll" && !transactionState) {
         return (...args) => {
-          if (syncTransactionSideEffects) {
-            throw new TypeError("deleteAll() cannot be used inside transactionSync(); use transaction()");
+          const activeState = activeTransactionState();
+          assertAlarmTransactionActive(activeState);
+          if (transactionContext.syncDepth > 0) {
+            throw new TypeError(
+              "deleteAll() cannot be used inside transactionSync(); call it outside the transaction"
+            );
+          }
+          if (activeState) {
+            throw new TypeError("deleteAll() cannot be used inside transaction(); call it outside the transaction");
           }
           return (async () => {
             if (args.length > 1) throw new TypeError("deleteAll() accepts at most one options argument");
             const options = args[0];
             const deleteAlarm = options?.deleteAlarm !== false;
             const alarmRow = readAlarmRow(alarmStorage);
-            const preservedAlarm = deleteAlarm ? null : alarmRow;
-            // Implement the supported deleteAll() surface through public storage
-            // operations so the alarm shim and SQL object cleanup stay in sync.
             await deleteAllKvStorage(target);
             deleteAllSqlStorage(target, deleteAlarm);
             if (deleteAlarm) {
-              const sideEffects = activeSideEffects();
-              const token = sideEffects?.baselineAlarmToken != null
-                ? sideEffects.baselineAlarmToken
-                : alarmRow?.token == null ? null : NativeString(alarmRow.token);
-              const effect = () => token
+              const token = alarmRow?.token == null
+                ? null
+                : alarmTokenBeforeDelete(alarmRow.token);
+              await enqueueAlarmMutation(alarmMutations, () => token
                 ? alarmBinding.deleteAlarmIndex({ className, objectName, token })
-                : reflectApply(promiseResolve, NativePromise, ["skipped"]);
-              if (sideEffects) reflectApply(arrayPush, sideEffects, [effect]);
-              else await effect();
-            } else if (preservedAlarm) {
-              writeAlarmRow(alarmStorage, {
-                scheduledTime: preservedAlarm.scheduled_time,
-                retryCount: preservedAlarm.retry_count,
-                inFlight: NativeNumber(preservedAlarm.in_flight) === 1,
-                token: preservedAlarm.token,
-              });
+                : reflectApply(promiseResolve, NativePromise, ["skipped"]));
             }
           })();
+        };
+      }
+      if (prop === "rollback" && transactionState) {
+        return (...args) => {
+          const result = reflectApply(reflectGet(target, prop, receiver), target, args);
+          if (!transactionState.rolledBack) {
+            transactionState.effects.length = 0;
+            transactionState.rolledBack = true;
+          }
+          return result;
         };
       }
       const value = reflectGet(target, prop, receiver);
@@ -466,10 +693,10 @@ function wrapStorage(storage, alarmBinding, className, objectName, sideEffects =
   });
 }
 
-function wrapCtx(ctx, alarmBinding, className) {
+function wrapCtx(ctx, alarmBinding, className, installedStorageProxy = null) {
   if (!ctx || !alarmBinding) return ctx;
   const objectName = objectNameFromCtx(ctx);
-  let storageProxy = null;
+  let storageProxy = installedStorageProxy;
   return new NativeProxy(ctx, {
     get(target, prop, receiver) {
       if (prop === "storage") {
@@ -484,7 +711,7 @@ function wrapCtx(ctx, alarmBinding, className) {
 }
 
 function installStorageProxy(ctx, alarmBinding, className) {
-  if (!ctx || !alarmBinding) return ctx;
+  if (!ctx || !alarmBinding) return null;
   const objectName = objectNameFromCtx(ctx);
   const storageProxy = wrapStorage(ctx.storage, alarmBinding, className, objectName);
   try {
@@ -501,22 +728,22 @@ function installStorageProxy(ctx, alarmBinding, className) {
       ...formatWrappedError(err),
     });
   }
-  return ctx;
+  return storageProxy;
 }
 
 export function wrapDurableObjectClass(Base, className) {
   return class extends Base {
     constructor(ctx, env) {
       const alarmBinding = env?.[ALARMS_BINDING];
-      const constructorCtx = installStorageProxy(ctx, alarmBinding, className);
+      const constructorStorageProxy = installStorageProxy(ctx, alarmBinding, className);
       // The inner host-binding wrapper owns env facade materialization. Strip
       // only the alarm binding here so __WDL_HOST_BINDINGS_WRAPPED can survive
       // through the two-layer wrapper contract.
-      super(constructorCtx, withoutInternalEnv(env));
+      super(ctx, withoutInternalEnv(env));
       // Resolve once through the host wrapper after construction so prototype
       // methods, class fields, and accessors retain the real instance receiver.
       const tenantFetch = reflectGet(this, "fetch", this);
-      const wrappedCtx = wrapCtx(constructorCtx, alarmBinding, className);
+      const wrappedCtx = wrapCtx(ctx, alarmBinding, className, constructorStorageProxy);
       try {
         objectDefineProperty(this, "ctx", {
           value: wrappedCtx,

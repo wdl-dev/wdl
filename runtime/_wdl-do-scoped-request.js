@@ -13,6 +13,10 @@ export const DO_OWNER_CONTROL_HEADERS = Object.freeze({
   acceptHint: "x-wdl-do-accept-owner-hint",
   ownershipError: "x-wdl-do-ownership-error",
 });
+export const DO_FORWARD_HEADERS = Object.freeze({
+  forwarded: "x-wdl-do-forwarded",
+  hopCount: "x-wdl-do-hop-count",
+});
 export const DO_CONNECT_HEADERS = Object.freeze({
   ns: "x-wdl-do-ns",
   worker: "x-wdl-do-worker",

@@ -11,7 +11,11 @@ import {
 } from "../helpers/do-owner-hint.js";
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { makeRecordingFetch, withRecordingFetch } from "../helpers/mock-fetch.js";
-import { withMockedProperty } from "../helpers/mock-global.js";
+import {
+  withMockedGlobal,
+  withMockedProperty,
+  withMockedPropertyDescriptor,
+} from "../helpers/mock-global.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 import { doTransportDataUrl } from "../helpers/load-do-protocol.js";
@@ -29,6 +33,7 @@ const { clearDoOwnerHintsForTest, DurableObjectNamespace } = await importReposit
   [/from "shared-internal-auth";/, `from ${JSON.stringify(internalAuthUrl)};`],
 ]);
 const {
+  MAX_DO_RPC_RESPONSE_BYTES,
   connectHeaders,
   doOwnerHintCacheKey,
   ownerHintFromHeaders,
@@ -481,6 +486,231 @@ test("DO-to-DO RPC forwards through do-runtime and decodes structured result", a
   assert.equal(body.kind, "rpc");
   assert.equal(body.objectName, "room-rpc");
   assert.deepEqual(body.rpc, { method: "addMessage", args: ["hello"] });
+});
+
+test("DO-to-DO RPC preserves a valid undefined result", async () => {
+  const binding = bindingWithBackend({
+    async fetch() {
+      return Response.json({ ok: true });
+    },
+  });
+
+  assert.equal(await binding.rpcObject("room-rpc-undefined", "touch", []), undefined);
+});
+
+test("DO-to-DO RPC ignores inherited response envelope fields", async () => {
+  const objectPrototype = /** @type {Record<string, unknown>} */ (
+    /** @type {unknown} */ (Object.prototype)
+  );
+  await withMockedProperty(objectPrototype, "result", "polluted", async () => {
+    const binding = bindingWithBackend({
+      async fetch() {
+        return Response.json({ ok: true });
+      },
+    });
+    assert.equal(await binding.rpcObject("room-rpc-inherited-result", "touch", []), undefined);
+  });
+
+  await withMockedProperty(objectPrototype, "message", "PRIVATE polluted message", () =>
+    withMockedProperty(objectPrototype, "error", "polluted_code", async () => {
+      const binding = bindingWithBackend({
+        async fetch() {
+          return Response.json({}, { status: 500 });
+        },
+      });
+      await assert.rejects(
+        binding.rpcObject("room-rpc-inherited-error", "mutate", []),
+        (err) => err instanceof Error &&
+          err.message === "Durable Object RPC failed with status 500" &&
+          Reflect.get(err, "code") === undefined
+      );
+    })
+  );
+});
+
+test("DO-to-DO RPC uses its captured Error constructor", async () => {
+  const NativeError = Error;
+  const PoisonedError = /** @type {ErrorConstructor} */ (
+    /** @type {unknown} */ (function PoisonedError() {
+      throw new TypeError("global Error constructor was used");
+    })
+  );
+  await withMockedGlobal("Error", PoisonedError, async () => {
+    const malformedBinding = bindingWithBackend({
+      async fetch() {
+        return new Response("not-json");
+      },
+    });
+    await assert.rejects(
+      malformedBinding.rpcObject("room-rpc-poisoned-error", "mutate", []),
+      (err) => err instanceof NativeError &&
+        Reflect.get(err, "code") === "do_rpc_result_unknown"
+    );
+
+    const structuredBinding = bindingWithBackend({
+      async fetch() {
+        return Response.json({ error: "do_rpc_error", message: "remote failure" }, {
+          status: 500,
+        });
+      },
+    });
+    await assert.rejects(
+      structuredBinding.rpcObject("room-rpc-poisoned-structured-error", "mutate", []),
+      (err) => err instanceof NativeError &&
+        Reflect.get(err, "code") === "do_rpc_error" &&
+        Reflect.get(err, "message") === "remote failure"
+    );
+  });
+});
+
+test("DO-to-DO RPC defines structured error fields without prototype setters", async () => {
+  await withMockedPropertyDescriptor(Error.prototype, "name", {
+    get() {
+      return "Error";
+    },
+    set() {
+      throw new TypeError("Error.prototype.name setter was used");
+    },
+  }, async () => {
+    const binding = bindingWithBackend({
+      async fetch() {
+        return Response.json({
+          error: "do_rpc_error",
+          name: "RemoteRpcError",
+          message: "remote failure",
+          stack: "RemoteRpcError: remote failure\n    at remote-do",
+        }, { status: 500 });
+      },
+    });
+    await assert.rejects(
+      binding.rpcObject("room-rpc-error-prototype", "mutate", []),
+      (err) => err instanceof Error &&
+        err.name === "RemoteRpcError" &&
+        err.message === "remote failure" &&
+        err.stack === "RemoteRpcError: remote failure\n    at remote-do" &&
+        Reflect.get(err, "code") === "do_rpc_error"
+    );
+  });
+});
+
+test("DO-to-DO RPC defines error fields with null-prototype descriptors", async () => {
+  const objectPrototype = /** @type {Record<string, unknown>} */ (
+    /** @type {unknown} */ (Object.prototype)
+  );
+  const malformedResponse = new Response("not-json");
+  const structuredResponse = Response.json({
+    error: "do_rpc_error",
+    name: "RemoteRpcError",
+    message: "remote failure",
+    stack: "RemoteRpcError: remote failure\n    at remote-do",
+  }, { status: 500 });
+  await withMockedProperty(objectPrototype, "get", () => "polluted getter", async () => {
+    const malformedBinding = bindingWithBackend({
+      async fetch() {
+        return malformedResponse;
+      },
+    });
+    await assert.rejects(
+      malformedBinding.rpcObject("room-rpc-descriptor-unknown", "mutate", []),
+      (err) => err instanceof Error &&
+        Reflect.get(err, "code") === "do_rpc_result_unknown"
+    );
+
+    const structuredBinding = bindingWithBackend({
+      async fetch() {
+        return structuredResponse;
+      },
+    });
+    await assert.rejects(
+      structuredBinding.rpcObject("room-rpc-descriptor-structured", "mutate", []),
+      (err) => err instanceof Error &&
+        err.name === "RemoteRpcError" &&
+        err.stack === "RemoteRpcError: remote failure\n    at remote-do" &&
+        Reflect.get(err, "code") === "do_rpc_error"
+    );
+  });
+});
+
+test("DO-to-DO RPC fails closed on malformed success responses", async () => {
+  // Non-fatal UTF-8 decoding would replace 0xff and accept this as valid JSON.
+  const invalidUtf8Envelope = Uint8Array.from([
+    ...new TextEncoder().encode('{"ok":true,"result":"'),
+    0xff,
+    ...new TextEncoder().encode('"}'),
+  ]);
+  for (const response of [
+    new Response("not-json"),
+    new Response(invalidUtf8Envelope),
+    new Response(new ReadableStream({
+      pull() {
+        throw new Error("PRIVATE owner response read failure");
+      },
+    })),
+    Response.json({ result: "missing success marker" }),
+  ]) {
+    const binding = bindingWithBackend({
+      async fetch() {
+        return response;
+      },
+    });
+    await assert.rejects(
+      binding.rpcObject("room-rpc-malformed", "mutate", []),
+      (err) => err instanceof Error &&
+        Reflect.get(err, "code") === "do_rpc_result_unknown" &&
+        err.message === "Durable Object RPC result is unavailable; request outcome may be unknown"
+    );
+  }
+});
+
+test("DO-to-DO RPC rejects declared oversized responses and cancels their body", async () => {
+  let canceled = false;
+  const body = new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const binding = bindingWithBackend({
+    async fetch() {
+      return new Response(body, {
+        headers: { "content-length": String(MAX_DO_RPC_RESPONSE_BYTES + 1) },
+      });
+    },
+  });
+
+  await assert.rejects(
+    binding.rpcObject("room-rpc-declared-oversized", "mutate", []),
+    (err) => err instanceof Error && Reflect.get(err, "code") === "do_rpc_result_unknown"
+  );
+  assert.equal(canceled, true);
+});
+
+test("DO-to-DO RPC stops streaming responses when they cross the byte limit", async () => {
+  let pulls = 0;
+  let canceled = false;
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      if (pulls <= 2) controller.enqueue(new Uint8Array(600 * 1024));
+      else return new Promise(() => {});
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const binding = bindingWithBackend({
+    async fetch() {
+      return new Response(body);
+    },
+  });
+
+  await assert.rejects(
+    binding.rpcObject("room-rpc-streaming-oversized", "mutate", []),
+    (err) => err instanceof Error && Reflect.get(err, "code") === "do_rpc_result_unknown"
+  );
+  assert.equal(canceled, true);
 });
 
 test("DO-to-DO fetch retries owner generation races without hint opt-in", async () => {

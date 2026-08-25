@@ -42,6 +42,7 @@ export function doTransportDataUrl() {
       "./_wdl-request-id.js": REQUEST_ID_URL,
       "./_wdl-do-scoped-request.js": DO_SCOPED_REQUEST_URL,
       "do-runtime-protocol-wire-grammar": DO_WIRE_GRAMMAR_URL,
+      "shared-internal-auth": SHARED_INTERNAL_AUTH_URL,
     }),
   ]);
 }

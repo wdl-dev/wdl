@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, afterEach, test } from "node:test";
 import {
+  D1_FORWARD_HEADERS,
   D1_QUERY_CONTENT_TYPE,
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   d1OwnerClientHarnessState,
@@ -69,7 +70,8 @@ test("D1 owner client classifies non-error forwarded HTTP status as ok", async (
   const call = D1_OWNER_CLIENT_TEST_STATE.fetches[0];
   assert.equal(call.url, "http://d1-runtime-b:8787/internal/d1/query");
   assert.equal(new Headers(call.init.headers).get("x-request-id"), "req-1");
-  assert.equal(new Headers(call.init.headers).get("x-wdl-d1-hop-count"), "2");
+  assert.equal(new Headers(call.init.headers).get(D1_FORWARD_HEADERS.forwarded), "1");
+  assert.equal(new Headers(call.init.headers).get(D1_FORWARD_HEADERS.hopCount), "2");
   assert.equal(new Headers(call.init.headers).get("x-wdl-internal-auth"), TEST_INTERNAL_AUTH_TOKEN);
   assert.equal(new Headers(call.init.headers).get("content-type"), D1_QUERY_CONTENT_TYPE);
   assert.deepEqual(decodeD1QueryRequest(call.init.body), {
