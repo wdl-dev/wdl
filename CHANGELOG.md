@@ -1,47 +1,16 @@
 # Changelog
 
-## Unreleased
+## wdl.20260825.1 - 2026-08-26
 
-- Updated the bundled workerd and Workers types pins to `1.20260825.1` and
-  `5.20260825.1`, raising the maximum tenant compatibility date to `2026-09-01`.
-  Workerd now preserves in-flight hibernatable WebSocket auto-response state across
-  actor revival; WDL's separate in-flight application send/close caveat remains.
-  Explicit positive compatibility flags already enabled by date no longer make dynamic
-  Worker cold-load fail when they compile to the same flag set.
-- Kept `new_module_registry` disabled as an explicit WDL policy after its upstream
-  graduation because the platform-owned dynamic wrapper is the actual loader main
-  module and cannot preserve tenant `import.meta.main`. Refreshed the experimental flag
-  mirror for `python_workers_20260817`; Python modules remain unsupported.
-- Rejected the newly typed Workflow `locationHint` before backend I/O instead of
-  silently ignoring it. Native Durable Object `ctx.abort(..., { retryAlarm: false })`
-  does not suppress retries for WDL's Workflows-backed alarm dispatch.
-- Qualified CLI integration against `@wdl-dev/cli@1.8.1` while retaining `1.8.0` as the minimum supported CLI.
-- Kept transient Workflow backend and Redis failures retryable instead of committing them as terminal tenant failures, including parallel-step failures observed while waiting within the Workflows-owned dispatch deadline; exhausting that deadline is result-unknown and releases the claim for replay. Preserved authoritative waiting state when error release follows a committed suspension; required tagged terminal payloads and an authoritative waiting-state fence for suspension; and sanitized Workflows service 5xx diagnostics.
-- Roll Workflows first and wait for every old sender task to drain before rolling user-runtime and system-runtime for the required absolute Workflow dispatch-deadline field; old Runtime readers ignore the additive field, while new Runtime readers reject old senders that omit it.
-- Retried complete Queue batches on incomplete, malformed, or non-success Runtime outcome and decision envelopes except for the existing specified permanent 400 errors and 413 split/terminal handling.
-- Bounded Scheduler cron and Queue Runtime response bodies to 256 KiB before JSON parsing.
-- Bounded Scheduler Workflow tick responses to 64 KiB and rejected malformed JSON or non-object response roots while preserving field-level forward compatibility.
-- Bounded D1/DO supervisor drain and renew response bodies to 256 KiB before parsing or log truncation.
-- Reset Redis subscription reconnect backoff after established subscriptions.
-- Bounded Runtime live-tail negative caching to 10,000 recently observed worker keys.
-- Skipped duplicate live-tail forwarding payload construction for fresh inactive workers.
-- Rejected oversized Tail strings, BigInts beyond a fixed full-event magnitude guard, and oversized indexed binary views before proportional conversion, encoding, or indexed-key enumeration.
-- Removed zero-valued synchronous cold-load stage metrics and documented Runtime load durations as request-clock latency rather than CPU profiling.
-- Deferred Gateway WebSocket connection/buffer, Runtime AI pool/Workflow replay-cache, and do-runtime in-flight gauge publication to metric scrapes.
-- Rejected unsupported AI input modalities as soon as their documented carrier is observed.
-- Forwarded successful D1 query responses as opaque bytes through routers using bounded internal result headers, while retaining decoded fallback for mixed-version and error responses.
-- Carried D1 BLOB parameters and results as native `Uint8Array` values across the tenant facade, host binding, binary wire, actor, and read cache while retaining tagged-response fallback for mixed-version rollout, bypassing oversized read-cache key materialization, and bounding aggregate router retained key-and-response bytes.
-- Counted conservative per-value, row, object-entry, and container costs against `D1_MAX_RESULT_BYTES` so wide null/empty results cannot bypass the actor response budget.
-- Created per-database D1 read caches only after request-side cacheability and key-budget admission, so write-only and admission-bypassed databases cannot evict useful cache state.
-- Invalidated ordinary D1 mutations before dispatch and again when the local request settles, including write SQL sent through `all`, `raw`, or facade `first()`, preventing racing reads from repopulating stale data after observed actor completion, and conservatively invalidated caches rebuilt after owner takeover when delayed idempotent schema writes lost their result before `changed_db` was known.
-- Roll D1 native-byte readers in user-runtime, system-runtime (including Control), and do-runtime first and wait for old reader tasks to drain. Headerless fallback preserves response semantics, but an old d1-runtime router still classifies the response by expanding native BLOB values into number arrays, so this native-writer transition must not overlap old and new d1-runtime tasks: scale d1-runtime to zero, wait for old tasks, targets, and in-flight requests to exit, then start the new tasks. D1 is unavailable during this window; normal rolling may resume after every deployed tier uses the native-byte wire.
-- Shared Durable Object owner hints across object names in one canonical owner shard while retaining exact object identity and owner-actor authority.
-- Forwarded the first uncached Durable Object fetch/RPC through its router once and learned owner headers from the final response, while retaining direct-owner WebSocket upgrades.
-- Let forwarded and cached-direct Durable Object calls carry a route fence to the target host actor, removing one outer owner snapshot while preserving the actor's drain, Redis-time, whole-delete, storage, session-policy, and generation admission.
-- Bounded Durable Object RPC response bodies to 1 MiB in the host adapter and failed closed with `do_rpc_result_unknown` when a successful response could not be read or validated.
-- Sanitized terminal Durable Object ownership-control errors, preserving only allowlisted `503` codes and reducing every other private code/status combination to `503 owner_unavailable`.
-- Removed misleading per-actor Durable Object facet and object-registry gauges whose shared metric series did not represent process totals.
-- Made Durable Object alarm deletion lineage-fenced and ordered every per-object backend alarm mutation, including best-effort repair and transaction reservations, so concurrent set/delete/completion paths converge. Callback transaction proxies and owning storage aliases share native SQLite transaction state; the shim retains its closed-state fence until native commit/rollback settles, native rollback semantics govern side-effect discard, and alarm APIs in nested transactions are rejected. Retained the historical transaction-free, best-effort `deleteAll()` shim because pinned stock workerd's native SQLite reset asserts on WDL facets; KV deletion now uses bounded 128-key pages, preserved alarms are not rewritten, the KV/SQL/Workflows sequence remains explicitly non-atomic, and private facet deletion remains the platform cleanup owner. Pending tombstones update only token/in-flight, protect mixed-version readers, and remain deletable with corrupt payload fields. Cross-store failures remain outcome-unknown.
+- Updated workerd and Workers types to `1.20260825.1` and `5.20260825.1`, raising the maximum tenant compatibility date to `2026-09-01`; redundant explicit positive compatibility flags already enabled by date no longer fail Worker cold-load, and hibernatable WebSocket auto-response state now survives actor revival. Application `send()` and `close()` can still race actor eviction, so the resident default remains unchanged. Kept `new_module_registry` disabled because WDL's platform wrapper cannot preserve tenant `import.meta.main`, refreshed the experimental flag mirror, and continued rejecting Python Workers.
+- Removed repeated work from Runtime hot paths by bounding live-tail negative state to 10,000 worker keys, skipping inactive payload construction, rejecting oversized Tail values and unsupported AI modalities before proportional work, resetting Redis subscriber backoff only after established subscriptions, and publishing dynamic Gateway, Runtime, and Durable Object gauges at scrape time. Removed zero-valued synchronous cold-load stage metrics and misleading per-actor Durable Object gauges.
+- Carried D1 BLOB parameters and results as native `Uint8Array` values through the facade, host binding, binary wire, actor, and read cache; successful responses pass opaquely through routers, cache admission and retained bytes are bounded, wide null/empty results count against the actor budget, and ordinary mutations invalidate before dispatch and after settlement with conservative invalidation after takeover or an unknown result.
+- Shared Durable Object owner hints by canonical shard, routed the first uncached fetch/RPC once, and moved route-fence authority to the host actor, removing repeated owner snapshots while preserving drain, delete, storage, session-policy, lease, and generation checks. Bounded RPC responses to 1 MiB, mapped unreadable success to `do_rpc_result_unknown`, and sanitized ownership-control failures.
+- Ordered every per-object alarm backend mutation and lineage-fenced deletion, completion, repair, and transaction side effects while preserving native rollback and closed-transaction semantics. Retained the transaction-free, best-effort `deleteAll()` shim with bounded 128-key KV pages; its KV/SQL/Workflows sequence remains non-atomic, so rejection may leave a partial result and concurrent mutation remains unsupported. Native `ctx.abort(..., { retryAlarm: false })` does not control WDL's Workflows-backed alarm retries.
+- Rejected unsupported Workflow `locationHint` placement before backend I/O. Kept transient backend and Redis failures retryable, including late admitted parallel-step failures, and bounded settlement by a Workflows-owned absolute dispatch deadline. Required tagged terminal payloads, fenced suspension against authoritative waiting state, and preserved committed waiting state when a Runtime response is lost or invalid.
+- Made Queue delivery fail closed before destructive acknowledgement: malformed, incomplete, conflicting, or unknown decisions retry the complete batch, while specified permanent `400` errors and authoritative `413` split/single-message terminal handling remain unchanged. Bounded Queue and cron Runtime responses and D1/DO supervisor drain/renew bodies to 256 KiB, and Workflow ticks to 64 KiB, before parsing or diagnostic retention.
+- Qualified CLI `1.8.1` while retaining `1.8.0` as the minimum complete CLI.
+- **Deployment:** Roll Workflows first and wait for old sender tasks to drain. Next roll user-runtime, system-runtime (including Control), and do-runtime, then wait for all old D1 readers to drain. Finally scale d1-runtime to zero, wait for old tasks, targets, and in-flight requests to exit, and start the new version without old/new d1-runtime overlap; D1 is unavailable during this transition because an old router can expand native BLOB results into large number arrays while classifying them. Other services may use normal start-before-stop replacement, and normal D1 rolling may resume after this transition.
 
 ## wdl.20260818.1 - 2026-08-19
 

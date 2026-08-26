@@ -108,7 +108,8 @@ minimum complete CLI is the earliest published CLI that can express all stable
 CLI-managed capabilities introduced by that WDL range; it is not the possibly lagging
 package that happened to run in release CI. Use the latest patch release at or above the
 listed boundary. A newer CLI can still expose commands that an older WDL release does
-not implement, so server-side validation remains canonical.
+not implement, so server-side validation remains canonical. The final row remains open
+until a later WDL release raises the minimum complete CLI.
 
 | WDL release range | Minimum complete CLI | Capability boundary |
 | --- | --- | --- |
@@ -118,7 +119,7 @@ not implement, so server-side validation remains canonical.
 | `wdl.20260724.1` - `wdl.20260801.1` | `1.6.0` | `workers_dev = false` and route URL reporting. |
 | `wdl.20260801.2` - `wdl.20260804.1` | None (`1.6.0` baseline) | Existing CLI commands remain usable, but the transient `durableObjectRollout` opt-in was Control-API-only and never had a published CLI spelling. |
 | `wdl.20260804.2` - `wdl.20260815.1` | `1.7.0` | `[wdl] session_policy` deploy support. |
-| `wdl.20260817.1` - `wdl.20260818.1` | `1.8.0` | AI binding manifests and namespace AI provider management. |
+| `wdl.20260817.1` and later | `1.8.0` | AI binding manifests and namespace AI provider management. |
 
 The CLI must treat the remaining discovery fields as diagnostics and defaults for
 user-facing guidance, not as a replacement for explicit user configuration. Missing

@@ -62,7 +62,7 @@ CLI 可以展示：
 
 最低版本是对完整 CLI surface 的支持声明；CI-qualified 版本是 WDL CLI integration job 使用的精确已发布 package。两者都不是 request negotiation 或执行门禁：普通 CLI 命令不会预检 `/whoami`，Control 也不会按 CLI 版本拒绝请求。`whoami` 和 `doctor` 可以比较当前 CLI 与 `minCliVersion` 并报告兼容结果；每个请求仍由服务端执行 canonical validation。
 
-已发布版本使用以下按能力推导的兼容矩阵。最低完整 CLI 是能够表达对应 WDL 区间所引入全部稳定 CLI 管理能力的最早已发布版本，不取决于 release CI 当时可能滞后的 package。应使用不低于表中边界的最新 patch release。较新的 CLI 仍可能提供旧 WDL 没有实现的命令，因此服务端 validation 继续作为 canonical contract。
+已发布版本使用以下按能力推导的兼容矩阵。最低完整 CLI 是能够表达对应 WDL 区间所引入全部稳定 CLI 管理能力的最早已发布版本，不取决于 release CI 当时可能滞后的 package。应使用不低于表中边界的最新 patch release。较新的 CLI 仍可能提供旧 WDL 没有实现的命令，因此服务端 validation 继续作为 canonical contract。最后一行保持开放，直到后续 WDL release 提高最低完整 CLI 时再闭合。
 
 | WDL release range | 最低完整 CLI | 能力边界 |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ CLI 可以展示：
 | `wdl.20260724.1` - `wdl.20260801.1` | `1.6.0` | `workers_dev = false` 与 route URL reporting。 |
 | `wdl.20260801.2` - `wdl.20260804.1` | 无（基础命令为 `1.6.0`） | 既有 CLI 命令仍可用，但短暂存在的 `durableObjectRollout` opt-in 仅有 Control API，从未发布对应 CLI spelling。 |
 | `wdl.20260804.2` - `wdl.20260815.1` | `1.7.0` | `[wdl] session_policy` deploy 支持。 |
-| `wdl.20260817.1` - `wdl.20260818.1` | `1.8.0` | AI binding manifest 与 namespace AI provider management。 |
+| `wdl.20260817.1` 及后续版本 | `1.8.0` | AI binding manifest 与 namespace AI provider management。 |
 
 CLI 应把其余 discovery 字段当作 diagnostics 和 user-facing guidance 的默认值，而不是替代用户显式配置。可选 URL hint 缺失时，应展示为 unavailable，不应自行猜测。
 
