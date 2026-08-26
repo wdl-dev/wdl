@@ -7,7 +7,7 @@
 显式语言基线是项目合同的一部分：
 
 - JavaScript 以 Node 24 上的 ES2025 为目标。
-- Rust 以 Rust 1.97 上的 Edition 2024 为目标。
+- Rust 以 Rust 1.98 上的 Edition 2024 为目标。
 
 当仓库已经对同一操作形成现代写法时，不要重新引入旧写法。如果 dependency、runtime 或 build image 阻止使用现代形式，应把例外限制在局部，并在 owning module 或 review notes 里说明原因。
 

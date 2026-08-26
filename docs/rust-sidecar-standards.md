@@ -29,7 +29,7 @@ validation discipline, not forcing every crate to have the same file layout.
 ## Language And Toolchain
 
 All Rust crates use `edition = "2024"`. The toolchain is pinned in
-`rust/rust-toolchain.toml`; the current baseline is Rust 1.97.1. Prefer modern syntax and
+`rust/rust-toolchain.toml`; the current baseline is Rust 1.98.0. Prefer modern syntax and
 standard-library APIs available on that baseline; do not keep older spellings only out of
 habit. A newer syntax or API becomes acceptable when CI/build images can compile it and
 the touched runtime dependencies support it. `rust-toolchain.toml` is the single source

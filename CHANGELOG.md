@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+- Updated the bundled workerd and Workers types to `1.20260826.1` and `5.20260826.1`, raising the maximum tenant compatibility date to `2026-09-02`. Hibernatable WebSocket tags now retain owned storage across manager teardown.
+- Refreshed the pinned Distroless `base-debian13` image.
 - Allowed DeepSeek model descriptors to advertise model-owned input/output modalities and `previousResponseId` support while retaining provider-level protocol, conversation-state, stored-response, embeddings, and WebSocket restrictions. Existing-shape provider mutations remain rolling-safe, but descriptors using newly admitted capabilities must not be saved until Control and all runtime redis-proxy readers have converged on the accepting release.
+- Updated root build and lint tooling, qualified OpenAI Node SDK `7.5.0`, upgraded the Rust toolchain to `1.98.0`, refreshed Rust lockfile dependencies, and removed unused integration-helper barrel exports surfaced by stricter Knip analysis.
 
 ## wdl.20260825.1 - 2026-08-26
 

@@ -39,8 +39,9 @@ import {
 export {
   DO_HOST_SHARD_COUNT,
   DO_OWNERSHIP_CODE,
-  DO_OWNER_RACE_RETRY_CODES,
 } from "do-runtime-protocol-wire-grammar";
+/** @lintignore data-URL unit tests import this contract from a rewritten module. */
+export { DO_OWNER_RACE_RETRY_CODES } from "do-runtime-protocol-wire-grammar";
 export { DoRuntimeError } from "do-runtime-protocol-errors";
 export {
   hostIdForObject,

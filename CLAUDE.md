@@ -146,7 +146,7 @@ shared crate `wdl-rust-common`.
   pinned by `tests/fixtures/*.json` read on both sides plus
   `tests/unit/style-contracts.test.js`; change both sides and the fixture together.
 - Use the explicit language baselines by default: JavaScript targets ES2025 on Node 24,
-  and Rust targets Edition 2024 on Rust 1.97. Do not reintroduce older spellings when
+  and Rust targets Edition 2024 on Rust 1.98. Do not reintroduce older spellings when
   the repository standard already uses a modern API or syntax. Cross-language rules
   live in `docs/project-standards.md`; language-specific rules live in
   `docs/workerd-js-standards.md` and `docs/rust-sidecar-standards.md`.

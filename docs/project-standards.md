@@ -10,7 +10,7 @@ Rust, tests, docs, and deployment code.
 The explicit baselines are part of the project contract:
 
 - JavaScript targets ES2025 on Node 24.
-- Rust targets Edition 2024 on Rust 1.97.
+- Rust targets Edition 2024 on Rust 1.98.
 
 Do not reintroduce older spellings when the repository already has a modern standard
 for the same operation. If a dependency, runtime, or build image blocks the modern

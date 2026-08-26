@@ -17,7 +17,6 @@ export { ROOT };
 // gateway's admin-host short-circuit picks it up. Matches docker-compose.yml.
 export const GATEWAY_HOST = LOCAL_CONNECT_HOST;
 export const GATEWAY_PORT = Number(process.env.WDL_GATEWAY_HOST_PORT || 8080);
-export const S3MOCK_HOST = LOCAL_CONNECT_HOST;
 export const S3MOCK_PORT = Number(process.env.WDL_S3MOCK_HOST_PORT || 19500);
 export const ASSETS_CDN_BASE = localAssetsCdnBase(S3MOCK_PORT);
 export { ADMIN_HOST_HEADER };

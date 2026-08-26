@@ -46,8 +46,7 @@ pub fn queue_consumer_key(ns: &str, queue: &str) -> String {
 }
 
 pub fn parse_stream_key(key: &str) -> Option<(String, String)> {
-    let rest = key.strip_prefix("queue:")?;
-    let rest = rest.strip_suffix(":s")?;
+    let rest = key.strip_circumfix("queue:", ":s")?;
     split_queue_key_rest(rest, is_valid_runtime_load_ns)
 }
 

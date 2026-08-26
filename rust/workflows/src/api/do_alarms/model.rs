@@ -132,8 +132,8 @@ pub(super) fn job_keys_for_identity(
 
 pub(super) fn map_hgetall(flat: Vec<String>) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    for pair in flat.chunks_exact(2) {
-        map.insert(pair[0].clone(), pair[1].clone());
+    for [key, value] in flat.as_chunks::<2>().0 {
+        map.insert(key.clone(), value.clone());
     }
     map
 }

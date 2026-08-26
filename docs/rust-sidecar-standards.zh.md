@@ -18,7 +18,7 @@ Rust crate 位于 `rust/` 下的 Cargo workspace 中。`rust/Cargo.lock` 是共�
 
 ## 语言和工具链
 
-所有 Rust crate 都使用 `edition = "2024"`。工具链 pin 在 `rust/rust-toolchain.toml`；当前基线是 Rust 1.97.1。应优先使用该基线上可用的现代语法和标准库 API；不要只是因为习惯而保留旧写法。新的语法或 API 只有在 CI / build image 能编译、且相关 runtime dependency 支持时才进入可 review 的代码。`rust-toolchain.toml` 是唯一 source of truth：本地与 CI 的 rust job 直接读它，两个 Dockerfile 也把它 copy 进 build，让 `rust:1-alpine` base 的 `rustup` 安装同一个 pin 的工具链，而不是跟着滚动镜像自带的版本走。因此 Rust 升级就是对 `rust-toolchain.toml` 的一次显式修改。
+所有 Rust crate 都使用 `edition = "2024"`。工具链 pin 在 `rust/rust-toolchain.toml`；当前基线是 Rust 1.98.0。应优先使用该基线上可用的现代语法和标准库 API；不要只是因为习惯而保留旧写法。新的语法或 API 只有在 CI / build image 能编译、且相关 runtime dependency 支持时才进入可 review 的代码。`rust-toolchain.toml` 是唯一 source of truth：本地与 CI 的 rust job 直接读它，两个 Dockerfile 也把它 copy 进 build，让 `rust:1-alpine` base 的 `rustup` 安装同一个 pin 的工具链，而不是跟着滚动镜像自带的版本走。因此 Rust 升级就是对 `rust-toolchain.toml` 的一次显式修改。
 
 当前允许的 idiom：
 

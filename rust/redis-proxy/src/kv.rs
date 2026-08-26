@@ -1090,9 +1090,11 @@ mod tests {
         );
         for (redis_key, indices, fields) in commands {
             assert_eq!(indices.len(), fields.len());
-            for (index, pair) in indices.chunks_exact(2).enumerate() {
+            let (pairs, remainder) = indices.as_chunks::<2>();
+            assert!(remainder.is_empty());
+            for (index, pair) in pairs.iter().enumerate() {
                 let key_index = pair[0] / 2;
-                assert_eq!(pair, [key_index * 2, key_index * 2 + 1]);
+                assert_eq!(*pair, [key_index * 2, key_index * 2 + 1]);
                 assert_eq!(
                     redis_key,
                     hash_key_for_user_key("tenant", "store", &keys[key_index])
