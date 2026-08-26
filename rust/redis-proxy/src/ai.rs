@@ -302,14 +302,6 @@ fn provider_supports_protocol(
     }
 }
 
-fn provider_supports_descriptor(kind: &ProviderKind, descriptor: &ModelDescriptor) -> bool {
-    provider_supports_protocol(kind, &descriptor.protocol, &descriptor.transports)
-        && (!matches!(kind, ProviderKind::Deepseek)
-            || (descriptor.input_modalities == ["text"]
-                && descriptor.output_modalities == ["text"]
-                && !descriptor.capabilities.previous_response_id))
-}
-
 fn transport_order(value: &Transport) -> u8 {
     match value {
         Transport::Http => 0,
@@ -344,7 +336,11 @@ fn parse_provider_record(raw: &[u8]) -> AppResult<ProviderRecord> {
         || record.models.iter().any(|(alias, descriptor)| {
             !valid_model_alias(alias)
                 || !validate_descriptor(descriptor)
-                || !provider_supports_descriptor(&record.kind, descriptor)
+                || !provider_supports_protocol(
+                    &record.kind,
+                    &descriptor.protocol,
+                    &descriptor.transports,
+                )
         })
     {
         return Err(ai_error(

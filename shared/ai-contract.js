@@ -207,23 +207,6 @@ function assertProviderRequestSupport(kind, descriptor, scope) {
   if (descriptor.transports.some((transport) => transport !== "http" && transport !== "sse")) {
     throw new Error(`${scope}.transports contains a transport unavailable for provider kind deepseek`);
   }
-  if (descriptor.inputModalities.length !== 1 || descriptor.inputModalities[0] !== "text") {
-    throw new Error(`${scope}.inputModalities is unavailable for provider kind deepseek`);
-  }
-  if (descriptor.capabilities.previousResponseId) {
-    throw new Error(`${scope}.capabilities.previousResponseId is unavailable for provider kind deepseek`);
-  }
-}
-
-/** @param {string} kind @param {ReturnType<typeof normalizeModelDescriptor>} descriptor @param {string} scope */
-function assertProviderModelSupport(kind, descriptor, scope) {
-  assertProviderRequestSupport(kind, descriptor, scope);
-  if (
-    kind === "deepseek" &&
-    (descriptor.outputModalities.length !== 1 || descriptor.outputModalities[0] !== "text")
-  ) {
-    throw new Error(`${scope}.outputModalities is unavailable for provider kind deepseek`);
-  }
 }
 
 /**
@@ -252,7 +235,7 @@ function normalizeProvider(raw, { revision, requireRevision = true } = {}) {
       throw new Error(`provider.models alias ${JSON.stringify(alias)} is invalid`);
     }
     const normalizedDescriptor = normalizeModelDescriptor(descriptor, `provider.models.${alias}`);
-    assertProviderModelSupport(value.kind, normalizedDescriptor, `provider.models.${alias}`);
+    assertProviderRequestSupport(value.kind, normalizedDescriptor, `provider.models.${alias}`);
     normalizedModels[alias] = normalizedDescriptor;
   }
   const out = { revision: normalizedRevision, kind: value.kind, models: normalizedModels };

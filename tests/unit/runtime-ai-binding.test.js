@@ -655,8 +655,72 @@ test("AI host model list strips resolver-only identity and credential fields", a
   });
 });
 
-test("AI host allows empty DeepSeek state and rejects unsupported inputs before provider I/O", async () => {
+test("AI host allows advertised DeepSeek vision inputs and rejects unsupported capabilities before provider I/O", async () => {
   let providerCalls = 0;
+  const resolution = openAiResolution({
+    provider: "deepseek",
+    alias: "vision",
+    kind: "deepseek",
+    upstreamModel: "deepseek-v4-flash-vision-exp",
+    destination: "https://api.deepseek.com/responses",
+    credential: "fake-deepseek-key",
+    inputModalities: ["image", "text"],
+    capabilities: { ...openAiResolution().capabilities, previousResponseId: false },
+  });
+  const { binding } = makeAiBinding({
+    AI_NETWORK: { async fetch() { providerCalls += 1; return Response.json({ id: "resp_test" }); } },
+  });
+  await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
+    const allowedBodies = [
+      {
+        input: "hello",
+        previous_response_id: null,
+        conversation: null,
+        store: false,
+      },
+      {
+        input: [{
+          role: "user",
+          content: [
+            { type: "input_text", text: "describe the image" },
+            { type: "input_image", image_url: "https://images.example/input.png" },
+          ],
+        }],
+      },
+      {
+        input: [{
+          type: "function_call_output",
+          call_id: "call_1",
+          output: [{ type: "input_image", image_url: "https://images.example/tool.png" }],
+        }],
+      },
+    ];
+    for (const body of allowedBodies) {
+      const allowed = await binding.fetch(request({ model: "deepseek/vision", ...body }));
+      assert.equal(allowed.status, 200);
+    }
+
+    /** @type {Array<[Record<string, unknown>, string]>} */
+    const cases = [
+      [{ input: "hello", previous_response_id: "resp_old" }, "ai_continuation_unsupported"],
+      [{ input: "hello", conversation: { id: "conv_1" } }, "ai_continuation_unsupported"],
+      [{ input: "hello", store: true }, "ai_store_unsupported"],
+      [{
+        input: [{ type: "input_audio", input_audio: { data: "AA==", format: "wav" } }],
+      }, "ai_input_modality_unsupported"],
+      [{ input: "hello", background: true }, "ai_background_unsupported"],
+    ];
+    for (const [body, error] of cases) {
+      const response = await binding.fetch(request({ model: "deepseek/vision", ...body }));
+      assert.equal((await readJsonResponse(response, 400, error)).error, error);
+    }
+  });
+  assert.equal(providerCalls, 3);
+});
+
+test("AI host leaves DeepSeek model-owned output and continuation fields to the provider", async () => {
+  let providerCalls = 0;
+  let providerBody;
   const resolution = openAiResolution({
     provider: "deepseek",
     alias: "flash",
@@ -665,98 +729,36 @@ test("AI host allows empty DeepSeek state and rejects unsupported inputs before 
     destination: "https://api.deepseek.com/responses",
     credential: "fake-deepseek-key",
     inputModalities: ["text"],
-    capabilities: { ...openAiResolution().capabilities, previousResponseId: false },
+    capabilities: { ...openAiResolution().capabilities, previousResponseId: true },
   });
   const { binding } = makeAiBinding({
-    AI_NETWORK: { async fetch() { providerCalls += 1; return Response.json({ id: "resp_test" }); } },
+    AI_NETWORK: {
+      async fetch(
+        /** @type {RequestInfo | URL} */ _url,
+        /** @type {RequestInit} */ init = {}
+      ) {
+        providerCalls += 1;
+        providerBody = parseJsonObjectRequestBody(init, "DeepSeek provider request");
+        return Response.json({ id: "chat_test" });
+      },
+    },
   });
   await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
     const allowed = await binding.fetch(request({
-      model: "deepseek/flash",
-      input: "hello",
-      previous_response_id: null,
-      conversation: null,
-      store: false,
-    }));
-    assert.equal(allowed.status, 200);
-
-    /** @type {Array<[Record<string, unknown>, string]>} */
-    const cases = [
-      [{ input: "hello", previous_response_id: "resp_old" }, "ai_continuation_unsupported"],
-      [{ input: "hello", conversation: { id: "conv_1" } }, "ai_continuation_unsupported"],
-      [{ input: "hello", store: true }, "ai_store_unsupported"],
-      [{ input: [{ type: "input_image", image_url: "https://images.example/input.png" }] }, "ai_input_modality_unsupported"],
-      [{ input: [{ type: "input_file", file_url: "https://files.example/input.pdf" }] }, "ai_input_modality_unsupported"],
-      [{ messages: [{ role: "user", content: [{ type: "file", file: { file_id: "file_1" } }] }] }, "ai_input_modality_unsupported"],
-      [{
-        input: [{
-          type: "function_call_output",
-          call_id: "call_1",
-          output: [{ type: "input_image", image_url: "https://images.example/tool.png" }],
-        }],
-      }, "ai_input_modality_unsupported"],
-      [{
-        input: [{
-          type: "custom_tool_call_output",
-          call_id: "call_2",
-          output: [{ type: "input_file", file_url: "https://files.example/tool.pdf" }],
-        }],
-      }, "ai_input_modality_unsupported"],
-      [{
-        input: [{
-          type: "computer_call_output",
-          call_id: "call_3",
-          output: {
-            type: "computer_screenshot",
-            image_url: "https://images.example/screenshot.png",
-          },
-        }],
-      }, "ai_input_modality_unsupported"],
-      [{ input: "hello", background: true }, "ai_background_unsupported"],
-    ];
-    for (const [body, error] of cases) {
-      const response = await binding.fetch(request({ model: "deepseek/flash", ...body }));
-      assert.equal((await readJsonResponse(response, 400, error)).error, error);
-    }
-  });
-  assert.equal(providerCalls, 1);
-});
-
-test("AI host rejects DeepSeek non-text output before provider I/O", async () => {
-  let providerCalls = 0;
-  const resolution = openAiResolution({
-    provider: "deepseek",
-    alias: "flash",
-    kind: "deepseek",
-    upstreamModel: "deepseek-v4-flash",
-    protocol: "chat_completions",
-    destination: "https://api.deepseek.com/chat/completions",
-    credential: "fake-deepseek-key",
-    inputModalities: ["text"],
-    capabilities: { ...openAiResolution().capabilities, previousResponseId: false },
-  });
-  const { binding } = makeAiBinding({
-    AI_NETWORK: { async fetch() { providerCalls += 1; return Response.json({ id: "chat_test" }); } },
-  });
-  await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
-    const rejected = await binding.fetch(request({
       model: "deepseek/flash",
       messages: [{ role: "user", content: "hello" }],
       modalities: ["audio"],
-    }, "/v1/chat/completions"));
-    assert.equal(
-      (await readJsonResponse(rejected, 400, "DeepSeek audio output")).error,
-      "ai_output_modality_unsupported"
-    );
-
-    const allowed = await binding.fetch(request({
-      model: "deepseek/flash",
-      messages: [{ role: "user", content: "hello" }],
-      modalities: ["text"],
-    }, "/v1/chat/completions"));
+      previous_response_id: "resp_old",
+    }));
     assert.equal(allowed.status, 200);
   });
   assert.equal(providerCalls, 1);
+  assert.deepEqual(providerBody, {
+    model: "deepseek-v4-flash",
+    messages: [{ role: "user", content: "hello" }],
+    modalities: ["audio"],
+    previous_response_id: "resp_old",
+  });
 });
 
 test("AI host reports an oversized tenant request as 413 before resolution", async () => {

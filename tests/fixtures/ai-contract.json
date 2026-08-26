@@ -236,15 +236,15 @@
       }
     },
     {
-      "name": "deepseek-multimodal-unavailable",
-      "valid": false,
+      "name": "deepseek-vision-input",
+      "valid": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
         "models": {
           "vision": {
-            "upstreamModel": "deepseek-v4-flash",
-            "protocol": "responses",
+            "upstreamModel": "deepseek-v4-flash-vision-exp",
+            "protocol": "chat_completions",
             "transports": ["http", "sse"],
             "inputModalities": ["file", "image", "text"],
             "outputModalities": ["text"],
@@ -261,8 +261,33 @@
       }
     },
     {
-      "name": "deepseek-continuation-unavailable",
-      "valid": false,
+      "name": "deepseek-model-owned-audio-input",
+      "valid": true,
+      "value": {
+        "revision": "0123456789abcdef0123456789abcdef",
+        "kind": "deepseek",
+        "models": {
+          "voice": {
+            "upstreamModel": "deepseek-v4-flash-vision-exp",
+            "protocol": "responses",
+            "transports": ["http", "sse"],
+            "inputModalities": ["audio", "text"],
+            "outputModalities": ["text"],
+            "capabilities": {
+              "functionTools": true,
+              "structuredOutput": true,
+              "reasoning": true,
+              "previousResponseId": false,
+              "providerTools": false,
+              "binaryFrames": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "deepseek-model-owned-continuation",
+      "valid": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
@@ -286,8 +311,8 @@
       }
     },
     {
-      "name": "deepseek-audio-output-unavailable",
-      "valid": false,
+      "name": "deepseek-model-owned-audio-output",
+      "valid": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
@@ -378,6 +403,50 @@
           "functionTools": false,
           "structuredOutput": false,
           "reasoning": false,
+          "previousResponseId": false,
+          "providerTools": false,
+          "binaryFrames": false
+        }
+      }
+    },
+    {
+      "valid": true,
+      "value": {
+        "provider": "deepseek",
+        "alias": "vision",
+        "kind": "deepseek",
+        "upstreamModel": "deepseek-v4-flash-vision-exp",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://api.deepseek.com/responses",
+        "credential": "fixture-credential",
+        "inputModalities": ["image", "text"],
+        "capabilities": {
+          "functionTools": true,
+          "structuredOutput": true,
+          "reasoning": true,
+          "previousResponseId": false,
+          "providerTools": false,
+          "binaryFrames": false
+        }
+      }
+    },
+    {
+      "valid": true,
+      "value": {
+        "provider": "deepseek",
+        "alias": "vision",
+        "kind": "deepseek",
+        "upstreamModel": "deepseek-v4-flash-vision-exp",
+        "protocol": "responses",
+        "transport": "http",
+        "destination": "https://api.deepseek.com/responses",
+        "credential": "fixture-credential",
+        "inputModalities": ["audio", "text"],
+        "capabilities": {
+          "functionTools": true,
+          "structuredOutput": true,
+          "reasoning": true,
           "previousResponseId": false,
           "providerTools": false,
           "binaryFrames": false

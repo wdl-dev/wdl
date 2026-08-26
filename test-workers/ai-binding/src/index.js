@@ -230,6 +230,28 @@ async function handler(request, env) {
       return Response.json({ status: error?.status, code: error?.code });
     }
   }
+  if (url.pathname === "/deepseek-vision") {
+    const response = await env.AI.run("deepseek/vision", {
+      input: [{
+        role: "user",
+        content: [
+          { type: "input_text", text: "describe the image" },
+          {
+            type: "input_image",
+            image_url: "https://images.example/vision.png",
+            detail: "low",
+          },
+        ],
+      }],
+      wdl_test_mode: "vision_input",
+    });
+    return Response.json({
+      model: response.model,
+      type: response.wdl_vision_input?.type,
+      imageUrl: response.wdl_vision_input?.image_url,
+      detail: response.wdl_vision_input?.detail,
+    });
+  }
   if (url.pathname === "/deepseek-audio") {
     try {
       await env.AI.run("deepseek/chat", {

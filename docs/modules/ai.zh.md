@@ -97,6 +97,8 @@ Provider 和 model alias grammar 由 `shared/ns-pattern.js` 拥有；model alias
 
 Adapter table 在代码中固定官方 destination，provider metadata 不能提供 endpoint。Model descriptor 仍必须只声明 upstream model 实际支持的能力；WDL 不解释的 native field 由 provider error 作为权威结果。
 
+DeepSeek 与其他 provider 使用同一套由 model 拥有的 input/output modality 和 capability 声明。这覆盖 WDL request 上限内的 Chat Completions `image_url` / image `file` block 与 Responses `input_image` part，不再把 capability 硬编码到某个 DeepSeek model family；WDL 仍不提供 provider file upload 或 file lifecycle API。
+
 ## Redis 与持久状态
 
 AI 使用 DB 0：
@@ -172,7 +174,7 @@ Host rejection 记录 `ai_binding_request_rejected`；被拒绝的 Control AI mu
 
 ## 部署 / Rollout 注意事项
 
-AI 的跨 tier 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 receiver-before-sender 流程。Provider availability 必须从目标部署的真实 user-runtime 与 do-runtime 出口完成资格确认；local fake-provider integration 只能证明 protocol 与 secret boundary，不能证明区域 provider availability。
+AI 的跨 tier 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 receiver-before-sender 流程。发布滚动期间仍可执行使用既有 shape 的 provider mutation，但必须等 Control 以及 user-runtime、system-runtime、do-runtime 的 redis-proxy reader 全量收敛到该版本后，才能保存使用新准入 capability 的 descriptor。Provider availability 必须从目标部署的真实 user-runtime 与 do-runtime 出口完成资格确认；local fake-provider integration 只能证明 protocol 与 secret boundary，不能证明区域 provider availability。
 
 ## 测试
 
@@ -188,6 +190,6 @@ Integration 使用仓库内 fake official provider。真实 credential 绝不能
 - 不接受任意 OpenAI-compatible endpoint。新增 provider 必须增加经过 review 的精确 destination adapter 和 conformance test。
 - 没有 managed catalog、平台共享 credential、usage aggregation、billing、quota、distributed fairness 或自动 provider failover。
 - 未实现 `toMarkdown()`、异步 batch inference、background Responses、stored file API、WebRTC、SIP 或自动 tool execution。
-- DeepSeek non-text input 或 output、continuation（`previous_response_id`/conversation state）、stored responses、embeddings 与 WebSocket transport 会在 provider I/O 前被拒绝。
+- DeepSeek conversation state 与 stored responses 会在 provider I/O 前被拒绝。Embeddings 和 WebSocket transport 仍不可用，因为 WDL 没有对应的官方 DeepSeek adapter path。
 - Provider-native warning 与 semantic event 原样透传；WDL 不发明私有 provider event protocol。
 - Durable Object 内的 AI WebSocket 仍是普通 outbound session。DO hibernation 不会让 provider socket durable 或可重连。

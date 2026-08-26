@@ -129,7 +129,7 @@ const PROVIDERS = Object.freeze({
           protocol: "chat_completions",
           transports: ["http", "sse"],
           inputModalities: ["text"],
-          outputModalities: ["text"],
+          outputModalities: ["audio", "text"],
           capabilities: { functionTools: true, reasoning: true },
         },
         flash: {
@@ -137,6 +137,14 @@ const PROVIDERS = Object.freeze({
           protocol: "responses",
           transports: ["http", "sse"],
           inputModalities: ["text"],
+          outputModalities: ["text"],
+          capabilities: { functionTools: true, reasoning: true },
+        },
+        vision: {
+          upstreamModel: "deepseek-v4-flash-vision-exp",
+          protocol: "responses",
+          transports: ["http", "sse"],
+          inputModalities: ["image", "text"],
           outputModalities: ["text"],
           capabilities: { functionTools: true, reasoning: true },
         },
@@ -497,7 +505,7 @@ test("AI facade loads one catalog snapshot per loaded Worker module", async () =
       200,
       `AI cached models ${attempt + 1}`
     );
-    assert.equal(modelList.models.length, 6);
+    assert.equal(modelList.models.length, 7);
   }
   const inference = await readIntegrationJson(
     await gatewayFetch(ns, "/ai/json?model=openai%2Fprimary"),
@@ -539,6 +547,7 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   assert.deepEqual(imported.models, [
     "deepseek/chat",
     "deepseek/flash",
+    "deepseek/vision",
     "openai/embedding",
     "openai/primary",
     "xai/agent",
@@ -553,6 +562,7 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   assert.deepEqual(modelList.models.map((/** @type {{ id: string }} */ model) => model.id), [
     "deepseek/chat",
     "deepseek/flash",
+    "deepseek/vision",
     "openai/embedding",
     "openai/primary",
     "xai/agent",
@@ -560,11 +570,22 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   ]);
   assert.equal(modelList.models.some((/** @type {Record<string, unknown>} */ model) =>
     "upstreamModel" in model), false);
+  assert.deepEqual(
+    modelList.models.find((/** @type {{ id: string }} */ model) =>
+      model.id === "deepseek/vision")?.inputModalities,
+    ["image", "text"]
+  );
+  assert.deepEqual(
+    modelList.models.find((/** @type {{ id: string }} */ model) =>
+      model.id === "deepseek/chat")?.outputModalities,
+    ["audio", "text"]
+  );
 
   for (const [model, upstreamModel] of [
     ["openai/primary", "gpt-test"],
     ["xai/agent", "grok-test"],
     ["deepseek/flash", "deepseek-v4-flash"],
+    ["deepseek/vision", "deepseek-v4-flash-vision-exp"],
   ]) {
     const response = await readIntegrationJson(
       await gatewayFetch(ns, `/ai/json?model=${encodeURIComponent(model)}`),
@@ -605,14 +626,26 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
     code: "ai_input_modality_unsupported",
   });
 
+  const deepSeekVision = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/deepseek-vision"),
+    200,
+    "DeepSeek vision input"
+  );
+  assert.deepEqual(deepSeekVision, {
+    model: "deepseek-v4-flash-vision-exp",
+    type: "input_image",
+    imageUrl: "https://images.example/vision.png",
+    detail: "low",
+  });
+
   const deepSeekAudio = await readIntegrationJson(
     await gatewayFetch(ns, "/ai/deepseek-audio"),
     200,
-    "DeepSeek audio output rejection"
+    "DeepSeek model-owned output modality"
   );
   assert.deepEqual(deepSeekAudio, {
-    status: 400,
-    code: "ai_output_modality_unsupported",
+    status: 200,
+    code: null,
   });
 
   const malformedModel = await readIntegrationJson(

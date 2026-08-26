@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Allowed DeepSeek model descriptors to advertise model-owned input/output modalities and `previousResponseId` support while retaining provider-level protocol, conversation-state, stored-response, embeddings, and WebSocket restrictions. Existing-shape provider mutations remain rolling-safe, but descriptors using newly admitted capabilities must not be saved until Control and all runtime redis-proxy readers have converged on the accepting release.
+
 ## wdl.20260825.1 - 2026-08-26
 
 - Updated workerd and Workers types to `1.20260825.1` and `5.20260825.1`, raising the maximum tenant compatibility date to `2026-09-01`; redundant explicit positive compatibility flags already enabled by date no longer fail Worker cold-load, and hibernatable WebSocket auto-response state now survives actor revival. Application `send()` and `close()` can still race actor eviction, so the resident default remains unchanged. Kept `new_module_registry` disabled because WDL's platform wrapper cannot preserve tenant `import.meta.main`, refreshed the experimental flag mirror, and continued rejecting Python Workers.

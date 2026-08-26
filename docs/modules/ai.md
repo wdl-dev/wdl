@@ -182,6 +182,12 @@ an endpoint. Model descriptors must still advertise only capabilities actually
 supported by their upstream model; provider errors remain authoritative for native
 fields that WDL does not interpret.
 
+DeepSeek uses the same model-owned input/output modality and capability declarations as
+the other providers. This covers Chat Completions `image_url` / image `file` blocks and
+Responses `input_image` parts within WDL's request limit without hard-coding capabilities
+to a DeepSeek model family. WDL still does not expose provider file-upload or
+file-lifecycle APIs.
+
 ## Redis And Persisted State
 
 AI uses DB 0:
@@ -347,10 +353,13 @@ worker, version, and raw error text stay in logs rather than metric labels.
 ## Deployment / Rollout Notes
 
 AI cross-tier changes follow the receiver-before-sender procedure in the
-[infra rollout notes](infra.md#deployment--rollout-notes). Provider availability must
-be qualified from each deployment's actual user-runtime and do-runtime egress. Local
-fake-provider integration proves protocol and secret boundaries but is not evidence of
-regional provider availability.
+[infra rollout notes](infra.md#deployment--rollout-notes). Existing-shape provider
+mutations remain available while a release rolls, but descriptors using newly admitted
+capabilities must not be saved until Control and the user-runtime, system-runtime, and
+do-runtime redis-proxy readers have converged on that release. Provider availability
+must be qualified from each deployment's actual user-runtime and do-runtime egress.
+Local fake-provider integration proves protocol and secret boundaries but is not
+evidence of regional provider availability.
 
 ## Tests
 
@@ -379,9 +388,9 @@ committed or printed by test output.
   distributed fairness, or automatic provider failover exists.
 - No `toMarkdown()`, asynchronous batch inference, background Responses, stored file
   APIs, WebRTC, SIP, or automatic tool execution is implemented.
-- DeepSeek non-text input or output, continuation (`previous_response_id`/conversation
-  state), stored responses, embeddings, and WebSocket transports are rejected before
-  provider I/O.
+- DeepSeek conversation state and stored responses are rejected before provider I/O.
+  Embeddings and WebSocket transports remain unavailable because WDL has no official
+  DeepSeek adapter path for them.
 - Provider-native warnings and semantic events pass through; WDL does not invent a
   private provider event protocol.
 - An AI WebSocket inside a Durable Object is an ordinary outbound session. DO

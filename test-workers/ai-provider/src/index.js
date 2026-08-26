@@ -239,6 +239,17 @@ export default {
       }
       return json({ ...responseObject(body), wdl_file_input: file });
     }
+    if (body.wdl_test_mode === "vision_input") {
+      const image = body.input?.[0]?.content?.find((part) => part?.type === "input_image");
+      if (
+        typeof image?.image_url !== "string" ||
+        image.image_url.length === 0 ||
+        image.detail !== "low"
+      ) {
+        return json({ error: { message: "missing fake vision input", type: "invalid_request_error" } }, 400);
+      }
+      return json({ ...responseObject(body), wdl_vision_input: image });
+    }
     if (url.pathname.endsWith("/chat/completions")) {
       return json({
         id: "chatcmpl_fake",
