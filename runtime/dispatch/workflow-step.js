@@ -1,5 +1,9 @@
 import { INTERNAL_AUTH_FAILURE_CODE } from "shared-internal-auth";
 import {
+  isRuntimeInfrastructureError,
+  runtimeInfrastructureDiagnostic,
+} from "runtime-infrastructure-error";
+import {
   workflowBackendBody,
   workflowStepSuccessBackendBody,
   workflowStepError,
@@ -29,10 +33,13 @@ import {
  *   runToken: string,
  *   createdAtMs: number,
  * }} WorkflowRun
- * @typedef {{ ordinal: number, stepName: string, nameCount: number, dependencies: number[], config: unknown }} StepIdentity
+ * @typedef {"do" | "sleep" | "sleepUntil" | "waitForEvent"} WorkflowStepKind
+ * @typedef {{ ordinal: number, stepName: string, nameCount: number, dependencies: number[], kind: WorkflowStepKind, config: unknown }} StepIdentity
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayStepRecord} WorkflowReplayStepRecord
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayCache} WorkflowReplayCache
  */
+
+const intrinsicObjectHasOwn = Object.hasOwn;
 
 /** @param {unknown} value @param {"name" | "message"} field */
 function readThrowableField(value, field) {
@@ -94,11 +101,17 @@ export const WORKFLOW_BACKEND_UNAVAILABLE_CODE = "workflow_backend_unavailable";
 export const WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE = "Workflow backend is unavailable";
 export const MAX_WORKFLOW_STARTED_STEPS_PER_RUN_TURN = 1000;
 export const MAX_WORKFLOW_ACTIVE_STEPS_PER_RUN_TURN = 1000;
+export const WORKFLOW_STEP_KINDS = Object.freeze({
+  do: "do",
+  sleep: "sleep",
+  sleepUntil: "sleepUntil",
+  waitForEvent: "waitForEvent",
+});
 
 const workflowInfrastructureDiagnostics = new WeakMap();
 
 /** @param {string} diagnostic */
-function workflowInfrastructureError(diagnostic) {
+export function workflowInfrastructureError(diagnostic) {
   const err = new Error(WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE);
   err.name = WORKFLOW_BACKEND_UNAVAILABLE_CODE;
   workflowInfrastructureDiagnostics.set(err, diagnostic);
@@ -110,7 +123,10 @@ export function isWorkflowInfrastructureError(err) {
   return (
     err !== null &&
     (typeof err === "object" || typeof err === "function") &&
-    workflowInfrastructureDiagnostics.has(/** @type {object} */ (err))
+    (
+      workflowInfrastructureDiagnostics.has(/** @type {object} */ (err)) ||
+      isRuntimeInfrastructureError(err)
+    )
   );
 }
 
@@ -118,7 +134,8 @@ export function isWorkflowInfrastructureError(err) {
 export function workflowInfrastructureLogError(err) {
   const diagnostic = err !== null &&
     (typeof err === "object" || typeof err === "function")
-    ? workflowInfrastructureDiagnostics.get(/** @type {object} */ (err))
+    ? workflowInfrastructureDiagnostics.get(/** @type {object} */ (err)) ??
+      runtimeInfrastructureDiagnostic(err)
     : undefined;
   const logError = new Error(diagnostic || WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE);
   logError.name = WORKFLOW_BACKEND_UNAVAILABLE_CODE;
@@ -149,6 +166,32 @@ function unexpectedWorkflowBackendState(path, state) {
   return workflowInfrastructureError(
     `Workflow backend ${path} returned invalid state ${JSON.stringify(state)}`
   );
+}
+
+/**
+ * @param {string} path
+ * @param {Record<string, unknown>} record
+ * @param {string} variant
+ * @param {"output" | "error"} field
+ */
+function requiredWorkflowBackendPayload(path, record, variant, field) {
+  if (!intrinsicObjectHasOwn(record, field)) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} returned ${variant} without required ${field}`
+    );
+  }
+  return record[field];
+}
+
+/** @param {unknown} step */
+function validateWorkflowReplayStepPayload(step) {
+  if (step === null || typeof step !== "object" || Array.isArray(step)) return;
+  const record = /** @type {Record<string, unknown>} */ (step);
+  if (record.status === "completed") {
+    requiredWorkflowBackendPayload("replay-steps", record, "completed", "output");
+  } else if (record.status === "failed") {
+    requiredWorkflowBackendPayload("replay-steps", record, "failed", "error");
+  }
 }
 
 class WorkflowSuspended extends Error {
@@ -293,20 +336,27 @@ async function workflowBackendRequest(backend, path, body, requestId = null) {
  */
 async function fetchReplayStepPage(backend, run, cache, ordinal, requestId) {
   while (!cache.complete && ordinal >= cache.nextOrdinal) {
+    const startOrdinal = cache.nextOrdinal;
     const page = await workflowBackendCall(backend, "replay-steps", {
       ...workflowReplayIdentity(run),
-      startOrdinal: cache.nextOrdinal,
+      startOrdinal,
       limit: WORKFLOW_REPLAY_PAGE_SIZE,
     }, requestId);
     const steps = Array.isArray(page?.steps) ? page.steps : [];
+    const nextOrdinal = typeof page?.nextOrdinal === "number" && Number.isInteger(page.nextOrdinal)
+      ? page.nextOrdinal
+      : startOrdinal + steps.length;
+    if (!page?.done && steps.length > 0 && nextOrdinal <= startOrdinal) {
+      throw workflowInfrastructureError(
+        "Workflow backend replay-steps returned a non-advancing cursor"
+      );
+    }
+    for (const step of steps) validateWorkflowReplayStepPayload(step);
     for (const step of steps) {
       if (Number.isInteger(step?.ordinal)) rememberWorkflowReplayStep(cache, step.ordinal, step);
     }
-    const nextOrdinal = typeof page?.nextOrdinal === "number" && Number.isInteger(page.nextOrdinal)
-      ? page.nextOrdinal
-      : cache.nextOrdinal + steps.length;
     cache.nextOrdinal = Math.max(cache.nextOrdinal, nextOrdinal);
-    cache.complete = Boolean(page?.done) || steps.length === 0;
+    if (page?.done || steps.length === 0) cache.complete = true;
   }
 }
 
@@ -314,8 +364,14 @@ async function fetchReplayStepPage(backend, run, cache, ordinal, requestId) {
  * @param {WorkflowRun} run
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string | null} [requestId]
+ * @param {() => string | undefined} [infrastructureDiagnostic]
  */
-export function createStepController(run, backend, requestId = null) {
+export function createStepController(
+  run,
+  backend,
+  requestId = null,
+  infrastructureDiagnostic = () => undefined
+) {
   let ordinal = 0;
   let startedSteps = 0;
   let suspendingStepInFlight = false;
@@ -338,6 +394,12 @@ export function createStepController(run, backend, requestId = null) {
   const activeStepRecords = new Set();
   /** @type {Promise<void> | null} */
   let replayFetchPromise = null;
+
+  /** @param {unknown} [error] */
+  const currentInfrastructureFailure = (error) => {
+    const diagnostic = runtimeInfrastructureDiagnostic(error) ?? infrastructureDiagnostic();
+    return diagnostic === undefined ? null : workflowInfrastructureError(diagnostic);
+  };
 
   /** @param {unknown} reason @param {{ name: string, message: string } | null} [error] */
   const rememberTerminalStepFailure = (reason, error = null) => {
@@ -465,12 +527,20 @@ export function createStepController(run, backend, requestId = null) {
       }, requestId);
       assertRunStillOpen();
       if (registered?.state === "complete") {
+        const output = step.returnsOutput
+          ? requiredWorkflowBackendPayload(
+              step.action,
+              registered,
+              "complete",
+              "output"
+            )
+          : undefined;
         /** @type {Record<string, unknown>} */
         const record = { status: "completed", attempt: 1 };
-        if (step.returnsOutput) record.output = registered.output ?? null;
+        if (step.returnsOutput) record.output = output;
         cacheStep(step.identity, record);
         markStepCompleted(step.identity);
-        return step.returnsOutput ? registered.output ?? null : undefined;
+        return output;
       }
       if (registered?.state !== "waiting") {
         throw unexpectedWorkflowBackendState(step.action, registered?.state);
@@ -546,10 +616,11 @@ export function createStepController(run, backend, requestId = null) {
 
   /**
    * @param {string} name
+   * @param {WorkflowStepKind} kind
    * @param {unknown} config
    * @returns {StepIdentity & WorkflowRun & { startedAtMs: number }}
    */
-  const nextStepIdentity = (name, config) => {
+  const nextStepIdentity = (name, kind, config) => {
     const nameCount = (nameCounts.get(name) || 0) + 1;
     nameCounts.set(name, nameCount);
     const dependencies = [...dependencyFrontier].toSorted((a, b) => a - b);
@@ -568,6 +639,7 @@ export function createStepController(run, backend, requestId = null) {
       stepName: name,
       nameCount,
       dependencies,
+      kind,
       config,
       startedAtMs: Date.now(),
     };
@@ -583,6 +655,7 @@ export function createStepController(run, backend, requestId = null) {
       name: identity.stepName,
       nameCount: identity.nameCount,
       dependencies: identity.dependencies,
+      kind: identity.kind,
       config: canonicalJson(identity.config),
       ...record,
     });
@@ -624,6 +697,7 @@ export function createStepController(run, backend, requestId = null) {
       cached.nameCount !== identity.nameCount ||
       !Array.isArray(cached.dependencies) ||
       !sameDependencies(cached.dependencies, identity.dependencies) ||
+      cached.kind !== identity.kind ||
       cached.config !== canonicalJson(identity.config)
     ) {
       recordWorkflowReplayCacheOutcome("miss");
@@ -666,7 +740,7 @@ export function createStepController(run, backend, requestId = null) {
         const config = typeof configOrCallback === "function"
           ? null
           : configOrCallback ?? null;
-        identity = nextStepIdentity(name, config);
+        identity = nextStepIdentity(name, WORKFLOW_STEP_KINDS.do, config);
         assertCanStartStep({ stepDo: true, stepDependencies: identity.dependencies });
       } catch (err) {
         if (!isWorkflowSuspended(err)) rememberTerminalStepFailure(err);
@@ -688,9 +762,15 @@ export function createStepController(run, backend, requestId = null) {
         const claim = await workflowBackendCall(backend, "claim-step", identity, requestId);
         assertRunStillOpen();
         if (claim?.state === "complete") {
-          cacheStep(identity, { status: "completed", attempt: 1, output: claim.output ?? null });
+          const output = requiredWorkflowBackendPayload(
+            "claim-step",
+            claim,
+            "complete",
+            "output"
+          );
+          cacheStep(identity, { status: "completed", attempt: 1, output });
           markStepCompleted(identity);
-          return claim.output ?? null;
+          return output;
         }
         if (claim?.state === "waiting") {
           cacheStep(identity, { status: "waiting", attempt: 1, dueAtMs: claim.dueAtMs ?? null });
@@ -698,8 +778,14 @@ export function createStepController(run, backend, requestId = null) {
           throw new WorkflowSuspended();
         }
         if (claim?.state === "failed") {
-          cacheStep(identity, { status: "failed", attempt: 1, error: claim.error ?? null });
-          throw persistedStepError(persistedStepErrorRecord(claim.error), "Workflow step failed");
+          const error = requiredWorkflowBackendPayload(
+            "claim-step",
+            claim,
+            "failed",
+            "error"
+          );
+          cacheStep(identity, { status: "failed", attempt: 1, error });
+          throw persistedStepError(persistedStepErrorRecord(error), "Workflow step failed");
         }
         if (claim?.state !== "run") {
           throw unexpectedWorkflowBackendState("claim-step", claim?.state);
@@ -718,6 +804,8 @@ export function createStepController(run, backend, requestId = null) {
           assertRunStillOpen();
         } catch (err) {
           if (runReturned) throw err;
+          const infrastructureFailure = currentInfrastructureFailure(err);
+          if (infrastructureFailure) throw infrastructureFailure;
           const error = workflowError(err);
           const committed = await workflowBackendCall(backend, "commit-step-error", {
             ...identity,
@@ -738,6 +826,8 @@ export function createStepController(run, backend, requestId = null) {
           rememberTerminalStepFailure(err, error);
           throw err;
         }
+        const infrastructureFailure = currentInfrastructureFailure();
+        if (infrastructureFailure) throw infrastructureFailure;
         const committedStep = workflowStepSuccessBackendBody({
           ...identity,
           attempt,
@@ -773,7 +863,11 @@ export function createStepController(run, backend, requestId = null) {
         assertCanStartStep({ suspending: true });
         const durationMs = parseSleepDurationMs(duration);
         const dueAtMs = Date.now() + durationMs;
-        const identity = nextStepIdentity(name, { type: "sleep", durationMs });
+        const identity = nextStepIdentity(
+          name,
+          WORKFLOW_STEP_KINDS.sleep,
+          { type: "sleep", durationMs }
+        );
         await runSuspendingStep({
           identity,
           action: "register-sleep",
@@ -796,7 +890,11 @@ export function createStepController(run, backend, requestId = null) {
           throw workflowStepError("workflow_invalid_step", "workflow sleepUntil target is invalid");
         }
         const dueAtMsCeil = Math.ceil(dueAtMs);
-        const identity = nextStepIdentity(name, { type: "sleepUntil", dueAtMs });
+        const identity = nextStepIdentity(
+          name,
+          WORKFLOW_STEP_KINDS.sleepUntil,
+          { type: "sleepUntil", dueAtMs }
+        );
         await runSuspendingStep({
           identity,
           action: "register-sleep",
@@ -824,7 +922,11 @@ export function createStepController(run, backend, requestId = null) {
         }
         const timeoutMs = waitOptions.timeout == null ? null : parseSleepDurationMs(waitOptions.timeout);
         const dueAtMs = timeoutMs == null ? null : Date.now() + timeoutMs;
-        const identity = nextStepIdentity(name, { type: "waitForEvent", eventType, timeoutMs });
+        const identity = nextStepIdentity(
+          name,
+          WORKFLOW_STEP_KINDS.waitForEvent,
+          { type: "waitForEvent", eventType, timeoutMs }
+        );
         return await runSuspendingStep({
           identity,
           action: "register-wait",

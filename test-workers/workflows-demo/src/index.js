@@ -1,6 +1,8 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 
+let cachedWorkflowKv;
+
 export class OrderWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     if (event.payload.sleepMs) {
@@ -101,6 +103,13 @@ export class OrderWorkflow extends WorkflowEntrypoint {
         blob: "x".repeat(1024 * 1024),
       }));
     }
+    if (event.payload.kvKey) {
+      cachedWorkflowKv ??= this.env.CACHE;
+      return await step.do("kv-round-trip", async () => {
+        await cachedWorkflowKv.put(event.payload.kvKey, event.payload.id);
+        return await cachedWorkflowKv.get(event.payload.kvKey);
+      });
+    }
     return await step.do("record", async () => {
       if (event.payload.runDelayMs) {
         await new Promise((resolve) => setTimeout(resolve, event.payload.runDelayMs));
@@ -118,6 +127,11 @@ export class OrderWorkflow extends WorkflowEntrypoint {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname.endsWith("/cache-kv")) {
+      cachedWorkflowKv ??= env.CACHE;
+      await cachedWorkflowKv.put("ordinary-cache", "ready");
+      return Response.json({ value: await cachedWorkflowKv.get("ordinary-cache") });
+    }
     if (url.pathname.endsWith("/create")) {
       const id = url.searchParams.get("id") || "order-1";
       const retentionMs = Number(url.searchParams.get("retentionMs") ?? 0);
@@ -146,6 +160,7 @@ export default {
           parallelSteps: url.searchParams.get("parallelSteps") === "1",
           dynamicStepName: url.searchParams.get("dynamicStepName") || "",
           largeStepResult: url.searchParams.get("largeStepResult") === "1",
+          kvKey: url.searchParams.get("kvKey") || "",
           runDelayMs: Number(url.searchParams.get("runDelayMs") ?? 0),
         },
       });

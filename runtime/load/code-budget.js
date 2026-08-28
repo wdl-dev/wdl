@@ -8,6 +8,7 @@ import {
   WDL_RESERVED_MODULE_PREFIX,
   WORKFLOWS_MODULE_NAME,
   WORKFLOWS_MODULE_SOURCE,
+  WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
   isWdlReservedModuleName,
   rewriteCloudflareWorkflowsImports,
 } from "runtime-load-module-rewrite";
@@ -41,11 +42,13 @@ const utf8Decoder = new TextDecoder();
  * @typedef {{
  *   bindingEntries: Array<[string, RuntimeBindingSpec]>,
  *   workflows: RuntimeWorkflowSpec[],
+ *   kvBindings: string[],
  *   d1Bindings: string[],
  *   r2Bindings: string[],
  *   doBindings: string[],
  *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
+ *   workflowClassNames: string[],
  *   hostWrappedClassNames: string[],
  *   needsHostBindingWrapper: boolean,
  * }} RuntimeMetaPlan
@@ -238,15 +241,18 @@ export function analyzeRuntimeMeta(meta) {
   const plan = {
     bindingEntries,
     workflows,
+    kvBindings: [],
     d1Bindings: [],
     r2Bindings: [],
     doBindings: [],
     aiBindings: [],
     workflowBindings: Object.create(null),
+    workflowClassNames: [],
     hostWrappedClassNames: [],
     needsHostBindingWrapper: false,
   };
   for (const [name, spec] of bindingEntries) {
+    if (spec?.type === "kv") plan.kvBindings.push(name);
     if (spec?.type === "ai") {
       if (Object.keys(spec).length !== 1) {
         throw new Error(
@@ -260,6 +266,9 @@ export function analyzeRuntimeMeta(meta) {
     addHostFacadeBinding(plan, spec, name);
   }
   for (const workflow of workflows) {
+    if (typeof workflow?.className === "string" && workflow.className) {
+      plan.workflowClassNames.push(workflow.className);
+    }
     if (typeof workflow?.binding === "string" && workflow.binding) {
       if (
         bindingNames.has(workflow.binding) ||
@@ -317,10 +326,14 @@ function runtimeInjectedModuleSources(
       ? generateHostBindingWrapperModule(
           mainModule,
           {
+            kvBindings: plan.kvBindings,
             d1Bindings: plan.d1Bindings,
             r2Bindings: plan.r2Bindings,
             doBindings: plan.doBindings,
             workflowBindings: plan.workflowBindings,
+            workflowClassNames: plan.workflowClassNames,
+            workflowInfrastructureInvocationProp:
+              WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
             entrypointNames: plan.hostWrappedClassNames,
             aiBindings: plan.aiBindings,
             importableEnvDisabled: Array.isArray(meta.compatibilityFlags) &&

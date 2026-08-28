@@ -83,7 +83,7 @@ WDL 在 JS workerd tier 和 Rust 服务中使用同一套可观测性策略：�
 中心 owner：
 
 - JS 服务通过 `shared/observability.js`（`createLogger`、`createHttpRequestScope` 和 `recordRequestComplete`）输出平台日志。生产 JS 中直接使用 `console.*` 仅限这个 primitive，以及无法 import module 的 embedded source string。
-- Rust 服务通过 `wdl-rust-common::log::emit_log_line` 或其薄 wrapper 输出日志，并通过 `wdl-rust-common::metrics::MetricStore` 暴露 metrics。
+- Rust 服务通过 `wdl-rust-common::log::emit_log_line` 或其薄 wrapper 输出日志，通过 `wdl-rust-common::metrics::MetricStore` 暴露 metrics，并通过 `wdl-rust-common::request_completion::record_request_completion` 共享 HTTP completion metrics/log fields。
 - HTTP request completion 统一由 request-scope helper 或 service middleware 记录，避免 request counter、duration summary、probe suppression、request-id field 和 `request_complete` 日志在各 tier 之间漂移。
 - 服务特定 metrics 应优先使用一个 metric family，并用有界的 `outcome`、`reason`、`kind`、`mode`、`stage`、`status`、`scope`、`operation` 或有限 machine `code` label 区分结果；只有真正提供不同信号时才拆出独立 family。
 
@@ -104,7 +104,7 @@ WDL 在 JS workerd tier 和 Rust 服务中使用同一套可观测性策略：�
 - JS `MetricsRegistry` 在单个 metric name 达到 100 个 series 时输出一次结构化 `metric_cardinality_warning` 日志，之后会丢弃该 metric 的全新 series，但继续更新已有 series。Rust `MetricStore` 当前仍保持同一 warning-only tripwire。该 warning 携带 metric name、观测到的 series 数和配置 limit；tenant-specific 细节本来就不应进入 label。因为这条 warning 由 metrics registry 输出，所以不会被 `LOG_LEVEL` 抑制。
 - `*_max` 是单独的 gauge family，不是 Prometheus summary family 下的额外 sample。Summary 只能输出 `_count`、`_sum` 和 quantile sample。
 - 成功的 probe route（`healthz`、`metrics`、`/_healthz`、`/_metrics`）会抑制 `request_complete` 日志，但 counter 仍会增加；错误仍会记录日志。
-- `LOG_LEVEL` 只控制日志输出，不影响 metrics。高 QPS 部署可以设 `LOG_LEVEL=warn` 来关闭 per-request access log，同时保留 Prometheus signal。
+- `LOG_LEVEL` 只控制日志输出，不影响 metrics。高 QPS 部署可以设 `LOG_LEVEL=warn` 来关闭 per-request access log，同时保留 Prometheus signal。JS request scope 会在求值 lazy extras 前检查 canonical logger，Rust completion middleware 会在构造 integer-duration 和 JSON log fields 前检查相同策略；实际输出的 success line 仍是同步 structured stdout。
 - Service-binding trace propagation 由 caller 显式完成。`ServiceBinding#fetch` 会强制 `x-worker-id` 指向 target，但只有 caller 在 Request 上转发 `x-request-id` 时才保留它；JSRPC 不会跨 isolate 携带 Node async context。
 
 Tail event families：

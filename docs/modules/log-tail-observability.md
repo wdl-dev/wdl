@@ -130,7 +130,9 @@ Central owners:
   production JS is limited to that primitive and to embedded source strings that cannot
   import modules.
 - Rust services emit logs through `wdl-rust-common::log::emit_log_line` or a thin
-  wrapper over it, and expose metrics through `wdl-rust-common::metrics::MetricStore`.
+  wrapper over it, expose metrics through `wdl-rust-common::metrics::MetricStore`, and
+  share HTTP completion metrics/log fields through
+  `wdl-rust-common::request_completion::record_request_completion`.
 - HTTP request completion is recorded once through the request-scope helper or service
   middleware so request counters, duration summaries, probe suppression, request-id
   fields, and `request_complete` logs do not drift per tier.
@@ -207,7 +209,10 @@ Common rules:
 - Successful probe routes (`healthz`, `metrics`, `/_healthz`, `/_metrics`) suppress
   `request_complete` logs while still incrementing counters; errors still log.
 - `LOG_LEVEL` gates log output only. Metrics bypass it, so high-QPS deployments may set
-  `LOG_LEVEL=warn` without losing Prometheus signal.
+  `LOG_LEVEL=warn` without losing Prometheus signal. JS request scopes check the
+  canonical logger before resolving lazy extras; Rust completion middleware checks the
+  same policy before constructing integer-duration and JSON log fields. Emitted success
+  lines remain synchronous structured stdout.
 - Service-binding trace propagation is caller-explicit. `ServiceBinding#fetch` forces
   `x-worker-id` to the target but only preserves `x-request-id` when the caller forwards
   it on the Request; JSRPC does not carry Node async context across isolates.

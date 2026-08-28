@@ -5,6 +5,10 @@ import {
 } from "do-runtime-protocol";
 import { errorMessage } from "shared-errors";
 import { withInternalAuth } from "shared-internal-auth";
+import {
+  parseDoAlarmMutationSuccess,
+  readDoAlarmResponseText,
+} from "shared-do-alarm-response";
 
 /**
  * @typedef {{
@@ -64,28 +68,50 @@ function workflowsBackend(env) {
  */
 async function postWorkflowsAlarm(env, path, body) {
   let response;
-  let parsed;
   try {
     response = await workflowsBackend(env).fetch(`http://workflows${path}`, {
       method: "POST",
       headers: withInternalAuth({ "content-type": "application/json" }, env),
       body: JSON.stringify(body),
     });
-    parsed = await response.json().catch(() => null);
   } catch (err) {
     throw new DoRuntimeError(503, "do_alarm_backend_unavailable", "DO alarm backend request failed", {
       error_message: errorMessage(err),
     });
   }
-  if (!response.ok) {
-    throw new DoRuntimeError(503, "do_alarm_backend_failed", "DO alarm backend rejected the request", {
-      upstream_status: response.status,
-      upstream_error: parsed && typeof parsed === "object" && "error" in parsed
-        ? /** @type {{ error?: unknown }} */ (parsed).error
-        : null,
+  let text;
+  try {
+    text = await readDoAlarmResponseText(response);
+  } catch (err) {
+    if (!response.ok) {
+      throw new DoRuntimeError(503, "do_alarm_backend_failed", "DO alarm backend rejected the request", {
+        upstream_status: response.status,
+      });
+    }
+    throw new DoRuntimeError(503, "do_alarm_result_unknown", "DO alarm backend result is unknown", {
+      error_message: errorMessage(err),
     });
   }
-  return parsed;
+  if (!response.ok) {
+    let upstreamError = null;
+    try {
+      const parsed = JSON.parse(text);
+      upstreamError = parsed && typeof parsed === "object" && "error" in parsed
+        ? /** @type {{ error?: unknown }} */ (parsed).error
+        : null;
+    } catch {}
+    throw new DoRuntimeError(503, "do_alarm_backend_failed", "DO alarm backend rejected the request", {
+      upstream_status: response.status,
+      upstream_error: upstreamError,
+    });
+  }
+  try {
+    return parseDoAlarmMutationSuccess(text);
+  } catch (err) {
+    throw new DoRuntimeError(503, "do_alarm_result_unknown", "DO alarm backend result is unknown", {
+      error_message: errorMessage(err),
+    });
+  }
 }
 
 /**

@@ -763,3 +763,34 @@ test("workflow binding creates and reads an instance through workflows", async (
     assert.match(metrics, line);
   }
 });
+
+test("module-cached Workflow KV facade follows each invocation", async () => {
+  const ns = uniqueNs("wfrt-kv-cache");
+  await deployAndPromote(ns, "shop", {
+    code: WORKER_CODE,
+    vars: { LABEL: "runtime-ok" },
+    bindings: { CACHE: { type: "kv", id: "workflow-cache" } },
+    workflows: [
+      { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+    ],
+  });
+
+  const primed = await gatewayFetch(ns, "/shop/cache-kv");
+  assert.deepEqual(
+    await readIntegrationJson(primed, 200, "ordinary cached KV response"),
+    { value: "ready" }
+  );
+
+  for (const id of ["cached-kv-first", "cached-kv-second"]) {
+    const created = await gatewayFetch(
+      ns,
+      `/shop/create?id=${id}&kvKey=shared`
+    );
+    await readIntegrationJson(created, 200, "workflow response");
+    await waitUntil(`workflow ${id} completes through cached KV facade`, async () => {
+      const status = await gatewayFetch(ns, `/shop/get?id=${id}`);
+      const body = await readIntegrationJson(status, 200, "workflow response");
+      return body.status === "completed" && body.output === id;
+    });
+  }
+});

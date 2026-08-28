@@ -281,7 +281,7 @@ export async function waitForActivation(ns, worker, opts = {}) {
 // if stale state starts leaking.
 export async function resetStack() {
   redisFlushAll();
-  redisSet("wf:schema_version", "2", { db: 2 });
+  redisSet("wf:schema_version", "3", { db: 2 });
   const reload = await adminFetch("/reload", { method: "POST" });
   assertStatus(reload, 200, "gateway reload after reset");
   await waitForGatewayCacheState(

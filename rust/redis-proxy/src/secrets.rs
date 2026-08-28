@@ -155,7 +155,7 @@ impl SecretEnvelopeDecryptor {
         let plaintext = aes_gcm_decrypt(
             &dek,
             &decode_canonical_base64(&envelope.iv, "iv", false)?,
-            &decode_canonical_base64(&envelope.ct, "ct", true)?,
+            decode_canonical_base64(&envelope.ct, "ct", true)?,
             &decode_canonical_base64(&envelope.tag, "tag", false)?,
             payload_aad(hash_key, field).as_bytes(),
         )?;
@@ -296,11 +296,6 @@ fn decode_canonical_base64(value: &str, field: &str, allow_empty: bool) -> AppRe
     let bytes = BASE64
         .decode(value)
         .map_err(|_| secret_decrypt_error(format!("{field} is not valid base64")))?;
-    if BASE64.encode(&bytes) != value {
-        return Err(secret_decrypt_error(format!(
-            "{field} is not canonical base64"
-        )));
-    }
     Ok(bytes)
 }
 
@@ -324,7 +319,13 @@ fn data_key_aad(kid: &str, hash_key: &str, field: &str) -> String {
     format!("WDL-SECRET-DEK\0{kid}\0{}", storage_aad(hash_key, field))
 }
 
-fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ct: &[u8], tag: &[u8], aad: &[u8]) -> AppResult<Vec<u8>> {
+fn aes_gcm_decrypt(
+    key: &[u8],
+    iv: &[u8],
+    ct: impl Into<Vec<u8>>,
+    tag: &[u8],
+    aad: &[u8],
+) -> AppResult<Vec<u8>> {
     if key.len() != AES_256_KEY_BYTES
         || iv.len() != AES_GCM_IV_BYTES
         || tag.len() != AES_GCM_TAG_BYTES
@@ -335,13 +336,13 @@ fn aes_gcm_decrypt(key: &[u8], iv: &[u8], ct: &[u8], tag: &[u8], aad: &[u8]) -> 
     }
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| secret_decrypt_error("secret envelope key has invalid length"))?;
-    let mut plaintext = ct.to_vec();
+    let mut plaintext = ct.into();
     let nonce = Nonce::try_from(iv)
         .map_err(|_| secret_decrypt_error("secret envelope has invalid AES-GCM material"))?;
     let tag = Tag::try_from(tag)
         .map_err(|_| secret_decrypt_error("secret envelope has invalid AES-GCM material"))?;
-    // Decrypt into the ciphertext clone and pass the tag separately so large
-    // secrets do not require a second ct||tag message allocation.
+    // Reuse owned ciphertext when available and pass the tag separately so
+    // large secrets do not require either a clone or a ct||tag allocation.
     cipher
         .decrypt_inout_detached(&nonce, aad, plaintext.as_mut_slice().into(), &tag)
         .map_err(|_| secret_decrypt_error("secret envelope authentication failed"))?;
@@ -377,6 +378,7 @@ mod tests {
         provider: SecretEnvelopeParityProvider,
         vectors: Vec<SecretEnvelopeParityVector>,
         rejections: Vec<SecretEnvelopeParityRejection>,
+        canonical_base64: CanonicalBase64Parity,
     }
 
     #[derive(Deserialize)]
@@ -404,6 +406,25 @@ mod tests {
         hash_key: String,
         field_name: String,
         configured_kid: String,
+    }
+
+    #[derive(Deserialize)]
+    struct CanonicalBase64Parity {
+        accepted: Vec<CanonicalBase64Accepted>,
+        rejected: Vec<CanonicalBase64Rejected>,
+    }
+
+    #[derive(Deserialize)]
+    struct CanonicalBase64Accepted {
+        name: String,
+        value: String,
+        bytes: Vec<u8>,
+    }
+
+    #[derive(Deserialize)]
+    struct CanonicalBase64Rejected {
+        name: String,
+        value: String,
     }
 
     fn parity_fixture() -> SecretEnvelopeParityFixture {
@@ -482,6 +503,26 @@ mod tests {
         let err =
             decode_config_base64("not-base64", SECRET_ENVELOPE_LOCAL_KEY_ENV, false).unwrap_err();
         assert_eq!(err.code, "secret_encryption_unconfigured");
+    }
+
+    #[test]
+    fn standard_base64_engine_matches_canonical_parity_vectors() {
+        let fixture = parity_fixture();
+        for vector in fixture.canonical_base64.accepted {
+            assert_eq!(
+                decode_canonical_base64(&vector.value, &vector.name, true).unwrap(),
+                vector.bytes,
+                "{}",
+                vector.name
+            );
+        }
+        for vector in fixture.canonical_base64.rejected {
+            assert!(
+                decode_canonical_base64(&vector.value, &vector.name, true).is_err(),
+                "{}",
+                vector.name
+            );
+        }
     }
 
     #[test]

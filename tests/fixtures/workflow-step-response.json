@@ -1,0 +1,34 @@
+{
+  "stepKinds": {
+    "do": "do",
+    "sleep": "sleep",
+    "sleepUntil": "sleepUntil",
+    "waitForEvent": "waitForEvent"
+  },
+  "claimTerminalVariants": {
+    "completed": {
+      "state": "complete",
+      "payloadField": "output"
+    },
+    "failed": {
+      "state": "failed",
+      "payloadField": "error"
+    }
+  },
+  "registerWaitTerminalVariants": {
+    "completed": {
+      "state": "complete",
+      "payloadField": "output"
+    }
+  },
+  "replayTerminalVariants": {
+    "completed": {
+      "status": "completed",
+      "payloadField": "output"
+    },
+    "failed": {
+      "status": "failed",
+      "payloadField": "error"
+    }
+  }
+}

@@ -339,6 +339,15 @@ deletable.
   internal alarm jobs to ready, claims one job under a DB 2 run token, and calls
   do-runtime `/internal/do/alarms/dispatch`. do-runtime constructs a native
   `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path.
+- Alarm mutation and delivery responses are capped at 16 KiB and use strict UTF-8 JSON
+  variants. do-runtime accepts only the shim's exact `{ok:true}` or
+  `{ok:true,ignored:true}` actor result, then preserves the established
+  `{ok:true,ignored:boolean}` Workflows wire. Workflows validates that outer shape before
+  finalizing a claimed job. Mutation success requires exact typed `ok`, `jobId`,
+  `changed`, and `deleted` fields: set/delete require a non-empty job id, while
+  whole-worker cleanup requires `jobId:null`. An unreadable or malformed 2xx response
+  rejects into the existing operation-specific compensation and unknown-outcome
+  contract.
 - Alarm mutation, retarget, dispatch, and whole-worker storage cleanup accept only the
   canonical positive JavaScript-safe-integer worker version grammar. Invalid internal or
   persisted versions fail before a job is stored or a worker invoke is attempted.

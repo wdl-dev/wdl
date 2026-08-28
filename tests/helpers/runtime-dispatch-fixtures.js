@@ -22,12 +22,18 @@ export function makeScope() {
   };
 }
 
-/** @param {any} entrypoint */
-export function makeStub(entrypoint) {
+/**
+ * @param {any} entrypoint
+ * @param {{ onGetEntrypoint?: (options: { props?: Record<string, unknown> } | undefined) => void }} [stubOptions]
+ */
+export function makeStub(entrypoint, stubOptions = {}) {
   return {
-    /** @param {string} [name] */
-    getEntrypoint(name) {
-      if (name && entrypoint?.entrypoints) return entrypoint.entrypoints[name];
+    /** @param {string} [name] @param {{ props?: Record<string, unknown> }} [options] */
+    getEntrypoint(name, options) {
+      stubOptions.onGetEntrypoint?.(options);
+      if (name && entrypoint?.entrypoints) {
+        return entrypoint.entrypoints[name];
+      }
       return entrypoint;
     },
   };

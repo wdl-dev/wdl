@@ -78,7 +78,8 @@ test("createHttpRequestScope echoes request id and records final request state",
   assert.equal(observability.calls.complete[0].status, 502);
   assert.equal(observability.calls.complete[0].error, err);
   assert.equal(observability.calls.complete[0].hasError, true);
-  assert.deepEqual(observability.calls.complete[0].extras, { namespace: "tenant-a" });
+  assert.equal(typeof observability.calls.complete[0].extras, "function");
+  assert.deepEqual(observability.calls.complete[0].extras(), { namespace: "tenant-a" });
 });
 
 test("createHttpRequestScope records nullish thrown values as errors", () => {

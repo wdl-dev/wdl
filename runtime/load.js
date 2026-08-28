@@ -38,11 +38,13 @@ const utf8Decoder = new TextDecoder();
  * @typedef {{
  *   bindingEntries: Array<[string, RuntimeBindingSpec]>,
  *   workflows: RuntimeWorkflowSpec[],
+ *   kvBindings: string[],
  *   d1Bindings: string[],
  *   r2Bindings: string[],
  *   doBindings: string[],
  *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
+ *   workflowClassNames: string[],
  *   hostWrappedClassNames: string[],
  *   needsHostBindingWrapper: boolean,
  * }} RuntimeMetaPlan

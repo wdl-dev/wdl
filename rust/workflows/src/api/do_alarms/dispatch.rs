@@ -25,6 +25,7 @@ use super::scripts::{
 };
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
+const DO_ALARM_RESPONSE_MAX_BYTES: usize = 16 * 1024;
 
 fn do_alarm_ready_admission_config(concurrency: usize) -> ReadyAdmissionConfig {
     ReadyAdmissionConfig {
@@ -63,9 +64,62 @@ enum ClaimDoAlarmResult {
     DiscardedCorrupt,
 }
 
+#[derive(Debug)]
 enum DoAlarmDispatchError {
     Retryable(String),
     InFlightUnknown(String),
+}
+
+async fn read_do_alarm_dispatch_body(
+    mut response: reqwest::Response,
+) -> Result<(reqwest::StatusCode, Vec<u8>), DoAlarmDispatchError> {
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > DO_ALARM_RESPONSE_MAX_BYTES as u64)
+    {
+        return Err(DoAlarmDispatchError::Retryable(
+            "do-runtime alarm response is too large".to_string(),
+        ));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|err| {
+        if err.is_timeout() {
+            DoAlarmDispatchError::InFlightUnknown(err.to_string())
+        } else {
+            DoAlarmDispatchError::Retryable(err.to_string())
+        }
+    })? {
+        if body.len().saturating_add(chunk.len()) > DO_ALARM_RESPONSE_MAX_BYTES {
+            return Err(DoAlarmDispatchError::Retryable(
+                "do-runtime alarm response is too large".to_string(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((status, body))
+}
+
+fn parse_do_alarm_dispatch_success(body: &[u8]) -> Result<bool, DoAlarmDispatchError> {
+    let parsed: JsonValue = serde_json::from_slice(body).map_err(|err| {
+        DoAlarmDispatchError::Retryable(format!("do-runtime alarm response is invalid JSON: {err}"))
+    })?;
+    let record = parsed.as_object().ok_or_else(|| {
+        DoAlarmDispatchError::Retryable(
+            "do-runtime alarm response must be a JSON object".to_string(),
+        )
+    })?;
+    if record.get("ok") != Some(&JsonValue::Bool(true)) {
+        return Err(DoAlarmDispatchError::Retryable(
+            "do-runtime alarm response must set ok=true".to_string(),
+        ));
+    }
+    match record.get("ignored") {
+        Some(JsonValue::Bool(ignored)) if record.len() == 2 => Ok(*ignored),
+        _ => Err(DoAlarmDispatchError::Retryable(
+            "do-runtime alarm response has an invalid success variant".to_string(),
+        )),
+    }
 }
 
 enum DoAlarmAdmission {
@@ -218,7 +272,7 @@ async fn dispatch_do_alarm(
     app: &AppState,
     job: &DoAlarmJob,
     dispatch_version: &str,
-) -> Result<JsonValue, DoAlarmDispatchError> {
+) -> Result<bool, DoAlarmDispatchError> {
     let url = format!(
         "http://{}:{}/internal/do/alarms/dispatch",
         app.config.do_runtime_host, app.config.do_runtime_port
@@ -251,25 +305,19 @@ async fn dispatch_do_alarm(
                 DoAlarmDispatchError::Retryable(err.to_string())
             }
         })?;
-    let status = response.status();
-    let body = response.text().await.map_err(|err| {
-        if err.is_timeout() {
-            DoAlarmDispatchError::InFlightUnknown(err.to_string())
-        } else {
-            DoAlarmDispatchError::Retryable(err.to_string())
-        }
-    })?;
+    let (status, body) = read_do_alarm_dispatch_body(response).await?;
     if !status.is_success() {
+        let detail = String::from_utf8_lossy(&body)
+            .chars()
+            .take(1024)
+            .collect::<String>();
         return Err(DoAlarmDispatchError::Retryable(format!(
             "do-runtime returned {}: {}",
             status.as_u16(),
-            body
+            detail
         )));
     }
-    if body.trim().is_empty() {
-        return Ok(JsonValue::Null);
-    }
-    serde_json::from_str(&body).map_err(|err| DoAlarmDispatchError::Retryable(err.to_string()))
+    parse_do_alarm_dispatch_success(&body)
 }
 
 async fn resolve_alarm_dispatch_version(
@@ -492,13 +540,9 @@ async fn finish_claimed_do_alarm(
     dispatch_version: &str,
 ) -> WorkflowResult<()> {
     match dispatch_do_alarm(app, job, dispatch_version).await {
-        Ok(body) => {
+        Ok(ignored) => {
             if finalize_claimed_do_alarm(app, job).await? {
                 increment_do_alarm_outcome(app, "delivered");
-                let ignored = body
-                    .get("ignored")
-                    .and_then(JsonValue::as_bool)
-                    .unwrap_or(false);
                 log(
                     app,
                     if ignored {
@@ -657,11 +701,115 @@ pub(crate) async fn admit_ready_do_alarms(
 #[cfg(test)]
 mod tests {
     use super::{
-        AlarmDispatchVersionDecision, DoAlarmAdmissionResult, ReadyAdmissionResult,
-        alarm_dispatch_version_decision, do_alarm_ready_admission_config,
-        retry_delay_ms_from_parts, saturating_i64_ms,
+        AlarmDispatchVersionDecision, DO_ALARM_RESPONSE_MAX_BYTES, DoAlarmAdmissionResult,
+        DoAlarmDispatchError, ReadyAdmissionResult, alarm_dispatch_version_decision,
+        do_alarm_ready_admission_config, parse_do_alarm_dispatch_success,
+        read_do_alarm_dispatch_body, retry_delay_ms_from_parts, saturating_i64_ms,
     };
+    use serde_json::Value as JsonValue;
+    use std::io::{Read, Write};
     use wdl_rust_common::worker_contract::{SessionPolicyMode, SessionPolicyProjection};
+
+    async fn raw_http_response(
+        response: Vec<u8>,
+    ) -> (reqwest::Response, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let _ = stream.write_all(&response);
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/alarm"))
+            .send()
+            .await
+            .unwrap();
+        (response, server)
+    }
+
+    #[test]
+    fn alarm_dispatch_success_variants_match_the_cross_language_contract() {
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/do-alarm-response.json"
+        ))
+        .expect("DO alarm response fixture parses");
+        assert_eq!(
+            fixture["maxBytes"].as_u64(),
+            Some(DO_ALARM_RESPONSE_MAX_BYTES as u64)
+        );
+        for (name, expected) in [("delivered", false), ("ignored", true)] {
+            let body = serde_json::to_vec(&fixture["dispatchSuccessVariants"][name])
+                .expect("dispatch success serializes");
+            assert_eq!(
+                parse_do_alarm_dispatch_success(&body).expect("valid dispatch response"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn alarm_dispatch_success_variants_fail_closed() {
+        for body in [
+            b"".as_slice(),
+            b"null".as_slice(),
+            br#"{}"#.as_slice(),
+            br#"{"ok":false}"#.as_slice(),
+            br#"{"ok":true}"#.as_slice(),
+            br#"{"ok":true,"extra":true}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_do_alarm_dispatch_success(body),
+                Err(DoAlarmDispatchError::Retryable(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn alarm_dispatch_reader_rejects_oversized_content_length() {
+        let (response, server) = raw_http_response(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                DO_ALARM_RESPONSE_MAX_BYTES + 1
+            )
+            .into_bytes(),
+        )
+        .await;
+
+        let error = read_do_alarm_dispatch_body(response)
+            .await
+            .expect_err("oversized alarm response");
+        server.join().unwrap();
+        assert!(matches!(
+            error,
+            DoAlarmDispatchError::Retryable(message)
+                if message == "do-runtime alarm response is too large"
+        ));
+    }
+
+    #[tokio::test]
+    async fn alarm_dispatch_reader_rejects_oversized_chunked_body() {
+        let body = vec![b'x'; DO_ALARM_RESPONSE_MAX_BYTES + 1];
+        let mut raw = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",
+            body.len()
+        )
+        .into_bytes();
+        raw.extend_from_slice(&body);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (response, server) = raw_http_response(raw).await;
+
+        let error = read_do_alarm_dispatch_body(response)
+            .await
+            .expect_err("oversized chunked alarm response");
+        server.join().unwrap();
+        assert!(matches!(
+            error,
+            DoAlarmDispatchError::Retryable(message)
+                if message == "do-runtime alarm response is too large"
+        ));
+    }
 
     #[test]
     fn alarm_dispatch_version_decision_preserves_fences_and_retargets() {

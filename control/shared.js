@@ -50,6 +50,10 @@ import {
 import { runOptimistic, withOptimisticRetries } from "control-optimistic";
 import { readJsonBody } from "control-json-body";
 import {
+  parseDoAlarmCleanupSuccess,
+  readDoAlarmResponseText,
+} from "shared-do-alarm-response";
+import {
   acquireTokenLock,
   createTokenLock,
   releaseTokenLock,
@@ -674,8 +678,17 @@ export async function cleanupDoAlarmsForWorker({ ns, worker, doStorageId, reques
     requestFailedMessage: "Workflow DO alarm cleanup failed",
     // This endpoint was already bounded before transport consolidation.
     timeoutMs: WORKFLOWS_INTERNAL_TIMEOUT_MS,
+    readBody: async (response) => {
+      const text = await readDoAlarmResponseText(response);
+      if (response.ok) return parseDoAlarmCleanupSuccess(text);
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    },
   });
-  if (!response.ok || !isRecord(body) || body.ok !== true) {
+  if (!response.ok) {
     throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
       message: "Workflow DO alarm cleanup failed",
       ...context,

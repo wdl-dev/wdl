@@ -8,7 +8,7 @@ Workflows 提供 Cloudflare-shaped workflow API，但由 WDL 自己的 Rust engi
 
 Workflow engine 是独立 axum 服务 `workflows`，监听 `:9120`。Runtime 通过 `runtime/workflows-client.js` 暴露 workflow binding，并通过 `runtime/dispatch/workflow-*.js` 处理 dispatch。Control 解析 workflow metadata，并拥有 deploy-time workflow definition keys。本模块文档是当前 workflows 设计参考。
 
-V2 这个名称用于区分当前支持 DAG 的 engine 和早期仅测试使用的 V1 engine。新环境应按 greenfield schema 2 workflows state 组织。
+V2 这个名称用于区分当前支持 DAG 的 engine 和早期仅测试使用的 V1 engine。新环境应按 greenfield schema 3 workflows state 组织。
 
 workerd 提供用户代码执行环境、`WorkflowEntrypoint` class shape、module loading，以及让 runtime 在 frozen worker version 中调用 workflow class 的能力。它不提供 WDL 可复用的本地 workflow engine。WDL 在 workflows 中补齐外部 engine：DB 2 persistence、leases、ready/due scheduling、step replay、sleep、wait、event buffering、lifecycle transition、retention，以及 dispatch 回 runtime。
 
@@ -44,7 +44,9 @@ Control / CLI：
 
 ## Redis / Storage 合同
 
-Workflows 独占 Valkey DB 2 作为 instance execution state。Control 在 DB 0 拥有 `wf:defs:<ns>:<worker>`，用于 deploy-time workflow key allocation 和稳定 identity。该 Hash 会保留 retired name 直到 whole-worker delete；definition list 只会为当前 active worker 枚举这段 retired history，而 deploy 和单个 workflow 的 status/lifecycle 路径只读取自己需要的 name。
+Workflows 独占 Valkey DB 2 作为 instance execution state；自定义 `WORKFLOWS_REDIS_URL` 只选择 Redis endpoint，service 会把它规范化到 DB 2。Control 在 DB 0 拥有 `wf:defs:<ns>:<worker>`，用于 deploy-time workflow key allocation 和稳定 identity。该 Hash 会保留 retired name 直到 whole-worker delete；definition list 只会为当前 active worker 枚举这段 retired history，而 deploy 和单个 workflow 的 status/lifecycle 路径只读取自己需要的 name。
+
+Workflows 启动时会比较自身解析后的 connection address 与有效 DB 2，以及 `CONTROL_REDIS_URL` 和独立 data plane 配置存在时的 `DATA_REDIS_URL`；数据库 identity 相同会在连接前失败。使用独立 data plane 的部署必须把 canonical `DATA_REDIS_URL` 同时提供给 Workflows service，使 ownership check 能覆盖该数据库；URL credential 和无关 query setting 不改变数据库 identity。
 
 关键概念：
 
@@ -60,7 +62,7 @@ Key families：
 | Key | Type | Owner | Authority | Cleanup/delete 语义 |
 |---|---|---|---|---|
 | `wf:defs:<ns>:<worker>` | Hash | Control | deploy metadata 的 workflow definition/key allocation 权威记录。 | Worker delete 在 lifecycle check 通过后删除 definitions。 |
-| `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker。 | 当前值是 `2`；greenfield deployment 从 schema 2 开始。 |
+| `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker。 | 当前值是 `3`；greenfield deployment 从 schema 3 开始。 |
 | `wf:instance:{<ns>:<workflowKey>:<instanceId>}:state` | Hash | workflows | instance state 权威记录。 | Terminal retention 和 lifecycle cleanup 删除过期 state。 |
 | `wf:instance:{...}:payloads` | Hash | workflows | aggregate cap 下的 payload ref storage。 | 随 instance state family 删除。 |
 | `wf:instance:{...}:steps`、`step-summaries`、`step-summary-index` | Hash/ZSET | workflows | step replay/history state 权威记录。 | 随 instance 删除；history read 有界，并拒绝 summary/index 数量不一致或请求页中 summary 缺失。 |
@@ -118,12 +120,13 @@ Scheduling 是 hint-based，但状态权威在 instance hash：
 
 Step facade 实现 durable replay：
 
-- `step.do(name, [config], callback)` 使用 ordinal、name、same-name count、DAG dependencies 和 canonical config hash 作为 replay identity。已完成且匹配的 step 返回 stored result；shape mismatch 会以 `workflow_step_mismatch` fail closed。
+- `step.do(name, [config], callback)` 使用 backend-owned operation kind、ordinal、name、same-name count、DAG dependencies 和 canonical config hash 作为 replay identity。已完成且匹配的 step 返回 stored result；shape mismatch 会以 `workflow_step_mismatch` fail closed。
 - 单个 step 最多记录 1000 条 dependency edge。如果超过 1000 个尚未 join 的 sibling 汇入后续 `step.do`，workflows 会以 `request_too_large` 拒绝该 step request；用中间 join 控制 fan-in。
 - 单个 runtime dispatch turn 最多允许 1000 个 in-flight workflow step，也最多启动 1000 个 fresh backend step。这会在 root/sibling fan-out 形成 backend claim/commit 洪峰前先限流；completed/failed replay cache hit 不计入 fresh-start 上限。waiting replay record 会重新检查 workflows backend，并计入该上限，以便在再次 suspend 前修复 due / wait index。并行 `step.do` sibling 必须在同一个同步 fan-out batch 中创建，不能先 `await` 其中一个 sibling 再继续启动新的 durable step；await 后必须等整个 batch 完成，确保 replay 计算出同样的 dependency frontier。
 - `step.sleep()` 和 `step.sleepUntil()` 记录 waiting state 和 due time，然后用 reserved internal sentinel suspend 当前 run。
 - `step.waitForEvent()` 先检查 buffered event，再记录 wait 和可选 timeout。`sendEvent` 会在 wait 出现前保存 event payload 和 type index，因此支持 event-before-wait。
 - Runtime 从头 replay 用户代码。它会 lazy fetch replay pages，也可以在进程内 advisory cache，但 DB 2 step state 始终是权威。
+- Workflows step response 是 tagged variant：`claim-step` 或 `register-wait` 的 `complete` response 和 replay 的 `completed` record 必须各自拥有 `output` 字段，failed variant 必须拥有 `error` 字段。显式 JSON `null` 是合法 payload。畸形 advisory replay record 会回退到权威 `claim-step`；畸形 authoritative response 属于 result-unknown，Runtime 会重试 run，而不是伪造 null。每个新 step record 还会携带 backend-owned operation kind（`do`、`sleep`、`sleepUntil` 或 `waitForEvent`）；缺失或不匹配的 replay kind 会视为 cache miss，并回退到对应的权威 endpoint。
 - Replay step record 与它引用的 payload 共用完整的 generation、run-token、creation-time、lease 和 active-status fence。只有该 fence 仍有效时才会解析引用的 payload，因此 restart 不会把另一 execution generation 的 payload 混入当前 page。
 - V2 会为 `step.do` 持久化 DAG。runtime 按同步调用顺序分配 ordinal，把已完成 step 视作当前 dependency frontier，并把 frontier 存到后续 step 上。`Promise.all([step.do(...), step.do(...)])` 会产生拥有相同 parent 的 sibling nodes；join 后再调用的 `step.do` 会依赖这两个 sibling。依赖调度、join、cancel 仍由用户代码的 `await` / `Promise` 结构表达；workflows 持久化最终 graph，不另跑一个独立 graph planner。
 
@@ -163,8 +166,10 @@ workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/
 - 跨 tier Workflow protocol 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程；受影响的具体 service 写入该版本 CHANGELOG。
 - 必需的 runtime dispatch deadline 是一个明确的 sender-first 例外：先滚动 workflows 并等待全部旧 Workflows task drain，再滚动 user-runtime 和 system-runtime。旧 Runtime 会忽略 additive field，新 Runtime 会拒绝缺少该字段的旧 sender。
 - DB 2 是 workflow instance state 边界；不要从 control/runtime/scheduler 直接写 DB 2。
-- workflows 在 DB 2 中持久化 `wf:schema_version`。Schema `2` 会在 step record 和 summary 中存储 DAG dependency edges。当前部署按该 schema 的 greenfield state 处理；没有新的设计前，不要为 in-flight legacy workflow instance 添加原地迁移路径。
-- 如果开发或维护环境启动时 workflows DB 2 中已有未带版本的 `wf:*` runtime key，应先停止 workflows，清理该 DB 2 runtime state 后再启动。WDL workflow definitions 位于 DB 0 的 `wf:defs:*`，不属于 DB 2 runtime-state cleanup 范围。
+- workflows 在 DB 2 中持久化 `wf:schema_version`。Schema `3` 会在 step record 中存储 DAG dependency edges 与 backend-owned operation kind。缺失 kind 会 fail closed；schema-2 record 不做有歧义的原地 adoption。
+- Schema 3 是一次 maintenance reset。先滚动 user-runtime 和 system-runtime，并等待全部旧 Runtime reader drain；随后暂停 tenant dispatch，并确认 DB 2 中不存在任何必须保留的 state，包括终态 Workflow 结果、step history 或 Durable Object alarm。停止 Scheduler、将 Workflows 缩容到零，等待旧 task 完全退出并清空 DB 2（包括 `wf:schema_version`），再以无新旧 Workflows overlap 的方式启动新版 Workflows 与 Scheduler，最后恢复 dispatch。DB 0 的 `wf:defs:*` definition 不属于该 reset。
+- 遗留部署如果使用了任何非 DB 2 的 Workflows 数据库，必须把本次升级视为 configuration migration；schema 3 不迁移旧 runtime state。应先删除非 DB 2 的 `WORKFLOWS_REDIS_DB` override；旧数据库若与其它 owner 共享则绝不能清空。只有原 endpoint 的 DB 2 为空且由 Workflows 独占时才能直接使用，否则应把 `WORKFLOWS_REDIS_URL` 指向一个 DB 2 为空的新 endpoint；结构化解析后，该 URL 编码的任何 DB selection 都会被覆盖为 `2`。
+- 只包含 schema-2 Workflows runtime state 的专用 DB 2 是支持的 reset 来源。包含其它 subsystem 所有 key 的共享 DB 2 属于不支持配置：不得做 prefix cleanup 或清空该库，必须把 Workflows 切换到一个 DB 2 为空的新 endpoint。非空但缺少 `wf:schema_version` 的 DB 2 会拒绝启动；只有 operator 确认该库由 Workflows 独占且可以丢弃后才能清空。WDL workflow definitions 位于 DB 0 的 `wf:defs:*`，不属于 DB 2 cleanup。
 
 ## 保护该模块的测试
 

@@ -2401,6 +2401,7 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
     },
   };
   wrapWorkerCodeForHostBindings(workerCode, {
+    bindings: { CACHE: { type: "kv", id: "cache" } },
     workflows: [
       {
         name: "orders",
@@ -2422,12 +2423,15 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /export \{ WorkflowEntrypoint \}/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /this\.name = "NonRetryableError"/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \{ Workflow \}/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const KV_BINDINGS = \["CACHE"\]/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const WORKFLOW_BINDINGS = \["ORDERS"\]/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback\(request, wrapEnv\(this\.env, requestIdFromEventArg\(request\)\)\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.OrderWorkflow/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /takeWorkflowInfrastructureInvocationId\(ctx\)/);
+  assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /__WdlRunWorkflow__/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from "\.\/worker\.js";/);
 });
 

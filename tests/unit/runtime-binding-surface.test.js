@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importRepositoryModule, repositoryFileUrl } from "../helpers/load-shared-module.js";
+import { importRepositoryModule, moduleDataUrl, repositoryFileUrl } from "../helpers/load-shared-module.js";
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { RUNTIME_METRICS_NOOP_URL } from "../helpers/mocks/runtime-metrics.js";
 import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
@@ -9,6 +9,15 @@ const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_BASE64_URL = repositoryFileUrl("shared/base64.js");
 const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
+const RUNTIME_INFRASTRUCTURE_ERROR_STUB_URL = moduleDataUrl(`
+export function isRuntimeInfrastructureError() { return false; }
+export function runtimeInfrastructureError(message) { return new Error(message); }
+`);
+const KV_CAPACITY_STUB_URL = moduleDataUrl(`
+export function acquireKvReadLease() { return { release() {} }; }
+export function kvReadCapacityError() { return new Error("capacity"); }
+export function kvReadTimeoutError() { return new Error("timeout"); }
+`);
 
 const toBytesStub = `const toBytes = (value) => {
   if (typeof value === "string") return new TextEncoder().encode(value);
@@ -43,6 +52,8 @@ test("KV host RPC surface exposes only public namespace methods", async () => {
     [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
     [/import \{ toBytes \} from "runtime-lib";/, toBytesStub],
     [/from "runtime-metrics";/, `from ${JSON.stringify(RUNTIME_METRICS_NOOP_URL)};`],
+    [/from "runtime-infrastructure-error";/, `from ${JSON.stringify(RUNTIME_INFRASTRUCTURE_ERROR_STUB_URL)};`],
+    [/from "runtime-bindings-kv-capacity";/, `from ${JSON.stringify(KV_CAPACITY_STUB_URL)};`],
     [/from "shared-base64";/, `from ${JSON.stringify(SHARED_BASE64_URL)};`],
     [/from "shared-bounded-body";/, `from ${JSON.stringify(SHARED_BOUNDED_BODY_URL)};`],
     [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],

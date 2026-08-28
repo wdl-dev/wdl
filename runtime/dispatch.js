@@ -31,12 +31,17 @@ import {
   WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
   workflowError,
   workflowInFlightSettleTimeoutError,
+  workflowInfrastructureError,
   workflowInfrastructureLogError,
 } from "runtime-dispatch-workflow-step";
+import {
+  beginRuntimeInfrastructureInvocation,
+} from "runtime-infrastructure-error";
+import { WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP } from "runtime-load-module-rewrite";
 /**
  * @typedef {{ respond(response: Response): Response, markError(err: unknown): void, requestId: string }} DispatchScope
  * @typedef {{ fetch(request: Request): Promise<Response>, scheduled?(controller: unknown): Promise<unknown>, queue?(queueName: string, messages: unknown[]): Promise<unknown>, run?(event: unknown, step: unknown): Promise<unknown> }} LoadedEntrypoint
- * @typedef {{ getEntrypoint(name?: string): LoadedEntrypoint }} LoadedWorkerStub
+ * @typedef {{ getEntrypoint(name?: string, options?: { props?: Record<string, unknown> }): LoadedEntrypoint }} LoadedWorkerStub
  * @typedef {{ namespace: string, workerName: string, workerId: string, requestId: string | null }} RuntimeIdentity
  * @typedef {{ waitUntil?(promise: Promise<unknown>): void }} RuntimeCtx
  * @typedef {{ WORKFLOWS_BACKEND?: { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> } | null, WDL_INTERNAL_AUTH_TOKEN?: unknown, [key: string]: unknown }} RuntimeEnv
@@ -224,14 +229,28 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
     phase: "start",
     fields,
   });
+  const infrastructureInvocation = beginRuntimeInfrastructureInvocation();
   let step = null;
   try {
-    const entry = stub.getEntrypoint(run.className);
-    step = createStepController(run, workflowBackendForStep(env), scope.requestId);
+    const entry = stub.getEntrypoint(run.className, {
+      props: {
+        [WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP]: infrastructureInvocation.id,
+      },
+    });
+    step = createStepController(
+      run,
+      workflowBackendForStep(env),
+      scope.requestId,
+      infrastructureInvocation.diagnostic
+    );
     if (typeof entry.run !== "function") {
       throw workflowStepError("workflow_invalid_step", `workflow class ${run.className} does not expose run()`);
     }
     const output = await entry.run(run.event, step.facade);
+    const completedInfrastructureDiagnostic = infrastructureInvocation.diagnostic();
+    if (completedInfrastructureDiagnostic) {
+      throw workflowInfrastructureError(completedInfrastructureDiagnostic);
+    }
     if (step.hasInFlightSteps()) {
       step.closeForRunReturn();
       throw workflowStepError("workflow_invalid_step", "workflow run returned while workflow steps were still in flight");
@@ -279,6 +298,10 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
         step.closeForRunReturn();
         caught = workflowInFlightSettleTimeoutError();
       }
+    }
+    const caughtInfrastructureDiagnostic = infrastructureInvocation.diagnostic();
+    if (caughtInfrastructureDiagnostic) {
+      caught = workflowInfrastructureError(caughtInfrastructureDiagnostic);
     }
     let terminalStepError = null;
     if (step?.hasTerminalStepFailure()) {
@@ -372,7 +395,11 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
     }
     return scope.respond(response);
   } finally {
-    step?.closeForRunReturn();
+    try {
+      step?.closeForRunReturn();
+    } finally {
+      infrastructureInvocation.close();
+    }
   }
 }
 

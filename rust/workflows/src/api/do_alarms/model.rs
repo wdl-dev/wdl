@@ -370,6 +370,53 @@ mod tests {
     }
 
     #[test]
+    fn do_alarm_mutation_response_matches_the_cross_language_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/do-alarm-response.json"
+        ))
+        .expect("DO alarm response fixture parses");
+        let response = serde_json::to_value(DoAlarmMutationResponse {
+            ok: true,
+            job_id: Some("doa-test".to_string()),
+            changed: true,
+            deleted: 0,
+        })
+        .expect("DO alarm mutation response serializes");
+        assert_eq!(response, fixture["mutationSuccessVariants"]["set"]);
+        let cleanup_response = serde_json::to_value(DoAlarmMutationResponse {
+            ok: true,
+            job_id: None,
+            changed: true,
+            deleted: 2,
+        })
+        .expect("DO alarm cleanup response serializes");
+        assert_eq!(
+            cleanup_response,
+            fixture["mutationSuccessVariants"]["cleanup"]
+        );
+        let mut fields = response
+            .as_object()
+            .expect("DO alarm mutation response is an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(
+            fields,
+            fixture["mutationRequiredFields"]
+                .as_array()
+                .expect("mutation required fields is an array")
+                .iter()
+                .map(|field| field
+                    .as_str()
+                    .expect("mutation field is a string")
+                    .to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(response["ok"], true);
+    }
+
+    #[test]
     fn do_alarm_mutation_ingress_rejects_noncanonical_identity() {
         for (field, value) in [
             ("ns", "Demo"),

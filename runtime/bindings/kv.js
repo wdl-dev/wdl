@@ -15,8 +15,21 @@
 
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { toBytes } from "runtime-lib";
+import {
+  acquireKvReadLease,
+  kvReadCapacityError,
+  kvReadTimeoutError,
+} from "runtime-bindings-kv-capacity";
 import { recordBindingOperation } from "runtime-metrics";
-import { base64ToBytes, bytesToBase64 } from "shared-base64";
+import {
+  isRuntimeInfrastructureError,
+  runtimeInfrastructureError,
+} from "runtime-infrastructure-error";
+import {
+  canonicalBase64ToBytes,
+  bytesToBase64,
+  prepareCanonicalBase64Values,
+} from "shared-base64";
 import { readBoundedStreamBytes } from "shared-bounded-body";
 import { discardResponseBody } from "shared-respond";
 import {
@@ -27,19 +40,20 @@ import {
 } from "runtime-bindings-proxy";
 
 export const KV_VALUE_MAX_BYTES = 25 * 1024 * 1024;
+export const KV_READ_RESPONSE_MAX_BYTES = 36 * 1024 * 1024;
 export const KV_LIST_LIMIT_MAX = 1000;
 const KV_LIST_LIMIT_DEFAULT = 1000;
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * @typedef {{ ns: string, id: string }} KVBindingProps
  * @typedef {{ REDIS_PROXY_URL?: unknown, SERVICE_NAME?: string, WDL_INTERNAL_AUTH_TOKEN?: unknown }} KVBindingEnv
- * @typedef {{ ctx: { props: KVBindingProps }, env: KVBindingEnv }} KVBinding
+ * @typedef {{ ctx: { props: KVBindingProps, waitUntil(promise: Promise<unknown>): void }, env: KVBindingEnv }} KVBinding
  * @typedef {string | { type?: string }} KVGetType
  * @typedef {{ expirationTtl?: unknown, expiration?: unknown, metadata?: unknown }} KVPutOptions
  * @typedef {{ prefix?: unknown, cursor?: unknown, limit?: unknown, metadata?: unknown }} KVListOptions
- * @typedef {{ key: string, value_b64?: string | null, metadata?: unknown }} KVBatchEntry
  */
 
 /** @param {KV} kv @returns {KVBinding} */
@@ -102,21 +116,28 @@ function coerceValue(bytes, typeOrOpts) {
   if (type === "text") return utf8Decoder.decode(bytes);
   if (type === "json") return JSON.parse(utf8Decoder.decode(bytes));
   if (type === "arrayBuffer") {
-    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    if (
+      bytes.buffer instanceof ArrayBuffer &&
+      bytes.byteOffset === 0 &&
+      bytes.byteLength === bytes.buffer.byteLength
+    ) {
+      return bytes.buffer;
+    }
+    return bytes.slice().buffer;
   }
   if (type === "stream") return new Response(/** @type {BodyInit} */ (bytes)).body;
   throw new Error(`KV: unsupported type "${type}"`);
 }
 
 /**
- * @param {string | null | undefined} valueB64
+ * @param {Uint8Array | null} value
  * @param {KVGetType | undefined} typeOrOpts
  * @returns {unknown}
  */
-function coerceBatchValue(valueB64, typeOrOpts) {
-  if (valueB64 == null) return null;
+function coerceBatchValue(value, typeOrOpts) {
+  if (value === null) return null;
   assertBatchType(typeOrOpts);
-  return coerceValue(base64ToBytes(valueB64), typeOrOpts);
+  return coerceValue(value, typeOrOpts);
 }
 
 /**
@@ -171,16 +192,220 @@ async function proxyFetch(kv, path, init, params) {
     // 404 is load-bearing on /kv/get (missing key -> null); no other route
     // returns it. Cancel the body without reading so proxy-side error text
     // doesn't land verbatim in the Error surfaced to user code.
-    okStatuses: [404],
+    okStatuses: path === "/kv/get" ? [404] : undefined,
   });
+}
+
+/**
+ * @template T
+ * @param {KVBinding} kv
+ * @param {Response} response
+ * @param {(bytes: Uint8Array) => T} consume
+ * @param {string | null} [infrastructureInvocationId]
+ * @returns {Promise<T>}
+ */
+async function consumeReadResponse(
+  kv,
+  response,
+  consume,
+  infrastructureInvocationId = null
+) {
+  const aborter = new AbortController();
+  const lease = acquireKvReadLease(kv, response, () => {
+    aborter.abort(kvReadTimeoutError(infrastructureInvocationId));
+  });
+  if (!lease) {
+    await discardResponseBody(response);
+    throw kvReadCapacityError(infrastructureInvocationId);
+  }
+  try {
+    let bytes;
+    try {
+      if (!response.body && lease.contentLength !== null && lease.contentLength > 0) {
+        throw new TypeError("KV response body is missing despite a non-zero Content-Length");
+      }
+      bytes = response.body
+        ? await readBoundedStreamBytes(
+          response.body,
+          KV_READ_RESPONSE_MAX_BYTES,
+          () => runtimeInfrastructureError(
+            "KV read response is too large",
+            "Runtime KV response exceeded its wire byte limit",
+            infrastructureInvocationId
+          ),
+          aborter.signal,
+          lease.contentLength
+        )
+        : new Uint8Array();
+    } catch (error) {
+      if (isRuntimeInfrastructureError(error)) throw error;
+      throw runtimeInfrastructureError(
+        "KV read response failed",
+        `Runtime KV response body failed: ${error instanceof Error ? error.message : String(error)}`,
+        infrastructureInvocationId
+      );
+    }
+    return consume(bytes);
+  } finally {
+    lease.release(aborter.signal.aborted ? "deadline" : "completed");
+  }
+}
+
+/** @param {unknown} value */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** @param {string} diagnostic @param {string | null} infrastructureInvocationId */
+function invalidKvEnvelope(diagnostic, infrastructureInvocationId) {
+  return runtimeInfrastructureError(
+    "KV read response is invalid",
+    diagnostic,
+    infrastructureInvocationId
+  );
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {string | null} infrastructureInvocationId
+ * @param {string} diagnostic
+ * @returns {Record<string, unknown>}
+ */
+function parseKvEnvelopeRecord(bytes, infrastructureInvocationId, diagnostic) {
+  let parsed;
+  try {
+    parsed = /** @type {unknown} */ (JSON.parse(strictUtf8Decoder.decode(bytes)));
+  } catch {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+  if (!isRecord(parsed)) throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  return /** @type {Record<string, unknown>} */ (parsed);
+}
+
+/**
+ * @param {string} value
+ * @param {string | null} infrastructureInvocationId
+ * @param {string} diagnostic
+ */
+function decodeKvEnvelopeBase64(value, infrastructureInvocationId, diagnostic) {
+  try {
+    return canonicalBase64ToBytes(value);
+  } catch {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+}
+
+/**
+ * @param {Array<{ value_b64: string | null }>} entries
+ * @param {string | null} infrastructureInvocationId
+ */
+function prepareKvBatchValues(entries, infrastructureInvocationId) {
+  const diagnostic = "Runtime KV batch response envelope is invalid";
+  try {
+    return prepareCanonicalBase64Values(entries.map((entry) => entry.value_b64));
+  } catch {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {string | null} infrastructureInvocationId
+ * @param {string[]} requestedKeys
+ * @returns {Array<{ key: string, value_b64: string | null, metadata: unknown }>}
+ */
+function parseKvBatchEnvelope(bytes, infrastructureInvocationId, requestedKeys) {
+  const diagnostic = "Runtime KV batch response envelope is invalid";
+  const body = parseKvEnvelopeRecord(bytes, infrastructureInvocationId, diagnostic);
+  if (!Array.isArray(body.entries) || body.entries.length !== requestedKeys.length) {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+  for (let index = 0; index < body.entries.length; index += 1) {
+    const entry = body.entries[index];
+    if (
+      !isRecord(entry) ||
+      typeof entry.key !== "string" ||
+      entry.key !== requestedKeys[index] ||
+      !Object.hasOwn(entry, "value_b64") ||
+      (entry.value_b64 !== null && typeof entry.value_b64 !== "string") ||
+      !Object.hasOwn(entry, "metadata") ||
+      (entry.value_b64 === null && entry.metadata !== null)
+    ) {
+      throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+    }
+  }
+  return /** @type {Array<{ key: string, value_b64: string | null, metadata: unknown }>} */ (
+    body.entries
+  );
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {string | null} infrastructureInvocationId
+ */
+function parseKvMetadataEnvelope(bytes, infrastructureInvocationId) {
+  const diagnostic = "Runtime KV metadata response envelope is invalid";
+  const body = parseKvEnvelopeRecord(bytes, infrastructureInvocationId, diagnostic);
+  const valueB64 = body.value_b64;
+  if (!Object.hasOwn(body, "value_b64") || !Object.hasOwn(body, "metadata")) {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+  if (valueB64 === null && body.metadata !== null) {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+  let value;
+  if (valueB64 === null) {
+    value = null;
+  } else if (typeof valueB64 === "string") {
+    value = decodeKvEnvelopeBase64(valueB64, infrastructureInvocationId, diagnostic);
+  } else {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+  return {
+    value,
+    metadata: body.metadata,
+  };
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {string | null} infrastructureInvocationId
+ * @param {boolean} includeMetadata
+ */
+function parseKvListEnvelope(bytes, infrastructureInvocationId, includeMetadata) {
+  const diagnostic = "Runtime KV list response envelope is invalid";
+  const body = parseKvEnvelopeRecord(bytes, infrastructureInvocationId, diagnostic);
+  if (!Array.isArray(body.keys) || typeof body.list_complete !== "boolean") {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+  /** @type {Array<{ name: string, metadata?: unknown }>} */
+  const keys = [];
+  for (const entry of body.keys) {
+    if (
+      !isRecord(entry) ||
+      typeof entry.name !== "string" ||
+      (includeMetadata && !Object.hasOwn(entry, "metadata"))
+    ) {
+      throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+    }
+    keys.push(includeMetadata
+      ? { name: entry.name, metadata: entry.metadata }
+      : { name: entry.name });
+  }
+  if (body.list_complete) return { keys, list_complete: true };
+  if (typeof body.cursor !== "string" || body.cursor.length === 0) {
+    throw invalidKvEnvelope(diagnostic, infrastructureInvocationId);
+  }
+  return { keys, list_complete: false, cursor: body.cursor };
 }
 
 export class KV extends WorkerEntrypoint {
   /**
    * @param {string | string[]} key
    * @param {KVGetType} [typeOrOpts]
+   * @param {string | null} [infrastructureInvocationId]
    */
-  async get(key, typeOrOpts) {
+  async get(key, typeOrOpts, infrastructureInvocationId = null) {
     const kv = kvBinding(this);
     return recordBindingOperation(serviceName(kv), "kv", "get", async () => {
       if (Array.isArray(key)) {
@@ -190,12 +415,20 @@ export class KV extends WorkerEntrypoint {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ keys: key }),
         });
-        const body = await res.json();
-        return new Map(
-          body.entries.map(/** @param {KVBatchEntry} entry */ (entry) => [
-            entry.key,
-            coerceBatchValue(entry.value_b64 ?? null, typeOrOpts),
-          ])
+        return consumeReadResponse(
+          kv,
+          res,
+          (bytes) => {
+            const entries = parseKvBatchEnvelope(bytes, infrastructureInvocationId, key);
+            const values = prepareKvBatchValues(entries, infrastructureInvocationId);
+            return new Map(
+              values.map((value, index) => [
+                entries[index].key,
+                coerceBatchValue(value, typeOrOpts),
+              ])
+            );
+          },
+          infrastructureInvocationId
         );
       }
       const res = await proxyFetch(kv, "/kv/get", undefined, { key });
@@ -203,15 +436,21 @@ export class KV extends WorkerEntrypoint {
         await discardResponseBody(res);
         return null;
       }
-      return coerceValue(new Uint8Array(await res.arrayBuffer()), typeOrOpts);
+      return consumeReadResponse(
+        kv,
+        res,
+        (bytes) => coerceValue(bytes, typeOrOpts),
+        infrastructureInvocationId
+      );
     });
   }
 
   /**
    * @param {string | string[]} key
    * @param {KVGetType} [typeOrOpts]
+   * @param {string | null} [infrastructureInvocationId]
    */
-  async getWithMetadata(key, typeOrOpts) {
+  async getWithMetadata(key, typeOrOpts, infrastructureInvocationId = null) {
     const kv = kvBinding(this);
     return recordBindingOperation(serviceName(kv), "kv", "getWithMetadata", async () => {
       if (Array.isArray(key)) {
@@ -221,21 +460,36 @@ export class KV extends WorkerEntrypoint {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ keys: key, metadata: true }),
         });
-        const body = await res.json();
-        return new Map(
-          body.entries.map(/** @param {KVBatchEntry} entry */ (entry) => [
-            entry.key,
-            {
-              value: coerceBatchValue(entry.value_b64 ?? null, typeOrOpts),
-              metadata: entry.metadata ?? null,
-            },
-          ])
+        return consumeReadResponse(
+          kv,
+          res,
+          (bytes) => {
+            const entries = parseKvBatchEnvelope(bytes, infrastructureInvocationId, key);
+            const values = prepareKvBatchValues(entries, infrastructureInvocationId);
+            return new Map(
+              values.map((value, index) => [
+                entries[index].key,
+                {
+                  value: coerceBatchValue(value, typeOrOpts),
+                  metadata: entries[index].metadata,
+                },
+              ])
+            );
+          },
+          infrastructureInvocationId
         );
       }
       const res = await proxyFetch(kv, "/kv/get-with-metadata", undefined, { key });
-      const body = await res.json();
-      const value = body.value_b64 ? coerceValue(base64ToBytes(body.value_b64), typeOrOpts) : null;
-      return { value, metadata: body.metadata ?? null };
+      return consumeReadResponse(
+        kv,
+        res,
+        (bytes) => {
+          const body = parseKvMetadataEnvelope(bytes, infrastructureInvocationId);
+          const value = body.value === null ? null : coerceValue(body.value, typeOrOpts);
+          return { value, metadata: body.metadata };
+        },
+        infrastructureInvocationId
+      );
     });
   }
 
@@ -294,14 +548,20 @@ export class KV extends WorkerEntrypoint {
 
   /**
    * @param {KVListOptions} [opts]
+   * @param {string | null} [infrastructureInvocationId]
    */
-  async list(opts = {}) {
+  async list(opts = {}, infrastructureInvocationId = null) {
     const kv = kvBinding(this);
     return recordBindingOperation(serviceName(kv), "kv", "list", async () => {
       const { prefix = "", cursor, metadata } = opts;
       const limit = normalizeListLimit(opts.limit);
       const res = await proxyFetch(kv, "/kv/list", undefined, { prefix, limit, cursor, metadata: metadata === true ? "true" : undefined });
-      return res.json();
+      return consumeReadResponse(
+        kv,
+        res,
+        (bytes) => parseKvListEnvelope(bytes, infrastructureInvocationId, metadata === true),
+        infrastructureInvocationId
+      );
     });
   }
 }

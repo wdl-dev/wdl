@@ -29,7 +29,7 @@ resource "aws_ecs_task_definition" "workflows" {
     environment = [
       { name = "REDIS_URL", value = "redis://${local.redis_addr}" },
       { name = "CONTROL_REDIS_URL", value = "redis://${local.redis_addr}" },
-      { name = "WORKFLOWS_REDIS_DB", value = "2" },
+      { name = "DATA_REDIS_URL", value = local.data_redis_url },
       { name = "WORKFLOWS_PORT", value = "9120" },
       # Long tool steps (e.g. a full deploy) can exceed the 60s code default and
       # get re-dispatched mid-step; give a dispatch one turn's headroom.

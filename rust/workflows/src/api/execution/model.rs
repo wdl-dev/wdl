@@ -16,6 +16,10 @@ use super::super::{
 // summaries/indexes never become a backdoor for large tenant payload storage.
 pub(super) const INLINE_STEP_PAYLOAD_BYTES_MAX: usize = 2 * 1024;
 const MAX_STEP_DEPENDENCIES: usize = 1000;
+pub(super) const STEP_KIND_DO: &str = "do";
+pub(super) const STEP_KIND_SLEEP: &str = "sleep";
+pub(super) const STEP_KIND_SLEEP_UNTIL: &str = "sleepUntil";
+pub(super) const STEP_KIND_WAIT_FOR_EVENT: &str = "waitForEvent";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +61,7 @@ pub(super) struct StepRecord {
     pub(super) step_name: String,
     pub(super) name_count: u32,
     pub(super) dependencies: Vec<u32>,
+    pub(super) kind: String,
     pub(super) config: String,
     pub(super) status: String,
     #[serde(default)]
@@ -293,11 +298,13 @@ pub(super) fn verify_step_record(
     req: &WorkflowStepRequest,
     config: &str,
     record: &StepRecord,
+    expected_kind: &str,
 ) -> WorkflowResult<()> {
     if record.ordinal != req.ordinal
         || record.step_name != req.step_name
         || record.name_count != req.name_count
         || record.dependencies != req.dependencies
+        || record.kind.as_str() != expected_kind
         || record.config != config
     {
         return Err(WorkflowError::step_mismatch(
@@ -357,6 +364,7 @@ mod tests {
             step_name: "tiny".to_string(),
             name_count: 1,
             dependencies: vec![3, 5],
+            kind: STEP_KIND_DO.to_string(),
             config: "null".to_string(),
             status: "completed".to_string(),
             attempt: 1,
@@ -484,11 +492,12 @@ mod tests {
     }
 
     #[test]
-    fn stored_step_records_require_dependency_shape() {
+    fn stored_step_records_require_identity_shape() {
         let record = json!({
             "ordinal": 0,
             "stepName": "root",
             "nameCount": 1,
+            "kind": STEP_KIND_DO,
             "config": "null",
             "status": "completed",
             "attempt": 1,
@@ -505,6 +514,28 @@ mod tests {
             record_err
                 .to_string()
                 .contains("missing field `dependencies`"),
+            "unexpected serde error: {record_err}"
+        );
+
+        let record = json!({
+            "ordinal": 0,
+            "stepName": "root",
+            "nameCount": 1,
+            "dependencies": [],
+            "config": "null",
+            "status": "completed",
+            "attempt": 1,
+            "outputRef": null,
+            "errorRef": null,
+            "completedAtMs": 123,
+            "failedAtMs": null,
+            "dueAtMs": null
+        });
+        let Err(record_err) = serde_json::from_value::<StepRecord>(record) else {
+            panic!("missing step record kind must fail closed");
+        };
+        assert!(
+            record_err.to_string().contains("missing field `kind`"),
             "unexpected serde error: {record_err}"
         );
 
@@ -558,11 +589,12 @@ mod tests {
             due_at_ms: None,
         };
         let config = validate_step_request(&req).expect("valid request");
-        let record = StepRecord {
+        let mut record = StepRecord {
             ordinal: 3,
             step_name: "join".to_string(),
             name_count: 1,
             dependencies: vec![0, 1],
+            kind: STEP_KIND_DO.to_string(),
             config: config.clone(),
             status: "completed".to_string(),
             attempt: 1,
@@ -575,8 +607,14 @@ mod tests {
             due_at_ms: None,
         };
 
-        let err = verify_step_record(&req, &config, &record)
+        let err = verify_step_record(&req, &config, &record, STEP_KIND_DO)
             .expect_err("dependency mismatch should fail replay");
+        assert_eq!(err.code, "workflow_step_mismatch");
+
+        record.dependencies = req.dependencies.clone();
+        record.kind = STEP_KIND_WAIT_FOR_EVENT.to_string();
+        let err = verify_step_record(&req, &config, &record, STEP_KIND_DO)
+            .expect_err("mismatched operation kind should fail replay");
         assert_eq!(err.code, "workflow_step_mismatch");
     }
 }

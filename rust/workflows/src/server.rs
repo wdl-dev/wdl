@@ -30,9 +30,10 @@ use wdl_rust_common::internal_auth::{
     internal_auth_headers_match,
 };
 use wdl_rust_common::metrics::prometheus_response;
+use wdl_rust_common::redis_conn::{redis_client_from_url, redis_client_from_url_with_db};
+use wdl_rust_common::request_completion::{RequestCompletion, record_request_completion};
 use wdl_rust_common::request_id::request_id_from_headers;
 use wdl_rust_common::shutdown::shutdown_signal;
-use wdl_rust_common::time::duration_ms_for_log;
 
 const WORKFLOW_SERVER_ERROR_MESSAGE: &str = "Workflow service request failed";
 
@@ -315,56 +316,20 @@ fn record_request_complete(
     started_at: Instant,
     error: Option<(&str, &str)>,
 ) {
-    let elapsed = started_at.elapsed();
-    let duration_ms = elapsed.as_secs_f64() * 1000.0;
-    let log_duration_ms = duration_ms_for_log(elapsed);
-    let status_label = status.as_u16().to_string();
-    state.metrics.increment(
-        "requests",
-        &[
-            ("service", SERVICE),
-            ("route", route),
-            ("status", &status_label),
-        ],
-        1.0,
+    record_request_completion(
+        &state.metrics,
+        SERVICE,
+        state.config.log_level,
+        RequestCompletion {
+            method,
+            route,
+            status: status.as_u16(),
+            status_label: status.as_str(),
+            request_id,
+            duration: started_at.elapsed(),
+            error,
+        },
     );
-    state.metrics.observe(
-        "request_duration_ms",
-        &[("service", SERVICE), ("route", route)],
-        duration_ms,
-    );
-    if status.is_server_error() {
-        state.metrics.increment(
-            "request_errors",
-            &[
-                ("service", SERVICE),
-                ("route", route),
-                ("status", &status_label),
-            ],
-            1.0,
-        );
-    }
-    let probe = matches!(route, "healthz" | "metrics");
-    if !probe || status.is_server_error() {
-        log(
-            state,
-            if status.is_server_error() {
-                LogLevel::Error
-            } else {
-                LogLevel::Info
-            },
-            "request_complete",
-            json!({
-                "request_id": request_id,
-                "method": method,
-                "route": route,
-                "status": status.as_u16(),
-                "duration_ms": log_duration_ms,
-                "error_code": error.map(|(code, _)| code),
-                "error_message": error.map(|(_, message)| message),
-            }),
-        );
-    }
 }
 
 fn response_error(response: &Response) -> Option<(&'static str, &str)> {
@@ -464,10 +429,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config_from_env());
     let redis_configured =
         optional_env("WORKFLOWS_REDIS_URL").is_some() || optional_env("REDIS_URL").is_some();
-    let redis_client = redis::Client::open(config.redis_url.as_str())?;
-    let redis_conn = redis_client.get_connection_manager().await?;
-    let control_redis_client = redis::Client::open(config.control_redis_url.as_str())?;
-    let control_redis_conn = control_redis_client.get_connection_manager().await?;
+    let redis_client =
+        redis_client_from_url_with_db(&config.redis_url, Some(crate::config::WORKFLOWS_REDIS_DB))?;
+    let control_redis_client = redis_client_from_url(&config.control_redis_url)?;
+    let (redis_conn, control_redis_conn) = tokio::try_join!(
+        redis_client.get_connection_manager(),
+        control_redis_client.get_connection_manager(),
+    )?;
     let state = AppState {
         redis: Redis::new(redis_conn),
         control_redis: Redis::new(control_redis_conn),

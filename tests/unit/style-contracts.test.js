@@ -30,6 +30,7 @@ import {
   HOST_BINDING_MODULE_NAMES,
   RUNTIME_WRAPPER_MODULE_NAME,
   WDL_RESERVED_MODULE_PREFIX,
+  WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
   WORKFLOWS_MODULE_NAME,
   isWdlReservedModuleName,
 } from "../../runtime/load/module-rewrite.js";
@@ -810,6 +811,82 @@ test("Workflow Runtime results and Workflow-owned retryable backend errors share
     "rust/workflows/src/api/tick/dispatch.rs",
   ]) {
     assert.match(readRepoFile(reader), /workflow-runtime-response\.json/, reader);
+  }
+});
+
+test("Workflow step terminal responses share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/workflow-step-response.json";
+  const contract = /** @type {{
+   *   stepKinds: Record<string, string>,
+   *   claimTerminalVariants: Record<string, Record<string, unknown>>,
+   *   registerWaitTerminalVariants: Record<string, Record<string, unknown>>,
+   *   replayTerminalVariants: Record<string, Record<string, unknown>>,
+   * }} */ (readRepositoryJson(fixture));
+  assert.deepEqual(Object.keys(contract).sort(), [
+    "claimTerminalVariants",
+    "registerWaitTerminalVariants",
+    "replayTerminalVariants",
+    "stepKinds",
+  ]);
+  assert.deepEqual(contract.stepKinds, {
+    do: "do",
+    sleep: "sleep",
+    sleepUntil: "sleepUntil",
+    waitForEvent: "waitForEvent",
+  });
+  /** @type {Array<[Record<string, Record<string, unknown>>, "state" | "status", string[]]>} */
+  const variantGroups = [
+    [contract.claimTerminalVariants, "state", ["completed", "failed"]],
+    [contract.registerWaitTerminalVariants, "state", ["completed"]],
+    [contract.replayTerminalVariants, "status", ["completed", "failed"]],
+  ];
+  for (const [variants, tagField, names] of variantGroups) {
+    assert.deepEqual(Object.keys(variants).sort(), names);
+    for (const variant of Object.values(variants)) {
+      assert.equal(typeof variant[tagField], "string");
+      assert.ok(variant.payloadField === "output" || variant.payloadField === "error");
+    }
+  }
+  for (const reader of [
+    "tests/unit/runtime-dispatch-workflows.test.js",
+    "rust/workflows/src/api/execution.rs",
+    "rust/workflows/src/api/execution/events.rs",
+    "rust/workflows/src/api/execution/history.rs",
+  ]) {
+    assert.match(readRepoFile(reader), /workflow-step-response\.json/, reader);
+  }
+});
+
+test("DO alarm destructive response readers share one bounded fixture", () => {
+  const fixture = "tests/fixtures/do-alarm-response.json";
+  const contract = /** @type {{
+   *   maxBytes: unknown,
+   *   actorSuccessVariants: Record<string, unknown>,
+   *   dispatchSuccessVariants: Record<string, unknown>,
+   *   mutationSuccessVariants: Record<string, unknown>,
+   *   mutationRequiredFields: unknown[],
+   * }} */ (readRepositoryJson(fixture));
+  assert.equal(contract.maxBytes, 16 * 1024);
+  assert.deepEqual(Object.keys(contract.actorSuccessVariants).sort(), [
+    "delivered",
+    "ignored",
+  ]);
+  assert.deepEqual(Object.keys(contract.dispatchSuccessVariants).sort(), [
+    "delivered",
+    "ignored",
+  ]);
+  assert.deepEqual(Object.keys(contract.mutationSuccessVariants).sort(), [
+    "cleanup",
+    "delete",
+    "set",
+  ]);
+  assert.deepEqual(contract.mutationRequiredFields, ["changed", "deleted", "jobId", "ok"]);
+  for (const reader of [
+    "tests/unit/do-alarm-client.test.js",
+    "rust/workflows/src/api/do_alarms/dispatch.rs",
+    "rust/workflows/src/api/do_alarms/model.rs",
+  ]) {
+    assert.match(readRepoFile(reader), /do-alarm-response\.json/, reader);
   }
 });
 
@@ -1599,16 +1676,27 @@ test("metric cardinality warnings use structured log events in JS and Rust", () 
   assert.doesNotMatch(rust, /\beprintln!\s*\(/);
 });
 
-test("redis-proxy HTTP observability matches platform request strategy", () => {
-  const lib = withoutLineComments(readRepoFile("rust/redis-proxy/src/lib.rs"));
+test("Rust HTTP request completion has one shared observability owner", () => {
+  const common = withoutLineComments(readRepoFile("rust/common/src/request_completion.rs"));
+  const redisProxy = withoutLineComments(readRepoFile("rust/redis-proxy/src/lib.rs"));
   const observability = withoutLineComments(readRepoFile("rust/redis-proxy/src/observability.rs"));
+  const workflows = withoutLineComments(readRepoFile("rust/workflows/src/server.rs"));
 
   assert.match(observability, /emit_log_line\(SERVICE, level, current_level\(\), event, fields\)/);
-  assert.match(lib, /"request_errors"/);
-  assert.match(lib, /"request_complete"/);
-  assert.match(lib, /request_id_from_headers\(request\.headers\(\)\)/);
-  assert.match(lib, /matches!\(route, "healthz" \| "metrics"\)/);
-  assert.match(lib, /struct ResponseError/);
+  for (const literal of ["requests", "request_duration_ms", "request_errors", "request_complete"]) {
+    assert.match(common, new RegExp(JSON.stringify(literal)));
+  }
+  assert.match(common, /matches!\(completion\.route, "healthz" \| "metrics"\)/);
+  assert.match(common, /level < min_log_level/);
+  for (const source of [redisProxy, workflows]) {
+    assert.match(source, /record_request_completion\(/);
+    assert.match(source, /status_label: status\.as_str\(\)/);
+    assert.doesNotMatch(source, /"request_errors"/);
+    assert.doesNotMatch(source, /"request_complete"/);
+  }
+  assert.match(redisProxy, /request_id_from_headers\(request\.headers\(\)\)/);
+  assert.match(redisProxy, /matches!\(route, "healthz" \| "metrics"\)/);
+  assert.match(redisProxy, /struct ResponseError/);
 });
 
 test("active docs and sources do not point at note paths", () => {
@@ -2563,6 +2651,34 @@ test("Valkey logical DB routing stays explicit across Rust data paths", () => {
   assert.match(runtimeLoad, /with_control_redis/, "runtime-load reads bundles and secrets from DB 0");
 });
 
+test("Rust services construct Redis clients through the shared TCP settings owner", () => {
+  const owner = "rust/common/src/redis_conn.rs";
+  const source = withoutLineComments(readRepoFile(owner));
+  assert.match(source, /pub fn redis_client_from_url/);
+  assert.match(source, /pub fn redis_client_from_url_with_db/);
+  assert.match(source, /TcpSettings::default\(\)\.set_nodelay\(true\)/);
+
+  const offenders = rustFiles("rust").filter((file) => (
+    file !== owner && /\b(?:redis::)?Client::open\s*\(/.test(withoutLineComments(readRepoFile(file)))
+  ));
+  assert.deepEqual(offenders, []);
+});
+
+test("Workflows deployment surfaces expose the data-plane Redis identity", () => {
+  const compose = readRepoFile("docker-compose.yml");
+  const workflowsCompose = compose.slice(
+    compose.indexOf("\n  workflows:\n"),
+    compose.indexOf("\n  gateway:\n")
+  );
+  assert.match(workflowsCompose, /DATA_REDIS_URL:\s*redis:\/\/redis:6379\/1/);
+
+  const terraform = readRepoFile("terraform/modules/compute/workflows_service.tf");
+  assert.match(terraform, /name = "DATA_REDIS_URL", value = local\.data_redis_url/);
+
+  const localKubernetes = readRepoFile("deploy/kubernetes/overlays/local/kustomization.yaml");
+  assert.match(localKubernetes, /DATA_REDIS_URL=redis:\/\/redis:6379\/1/);
+});
+
 test("workflow instance state is owned by workflows DB2", () => {
   const workflowPrefixes = [
     "wf:schema_version",
@@ -3121,6 +3237,28 @@ test("runtime-generated root module names stay inside the WDL-reserved namespace
   assert.match(codeBudget, /out\.set\(\s*RUNTIME_WRAPPER_MODULE_NAME,/);
   assert.match(codeBudget, /workerCode\.mainModule = RUNTIME_WRAPPER_MODULE_NAME/);
   assert.equal(isWdlReservedModuleName("src/_wdl-helper.js"), false);
+});
+
+test("Workflow infrastructure invocation props have one runtime owner", () => {
+  assert.equal(
+    extractExportedStringConst(
+      "runtime/load/module-rewrite.js",
+      "WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP"
+    ),
+    WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP
+  );
+  assert.match(
+    readRepoFile("runtime/dispatch.js"),
+    /WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP/
+  );
+  assert.match(
+    readRepoFile("runtime/load/code-budget.js"),
+    /WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP/
+  );
+  assert.doesNotMatch(
+    readRepoFile("runtime/load/wrapper-generate.js"),
+    new RegExp(RegExp.escape(WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP))
+  );
 });
 
 test("source maps cover the runtime injection registry's embedded source owners", () => {

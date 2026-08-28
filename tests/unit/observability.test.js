@@ -905,6 +905,44 @@ test("recordRequestComplete: null/undefined extras keys are stripped", () => {
   assert.equal(entries[0].fields.version, "v3");
 });
 
+test("recordRequestComplete: suppressed logs do not resolve lazy extras", () => {
+  const reg = new MetricsRegistry();
+  const { log: capture, entries } = captureLog();
+  let extrasCalls = 0;
+  const log = Object.assign(capture, {
+    enabled: (/** @type {string} */ level) => level === "error",
+  });
+
+  recordRequestComplete({
+    service: "gateway", metrics: reg, log,
+    method: "GET", requestId: "r", route: "worker_fetch", status: 200,
+    startedAt: Date.now(),
+    extras: () => {
+      extrasCalls += 1;
+      return { namespace: "demo" };
+    },
+  });
+  assert.equal(extrasCalls, 0);
+  assert.equal(entries.length, 0);
+  assert.match(
+    reg.renderPrometheus(),
+    /wdl_requests_total\{route="worker_fetch",service="gateway",status="200"\} 1/
+  );
+
+  recordRequestComplete({
+    service: "gateway", metrics: reg, log,
+    method: "GET", requestId: "r", route: "worker_fetch", status: 502,
+    startedAt: Date.now(),
+    extras: () => {
+      extrasCalls += 1;
+      return { namespace: "demo" };
+    },
+  });
+  assert.equal(extrasCalls, 1);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].fields.namespace, "demo");
+});
+
 test("recordRequestComplete: error argument flows into log via formatError", () => {
   const reg = new MetricsRegistry();
   const { log, entries } = captureLog();
@@ -937,6 +975,8 @@ test("setLogLevel ignores unknown names (keeps previous level)", () => {
   try {
     setLogLevel("bogus");
     const log = createLogger("test-svc");
+    assert.equal(log.enabled?.("info"), false);
+    assert.equal(log.enabled?.("warn"), true);
     withCapturedConsole(({ stdout }) => {
       log("info", "gated", {});
       assert.equal(stdout.length, 0, "level should still be warn, not reset");

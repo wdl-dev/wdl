@@ -14,6 +14,13 @@ const SHARED_OPTIMISTIC_RETRY_URL = repositoryFileUrl("shared/optimistic-retry.j
 const SHARED_QUEUE_KEYS_URL = repositoryFileUrl("shared/queue-keys.js");
 const SHARED_S3_CLEANUP_LIFECYCLE_URL = repositoryFileUrl("shared/s3-cleanup-lifecycle.js");
 const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
+const DO_ALARM_RESPONSE_URL = freshRepositoryModuleDataUrl(
+  "shared/do-alarm-response.js",
+  importSpecifierReplacements({
+    "shared-bounded-body": SHARED_BOUNDED_BODY_URL,
+    "shared-respond": SHARED_RESPOND_URL,
+  }),
+);
 
 /**
  * Compile the production-backed pure dependencies shared by the synthetic
@@ -108,6 +115,7 @@ export function compileControlSharedGraph({
       "control-errors": dependencies.controlErrorsUrl,
       "control-optimistic": dependencies.controlOptimisticUrl,
       "control-json-body": dependencies.controlJsonBodyUrl,
+      "shared-do-alarm-response": DO_ALARM_RESPONSE_URL,
       "shared-redis-lock": sharedRedisLockUrl,
     }),
   );

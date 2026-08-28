@@ -68,7 +68,6 @@ export function createHttpRequestScope({
      * @returns {void}
      */
     complete() {
-      const requestExtras = typeof extras === "function" ? extras() : extras;
       recordRequestComplete({
         service,
         metrics,
@@ -80,7 +79,7 @@ export function createHttpRequestScope({
         startedAt,
         error: requestError,
         hasError: hasRequestError,
-        extras: requestExtras,
+        extras,
         probeRoutes,
       });
     },

@@ -7,6 +7,7 @@ use crate::{
     InstanceKeys, config_from_env, due_key, pending_version_key, ready_active_key, ready_key,
     schema_version_key, validate_instance_id_value,
 };
+use wdl_rust_common::redis_conn::redis_client_from_url_with_db;
 use wdl_rust_common::test_env::with_temp_envs;
 // Source-contract tests below intentionally couple to these module paths. If
 // the files move, update the constants and the associated assertions together.
@@ -27,7 +28,27 @@ fn temp_env<R>(items: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
     {
         all_items.push(("WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY", None));
     }
+    if !all_items.iter().any(|(key, _)| *key == "DATA_REDIS_URL") {
+        all_items.push(("DATA_REDIS_URL", None));
+    }
     with_temp_envs(&all_items, f)
+}
+
+fn workflows_redis_client(url: &str) -> redis::Client {
+    redis_client_from_url_with_db(url, Some(crate::config::WORKFLOWS_REDIS_DB))
+        .expect("Workflows Redis client configuration")
+}
+
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_string())
+        })
+        .unwrap_or_default()
 }
 
 #[test]
@@ -51,7 +72,14 @@ fn workflows_redis_url_defaults_to_db2() {
         ],
         || {
             let config = config_from_env();
-            assert_eq!(config.redis_url, "redis://redis:6379/2");
+            assert_eq!(config.redis_url, "redis://redis:6379");
+            assert_eq!(
+                workflows_redis_client(&config.redis_url)
+                    .get_connection_info()
+                    .redis_settings()
+                    .db(),
+                2
+            );
             assert_eq!(config.control_redis_url, "redis://redis:6379");
             assert_eq!(config.runtime_host, "127.0.0.1");
             assert_eq!(config.runtime_port, 8088);
@@ -92,39 +120,98 @@ fn do_alarm_dispatch_concurrency_stays_within_one_tick_batch() {
 }
 
 #[test]
-fn workflows_redis_db_applies_when_workflows_redis_url_unset() {
+fn workflows_redis_db_rejects_non_db2_values() {
+    for configured in ["0", "9", "invalid"] {
+        temp_env(
+            &[
+                ("WORKFLOWS_REDIS_URL", None),
+                ("CONTROL_REDIS_URL", None),
+                ("WORKFLOWS_REDIS_DB", Some(configured)),
+                ("RUNTIME_HOST", None),
+                ("RUNTIME_PORT", None),
+                ("SYSTEM_RUNTIME_HOST", None),
+                ("SYSTEM_RUNTIME_PORT", None),
+                ("WORKFLOWS_DISPATCH_TIMEOUT_MS", None),
+                ("WORKFLOWS_RUN_LEASE_MS", None),
+                ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
+                ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
+                ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
+                ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
+                ("REDIS_URL", Some("redis://redis:6379")),
+            ],
+            || {
+                let Err(panic) = std::panic::catch_unwind(config_from_env) else {
+                    panic!("non-DB2 Workflows configuration must fail closed");
+                };
+                let message = panic_message(panic);
+                assert!(message.contains("WORKFLOWS_REDIS_DB must be 2"));
+            },
+        );
+    }
+}
+
+#[test]
+fn workflows_rejects_equivalent_control_db2_urls_without_leaking_credentials() {
     temp_env(
         &[
-            ("WORKFLOWS_REDIS_URL", None),
-            ("CONTROL_REDIS_URL", None),
-            ("WORKFLOWS_REDIS_DB", Some("9")),
-            ("RUNTIME_HOST", None),
-            ("RUNTIME_PORT", None),
-            ("SYSTEM_RUNTIME_HOST", None),
-            ("SYSTEM_RUNTIME_PORT", None),
-            ("WORKFLOWS_DISPATCH_TIMEOUT_MS", None),
-            ("WORKFLOWS_RUN_LEASE_MS", None),
-            ("WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS", None),
-            ("WORKFLOWS_READY_DISPATCH_CONCURRENCY", None),
-            ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
-            ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
-            ("REDIS_URL", Some("redis://redis:6379")),
+            (
+                "WORKFLOWS_REDIS_URL",
+                Some("redis://workflow-user:workflow-secret@shared:6379/7?protocol=resp3"),
+            ),
+            (
+                "CONTROL_REDIS_URL",
+                Some("redis://control-user:control-secret@shared/2?protocol=resp2"),
+            ),
+            ("WORKFLOWS_REDIS_DB", None),
         ],
         || {
-            let config = config_from_env();
-            assert_eq!(config.redis_url, "redis://redis:6379/9");
-            assert_eq!(config.control_redis_url, "redis://redis:6379");
+            let Err(panic) = std::panic::catch_unwind(config_from_env) else {
+                panic!("shared Control and Workflows DB 2 must fail closed");
+            };
+            let message = panic_message(panic);
+            assert!(message.contains("Workflows DB 2 must not share"));
+            assert!(!message.contains("workflow-secret"));
+            assert!(!message.contains("control-secret"));
+            assert!(!message.contains("redis://"));
         },
     );
 }
 
 #[test]
-fn workflows_redis_db_replaces_existing_redis_url_db_suffix() {
+fn workflows_rejects_equivalent_data_plane_db2_urls_without_leaking_credentials() {
+    temp_env(
+        &[
+            (
+                "WORKFLOWS_REDIS_URL",
+                Some("redis://workflow-user:workflow-secret@shared:6379/7?protocol=resp3"),
+            ),
+            ("CONTROL_REDIS_URL", Some("redis://shared:6379/0")),
+            (
+                "DATA_REDIS_URL",
+                Some("redis://data-user:data-secret@shared/2?protocol=resp2"),
+            ),
+            ("WORKFLOWS_REDIS_DB", None),
+        ],
+        || {
+            let Err(panic) = std::panic::catch_unwind(config_from_env) else {
+                panic!("shared data-plane and Workflows DB 2 must fail closed");
+            };
+            let message = panic_message(panic);
+            assert!(message.contains("Workflows DB 2 must not share the data-plane"));
+            assert!(!message.contains("workflow-secret"));
+            assert!(!message.contains("data-secret"));
+            assert!(!message.contains("redis://"));
+        },
+    );
+}
+
+#[test]
+fn workflows_effective_db_overrides_existing_url_suffix() {
     temp_env(
         &[
             ("WORKFLOWS_REDIS_URL", None),
             ("CONTROL_REDIS_URL", None),
-            ("WORKFLOWS_REDIS_DB", Some("2")),
+            ("WORKFLOWS_REDIS_DB", None),
             ("RUNTIME_HOST", None),
             ("RUNTIME_PORT", None),
             ("SYSTEM_RUNTIME_HOST", None),
@@ -139,19 +226,26 @@ fn workflows_redis_db_replaces_existing_redis_url_db_suffix() {
         ],
         || {
             let config = config_from_env();
-            assert_eq!(config.redis_url, "redis://redis:6379/2");
+            assert_eq!(config.redis_url, "redis://redis:6379/1");
+            assert_eq!(
+                workflows_redis_client(&config.redis_url)
+                    .get_connection_info()
+                    .redis_settings()
+                    .db(),
+                2
+            );
             assert_eq!(config.control_redis_url, "redis://redis:6379/1");
         },
     );
 }
 
 #[test]
-fn workflows_redis_db_preserves_redis_url_query_suffix() {
+fn workflows_redis_url_preserves_query_suffix() {
     temp_env(
         &[
             ("WORKFLOWS_REDIS_URL", None),
             ("CONTROL_REDIS_URL", None),
-            ("WORKFLOWS_REDIS_DB", Some("3")),
+            ("WORKFLOWS_REDIS_DB", None),
             ("RUNTIME_HOST", None),
             ("RUNTIME_PORT", None),
             ("SYSTEM_RUNTIME_HOST", None),
@@ -166,7 +260,14 @@ fn workflows_redis_db_preserves_redis_url_query_suffix() {
         ],
         || {
             let config = config_from_env();
-            assert_eq!(config.redis_url, "redis://redis:6379/3?protocol=resp3");
+            assert_eq!(config.redis_url, "redis://redis:6379/1?protocol=resp3");
+            let client = workflows_redis_client(&config.redis_url);
+            let info = client.get_connection_info();
+            assert_eq!(info.redis_settings().db(), 2);
+            assert_eq!(
+                info.redis_settings().protocol(),
+                redis::ProtocolVersion::RESP3
+            );
             assert_eq!(
                 config.control_redis_url,
                 "redis://redis:6379/1?protocol=resp3"
@@ -176,12 +277,12 @@ fn workflows_redis_db_preserves_redis_url_query_suffix() {
 }
 
 #[test]
-fn workflows_redis_db_preserves_redis_url_userinfo_and_ipv6_authority() {
+fn workflows_redis_url_preserves_userinfo_and_ipv6_authority() {
     temp_env(
         &[
             ("WORKFLOWS_REDIS_URL", None),
             ("CONTROL_REDIS_URL", None),
-            ("WORKFLOWS_REDIS_DB", Some("4")),
+            ("WORKFLOWS_REDIS_DB", None),
             ("RUNTIME_HOST", None),
             ("RUNTIME_PORT", None),
             ("SYSTEM_RUNTIME_HOST", None),
@@ -201,11 +302,48 @@ fn workflows_redis_db_preserves_redis_url_userinfo_and_ipv6_authority() {
             let config = config_from_env();
             assert_eq!(
                 config.redis_url,
-                "redis://user:pass@[::1]:6379/4?protocol=resp3"
+                "redis://user:pass@[::1]:6379/1?protocol=resp3"
             );
+            let client = workflows_redis_client(&config.redis_url);
+            let info = client.get_connection_info();
+            assert_eq!(info.redis_settings().db(), 2);
+            assert_eq!(info.redis_settings().username(), Some("user"));
+            assert_eq!(info.redis_settings().password(), Some("pass"));
             assert_eq!(
                 config.control_redis_url,
                 "redis://user:pass@[::1]:6379/1?protocol=resp3"
+            );
+        },
+    );
+}
+
+#[test]
+fn workflows_redis_url_preserves_unix_socket_path_and_query() {
+    temp_env(
+        &[
+            (
+                "WORKFLOWS_REDIS_URL",
+                Some("redis+unix:///run/redis.sock?db=7&protocol=resp3"),
+            ),
+            ("CONTROL_REDIS_URL", Some("redis://control:6379")),
+            ("WORKFLOWS_REDIS_DB", None),
+        ],
+        || {
+            let config = config_from_env();
+            assert_eq!(
+                config.redis_url,
+                "redis+unix:///run/redis.sock?db=7&protocol=resp3"
+            );
+            let client = workflows_redis_client(&config.redis_url);
+            let info = client.get_connection_info();
+            assert_eq!(
+                info.addr(),
+                &redis::ConnectionAddr::Unix("/run/redis.sock".into())
+            );
+            assert_eq!(info.redis_settings().db(), 2);
+            assert_eq!(
+                info.redis_settings().protocol(),
+                redis::ProtocolVersion::RESP3
             );
         },
     );
@@ -234,6 +372,13 @@ fn workflows_redis_url_uses_explicit_url() {
         || {
             let config = config_from_env();
             assert_eq!(config.redis_url, "redis://other:6379/7");
+            assert_eq!(
+                workflows_redis_client(&config.redis_url)
+                    .get_connection_info()
+                    .redis_settings()
+                    .db(),
+                2
+            );
             assert_eq!(config.control_redis_url, "redis://control:6379");
             assert_eq!(config.runtime_host, "runtime");
             assert_eq!(config.runtime_port, 18088);
@@ -266,7 +411,7 @@ fn workflows_run_lease_clamps_above_dispatch_timeout() {
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379")),
-            ("WORKFLOWS_REDIS_DB", Some("2")),
+            ("WORKFLOWS_REDIS_DB", None),
         ],
         || {
             let config = config_from_env();
@@ -294,7 +439,7 @@ fn workflows_do_alarm_claim_lease_clamps_above_dispatch_timeout() {
             ("WORKFLOWS_PROGRESS_CALLBACK_LOOKUP_CONCURRENCY", None),
             ("WORKFLOWS_PROGRESS_CALLBACK_CONCURRENCY", None),
             ("REDIS_URL", Some("redis://redis:6379")),
-            ("WORKFLOWS_REDIS_DB", Some("2")),
+            ("WORKFLOWS_REDIS_DB", None),
         ],
         || {
             let config = config_from_env();

@@ -170,16 +170,12 @@ pub(crate) fn add_batch_raw_bytes(total: &mut usize, bytes: usize) -> AppResult<
     Ok(())
 }
 
-pub(crate) fn key_base(ns: &str, id: &str) -> String {
-    format!("kvh:{ns}:{id}:")
-}
-
 pub(crate) fn bucket_for_key(key: &str) -> u32 {
     fnv1a32(key.as_bytes()) % KV_HASH_BUCKETS
 }
 
 pub(crate) fn hash_key(ns: &str, id: &str, bucket: u32) -> String {
-    format!("{}b:{bucket}", key_base(ns, id))
+    format!("kvh:{ns}:{id}:b:{bucket}")
 }
 
 fn hash_key_for_user_key(ns: &str, id: &str, key: &str) -> String {

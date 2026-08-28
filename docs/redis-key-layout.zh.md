@@ -10,7 +10,7 @@ WDL 使用明确的逻辑切分：
 - **`DB 1`，数据面：**KV hash bucket、queue stream、delayed queue、orphan stream 和 live log-tail stream。
 - **`DB 2`，workflows：**`wf:schema_version`、instance state、step record/summary、ready/due shard、event 和 event-type index、payload ref、retention index、restart target-version blocker、run lease。
 
-Local compose、Kubernetes 和 Terraform 都启用这个切分。Rust service 和 Rust `redis-proxy` 使用 `DATA_REDIS_URL` / `DATA_REDIS_DB` 选择 data-plane Redis connection/database；嵌入的 JS control/log-tail 路径使用 `DATA_REDIS_ADDR` 加 `DATA_REDIS_DB`，因为它们的 RESP client 接收 host:port address。未设置这些 data-plane 变量的部署会把数据面 key 留在 control Redis connection/database，直到显式 opt in。Workflows 不同：未设置 `WORKFLOWS_REDIS_URL` 时 workflows service 仍默认使用 DB 2；只有显式设置 `WORKFLOWS_REDIS_DB=0` 时才使用 DB 0。
+Local compose、Kubernetes 和 Terraform 都启用这个切分。Rust service 和 Rust `redis-proxy` 使用 `DATA_REDIS_URL` 选择完整的 data-plane Redis endpoint 与逻辑数据库；`DATA_REDIS_DB` 不影响这些 Rust client。嵌入的 JS control/log-tail 路径使用 `DATA_REDIS_ADDR` 加 `DATA_REDIS_DB`，因为它们的 RESP client 接收 host:port address。未设置对应路径变量的部署会把 data-plane key 留在 control Redis connection/database，直到显式 opt in。Workflows 不同：`WORKFLOWS_REDIS_URL` 可以选择其它 Redis endpoint，但 workflows service 始终将该 endpoint 规范化到 DB 2。DB 2 必须由 Workflows runtime state 独占，不能与 control 或 data-plane state 共享。遗留 `WORKFLOWS_REDIS_DB` 配置只允许值 `2`，并应从 deployment configuration 中删除。Workflows 会比较解析后的 database identity 与 `CONTROL_REDIS_URL`，以及配置存在时的 `DATA_REDIS_URL`；拆分 data plane 的部署必须把 canonical URL 传给 Workflows 以执行该启动检查。
 
 ## 全局控制面 Keys
 

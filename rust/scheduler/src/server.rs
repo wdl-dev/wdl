@@ -8,6 +8,7 @@ use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::env::optional_env;
 use wdl_rust_common::health::healthcheck_http_200;
 use wdl_rust_common::metrics::prometheus_response;
+use wdl_rust_common::redis_conn::redis_client_from_url;
 use wdl_rust_common::shutdown::shutdown_signal;
 
 use crate::{
@@ -38,10 +39,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config_from_env());
     let redis_configured = optional_env("REDIS_URL").is_some();
     let data_redis_configured = optional_env("DATA_REDIS_URL").is_some();
-    let redis_client = redis::Client::open(config.redis_url.as_str())?;
-    let data_redis_client = redis::Client::open(config.data_redis_url.as_str())?;
-    let conn = redis_client.get_connection_manager().await?;
-    let data_conn = data_redis_client.get_connection_manager().await?;
+    let redis_client = redis_client_from_url(&config.redis_url)?;
+    let data_redis_client = redis_client_from_url(&config.data_redis_url)?;
+    let (conn, data_conn) = tokio::try_join!(
+        redis_client.get_connection_manager(),
+        data_redis_client.get_connection_manager(),
+    )?;
     let state = AppState {
         redis: Redis::new(conn),
         data_redis: Redis::new(data_conn),

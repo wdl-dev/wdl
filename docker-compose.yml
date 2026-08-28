@@ -380,7 +380,7 @@ services:
     environment:
       <<: *internal-auth-env
       REDIS_URL: redis://redis:6379
-      WORKFLOWS_REDIS_DB: "2"
+      DATA_REDIS_URL: redis://redis:6379/1
       WORKFLOWS_PORT: "9120"
       RUNTIME_HOST: envoy
       RUNTIME_PORT: "18088"

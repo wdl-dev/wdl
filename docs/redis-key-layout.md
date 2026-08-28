@@ -17,15 +17,19 @@ WDL uses a deliberate logical split:
   ready/due shards, events and event-type indexes, payload refs, retention indexes,
   restart target-version blockers, and run leases.
 
-Local compose, Kubernetes, and Terraform enable this split. Rust services and the
-Rust `redis-proxy` use `DATA_REDIS_URL` / `DATA_REDIS_DB` to select the
-data-plane Redis connection/database; embedded JS control/log-tail paths use
-`DATA_REDIS_ADDR` plus `DATA_REDIS_DB` because their RESP client accepts a
-host:port address. Deployments that omit those data-plane variables keep
-data-plane keys on the control Redis connection/database until they opt in.
-Workflows is different: when `WORKFLOWS_REDIS_URL` is omitted, the workflows
-service still defaults to DB 2; it uses DB 0 only when `WORKFLOWS_REDIS_DB=0` is
-set explicitly.
+Local compose, Kubernetes, and Terraform enable this split. Rust services and the Rust
+`redis-proxy` use `DATA_REDIS_URL` to select the complete data-plane Redis endpoint and
+logical database; `DATA_REDIS_DB` does not affect those Rust clients. Embedded JS
+control/log-tail paths use `DATA_REDIS_ADDR` plus `DATA_REDIS_DB` because their RESP
+client accepts a host:port address. Deployments that omit the variables for their path
+keep data-plane keys on the control Redis connection/database until they opt in.
+Workflows is different: `WORKFLOWS_REDIS_URL` may select another Redis endpoint, but the
+service always normalizes that endpoint to DB 2. DB 2 must remain dedicated to Workflows
+runtime state and must not share control or data-plane state. The legacy
+`WORKFLOWS_REDIS_DB` setting is accepted only when its value is `2` and should be
+removed from deployment configuration. Workflows compares parsed database identity with
+`CONTROL_REDIS_URL` and with `DATA_REDIS_URL` when configured; deployments that separate
+the data plane must pass its canonical URL to Workflows for this startup check.
 
 ## Global Control Keys
 

@@ -760,7 +760,12 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
       assert.equal(new Headers(init?.headers).get("x-request-id"), "rid-cleanup");
       fetchSignals.push(init.signal);
       requestBodies.cleanup = parseJsonObjectRequestBody(init, "DO alarm cleanup request body");
-      return Response.json({ ok: true });
+      return Response.json({
+        ok: true,
+        jobId: null,
+        changed: true,
+        deleted: 2,
+      });
     },
   };
 
@@ -783,6 +788,39 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
     lifecycle: { ns: "demo", worker: "api", version: "v2" },
     cleanup: { ns: "demo", worker: "api", doStorageId: "do_old" },
   });
+});
+
+test("DO alarm cleanup rejects malformed or oversized success envelopes", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+
+  for (const response of [
+    Response.json({ ok: true }),
+    Response.json({ ok: true, jobId: "doa-wrong", changed: true, deleted: 1 }),
+    Response.json({ ok: true, jobId: null, changed: true, deleted: 1, extra: true }),
+    new Response("not-json", { headers: { "content-type": "application/json" } }),
+  ]) {
+    state.workflows = { fetch: async () => response };
+    await assert.rejects(
+      () => cleanupDoAlarmsForWorker({ ns: "demo", worker: "api", doStorageId: "do_old" }),
+      (error) => error instanceof Error && /** @type {any} */ (error).status === 503
+    );
+  }
+
+  let cancelled = false;
+  state.workflows = {
+    fetch: async () => new Response(new ReadableStream({
+      cancel() { cancelled = true; },
+    }), {
+      headers: { "content-length": String(16 * 1024 + 1) },
+    }),
+  };
+  await assert.rejects(
+    () => cleanupDoAlarmsForWorker({ ns: "demo", worker: "api", doStorageId: "do_old" }),
+    (error) => error instanceof Error && /** @type {any} */ (error).status === 503
+  );
+  await Promise.resolve();
+  assert.equal(cancelled, true);
 });
 
 test("workflows transport requires an explicit timeout selection at runtime", async () => {

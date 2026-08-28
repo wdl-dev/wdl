@@ -177,13 +177,17 @@ is `https://ai.wdl`; provider aliases, official destinations, Redis shapes, byte
 bounds, WebSocket rules, and non-goals are owned by [`ai.md`](ai.md).
 
 Generated host-facade wrappers preserve the Worker's importable-env compatibility
-contract. They use workerd `withEnv()` only when `disallow_importable_env` is absent.
-With importable env enabled, tenant modules may retain the imported env proxy at module
-scope and read bindings from that proxy during an invocation. Capturing an individual
-binding during module evaluation is not a facade contract: evaluation precedes wrapper
-invocation and can observe only the raw binding-scoped host adapter. With
-`disallow_importable_env`, imported env remains empty at module scope and during
-invocations, while positional env still receives generated facades.
+contract. With importable env enabled, tenant modules may retain the imported env proxy
+at module scope and read bindings from that proxy during an invocation. Capturing an
+individual binding during module evaluation is not a facade contract: evaluation
+precedes wrapper invocation and can observe only the raw binding-scoped host adapter.
+With `disallow_importable_env`, imported env remains empty at module scope and during
+invocations, while positional env still receives generated facades. Workflow KV
+facades resolve their current infrastructure attribution from a private `withEnv()`
+async context, so a facade cached across Workflow entrypoint instances follows the
+current invocation. A module-evaluation capture of the raw KV adapter remains outside
+the facade contract; its failures are ordinary binding errors and do not mutate any
+Workflow invocation record.
 
 ASSETS is a deploy-artifact helper, not a full Cloudflare Pages asset pipeline. Control
 uploads files to `assets/<ns>/<worker>/<token>/<path>`, injects an `ASSETS` binding, and
@@ -228,6 +232,13 @@ public traffic for platform-tier namespaces before Redis lookup.
 Runtime reads immutable bundle and metadata keys from DB 0 through `redis-proxy`.
 Data-plane bindings use their own storage:
 
+- Each redis-proxy keeps two physical connection managers in its control logical pool
+  and two in its data logical pool, selecting one manager per operation in round-robin
+  order. Split deployments normally map those pools to DB 0 and DB 1; when
+  `DATA_REDIS_URL` is absent, the data pool reuses the `REDIS_URL` endpoint and database.
+  A command, transaction, Lua invocation, or packed pipeline never crosses managers;
+  the second connection limits small-request head-of-line blocking behind a large
+  ordered Redis reply.
 - Secret hash values in DB 0 are envelope ciphertext. redis-proxy decrypts them during
   runtime-load and fails closed when provider configuration or envelope validation
   fails.
@@ -239,7 +250,26 @@ Data-plane bindings use their own storage:
   facade instances per event. Persistent class entrypoints receive one wrapped env and
   facade set at construction and reuse it; only their diagnostic context is refreshed
   per invocation as described below.
-- KV and queue producers use DB 1 through `redis-proxy`.
+- KV and queue producers use the data logical pool through `redis-proxy`. Split
+  deployments map it to DB 1; without `DATA_REDIS_URL`, it reuses the control database.
+- Runtime applies a fixed 32 MiB aggregate wire-byte admission budget per task before
+  materializing KV response bodies. A valid `Content-Length` reserves its advertised
+  bytes up to the full budget and lets the reader fill one exact allocation; missing or
+  larger lengths reserve the whole budget. Concurrent excess reads fail closed and
+  cancel their upstream body. Each individual host envelope also has a 36 MiB hard wire
+  cap; a larger declared or streamed body is cancelled and fails as attributed
+  infrastructure error. The public 25 MiB per-value limit is unchanged. Runtime owns
+  the body reader, keeps JSON/Base64 result construction inside the lease, and releases
+  abandoned reservations through a 5-second cleanup deadline. A host-only invocation
+  record attributes capacity, body-read, and malformed host-envelope failures observed
+  while `run()` and its admitted step callbacks settle to only that Workflow dispatch,
+  even when tenant code catches the Error; the affected step success/error is not
+  committed. Tenant value decoding, including `type: "json"`, remains a user-data error
+  and does not mark the invocation. Batch envelopes must match requested key count and
+  order; only scalar `get()` treats proxy `404` as a missing value.
+  Runtime passes the record id in private entrypoint props, and the generated wrapper
+  consumes it before the tenant constructor runs. Missing, invalid, or expired ids do
+  not affect another invocation.
 - Workflow bindings call `workflows`; runtime does not read DB 2 directly. Frozen
   Workflow identity exists once in binding-scoped host props. The generated facade
   carries only public operation fields, and Node-compatible `process.env` cannot expose

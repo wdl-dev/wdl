@@ -58,11 +58,17 @@ export function createHttpRequestScope({ request }) {
 const workerIdUrl = repositoryFileUrl("shared/worker-id.js");
 const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 const actorUrl = stub(`export class WdlDoHostActor {}`);
+const alarmResponseUrl = repositoryModuleDataUrl("shared/do-alarm-response.js", [
+  [/from "shared-bounded-body";/, `from ${JSON.stringify(repositoryFileUrl("shared/bounded-body.js"))};`],
+  [/from "shared-respond";/, `from ${JSON.stringify(sharedRespondUrl)};`],
+]);
+const { DO_ALARM_RESPONSE_MAX_BYTES } = await import(alarmResponseUrl);
 const alarmDispatchUrl = stub(readRepositoryModuleSource("do-runtime/alarm-dispatch.js", importSpecifierReplacements({
   "shared-worker-id": workerIdUrl,
   "shared-worker-contract": workerContractUrl,
   "do-runtime-protocol": protocolUrl,
   "do-runtime-http": httpUrl,
+  "shared-do-alarm-response": alarmResponseUrl,
 })));
 const objectRegistryUrl = stub(`
 export function parseObjectRegistryMember(member) {
@@ -91,6 +97,11 @@ export async function waitForInFlightDispatches() {
 const aiCapacityUrl = stub(`
 export function prepareAiCapacityMetrics(env) {
   globalThis.__doIndexPrepareAiMetrics.push(env);
+}
+`);
+const kvCapacityUrl = stub(`
+export function prepareKvReadCapacityMetrics(env) {
+  globalThis.__doIndexPrepareKvMetrics.push(env);
 }
 `);
 const taskIdentityUrl = stub(`
@@ -153,6 +164,7 @@ const IMPORT_STUBS = {
   "shared-owner-forwarder": sharedOwnerForwarderUrl(),
   "runtime-do-transport": doTransportUrl,
   "runtime-bindings-ai-capacity": aiCapacityUrl,
+  "runtime-bindings-kv-capacity": kvCapacityUrl,
   "_wdl-do-scoped-request.js": doScopedRequestUrl,
   "runtime-bindings-kv": emptyBindingUrl,
   "runtime-bindings-assets": emptyBindingUrl,
@@ -181,6 +193,7 @@ beforeEach(() => {
   /** @type {any} */ (globalThis).__doIndexRenewResult = null;
   /** @type {any} */ (globalThis).__doIndexHostFetches = [];
   /** @type {any} */ (globalThis).__doIndexPrepareAiMetrics = [];
+  /** @type {any} */ (globalThis).__doIndexPrepareKvMetrics = [];
   /** @type {any} */ (globalThis).__doIndexPrepareDoMetrics = 0;
   /** @type {any} */ (globalThis).__doIndexForwardCalls = [];
   /** @type {any} */ (globalThis).__doIndexForwardResponse = null;
@@ -236,6 +249,7 @@ test("do-runtime metrics endpoint uses the shared Prometheus response contract",
   );
   assert.equal(await response.text(), "# HELP do_runtime_test_metric\n");
   assert.deepEqual(/** @type {any} */ (globalThis).__doIndexPrepareAiMetrics, [runtimeEnv]);
+  assert.deepEqual(/** @type {any} */ (globalThis).__doIndexPrepareKvMetrics, [runtimeEnv]);
   assert.equal(/** @type {any} */ (globalThis).__doIndexPrepareDoMetrics, 1);
 });
 
@@ -277,6 +291,43 @@ test("do-runtime alarm dispatch endpoint invokes the local alarm shim path", asy
   const hostFetches = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexHostFetches);
   const [fetchCall] = hostFetches;
   assert.equal(fetchCall.input.url, "https://do-runtime.internal/invoke");
+});
+
+test("do-runtime alarm dispatch rejects malformed successful actor envelopes", async (t) => {
+  const cases = [
+    ["empty", new Response("")],
+    ["invalid JSON", new Response("not-json")],
+    ["scalar", Response.json(true)],
+    ["empty object", Response.json({})],
+    ["ok false", Response.json({ ok: false })],
+    ["ignored false", Response.json({ ok: true, ignored: false })],
+    ["unknown field", Response.json({ ok: true, extra: true })],
+    ["oversized", new Response("x".repeat(DO_ALARM_RESPONSE_MAX_BYTES + 1))],
+    ["invalid UTF-8", new Response(new Uint8Array([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0x80, 0x22, 0x7d]))],
+  ];
+
+  for (const [label, actorResponse] of cases) {
+    await t.test(String(label), async () => {
+      /** @type {any} */ (globalThis).__doIndexHostResponse = /** @type {Response} */ (actorResponse).clone();
+      const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ns: "tenant",
+          worker: "alarms",
+          version: "v7",
+          doStorageId: "do_0123456789abcdef0123456789abcdef",
+          className: "Room",
+          objectName: "alice",
+          retryCount: 2,
+          token: "row-token",
+        }),
+      }), env());
+
+      const body = await readJsonResponse(response, 503, String(label));
+      assert.equal(body.error, "do_alarm_dispatch_result_unknown");
+    });
+  }
 });
 
 test("do-runtime alarm dispatch delegates object identity validation", async () => {

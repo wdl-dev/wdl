@@ -26,6 +26,7 @@ import {
 import { DO_FORWARD_HEADERS, DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
 import { json, jsonError } from "do-runtime-http";
 import { prepareAiCapacityMetrics } from "runtime-bindings-ai-capacity";
+import { prepareKvReadCapacityMetrics } from "runtime-bindings-kv-capacity";
 import {
   parseObjectRegistryMember,
 } from "do-runtime-object-registry";
@@ -548,6 +549,7 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/_metrics") {
         prepareAiCapacityMetrics(env);
+        prepareKvReadCapacityMetrics(env);
         prepareDoRuntimeMetrics();
         return scope.respond(prometheusResponse(metrics));
       }

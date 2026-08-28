@@ -15,7 +15,7 @@ deploy-time workflow definition keys. This module doc is the current workflows d
 reference.
 
 The V2 name distinguishes the current DAG-capable engine from the earlier test-only V1
-engine. New environments should be treated as greenfield schema-2 workflows state.
+engine. New environments should be treated as greenfield schema-3 workflows state.
 
 workerd provides the user-code execution environment, `WorkflowEntrypoint` class shape,
 module loading, and the ability for runtime to invoke a workflow class in a frozen
@@ -80,11 +80,19 @@ Internal:
 
 ## Redis / Storage Contracts
 
-Workflows exclusively owns Valkey DB 2 for instance execution state. Control owns
+Workflows exclusively owns Valkey DB 2 for instance execution state. A custom
+`WORKFLOWS_REDIS_URL` selects the Redis endpoint but is normalized to DB 2. Control owns
 `wf:defs:<ns>:<worker>` in DB 0 for deploy-time workflow key allocation and stable
 identity. The hash retains retired names until whole-worker delete. Definition listing
 enumerates that retired history for currently active workers; deploy and single-workflow
 status/lifecycle paths read only the names they need.
+
+At startup, Workflows compares its parsed connection address and effective DB 2 with
+`CONTROL_REDIS_URL` and with `DATA_REDIS_URL` when that independent data-plane URL is
+configured. Equal database identities fail before connecting. Deployments with a
+separate data plane must expose its canonical `DATA_REDIS_URL` to the Workflows service
+so this ownership check covers it; URL credentials and unrelated query settings do not
+change database identity.
 
 Key concepts:
 
@@ -109,7 +117,7 @@ Key families:
 | Key | Type | Owner | Authority | Cleanup/delete semantics |
 |---|---|---|---|---|
 | `wf:defs:<ns>:<worker>` | Hash | Control | Authoritative workflow definition/key allocation for deploy metadata. | Worker delete removes definitions after lifecycle checks pass. |
-| `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker. | Current value is `2`; greenfield deployments start on schema 2. |
+| `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker. | Current value is `3`; greenfield deployments start on schema 3. |
 | `wf:instance:{<ns>:<workflowKey>:<instanceId>}:state` | Hash | workflows | Authoritative instance state. | Terminal retention and lifecycle cleanup remove expired state. |
 | `wf:instance:{...}:payloads` | Hash | workflows | Payload ref storage under aggregate caps. | Deleted with the instance state family. |
 | `wf:instance:{...}:steps`, `step-summaries`, `step-summary-index` | Hash/ZSET | workflows | Authoritative step replay/history state. | Deleted with the instance; history reads are bounded and reject mismatched summary/index counts or missing summaries in the requested page. |
@@ -326,10 +334,10 @@ Scheduling is hint-based but state-authoritative:
 
 The step facade implements durable replay:
 
-- `step.do(name, [config], callback)` uses ordinal, name, same-name count, DAG
-  dependencies, and canonical config hash as the replay identity. A completed matching
-  step returns the stored result. A shape mismatch fails closed with
-  `workflow_step_mismatch`.
+- `step.do(name, [config], callback)` uses the backend-owned operation kind, ordinal,
+  name, same-name count, DAG dependencies, and canonical config hash as the replay
+  identity. A completed matching step returns the stored result. A shape mismatch fails
+  closed with `workflow_step_mismatch`.
 - A single step can record at most 1000 dependency edges. If more than 1000 unjoined
   sibling steps feed one later `step.do`, workflows rejects that step request as
   `request_too_large`; add intermediate joins to keep fan-in bounded.
@@ -349,6 +357,15 @@ The step facade implements durable replay:
   event-before-wait is supported.
 - Runtime replays user code from the start. It fetches replay pages lazily and may cache
   them in-process, but DB 2 step state is authoritative.
+- Workflows step responses are tagged variants. A `claim-step` or `register-wait`
+  `complete` response and a replay `completed` record require their own `output` field;
+  failed variants require their own `error` field. Explicit JSON `null` is a valid
+  payload. A malformed advisory replay record falls back to authoritative `claim-step`;
+  a malformed authoritative response is result-unknown and makes Runtime retry the run
+  instead of fabricating null.
+  Each new step record also carries the backend-owned operation kind (`do`, `sleep`,
+  `sleepUntil`, or `waitForEvent`). A missing or mismatched replay kind is a cache miss
+  and falls back to the corresponding authoritative endpoint.
 - Replay step records and their referenced payloads share the full generation,
   run-token, creation-time, lease, and active-status fence. A referenced payload is
   resolved only while that fence remains valid, so restart cannot mix payloads from
@@ -447,14 +464,28 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
   omits it.
 - DB 2 is the workflow instance state boundary; do not add direct DB 2 writes from
   control/runtime/scheduler.
-- Workflows persists `wf:schema_version` in DB 2. Schema `2` stores DAG dependency edges
-  on step records and summaries. Current deployments are greenfield for this schema; do
-  not add in-place migration paths for in-flight legacy workflow instances without a new
-  design.
-- If a development or maintenance environment starts with unversioned `wf:*` runtime
-  keys in workflows DB 2, stop workflows and clear that DB 2 runtime state before
-  restarting. WDL workflow definitions live in DB 0 under `wf:defs:*` and are not part
-  of this DB 2 runtime-state cleanup.
+- Workflows persists `wf:schema_version` in DB 2. Schema `3` stores DAG dependency edges
+  and backend-owned operation kinds on step records. Missing kinds fail closed; there is
+  no ambiguous in-place adoption for schema-2 records.
+- Schema 3 is a maintenance reset. First roll user-runtime and system-runtime and wait
+  for every old Runtime reader to drain. Quiesce tenant dispatch and confirm that DB 2
+  contains no state that must be retained, including terminal Workflow results, step
+  history, or Durable Object alarms. Stop Scheduler and scale Workflows to zero, then
+  wait for old Workflows tasks to exit and clear DB 2 including `wf:schema_version`.
+  Start the new Workflows and Scheduler without old/new Workflows overlap before
+  resuming dispatch. DB 0 `wf:defs:*` definitions are not part of the reset.
+- A legacy deployment that used any non-DB2 Workflows database must treat this as a
+  configuration migration; schema 3 does not move old runtime state. Remove the non-DB2
+  `WORKFLOWS_REDIS_DB` override first. Never clear the old database if it is shared. Use
+  DB 2 on the existing endpoint only when it is empty and dedicated to Workflows;
+  otherwise point `WORKFLOWS_REDIS_URL` at a new endpoint whose DB 2 is empty. Any DB
+  selection encoded by that URL is overridden to `2` after structured parsing.
+- A dedicated DB 2 containing schema-2 Workflows runtime state is a supported reset
+  source. A DB 2 containing keys owned by another subsystem is an unsupported
+  configuration: do not use prefix cleanup or clear it; move Workflows to a new endpoint
+  with an empty DB 2. A non-empty DB 2 without `wf:schema_version` fails startup and may
+  be cleared only after the operator confirms it is dedicated and disposable. WDL
+  workflow definitions live in DB 0 under `wf:defs:*` and are not part of DB 2 cleanup.
 
 ## Tests That Protect This Module
 

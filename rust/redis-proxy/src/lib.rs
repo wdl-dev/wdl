@@ -1,6 +1,7 @@
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use axum::body::Body;
@@ -20,19 +21,57 @@ use wdl_rust_common::internal_auth::{
     internal_auth_failure_response, internal_auth_headers_match, internal_auth_tokens_from_env,
 };
 use wdl_rust_common::metrics::prometheus_response;
-use wdl_rust_common::redis_conn::RedisConnection;
+use wdl_rust_common::redis_conn::redis_client_from_url;
+use wdl_rust_common::request_completion::{RequestCompletion, record_request_completion};
 use wdl_rust_common::request_id::request_id_from_headers;
-use wdl_rust_common::time::duration_ms_for_log;
 
 // CF KV allows 25 MiB values; set Axum's body cap above that instead of
 // inheriting its 2 MiB default for Bytes / Json extractors.
 pub(crate) const MAX_KV_VALUE_BYTES: usize = 26 * 1024 * 1024;
 pub(crate) const SERVICE: &str = "redis-proxy";
+const REDIS_CONNECTIONS_PER_POOL: usize = 2;
+
+#[derive(Clone)]
+struct RedisPool {
+    connections: Arc<[redis::aio::ConnectionManager]>,
+    next: Arc<AtomicUsize>,
+}
+
+fn next_connection_index(next: &AtomicUsize, connections: usize) -> usize {
+    assert!(connections > 0, "Redis pool requires at least one manager");
+    next.fetch_add(1, Ordering::Relaxed) % connections
+}
+
+impl RedisPool {
+    fn new(connections: Vec<redis::aio::ConnectionManager>) -> Self {
+        assert!(
+            !connections.is_empty(),
+            "Redis pool requires at least one manager"
+        );
+        Self {
+            connections: connections.into(),
+            next: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn manager(&self) -> redis::aio::ConnectionManager {
+        let index = next_connection_index(&self.next, self.connections.len());
+        self.connections[index].clone()
+    }
+
+    async fn with_conn<T, F, Fut>(&self, f: F) -> Result<T, redis::RedisError>
+    where
+        F: FnOnce(redis::aio::ConnectionManager) -> Fut,
+        Fut: std::future::Future<Output = Result<T, redis::RedisError>>,
+    {
+        f(self.manager()).await
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    control_redis: RedisConnection,
-    data_redis: RedisConnection,
+    control_redis: RedisPool,
+    data_redis: RedisPool,
     metrics: Arc<Metrics>,
     secret_decryptor: secrets::SecretEnvelopeDecryptor,
     internal_auth_tokens: Arc<InternalAuthTokens>,
@@ -128,9 +167,9 @@ impl AppState {
         self.control_redis.with_conn(f).await
     }
 
-    // ConnectionManager multiplexes over one socket; clone is a cheap Arc bump.
-    // The sidecar's ordinary KV/Queue/Logs routes are data-plane routes; the
-    // runtime-load route opts into with_control_redis() explicitly.
+    // Each manager multiplexes over one socket. The pool selects one manager per
+    // operation, and cloning that selection is a cheap Arc bump. Ordinary
+    // KV/Queue/Logs routes use the data pool; runtime-load opts into the control pool.
     pub(crate) async fn with_redis<T, F, Fut>(&self, f: F) -> Result<T, redis::RedisError>
     where
         F: FnOnce(redis::aio::ConnectionManager) -> Fut,
@@ -140,7 +179,7 @@ impl AppState {
     }
 
     pub(crate) fn redis(&self) -> redis::aio::ConnectionManager {
-        self.data_redis.clone_manager()
+        self.data_redis.manager()
     }
 
     pub(crate) fn secret_decryptor(&self) -> &secrets::SecretEnvelopeDecryptor {
@@ -150,6 +189,15 @@ impl AppState {
     pub(crate) fn metrics(&self) -> &Metrics {
         self.metrics.as_ref()
     }
+}
+
+async fn redis_connection_pool(client: &redis::Client) -> Result<RedisPool, redis::RedisError> {
+    let (first, second) = tokio::try_join!(
+        client.get_connection_manager(),
+        client.get_connection_manager(),
+    )?;
+    let managers: [redis::aio::ConnectionManager; REDIS_CONNECTIONS_PER_POOL] = [first, second];
+    Ok(RedisPool::new(Vec::from(managers)))
 }
 
 pub(crate) fn empty(status: StatusCode) -> Response {
@@ -198,55 +246,20 @@ fn record_request_complete(
     started_at: Instant,
     error: Option<(&str, &str)>,
 ) {
-    let elapsed = started_at.elapsed();
-    let duration_ms = elapsed.as_secs_f64() * 1000.0;
-    let log_duration_ms = duration_ms_for_log(elapsed);
-    let status_label = status.as_str();
-    state.metrics.increment(
-        "requests",
-        &[
-            ("service", SERVICE),
-            ("route", route),
-            ("status", status_label),
-        ],
-        1.0,
+    record_request_completion(
+        &state.metrics,
+        SERVICE,
+        observability::current_level(),
+        RequestCompletion {
+            method,
+            route,
+            status: status.as_u16(),
+            status_label: status.as_str(),
+            request_id,
+            duration: started_at.elapsed(),
+            error,
+        },
     );
-    state.metrics.observe(
-        "request_duration_ms",
-        &[("service", SERVICE), ("route", route)],
-        duration_ms,
-    );
-    if status.is_server_error() {
-        state.metrics.increment(
-            "request_errors",
-            &[
-                ("service", SERVICE),
-                ("route", route),
-                ("status", status_label),
-            ],
-            1.0,
-        );
-    }
-    let probe = matches!(route, "healthz" | "metrics");
-    if !probe || status.is_server_error() {
-        observability::log_event(
-            if status.is_server_error() {
-                observability::LogLevel::Error
-            } else {
-                observability::LogLevel::Info
-            },
-            "request_complete",
-            json!({
-                "request_id": request_id,
-                "method": method,
-                "route": route,
-                "status": status.as_u16(),
-                "duration_ms": log_duration_ms,
-                "error_code": error.map(|(code, _)| code),
-                "error_message": error.map(|(_, message)| message),
-            }),
-        );
-    }
 }
 
 fn response_error(response: &Response) -> Option<(&'static str, &str)> {
@@ -318,14 +331,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let data_redis_configured = optional_env("DATA_REDIS_URL").is_some();
     let redis_url = env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string());
     let data_redis_url = env::var("DATA_REDIS_URL").unwrap_or_else(|_| redis_url.clone());
-    let control_client = redis::Client::open(redis_url.as_str())?;
-    let data_client = redis::Client::open(data_redis_url.as_str())?;
-    let control_conn = control_client.get_connection_manager().await?;
-    let data_conn = data_client.get_connection_manager().await?;
+    let control_client = redis_client_from_url(&redis_url)?;
+    let data_client = redis_client_from_url(&data_redis_url)?;
+    let (control_redis, data_redis) = tokio::try_join!(
+        redis_connection_pool(&control_client),
+        redis_connection_pool(&data_client),
+    )?;
     let metrics = Arc::new(Metrics::default());
     let state = AppState {
-        control_redis: RedisConnection::new(control_conn),
-        data_redis: RedisConnection::new(data_conn),
+        control_redis,
+        data_redis,
         metrics: metrics.clone(),
         secret_decryptor: secrets::SecretEnvelopeDecryptor::from_env(metrics)
             .map_err(|err| std::io::Error::other(format!("{}: {}", err.code, err.message)))?,
@@ -357,7 +372,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     log_info(
         "started",
-        started_log(port, redis_configured, data_redis_configured),
+        started_log(
+            port,
+            redis_configured,
+            data_redis_configured,
+            REDIS_CONNECTIONS_PER_POOL,
+        ),
     );
     axum::serve(listener, app).await?;
     Ok(())
@@ -371,6 +391,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn redis_pool_selects_one_manager_per_operation_in_round_robin_order() {
+        let next = AtomicUsize::new(0);
+        let selected = (0..6)
+            .map(|_| next_connection_index(&next, REDIS_CONNECTIONS_PER_POOL))
+            .collect::<Vec<_>>();
+        assert_eq!(selected, [0, 1, 0, 1, 0, 1]);
+    }
 
     #[tokio::test]
     async fn app_error_response_uses_machine_error_and_human_message() {

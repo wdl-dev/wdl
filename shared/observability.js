@@ -9,7 +9,9 @@ import { errorMessage } from "./errors.js";
 const CARDINALITY_WARN_LIMIT = 100;
 /**
  * @typedef {Record<string, string | number | boolean>} Labels
- * @typedef {(level: string, event: string, fields?: Record<string, unknown>) => void} Logger
+ * @typedef {((level: string, event: string, fields?: Record<string, unknown>) => void) & {
+ *   enabled?: (level: string) => boolean,
+ * }} Logger
  * @typedef {{
  *   increment(name: string, labels?: Labels, delta?: number): void,
  *   observe(name: string, labels: Labels, value: number): void,
@@ -30,7 +32,7 @@ const CARDINALITY_WARN_LIMIT = 100;
  *   startedAt: number,
  *   error?: unknown,
  *   hasError?: boolean,
- *   extras?: Record<string, unknown> | null,
+ *   extras?: Record<string, unknown> | (() => Record<string, unknown>) | null,
  *   probeRoutes?: string[],
  * }} RequestCompleteOptions
  * @typedef {{ name: string, labels: Labels, value: number }} CounterMetric
@@ -257,9 +259,12 @@ export function recordRequestComplete({
     metrics.observe("request_duration_ms", requestLabels, durationMs);
     if (status >= 500) metrics.increment("request_errors", { ...requestLabels, status: statusLabel });
   }
-  if (!probeRoutes.includes(route) || requestHasError || status >= 500) {
-    const pruned = pruneExtras(extras);
-    log(requestHasError || status >= 500 ? "error" : "info", "request_complete", {
+  const shouldLog = !probeRoutes.includes(route) || requestHasError || status >= 500;
+  const level = requestHasError || status >= 500 ? "error" : "info";
+  if (shouldLog && (!log.enabled || log.enabled(level))) {
+    const resolvedExtras = typeof extras === "function" ? extras() : extras;
+    const pruned = pruneExtras(resolvedExtras);
+    log(level, "request_complete", {
       request_id: requestId,
       method,
       route,
@@ -356,11 +361,18 @@ export function createLogLevelBinder() {
  * @returns {Logger}
  */
 export function createLogger(service) {
-  return function log(level, event, fields = {}) {
+  const log = function log(
+    /** @type {string} */ level,
+    /** @type {string} */ event,
+    /** @type {Record<string, unknown>} */ fields = {}
+  ) {
     const threshold = LOG_LEVELS[level] ?? LOG_LEVELS.info;
     if (threshold < currentLogLevel) return;
     emitStructuredLogLine(service, level, event, fields);
   };
+  log.enabled = (/** @type {string} */ level) =>
+    (LOG_LEVELS[level] ?? LOG_LEVELS.info) >= currentLogLevel;
+  return log;
 }
 
 /**

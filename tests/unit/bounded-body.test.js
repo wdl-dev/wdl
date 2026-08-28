@@ -61,6 +61,35 @@ test("readBoundedStreamBytes copies a view backed by a larger buffer", async () 
   assert.equal(bytes.buffer.byteLength, 2);
 });
 
+test("readBoundedStreamBytes fills an exact declared-length buffer across chunks", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2]));
+      controller.enqueue(new Uint8Array([3, 4]));
+      controller.close();
+    },
+  });
+
+  const bytes = await readBoundedStreamBytes(stream, 4, undefined, undefined, 4);
+
+  assert.deepEqual([...bytes], [1, 2, 3, 4]);
+  assert.equal(bytes.buffer.byteLength, 4);
+});
+
+test("readBoundedStreamBytes rejects declared-length mismatches", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]));
+      controller.close();
+    },
+  });
+
+  await assert.rejects(
+    () => readBoundedStreamBytes(stream, 4, undefined, undefined, 2),
+    /exceeds Content-Length/
+  );
+});
+
 test("readBoundedStreamBytes supports caller-owned overflow errors", async () => {
   let cancelled = false;
   const stream = new ReadableStream({

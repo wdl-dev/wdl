@@ -60,7 +60,7 @@ R2 binding 把 `bucket_name` 映射到平台 S3-compatible bucket 下的 namespa
 
 AI 最多接受一个 `{ type: "ai" }` binding。Generated wrapper 通过 positional handler/entrypoint env 暴露 `fetch()`、`run()` 和 `models()`；启用 importable env 时，invocation 内对 imported env proxy 的实时读取会看到同一个 facade。Host entrypoint prototype 本身只暴露 `fetch()`。Virtual raw origin 是 `https://ai.wdl`；provider alias、官方 destination、Redis shape、byte/time bound、WebSocket 规则和非目标由 [`ai.zh.md`](ai.zh.md) 拥有。
 
-Generated host-facade wrapper 保留 Worker 的 importable-env compatibility contract：只有未设置 `disallow_importable_env` 时才调用 workerd `withEnv()`。启用 importable env 时，tenant module 可以在 module scope 保存 imported env proxy，并在 invocation 中从 proxy 实时读取 binding；module evaluation 期间直接缓存单个 binding 不属于 facade contract，因为 module evaluation 早于 wrapper invocation，只可能观察到 binding-scoped raw host adapter。设置 `disallow_importable_env` 后，module scope 和 invocation 中的 imported env 都保持为空，positional env 仍然获得 generated facade。
+Generated host-facade wrapper 保留 Worker 的 importable-env compatibility contract：启用 importable env 时，tenant module 可以在 module scope 保存 imported env proxy，并在 invocation 中从 proxy 实时读取 binding；module evaluation 期间直接缓存单个 binding 不属于 facade contract，因为 module evaluation 早于 wrapper invocation，只可能观察到 binding-scoped raw host adapter。设置 `disallow_importable_env` 后，module scope 和 invocation 中的 imported env 都保持为空，positional env 仍然获得 generated facade。Workflow KV facade 从 private `withEnv()` async context 解析当前 infrastructure attribution，因此跨 Workflow entrypoint instance 缓存的 facade 会跟随当前 invocation。Module-evaluation 捕获的 raw KV adapter 仍在 facade contract 外；其 failure 是普通 binding error，不会修改任何 Workflow invocation record。
 
 ASSETS 是 deploy-artifact helper，不是完整 Cloudflare Pages asset pipeline。Control 把文件上传到 `assets/<ns>/<worker>/<token>/<path>`，注入 `ASSETS` binding，runtime 暴露 `env.ASSETS.url(path)`。Tenant code 会 await 这次 JSRPC 调用；host 侧 URL 构造不做 IO，并用 `ASSETS_CDN_BASE` 返回浏览器可访问的 CDN URL。Path 按 `/` 切段，空段、`.` 和 `..` 被拒绝，每段会 percent-encode。Version 在 load 时绑定，因此 rollback 会切换 asset URL。需要对静态文件做 auth 或 rewrite 的 worker 应把文件留在 bundle 里，而不是使用 declared `assets`。
 
@@ -76,10 +76,12 @@ Platform binding 是 WDL-specific、指向 platform-tier namespace（例如 `__p
 
 Runtime 通过 `redis-proxy` 从 DB 0 读取不可变 bundle 和 metadata。Data-plane binding 使用各自的 storage：
 
+- 每个 redis-proxy 在 control 逻辑 pool 和 data 逻辑 pool 中各保留两个物理 connection manager，并按 operation 轮询选择一个 manager。拆分部署通常把两者分别映射到 DB 0 和 DB 1；未设置 `DATA_REDIS_URL` 时，data pool 会复用 `REDIS_URL` 的 endpoint 与数据库。单条 command、transaction、Lua invocation 或 packed pipeline 不会跨 manager；第二条连接用于限制小请求排在大型有序 Redis reply 后面的队头阻塞。
 - DB 0 中的 secret hash value 是 envelope ciphertext。redis-proxy 在 runtime-load 时解密；provider 配置或 envelope 校验失败时 fail closed。
 - Runtime 将 bundle entry 解码为指向有界 cold-load envelope 的 view。Text 和 JSON module 直接从 view 解码；wasm 和 data module 获得独立 byte copy，tenant 可见 buffer 无法暴露相邻 module 或 secret。
 - Loaded host-binding wrapper 只为稳定的 workerd env object 缓存完成 stripping 的 template。Default object/function handler 每个 event 都获得新的顶层 env copy 和 facade instance；持久 class entrypoint 则在构造时获得一组 wrapped env/facade 并持续复用，只有下文所述的 diagnostic context 会在每次 invocation 时刷新。
-- KV 和 queue producer 通过 `redis-proxy` 使用 DB 1。
+- KV 和 queue producer 通过 `redis-proxy` 使用 data 逻辑 pool。拆分部署把它映射到 DB 1；未设置 `DATA_REDIS_URL` 时则复用 control 数据库。
+- Runtime 在 materialize KV response body 前执行每 task 固定 32 MiB 的聚合 wire-byte admission。合法 `Content-Length` 会按声明字节数预留至完整预算，并让 reader 直接填充一次精确 allocation；缺失或更大的长度占用完整预算。并发超额读取会 fail closed 并取消 upstream body。单个 host envelope 另有 36 MiB hard wire cap；声明或实际流式 body 超限时会取消 upstream，并作为归因到当前 invocation 的 infrastructure error 失败。公开的 25 MiB 单值上限不变。Runtime 自己持有 body reader，让 JSON/Base64 result construction 留在 lease 内，并通过 5 秒 cleanup deadline 释放被遗弃的 reservation。Host-only invocation record 只把 `run()` 及其已 admission step callback 结算期间观察到的容量、body-read 或 malformed host-envelope failure 归因到对应 Workflow dispatch；即使 tenant 捕获 Error，该次 dispatch 也会重试，且不会提交受影响的 step success/error。Tenant value decode（包括 `type: "json"`）仍属于 user-data error，不会标记 invocation。Batch envelope 必须与请求 key 的数量及顺序精确一致；只有 scalar `get()` 会把 proxy `404` 解释为 missing value。Runtime 通过 private entrypoint props 传递 record id，generated wrapper 会在 tenant constructor 运行前消费它；缺失、非法或已失效 id 不会影响其它 invocation。
 - Workflow binding 调用 `workflows`；runtime 不直接读取 DB 2。
 - D1 和 DO binding 调用专门 runtime service。
 - R2/ASSETS 使用 S3-compatible object storage。

@@ -6,6 +6,11 @@ import {
   generateAbortShimWrapperModule,
   generateHostBindingWrapperModule,
 } from "../../runtime/load/wrapper-generate.js";
+import { WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP } from "../../runtime/load/module-rewrite.js";
+import {
+  beginRuntimeInfrastructureInvocation,
+  runtimeInfrastructureError,
+} from "../../runtime/infrastructure-error.js";
 import {
   applyModuleReplacements,
   moduleDataUrl,
@@ -31,10 +36,317 @@ test("host wrapper runtime exports only helpers consumed by generated wrappers",
     .map((match) => match[1])
     .toSorted();
   const consumed = [...new Set(
-    [...generateHostBindingWrapperModule("worker.js").matchAll(/__WdlHostRuntime__\.(\w+)/g)]
+    [...generateHostBindingWrapperModule("worker.js", {
+      entrypointNames: ["Flow"],
+      workflowClassNames: ["Flow"],
+      workflowInfrastructureInvocationProp: WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
+    }).matchAll(/__WdlHostRuntime__\.(\w+)/g)]
       .map((match) => match[1])
   )].toSorted();
   assert.deepEqual(exported, consumed);
+});
+
+test("workflow wrappers keep cached KV attribution current and hide invocation props", async () => {
+  const userUrl = moduleDataUrl(`
+    let cachedKv;
+    export const capturedBridgeIds = [];
+    export const observedProps = [];
+    export class Flow {
+      constructor(ctx, env) {
+        observedProps.push({ ...ctx.props });
+        Object.getPrototypeOf(this).__WdlRunWorkflow__ = (_event, _step, id) => {
+          capturedBridgeIds.push(id);
+        };
+        this.env = env;
+      }
+      async run(event, step) {
+        this.__WdlRunWorkflow__?.(event, step, "forged");
+        const argumentCount = arguments.length;
+        return step.do("read", async () => {
+          cachedKv ??= this.env.CACHE;
+          try {
+            const value = await cachedKv.get("key", { type: "text" }, "tenant-extra");
+            return { event, value, argumentCount };
+          } catch {
+            return { event, value: "fallback", argumentCount };
+          }
+        });
+      }
+    }
+    export default {
+      fetch(_request, env) {
+        cachedKv ??= env.CACHE;
+        return cachedKv.get("ordinary");
+      },
+    };
+  `);
+  const cloudflareUrl = moduleDataUrl(`
+    import { AsyncLocalStorage } from "node:async_hooks";
+    const envStorage = new AsyncLocalStorage();
+    export const env = new Proxy({}, {
+      get(_target, property) { return envStorage.getStore()?.[property]; },
+    });
+    export class WorkerEntrypoint {}
+    export function abortIsolate() {}
+    export function withEnv(value, fn) { return envStorage.run(value, fn); }
+  `);
+  const source = applyModuleReplacements(
+    generateHostBindingWrapperModule("worker.js", {
+      kvBindings: ["CACHE"],
+      entrypointNames: ["Flow"],
+      workflowClassNames: ["Flow"],
+      workflowInfrastructureInvocationProp: WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
+    }),
+    [
+      ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
+      [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+    ]
+  );
+  const wrapped = await import(moduleDataUrl(source));
+  const user = await import(userUrl);
+  const cloudflare = await import(cloudflareUrl);
+  /** @type {unknown[][]} */
+  const calls = [];
+  let failNext = false;
+  const rawKv = {
+    /** @param {unknown[]} args */
+    get(...args) {
+      calls.push(args);
+      if (failNext) {
+        failNext = false;
+        const error = runtimeInfrastructureError(
+          "KV read failed",
+          "isolated callback KV failure",
+          /** @type {string} */ (args[2])
+        );
+        throw new Error(error.message);
+      }
+      return "value";
+    },
+  };
+  const step = {
+    /** @param {string} _name @param {(...args: unknown[]) => unknown} callback */
+    do(_name, callback) {
+      return cloudflare.withEnv({}, () => callback({ attempt: 1 }));
+    },
+  };
+  assert.equal(
+    await wrapped.default.fetch(new Request("https://worker.test"), { CACHE: rawKv }, {}),
+    "value"
+  );
+  const firstProps = { [WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP]: "invocation-1" };
+  const first = new wrapped.Flow({ props: firstProps }, { CACHE: rawKv });
+  const firstResult = await first.run({ payload: 1 }, step);
+  const secondProps = { [WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP]: "invocation-2" };
+  const second = new wrapped.Flow({ props: secondProps }, { CACHE: rawKv });
+  const secondResult = await second.run({ payload: 2 }, step);
+
+  assert.equal(firstResult.argumentCount, 2);
+  assert.equal(secondResult.argumentCount, 2);
+  assert.deepEqual([firstResult.event, secondResult.event], [
+    { payload: 1 },
+    { payload: 2 },
+  ]);
+  assert.deepEqual(calls, [
+    ["ordinary", undefined, null],
+    ["key", { type: "text" }, "invocation-1"],
+    ["key", { type: "text" }, "invocation-2"],
+  ]);
+  assert.deepEqual(user.observedProps, [{}, {}]);
+  assert.deepEqual(user.capturedBridgeIds, ["forged", "forged"]);
+  assert.equal(Object.hasOwn(firstProps, WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP), false);
+  assert.equal(Object.hasOwn(secondProps, WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP), false);
+
+  const unaffected = beginRuntimeInfrastructureInvocation();
+  const failed = beginRuntimeInfrastructureInvocation();
+  try {
+    failNext = true;
+    const failing = new wrapped.Flow({
+      props: { [WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP]: failed.id },
+    }, { CACHE: rawKv });
+    const fallback = await failing.run({ payload: "failure" }, step);
+    assert.equal(fallback.value, "fallback");
+    assert.equal(failed.diagnostic(), "isolated callback KV failure");
+    assert.equal(unaffected.diagnostic(), undefined);
+  } finally {
+    failed.close();
+    unaffected.close();
+  }
+});
+
+test("workflow classes preserve ordinary named-entrypoint run calls without a private prop", async () => {
+  const userUrl = moduleDataUrl(`
+    export class Flow {
+      constructor(ctx, env) {
+        this.ctx = ctx;
+        this.env = env;
+      }
+      run(...args) {
+        return {
+          args,
+          value: this.env.CACHE.get("ordinary"),
+          props: { ...this.ctx.props },
+        };
+      }
+    }
+    export default {};
+  `);
+  const cloudflareUrl = moduleDataUrl(`
+    export const env = {};
+    export class WorkerEntrypoint {}
+    export function abortIsolate() {}
+    export function withEnv(_value, fn) { return fn(); }
+  `);
+  const source = applyModuleReplacements(
+    generateHostBindingWrapperModule("worker.js", {
+      kvBindings: ["CACHE"],
+      entrypointNames: ["Flow"],
+      workflowClassNames: ["Flow"],
+      workflowInfrastructureInvocationProp: WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
+    }),
+    [
+      ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
+      [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+    ]
+  );
+  const wrapped = await import(moduleDataUrl(source));
+  /** @type {unknown[][]} */
+  const calls = [];
+  const rawKv = {
+    /** @param {unknown[]} args */
+    get(...args) {
+      calls.push(args);
+      return "value";
+    },
+  };
+  const flow = new wrapped.Flow({ props: { ordinary: true } }, { CACHE: rawKv });
+
+  const result = flow.run("ordinary", "second", "third");
+  assert.deepEqual(result.args, ["ordinary", "second", "third"]);
+  assert.equal(result.value, "value");
+  assert.deepEqual(result.props, { ordinary: true });
+  assert.deepEqual(calls, [["ordinary", undefined, null]]);
+});
+
+test("workflow KV attribution survives disallow_importable_env without exposing bindings", async () => {
+  const cloudflareUrl = moduleDataUrl(`
+    import { AsyncLocalStorage } from "node:async_hooks";
+    const envStorage = new AsyncLocalStorage();
+    export const env = new Proxy({}, {
+      get(_target, property) { return envStorage.getStore()?.[property]; },
+      set(_target, property, value) {
+        const current = envStorage.getStore();
+        return current ? Reflect.set(current, property, value) : true;
+      },
+      defineProperty(_target, property, descriptor) {
+        const current = envStorage.getStore();
+        return current ? Reflect.defineProperty(current, property, descriptor) : true;
+      },
+      deleteProperty(_target, property) {
+        const current = envStorage.getStore();
+        return current ? Reflect.deleteProperty(current, property) : true;
+      },
+      has(_target, property) {
+        const current = envStorage.getStore();
+        return current ? Reflect.has(current, property) : false;
+      },
+      ownKeys() { return Reflect.ownKeys(envStorage.getStore() || {}); },
+      getOwnPropertyDescriptor(_target, property) {
+        const current = envStorage.getStore();
+        return current ? Reflect.getOwnPropertyDescriptor(current, property) : undefined;
+      },
+    });
+    export class WorkerEntrypoint {}
+    export function abortIsolate() {}
+    export function withEnv(value, fn) { return envStorage.run(value, fn); }
+  `);
+  const userUrl = moduleDataUrl(`
+    import { env as importedEnv } from ${JSON.stringify(cloudflareUrl)};
+    export class Flow {
+      constructor(_ctx, env) { this.env = env; }
+      async run() {
+        return arguments[1].do("read", async () => {
+          importedEnv.x = 1;
+          const objectDefineResult = Object.defineProperty(
+            importedEnv,
+            "y",
+            { value: 2, enumerable: true }
+          );
+          const reflectDefineResult = Reflect.defineProperty(
+            importedEnv,
+            "z",
+            { value: 3, enumerable: true }
+          );
+          return {
+            value: await this.env.CACHE.get("key"),
+            objectDefineReturnedEnv: objectDefineResult === importedEnv,
+            reflectDefineResult,
+            importedKeys: Object.keys(importedEnv),
+            importedKv: importedEnv.CACHE,
+            hasX: "x" in importedEnv,
+            hasY: "y" in importedEnv,
+            hasZ: "z" in importedEnv,
+            xDescriptor: Object.getOwnPropertyDescriptor(importedEnv, "x"),
+            yDescriptor: Object.getOwnPropertyDescriptor(importedEnv, "y"),
+            zDescriptor: Object.getOwnPropertyDescriptor(importedEnv, "z"),
+          };
+        });
+      }
+    }
+    export default {};
+  `);
+  const source = applyModuleReplacements(
+    generateHostBindingWrapperModule("worker.js", {
+      kvBindings: ["CACHE"],
+      entrypointNames: ["Flow"],
+      workflowClassNames: ["Flow"],
+      workflowInfrastructureInvocationProp: WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
+      importableEnvDisabled: true,
+    }),
+    [
+      ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
+      [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+    ]
+  );
+  const wrapped = await import(moduleDataUrl(source));
+  const cloudflare = await import(cloudflareUrl);
+  /** @type {unknown[][]} */
+  const calls = [];
+  const flow = new wrapped.Flow({
+    props: { [WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP]: "private-disabled" },
+  }, {
+    CACHE: {
+      /** @param {unknown[]} args */
+      get(...args) {
+        calls.push(args);
+        return "value";
+      },
+    },
+  });
+
+  const step = {
+    /** @param {string} _name @param {(...args: unknown[]) => unknown} callback */
+    do(_name, callback) {
+      return cloudflare.withEnv({}, () => callback({ attempt: 1 }));
+    },
+  };
+  assert.deepEqual(await flow.run({}, step), {
+    value: "value",
+    objectDefineReturnedEnv: true,
+    reflectDefineResult: true,
+    importedKeys: [],
+    importedKv: undefined,
+    hasX: false,
+    hasY: false,
+    hasZ: false,
+    xDescriptor: undefined,
+    yDescriptor: undefined,
+    zDescriptor: undefined,
+  });
+  assert.deepEqual(calls, [["key", undefined, "private-disabled"]]);
 });
 
 /**

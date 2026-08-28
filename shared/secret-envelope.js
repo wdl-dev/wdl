@@ -1,6 +1,6 @@
 import {
-  base64ToBytes as decodeBase64Bytes,
   bytesToBase64,
+  canonicalBase64ToBytes as decodeCanonicalBase64Bytes,
 } from "./base64.js";
 
 const SECRET_ENVELOPE_PREFIX = "WDL-ENC:";
@@ -73,16 +73,11 @@ function base64ToBytes(value, fieldName = "base64 field", { allowEmpty = false }
     const requirement = allowEmpty ? "a base64 string" : "a non-empty base64 string";
     throw new SecretEnvelopeError("invalid_envelope", `${fieldName} must be ${requirement}`);
   }
-  let bytes;
   try {
-    bytes = decodeBase64Bytes(value);
+    return decodeCanonicalBase64Bytes(value);
   } catch {
     throw new SecretEnvelopeError("invalid_envelope", `${fieldName} is not valid base64`);
   }
-  if (bytesToBase64(bytes) !== value) {
-    throw new SecretEnvelopeError("invalid_envelope", `${fieldName} is not canonical base64`);
-  }
-  return bytes;
 }
 
 /** @param {number} length @returns {Uint8Array} */

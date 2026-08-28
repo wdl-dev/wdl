@@ -1,6 +1,8 @@
 export const WORKFLOWS_MODULE_NAME = "_wdl-cloudflare-workflows.js";
 export const WDL_RESERVED_MODULE_PREFIX = "_wdl-";
 export const RUNTIME_WRAPPER_MODULE_NAME = "_wdl-wrapper.js";
+export const WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP =
+  "__wdlWorkflowInfrastructureInvocationId";
 
 export const WORKFLOWS_MODULE_SOURCE = `
 export { WorkflowEntrypoint } from "cloudflare:workers";

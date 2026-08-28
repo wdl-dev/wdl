@@ -44,7 +44,9 @@ Every protocol shape needs one owning module and one current written source:
 | Queue Runtime outcomes | `tests/fixtures/queue-runtime-response.json` owns the cross-language outer/inner outcome literals and required result fields consumed by Runtime dispatch and Rust Scheduler; `rust/scheduler/src/queue/delivery/outcome.rs` owns Queue decision grammar validation before destructive acknowledgement. |
 | Workflow definitions and instance state | `docs/modules/workflows.md`, `rust/workflows/`, runtime workflow dispatch |
 | Workflow Runtime result and Workflow-owned retryable backend errors | `tests/fixtures/workflow-runtime-response.json` owns the cross-language outcome literals, required terminal payload fields, and Workflow-owned retryable error literals consumed by Runtime dispatch and Rust Workflows. Internal-auth failure uses the shared `shared/internal-auth.js` and `tests/fixtures/internal-auth-contract.json` contract. |
+| Workflow step replay identity and terminal responses | `tests/fixtures/workflow-step-response.json` owns backend-written operation kinds and the required claim/replay/register-wait terminal payload fields consumed by Runtime and emitted by Rust Workflows. |
 | Workflow tick response | `tests/fixtures/workflow-tick-response.json` and `rust/common/src/workflow_tick.rs` own the executable shape; `rust/workflows/` and `rust/scheduler/` consume it, while `docs/modules/workflows.md` documents the surrounding behavior. |
+| Durable Object alarm success responses | `tests/fixtures/do-alarm-response.json` owns the 16 KiB cap and exact actor, dispatch, set/delete, and cleanup success variants consumed by JavaScript and Rust. |
 | Observability event and metric shape | `docs/modules/log-tail-observability.md`, `shared/observability.js`, `wdl-rust-common` |
 
 If one tier writes a shape and another tier reads it, the same change must update the

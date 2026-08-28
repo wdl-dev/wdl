@@ -59,6 +59,7 @@ const WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE = 256;
  *   name?: unknown,
  *   nameCount?: unknown,
  *   dependencies?: unknown,
+ *   kind?: unknown,
  *   config?: unknown,
  *   status?: unknown,
  *   outputJson?: string,
@@ -123,6 +124,7 @@ function serializedReplayStepBytes(step) {
     step.name ?? null,
     step.nameCount ?? null,
     step.dependencies ?? null,
+    step.kind ?? null,
     step.status ?? null,
     step.error ?? null,
   ]) ?? "null";
@@ -234,6 +236,7 @@ export function rememberWorkflowReplayStep(cache, ordinal, step) {
     name: step.name,
     nameCount: step.nameCount,
     dependencies: step.dependencies,
+    kind: step.kind,
     config: step.config,
     status: step.status,
     outputJson: step.outputJson,

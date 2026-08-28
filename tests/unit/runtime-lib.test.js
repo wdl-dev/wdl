@@ -17,8 +17,14 @@ const {
   normalizeQueuedDispatchBody,
   normalizeScheduledDispatchBody,
 } = await import(runtimeLibModuleDataUrl());
-const { base64ToBytes, bytesToBase64 } = await import("../../shared/base64.js");
+const {
+  base64ToBytes,
+  bytesToBase64,
+  canonicalBase64ToBytes,
+  prepareCanonicalBase64Values,
+} = await import("../../shared/base64.js");
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
+const secretEnvelopeFixture = readRepositoryJson("tests/fixtures/secret-envelope-parity.json");
 
 const enc = new TextEncoder();
 
@@ -33,6 +39,58 @@ test("shared base64 decoder matches atob rejection semantics with Buffer present
   for (const invalid of ["%%%", "Zg=", "Zm9v=", "-_8=", "YWJjZA==x"]) {
     assert.throws(() => base64ToBytes(invalid), /Invalid base64 input/);
   }
+});
+
+test("shared base64 decoder matches atob for every final sextet", () => {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  /** @param {string} value */
+  const atobBytes = (value) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  for (const final of alphabet) {
+    for (const value of [`A${final}`, `A${final}==`, `AA${final}`, `AA${final}=`]) {
+      assert.deepEqual(base64ToBytes(value), atobBytes(value), value);
+    }
+  }
+});
+
+test("canonical base64 decoder matches the cross-language fixture and padding bits", () => {
+  for (const vector of secretEnvelopeFixture.canonicalBase64.accepted) {
+    assert.deepEqual(canonicalBase64ToBytes(vector.value), new Uint8Array(vector.bytes), vector.name);
+    assert.deepEqual(
+      prepareCanonicalBase64Values([vector.value]).map((value) => value)[0],
+      new Uint8Array(vector.bytes),
+      vector.name
+    );
+  }
+  for (const vector of secretEnvelopeFixture.canonicalBase64.rejected) {
+    assert.throws(() => canonicalBase64ToBytes(vector.value), /Invalid canonical base64/, vector.name);
+    assert.throws(
+      () => prepareCanonicalBase64Values([vector.value]),
+      /Invalid canonical base64/,
+      vector.name
+    );
+  }
+
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let index = 0; index < alphabet.length; index += 1) {
+    const oneByte = `A${alphabet[index]}==`;
+    const twoBytes = `AA${alphabet[index]}=`;
+    if ((index & 0x0f) === 0) canonicalBase64ToBytes(oneByte);
+    else assert.throws(() => canonicalBase64ToBytes(oneByte), /Invalid canonical base64/);
+    if ((index & 0x03) === 0) canonicalBase64ToBytes(twoBytes);
+    else assert.throws(() => canonicalBase64ToBytes(twoBytes), /Invalid canonical base64/);
+  }
+});
+
+test("prepared canonical base64 values are isolated from caller array mutation", () => {
+  const values = ["Zg==", "Zw=="];
+  const prepared = prepareCanonicalBase64Values(values);
+  const decoded = prepared.map((value, index) => {
+    if (index === 0) values[1] = "_w==";
+    assert.ok(value !== null);
+    return new TextDecoder().decode(value);
+  });
+
+  assert.deepEqual(decoded, ["f", "g"]);
 });
 
 test("toBytes: string → Uint8Array utf8", () => {

@@ -1,0 +1,48 @@
+{
+  "maxBytes": 16384,
+  "actorSuccessVariants": {
+    "delivered": {
+      "ok": true
+    },
+    "ignored": {
+      "ok": true,
+      "ignored": true
+    }
+  },
+  "dispatchSuccessVariants": {
+    "delivered": {
+      "ok": true,
+      "ignored": false
+    },
+    "ignored": {
+      "ok": true,
+      "ignored": true
+    }
+  },
+  "mutationSuccessVariants": {
+    "set": {
+      "ok": true,
+      "jobId": "doa-test",
+      "changed": true,
+      "deleted": 0
+    },
+    "delete": {
+      "ok": true,
+      "jobId": "doa-test",
+      "changed": true,
+      "deleted": 1
+    },
+    "cleanup": {
+      "ok": true,
+      "jobId": null,
+      "changed": true,
+      "deleted": 2
+    }
+  },
+  "mutationRequiredFields": [
+    "changed",
+    "deleted",
+    "jobId",
+    "ok"
+  ]
+}
