@@ -2,9 +2,15 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 
 let cachedWorkflowKv;
+let rootDelayStarted = 0;
 
 export class OrderWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
+    if (event.payload.rootDelayMs) {
+      rootDelayStarted += 1;
+      await new Promise((resolve) => setTimeout(resolve, event.payload.rootDelayMs));
+      return { delayed: true };
+    }
     if (event.payload.sleepMs) {
       await step.sleep("settle", event.payload.sleepMs);
       return await step.do("after-sleep", async () => ({
@@ -127,6 +133,9 @@ export class OrderWorkflow extends WorkflowEntrypoint {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname.endsWith("/root-delay-status")) {
+      return Response.json({ started: rootDelayStarted });
+    }
     if (url.pathname.endsWith("/cache-kv")) {
       cachedWorkflowKv ??= env.CACHE;
       await cachedWorkflowKv.put("ordinary-cache", "ready");

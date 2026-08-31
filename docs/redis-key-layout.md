@@ -23,13 +23,15 @@ logical database; `DATA_REDIS_DB` does not affect those Rust clients. Embedded J
 control/log-tail paths use `DATA_REDIS_ADDR` plus `DATA_REDIS_DB` because their RESP
 client accepts a host:port address. Deployments that omit the variables for their path
 keep data-plane keys on the control Redis connection/database until they opt in.
-Workflows is different: `WORKFLOWS_REDIS_URL` may select another Redis endpoint, but the
-service always normalizes that endpoint to DB 2. DB 2 must remain dedicated to Workflows
+Workflows is different: `WORKFLOWS_REDIS_URL` may select another Redis endpoint, but it
+must omit the database or explicitly select DB 2; explicit non-DB2 URLs are rejected.
+DB 2 must remain dedicated to Workflows
 runtime state and must not share control or data-plane state. The legacy
 `WORKFLOWS_REDIS_DB` setting is accepted only when its value is `2` and should be
 removed from deployment configuration. Workflows compares parsed database identity with
-`CONTROL_REDIS_URL` and with `DATA_REDIS_URL` when configured; deployments that separate
-the data plane must pass its canonical URL to Workflows for this startup check.
+`CONTROL_REDIS_URL` and the effective Rust data-plane URL
+(`DATA_REDIS_URL ?? REDIS_URL`); deployments that separate the data plane must pass its
+canonical URL to Workflows for this startup check.
 
 ## Global Control Keys
 

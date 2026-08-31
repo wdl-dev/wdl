@@ -21,6 +21,7 @@ import {
   redisZAdd,
   redisZRange,
   redisZRem,
+  redisZScore,
 } from "./redis.js";
 import { delay } from "./stack.js";
 import { loadDoProtocol } from "../../helpers/load-do-protocol.js";
@@ -118,6 +119,11 @@ export function redisDoAlarmStateKeysForWorker(ns, worker) {
 /** @param {string} jobId */
 export function redisDoAlarmDueIncludes(jobId) {
   return redisZRange(doAlarmDueKey(jobId), 0, -1, WORKFLOWS_REDIS).includes(jobId);
+}
+
+/** @param {string} jobId */
+export function redisDoAlarmDueScore(jobId) {
+  return redisZScore(doAlarmDueKey(jobId), jobId, WORKFLOWS_REDIS);
 }
 
 /** @param {string} jobId */

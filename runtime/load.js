@@ -32,7 +32,7 @@ const utf8Decoder = new TextDecoder();
  * @typedef {string | { cjs: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
  * @typedef {{ modules: Record<string, WorkerModuleValue>, mainModule: string, [key: string]: unknown }} WorkerCodeShape
  * @typedef {Record<string, unknown> & { type?: string, className?: unknown }} RuntimeBindingSpec
- * @typedef {{ binding?: unknown, className?: unknown }} RuntimeWorkflowSpec
+ * @typedef {{ binding?: unknown, name?: unknown, className?: unknown, workflowKey?: unknown }} RuntimeWorkflowSpec
  * @typedef {{ entrypoint?: unknown }} RuntimeExportSpec
  * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null }} RuntimeBundleMeta
  * @typedef {{

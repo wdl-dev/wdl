@@ -1,12 +1,19 @@
 // WDL Workflows runtime core path: loaded worker facade reaches workflows.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import {
+  KV_FACADE_RPC_METHOD,
+  KV_READ_INFRASTRUCTURE_ERROR_CODE,
+  WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
+} from "../../runtime/infrastructure-error.js";
+import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
 import { prometheusCounter } from "./helpers/prometheus.js";
 import {
   WORKER_CODE,
   deployAndPromote,
   dispatchWorkflowReplay,
   gatewayFetch,
+  gatewayWorkerId,
   redisSMembers,
   redisWorkflowStateHDel,
   redisWorkflowStateHSet,
@@ -14,6 +21,7 @@ import {
   redisZScore,
   readIntegrationJson,
   responseJson,
+  runtimeDispatchPost,
   serviceInternalGet,
   serviceInternalPost,
   serviceInternalPostLarge,
@@ -26,6 +34,21 @@ import {
 } from "./helpers/workflows-scenarios.js";
 
 setupIntegrationSuite();
+
+const WORKFLOW_KV_PROVENANCE_PROBE_CODE = readRepositoryModuleSource(
+  "test-workers/workflow-kv-provenance/src/index.js",
+  [
+    ["__WDL_KV_FACADE_RPC_METHOD__", KV_FACADE_RPC_METHOD],
+    [
+      "__WDL_KV_READ_INFRASTRUCTURE_ERROR_CODE__",
+      KV_READ_INFRASTRUCTURE_ERROR_CODE,
+    ],
+    [
+      "__WDL_WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN__",
+      WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
+    ],
+  ]
+);
 
 test("workflow binding creates and reads an instance through workflows", async () => {
   const ns = uniqueNs("wfrt");
@@ -764,33 +787,640 @@ test("workflow binding creates and reads an instance through workflows", async (
   }
 });
 
-test("module-cached Workflow KV facade follows each invocation", async () => {
-  const ns = uniqueNs("wfrt-kv-cache");
+test("module-cached Workflow KV facade remains wrapped across invocations", async (t) => {
+  for (const { label, compatibilityFlags } of [
+    { label: "importable env", compatibilityFlags: [] },
+    { label: "disallowed importable env", compatibilityFlags: ["disallow_importable_env"] },
+  ]) {
+    await t.test(label, async () => {
+      const ns = uniqueNs("wfrt-kv-cache");
+      await deployAndPromote(ns, "shop", {
+        code: WORKER_CODE,
+        vars: { LABEL: "runtime-ok" },
+        bindings: { CACHE: { type: "kv", id: "workflow-cache" } },
+        workflows: [
+          { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+        ],
+        compatibilityFlags,
+      });
+
+      const primed = await gatewayFetch(ns, "/shop/cache-kv");
+      assert.deepEqual(
+        await readIntegrationJson(primed, 200, "ordinary cached KV response"),
+        { value: "ready" }
+      );
+
+      for (const id of ["cached-kv-first", "cached-kv-second"]) {
+        const created = await gatewayFetch(
+          ns,
+          `/shop/create?id=${id}&kvKey=shared`
+        );
+        await readIntegrationJson(created, 200, "workflow response");
+        await waitUntil(`workflow ${id} completes through cached KV facade`, async () => {
+          const status = await gatewayFetch(ns, `/shop/get?id=${id}`);
+          const body = await readIntegrationJson(status, 200, "workflow response");
+          return body.status === "completed" && body.output === id;
+        });
+      }
+    });
+  }
+});
+
+test("Workflow KV facade ignores module-evaluation method shadows", async () => {
+  const ns = uniqueNs("wfrt-kv-provenance");
   await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-provenance" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create"),
+    200,
+    "workflow provenance probe create"
+  );
+  await waitUntil("workflow provenance probe completes", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get"),
+      200,
+      "workflow provenance probe status"
+    );
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, {
+      captured: null,
+      constructorProps: [],
+      defineSucceeded: true,
+      error: null,
+      promisePrototypeThenCalls: 0,
+      prototypeListCalls: 0,
+      prototypeReportCalls: 0,
+      reporterPromiseSpeciesCalls: 0,
+      reporterPromiseThenCalls: 0,
+      rpcPromiseThenCalls: 0,
+      serviceStubReportIntercepts: 0,
+      serviceStubListCalls: 0,
+      serviceStubInvokeCalls: 0,
+      value: "value",
+    });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+});
+
+test("disallow_importable_env KV provenance preserves host capability identity", async () => {
+  const ns = uniqueNs("wfrt-kv-prototype");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    compatibilityFlags: ["disallow_importable_env"],
+    bindings: { CACHE: { type: "kv", id: "workflow-prototype" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?prototypeList=1"),
+    200,
+    "workflow prototype list create"
+  );
+  await waitUntil("workflow bypasses Object.prototype list shadow", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=prototype-list"),
+      200,
+      "workflow prototype list status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`prototype list workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, {
+      listComplete: true,
+      prototypeListCalls: 0,
+      serviceStubListCalls: 0,
+      serviceStubInvokeCalls: 0,
+    });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/seed"),
+    200,
+    "workflow prototype reporter seed"
+  );
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?capacityUncaught=1"),
+    200,
+    "workflow prototype reporter create"
+  );
+  await waitUntil("workflow bypasses ServiceStub fetch shadow", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=capacity-uncaught"),
+      200,
+      "workflow prototype reporter status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`prototype reporter workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, {
+      retried: true,
+      runs: 2,
+      serviceStubReportIntercepts: 0,
+    });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+
+  assert.deepEqual(
+    await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/prime-fake"),
+      200,
+      "workflow fake facade prime"
+    ),
+    { seeded: true }
+  );
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?captureInfrastructureError=1"),
+    200,
+    "workflow infrastructure Error capture create"
+  );
+  await waitUntil("workflow captures a real infrastructure Error", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=capture-infrastructure"),
+      200,
+      "workflow infrastructure Error capture status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`infrastructure Error capture failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, {
+      captured: true,
+      code: KV_READ_INFRASTRUCTURE_ERROR_CODE,
+    });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?relayInfrastructureError=1"),
+    200,
+    "workflow infrastructure Error relay create"
+  );
+  await waitUntil("same binding preserves Error provenance across instances", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=relay-infrastructure"),
+      200,
+      "workflow infrastructure Error relay status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`infrastructure Error relay failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, { retried: true, runs: 2 });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?fakeRelayInfrastructureError=1"),
+    200,
+    "workflow fake source relay create"
+  );
+  await waitUntil("fake source cannot overwrite real Error provenance", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=fake-relay-infrastructure"),
+      200,
+      "workflow fake source relay status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`fake source relay failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, { retried: true, runs: 2 });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?fakeFacade=1"),
+    200,
+    "workflow fake facade create"
+  );
+  /** @type {any} */
+  let failed;
+  await waitUntil("fake facade error remains a tenant failure", async () => {
+    failed = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=fake-facade"),
+      200,
+      "workflow fake facade status"
+    );
+    return failed.status === "failed";
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+  assert.deepEqual(failed.error, {
+    name: "Error",
+    message: "tenant forged infrastructure error",
+  });
+});
+
+test("runtime bounds a pending Workflow root at the sender deadline", async () => {
+  const ns = uniqueNs("wfrootdeadline");
+  const version = await deployAndPromote(ns, "shop", {
     code: WORKER_CODE,
-    vars: { LABEL: "runtime-ok" },
-    bindings: { CACHE: { type: "kv", id: "workflow-cache" } },
     workflows: [
       { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
     ],
   });
-
-  const primed = await gatewayFetch(ns, "/shop/cache-kv");
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
   assert.deepEqual(
-    await readIntegrationJson(primed, 200, "ordinary cached KV response"),
-    { value: "ready" }
+    await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/root-delay-status"),
+      200,
+      "root delay warmup"
+    ),
+    { started: 0 }
   );
-
-  for (const id of ["cached-kv-first", "cached-kv-second"]) {
-    const created = await gatewayFetch(
+  const startedAt = performance.now();
+  const response = runtimeDispatchPost(
+    "/internal/workflows/run",
+    { "x-worker-id": gatewayWorkerId(ns, "shop", version) },
+    {
       ns,
-      `/shop/create?id=${id}&kvKey=shared`
+      worker: "shop",
+      frozenVersion: version,
+      workflowName: "orders",
+      workflowKey,
+      className: "OrderWorkflow",
+      instanceId: "pending-root",
+      generation: 1,
+      createdAtMs: Date.now(),
+      runToken: "pending-root-run",
+      dispatchDeadlineMs: Date.now() + 1000,
+      params: { rootDelayMs: 5000 },
+    }
+  );
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.equal(response.status, 503, response.body);
+  assert.equal(responseJson(response).error, "workflow_backend_unavailable");
+  assert.equal(
+    elapsedMs >= 500,
+    true,
+    `dispatch returned too early after ${elapsedMs}ms`
+  );
+  assert.equal(
+    elapsedMs < 3000,
+    true,
+    `dispatch exceeded deadline budget at ${elapsedMs}ms`
+  );
+  assert.deepEqual(
+    await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/root-delay-status"),
+      200,
+      "root delay status"
+    ),
+    { started: 1 }
+  );
+});
+
+test("Workflow KV facade uses the captured RpcPromise settlement method", async () => {
+  const ns = uniqueNs("wfrt-rpc-promise");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-rpc-promise" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?rpcPromiseThen=1"),
+    200,
+    "workflow RpcPromise create"
+  );
+  await waitUntil("workflow bypasses tenant RpcPromise.then", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=rpc-promise-then"),
+      200,
+      "workflow RpcPromise status"
     );
-    await readIntegrationJson(created, 200, "workflow response");
-    await waitUntil(`workflow ${id} completes through cached KV facade`, async () => {
-      const status = await gatewayFetch(ns, `/shop/get?id=${id}`);
-      const body = await readIntegrationJson(status, 200, "workflow response");
-      return body.status === "completed" && body.output === id;
+    if (body.status === "failed") {
+      throw new Error(`RpcPromise workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, { value: null, rpcPromiseThenCalls: 0 });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+});
+
+test("native Promise prototype pollution cannot forge Workflow KV provenance", async () => {
+  const ns = uniqueNs("wfrt-promise-prototype");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-promise-prototype" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?promisePrototypeThen=1"),
+    200,
+    "workflow Promise prototype create"
+  );
+  /** @type {any} */
+  let failed;
+  await waitUntil("tenant Promise prototype error is terminal", async () => {
+    failed = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=promise-prototype-then"),
+      200,
+      "workflow Promise prototype status"
+    );
+    if (failed.status === "completed") {
+      throw new Error(`Promise prototype error retried: ${JSON.stringify(failed.output)}`);
+    }
+    return failed.status === "failed";
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+  assert.deepEqual(failed.error, {
+    name: "Error",
+    message: "tenant Promise.prototype.then",
+  });
+});
+
+test("native Promise prototype pollution cannot intercept Workflow reporter settlement", async () => {
+  const ns = uniqueNs("wfrt-reporter-promise");
+  const version = await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-reporter-promise" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/seed"),
+    200,
+    "workflow reporter Promise seed"
+  );
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?promiseReporterThen=1"),
+    200,
+    "workflow reporter Promise create"
+  );
+  await waitUntil("workflow reporter bypasses tenant Promise.then", async () => {
+    const response = serviceInternalPost(
+      "workflows",
+      9120,
+      "/internal/workflows/status",
+      {
+        ns,
+        worker: "shop",
+        frozenVersion: version,
+        workflowName: "flow",
+        workflowKey,
+        className: "Flow",
+        instanceId: "promise-reporter-then",
+      }
+    );
+    assert.equal(response.status, 200, response.body);
+    const body = responseJson(response);
+    if (body.status === "failed") {
+      throw new Error(`reporter Promise workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, {
+      retried: true,
+      runs: 2,
+      serviceStubReportIntercepts: 0,
+      reporterPromiseSpeciesCalls: 0,
+      reporterPromiseThenCalls: 0,
+    });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+});
+
+test("Workflow KV facade bypasses legacy ServiceStub get/put/delete helpers", async () => {
+  const ns = uniqueNs("wfrt-fetcher-legacy");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    compatibilityFlags: ["fetcher_has_get_put_delete"],
+    bindings: { CACHE: { type: "kv", id: "workflow-fetcher-legacy" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create"),
+    200,
+    "workflow legacy fetcher create"
+  );
+  await waitUntil("workflow uses KV RPC methods behind legacy fetcher helpers", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get"),
+      200,
+      "workflow legacy fetcher status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`legacy fetcher workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.equal(body.output.value, "value");
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+});
+
+test("Workflow step descriptors remain wrapped and hide dup", async () => {
+  const ns = uniqueNs("wfrt-step-facade");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-step-facade" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/seed"),
+    200,
+    "workflow step facade seed"
+  );
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?stepBypass=1"),
+    200,
+    "workflow step facade create"
+  );
+  await waitUntil("workflow retries through descriptor-wrapped step callback", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=step-bypass"),
+      200,
+      "workflow step facade status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`step facade workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, { retried: true, runs: 2 });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+});
+
+test("tenant KV method shadows cannot forge host provenance", async () => {
+  const ns = uniqueNs("wfrt-kv-shadow");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-shadow" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?methodShadow=1"),
+    200,
+    "workflow method shadow create"
+  );
+  await waitUntil("workflow bypasses tenant KV method shadow", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=method-shadow"),
+      200,
+      "workflow method shadow status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`method shadow workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.equal(body.output, "trusted");
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+});
+
+test("tenant KV argument serialization errors cannot forge host provenance", async () => {
+  const ns = uniqueNs("wfrt-kv-args");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-args" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  for (const kind of ["options", "key"]) {
+    await readIntegrationJson(
+      await gatewayFetch(ns, `/shop/create?forgedReadArgs=${kind}`),
+      200,
+      "workflow forged argument create"
+    );
+    /** @type {any} */
+    let failed;
+    await waitUntil(`workflow ${kind} argument error is terminal`, async () => {
+      failed = await readIntegrationJson(
+        await gatewayFetch(ns, `/shop/get?id=forged-${kind}`),
+        200,
+        "workflow forged argument status"
+      );
+      return failed.status === "failed";
+    }, { timeoutMs: 60_000, intervalMs: 250 });
+    assert.deepEqual(failed.error, {
+      name: "Error",
+      message: `tenant ${kind} serialization`,
     });
   }
+});
+
+test("real-workerd KV failures retry across run and durable callback boundaries", async () => {
+  const ns = uniqueNs("wfrt-kv-boundaries");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-boundaries" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/seed"),
+    200,
+    "workflow boundary seed"
+  );
+
+  for (const { query, id } of [
+    { query: "directRunInfrastructure=1", id: "direct-run-infrastructure" },
+    { query: "outerCatch=1", id: "outer-catch" },
+  ]) {
+    await readIntegrationJson(
+      await gatewayFetch(ns, `/shop/create?${query}`),
+      200,
+      "workflow boundary create"
+    );
+    await waitUntil(`workflow ${id} retries`, async () => {
+      const body = await readIntegrationJson(
+        await gatewayFetch(ns, `/shop/get?id=${id}`),
+        200,
+        "workflow boundary status"
+      );
+      if (body.status === "failed") {
+        throw new Error(`workflow boundary failed: ${JSON.stringify(body.error)}`);
+      }
+      if (body.status !== "completed") return false;
+      assert.deepEqual(body.output, { retried: true, runs: 2 });
+      return true;
+    }, { timeoutMs: 60_000, intervalMs: 250 });
+  }
+});
+
+test("caught real-workerd KV capacity failures may commit a step fallback", async () => {
+  const ns = uniqueNs("wfrt-kv-capacity");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-capacity" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/seed"),
+    200,
+    "workflow capacity seed"
+  );
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?capacityRetry=1"),
+    200,
+    "workflow capacity create"
+  );
+  await waitUntil("workflow commits caught KV capacity fallback", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=capacity"),
+      200,
+      "workflow capacity status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`capacity workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.equal(body.output.fallbackCommitted, true);
+    assert.equal(body.output.runs, 1);
+    assert.ok(body.output.rejectedReads >= 1 && body.output.rejectedReads <= 3);
+    assert.equal(body.output.rejectionCodes.length, body.output.rejectedReads);
+    assert.ok(
+      body.output.rejectionCodes.every(
+        (/** @type {unknown} */ code) => code === KV_READ_INFRASTRUCTURE_ERROR_CODE
+      )
+    );
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
+});
+
+test("uncaught real-workerd KV capacity failure retries before step error commit", async () => {
+  const ns = uniqueNs("wfrt-kv-capacity-uncaught");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-capacity" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/seed"),
+    200,
+    "workflow capacity seed"
+  );
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?capacityUncaught=1"),
+    200,
+    "workflow capacity create"
+  );
+  await waitUntil("workflow retries after uncaught KV capacity failure", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=capacity-uncaught"),
+      200,
+      "workflow capacity status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`capacity workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, {
+      retried: true,
+      runs: 2,
+      serviceStubReportIntercepts: 0,
+    });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
 });

@@ -2,6 +2,7 @@ import { beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { parseJsonText } from "../helpers/json-payload.js";
 import { loadRuntimeDispatch } from "../helpers/load-runtime-dispatch.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 import {
   importRepositoryModule,
   importSpecifierReplacements,
@@ -10,13 +11,14 @@ import {
 } from "../helpers/load-shared-module.js";
 import {
   jsonRequest,
+  makeCtx,
   makeScope,
   makeStub,
   makeWorkflowBackend,
 } from "../helpers/runtime-dispatch-fixtures.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { delay, settlementWithin } from "../helpers/timing.js";
-import { WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP } from "../../runtime/load/module-rewrite.js";
+import { WORKFLOW_INFRASTRUCTURE_REPORTER_PROP } from "../../runtime/load/module-rewrite.js";
 
 const {
   runtimeDispatch,
@@ -26,12 +28,23 @@ const {
 } = await loadRuntimeDispatch();
 
 /** @param {{ props?: Record<string, unknown> } | undefined} options */
-function workflowInfrastructureInvocationId(options) {
-  const value = options?.props?.[
-    WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP
-  ];
-  assert.equal(typeof value, "string");
-  return /** @type {string} */ (value);
+function workflowInfrastructureReporter(options) {
+  const reporter = /** @type {{ fetch?: unknown } | undefined} */ (
+    options?.props?.[WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]
+  );
+  assert.ok(reporter && typeof reporter.fetch === "function");
+  const reporterFetch = /** @type {(request: Request) => unknown} */ (reporter.fetch);
+  return {
+    /** @param {string} code */
+    report(code) {
+      reporterFetch.call(
+        reporter,
+        new Request(
+          `${runtimeInfrastructureError.WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN}/${code}`
+        )
+      );
+    },
+  };
 }
 const workflowJson = await importRepositoryModule(
   "runtime/dispatch/workflow-json.js",
@@ -79,6 +92,7 @@ const {
 function handleWorkflowRunDispatch(args) {
   return handleWorkflowRunDispatchRaw({
     ...args,
+    ctx: args.ctx ?? makeCtx(runtimeDispatch.WorkflowInfrastructureReporter),
     run: {
       dispatchDeadlineMs: Date.now() + 60_000,
       ...args.run,
@@ -88,6 +102,7 @@ function handleWorkflowRunDispatch(args) {
 const {
   MAX_WORKFLOW_ACTIVE_STEPS_PER_RUN_TURN,
   MAX_WORKFLOW_STARTED_STEPS_PER_RUN_TURN,
+  WORKFLOW_BACKEND_RESPONSE_MAX_BYTES,
   workflowError,
 } = runtimeDispatchWorkflowStep;
 const {
@@ -490,6 +505,266 @@ test("handleWorkflowRunDispatch invokes named workflow run with step.do facade",
   assert.deepEqual(scope.errors, []);
 });
 
+test("handleWorkflowRunDispatch rejects an expired deadline before tenant dispatch", async () => {
+  let getEntrypointCalls = 0;
+  let runCalls = 0;
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_expired-before-run",
+      className: "OrderWorkflow",
+      instanceId: "inst-expired-before-run",
+      generation: 1,
+      runToken: "run-1",
+      dispatchDeadlineMs: Date.now() - 1,
+      event: { payload: {} },
+    },
+    scope: makeScope(),
+    env: workflowEnv(null),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          run() {
+            runCalls += 1;
+            return "must not run";
+          },
+        },
+      },
+    }, {
+      onGetEntrypoint() {
+        getEntrypointCalls += 1;
+      },
+    }),
+  });
+
+  assert.equal(
+    (await readJsonResponse(response, 503)).error,
+    "workflow_backend_unavailable"
+  );
+  assert.equal(getEntrypointCalls, 0);
+  assert.equal(runCalls, 0);
+});
+
+test("handleWorkflowRunDispatch rechecks the deadline immediately before tenant run", async () => {
+  let now = Date.now();
+  const deadlineMs = now + 1_000;
+  let runCalls = 0;
+  await withMockedProperty(Date, "now", () => now, async () => {
+    const response = await handleWorkflowRunDispatch({
+      run: {
+        ns: "demo",
+        worker: "shop",
+        frozenVersion: "v1",
+        workflowName: "orders",
+        workflowKey: "wf_expired-after-entrypoint",
+        className: "OrderWorkflow",
+        instanceId: "inst-expired-after-entrypoint",
+        generation: 1,
+        runToken: "run-1",
+        dispatchDeadlineMs: deadlineMs,
+        event: { payload: {} },
+      },
+      scope: makeScope(),
+      env: workflowEnv(null),
+      stub: makeStub({
+        entrypoints: {
+          OrderWorkflow: {
+            run() {
+              runCalls += 1;
+              return "must not run";
+            },
+          },
+        },
+      }, {
+        onGetEntrypoint() {
+          now = deadlineMs + 1;
+        },
+      }),
+    });
+
+    assert.equal(
+      (await readJsonResponse(response, 503)).error,
+      "workflow_backend_unavailable"
+    );
+  });
+  assert.equal(runCalls, 0);
+});
+
+test("handleWorkflowRunDispatch rejects terminal outcomes settled after the deadline", async (t) => {
+  for (const outcome of ["completed", "failed", "suspended"]) {
+    await t.test(outcome, async () => {
+      let now = 1_000;
+      const deadlineMs = 2_000;
+      const backend = outcome === "suspended"
+        ? makeWorkflowBackend(async (url) => {
+          if (url.endsWith("/register-wait")) return Response.json({ state: "waiting" });
+          return Response.json(
+            { error: "unexpected", message: "unexpected backend call" },
+            { status: 500 }
+          );
+        })
+        : null;
+      await withMockedProperty(Date, "now", () => now, async () => {
+        const response = await handleWorkflowRunDispatch({
+          run: {
+            ns: "demo",
+            worker: "shop",
+            frozenVersion: "v1",
+            workflowName: "orders",
+            workflowKey: `wf_expired-${outcome}`,
+            className: "OrderWorkflow",
+            instanceId: `inst-expired-${outcome}`,
+            generation: 1,
+            runToken: "run-1",
+            dispatchDeadlineMs: deadlineMs,
+            event: { payload: {} },
+          },
+          scope: makeScope(),
+          env: workflowEnv(backend),
+          stub: makeStub({
+            entrypoints: {
+              OrderWorkflow: {
+                async run(/** @type {any} */ _event, /** @type {any} */ step) {
+                  if (outcome === "suspended") {
+                    try {
+                      return await step.waitForEvent("approval", { type: "approval" });
+                    } finally {
+                      now = deadlineMs + 1;
+                    }
+                  }
+                  now = deadlineMs + 1;
+                  if (outcome === "failed") throw new Error("tenant failure");
+                  return "tenant output";
+                },
+              },
+            },
+          }),
+        });
+
+        assert.equal(
+          (await readJsonResponse(response, 503)).error,
+          "workflow_backend_unavailable"
+        );
+      });
+    });
+  }
+});
+
+test("handleWorkflowRunDispatch bounds a root run Promise at the absolute deadline", async () => {
+  const scope = makeScope();
+  scope.requestId = "rid-hung-root";
+  const lateRun = Promise.withResolvers();
+  /** @type {Array<{ report(code: string): Promise<void> | void }>} */
+  const issuedReporters = [];
+  const dispatch = handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_hung-root",
+      className: "OrderWorkflow",
+      instanceId: "inst-hung-root",
+      generation: 1,
+      runToken: "run-1",
+      dispatchDeadlineMs: Date.now() + 100,
+      event: { payload: {} },
+    },
+    scope,
+    env: workflowEnv(null),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          run() { return lateRun.promise; },
+        },
+      },
+    }, {
+      onGetEntrypoint(options) {
+        issuedReporters.push(workflowInfrastructureReporter(options));
+      },
+    }),
+  });
+
+  const settled = await settlementWithin(dispatch, 1000);
+  assert.equal(settled.status, "fulfilled");
+  if (settled.status !== "fulfilled") throw new Error("workflow dispatch did not settle");
+  assert.equal(
+    (await readJsonResponse(settled.value, 503)).error,
+    "workflow_backend_unavailable"
+  );
+  assert.equal(scope.errors.length, 1);
+  const staleReporter = issuedReporters[0];
+  assert.ok(staleReporter);
+  assert.throws(
+    () => staleReporter.report(
+      runtimeInfrastructureError.KV_READ_INFRASTRUCTURE_ERROR_CODE
+    ),
+    /closed or invalid/
+  );
+  lateRun.reject(new Error("late tenant rejection"));
+  await delay(0);
+});
+
+test("handleWorkflowRunDispatch rechecks the deadline after terminal response construction", async (t) => {
+  for (const outcome of ["completed", "failed"]) {
+    await t.test(outcome, async () => {
+      let now = 1_000;
+      const deadlineMs = 2_000;
+      const failed = {};
+      Object.defineProperty(failed, "name", { value: "Error" });
+      Object.defineProperty(failed, "message", {
+        get() {
+          now = deadlineMs + 1;
+          return "tenant failure";
+        },
+      });
+      const completed = {
+        toJSON() {
+          now = deadlineMs + 1;
+          return ["tenant output"];
+        },
+      };
+      await withMockedProperty(Date, "now", () => now, async () => {
+        const response = await handleWorkflowRunDispatch({
+          run: {
+            ns: "demo",
+            worker: "shop",
+            frozenVersion: "v1",
+            workflowName: "orders",
+            workflowKey: `wf_terminal-build-${outcome}`,
+            className: "OrderWorkflow",
+            instanceId: `inst-terminal-build-${outcome}`,
+            generation: 1,
+            runToken: "run-1",
+            dispatchDeadlineMs: deadlineMs,
+            event: { payload: {} },
+          },
+          scope: makeScope(),
+          env: workflowEnv(null),
+          stub: makeStub({
+            entrypoints: {
+              OrderWorkflow: {
+                async run() {
+                  if (outcome === "failed") throw failed;
+                  return completed;
+                },
+              },
+            },
+          }),
+        });
+
+        assert.equal(
+          (await readJsonResponse(response, 503)).error,
+          "workflow_backend_unavailable"
+        );
+      });
+    });
+  }
+});
+
 test("handleWorkflowRunDispatch returns retryable transport errors for backend infrastructure failures", async (t) => {
   const cases = [
     {
@@ -851,6 +1126,261 @@ test("handleWorkflowRunDispatch keeps deterministic backend state errors termina
     name: "workflow_invalid_state",
     message: "Workflow service request failed",
   });
+});
+
+test("handleWorkflowRunDispatch bounds a stalled authoritative backend body", async () => {
+  let bodyReadStarted = false;
+  const stalled = new ReadableStream({
+    pull() {
+      bodyReadStarted = true;
+      return new Promise(() => {});
+    },
+    cancel() { return new Promise(() => {}); },
+  });
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) return new Response(stalled);
+    throw new Error(`unexpected backend call: ${url}`);
+  });
+  const outcome = await settlementWithin(handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_backend-body-deadline",
+      className: "OrderWorkflow",
+      instanceId: "inst-backend-body-deadline",
+      generation: 1,
+      runToken: "run-1",
+      dispatchDeadlineMs: Date.now() + 200,
+      event: { payload: {} },
+    },
+    scope: makeScope(),
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          /** @param {unknown} _event @param {any} step */
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            return await step.do("stalled", async () => "unused");
+          },
+        },
+      },
+    }),
+  }), 1000);
+
+  assert.equal(outcome.status, "fulfilled");
+  if (outcome.status !== "fulfilled") return;
+  assert.equal(bodyReadStarted, true);
+  assert.equal(
+    (await readJsonResponse(outcome.value, 503)).error,
+    "workflow_backend_unavailable"
+  );
+});
+
+test("handleWorkflowRunDispatch rejects an authoritative ACK parsed after its deadline", async () => {
+  let now = Date.now();
+  const deadlineMs = now + 1_000;
+  let callbackRuns = 0;
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) {
+      return new Response('{"state":"run","attempt":1}');
+    }
+    throw new Error(`unexpected backend call: ${url}`);
+  });
+  const intrinsicJsonParse = JSON.parse;
+  await withMockedProperty(Date, "now", () => now, () => withMockedProperty(
+    JSON,
+    "parse",
+    (text, reviver) => {
+      const parsed = intrinsicJsonParse(text, reviver);
+      if (text === '{"state":"run","attempt":1}') now = deadlineMs + 1;
+      return parsed;
+    },
+    async () => {
+      const response = await handleWorkflowRunDispatch({
+        run: {
+          ns: "demo",
+          worker: "shop",
+          frozenVersion: "v1",
+          workflowName: "orders",
+          workflowKey: "wf_backend-parse-deadline",
+          className: "OrderWorkflow",
+          instanceId: "inst-backend-parse-deadline",
+          generation: 1,
+          runToken: "run-1",
+          dispatchDeadlineMs: deadlineMs,
+          event: { payload: {} },
+        },
+        scope: makeScope(),
+        env: workflowEnv(backend),
+        stub: makeStub({
+          entrypoints: {
+            OrderWorkflow: {
+              /** @param {unknown} _event @param {any} step */
+              async run(_event, step) {
+                return await step.do("late-ack", async () => {
+                  callbackRuns += 1;
+                  return "unused";
+                });
+              },
+            },
+          },
+        }),
+      });
+
+      assert.equal(
+        (await readJsonResponse(response, 503)).error,
+        "workflow_backend_unavailable"
+      );
+      assert.equal(callbackRuns, 0);
+    }
+  ));
+});
+
+test("handleWorkflowRunDispatch rejects an identity response length mismatch", async () => {
+  const payload = '{"state":"run","attempt":1}';
+  let callbackRuns = 0;
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) {
+      return new Response(payload, {
+        headers: {
+          "content-length": String(new TextEncoder().encode(payload).byteLength + 1),
+        },
+      });
+    }
+    throw new Error(`unexpected backend call: ${url}`);
+  });
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_backend-length-mismatch",
+      className: "OrderWorkflow",
+      instanceId: "inst-backend-length-mismatch",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope: makeScope(),
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          /** @param {unknown} _event @param {any} step */
+          async run(_event, step) {
+            return await step.do("length-mismatch", async () => {
+              callbackRuns += 1;
+              return "unused";
+            });
+          },
+        },
+      },
+    }),
+  });
+
+  assert.equal(
+    (await readJsonResponse(response, 503)).error,
+    "workflow_backend_unavailable"
+  );
+  assert.equal(callbackRuns, 0);
+});
+
+test("handleWorkflowRunDispatch keeps compressed response lengths on the chunk fallback", async () => {
+  const payload = '{"state":"run","attempt":1}';
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) {
+      return new Response(payload, {
+        headers: {
+          "content-encoding": "gzip",
+          "content-length": String(new TextEncoder().encode(payload).byteLength + 1),
+        },
+      });
+    }
+    if (url.endsWith("/commit-step-success")) {
+      return Response.json({ state: "complete" });
+    }
+    throw new Error(`unexpected backend call: ${url}`);
+  });
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_backend-compressed-length",
+      className: "OrderWorkflow",
+      instanceId: "inst-backend-compressed-length",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope: makeScope(),
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          /** @param {unknown} _event @param {any} step */
+          async run(_event, step) {
+            return await step.do("compressed-length", async () => "ok");
+          },
+        },
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.outcome, "completed");
+  assert.equal(body.output, "ok");
+});
+
+test("handleWorkflowRunDispatch rejects oversized authoritative backend bodies", async () => {
+  assert.equal(WORKFLOW_BACKEND_RESPONSE_MAX_BYTES, 32 * 1024 * 1024);
+  let cancelled = false;
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) {
+      return new Response(new ReadableStream({
+        cancel() { cancelled = true; },
+      }), {
+        headers: {
+          "content-length": String(WORKFLOW_BACKEND_RESPONSE_MAX_BYTES + 1),
+        },
+      });
+    }
+    throw new Error(`unexpected backend call: ${url}`);
+  });
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_backend-body-limit",
+      className: "OrderWorkflow",
+      instanceId: "inst-backend-body-limit",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope: makeScope(),
+    env: workflowEnv(backend),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          /** @param {unknown} _event @param {any} step */
+          async run(_event, step) {
+            return await step.do("oversized", async () => "unused");
+          },
+        },
+      },
+    }),
+  });
+
+  assert.equal((await readJsonResponse(response, 503)).error, "workflow_backend_unavailable");
+  await Promise.resolve();
+  assert.equal(cancelled, true);
 });
 
 test("handleWorkflowRunDispatch does not commit a lost step-success acknowledgement as failure", async () => {
@@ -2889,8 +3419,8 @@ test("handleWorkflowRunDispatch returns result-unknown when the sender deadline 
     if (url.endsWith("/claim-step")) return Response.json({ state: "run" });
     return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
   });
-  const dispatchDeadlineMs = Date.now() + 1500;
   await delay(200);
+  const dispatchDeadlineMs = Date.now() + 1300;
   const dispatch = handleWorkflowRunDispatch({
     run: {
       ns: "demo",
@@ -3232,22 +3762,19 @@ test("handleWorkflowRunDispatch does not trust a forged infrastructure error nam
   assert.deepEqual(scope.errors, [forged]);
 });
 
-test("handleWorkflowRunDispatch retries process-marked host infrastructure errors", async () => {
+test("handleWorkflowRunDispatch retries when the run boundary reports a KV failure", async () => {
   const scope = makeScope();
-  scope.requestId = "rid-host-capacity";
-  const capacityError = runtimeInfrastructureError.runtimeInfrastructureError(
-    "KV read capacity is exhausted",
-    "Runtime KV aggregate response-body capacity was exhausted"
-  );
+  /** @type {{ report(code: string): Promise<void> | void } | null} */
+  let reporter = null;
   const response = await handleWorkflowRunDispatch({
     run: {
       ns: "demo",
       worker: "shop",
       frozenVersion: "v1",
       workflowName: "orders",
-      workflowKey: "wf_abc",
+      workflowKey: "wf_reported-run-failure",
       className: "OrderWorkflow",
-      instanceId: "inst-host-capacity",
+      instanceId: "inst-reported-run-failure",
       generation: 1,
       runToken: "run-1",
       event: { payload: {} },
@@ -3258,222 +3785,162 @@ test("handleWorkflowRunDispatch retries process-marked host infrastructure error
       entrypoints: {
         OrderWorkflow: {
           async run() {
-            throw capacityError;
+            await reporter?.report(
+              runtimeInfrastructureError.KV_READ_INFRASTRUCTURE_ERROR_CODE
+            );
+            throw new Error("KV read failed");
           },
         },
+      },
+    }, {
+      onGetEntrypoint(options) {
+        reporter = workflowInfrastructureReporter(options);
       },
     }),
   });
 
-  const body = await readJsonResponse(response, 503);
-  assert.deepEqual(body, {
-    error: "workflow_backend_unavailable",
-    message: "Workflow backend is unavailable",
-    request_id: "rid-host-capacity",
-  });
+  assert.equal((await readJsonResponse(response, 503)).error, "workflow_backend_unavailable");
   assert.equal(scope.errors.length, 1);
-  assert.equal(/** @type {Error} */ (scope.errors[0]).name, "workflow_backend_unavailable");
   assert.equal(
     /** @type {Error} */ (scope.errors[0]).message,
-    "Runtime KV aggregate response-body capacity was exhausted"
+    "Runtime KV infrastructure failure escaped tenant boundary"
   );
 });
 
-test("handleWorkflowRunDispatch retries host failures whose Error identity crosses JSRPC", async () => {
-  const scope = makeScope();
-  scope.requestId = "rid-host-capacity-jsrpc";
-  /** @type {string | null} */
-  let infrastructureInvocationId = null;
+test("handleWorkflowRunDispatch does not commit a step error after its callback reports a KV failure", async () => {
+  /** @type {{ report(code: string): Promise<void> | void } | null} */
+  let reporter = null;
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
+    if (url.endsWith("/commit-step-error")) {
+      throw new Error("reported KV failure must not become a durable step error");
+    }
+    throw new Error(`unexpected backend call: ${url}`);
+  });
   const response = await handleWorkflowRunDispatch({
     run: {
       ns: "demo",
       worker: "shop",
       frozenVersion: "v1",
       workflowName: "orders",
-      workflowKey: "wf_abc",
+      workflowKey: "wf_reported-step-failure",
       className: "OrderWorkflow",
-      instanceId: "inst-host-capacity-jsrpc",
+      instanceId: "inst-reported-step-failure",
       generation: 1,
       runToken: "run-1",
       event: { payload: {} },
     },
-    scope,
-    env: workflowEnv(null),
+    scope: makeScope(),
+    env: workflowEnv(backend),
     stub: makeStub({
       entrypoints: {
         OrderWorkflow: {
-          async run() {
-            const hostError = runtimeInfrastructureError.runtimeInfrastructureError(
-              "KV read capacity is exhausted",
-              "Runtime KV aggregate response-body capacity was exhausted",
-              infrastructureInvocationId
-            );
-            throw new Error(hostError.message);
+          async run(/** @type {any} */ _event, /** @type {any} */ step) {
+            try {
+              await step.do("read", async () => {
+                await reporter?.report(
+                  runtimeInfrastructureError.KV_READ_INFRASTRUCTURE_ERROR_CODE
+                );
+                throw new Error("KV read failed");
+              });
+            } catch {
+              return "outer fallback";
+            }
           },
         },
       },
     }, {
       onGetEntrypoint(options) {
-        infrastructureInvocationId = workflowInfrastructureInvocationId(options);
+        reporter = workflowInfrastructureReporter(options);
       },
     }),
   });
 
-  const body = await readJsonResponse(response, 503);
-  assert.equal(body.error, "workflow_backend_unavailable");
-  assert.equal(body.request_id, "rid-host-capacity-jsrpc");
-  assert.equal(scope.errors.length, 1);
+  assert.equal((await readJsonResponse(response, 503)).error, "workflow_backend_unavailable");
   assert.equal(
-    /** @type {Error} */ (scope.errors[0]).message,
-    "Runtime KV aggregate response-body capacity was exhausted"
+    backend.calls.some((call) => call.url.endsWith("/commit-step-error")),
+    false
   );
 });
 
-test("handleWorkflowRunDispatch attributes swallowed host failures to one invocation", async () => {
-  const firstStarted = Promise.withResolvers();
-  const releaseFirst = Promise.withResolvers();
-  const firstScope = makeScope();
-  const secondScope = makeScope();
-  firstScope.requestId = "rid-isolated-first";
-  secondScope.requestId = "rid-isolated-second";
-  /** @param {string} instanceId */
-  const run = (instanceId) => ({
-    ns: "demo",
-    worker: "shop",
-    frozenVersion: "v1",
-    workflowName: "orders",
-    workflowKey: `wf_${instanceId}`,
-    className: "OrderWorkflow",
-    instanceId,
-    generation: 1,
-    runToken: "run-1",
-    event: { payload: {} },
-  });
-
-  const firstDispatch = handleWorkflowRunDispatch({
-    run: run("isolated-first"),
-    scope: firstScope,
+test("handleWorkflowRunDispatch keeps infrastructure reporters isolated per dispatch", async () => {
+  /** @type {{ report(code: string): Promise<void> | void } | null} */
+  let failingReporter = null;
+  /** @type {Array<{ report(code: string): Promise<void> | void }>} */
+  const issuedReporters = [];
+  const failing = handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_reporter-isolation",
+      className: "OrderWorkflow",
+      instanceId: "inst-reporter-failing",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope: makeScope(),
     env: workflowEnv(null),
     stub: makeStub({
       entrypoints: {
         OrderWorkflow: {
           async run() {
-            firstStarted.resolve(undefined);
-            await releaseFirst.promise;
-            return "first-ok";
-          },
-        },
-      },
-    }),
-  });
-  await firstStarted.promise;
-
-  /** @type {string | null} */
-  let secondInfrastructureInvocationId = null;
-  const secondResponse = await handleWorkflowRunDispatch({
-    run: run("isolated-second"),
-    scope: secondScope,
-    env: workflowEnv(null),
-    stub: makeStub({
-      entrypoints: {
-        OrderWorkflow: {
-          async run() {
-            runtimeInfrastructureError.runtimeInfrastructureError(
-              "KV read capacity is exhausted",
-              "isolated host capacity failure",
-              secondInfrastructureInvocationId
+            await failingReporter?.report(
+              runtimeInfrastructureError.KV_READ_INFRASTRUCTURE_ERROR_CODE
             );
-            return "tenant fallback";
+            throw new Error("KV read failed");
           },
         },
       },
     }, {
       onGetEntrypoint(options) {
-        secondInfrastructureInvocationId = workflowInfrastructureInvocationId(options);
+        const reporter = workflowInfrastructureReporter(options);
+        failingReporter = reporter;
+        issuedReporters.push(reporter);
       },
     }),
   });
-  assert.equal((await readJsonResponse(secondResponse, 503)).error, "workflow_backend_unavailable");
-
-  releaseFirst.resolve(undefined);
-  const firstBody = await readJsonResponse(await firstDispatch, 200);
-  assert.equal(firstBody.outcome, "completed");
-  assert.equal(firstBody.output, "first-ok");
-  assert.equal(firstScope.errors.length, 0);
-});
-
-for (const caughtByTenant of [false, true]) {
-  test(`handleWorkflowRunDispatch does not commit ${caughtByTenant ? "caught" : "thrown"} host failure results`, async () => {
-    let callbackRuns = 0;
-    /** @type {string | null} */
-    let infrastructureInvocationId = null;
-    const backend = makeWorkflowBackend(async (url) => {
-      if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
-      if (url.endsWith("/commit-step-success")) return Response.json({ state: "complete" });
-      if (url.endsWith("/commit-step-error")) return Response.json({ state: "failed" });
-      return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
-    });
-    const entrypoint = {
-      async run(/** @type {any} */ _event, /** @type {any} */ step) {
-        return step.do("host-read", async () => {
-          callbackRuns += 1;
-          if (callbackRuns === 1) {
-            const hostError = runtimeInfrastructureError.runtimeInfrastructureError(
-              "KV read capacity is exhausted",
-              "step host capacity failure",
-              infrastructureInvocationId
-            );
-            if (!caughtByTenant) throw new Error(hostError.message);
-            return "tenant fallback";
-          }
-          return "healthy";
-        });
-      },
-    };
-    const dispatchArgs = () => ({
-      run: {
-        ns: "demo",
-        worker: "shop",
-        frozenVersion: "v1",
-        workflowName: "orders",
-        workflowKey: "wf_host-commit",
-        className: "OrderWorkflow",
-        instanceId: `inst-host-${caughtByTenant ? "caught" : "thrown"}`,
-        generation: 1,
-        runToken: "run-1",
-        event: { payload: {} },
-      },
-      scope: makeScope(),
-      env: workflowEnv(backend),
-      stub: makeStub({ entrypoints: { OrderWorkflow: entrypoint } }, {
-        onGetEntrypoint(options) {
-          infrastructureInvocationId = workflowInfrastructureInvocationId(options);
+  const healthy = handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_reporter-isolation",
+      className: "OrderWorkflow",
+      instanceId: "inst-reporter-healthy",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope: makeScope(),
+    env: workflowEnv(null),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run() { return "healthy"; },
         },
-      }),
-    });
-
-    const first = await handleWorkflowRunDispatch(dispatchArgs());
-    assert.equal((await readJsonResponse(first, 503)).error, "workflow_backend_unavailable");
-    assert.deepEqual(
-      backend.calls.filter((call) => call.url.includes("/commit-step-")),
-      []
-    );
-
-    const second = await handleWorkflowRunDispatch(dispatchArgs());
-    const secondBody = await readJsonResponse(second, 200);
-    assert.equal(secondBody.outcome, "completed");
-    assert.equal(secondBody.output, "healthy");
-    assert.equal(callbackRuns, 2);
-    assert.equal(
-      backend.calls.filter((call) => call.url.endsWith("/commit-step-success")).length,
-      1
-    );
-    assert.equal(
-      backend.calls.filter((call) => call.url.endsWith("/commit-step-error")).length,
-      0
-    );
+      },
+    }),
   });
-}
+
+  const [failedResponse, healthyResponse] = await Promise.all([failing, healthy]);
+  assert.equal((await readJsonResponse(failedResponse, 503)).error, "workflow_backend_unavailable");
+  const healthyBody = await readJsonResponse(healthyResponse, 200);
+  assert.equal(healthyBody.outcome, "completed");
+  assert.equal(healthyBody.output, "healthy");
+  assert.equal(typeof healthyBody.duration_ms, "number");
+  const staleReporter = issuedReporters[0];
+  assert.ok(staleReporter);
+  assert.throws(
+    () => staleReporter.report(
+      runtimeInfrastructureError.KV_READ_INFRASTRUCTURE_ERROR_CODE
+    ),
+    /closed or invalid/
+  );
+});
 
 test("handleWorkflowRunDispatch does not trust a forged WorkflowSuspended name", async () => {
   const scope = makeScope();
@@ -3856,68 +4323,6 @@ test("handleWorkflowRunDispatch lets a late fan-out infrastructure failure overr
     request_id: scope.requestId,
   });
   assert.equal(scope.errors.length, 1);
-});
-
-test("handleWorkflowRunDispatch observes invocation host failures after sibling settlement", async () => {
-  const scope = makeScope();
-  scope.requestId = "rid-late-host-sequence";
-  const callbackStarted = Promise.withResolvers();
-  const releaseCallback = Promise.withResolvers();
-  const backend = makeWorkflowBackend(async (url) => {
-    if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
-    if (url.endsWith("/commit-step-success")) return Response.json({ state: "complete" });
-    return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
-  });
-  /** @type {string | null} */
-  let infrastructureInvocationId = null;
-  const dispatch = handleWorkflowRunDispatch({
-    run: {
-      ns: "demo",
-      worker: "shop",
-      frozenVersion: "v1",
-      workflowName: "orders",
-      workflowKey: "wf_abc",
-      className: "OrderWorkflow",
-      instanceId: "inst-late-host-sequence",
-      generation: 1,
-      runToken: "run-1",
-      event: { payload: {} },
-    },
-    scope,
-    env: workflowEnv(backend),
-    stub: makeStub({
-      entrypoints: {
-        OrderWorkflow: {
-          async run(/** @type {any} */ _event, /** @type {any} */ step) {
-            void step.do("late-host", async () => {
-              callbackStarted.resolve(undefined);
-              await releaseCallback.promise;
-              runtimeInfrastructureError.runtimeInfrastructureError(
-                "KV read capacity is exhausted",
-                "late host capacity failure",
-                infrastructureInvocationId
-              );
-              return "ok";
-            }).catch(() => {});
-            await callbackStarted.promise;
-            throw new TypeError("tenant failure");
-          },
-        },
-      },
-    }, {
-      onGetEntrypoint(options) {
-        infrastructureInvocationId = workflowInfrastructureInvocationId(options);
-      },
-    }),
-  });
-
-  await callbackStarted.promise;
-  assert.equal((await settlementWithin(dispatch, 10)).status, "pending");
-  releaseCallback.resolve(undefined);
-
-  const body = await readJsonResponse(await dispatch, 503);
-  assert.equal(body.error, "workflow_backend_unavailable");
-  assert.equal(/** @type {Error} */ (scope.errors[0]).message, "late host capacity failure");
 });
 
 test("handleWorkflowRunDispatch marks NonRetryableError step failures terminal", async () => {

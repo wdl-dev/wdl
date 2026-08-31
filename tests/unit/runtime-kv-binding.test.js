@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   importRepositoryModule,
   freshRepositoryModuleDataUrl,
+  readRepositoryJson,
   repositoryFileUrl,
   runtimeLibModuleDataUrl,
 } from "../helpers/load-shared-module.js";
@@ -18,6 +19,9 @@ const RUNTIME_LIB_URL = runtimeLibModuleDataUrl();
 const SHARED_BASE64_URL = repositoryFileUrl("shared/base64.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
+const kvHostResponse = /** @type {any} */ (
+  readRepositoryJson("tests/fixtures/kv-host-response.json")
+);
 
 /**
  * @param {Array<[RegExp | string, string]>} [replacements]
@@ -68,15 +72,33 @@ function withFetchStub(fn) {
   };
 }
 
-/** @param {any} KV */
-function makeKv(KV) {
+/** @param {any} KV @param {Record<string, unknown>} [env] */
+function makeKv(KV, env = {
+  REDIS_PROXY_URL: "http://redis-proxy",
+  SERVICE_NAME: "unit",
+  WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token",
+}) {
   return new KV(
     {
-      props: { ns: "tenant-a", id: "cache" },
+      props: {
+        ns: "tenant-a",
+        id: "cache",
+      },
       /** @param {Promise<unknown>} promise */
       waitUntil(promise) { void promise.catch(() => {}); },
     },
-    { REDIS_PROXY_URL: "http://redis-proxy", SERVICE_NAME: "unit", WDL_INTERNAL_AUTH_TOKEN: "test-internal-auth-token" }
+    env
+  );
+}
+
+/** @param {Record<string, unknown>} runtimeInfrastructure */
+function brandedInfrastructureError(runtimeInfrastructure) {
+  return (/** @type {unknown} */ error) => (
+    error instanceof Error &&
+    Object.hasOwn(error, "code") &&
+    Object.prototype.propertyIsEnumerable.call(error, "code") &&
+    /** @type {any} */ (error).code ===
+      runtimeInfrastructure.KV_READ_INFRASTRUCTURE_ERROR_CODE
   );
 }
 
@@ -138,6 +160,34 @@ test("KV batch get calls the batch proxy endpoint and returns a Map", withFetchS
   assert.deepEqual([...out.entries()], [["a", "alpha"], ["missing", null]]);
 }));
 
+test("KV host response readers match the cross-language fixture", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, KV_READ_RESPONSE_MAX_BYTES } = await loadKvBinding();
+  assert.equal(KV_READ_RESPONSE_MAX_BYTES, kvHostResponse.maxResponseBytes);
+  const responses = [
+    kvHostResponse.batch.response,
+    kvHostResponse.metadata.found,
+    kvHostResponse.metadata.missing,
+    kvHostResponse.list.complete,
+    kvHostResponse.list.incomplete,
+  ];
+  setFetch(async () => Response.json(responses.shift()));
+  const kv = makeKv(KV);
+
+  const batch = await kv.get(kvHostResponse.batch.requestedKeys);
+  assert.deepEqual([...batch.entries()], [
+    ["binary", new TextDecoder().decode(Uint8Array.from([0, 0xff, 0x10]))],
+    ["empty", ""],
+    ["missing", null],
+  ]);
+  assert.deepEqual(await kv.getWithMetadata("binary", "arrayBuffer"), {
+    value: Uint8Array.from([0xff, 0]).buffer,
+    metadata: { kind: "binary" },
+  });
+  assert.deepEqual(await kv.getWithMetadata("missing"), { value: null, metadata: null });
+  assert.deepEqual(await kv.list({ metadata: true }), kvHostResponse.list.complete);
+  assert.deepEqual(await kv.list(), kvHostResponse.list.incomplete);
+}));
+
 test("KV read capacity rejects concurrent large materialization and releases leases", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding();
   const largeLength = 20 * 1024 * 1024;
@@ -196,10 +246,9 @@ test("KV read capacity rejects concurrent large materialization and releases lea
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 
-test("KV rejects oversized host envelopes with attribution and lease cleanup", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+test("KV rejects oversized host envelopes with a branded error and lease cleanup", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, KV_READ_RESPONSE_MAX_BYTES, kvCapacity, runtimeInfrastructure } =
     await loadKvBinding();
-  const invocation = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
   let cancelled = false;
   setFetch(async () => new Response(new ReadableStream({
     cancel() { cancelled = true; },
@@ -207,22 +256,14 @@ test("KV rejects oversized host envelopes with attribution and lease cleanup", w
     headers: { "content-length": String(KV_READ_RESPONSE_MAX_BYTES + 1) },
   }));
 
-  try {
-    await assert.rejects(
-      () => makeKv(KV).get("oversized", undefined, invocation.id),
-      (error) => error instanceof Error &&
-        error.message === "KV read response is too large" &&
-        runtimeInfrastructure.isRuntimeInfrastructureError(error)
-    );
-    assert.equal(
-      invocation.diagnostic(),
-      "Runtime KV response exceeded its wire byte limit"
-    );
-    assert.equal(cancelled, true);
-    assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
-  } finally {
-    invocation.close();
-  }
+  await assert.rejects(
+    () => makeKv(KV).get("oversized"),
+    (error) => error instanceof Error &&
+      error.message === "KV read response is too large" &&
+      runtimeInfrastructure.isRuntimeInfrastructureError(error)
+  );
+  assert.equal(cancelled, true);
+  assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 
 test("KV read capacity releases reservation when body consumption fails", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
@@ -240,43 +281,7 @@ test("KV read capacity releases reservation when body consumption fails", withFe
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 
-test("raw KV host failures do not affect active Workflow invocations", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
-  const { KV, runtimeInfrastructure } = await loadKvBinding();
-  const active = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
-  setFetch(async () => new Response(new ReadableStream({
-    start(controller) { controller.error(new Error("body failed")); },
-  }), { headers: { "content-length": "1" } }));
-
-  try {
-    await assert.rejects(() => makeKv(KV).get("broken"), /KV read response failed/);
-    assert.equal(active.diagnostic(), undefined);
-  } finally {
-    active.close();
-  }
-}));
-
-test("stale cached KV attribution cannot affect a later Workflow invocation", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
-  const { KV, runtimeInfrastructure } = await loadKvBinding();
-  const stale = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
-  const staleId = stale.id;
-  stale.close();
-  const current = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
-  setFetch(async () => new Response(new ReadableStream({
-    start(controller) { controller.error(new Error("body failed")); },
-  }), { headers: { "content-length": "1" } }));
-
-  try {
-    await assert.rejects(
-      () => makeKv(KV).get("broken", undefined, staleId),
-      /KV read response failed/
-    );
-    assert.equal(current.diagnostic(), undefined);
-  } finally {
-    current.close();
-  }
-}));
-
-test("KV malformed batch envelopes are attributed to the exact Workflow invocation", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+test("KV malformed batch envelopes return branded infrastructure errors", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, runtimeInfrastructure } = await loadKvBinding();
   const cases = [
     { keys: ["a"], response: () => new Response(JSON.stringify({ entries: {} })) },
@@ -290,13 +295,13 @@ test("KV malformed batch envelopes are attributed to the exact Workflow invocati
     {
       keys: ["a"],
       response: () => new Response(JSON.stringify({
-        entries: [{ key: "a", value_b64: "Zg", metadata: null }],
+        entries: [{ key: "a", ...kvHostResponse.invalid.nonCanonicalBase64 }],
       })),
     },
     {
       keys: ["a"],
       response: () => new Response(JSON.stringify({
-        entries: [{ key: "a", value_b64: null, metadata: { orphan: true } }],
+        entries: [{ key: "a", ...kvHostResponse.invalid.orphanMetadata }],
       })),
     },
     { keys: ["a"], response: () => new Response(new Uint8Array([0xff])) },
@@ -313,106 +318,59 @@ test("KV malformed batch envelopes are attributed to the exact Workflow invocati
   ];
 
   for (const testCase of cases) {
-    const invocation = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
     setFetch(async () => testCase.response());
-    try {
-      await assert.rejects(
-        () => makeKv(KV).get(testCase.keys, testCase.type, invocation.id),
-        (error) => error instanceof Error &&
-          error.message === "KV read response is invalid" &&
-          runtimeInfrastructure.isRuntimeInfrastructureError(error)
-      );
-      assert.equal(
-        invocation.diagnostic(),
-        "Runtime KV batch response envelope is invalid"
-      );
-    } finally {
-      invocation.close();
-    }
+    await assert.rejects(
+      () => makeKv(KV).get(testCase.keys, testCase.type),
+      (error) => error instanceof Error &&
+        error.message === "KV read response is invalid" &&
+        runtimeInfrastructure.isRuntimeInfrastructureError(error)
+    );
   }
 }));
 
-test("KV metadata envelope preserves empty values and attributes malformed base64", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+test("KV metadata envelope preserves empty values and brands malformed responses", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, runtimeInfrastructure } = await loadKvBinding();
-  const valid = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
   setFetch(async () => new Response(JSON.stringify({ value_b64: "", metadata: null })));
-  try {
-    const result = await makeKv(KV).getWithMetadata("empty", "arrayBuffer", valid.id);
-    assert.ok(result.value instanceof ArrayBuffer);
-    assert.equal(result.value.byteLength, 0);
-    assert.equal(result.metadata, null);
-    assert.equal(valid.diagnostic(), undefined);
-  } finally {
-    valid.close();
-  }
+  const result = await makeKv(KV).getWithMetadata("empty", "arrayBuffer");
+  assert.ok(result.value instanceof ArrayBuffer);
+  assert.equal(result.value.byteLength, 0);
+  assert.equal(result.metadata, null);
 
-  const invalid = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
-  setFetch(async () => new Response(JSON.stringify({ value_b64: "Zg", metadata: null })));
-  try {
-    await assert.rejects(
-      () => makeKv(KV).getWithMetadata("broken", undefined, invalid.id),
-      /KV read response is invalid/
-    );
-    assert.equal(
-      invalid.diagnostic(),
-      "Runtime KV metadata response envelope is invalid"
-    );
-  } finally {
-    invalid.close();
-  }
+  setFetch(async () => new Response(JSON.stringify(
+    kvHostResponse.invalid.nonCanonicalBase64
+  )));
+  await assert.rejects(
+    () => makeKv(KV).getWithMetadata("broken"),
+    (error) => error instanceof Error &&
+      runtimeInfrastructure.isRuntimeInfrastructureError(error)
+  );
 
-  const orphanMetadata = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
-  setFetch(async () => new Response(JSON.stringify({
-    value_b64: null,
-    metadata: { orphan: true },
-  })));
-  try {
-    await assert.rejects(
-      () => makeKv(KV).getWithMetadata("missing", undefined, orphanMetadata.id),
-      /KV read response is invalid/
-    );
-    assert.equal(
-      orphanMetadata.diagnostic(),
-      "Runtime KV metadata response envelope is invalid"
-    );
-  } finally {
-    orphanMetadata.close();
-  }
+  setFetch(async () => new Response(JSON.stringify(kvHostResponse.invalid.orphanMetadata)));
+  await assert.rejects(
+    () => makeKv(KV).getWithMetadata("missing"),
+    (error) => error instanceof Error &&
+      runtimeInfrastructure.isRuntimeInfrastructureError(error)
+  );
 }));
 
-test("KV malformed list envelopes are attributed to the exact Workflow invocation", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+test("KV malformed list envelopes return branded infrastructure errors", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, runtimeInfrastructure } = await loadKvBinding();
-  const invocation = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
-  setFetch(async () => new Response(JSON.stringify({ keys: {}, list_complete: true })));
-  try {
-    await assert.rejects(
-      () => makeKv(KV).list({}, invocation.id),
-      /KV read response is invalid/
-    );
-    assert.equal(
-      invocation.diagnostic(),
-      "Runtime KV list response envelope is invalid"
-    );
-  } finally {
-    invocation.close();
-  }
+  setFetch(async () => new Response(JSON.stringify(
+    kvHostResponse.invalid.incompleteListWithoutCursor
+  )));
+  await assert.rejects(
+    () => makeKv(KV).list(),
+    (error) => error instanceof Error &&
+      runtimeInfrastructure.isRuntimeInfrastructureError(error)
+  );
 }));
 
-test("KV tenant JSON decoding errors do not mark the Workflow invocation", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
-  const { KV, runtimeInfrastructure } = await loadKvBinding();
-  const invocation = runtimeInfrastructure.beginRuntimeInfrastructureInvocation();
+test("KV tenant JSON decoding errors remain ordinary user-data errors", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV } = await loadKvBinding();
   setFetch(async () => new Response(JSON.stringify({
     entries: [{ key: "a", value_b64: btoa("not-json"), metadata: null }],
   })));
-  try {
-    await assert.rejects(
-      () => makeKv(KV).get(["a"], "json", invocation.id),
-      SyntaxError
-    );
-    assert.equal(invocation.diagnostic(), undefined);
-  } finally {
-    invocation.close();
-  }
+  await assert.rejects(() => makeKv(KV).get(["a"], "json"), SyntaxError);
 }));
 
 test("KV read capacity rejects a missing declared response body", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
@@ -492,19 +450,48 @@ test("KV list rejects invalid limits before proxy work", withFetchStub(async (/*
 }));
 
 test("KV proxy accepts 404 only for scalar get", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
-  const { KV } = await loadKvBinding();
+  const { KV, runtimeInfrastructure } = await loadKvBinding();
   setFetch(async () => new Response(null, { status: 404 }));
   const kv = makeKv(KV);
+  const isBranded = brandedInfrastructureError(runtimeInfrastructure);
 
   assert.equal(await kv.get("missing"), null);
-  await assert.rejects(() => kv.get(["missing"]), /KV proxy \/kv\/get-batch failed with 404/);
-  await assert.rejects(
-    () => kv.getWithMetadata("missing"),
-    /KV proxy \/kv\/get-with-metadata failed with 404/
-  );
-  await assert.rejects(() => kv.list(), /KV proxy \/kv\/list failed with 404/);
+  await assert.rejects(() => kv.get(["missing"]), isBranded);
+  await assert.rejects(() => kv.getWithMetadata("missing"), isBranded);
+  await assert.rejects(() => kv.list(), isBranded);
   await assert.rejects(() => kv.put("key", "value"), /KV proxy \/kv\/put failed with 404/);
   await assert.rejects(() => kv.delete("key"), /KV proxy \/kv\/delete failed with 404/);
+}));
+
+test("KV read host configuration, auth, route, transport, and 5xx failures carry the infrastructure code", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, runtimeInfrastructure } = await loadKvBinding();
+  const kv = makeKv(KV);
+  const isBranded = brandedInfrastructureError(runtimeInfrastructure);
+
+  await assert.rejects(
+    () => makeKv(KV, { SERVICE_NAME: "unit" }).get("key"),
+    isBranded
+  );
+  await assert.rejects(
+    () => makeKv(KV, { REDIS_PROXY_URL: "http://[", SERVICE_NAME: "unit" }).list(),
+    isBranded
+  );
+
+  setFetch(async () => { throw new Error("connect failed"); });
+  await assert.rejects(() => kv.get("key"), isBranded);
+
+  for (const status of [401, 404, 405, 503]) {
+    setFetch(async () => new Response(null, { status }));
+    await assert.rejects(() => kv.list(), isBranded);
+  }
+
+  for (const status of [400, 413]) {
+    setFetch(async () => new Response(null, { status }));
+    await assert.rejects(
+      () => kv.getWithMetadata("key"),
+      (error) => error instanceof Error && !Object.hasOwn(error, "code")
+    );
+  }
 }));
 
 test("KV put rejects oversized typed-array values before proxy work", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {

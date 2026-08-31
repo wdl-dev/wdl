@@ -21,13 +21,14 @@ export const ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE = "2026-04-21";
 export const ENHANCED_ERROR_SERIALIZATION_FLAG = "enhanced_error_serialization";
 export const LEGACY_ERROR_SERIALIZATION_FLAG = "legacy_error_serialization";
 
-// WDL requires standard stream constructors for its injected platform facades,
-// does not expose irrevocable persistence for tenant-visible capability stubs,
-// and cannot expose new-module-registry main-module identity while every loaded
-// worker runs through the platform-owned wrapper module.
+// WDL requires Fetcher RPC and standard stream constructors for its injected
+// platform facades, does not expose irrevocable persistence for tenant-visible
+// capability stubs, and cannot expose new-module-registry main-module identity
+// while every loaded worker runs through the platform-owned wrapper module.
 export const WDL_UNSUPPORTED_COMPAT_FLAGS = Object.freeze([
   "allow_irrevocable_stub_storage",
   "new_module_registry",
+  "no_rpc",
   "streams_disable_constructors",
 ]);
 

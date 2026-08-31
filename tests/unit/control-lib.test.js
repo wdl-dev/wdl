@@ -1007,6 +1007,7 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.deepEqual(WDL_UNSUPPORTED_COMPAT_FLAGS, [
     "allow_irrevocable_stub_storage",
     "new_module_registry",
+    "no_rpc",
     "streams_disable_constructors",
   ]);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unique_ctx_per_invocation"), false);

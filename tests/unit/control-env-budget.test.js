@@ -14,11 +14,21 @@ const { libUrl: controlLibUrl } = await compileControlGraph();
 const secretEnvelopeUrl = repositoryFileUrl("shared/secret-envelope.js");
 const workerContractUrl = repositoryFileUrl("shared/worker-contract.js");
 const sharedRedisUrl = sharedRedisStubUrl();
+const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
 const runtimeEnvBuildUrl = repositoryModuleDataUrl(
   "runtime/load/env-build.js",
   importSpecifierReplacements({
-    "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
+    "shared-ns-pattern": sharedNsPatternUrl,
     "shared-worker-contract": repositoryFileUrl("shared/worker-contract.js"),
+  })
+);
+const runtimeCodeBudgetUrl = repositoryModuleDataUrl(
+  "runtime/load/code-budget.js",
+  importSpecifierReplacements({
+    "runtime-load-module-rewrite": repositoryFileUrl("runtime/load/module-rewrite.js"),
+    "runtime-load-wrapper-generate": repositoryFileUrl("runtime/load/wrapper-generate.js"),
+    "runtime-infrastructure-error": repositoryFileUrl("runtime/infrastructure-error.js"),
+    "shared-ns-pattern": sharedNsPatternUrl,
   })
 );
 const {
@@ -36,6 +46,7 @@ const {
   WORKER_LOADER_ENV_VERSION_PLACEHOLDER,
 } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "control-lib": controlLibUrl,
+  "runtime-load-code-budget": runtimeCodeBudgetUrl,
   "runtime-load-env-build": runtimeEnvBuildUrl,
   "shared-secret-envelope": secretEnvelopeUrl,
   "shared-worker-contract": workerContractUrl,

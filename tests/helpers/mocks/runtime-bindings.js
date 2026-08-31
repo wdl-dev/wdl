@@ -1,5 +1,6 @@
 export const RUNTIME_BINDING_STUB_SOURCE = `
 export class KV {}
+export class WorkflowInfrastructureReporter {}
 export class Assets {}
 export class ServiceBinding {}
 export class QueueProducer {}

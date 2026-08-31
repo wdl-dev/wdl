@@ -156,7 +156,7 @@ fn workflows_rejects_equivalent_control_db2_urls_without_leaking_credentials() {
         &[
             (
                 "WORKFLOWS_REDIS_URL",
-                Some("redis://workflow-user:workflow-secret@shared:6379/7?protocol=resp3"),
+                Some("redis://workflow-user:workflow-secret@shared:6379/2?protocol=resp3"),
             ),
             (
                 "CONTROL_REDIS_URL",
@@ -183,7 +183,7 @@ fn workflows_rejects_equivalent_data_plane_db2_urls_without_leaking_credentials(
         &[
             (
                 "WORKFLOWS_REDIS_URL",
-                Some("redis://workflow-user:workflow-secret@shared:6379/7?protocol=resp3"),
+                Some("redis://workflow-user:workflow-secret@shared:6379/2?protocol=resp3"),
             ),
             ("CONTROL_REDIS_URL", Some("redis://shared:6379/0")),
             (
@@ -201,6 +201,28 @@ fn workflows_rejects_equivalent_data_plane_db2_urls_without_leaking_credentials(
             assert!(!message.contains("workflow-secret"));
             assert!(!message.contains("data-secret"));
             assert!(!message.contains("redis://"));
+        },
+    );
+}
+
+#[test]
+fn workflows_rejects_data_plane_db2_from_the_redis_url_fallback() {
+    temp_env(
+        &[
+            ("WORKFLOWS_REDIS_URL", None),
+            ("CONTROL_REDIS_URL", Some("redis://control:6379/0")),
+            ("DATA_REDIS_URL", None),
+            ("REDIS_URL", Some("redis://shared:6379/2")),
+            ("WORKFLOWS_REDIS_DB", None),
+        ],
+        || {
+            let Err(panic) = std::panic::catch_unwind(config_from_env) else {
+                panic!("effective data-plane and Workflows DB 2 must fail closed");
+            };
+            assert!(
+                panic_message(panic)
+                    .contains("Workflows DB 2 must not share the data-plane Redis database")
+            );
         },
     );
 }
@@ -237,6 +259,32 @@ fn workflows_effective_db_overrides_existing_url_suffix() {
             assert_eq!(config.control_redis_url, "redis://redis:6379/1");
         },
     );
+}
+
+#[test]
+fn workflows_explicit_url_rejects_non_db2_without_leaking_credentials() {
+    for configured in [
+        "redis://user:secret@workflow:6379/5?protocol=resp3",
+        "redis+unix:///run/redis.sock?db=5&pass=secret&protocol=resp3",
+    ] {
+        temp_env(
+            &[
+                ("WORKFLOWS_REDIS_URL", Some(configured)),
+                ("CONTROL_REDIS_URL", Some("redis://control:6379/0")),
+                ("WORKFLOWS_REDIS_DB", None),
+            ],
+            || {
+                let Err(panic) = std::panic::catch_unwind(config_from_env) else {
+                    panic!("explicit non-DB2 Workflows URL must fail closed");
+                };
+                let message = panic_message(panic);
+                assert!(message.contains("must omit its database or select DB 2"));
+                assert!(!message.contains("secret"));
+                assert!(!message.contains("redis://"));
+                assert!(!message.contains("redis+unix://"));
+            },
+        );
+    }
 }
 
 #[test]
@@ -323,7 +371,7 @@ fn workflows_redis_url_preserves_unix_socket_path_and_query() {
         &[
             (
                 "WORKFLOWS_REDIS_URL",
-                Some("redis+unix:///run/redis.sock?db=7&protocol=resp3"),
+                Some("redis+unix:///run/redis.sock?db=2&protocol=resp3"),
             ),
             ("CONTROL_REDIS_URL", Some("redis://control:6379")),
             ("WORKFLOWS_REDIS_DB", None),
@@ -332,7 +380,7 @@ fn workflows_redis_url_preserves_unix_socket_path_and_query() {
             let config = config_from_env();
             assert_eq!(
                 config.redis_url,
-                "redis+unix:///run/redis.sock?db=7&protocol=resp3"
+                "redis+unix:///run/redis.sock?db=2&protocol=resp3"
             );
             let client = workflows_redis_client(&config.redis_url);
             let info = client.get_connection_info();
@@ -353,7 +401,7 @@ fn workflows_redis_url_preserves_unix_socket_path_and_query() {
 fn workflows_redis_url_uses_explicit_url() {
     temp_env(
         &[
-            ("WORKFLOWS_REDIS_URL", Some("redis://other:6379/7")),
+            ("WORKFLOWS_REDIS_URL", Some("redis://other:6379/2")),
             ("CONTROL_REDIS_URL", Some("redis://control:6379")),
             ("RUNTIME_HOST", Some("runtime")),
             ("RUNTIME_PORT", Some("18088")),
@@ -371,7 +419,7 @@ fn workflows_redis_url_uses_explicit_url() {
         ],
         || {
             let config = config_from_env();
-            assert_eq!(config.redis_url, "redis://other:6379/7");
+            assert_eq!(config.redis_url, "redis://other:6379/2");
             assert_eq!(
                 workflows_redis_client(&config.redis_url)
                     .get_connection_info()
@@ -398,7 +446,7 @@ fn workflows_redis_url_uses_explicit_url() {
 fn workflows_run_lease_clamps_above_dispatch_timeout() {
     temp_env(
         &[
-            ("WORKFLOWS_REDIS_URL", Some("redis://other:6379/7")),
+            ("WORKFLOWS_REDIS_URL", Some("redis://other:6379/2")),
             ("CONTROL_REDIS_URL", Some("redis://control:6379")),
             ("RUNTIME_HOST", None),
             ("RUNTIME_PORT", None),
@@ -426,7 +474,7 @@ fn workflows_run_lease_clamps_above_dispatch_timeout() {
 fn workflows_do_alarm_claim_lease_clamps_above_dispatch_timeout() {
     temp_env(
         &[
-            ("WORKFLOWS_REDIS_URL", Some("redis://other:6379/7")),
+            ("WORKFLOWS_REDIS_URL", Some("redis://other:6379/2")),
             ("CONTROL_REDIS_URL", Some("redis://control:6379")),
             ("RUNTIME_HOST", None),
             ("RUNTIME_PORT", None),
@@ -699,10 +747,9 @@ fn workflow_admission_isolates_per_instance_dispatch_errors() {
 }
 
 #[test]
-fn workflow_runtime_dispatch_timeout_releases_run_claim_unlike_do_alarm_dispatch() {
+fn workflow_runtime_dispatch_timeout_releases_run_claim() {
     let tick_source = include_str!("api/tick.rs");
     let runtime_dispatch_source = RUNTIME_DISPATCH_SOURCE;
-    let do_alarm_dispatch_source = include_str!("api/do_alarms/dispatch.rs");
 
     assert!(
         runtime_dispatch_source
@@ -710,18 +757,10 @@ fn workflow_runtime_dispatch_timeout_releases_run_claim_unlike_do_alarm_dispatch
         "ordinary workflow runtime dispatch must keep using the explicit dispatch timeout boundary"
     );
     assert!(
-        runtime_dispatch_source.contains(r#""dispatchDeadlineMs": dispatch_deadline_ms"#),
-        "runtime must receive the sender-computed absolute dispatch deadline"
-    );
-    assert!(
         tick_source.contains("Err(err) => {\n            app.metrics")
             && tick_source
                 .contains("release_run_claim(app, &identity, &claim, &previous_status).await?;"),
         "ordinary workflow dispatch errors, including reqwest timeouts, currently release the run claim for retry"
-    );
-    assert!(
-        do_alarm_dispatch_source.contains("DoAlarmDispatchError::InFlightUnknown"),
-        "DO alarms intentionally preserve running claims on timeout instead of immediately retrying"
     );
 }
 

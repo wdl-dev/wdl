@@ -338,9 +338,14 @@ deletable.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due
   internal alarm jobs to ready, claims one job under a DB 2 run token, and calls
   do-runtime `/internal/do/alarms/dispatch`. do-runtime constructs a native
-  `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path.
-- Alarm mutation and delivery responses are capped at 16 KiB and use strict UTF-8 JSON
-  variants. do-runtime accepts only the shim's exact `{ok:true}` or
+  `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path. Delivery
+  correctness does not depend on HTTP caller-disconnect signals; dispatch timeout and the
+  Workflows-owned claim lease bound unknown results.
+- Alarm mutations use one 5-second fetch/body deadline. Alarm delivery keeps tenant
+  execution under the Workflows dispatch-timeout and claim-lease contract, then applies
+  an independent 5-second deadline to the returned body. Body reads reject independently
+  of best-effort stream cancellation. Responses are capped at 16 KiB and use strict
+  UTF-8 JSON variants. do-runtime accepts only the shim's exact `{ok:true}` or
   `{ok:true,ignored:true}` actor result, then preserves the established
   `{ok:true,ignored:boolean}` Workflows wire. Workflows validates that outer shape before
   finalizing a claimed job. Mutation success requires exact typed `ok`, `jobId`,
@@ -362,10 +367,14 @@ deletable.
   `WORKFLOWS_DO_ALARM_RETRY_JITTER` up to `WORKFLOWS_DO_ALARM_RETRY_MAX_TRIES`
   (default `6`), then discard and increment
   `do_alarm_dispatches{outcome="discarded"}`.
-- If the Workflows client times out after calling do-runtime, the backend keeps the
-  running claim until `WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS` expires instead of
-  immediately scheduling a retry. The default is five minutes, and the configured value
-  is clamped above `WORKFLOWS_DISPATCH_TIMEOUT_MS` so normal timeout handling avoids
+- Only a connect failure before the Workflows request reaches do-runtime or a trusted,
+  complete `do_alarm_dispatch_failed` response schedules an immediate alarm retry. A timeout,
+  explicit `do_alarm_dispatch_result_unknown`, owner-forward transport failure, or
+  response that cannot be read and classified keeps the running claim until
+  `WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS` expires. A running job is removed from ready and
+  indexed in due at that lease expiry, so repeated ticks do not resample it while the
+  result remains unknown. The default lease is five minutes, and the configured value is
+  clamped above `WORKFLOWS_DISPATCH_TIMEOUT_MS` so unknown-result handling avoids
   overlapping alarm bodies while do-runtime may still be executing the original
   dispatch. Operators should size the claim lease for the longest expected alarm handler
   body, not only for the HTTP dispatch timeout; alarm bodies remain at-least-once and
@@ -583,6 +592,7 @@ logs do not measure the lifetime of backend WebSocket recovery after the initial
 - `tests/unit/do-object-registry.test.js`
 - `tests/unit/do-runtime-actor.test.js`
 - `tests/unit/do-runtime-http.test.js`
+- `tests/unit/do-runtime-index.test.js`
 - `tests/unit/do-runtime-load.test.js`
 - `tests/unit/do-runtime-protocol.test.js`
 - `tests/unit/do-state.test.js`

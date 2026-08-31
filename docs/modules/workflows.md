@@ -81,18 +81,19 @@ Internal:
 ## Redis / Storage Contracts
 
 Workflows exclusively owns Valkey DB 2 for instance execution state. A custom
-`WORKFLOWS_REDIS_URL` selects the Redis endpoint but is normalized to DB 2. Control owns
+`WORKFLOWS_REDIS_URL` selects the Redis endpoint and may omit its database or explicitly
+select DB 2; an explicit non-DB2 selection is rejected. Control owns
 `wf:defs:<ns>:<worker>` in DB 0 for deploy-time workflow key allocation and stable
 identity. The hash retains retired names until whole-worker delete. Definition listing
 enumerates that retired history for currently active workers; deploy and single-workflow
 status/lifecycle paths read only the names they need.
 
 At startup, Workflows compares its parsed connection address and effective DB 2 with
-`CONTROL_REDIS_URL` and with `DATA_REDIS_URL` when that independent data-plane URL is
-configured. Equal database identities fail before connecting. Deployments with a
-separate data plane must expose its canonical `DATA_REDIS_URL` to the Workflows service
-so this ownership check covers it; URL credentials and unrelated query settings do not
-change database identity.
+`CONTROL_REDIS_URL` and with the effective Rust data-plane URL
+(`DATA_REDIS_URL ?? REDIS_URL`). Equal database identities fail before connecting.
+Deployments with a separate data plane must expose its canonical `DATA_REDIS_URL` to the
+Workflows service so this ownership check covers it; URL credentials and unrelated query
+settings do not change database identity.
 
 Key concepts:
 
@@ -130,7 +131,7 @@ Key families:
 | `wf:pending-version:<ns>:<worker>:<version>` | ZSET | workflows | Short-lived restart target-version blockers, scored by expiry time. | Version-delete checks active members; restart atomically validates its marker before creating the durable `wf:by-version` referrer. Members expire after 30 seconds, and the ZSET has a 60-second key TTL for physical cleanup. |
 | `wf:retention` | ZSET | workflows | Terminal retention due index. | Retention tick deletes expired terminal instances. |
 | `wf:internal:do-alarm:{<jobId>}:state` | Hash | workflows | Authoritative backend job state for one Durable Object SQLite alarm row. | Successful delivery, retry exhaustion, explicit delete, and worker cleanup remove the job. |
-| `wf:internal:do-alarm:due:<shard>` | ZSET | workflows | DO alarm due index. Score is due timestamp in milliseconds. | Tick promotion moves eligible jobs to ready. |
+| `wf:internal:do-alarm:due:<shard>` | ZSET | workflows | DO alarm scheduling and claim-lease index. Score is the next schedulable timestamp in milliseconds: alarm/retry due time or running claim lease expiry. | Tick promotion moves eligible jobs to ready. |
 | `wf:internal:do-alarm:ready:<shard>`, `ready:active`, `ready:cursor` | Set/String | workflows | DO alarm ready hints, active shard set, and fair-dispatch cursor. | Dispatch removes ready hints or reschedules on retry; the cursor rotates shard start order across ticks. |
 | `wf:internal:do-alarm:by-worker:<ns>:<worker>` | Set | workflows | Worker cleanup index for internal DO alarm jobs. | Whole-worker delete asks Workflows to remove indexed jobs after the delete commits; residual jobs self-discard on their next dispatch. |
 | `wf:internal:do-alarm:by-worker:<ns>:<worker>:cleanup-snapshot:<random>` | Set | workflows | Temporary cleanup-worker snapshot of one by-worker DO alarm index. | Internal only; TTL is 60 seconds and is refreshed while cleanup drains the snapshot. |
@@ -178,11 +179,13 @@ Key families:
   to `128`, and is bounded to the 1–128 ready batch. The independent DO alarm pool is
   controlled by `WORKFLOWS_DO_ALARM_DISPATCH_CONCURRENCY`, defaults to `32`, and is
   bounded to 1–100 jobs. Admitted tasks retain their pool permit and shutdown in-flight
-  guard through runtime dispatch and fenced commit. A process loss leaves recovery to
-  the existing run lease and ready hint. Scheduler applies an independent client
-  deadline to maintenance and admission with `WORKFLOWS_TICK_TIMEOUT_MS`, which defaults
-  to 60 seconds; it is not a workflow execution deadline and is independent of the
-  Workflows runtime dispatch timeout. Scheduler uses
+  guard through runtime dispatch and fenced commit. Workflow execution process loss
+  recovers through the run lease and ready hint. A running DO alarm is removed from
+  ready and parked in its due shard at the claim lease expiry; due promotion restores
+  it to ready after expiry. Scheduler applies an independent client deadline to
+  maintenance and admission with `WORKFLOWS_TICK_TIMEOUT_MS`, which defaults to 60
+  seconds; it is not a workflow execution deadline and is independent of the Workflows
+  runtime dispatch timeout. Scheduler uses
   `WORKFLOWS_TICK_ACTIVE_INTERVAL_MS` (default 100 ms) while a tick reports maintenance,
   admission, or pending work blocked on either dispatch pool; otherwise it uses
   `WORKFLOWS_TICK_INTERVAL_MS` (default 1 second).
@@ -316,14 +319,24 @@ Scheduling is hint-based but state-authoritative:
    on that path applies this 503 contract.
    When parallel steps are in flight, Runtime closes new step admission and waits within
    the remaining Workflows-owned dispatch timeout, reserving one second to return the
-   response. A host-branded infrastructure failure observed during that bounded wait
-   takes precedence over an ordinary terminal step error, so a late lost commit
-   acknowledgement is not persisted as a deterministic failure. Exhausting the
-   authoritative dispatch budget is itself result-unknown and returns the same fixed 503
-   so Workflows releases the claim and replay can reconcile any late durable step commit.
+   response. A KV read infrastructure failure reported by an escaping step callback
+   during that bounded wait takes precedence over an ordinary terminal step error.
+   Exhausting the authoritative dispatch budget is itself result-unknown and returns
+   the same fixed 503 so Workflows releases the claim and replay can reconcile any late
+   durable step commit.
    Workflows computes and sends the absolute deadline before request serialization, so
    transport, queueing, body parsing, tenant execution, and sibling settlement consume
-   the same budget.
+   the same budget. Runtime rejects an already-expired budget before acquiring the
+   tenant entrypoint, races the root run Promise against the deadline, and rejects a
+   completed, failed, or suspended outcome that settles or finishes response construction
+   after the deadline. It applies the remaining budget and a 32 MiB cap while reading
+   every authoritative Workflows backend response;
+   canonical identity-encoded `Content-Length` responses fill one exact buffer. A direct
+   host KV read infrastructure Error that escapes `run()` or a step callback with the
+   same identity reports a retryable dispatch failure. A step callback report is observed
+   before its error can be committed; catching the rejected `step.do()` in outer `run()`
+   cannot convert it back to success. Errors caught inside the relevant boundary and
+   converted to a fallback are ordinary Workflow results.
    Deterministic step, fence, payload, and persisted-state errors remain terminal. A
    missing or unknown Runtime outcome, or a terminal variant missing its required
    payload field, is also a protocol error rather than an implicit failure result.
@@ -458,28 +471,31 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 - Cross-tier Workflow protocol changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes). The release changelog names
   the affected services.
-- The required runtime dispatch deadline is an explicit sender-first exception: roll and
-  drain all old Workflows tasks before rolling user-runtime and system-runtime. The old
-  Runtime ignores the additive field, while the new Runtime rejects an old sender that
-  omits it.
+- The required runtime dispatch deadline is a sender-first exception. The schema-3
+  maintenance sequence below satisfies it by draining every old Workflows sender before
+  rolling user-runtime and system-runtime. The old Runtime accepts the additive field,
+  while the new Runtime rejects an old sender that omits it.
 - DB 2 is the workflow instance state boundary; do not add direct DB 2 writes from
   control/runtime/scheduler.
 - Workflows persists `wf:schema_version` in DB 2. Schema `3` stores DAG dependency edges
   and backend-owned operation kinds on step records. Missing kinds fail closed; there is
   no ambiguous in-place adoption for schema-2 records.
-- Schema 3 is a maintenance reset. First roll user-runtime and system-runtime and wait
-  for every old Runtime reader to drain. Quiesce tenant dispatch and confirm that DB 2
-  contains no state that must be retained, including terminal Workflow results, step
-  history, or Durable Object alarms. Stop Scheduler and scale Workflows to zero, then
-  wait for old Workflows tasks to exit and clear DB 2 including `wf:schema_version`.
-  Start the new Workflows and Scheduler without old/new Workflows overlap before
-  resuming dispatch. DB 0 `wf:defs:*` definitions are not part of the reset.
+- Schema 3 is a maintenance reset. Quiesce tenant dispatch and confirm that DB 2 contains
+  no state that must be retained, including terminal Workflow results, step history, or
+  Durable Object alarms. Stop Scheduler, scale Workflows to zero, and wait for every old
+  Workflows task to exit. Clear the dedicated DB 2 including `wf:schema_version`, then
+  roll user-runtime, system-runtime, and do-runtime and wait for every old task to drain.
+  Start the new Workflows and Scheduler without old/new Workflows overlap, then resume
+  dispatch. This ordering keeps new alarm result-unknown writers away from old Workflows
+  readers and new Workflows readers away from old do-runtime dispatch behavior. DB 0
+  `wf:defs:*` definitions are not part of the reset.
 - A legacy deployment that used any non-DB2 Workflows database must treat this as a
   configuration migration; schema 3 does not move old runtime state. Remove the non-DB2
   `WORKFLOWS_REDIS_DB` override first. Never clear the old database if it is shared. Use
   DB 2 on the existing endpoint only when it is empty and dedicated to Workflows;
-  otherwise point `WORKFLOWS_REDIS_URL` at a new endpoint whose DB 2 is empty. Any DB
-  selection encoded by that URL is overridden to `2` after structured parsing.
+  otherwise point `WORKFLOWS_REDIS_URL` at a new endpoint whose DB 2 is empty. Omit the
+  URL database or select `2`; explicit non-DB2 URL state is rejected rather than silently
+  abandoned.
 - A dedicated DB 2 containing schema-2 Workflows runtime state is a supported reset
   source. A DB 2 containing keys owned by another subsystem is an unsupported
   configuration: do not use prefix cleanup or clear it; move Workflows to a new endpoint

@@ -26,6 +26,7 @@ use super::scripts::{
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
 const DO_ALARM_RESPONSE_MAX_BYTES: usize = 16 * 1024;
+const DO_ALARM_DISPATCH_FAILED: &str = "do_alarm_dispatch_failed";
 
 fn do_alarm_ready_admission_config(concurrency: usize) -> ReadyAdmissionConfig {
     ReadyAdmissionConfig {
@@ -61,7 +62,7 @@ impl DoAlarmAdmissionResult {
 enum ClaimDoAlarmResult {
     Job(Box<DoAlarmJob>),
     None,
-    DiscardedCorrupt,
+    Corrupt { discarded: bool },
 }
 
 #[derive(Debug)]
@@ -78,22 +79,22 @@ async fn read_do_alarm_dispatch_body(
         .content_length()
         .is_some_and(|length| length > DO_ALARM_RESPONSE_MAX_BYTES as u64)
     {
-        return Err(DoAlarmDispatchError::Retryable(
-            "do-runtime alarm response is too large".to_string(),
-        ));
+        return Err(DoAlarmDispatchError::InFlightUnknown(format!(
+            "do-runtime returned {}: alarm response is too large",
+            status.as_u16()
+        )));
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|err| {
-        if err.is_timeout() {
-            DoAlarmDispatchError::InFlightUnknown(err.to_string())
-        } else {
-            DoAlarmDispatchError::Retryable(err.to_string())
-        }
-    })? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| DoAlarmDispatchError::InFlightUnknown(err.to_string()))?
+    {
         if body.len().saturating_add(chunk.len()) > DO_ALARM_RESPONSE_MAX_BYTES {
-            return Err(DoAlarmDispatchError::Retryable(
-                "do-runtime alarm response is too large".to_string(),
-            ));
+            return Err(DoAlarmDispatchError::InFlightUnknown(format!(
+                "do-runtime returned {}: alarm response is too large",
+                status.as_u16()
+            )));
         }
         body.extend_from_slice(&chunk);
     }
@@ -102,23 +103,52 @@ async fn read_do_alarm_dispatch_body(
 
 fn parse_do_alarm_dispatch_success(body: &[u8]) -> Result<bool, DoAlarmDispatchError> {
     let parsed: JsonValue = serde_json::from_slice(body).map_err(|err| {
-        DoAlarmDispatchError::Retryable(format!("do-runtime alarm response is invalid JSON: {err}"))
+        DoAlarmDispatchError::InFlightUnknown(format!(
+            "do-runtime alarm response is invalid JSON: {err}"
+        ))
     })?;
     let record = parsed.as_object().ok_or_else(|| {
-        DoAlarmDispatchError::Retryable(
+        DoAlarmDispatchError::InFlightUnknown(
             "do-runtime alarm response must be a JSON object".to_string(),
         )
     })?;
     if record.get("ok") != Some(&JsonValue::Bool(true)) {
-        return Err(DoAlarmDispatchError::Retryable(
+        return Err(DoAlarmDispatchError::InFlightUnknown(
             "do-runtime alarm response must set ok=true".to_string(),
         ));
     }
     match record.get("ignored") {
         Some(JsonValue::Bool(ignored)) if record.len() == 2 => Ok(*ignored),
-        _ => Err(DoAlarmDispatchError::Retryable(
+        _ => Err(DoAlarmDispatchError::InFlightUnknown(
             "do-runtime alarm response has an invalid success variant".to_string(),
         )),
+    }
+}
+
+fn do_alarm_dispatch_http_error(status: reqwest::StatusCode, body: &[u8]) -> DoAlarmDispatchError {
+    let parsed = serde_json::from_slice::<JsonValue>(body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(JsonValue::as_object)
+        .and_then(|record| record.get("error"))
+        .and_then(JsonValue::as_str);
+    let public_message = parsed
+        .as_ref()
+        .and_then(JsonValue::as_object)
+        .and_then(|record| record.get("message"))
+        .and_then(JsonValue::as_str);
+    let detail = String::from_utf8_lossy(body)
+        .chars()
+        .take(1024)
+        .collect::<String>();
+    let message = format!("do-runtime returned {}: {}", status.as_u16(), detail);
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        && code == Some(DO_ALARM_DISPATCH_FAILED)
+        && public_message.is_some()
+    {
+        DoAlarmDispatchError::Retryable(message)
+    } else {
+        DoAlarmDispatchError::InFlightUnknown(message)
     }
 }
 
@@ -234,23 +264,27 @@ async fn claim_do_alarm(app: &AppState, job_id: &str) -> WorkflowResult<ClaimDoA
     match job_from_state(job_id.to_string(), state.clone()) {
         Ok(job) => Ok(ClaimDoAlarmResult::Job(Box::new(job))),
         Err(err) => {
-            if let Some(run_token) = state.get("runToken") {
+            let discarded = if let Some(run_token) = state.get("runToken") {
                 let by_worker = state
                     .get("ns")
                     .zip(state.get("worker"))
                     .map(|(ns, worker)| crate::do_alarm_by_worker_key(ns, worker));
-                discard_corrupt_do_alarm(app, job_id, run_token, by_worker.as_deref()).await?;
+                discard_corrupt_do_alarm(app, job_id, run_token, by_worker.as_deref()).await?
+            } else {
+                false
+            };
+            if discarded {
+                log(
+                    app,
+                    LogLevel::Warn,
+                    "do_alarm_corrupt_discarded",
+                    json!({
+                        "job_id": job_id,
+                        "error_message": err.message,
+                    }),
+                );
             }
-            log(
-                app,
-                LogLevel::Warn,
-                "do_alarm_corrupt_discarded",
-                json!({
-                    "job_id": job_id,
-                    "error_message": err.message,
-                }),
-            );
-            Ok(ClaimDoAlarmResult::DiscardedCorrupt)
+            Ok(ClaimDoAlarmResult::Corrupt { discarded })
         }
     }
 }
@@ -299,23 +333,15 @@ async fn dispatch_do_alarm(
         .send()
         .await
         .map_err(|err| {
-            if err.is_timeout() {
-                DoAlarmDispatchError::InFlightUnknown(err.to_string())
-            } else {
+            if err.is_connect() {
                 DoAlarmDispatchError::Retryable(err.to_string())
+            } else {
+                DoAlarmDispatchError::InFlightUnknown(err.to_string())
             }
         })?;
     let (status, body) = read_do_alarm_dispatch_body(response).await?;
     if !status.is_success() {
-        let detail = String::from_utf8_lossy(&body)
-            .chars()
-            .take(1024)
-            .collect::<String>();
-        return Err(DoAlarmDispatchError::Retryable(format!(
-            "do-runtime returned {}: {}",
-            status.as_u16(),
-            detail
-        )));
+        return Err(do_alarm_dispatch_http_error(status, &body));
     }
     parse_do_alarm_dispatch_success(&body)
 }
@@ -499,8 +525,10 @@ async fn prepare_ready_do_alarm_job(
 ) -> WorkflowResult<DoAlarmAdmission> {
     let job = match claim_do_alarm(app, job_id).await? {
         ClaimDoAlarmResult::Job(job) => *job,
-        ClaimDoAlarmResult::DiscardedCorrupt => {
-            increment_do_alarm_outcome(app, "discarded");
+        ClaimDoAlarmResult::Corrupt { discarded } => {
+            if discarded {
+                increment_do_alarm_outcome(app, "discarded");
+            }
             return Ok(DoAlarmAdmission::Immediate);
         }
         ClaimDoAlarmResult::None => {
@@ -511,21 +539,21 @@ async fn prepare_ready_do_alarm_job(
     let Some(dispatch_version) = resolve_alarm_dispatch_version(app, &job).await? else {
         if finalize_claimed_do_alarm(app, &job).await? {
             increment_do_alarm_outcome(app, "discarded");
+            log(
+                app,
+                LogLevel::Warn,
+                "do_alarm_discarded",
+                json!({
+                    "namespace": job.ns,
+                    "worker": job.worker,
+                    "class_name": job.class_name,
+                    "object_name": job.object_name,
+                    "job_id": job.job_id,
+                    "retry_count": job.retry_count,
+                    "error_message": "DO alarm target is no longer retained or active",
+                }),
+            );
         }
-        log(
-            app,
-            LogLevel::Warn,
-            "do_alarm_discarded",
-            json!({
-                "namespace": job.ns,
-                "worker": job.worker,
-                "class_name": job.class_name,
-                "object_name": job.object_name,
-                "job_id": job.job_id,
-                "retry_count": job.retry_count,
-                "error_message": "DO alarm target is no longer retained or active",
-            }),
-        );
         return Ok(DoAlarmAdmission::Immediate);
     };
     Ok(DoAlarmAdmission::Dispatch {
@@ -586,28 +614,30 @@ async fn finish_claimed_do_alarm(
                 2 => increment_do_alarm_outcome(app, "discarded"),
                 _ => {}
             }
-            log(
-                app,
-                if outcome == 2 {
-                    LogLevel::Warn
-                } else {
-                    LogLevel::Info
-                },
-                if outcome == 2 {
-                    "do_alarm_discarded"
-                } else {
-                    "do_alarm_retry_scheduled"
-                },
-                json!({
-                    "namespace": job.ns,
-                    "worker": job.worker,
-                    "class_name": job.class_name,
-                    "object_name": job.object_name,
-                    "job_id": job.job_id,
-                    "retry_count": job.retry_count,
-                    "error_message": err,
-                }),
-            );
+            if matches!(outcome, 1 | 2) {
+                log(
+                    app,
+                    if outcome == 2 {
+                        LogLevel::Warn
+                    } else {
+                        LogLevel::Info
+                    },
+                    if outcome == 2 {
+                        "do_alarm_discarded"
+                    } else {
+                        "do_alarm_retry_scheduled"
+                    },
+                    json!({
+                        "namespace": job.ns,
+                        "worker": job.worker,
+                        "class_name": job.class_name,
+                        "object_name": job.object_name,
+                        "job_id": job.job_id,
+                        "retry_count": job.retry_count,
+                        "error_message": err,
+                    }),
+                );
+            }
         }
     }
     Ok(())
@@ -703,8 +733,9 @@ mod tests {
     use super::{
         AlarmDispatchVersionDecision, DO_ALARM_RESPONSE_MAX_BYTES, DoAlarmAdmissionResult,
         DoAlarmDispatchError, ReadyAdmissionResult, alarm_dispatch_version_decision,
-        do_alarm_ready_admission_config, parse_do_alarm_dispatch_success,
-        read_do_alarm_dispatch_body, retry_delay_ms_from_parts, saturating_i64_ms,
+        do_alarm_dispatch_http_error, do_alarm_ready_admission_config,
+        parse_do_alarm_dispatch_success, read_do_alarm_dispatch_body, retry_delay_ms_from_parts,
+        saturating_i64_ms,
     };
     use serde_json::Value as JsonValue;
     use std::io::{Read, Write};
@@ -729,12 +760,16 @@ mod tests {
         (response, server)
     }
 
-    #[test]
-    fn alarm_dispatch_success_variants_match_the_cross_language_contract() {
-        let fixture: JsonValue = serde_json::from_str(include_str!(
+    fn do_alarm_response_fixture() -> JsonValue {
+        serde_json::from_str(include_str!(
             "../../../../../tests/fixtures/do-alarm-response.json"
         ))
-        .expect("DO alarm response fixture parses");
+        .expect("DO alarm response fixture parses")
+    }
+
+    #[test]
+    fn alarm_dispatch_success_variants_match_the_cross_language_contract() {
+        let fixture = do_alarm_response_fixture();
         assert_eq!(
             fixture["maxBytes"].as_u64(),
             Some(DO_ALARM_RESPONSE_MAX_BYTES as u64)
@@ -750,6 +785,47 @@ mod tests {
     }
 
     #[test]
+    fn alarm_dispatch_error_variants_match_the_cross_language_contract() {
+        let fixture = do_alarm_response_fixture();
+        for (name, in_flight_unknown) in [("failed", false), ("resultUnknown", true)] {
+            let variant = &fixture["dispatchErrorVariants"][name];
+            let status = reqwest::StatusCode::from_u16(
+                variant["status"].as_u64().expect("status is an integer") as u16,
+            )
+            .expect("status is valid");
+            let body = serde_json::to_vec(&variant["body"]).expect("error body serializes");
+            let error = do_alarm_dispatch_http_error(status, &body);
+            assert_eq!(
+                matches!(error, DoAlarmDispatchError::InFlightUnknown(_)),
+                in_flight_unknown,
+                "{name}"
+            );
+        }
+        assert!(matches!(
+            do_alarm_dispatch_http_error(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                br#"{"error":"do_alarm_dispatch_failed","message":"Alarm execution failed"}"#,
+            ),
+            DoAlarmDispatchError::Retryable(_)
+        ));
+    }
+
+    #[test]
+    fn ambiguous_non_success_responses_preserve_the_running_claim() {
+        for body in [
+            b"".as_slice(),
+            b"not-json".as_slice(),
+            br#"{"error":"do_alarm_dispatch_failed"}"#.as_slice(),
+            br#"{"error":"owner_unavailable","message":"DO owner is unavailable"}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                do_alarm_dispatch_http_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, body),
+                DoAlarmDispatchError::InFlightUnknown(_)
+            ));
+        }
+    }
+
+    #[test]
     fn alarm_dispatch_success_variants_fail_closed() {
         for body in [
             b"".as_slice(),
@@ -761,16 +837,38 @@ mod tests {
         ] {
             assert!(matches!(
                 parse_do_alarm_dispatch_success(body),
-                Err(DoAlarmDispatchError::Retryable(_))
+                Err(DoAlarmDispatchError::InFlightUnknown(_))
             ));
         }
     }
 
     #[tokio::test]
-    async fn alarm_dispatch_reader_rejects_oversized_content_length() {
+    async fn alarm_dispatch_reader_preserves_claim_for_oversized_success_content_length() {
         let (response, server) = raw_http_response(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                DO_ALARM_RESPONSE_MAX_BYTES + 1
+            )
+            .into_bytes(),
+        )
+        .await;
+
+        let error = read_do_alarm_dispatch_body(response)
+            .await
+            .expect_err("oversized successful alarm response");
+        server.join().unwrap();
+        assert!(matches!(
+            error,
+            DoAlarmDispatchError::InFlightUnknown(message)
+                if message == "do-runtime returned 200: alarm response is too large"
+        ));
+    }
+
+    #[tokio::test]
+    async fn alarm_dispatch_reader_preserves_claim_for_oversized_error_content_length() {
+        let (response, server) = raw_http_response(
+            format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 DO_ALARM_RESPONSE_MAX_BYTES + 1
             )
             .into_bytes(),
@@ -783,8 +881,8 @@ mod tests {
         server.join().unwrap();
         assert!(matches!(
             error,
-            DoAlarmDispatchError::Retryable(message)
-                if message == "do-runtime alarm response is too large"
+            DoAlarmDispatchError::InFlightUnknown(message)
+                if message == "do-runtime returned 503: alarm response is too large"
         ));
     }
 
@@ -806,8 +904,8 @@ mod tests {
         server.join().unwrap();
         assert!(matches!(
             error,
-            DoAlarmDispatchError::Retryable(message)
-                if message == "do-runtime alarm response is too large"
+            DoAlarmDispatchError::InFlightUnknown(message)
+                if message == "do-runtime returned 200: alarm response is too large"
         ));
     }
 
@@ -1002,31 +1100,5 @@ mod tests {
     fn u64_millisecond_config_saturates_before_i64_arithmetic() {
         assert_eq!(saturating_i64_ms(42), 42);
         assert_eq!(saturating_i64_ms(u64::MAX), i64::MAX);
-    }
-
-    #[test]
-    fn dispatch_timeout_preserves_running_claim_until_lease_expiry() {
-        let source = include_str!("dispatch.rs");
-        let implementation = source
-            .split("\n#[cfg(test)]")
-            .next()
-            .expect("dispatch implementation should precede tests");
-        let timeout_branch = implementation
-            .find("Err(DoAlarmDispatchError::InFlightUnknown(err))")
-            .expect("in-flight unknown dispatches must have their own branch");
-        let retry_branch = implementation
-            .find("Err(DoAlarmDispatchError::Retryable(err))")
-            .expect("retryable dispatch errors must stay separate");
-
-        assert!(implementation.contains("if err.is_timeout()"));
-        assert!(implementation.contains("DoAlarmDispatchError::InFlightUnknown(err.to_string())"));
-        assert!(implementation.contains("app.config.do_alarm_claim_lease_ms"));
-        assert!(timeout_branch < retry_branch);
-        assert!(
-            implementation[timeout_branch..retry_branch]
-                .contains("increment_do_alarm_outcome(app, \"in_flight_unknown\")")
-        );
-        assert!(implementation.contains("\"do_alarm_dispatch_in_flight_unknown\""));
-        assert!(implementation.contains("DoAlarmDispatchError::InFlightUnknown(err)"));
     }
 }

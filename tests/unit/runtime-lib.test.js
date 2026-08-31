@@ -25,6 +25,9 @@ const {
 } = await import("../../shared/base64.js");
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 const secretEnvelopeFixture = readRepositoryJson("tests/fixtures/secret-envelope-parity.json");
+const workflowRuntimeRequest = /** @type {{ run: Record<string, unknown> }} */ (
+  readRepositoryJson("tests/fixtures/workflow-runtime-request.json")
+);
 
 const enc = new TextEncoder();
 
@@ -179,6 +182,14 @@ function workflowBody(overrides = {}) {
     ...overrides,
   };
 }
+
+test("normalizeWorkflowRunBody matches the cross-language request contract", () => {
+  const { params, ...identity } = workflowRuntimeRequest.run;
+  assert.deepEqual(normalizeWorkflowRunBody(workflowRuntimeRequest.run), {
+    ...identity,
+    event: { payload: params },
+  });
+});
 
 test("normalizeWorkflowRunBody validates persisted identity integers", () => {
   assert.deepEqual(normalizeWorkflowRunBody(workflowBody()), {

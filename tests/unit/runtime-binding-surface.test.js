@@ -4,12 +4,15 @@ import { importRepositoryModule, moduleDataUrl, repositoryFileUrl } from "../hel
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { RUNTIME_METRICS_NOOP_URL } from "../helpers/mocks/runtime-metrics.js";
 import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
+import { KV_FACADE_RPC_METHOD } from "../../runtime/infrastructure-error.js";
 
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const SHARED_BASE64_URL = repositoryFileUrl("shared/base64.js");
 const SHARED_BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
+const SHARED_NS_PATTERN_URL = repositoryFileUrl("shared/ns-pattern.js");
 const SHARED_RESPOND_URL = repositoryFileUrl("shared/respond.js");
 const RUNTIME_INFRASTRUCTURE_ERROR_STUB_URL = moduleDataUrl(`
+export const KV_FACADE_RPC_METHOD = ${JSON.stringify(KV_FACADE_RPC_METHOD)};
 export function isRuntimeInfrastructureError() { return false; }
 export function runtimeInfrastructureError(message) { return new Error(message); }
 `);
@@ -47,7 +50,7 @@ const buildAssetUrlStub = `const buildAssetUrl = (cdnBase, prefix, path) => {
   return base + "/" + prefix + segments.map((s) => encodeURIComponent(s)).join("/");
 }`;
 
-test("KV host RPC surface exposes only public namespace methods", async () => {
+test("KV host RPC surface exposes public namespace methods and one internal trampoline", async () => {
   const { KV } = await importRepositoryModule("runtime/bindings/kv.js", [
     [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
     [/import \{ toBytes \} from "runtime-lib";/, toBytesStub],
@@ -56,11 +59,13 @@ test("KV host RPC surface exposes only public namespace methods", async () => {
     [/from "runtime-bindings-kv-capacity";/, `from ${JSON.stringify(KV_CAPACITY_STUB_URL)};`],
     [/from "shared-base64";/, `from ${JSON.stringify(SHARED_BASE64_URL)};`],
     [/from "shared-bounded-body";/, `from ${JSON.stringify(SHARED_BOUNDED_BODY_URL)};`],
+    [/from "shared-ns-pattern";/, `from ${JSON.stringify(SHARED_NS_PATTERN_URL)};`],
     [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
     [/from "shared-respond";/, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
   ]);
 
   assert.deepEqual(Object.getOwnPropertyNames(KV.prototype).toSorted(), [
+    KV_FACADE_RPC_METHOD,
     "constructor",
     "delete",
     "get",

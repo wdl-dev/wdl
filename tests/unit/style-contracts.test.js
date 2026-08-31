@@ -30,11 +30,19 @@ import {
   HOST_BINDING_MODULE_NAMES,
   RUNTIME_WRAPPER_MODULE_NAME,
   WDL_RESERVED_MODULE_PREFIX,
-  WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP,
+  WORKFLOW_INFRASTRUCTURE_REPORTER_PROP,
   WORKFLOWS_MODULE_NAME,
   isWdlReservedModuleName,
 } from "../../runtime/load/module-rewrite.js";
-import { HOST_BINDING_RUNTIME_MODULE_NAME } from "../../runtime/load/wrapper-generate.js";
+import {
+  HOST_BINDING_RUNTIME_MODULE_NAME,
+  WORKFLOW_KV_CAPTURE_MODULE_NAME,
+} from "../../runtime/load/wrapper-generate.js";
+import {
+  KV_FACADE_RPC_METHOD,
+  KV_READ_INFRASTRUCTURE_ERROR_CODE,
+  WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
+} from "../../runtime/infrastructure-error.js";
 import {
   DO_ALARM_SHIM_MODULE,
   DO_RUNTIME_RESERVED_MODULE,
@@ -688,6 +696,26 @@ test("secret Redis key literals stay aligned across JS and redis-proxy", () => {
   assert.match(rust, /format!\("secrets:\{\}:\{\}", q\.ns, q\.worker\)/);
 });
 
+test("canonical Base64 decoders share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/secret-envelope-parity.json";
+  const grammar = readRepositoryJson(fixture).canonicalBase64;
+  assert.deepEqual(Object.keys(grammar).sort(), ["accepted", "rejected"]);
+  assert.ok(Array.isArray(grammar.accepted));
+  assert.ok(Array.isArray(grammar.rejected));
+  for (const vector of grammar.accepted) {
+    assert.deepEqual(Object.keys(vector).sort(), ["bytes", "name", "value"]);
+  }
+  for (const vector of grammar.rejected) {
+    assert.deepEqual(Object.keys(vector).sort(), ["name", "value"]);
+  }
+  const jsReader = readRepoFile("tests/unit/runtime-lib.test.js");
+  const rustReader = readRepoFile("rust/redis-proxy/src/secrets.rs");
+  assert.match(jsReader, /secret-envelope-parity\.json/);
+  assert.match(jsReader, /\.canonicalBase64\b/);
+  assert.match(rustReader, /secret-envelope-parity\.json/);
+  assert.match(rustReader, /\.canonical_base64\b/);
+});
+
 test("AI persisted and wire contracts share one JS and Rust fixture", () => {
   const jsReader = readRepoFile("tests/unit/ai-contract.test.js");
   const rustReader = readRepoFile("rust/redis-proxy/src/ai.rs");
@@ -814,6 +842,33 @@ test("Workflow Runtime results and Workflow-owned retryable backend errors share
   }
 });
 
+test("Workflow Runtime run requests share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/workflow-runtime-request.json";
+  const contract = /** @type {{ run: Record<string, unknown> }} */ (
+    readRepositoryJson(fixture)
+  );
+  assert.deepEqual(Object.keys(contract.run).toSorted(), [
+    "className",
+    "createdAtMs",
+    "dispatchDeadlineMs",
+    "frozenVersion",
+    "generation",
+    "instanceId",
+    "ns",
+    "params",
+    "runToken",
+    "worker",
+    "workflowKey",
+    "workflowName",
+  ]);
+  for (const reader of [
+    "tests/unit/runtime-lib.test.js",
+    "rust/workflows/src/api/tick/dispatch.rs",
+  ]) {
+    assert.match(readRepoFile(reader), /workflow-runtime-request\.json/, reader);
+  }
+});
+
 test("Workflow step terminal responses share one JS and Rust fixture", () => {
   const fixture = "tests/fixtures/workflow-step-response.json";
   const contract = /** @type {{
@@ -857,12 +912,39 @@ test("Workflow step terminal responses share one JS and Rust fixture", () => {
   }
 });
 
-test("DO alarm destructive response readers share one bounded fixture", () => {
+test("Runtime KV host responses share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/kv-host-response.json";
+  const contract = /** @type {{
+   *   maxResponseBytes: number,
+   *   batch: { requestedKeys: string[], response: { entries: unknown[] } },
+   *   metadata: Record<string, unknown>,
+   *   list: Record<string, unknown>,
+   *   invalid: Record<string, unknown>,
+   * }} */ (readRepositoryJson(fixture));
+  assert.equal(contract.maxResponseBytes, 36 * 1024 * 1024);
+  assert.equal(contract.batch.requestedKeys.length, contract.batch.response.entries.length);
+  assert.deepEqual(Object.keys(contract.metadata).sort(), ["found", "missing"]);
+  assert.deepEqual(Object.keys(contract.list).sort(), ["complete", "incomplete"]);
+  assert.deepEqual(Object.keys(contract.invalid).sort(), [
+    "incompleteListWithoutCursor",
+    "nonCanonicalBase64",
+    "orphanMetadata",
+  ]);
+  for (const reader of [
+    "tests/unit/runtime-kv-binding.test.js",
+    "rust/redis-proxy/src/kv.rs",
+  ]) {
+    assert.match(readRepoFile(reader), /kv-host-response\.json/, reader);
+  }
+});
+
+test("DO alarm response readers share one bounded fixture", () => {
   const fixture = "tests/fixtures/do-alarm-response.json";
   const contract = /** @type {{
    *   maxBytes: unknown,
    *   actorSuccessVariants: Record<string, unknown>,
    *   dispatchSuccessVariants: Record<string, unknown>,
+   *   dispatchErrorVariants: Record<string, unknown>,
    *   mutationSuccessVariants: Record<string, unknown>,
    *   mutationRequiredFields: unknown[],
    * }} */ (readRepositoryJson(fixture));
@@ -875,6 +957,10 @@ test("DO alarm destructive response readers share one bounded fixture", () => {
     "delivered",
     "ignored",
   ]);
+  assert.deepEqual(Object.keys(contract.dispatchErrorVariants).sort(), [
+    "failed",
+    "resultUnknown",
+  ]);
   assert.deepEqual(Object.keys(contract.mutationSuccessVariants).sort(), [
     "cleanup",
     "delete",
@@ -883,6 +969,7 @@ test("DO alarm destructive response readers share one bounded fixture", () => {
   assert.deepEqual(contract.mutationRequiredFields, ["changed", "deleted", "jobId", "ok"]);
   for (const reader of [
     "tests/unit/do-alarm-client.test.js",
+    "tests/unit/do-runtime-index.test.js",
     "rust/workflows/src/api/do_alarms/dispatch.rs",
     "rust/workflows/src/api/do_alarms/model.rs",
   ]) {
@@ -3227,6 +3314,7 @@ test("runtime-generated root module names stay inside the WDL-reserved namespace
     RUNTIME_WRAPPER_MODULE_NAME,
     WORKFLOWS_MODULE_NAME,
     HOST_BINDING_RUNTIME_MODULE_NAME,
+    WORKFLOW_KV_CAPTURE_MODULE_NAME,
     DO_RUNTIME_RESERVED_MODULE,
     DO_ALARM_SHIM_MODULE,
     ...Object.values(HOST_BINDING_MODULE_NAMES),
@@ -3239,25 +3327,76 @@ test("runtime-generated root module names stay inside the WDL-reserved namespace
   assert.equal(isWdlReservedModuleName("src/_wdl-helper.js"), false);
 });
 
-test("Workflow infrastructure invocation props have one runtime owner", () => {
+test("Workflow infrastructure reporter protocol has one runtime owner", () => {
   assert.equal(
     extractExportedStringConst(
       "runtime/load/module-rewrite.js",
-      "WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP"
+      "WORKFLOW_INFRASTRUCTURE_REPORTER_PROP"
     ),
-    WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP
+    WORKFLOW_INFRASTRUCTURE_REPORTER_PROP
   );
   assert.match(
     readRepoFile("runtime/dispatch.js"),
-    /WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP/
+    /WORKFLOW_INFRASTRUCTURE_REPORTER_PROP/
   );
   assert.match(
     readRepoFile("runtime/load/code-budget.js"),
-    /WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP/
+    /WORKFLOW_INFRASTRUCTURE_REPORTER_PROP/
   );
   assert.doesNotMatch(
     readRepoFile("runtime/load/wrapper-generate.js"),
-    new RegExp(RegExp.escape(WORKFLOW_INFRASTRUCTURE_INVOCATION_PROP))
+    new RegExp(RegExp.escape(WORKFLOW_INFRASTRUCTURE_REPORTER_PROP))
+  );
+  assert.equal(
+    extractExportedStringConst(
+      "runtime/infrastructure-error.js",
+      "KV_READ_INFRASTRUCTURE_ERROR_CODE"
+    ),
+    KV_READ_INFRASTRUCTURE_ERROR_CODE
+  );
+  assert.match(
+    readRepoFile("runtime/dispatch.js"),
+    /KV_READ_INFRASTRUCTURE_ERROR_CODE/
+  );
+  assert.match(
+    readRepoFile("runtime/load/code-budget.js"),
+    /KV_READ_INFRASTRUCTURE_ERROR_CODE/
+  );
+  assert.doesNotMatch(
+    readRepoFile("runtime/load/wrapper-generate.js"),
+    new RegExp(RegExp.escape(KV_READ_INFRASTRUCTURE_ERROR_CODE))
+  );
+  assert.equal(
+    extractExportedStringConst(
+      "runtime/infrastructure-error.js",
+      "KV_FACADE_RPC_METHOD"
+    ),
+    KV_FACADE_RPC_METHOD
+  );
+  assert.match(readRepoFile("runtime/bindings/kv.js"), /KV_FACADE_RPC_METHOD/);
+  assert.match(readRepoFile("runtime/load/code-budget.js"), /KV_FACADE_RPC_METHOD/);
+  assert.doesNotMatch(
+    readRepoFile("runtime/load/wrapper-generate.js"),
+    new RegExp(RegExp.escape(KV_FACADE_RPC_METHOD))
+  );
+  assert.equal(
+    extractExportedStringConst(
+      "runtime/infrastructure-error.js",
+      "WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN"
+    ),
+    WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN
+  );
+  assert.match(
+    readRepoFile("runtime/dispatch.js"),
+    /WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN/
+  );
+  assert.match(
+    readRepoFile("runtime/load/code-budget.js"),
+    /WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN/
+  );
+  assert.doesNotMatch(
+    readRepoFile("runtime/load/wrapper-generate.js"),
+    new RegExp(RegExp.escape(WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN))
   );
 });
 

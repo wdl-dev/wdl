@@ -49,8 +49,48 @@ fn workflows_redis_url() -> String {
             "WORKFLOWS_REDIS_DB must be 2; remove the override or use WORKFLOWS_REDIS_URL to select an endpoint with a dedicated DB 2"
         );
     }
-    optional_env("WORKFLOWS_REDIS_URL")
-        .unwrap_or_else(|| env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string()))
+    if let Some(url) = optional_env("WORKFLOWS_REDIS_URL") {
+        let configured_db = explicit_redis_url_db(&url)
+            .unwrap_or_else(|_| panic!("WORKFLOWS_REDIS_URL is invalid"));
+        if configured_db.is_some_and(|db| db != WORKFLOWS_REDIS_DB) {
+            panic!(
+                "WORKFLOWS_REDIS_URL must omit its database or select DB 2; legacy non-DB2 state is not migrated"
+            );
+        }
+        return url;
+    }
+    env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string())
+}
+
+fn explicit_redis_url_db(raw: &str) -> Result<Option<i64>, ()> {
+    let url = url::Url::parse(raw).map_err(|_| ())?;
+    match url.scheme() {
+        "redis" | "rediss" | "valkey" | "valkeys" => {
+            let path = url.path();
+            if path.is_empty() || path == "/" {
+                return Ok(None);
+            }
+            let value = path.strip_prefix('/').ok_or(())?;
+            if value.is_empty() || value.contains('/') {
+                return Err(());
+            }
+            value.parse::<i64>().map(Some).map_err(|_| ())
+        }
+        "unix" | "redis+unix" | "valkey+unix" => {
+            let mut database = None;
+            for (name, value) in url.query_pairs() {
+                if name != "db" {
+                    continue;
+                }
+                if database.is_some() {
+                    return Err(());
+                }
+                database = Some(value.parse::<i64>().map_err(|_| ())?);
+            }
+            Ok(database)
+        }
+        _ => Err(()),
+    }
 }
 
 fn control_redis_url() -> String {
@@ -84,12 +124,11 @@ pub(crate) fn config_from_env() -> Config {
     if workflows_identity == control_identity {
         panic!("Workflows DB 2 must not share the Control Redis database");
     }
-    if let Some(data_redis_url) = optional_env("DATA_REDIS_URL") {
-        let data_identity =
-            redis_database_identity(&data_redis_url, None, "Data Redis URL is invalid");
-        if workflows_identity == data_identity {
-            panic!("Workflows DB 2 must not share the data-plane Redis database");
-        }
+    let data_redis_url = optional_env("DATA_REDIS_URL")
+        .unwrap_or_else(|| env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string()));
+    let data_identity = redis_database_identity(&data_redis_url, None, "Data Redis URL is invalid");
+    if workflows_identity == data_identity {
+        panic!("Workflows DB 2 must not share the data-plane Redis database");
     }
     let runtime_host = env::var("RUNTIME_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let runtime_port = env_u16("RUNTIME_PORT", 8088);

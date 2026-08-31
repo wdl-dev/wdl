@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::JS_MAX_SAFE_INTEGER;
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
@@ -89,6 +90,23 @@ fn runtime_dispatch_deadline_ms(now_ms: i64, timeout_ms: u64) -> i64 {
     now_ms
         .saturating_add(timeout_ms)
         .clamp(1, JS_MAX_SAFE_INTEGER as i64)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRuntimeDispatchRequest<'a> {
+    ns: &'a str,
+    worker: &'a str,
+    frozen_version: &'a str,
+    workflow_name: &'a str,
+    workflow_key: &'a str,
+    class_name: &'a str,
+    instance_id: &'a str,
+    generation: i64,
+    created_at_ms: i64,
+    run_token: &'a str,
+    dispatch_deadline_ms: i64,
+    params: &'a JsonValue,
 }
 
 static COMMIT_RUNTIME_TERMINAL: StaticRedisScript =
@@ -314,20 +332,20 @@ pub(super) async fn dispatch_runtime(
         request = request.header("x-request-id", request_id);
     }
     let response = request
-        .json(&json!({
-            "ns": identity.ns,
-            "worker": identity.worker,
-            "frozenVersion": identity.frozen_version,
-            "workflowName": identity.workflow_name,
-            "workflowKey": identity.workflow_key,
-            "className": identity.class_name,
-            "instanceId": identity.instance_id,
-            "generation": generation,
-            "createdAtMs": created_at_ms,
-            "runToken": run_token,
-            "dispatchDeadlineMs": dispatch_deadline_ms,
-            "params": params,
-        }))
+        .json(&WorkflowRuntimeDispatchRequest {
+            ns: &identity.ns,
+            worker: &identity.worker,
+            frozen_version: &identity.frozen_version,
+            workflow_name: &identity.workflow_name,
+            workflow_key: &identity.workflow_key,
+            class_name: &identity.class_name,
+            instance_id: &identity.instance_id,
+            generation,
+            created_at_ms,
+            run_token,
+            dispatch_deadline_ms,
+            params: &params,
+        })
         .send()
         .await
         .map_err(|err| {
@@ -525,6 +543,30 @@ mod tests {
             runtime_dispatch_deadline_ms(i64::MAX - 1, u64::MAX),
             JS_MAX_SAFE_INTEGER as i64
         );
+    }
+
+    #[test]
+    fn runtime_dispatch_request_matches_the_cross_language_contract() {
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/workflow-runtime-request.json"
+        ))
+        .expect("workflow runtime request fixture parses");
+        let params = json!({ "orderId": 123 });
+        let request = WorkflowRuntimeDispatchRequest {
+            ns: "demo",
+            worker: "shop",
+            frozen_version: "v7",
+            workflow_name: "orders",
+            workflow_key: "wf_0123456789abcdef0123456789abcdef",
+            class_name: "OrderWorkflow",
+            instance_id: "order-123",
+            generation: 3,
+            created_at_ms: 1_700_000_000_000,
+            run_token: "run-token",
+            dispatch_deadline_ms: 2_000_000_000_000,
+            params: &params,
+        };
+        assert_eq!(serde_json::to_value(request).unwrap(), fixture["run"]);
     }
 
     #[test]

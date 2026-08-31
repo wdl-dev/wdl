@@ -1,0 +1,62 @@
+{
+  "maxResponseBytes": 37748736,
+  "batch": {
+    "requestedKeys": ["binary", "empty", "missing"],
+    "response": {
+      "entries": [
+        {
+          "key": "binary",
+          "value_b64": "AP8Q",
+          "metadata": { "kind": "binary" }
+        },
+        {
+          "key": "empty",
+          "value_b64": "",
+          "metadata": { "kind": "empty" }
+        },
+        {
+          "key": "missing",
+          "value_b64": null,
+          "metadata": null
+        }
+      ]
+    }
+  },
+  "metadata": {
+    "found": {
+      "value_b64": "/wA=",
+      "metadata": { "kind": "binary" }
+    },
+    "missing": {
+      "value_b64": null,
+      "metadata": null
+    }
+  },
+  "list": {
+    "complete": {
+      "keys": [
+        { "name": "alpha", "metadata": { "kind": "listed" } }
+      ],
+      "list_complete": true
+    },
+    "incomplete": {
+      "keys": [],
+      "list_complete": false,
+      "cursor": "v1:opaque"
+    }
+  },
+  "invalid": {
+    "orphanMetadata": {
+      "value_b64": null,
+      "metadata": { "orphan": true }
+    },
+    "nonCanonicalBase64": {
+      "value_b64": "_w==",
+      "metadata": null
+    },
+    "incompleteListWithoutCursor": {
+      "keys": [],
+      "list_complete": false
+    }
+  }
+}

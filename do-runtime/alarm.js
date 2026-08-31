@@ -6,6 +6,7 @@ import {
 import { errorMessage } from "shared-errors";
 import { withInternalAuth } from "shared-internal-auth";
 import {
+  DO_ALARM_RESPONSE_DEADLINE_MS,
   parseDoAlarmMutationSuccess,
   readDoAlarmResponseText,
 } from "shared-do-alarm-response";
@@ -67,12 +68,14 @@ function workflowsBackend(env) {
  * @param {Record<string, unknown>} body
  */
 async function postWorkflowsAlarm(env, path, body) {
+  const signal = AbortSignal.timeout(DO_ALARM_RESPONSE_DEADLINE_MS);
   let response;
   try {
     response = await workflowsBackend(env).fetch(`http://workflows${path}`, {
       method: "POST",
       headers: withInternalAuth({ "content-type": "application/json" }, env),
       body: JSON.stringify(body),
+      signal,
     });
   } catch (err) {
     throw new DoRuntimeError(503, "do_alarm_backend_unavailable", "DO alarm backend request failed", {
@@ -81,7 +84,7 @@ async function postWorkflowsAlarm(env, path, body) {
   }
   let text;
   try {
-    text = await readDoAlarmResponseText(response);
+    text = await readDoAlarmResponseText(response, signal);
   } catch (err) {
     if (!response.ok) {
       throw new DoRuntimeError(503, "do_alarm_backend_failed", "DO alarm backend rejected the request", {

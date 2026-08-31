@@ -36,7 +36,14 @@ function ownerFence(owner) {
  * @param {number} [hopCount]
  * @param {string} [pathname]
  */
-export async function forwardToOwner(invoke, env, owner, requestId = null, hopCount = 0, pathname = "/internal/do/invoke") {
+export async function forwardToOwner(
+  invoke,
+  env,
+  owner,
+  requestId = null,
+  hopCount = 0,
+  pathname = "/internal/do/invoke"
+) {
   return await forwardOwnerRequest({
     env,
     endpoint: owner.endpoint,

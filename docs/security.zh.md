@@ -40,6 +40,17 @@ WDL 使用 stock workerd，不 patch workerd。因此 runtime 隔离从 workerd 
 - system-runtime 的 `__system__` worker 刻意拥有 private+public outbound，因为它们是平台代码，不是 tenant code。
 - 特权 runtime event 使用私有 `:8088` internal socket。Gateway 不应保留 `/_scheduled` 这样的 tenant-visible path；socket 边界才是安全边界。
 
+## Tenant Realm Provenance 边界
+
+Tenant execution context 不是 host authenticity boundary；即使普通 tenant code 不知道某个 property name、Symbol 或 storage key，也不改变这一点：
+
+- Imported env、nested `withEnv()`、`AsyncLocalStorage` 和 captured async frame 都是 tenant-controlled ambient state。Tenant code 可以替换 env，也可以恢复先前捕获的 frame。这些机制都不能拥有 authorization、fencing、deduplication、host-failure attribution 或其它 durable platform decision。
+- Private `Symbol` 只能防止意外命名冲突；tenant `Proxy` trap 可以观察 property key 并返回伪造值。`WeakMap` 或 `WeakSet` identity 只能证明 wrapper 先前见过同一个 object，不能证明最初产生或后来 relay 该 object 的 invocation。
+- JSRPC wildcard method 同样属于 tenant realm property lookup；继承属性可以阻止 wildcard resolution。Platform wrapper 必须在把对应 object 暴露给 tenant 前绑定经过审查的 callable，也不能把 raw RPC object 直接作为 facade target，让 descriptor 或 `dup()` 恢复底层 capability。
+- Host-only context 必须留在 host isolate、带 immutable host props 的 binding，或权威 backend state machine。Hidden entrypoint props 必须在 tenant constructor 运行前被消费；控制 wrapper generation 的 persisted metadata 必须在 tenant execution 前 fail closed。
+- Error provenance 刻意保持狭窄。Generated facade 只能把 direct host call 拒绝的精确 Error 与该调用的 bound capability 一并私有记录；只有该同一 object 穿出经过审查的 `run()` 或 callback Promise boundary，且记录的 capability 也属于当前 Workflow env 时，平台才可据此行动。捕获 Error 后返回 fallback 会让当前 boundary 不报告并允许提交 fallback；让 Promise 脱离 boundary settlement 也只会使当前 boundary 不观察该结果。这两种行为都不会删除私有的 Error-to-capability 关联。替换或包装后的 Error、`cause`、`AggregateError` 或其它 object 不会继承 provenance。之后重新抛出原始 Error 时仍须满足相同的 capability-membership 检查，使用同一 binding identity 的后续 invocation 可以满足该条件。该行为最多让 tenant 重试自己的 Workflow，不授予额外 capability。若产品要求已捕获且没有重新逃逸的 Error 仍影响某个 boundary，必须把决策移入 tenant 无法访问的 host execution realm 或显式 host protocol，不能继续叠加 ambient-context heuristic。
+- Dynamic Worker env 和 props 只能携带 pinned workerd 配置支持的 capability 形态。Compatibility flag 是有效的设计输入：如果某个 flag 能替代 WDL 自有机制或提供更简单的原生边界，平台自有 static worker 应主动评估；会改变 tenant Dynamic Worker 或扩大 tenant-visible capability 的 flag，则必须经过更严格的产品、安全、兼容性和 rollout 审查。当前 reporter 设计不启用 `allow_irrevocable_stub_storage`，因为在这里使用它需要把 irrevocable stub persistence 扩大到 tenant worker，明显宽于 report-only capability；该边界应使用 host-owned `ctx.exports` loopback/service stub。把任何 flag 或 capability 当作边界前，都必须用真实 workerd integration 覆盖 workerd-owned serialization、constructor ordering 和 reverse JSRPC；如果 capability transport 已有真实 workerd gate，且 stale capability 不穿过产品边界，则 host-local registry 的 concurrency 和 terminal cleanup 可以保留为单测。
+
 ## Internal Mesh 信任
 
 很多 internal endpoint 是私有平台协议，不是公开 API：
@@ -128,7 +139,8 @@ Request id 可以跨服务传播，但传播前必须 sanitize 并限制长度�
 
 - `tests/unit/style-contracts.test.js`：route channel、hidden Fetcher stripping、internal socket split、Fargate/task-role infrastructure guard、low-cardinality metrics 等 drift guard。
 - `tests/unit/auth-lib.test.js`、`tests/unit/auth-index.test.js`、`tests/integration/auth-worker.test.js`、`tests/integration/auth-platform.test.js`：token 和 role 边界。
-- `tests/unit/runtime-load.test.js`、`tests/unit/runtime-binding-surface.test.js`、`tests/integration/service-bindings.test.js`：wrapper 和 binding 暴露。
+- `tests/unit/runtime-load.test.js`、`tests/unit/runtime-wrapper-generate.test.js`、`tests/unit/runtime-binding-surface.test.js`、`tests/unit/runtime-dispatch-workflows.test.js` 和 `tests/integration/workflows-runtime-core.test.js`：wrapper/binding 暴露、tenant-realm provenance、private reporter lifecycle 和真实 workerd JSRPC 行为。
+- `tests/integration/service-bindings.test.js`：service-binding capability delegation。
 - `tests/unit/runtime-ai-binding.test.js`、`tests/unit/control-ai-handler.test.js`、`tests/integration/ai-binding.test.js`：credential non-exposure、精确 destination、public-only egress plumbing、有界 lifecycle 和 DO teardown 行为。
 - `tests/unit/gateway-dispatch.test.js`、`tests/integration/gateway.test.js`、`tests/integration/routing-gateway.test.js`：route 和 reserved namespace 行为。
 - `tests/integration/d1-*.test.js`、`tests/integration/durable-objects*.test.js` 和 workflows integration tests：stateful binding 的 owner/fence 行为。

@@ -131,6 +131,61 @@ Hidden platform Fetcher bindings must not leak to user code. Runtime wrappers th
 inject internal Fetchers must strip them from user-visible `env` and avoid raw `export
 *` paths that would expose unwrapped entrypoints.
 
+## Tenant-Realm Context And Provenance
+
+Tenant-executed JavaScript cannot carry trusted host context. The owning security rules
+are in [`security.md`](security.md#tenant-realm-provenance-boundaries); implementation
+and review must follow these defaults:
+
+- Do not use imported env, `withEnv()`, `AsyncLocalStorage`, `snapshot()` / `bind()`, a
+  private Symbol, or another ambient object graph as an authorization, fence,
+  deduplication, or invocation-attribution owner. A tenant can replace ambient env,
+  restore a captured frame, and use a `Proxy` to observe unknown property keys.
+- Use private `WeakMap` / `WeakSet` state only for exact object identity. Do not infer
+  invocation identity from that object, recursively trust `cause` / `AggregateError`,
+  or classify by message, name, or a tenant-forgeable code alone.
+- Treat JSRPC wildcard method resolution as tenant-controlled property lookup. Bind the
+  callable before the tenant can access its receiver, and expose a new explicit facade
+  whose target does not retain the raw RPC object. Do not rely on a `get`-only Proxy when
+  descriptors, prototype properties, or `dup()` can recover or replace the raw method.
+- Treat custom host thenables the same way. If correctness depends on the exact rejection
+  identity, capture the native settlement method before tenant evaluation and normalize
+  the host result without consulting tenant-modifiable `.then`, `constructor`, or
+  `Symbol.species` properties.
+- If an Error contract depends on provenance, associate only the Error rejected directly
+  by the reviewed host call with that call's bound capability. Act only when the same
+  object escapes the named Promise boundary and the capability belongs to the current
+  environment. Document where catch is allowed. Catching and returning a fallback or
+  detaching the Promise prevents the current boundary from reporting but does not erase
+  the private association. A replacement, wrapper, `cause`, `AggregateError`, or other
+  object does not inherit provenance. Rethrowing the exact Error may report under the
+  same capability-membership check, including in a later invocation using the same
+  binding identity. Making an Error affect a boundary it does not re-escape requires an
+  explicit host-owned protocol instead of more ambient bookkeeping.
+- Keep correctness state in the host isolate or authoritative service. A private
+  capability may carry only a low-cardinality operation into that owner; opaque ids and
+  mutable state stay host-side, are bounded by active operations, and are removed on
+  every terminal path.
+- Do not assume a local `RpcTarget` or a stub returned by one RPC can be serialized into
+  Dynamic Worker env/props. Evaluate native compatibility flags before building a WDL
+  substitute: platform-owned static workers should adopt a suitable flag proactively
+  when it simplifies the system, while tenant Dynamic Worker flags require a narrower
+  capability and compatibility review. `allow_irrevocable_stub_storage` is not suitable
+  for the current report-only path because it would expose broader persistent-stub
+  behavior to tenant workers. Prefer a `ctx.exports` loopback/service stub with immutable
+  props for this boundary.
+
+Before accepting a new tenant-to-host context design, identify which workerd-owned
+behaviors can reach that design and prove those paths in real workerd. Candidate cases
+include nested `withEnv()` with plain or Proxy env values, captured async-frame restore,
+module-cached facades across entrypoint instances, reverse-JSRPC callbacks, and
+hidden-prop consumption before tenant construction. Do not retain an old test matrix for
+mechanisms the final design no longer reads. Unit mocks alone cannot establish a claimed
+serialization or async-context property. Host-local owner registries still require
+concurrent-isolation and terminal cleanup tests, but those may remain unit tests when the
+capability transport itself has a real-workerd gate and no stale capability crosses a
+product boundary.
+
 ## API Contracts
 
 Platform JSON errors use:

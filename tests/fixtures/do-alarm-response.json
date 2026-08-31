@@ -19,6 +19,22 @@
       "ignored": true
     }
   },
+  "dispatchErrorVariants": {
+    "failed": {
+      "status": 503,
+      "body": {
+        "error": "do_alarm_dispatch_failed",
+        "message": "DO alarm dispatch failed"
+      }
+    },
+    "resultUnknown": {
+      "status": 503,
+      "body": {
+        "error": "do_alarm_dispatch_result_unknown",
+        "message": "DO alarm dispatch result is unknown"
+      }
+    }
+  },
   "mutationSuccessVariants": {
     "set": {
       "ok": true,

@@ -76,6 +76,20 @@ Control handler state 必须通过 `control/shared.js` accessor 流动。直接 
 
 Hidden platform Fetcher binding 不能泄漏给用户代码。注入 internal Fetcher 的 runtime wrapper 必须在用户可见 `env` 中删除这些 binding，并避免 raw `export *` 路径暴露未包装 entrypoint。
 
+## Tenant Realm Context 和 Provenance
+
+Tenant-executed JavaScript 不能承载可信 host context；权威安全规则见 [`security.zh.md`](security.zh.md#tenant-realm-provenance-边界)。实现和 review 默认遵守以下规则：
+
+- 不得把 imported env、`withEnv()`、`AsyncLocalStorage`、`snapshot()` / `bind()`、private Symbol 或其它 ambient object graph 用作 authorization、fence、deduplication 或 invocation-attribution owner。Tenant 可以替换 ambient env、恢复 captured frame，并用 `Proxy` 观察未知 property key。
+- Private `WeakMap` / `WeakSet` state 只能用于精确 object identity。不得从该 object 推断 invocation identity，不得递归信任 `cause` / `AggregateError`，也不得只按 message、name 或 tenant 可伪造 code 分类。
+- JSRPC wildcard method resolution 必须视为 tenant-controlled property lookup。必须在 tenant 能访问 receiver 前绑定 callable，并暴露 target 不持有 raw RPC object 的新显式 facade；如果 descriptor、prototype property 或 `dup()` 能恢复或替换 raw method，就不能只依赖实现了 `get` trap 的 Proxy。
+- Custom host thenable 采用同一原则。如果 correctness 依赖精确 rejection identity，必须在 tenant evaluation 前捕获原生 settlement method，并在不读取 tenant 可修改 `.then`、`constructor` 或 `Symbol.species` property 的前提下规范化 host result。
+- Error 合同如果依赖 provenance，只能把 reviewed host call 直接拒绝的 Error 与该调用的 bound capability 一并记录，并且只在同一 object 穿出命名 Promise boundary、该 capability 也属于当前 env 时行动；必须记录允许 catch 的位置。Catch 后返回 fallback 或 detach Promise 会使当前 boundary 不报告，但不会删除私有关联。替换或包装后的 Error、`cause`、`AggregateError` 或其它 object 不会继承 provenance。之后重新抛出原始 Error 时仍须满足相同的 capability-membership 检查，使用同一 binding identity 的后续 invocation 可以保留 provenance。让没有重新逃逸的 Error 影响某个 boundary 需要显式 host-owned protocol，不能继续增加 ambient bookkeeping。
+- Correctness state 应留在 host isolate 或权威 service。Private capability 只能向 owner 传递低基数 operation；opaque id 和 mutable state 保持 host-side，由 active operation 数量约束，并在每条 terminal path 删除。
+- 不得假设 local `RpcTarget` 或一次 RPC 返回的 stub 可以被序列化进 Dynamic Worker env/props；在自行构建 WDL 替代机制前，应先评估原生 compatibility flag。适合的平台自有 static worker flag 如果能简化系统，应主动采用；tenant Dynamic Worker flag 则需要更窄的 capability 和 compatibility 审查。`allow_irrevocable_stub_storage` 不适合当前 report-only 路径，因为它会向 tenant worker 暴露更宽的 persistent-stub 行为；该边界应优先使用带 immutable props 的 `ctx.exports` loopback/service stub。
+
+接受新的 tenant-to-host context 设计前，必须先识别哪些 workerd-owned behavior 能真正到达该设计，再用真实 workerd 证明这些路径。候选场景包括 plain 或 Proxy env 的 nested `withEnv()`、captured async-frame restore、跨 entrypoint instance 的 module-cached facade、reverse-JSRPC callback，以及 tenant construction 前 hidden-prop consumption；最终设计已经不再读取的旧机制不应继续保留整套测试矩阵。仅靠 unit mock 不能证明声称依赖的 workerd serialization 或 async-context property。Host-local owner registry 仍需并发隔离和 terminal cleanup 测试；如果 capability transport 本身已有真实 workerd gate，且 stale capability 不穿过产品边界，这两类 owner 生命周期测试可以保留为 unit test。
+
 ## API 合同
 
 平台 JSON error 使用：

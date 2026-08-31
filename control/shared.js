@@ -678,8 +678,8 @@ export async function cleanupDoAlarmsForWorker({ ns, worker, doStorageId, reques
     requestFailedMessage: "Workflow DO alarm cleanup failed",
     // This endpoint was already bounded before transport consolidation.
     timeoutMs: WORKFLOWS_INTERNAL_TIMEOUT_MS,
-    readBody: async (response) => {
-      const text = await readDoAlarmResponseText(response);
+    readBody: async (response, signal) => {
+      const text = await readDoAlarmResponseText(response, signal);
       if (response.ok) return parseDoAlarmCleanupSuccess(text);
       try {
         return JSON.parse(text);

@@ -80,7 +80,7 @@ export async function compileControlGraph(opts = {}) {
   const bundleUrl = freshRepositoryModuleDataUrl("control/bundle.js", [
     ...importSpecifierReplacements({
       "shared-ns-pattern": SHARED_NS_URL,
-      "shared-base64": SHARED_BASE64_URL,
+      "base64.js": SHARED_BASE64_URL,
       "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
       "control-lib": libUrl,
     }),

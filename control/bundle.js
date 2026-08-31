@@ -20,7 +20,7 @@ import {
 } from "shared-workerd-compat-flags";
 import { normalizeBindings, validateBindings } from "control-bindings";
 import { parseWorkerdDependencyVersion } from "control-lib";
-import { assertCanonicalBase64 } from "shared-base64";
+import { assertCanonicalBase64 } from "base64.js";
 import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
 
 export class BundleConfigError extends Error {

@@ -46,6 +46,7 @@ export function evictSiblings() { return Promise.resolve(); }
 export function recordLoadedWorker() {}
 `);
 const runtimeDispatchUrl = moduleDataUrl(`
+export class WorkflowInfrastructureReporter {}
 export async function handleFetchDispatch() { return new Response("unexpected dispatch"); }
 export async function handleQueuedDispatch() { return new Response("unexpected queued dispatch"); }
 export async function handleScheduledDispatch() { return new Response("unexpected scheduled dispatch"); }

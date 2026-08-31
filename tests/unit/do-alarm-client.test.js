@@ -41,6 +41,7 @@ const alarmResponseContract = /** @type {{
  * maxBytes: number,
  * actorSuccessVariants: Record<string, Record<string, unknown>>,
  * dispatchSuccessVariants: Record<string, { ok: true, ignored: boolean }>,
+ * dispatchErrorVariants: Record<string, { status: number, body: Record<string, unknown> }>,
  * mutationSuccessVariants: {
  *   set: Record<string, unknown>,
  *   delete: Record<string, unknown>,
@@ -75,6 +76,7 @@ beforeEach(() => {
 
 test("DO alarm response contract matches the cross-language fixture", async () => {
   assert.equal(alarmResponseModule.DO_ALARM_RESPONSE_MAX_BYTES, alarmResponseContract.maxBytes);
+  assert.equal(alarmResponseModule.DO_ALARM_RESPONSE_DEADLINE_MS, 5_000);
   for (const [name, actorResponse] of Object.entries(alarmResponseContract.actorSuccessVariants)) {
     const expected = alarmResponseContract.dispatchSuccessVariants[name];
     assert.deepEqual(
@@ -110,6 +112,37 @@ test("DO alarm response contract matches the cross-language fixture", async () =
   await assert.rejects(() => alarmResponseModule.readDoAlarmResponseText(oversized));
   await Promise.resolve();
   assert.equal(cancelled, true);
+});
+
+test("DO alarm response deadline does not wait for read or cancel", async () => {
+  const reading = Promise.withResolvers();
+  let cancelReason;
+  let released = false;
+  const response = /** @type {Response} */ (/** @type {unknown} */ ({
+    headers: new Headers(),
+    body: {
+      getReader() {
+        return {
+          read() { return reading.promise; },
+          /** @param {unknown} reason */
+          cancel(reason) {
+            cancelReason = reason;
+            return new Promise(() => {});
+          },
+          releaseLock() { released = true; },
+        };
+      },
+    },
+  }));
+  const controller = new AbortController();
+  const reason = new DOMException("alarm body deadline", "AbortError");
+  const result = alarmResponseModule.readDoAlarmResponseText(response, controller.signal);
+
+  controller.abort(reason);
+
+  await assert.rejects(result, (error) => error === reason);
+  assert.equal(cancelReason, reason);
+  assert.equal(released, true);
 });
 
 /** @param {number} [index] */
@@ -164,6 +197,7 @@ test("setAlarmIndex creates a Workflows-backed DO alarm job", async () => {
   assert.equal(calls.length, 1);
   assert.equal(String(calls[0].input), "http://workflows/internal/workflows/do-alarms/set");
   assert.equal(calls[0].init?.method, "POST");
+  assert.ok(calls[0].init?.signal instanceof AbortSignal);
   assert.deepEqual(alarmRequestBody(), {
     ns: "demo",
     worker: "alarms",

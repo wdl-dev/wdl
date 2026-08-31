@@ -2,6 +2,7 @@ import { readBoundedBytes } from "shared-bounded-body";
 import { discardResponseBody } from "shared-respond";
 
 export const DO_ALARM_RESPONSE_MAX_BYTES = 16 * 1024;
+export const DO_ALARM_RESPONSE_DEADLINE_MS = 5_000;
 
 const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 const intrinsicArrayIsArray = Array.isArray;
@@ -12,10 +13,13 @@ const intrinsicObjectKeys = Object.keys;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicTextDecoderDecode = TextDecoder.prototype.decode;
 
-/** @param {Response} response */
-export async function readDoAlarmResponseText(response) {
+/** @param {Response} response @param {AbortSignal} [signal] */
+export async function readDoAlarmResponseText(
+  response,
+  signal = AbortSignal.timeout(DO_ALARM_RESPONSE_DEADLINE_MS)
+) {
   try {
-    const bytes = await readBoundedBytes(response, DO_ALARM_RESPONSE_MAX_BYTES);
+    const bytes = await readBoundedBytes(response, DO_ALARM_RESPONSE_MAX_BYTES, signal);
     return intrinsicReflectApply(intrinsicTextDecoderDecode, strictUtf8Decoder, [bytes]);
   } catch (error) {
     void discardResponseBody(response);

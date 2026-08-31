@@ -19,6 +19,7 @@ import {
 } from "./helpers/index.js";
 import { redisDel } from "./helpers/redis.js";
 import {
+  doInternalInvoke,
   DO_ALARM_WORKER,
   doAlarmJobId,
   doAlarmJobIdForStorage,
@@ -28,6 +29,7 @@ import {
   redisAddDoAlarmByWorker,
   redisDeleteDoAlarmJob,
   redisDoAlarmDueIncludes,
+  redisDoAlarmDueScore,
   redisDoAlarmJobExists,
   redisDoAlarmJobIdsForWorker,
   redisDoAlarmReadyIncludes,
@@ -847,6 +849,11 @@ test("later ticks admit DO alarms while an earlier delivery remains active", asy
     await delay(300);
 
     await waitForDoAlarmAdmission("slow DO alarm admission");
+    assert.equal(redisDoAlarmReadyIncludes(slowJobId), false);
+    assert.equal(redisDoAlarmDueIncludes(slowJobId), true);
+    const slowClaim = redisGetDoAlarmJob(ns, "alarms", "AlarmCounter", "slow");
+    assert.equal(slowClaim.status, "running");
+    assert.equal(redisDoAlarmDueScore(slowJobId), slowClaim.runLeaseExpiresAtMs);
     await waitForJson(
       "slow DO alarm starts in the background",
       () => readAlarmStatus("slow"),
@@ -883,7 +890,7 @@ test("later ticks admit DO alarms while an earlier delivery remains active", asy
   });
 });
 
-test("expired running DO alarm claims redeliver from the ready hint", async () => {
+test("expired running DO alarm claims redeliver through the lease-expiry due index", async () => {
   const ns = uniqueNs("do-alarm-expired-run");
   await deployAndPromote(ns, "alarms", {
     mainModule: "worker.js",
@@ -904,15 +911,17 @@ test("expired running DO alarm claims redeliver from the ready hint", async () =
 
     const jobId = doAlarmJobId(ns, "alarms", "AlarmCounter", "expired-run");
     const claimed = await waitForDoAlarmJob(ns, "alarms", "AlarmCounter", "expired-run");
+    const expiredLeaseAtMs = Date.now() - 1000;
     redisSetDoAlarmJob(jobId, {
       ...claimed,
       status: "running",
       runToken: "expired-run-token",
-      runLeaseExpiresAtMs: String(Date.now() - 1000),
-      dueAtMs: String(Date.now() - 1000),
+      runLeaseExpiresAtMs: String(expiredLeaseAtMs),
+      dueAtMs: String(expiredLeaseAtMs),
     });
-    redisRemoveDoAlarmDue(jobId);
-    redisAddDoAlarmReady(jobId);
+    redisAddDoAlarmDue(expiredLeaseAtMs, jobId);
+    assert.equal(redisDoAlarmDueIncludes(jobId), true);
+    assert.equal(redisDoAlarmReadyIncludes(jobId), false);
 
     const tick = serviceInternalPost("workflows", 9120, "/internal/workflows/tick", {});
     assert.equal(tick.status, 200, tick.body);
@@ -1094,6 +1103,69 @@ test("getAlarm repairs a missing backend due-index entry from SQLite storage", a
     (json) => json.alarms === 1 && json.pending === null,
     45000
   );
+});
+
+test("routed DO alarm failures retain the actual owner provenance", async () => {
+  await withDoMultiRuntimes(async () => {
+    const ns = uniqueNs("do-alarm-owner-failure");
+    const version = await deployAndPromote(ns, "alarms", {
+      mainModule: "worker.js",
+      modules: { "worker.js": DO_ALARM_WORKER },
+      bindings: {
+        ALARMS: { type: "do", className: "AlarmCounter" },
+      },
+    });
+    const doStorageId = redisGetDoStorageId(ns, "alarms");
+    const objectName = "routed-failure";
+    const invoke = (/** @type {string} */ service, /** @type {string} */ path) =>
+      doInternalInvoke(service, {
+        ns,
+        worker: "alarms",
+        version,
+        doStorageId,
+        className: "AlarmCounter",
+        objectName,
+        request: {
+          method: "POST",
+          url: `https://do.internal${path}`,
+          headers: {},
+        },
+      });
+
+    await withServiceStopped("scheduler", async () => {
+      const prepared = invoke("do-runtime-b", "/schedule-failing");
+      assert.equal(prepared.status, 200, prepared.body);
+      const job = await waitForDoAlarmJob(ns, "alarms", "AlarmCounter", objectName);
+      const ownerKey = doHostId(ns, "alarms", "AlarmCounter", objectName);
+      assert.equal(redisGetDoOwner(ownerKey)?.taskId, "do-runtime-b");
+
+      try {
+        const delivery = serviceInternalPost(
+          "do-runtime-a",
+          8788,
+          "/internal/do/alarms/dispatch",
+          {
+            ns,
+            worker: "alarms",
+            version,
+            doStorageId,
+            className: "AlarmCounter",
+            objectName,
+            retryCount: 0,
+            token: job.rowToken,
+          }
+        );
+        assert.equal(delivery.status, 503, delivery.body);
+        const failure = responseJson(delivery);
+        assert.equal(failure.error, "do_alarm_dispatch_failed");
+        assert.equal(failure.message, "DO alarm dispatch failed");
+        assert.equal(failure.details?.upstream_status, 500);
+      } finally {
+        const cleanup = invoke("do-runtime-b", "/delete");
+        assert.equal(cleanup.status, 200, cleanup.body);
+      }
+    });
+  });
 });
 
 test("leased DO alarm redelivers after owner task crash before completion", async () => {

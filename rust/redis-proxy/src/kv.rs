@@ -597,6 +597,17 @@ fn normalize_list_prefix(prefix: Option<String>) -> AppResult<String> {
     Ok(prefix)
 }
 
+fn kv_list_response(keys: Vec<Value>, cursor: Option<String>) -> Json<Value> {
+    match cursor {
+        Some(cursor) => Json(json!({
+            "keys": keys,
+            "list_complete": false,
+            "cursor": cursor,
+        })),
+        None => Json(json!({ "keys": keys, "list_complete": true })),
+    }
+}
+
 pub(crate) fn escape_glob_literal(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -885,15 +896,12 @@ pub(crate) async fn kv_list(
             }
         })
         .collect::<Vec<_>>();
-    if bucket >= KV_HASH_BUCKETS && overflow.is_empty() {
-        Ok(Json(json!({ "keys": keys, "list_complete": true })))
+    let cursor = if bucket >= KV_HASH_BUCKETS && overflow.is_empty() {
+        None
     } else {
-        Ok(Json(json!({
-            "keys": keys,
-            "list_complete": false,
-            "cursor": encode_list_cursor(bucket, scan_cursor, overflow)?,
-        })))
-    }
+        Some(encode_list_cursor(bucket, scan_cursor, overflow)?)
+    };
+    Ok(kv_list_response(keys, cursor))
 }
 
 #[cfg(test)]
@@ -908,6 +916,13 @@ mod tests {
         KV_LIST_CURSOR_OVERFLOW_MAX, KV_LIST_CURSOR_PREFIX, KV_LIST_LIMIT_DEFAULT,
         KV_LIST_LIMIT_MAX,
     };
+
+    fn kv_host_response_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/kv-host-response.json"
+        ))
+        .expect("KV host response fixture parses")
+    }
     use wdl_rust_common::test_support::parse_packed_commands;
 
     #[test]
@@ -1123,23 +1138,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(entries).unwrap(),
-            json!([
-                {
-                    "key": "binary",
-                    "value_b64": "AP8Q",
-                    "metadata": { "kind": "binary" },
-                },
-                {
-                    "key": "empty",
-                    "value_b64": "",
-                    "metadata": { "kind": "empty" },
-                },
-                {
-                    "key": "missing",
-                    "value_b64": null,
-                    "metadata": null,
-                },
-            ])
+            kv_host_response_fixture()["batch"]["response"]["entries"]
         );
 
         let Err(err) = decode_batch_entries(vec!["key".to_string()], true, vec![None]) else {
@@ -1156,10 +1155,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(found).unwrap(),
-            json!({
-                "value_b64": "/wA=",
-                "metadata": { "kind": "binary" },
-            })
+            kv_host_response_fixture()["metadata"]["found"]
         );
 
         let missing = KvValueWithMetadataResponse {
@@ -1168,10 +1164,24 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(missing).unwrap(),
-            json!({
-                "value_b64": null,
-                "metadata": null,
-            })
+            kv_host_response_fixture()["metadata"]["missing"]
+        );
+    }
+
+    #[test]
+    fn list_response_variants_match_cross_language_fixture() {
+        let fixture = kv_host_response_fixture();
+        assert_eq!(
+            kv_list_response(
+                vec![json!({ "name": "alpha", "metadata": { "kind": "listed" } })],
+                None,
+            )
+            .0,
+            fixture["list"]["complete"],
+        );
+        assert_eq!(
+            kv_list_response(Vec::new(), Some("v1:opaque".to_string())).0,
+            fixture["list"]["incomplete"],
         );
     }
 

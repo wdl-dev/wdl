@@ -9,6 +9,7 @@ import { readJsonResponse } from "../helpers/response-json.js";
 import {
   importSpecifierReplacements,
   moduleDataUrl,
+  readRepositoryJson,
   readRepositoryModuleSource,
   repositoryFileUrl,
   repositoryModuleDataUrl,
@@ -16,6 +17,12 @@ import {
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
+const alarmResponseContract = /** @type {{
+ * dispatchErrorVariants: {
+ *   failed: { status: number, body: { error: string, message: string } },
+ *   resultUnknown: { status: number, body: { error: string, message: string } },
+ * },
+ * }} */ (readRepositoryJson("tests/fixtures/do-alarm-response.json"));
 
 /** @type {any} */ (globalThis).__doIndexHostResponse = null;
 /** @type {any} */ (globalThis).__doIndexOwner = null;
@@ -63,12 +70,15 @@ const alarmResponseUrl = repositoryModuleDataUrl("shared/do-alarm-response.js", 
   [/from "shared-respond";/, `from ${JSON.stringify(sharedRespondUrl)};`],
 ]);
 const { DO_ALARM_RESPONSE_MAX_BYTES } = await import(alarmResponseUrl);
+const doTransportUrl = doTransportDataUrl();
+const { ownerHintHeaders } = await import(doTransportUrl);
 const alarmDispatchUrl = stub(readRepositoryModuleSource("do-runtime/alarm-dispatch.js", importSpecifierReplacements({
   "shared-worker-id": workerIdUrl,
   "shared-worker-contract": workerContractUrl,
   "do-runtime-protocol": protocolUrl,
   "do-runtime-http": httpUrl,
   "shared-do-alarm-response": alarmResponseUrl,
+  "runtime-do-transport": doTransportUrl,
 })));
 const objectRegistryUrl = stub(`
 export function parseObjectRegistryMember(member) {
@@ -138,7 +148,6 @@ export async function forwardToOwner(...args) {
 }
 export async function forwardConnectToOwner() { throw new Error("unexpected connect forward"); }
 `);
-const doTransportUrl = doTransportDataUrl();
 const doScopedRequestUrl = repositoryFileUrl("runtime/_wdl-do-scoped-request.js");
 const emptyBindingUrl = stub(RUNTIME_BINDING_STUB_SOURCE);
 
@@ -270,8 +279,7 @@ test("do-runtime rejects private routes without valid internal auth token", asyn
 
 test("do-runtime alarm dispatch endpoint invokes the local alarm shim path", async () => {
   /** @type {any} */ (globalThis).__doIndexHostResponse = Response.json({ ok: true, ignored: true });
-
-  const response = await app.fetch(internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
+  const request = internalRequest("https://do-runtime/internal/do/alarms/dispatch", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -284,7 +292,9 @@ test("do-runtime alarm dispatch endpoint invokes the local alarm shim path", asy
       retryCount: 2,
       token: "row-token",
     }),
-  }), env());
+  });
+
+  const response = await app.fetch(request, env());
 
   assert.equal(response.status, 200);
   assert.deepEqual(await jsonBody(response), { ok: true, ignored: true });
@@ -293,7 +303,132 @@ test("do-runtime alarm dispatch endpoint invokes the local alarm shim path", asy
   assert.equal(fetchCall.input.url, "https://do-runtime.internal/invoke");
 });
 
+test("do-runtime forwards alarm invokes to a remote owner", async () => {
+  /** @type {any} */ (globalThis).__doIndexOwner = {
+    ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
+    taskId: "task-b",
+    endpoint: "do-runtime-b:8788",
+    generation: 9,
+  };
+  /** @type {any} */ (globalThis).__doIndexForwardResponse = Response.json({ ok: true, ignored: true });
+  const request = internalRequest("https://do-runtime/internal/do/invoke", {
+    method: "POST",
+    headers: { "content-type": DO_INVOKE_CONTENT_TYPE },
+    body: encodeDoInvokeRequest({
+      kind: "alarm",
+      ns: "tenant",
+      worker: "alarms",
+      version: "v7",
+      doStorageId: "do_0123456789abcdef0123456789abcdef",
+      className: "Room",
+      objectName: "alice",
+      alarm: { retryCount: 2, token: "row-token" },
+    }),
+  });
+
+  const response = await app.fetch(request, env());
+  assert.equal(response.status, 200);
+  const forwardCalls = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexForwardCalls);
+  assert.equal(forwardCalls.length, 1);
+});
+
+test("do-runtime preserves unknown alarm results across local and owner failures", async (t) => {
+  const resultUnknown = alarmResponseContract.dispatchErrorVariants.resultUnknown;
+  const remoteOwner = {
+    ownerKey: "do_0123456789abcdef0123456789abcdef:Room:shard0",
+    taskId: "task-b",
+    endpoint: "do-runtime-b:8788",
+    generation: 9,
+  };
+  const cases = /** @type {Array<{ label: string, setup: () => void }>} */ ([
+    {
+      label: "local transport rejection",
+      setup() {
+        /** @type {any} */ (globalThis).__doIndexHostResponse = Promise.reject(
+          new Error("local actor connection reset")
+        );
+      },
+    },
+    {
+      label: "transport rejection",
+      setup() {
+        /** @type {any} */ (globalThis).__doIndexOwner = remoteOwner;
+        /** @type {any} */ (globalThis).__doIndexForwardResponse = Promise.reject(
+          new Error("owner connection reset")
+        );
+      },
+    },
+    ...[502, 503, 504].map((status) => ({
+      label: `bare owner ${status}`,
+      setup() {
+        /** @type {any} */ (globalThis).__doIndexOwner = remoteOwner;
+        /** @type {any} */ (globalThis).__doIndexForwardResponse = new Response(
+          "upstream request failed",
+          { status }
+        );
+      },
+    })),
+    {
+      label: "mismatched owner hint",
+      setup() {
+        /** @type {any} */ (globalThis).__doIndexOwner = remoteOwner;
+        /** @type {any} */ (globalThis).__doIndexForwardResponse = Response.json({
+          error: "alarm_failed",
+          message: "Alarm execution failed",
+        }, {
+          status: 500,
+          headers: ownerHintHeaders({
+            ...remoteOwner,
+            ownerKey: "do_ffffffffffffffffffffffffffffffff:Room:shard0",
+          }),
+        });
+      },
+    },
+    {
+      label: "inner owner unavailable",
+      setup() {
+        /** @type {any} */ (globalThis).__doIndexOwner = remoteOwner;
+        /** @type {any} */ (globalThis).__doIndexForwardResponse = Response.json({
+          error: "owner_unavailable",
+          message: "DO owner is unavailable",
+        }, { status: 503 });
+      },
+    },
+  ]);
+  for (const { label, setup } of cases) {
+    await t.test(String(label), async () => {
+      /** @type {any} */ (globalThis).__doIndexHostResponse = null;
+      /** @type {any} */ (globalThis).__doIndexOwner = null;
+      /** @type {any} */ (globalThis).__doIndexForwardResponse = null;
+      setup();
+      const response = await app.fetch(internalRequest(
+        "https://do-runtime/internal/do/alarms/dispatch",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ns: "tenant",
+            worker: "alarms",
+            version: "v7",
+            doStorageId: "do_0123456789abcdef0123456789abcdef",
+            className: "Room",
+            objectName: "alice",
+            retryCount: 2,
+            token: "row-token",
+          }),
+        }
+      ), env());
+
+      assert.deepEqual(
+        await readJsonResponse(response, resultUnknown.status, String(label)),
+        resultUnknown.body
+      );
+    });
+  }
+});
+
 test("do-runtime alarm dispatch rejects malformed successful actor envelopes", async (t) => {
+  const resultUnknown = alarmResponseContract.dispatchErrorVariants.resultUnknown;
   const cases = [
     ["empty", new Response("")],
     ["invalid JSON", new Response("not-json")],
@@ -324,8 +459,8 @@ test("do-runtime alarm dispatch rejects malformed successful actor envelopes", a
         }),
       }), env());
 
-      const body = await readJsonResponse(response, 503, String(label));
-      assert.equal(body.error, "do_alarm_dispatch_result_unknown");
+      const body = await readJsonResponse(response, resultUnknown.status, String(label));
+      assert.deepEqual(body, resultUnknown.body);
     });
   }
 });
@@ -427,6 +562,7 @@ test("do-runtime alarm dispatch delegates version validation before dispatch", a
 });
 
 test("do-runtime alarm dispatch endpoint maps failed local dispatch to retryable 503", async () => {
+  const failed = alarmResponseContract.dispatchErrorVariants.failed;
   /** @type {any} */ (globalThis).__doIndexHostResponse = Response.json({
     error: "alarm_failed",
     message: "alarm body failed",
@@ -447,10 +583,9 @@ test("do-runtime alarm dispatch endpoint maps failed local dispatch to retryable
     }),
   }), env());
 
-  assert.equal(response.status, 503);
+  assert.equal(response.status, failed.status);
   assert.deepEqual(await jsonBody(response), {
-    error: "do_alarm_dispatch_failed",
-    message: "DO alarm dispatch failed",
+    ...failed.body,
     details: {
       upstream_status: 500,
       upstream_body: "{\"error\":\"alarm_failed\",\"message\":\"alarm body failed\"}",
@@ -621,6 +756,7 @@ test("do-runtime forwards ordinary invokes despite legacy owner-hint opt-in", as
   assert.equal(forwardCalls[0][0].objectName, "room-a");
   assert.equal(forwardCalls[0][2].taskId, "task-b");
   assert.equal(forwardCalls[0][5], "/internal/do/invoke");
+  assert.equal(forwardCalls[0][6], undefined);
 });
 
 test("do-runtime lets the host actor validate a trusted local route fence", async () => {

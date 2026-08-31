@@ -25,6 +25,12 @@ const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl("runtime/load/env-build.js
   [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
   [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],
 ]);
+const RUNTIME_CODE_BUDGET_URL = repositoryModuleDataUrl("runtime/load/code-budget.js", [
+  [/from "runtime-load-module-rewrite";/, `from ${JSON.stringify(repositoryFileUrl("runtime/load/module-rewrite.js"))};`],
+  [/from "runtime-load-wrapper-generate";/, `from ${JSON.stringify(repositoryFileUrl("runtime/load/wrapper-generate.js"))};`],
+  [/from "runtime-infrastructure-error";/, `from ${JSON.stringify(repositoryFileUrl("runtime/infrastructure-error.js"))};`],
+  [/from "shared-ns-pattern";/, `from ${JSON.stringify(repositoryFileUrl("shared/ns-pattern.js"))};`],
+]);
 const { libUrl: PRODUCTION_CONTROL_LIB_URL } = await compileControlGraph();
 const env = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
@@ -148,6 +154,7 @@ function envBudgetUrl() {
   const sharedRedisUrl = sharedRedisStubUrl();
   const source = applyModuleReplacements(readRepositoryFile("control/env-budget.js"), [
     [/from "control-lib";/, `from ${JSON.stringify(PRODUCTION_CONTROL_LIB_URL)};`],
+    [/from "runtime-load-code-budget";/, `from ${JSON.stringify(RUNTIME_CODE_BUDGET_URL)};`],
     [/from "runtime-load-env-build";/, `from ${JSON.stringify(RUNTIME_ENV_BUILD_URL)};`],
     [/from "shared-secret-envelope";/, `from ${JSON.stringify(SECRET_ENVELOPE_URL)};`],
     [/from "shared-worker-contract";/, `from ${JSON.stringify(WORKER_CONTRACT_URL)};`],

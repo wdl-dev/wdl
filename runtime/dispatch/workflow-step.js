@@ -1,8 +1,9 @@
 import { INTERNAL_AUTH_FAILURE_CODE } from "shared-internal-auth";
 import {
-  isRuntimeInfrastructureError,
-  runtimeInfrastructureDiagnostic,
-} from "runtime-infrastructure-error";
+  readBoundedBytes,
+  readBoundedStreamBytes,
+} from "shared-bounded-body";
+import { discardResponseBody } from "shared-respond";
 import {
   workflowBackendBody,
   workflowStepSuccessBackendBody,
@@ -97,6 +98,10 @@ function persistedStepErrorRecord(error) {
 }
 
 const WORKFLOWS_BASE_URL = "http://workflows/internal/workflows";
+// Covers the 16 MiB instance payload aggregate plus one bounded replay page's metadata.
+export const WORKFLOW_BACKEND_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 export const WORKFLOW_BACKEND_UNAVAILABLE_CODE = "workflow_backend_unavailable";
 export const WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE = "Workflow backend is unavailable";
 export const MAX_WORKFLOW_STARTED_STEPS_PER_RUN_TURN = 1000;
@@ -123,10 +128,7 @@ export function isWorkflowInfrastructureError(err) {
   return (
     err !== null &&
     (typeof err === "object" || typeof err === "function") &&
-    (
-      workflowInfrastructureDiagnostics.has(/** @type {object} */ (err)) ||
-      isRuntimeInfrastructureError(err)
-    )
+    workflowInfrastructureDiagnostics.has(/** @type {object} */ (err))
   );
 }
 
@@ -134,8 +136,7 @@ export function isWorkflowInfrastructureError(err) {
 export function workflowInfrastructureLogError(err) {
   const diagnostic = err !== null &&
     (typeof err === "object" || typeof err === "function")
-    ? workflowInfrastructureDiagnostics.get(/** @type {object} */ (err)) ??
-      runtimeInfrastructureDiagnostic(err)
+    ? workflowInfrastructureDiagnostics.get(/** @type {object} */ (err))
     : undefined;
   const logError = new Error(diagnostic || WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE);
   logError.name = WORKFLOW_BACKEND_UNAVAILABLE_CODE;
@@ -248,19 +249,41 @@ function parseSleepUntilMs(value) {
   throw workflowStepError("workflow_invalid_step", "workflow sleepUntil target must be a Date, timestamp, or date string");
 }
 
+/** @param {Response} response */
+function workflowBackendExpectedBytes(response) {
+  const contentEncoding = response.headers.get("content-encoding");
+  if (
+    contentEncoding !== null &&
+    contentEncoding.trim().toLowerCase() !== "identity"
+  ) {
+    return null;
+  }
+  const contentLength = response.headers.get("content-length");
+  if (
+    contentLength === null ||
+    !/^(?:0|[1-9][0-9]*)$/.test(contentLength)
+  ) {
+    return null;
+  }
+  const expectedBytes = Number(contentLength);
+  return Number.isSafeInteger(expectedBytes) ? expectedBytes : null;
+}
+
 /**
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string} path
  * @param {unknown} body
- * @param {string | null} [requestId]
+ * @param {string | null} requestId
+ * @param {number} deadlineMs
  * @returns {Promise<Record<string, unknown>>}
  */
-async function workflowBackendCall(backend, path, body, requestId = null) {
+async function workflowBackendCall(backend, path, body, requestId, deadlineMs) {
   return await workflowBackendRequest(
     backend,
     path,
     workflowBackendBody(path, body),
-    requestId
+    requestId,
+    deadlineMs
   );
 }
 
@@ -268,13 +291,21 @@ async function workflowBackendCall(backend, path, body, requestId = null) {
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string} path
  * @param {string} body
- * @param {string | null} [requestId]
+ * @param {string | null} requestId
+ * @param {number} deadlineMs
  * @returns {Promise<Record<string, unknown>>}
  */
-async function workflowBackendRequest(backend, path, body, requestId = null) {
+async function workflowBackendRequest(backend, path, body, requestId, deadlineMs) {
   if (!backend || typeof backend.fetch !== "function") {
     throw workflowInfrastructureError("Workflow backend binding is not configured");
   }
+  const remainingMs = Math.floor(deadlineMs - Date.now());
+  if (remainingMs <= 0) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} request exceeded the runtime dispatch deadline`
+    );
+  }
+  const signal = AbortSignal.timeout(Math.min(remainingMs, MAX_TIMER_DELAY_MS));
   /** @type {Record<string, string>} */
   const headers = { "content-type": "application/json" };
   if (requestId) headers["x-request-id"] = requestId;
@@ -284,18 +315,45 @@ async function workflowBackendRequest(backend, path, body, requestId = null) {
       method: "POST",
       headers,
       body,
+      signal,
     });
   } catch (err) {
     throw workflowInfrastructureError(
       `Workflow backend ${path} request failed: ${workflowError(err).message}`
     );
   }
+  if (Date.now() >= deadlineMs) {
+    void discardResponseBody(response);
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} response exceeded the runtime dispatch deadline`
+    );
+  }
   let parsed;
   try {
-    parsed = await response.json();
-  } catch {
+    const expectedBytes = workflowBackendExpectedBytes(response);
+    const bytes = expectedBytes !== null && response.body
+      ? await readBoundedStreamBytes(
+        response.body,
+        WORKFLOW_BACKEND_RESPONSE_MAX_BYTES,
+        undefined,
+        signal,
+        expectedBytes
+      )
+      : await readBoundedBytes(
+        response,
+        WORKFLOW_BACKEND_RESPONSE_MAX_BYTES,
+        signal
+      );
+    parsed = JSON.parse(strictUtf8Decoder.decode(bytes));
+  } catch (err) {
+    void discardResponseBody(response);
     throw workflowInfrastructureError(
-      `Workflow backend ${path} returned invalid JSON with HTTP ${response.status}`
+      `Workflow backend ${path} response failed with HTTP ${response.status}: ${workflowError(err).message}`
+    );
+  }
+  if (Date.now() >= deadlineMs) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} response exceeded the runtime dispatch deadline`
     );
   }
   const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -329,7 +387,7 @@ async function workflowBackendRequest(backend, path, body, requestId = null) {
 
 /**
  * @param {WorkflowBackend | null | undefined} backend
- * @param {WorkflowRun} run
+ * @param {WorkflowRun & { dispatchDeadlineMs: number }} run
  * @param {WorkflowReplayCache} cache
  * @param {number} ordinal
  * @param {string | null} requestId
@@ -341,7 +399,7 @@ async function fetchReplayStepPage(backend, run, cache, ordinal, requestId) {
       ...workflowReplayIdentity(run),
       startOrdinal,
       limit: WORKFLOW_REPLAY_PAGE_SIZE,
-    }, requestId);
+    }, requestId, run.dispatchDeadlineMs);
     const steps = Array.isArray(page?.steps) ? page.steps : [];
     const nextOrdinal = typeof page?.nextOrdinal === "number" && Number.isInteger(page.nextOrdinal)
       ? page.nextOrdinal
@@ -361,16 +419,16 @@ async function fetchReplayStepPage(backend, run, cache, ordinal, requestId) {
 }
 
 /**
- * @param {WorkflowRun} run
+ * @param {WorkflowRun & { dispatchDeadlineMs: number }} run
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string | null} [requestId]
- * @param {() => string | undefined} [infrastructureDiagnostic]
+ * @param {() => boolean | Promise<boolean>} [infrastructureFailure]
  */
 export function createStepController(
   run,
   backend,
   requestId = null,
-  infrastructureDiagnostic = () => undefined
+  infrastructureFailure = () => false
 ) {
   let ordinal = 0;
   let startedSteps = 0;
@@ -394,12 +452,6 @@ export function createStepController(
   const activeStepRecords = new Set();
   /** @type {Promise<void> | null} */
   let replayFetchPromise = null;
-
-  /** @param {unknown} [error] */
-  const currentInfrastructureFailure = (error) => {
-    const diagnostic = runtimeInfrastructureDiagnostic(error) ?? infrastructureDiagnostic();
-    return diagnostic === undefined ? null : workflowInfrastructureError(diagnostic);
-  };
 
   /** @param {unknown} reason @param {{ name: string, message: string } | null} [error] */
   const rememberTerminalStepFailure = (reason, error = null) => {
@@ -524,7 +576,7 @@ export function createStepController(
       const registered = await workflowBackendCall(backend, step.action, {
         ...step.identity,
         dueAtMs: step.dueAtMs,
-      }, requestId);
+      }, requestId, run.dispatchDeadlineMs);
       assertRunStillOpen();
       if (registered?.state === "complete") {
         const output = step.returnsOutput
@@ -759,7 +811,13 @@ export function createStepController(
         }
         assertRunStillOpen();
         reserveStartedStep();
-        const claim = await workflowBackendCall(backend, "claim-step", identity, requestId);
+        const claim = await workflowBackendCall(
+          backend,
+          "claim-step",
+          identity,
+          requestId,
+          run.dispatchDeadlineMs
+        );
         assertRunStillOpen();
         if (claim?.state === "complete") {
           const output = requiredWorkflowBackendPayload(
@@ -804,15 +862,19 @@ export function createStepController(
           assertRunStillOpen();
         } catch (err) {
           if (runReturned) throw err;
-          const infrastructureFailure = currentInfrastructureFailure(err);
-          if (infrastructureFailure) throw infrastructureFailure;
+          if (await infrastructureFailure()) {
+            throw workflowInfrastructureError(
+              "Runtime KV infrastructure failure escaped tenant boundary"
+            );
+          }
           const error = workflowError(err);
+          assertRunStillOpen();
           const committed = await workflowBackendCall(backend, "commit-step-error", {
             ...identity,
             attempt,
             error,
             nonRetryable: error.name === "NonRetryableError" || error.name === "workflow_invalid_step",
-          }, requestId);
+          }, requestId, run.dispatchDeadlineMs);
           if (committed?.state === "waiting") {
             cacheStep(identity, { status: "waiting", attempt, dueAtMs: committed.dueAtMs ?? null });
             suspended = true;
@@ -826,18 +888,18 @@ export function createStepController(
           rememberTerminalStepFailure(err, error);
           throw err;
         }
-        const infrastructureFailure = currentInfrastructureFailure();
-        if (infrastructureFailure) throw infrastructureFailure;
         const committedStep = workflowStepSuccessBackendBody({
           ...identity,
           attempt,
           output: output ?? null,
         });
+        assertRunStillOpen();
         const committed = await workflowBackendRequest(
           backend,
           "commit-step-success",
           committedStep.bodyJson,
-          requestId
+          requestId,
+          run.dispatchDeadlineMs
         );
         if (committed?.state !== "complete") {
           throw unexpectedWorkflowBackendState("commit-step-success", committed?.state);

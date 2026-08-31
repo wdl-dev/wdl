@@ -182,12 +182,18 @@ at module scope and read bindings from that proxy during an invocation. Capturin
 individual binding during module evaluation is not a facade contract: evaluation
 precedes wrapper invocation and can observe only the raw binding-scoped host adapter.
 With `disallow_importable_env`, imported env remains empty at module scope and during
-invocations, while positional env still receives generated facades. Workflow KV
-facades resolve their current infrastructure attribution from a private `withEnv()`
-async context, so a facade cached across Workflow entrypoint instances follows the
-current invocation. A module-evaluation capture of the raw KV adapter remains outside
-the facade contract; its failures are ordinary binding errors and do not mutate any
-Workflow invocation record.
+invocations, while positional env still receives generated facades. Bundles that
+declare both Workflow classes and KV bindings statically wrap those invocation-provided
+KV bindings, so a facade cached by an ordinary handler remains wrapped when reused by a
+Workflow. A generated support module captures the native `ServiceStub` prototype chain,
+its `fetch` method, `RpcPromise.then`, and `Promise.prototype.then` before tenant module
+evaluation. With importable env enabled it also binds one WDL-owned KV RPC trampoline at
+that point. With `disallow_importable_env`, each facade materialization binds that
+trampoline from its invocation-provided KV adapter before entering the tenant handler or
+constructor while excluding properties on the saved native prototype chain. Each facade
+then uses only its closed-over trampoline. Tenant code that directly captures and invokes
+the raw adapter remains outside the facade contract, and those failures are ordinary
+binding errors.
 
 ASSETS is a deploy-artifact helper, not a full Cloudflare Pages asset pipeline. Control
 uploads files to `assets/<ns>/<worker>/<token>/<path>`, injects an `ASSETS` binding, and
@@ -248,7 +254,7 @@ Data-plane bindings use their own storage:
 - Loaded host-binding wrappers cache only the stripped template for a stable workerd env
   object. Default object/function handlers receive a fresh top-level env copy and fresh
   facade instances per event. Persistent class entrypoints receive one wrapped env and
-  facade set at construction and reuse it; only their diagnostic context is refreshed
+  facade set at construction and reuse it; only their request-id context is refreshed
   per invocation as described below.
 - KV and queue producers use the data logical pool through `redis-proxy`. Split
   deployments map it to DB 1; without `DATA_REDIS_URL`, it reuses the control database.
@@ -257,19 +263,37 @@ Data-plane bindings use their own storage:
   bytes up to the full budget and lets the reader fill one exact allocation; missing or
   larger lengths reserve the whole budget. Concurrent excess reads fail closed and
   cancel their upstream body. Each individual host envelope also has a 36 MiB hard wire
-  cap; a larger declared or streamed body is cancelled and fails as attributed
+  cap; a larger declared or streamed body is cancelled and fails as a host
   infrastructure error. The public 25 MiB per-value limit is unchanged. Runtime owns
-  the body reader, keeps JSON/Base64 result construction inside the lease, and releases
-  abandoned reservations through a 5-second cleanup deadline. A host-only invocation
-  record attributes capacity, body-read, and malformed host-envelope failures observed
-  while `run()` and its admitted step callbacks settle to only that Workflow dispatch,
-  even when tenant code catches the Error; the affected step success/error is not
-  committed. Tenant value decoding, including `type: "json"`, remains a user-data error
-  and does not mark the invocation. Batch envelopes must match requested key count and
-  order; only scalar `get()` treats proxy `404` as a missing value.
-  Runtime passes the record id in private entrypoint props, and the generated wrapper
-  consumes it before the tenant constructor runs. Missing, invalid, or expired ids do
-  not affect another invocation.
+  the body reader, keeps JSON/Base64 result construction inside the lease, and applies a
+  5-second total deadline to every admitted host response body. The deadline rejects the
+  read independently of best-effort stream cancellation and releases its reservation.
+  Capacity rejection, body deadline/read failure, malformed host envelopes, host proxy
+  URL/configuration failure, internal-auth `401`, fixed read-route `404`/`405`, and read
+  proxy transport or 5xx failure carry one host-owned infrastructure code. Tenant-input
+  `400`/`413` responses and tenant value decoding, including `type: "json"`, remain
+  ordinary errors.
+  Batch envelopes must match requested key count and order; only scalar `get()` treats
+  proxy `404` as a missing value. The generated facade first projects supported KV read
+  arguments into accessor-free plain shapes, invokes a prototype-independent bound RPC
+  method, and settles the returned `RpcPromise` through the pre-captured native `then`
+  without exposing an intermediate native Promise assimilation step. Reporter completion
+  likewise uses the captured `Promise.prototype.then` without consulting tenant Promise
+  constructor or species hooks. The facade privately associates the exact Error rejected
+  by that host call with its bound KV capability. If that same Error identity escapes a
+  Workflow `run()` Promise or wrapped `step.do()` callback Promise, the wrapper reports
+  only when the capability also belongs to the current Workflow env. It uses the
+  pre-captured native `ServiceStub.fetch` trampoline and Runtime returns retryable 503; a
+  callback report is observed before `commit-step-error`. The tenant receives an explicit
+  null-prototype step facade, so reflection and `dup()` cannot recover the raw
+  reverse-JSRPC target. Catching the Error inside the corresponding boundary and returning
+  a fallback permits that fallback to commit. Once an Error escapes a step callback,
+  catching the rejected `step.do()` in outer `run()` does not undo the report.
+  Detaching a Promise likewise only keeps its settlement outside the current boundary;
+  neither action erases the private Error-to-capability association. A replacement,
+  wrapper, `cause`, or `AggregateError` does not inherit provenance. Rethrowing the exact
+  Error may report under the same capability-membership check. No message or
+  tenant-created error code is trusted.
 - Workflow bindings call `workflows`; runtime does not read DB 2 directly. Frozen
   Workflow identity exists once in binding-scoped host props. The generated facade
   carries only public operation fields, and Node-compatible `process.env` cannot expose
@@ -379,13 +403,14 @@ during those synchronous stages.
   enables them. Workerd 2026-08-25 accepts that redundant spelling because it produces the
   same compiled flag set; WDL does not duplicate upstream's date-to-flag table.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
-  `allow_irrevocable_stub_storage`, `new_module_registry`, and
+  `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and
   `streams_disable_constructors` deny policy at deploy; runtime rejects retained metadata
   containing either class. The new module registry graduated upstream, but WDL keeps it
   disabled because every dynamic Worker runs through `_wdl-wrapper.js`, which would make
-  tenant `import.meta.main` false. Static host workers also omit the irrevocable-stub
-  flag. Disable-style flags such as `no_*` are not part of the experimental mirror unless
-  WDL explicitly rejects them or upstream marks the enable flag itself experimental.
+  tenant `import.meta.main` false. WDL also requires Fetcher RPC for generated binding
+  facades. Static host workers omit the irrevocable-stub flag. Disable-style flags such
+  as `no_*` are not part of the experimental mirror unless WDL explicitly rejects them
+  or upstream marks the enable flag itself experimental.
 - Python Workers modules are not supported. Upstream's `python_workers_20260610` flag is
   no longer experimental and is no longer implied by date; `python_workers_20260817` is
   experimental. Control still rejects new `py` module manifests and runtime/do-runtime
@@ -420,6 +445,9 @@ during those synchronous stages.
 ## Tests That Protect This Module
 
 - `tests/unit/runtime-load.test.js`
+- `tests/unit/runtime-binding-surface.test.js`
+- `tests/unit/runtime-kv-binding.test.js`
+- `tests/unit/runtime-wrapper-generate.test.js`
 - `tests/unit/runtime-dispatch-handlers.test.js`
 - `tests/unit/runtime-dispatch-workflows.test.js`
 - `tests/unit/runtime-service-binding.test.js`

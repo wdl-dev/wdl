@@ -74,21 +74,15 @@ export function prepareKvReadCapacityMetrics(env) {
   metrics.setGauge("kv_read_in_flight_high_water_bytes", labels, state.highWaterBytes);
 }
 
-/** @param {string | null} [invocationId] */
-export function kvReadCapacityError(invocationId = null) {
+export function kvReadCapacityError() {
   return runtimeInfrastructureError(
-    KV_READ_CAPACITY_ERROR_MESSAGE,
-    "Runtime KV aggregate response-body capacity was exhausted",
-    invocationId
+    KV_READ_CAPACITY_ERROR_MESSAGE
   );
 }
 
-/** @param {string | null} [invocationId] */
-export function kvReadTimeoutError(invocationId = null) {
+export function kvReadTimeoutError() {
   return runtimeInfrastructureError(
-    KV_READ_TIMEOUT_ERROR_MESSAGE,
-    "Runtime KV response-body deadline expired",
-    invocationId
+    KV_READ_TIMEOUT_ERROR_MESSAGE
   );
 }
 

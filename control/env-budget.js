@@ -1,5 +1,6 @@
 import { decryptSecretValue } from "shared-secret-envelope";
 import { BundleMetaError, parseBundleMeta } from "control-lib";
+import { analyzeRuntimeMeta } from "runtime-load-code-budget";
 import { buildWorkerEnv, doAlarmBindingProps } from "runtime-load-env-build";
 import { bundleKey, MAX_WORKER_VERSION_TAG } from "shared-worker-contract";
 import { WatchError } from "shared-redis";
@@ -113,6 +114,7 @@ export function estimatedWorkerLoaderEnv({
   };
   const metaRecord = objectRecord(meta);
   if (!metaRecord || !worker) return env;
+  const plan = analyzeRuntimeMeta(metaRecord);
 
   const estimated = buildWorkerEnv(
     { ...metaRecord, vars: stringRecord(vars) },
@@ -124,7 +126,11 @@ export function estimatedWorkerLoaderEnv({
     typeof assetsCdnBase === "string" && assetsCdnBase
       ? assetsCdnBase
       : ESTIMATED_ASSETS_CDN_BASE,
-    ESTIMATED_RUNTIME_CONTEXT
+    ESTIMATED_RUNTIME_CONTEXT,
+    {
+      bindingEntries: plan.bindingEntries,
+      workflows: plan.workflows,
+    }
   );
 
   let doAlarmStorageId = null;

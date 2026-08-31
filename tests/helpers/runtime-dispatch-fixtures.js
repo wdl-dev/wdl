@@ -39,7 +39,8 @@ export function makeStub(entrypoint, stubOptions = {}) {
   };
 }
 
-export function makeCtx() {
+/** @param {new (ctx: any, env: any) => unknown} [WorkflowInfrastructureReporter] */
+export function makeCtx(WorkflowInfrastructureReporter) {
   /** @type {Promise<unknown>[]} */
   const tasks = [];
   return {
@@ -47,6 +48,17 @@ export function makeCtx() {
     waitUntil(promise) {
       tasks.push(promise);
     },
+    exports: WorkflowInfrastructureReporter
+      ? {
+          /** @param {{ props: Record<string, unknown> }} options */
+          WorkflowInfrastructureReporter(options) {
+            return new WorkflowInfrastructureReporter(
+              { props: options.props },
+              {}
+            );
+          },
+        }
+      : {},
     tasks,
   };
 }

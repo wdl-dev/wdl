@@ -39,11 +39,51 @@ export async function readBoundedStreamBytes(
       // Cancellation is best-effort; the caller-visible error must not wait on it.
     }
   };
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return;
+    cancel(signal.reason);
+    signal.throwIfAborted();
+  };
+  /** @type {((reason: unknown) => void) | null} */
+  let rejectRead = null;
   const abort = () => {
-    cancel(signal?.reason);
+    const reason = signal?.reason;
+    cancel(reason);
+    const reject = rejectRead;
+    rejectRead = null;
+    reject?.(reason);
   };
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
+  const read = () => {
+    if (!signal) return reader.read();
+    throwIfAborted();
+    return new Promise((resolve, reject) => {
+      rejectRead = reject;
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      const clear = () => {
+        if (rejectRead === reject) rejectRead = null;
+      };
+      try {
+        Promise.resolve(reader.read()).then(
+          (result) => {
+            clear();
+            resolve(result);
+          },
+          (error) => {
+            clear();
+            reject(error);
+          }
+        );
+      } catch (error) {
+        clear();
+        reject(error);
+      }
+    });
+  };
   /** @type {Uint8Array[]} */
   const chunks = [];
   const expected = expectedBytes === null || expectedBytes > maxBytes
@@ -51,15 +91,15 @@ export async function readBoundedStreamBytes(
     : new Uint8Array(expectedBytes);
   let total = 0;
   try {
-    signal?.throwIfAborted();
+    throwIfAborted();
     if (expectedBytes !== null && expectedBytes > maxBytes) {
       const error = overflowError();
       cancel(error);
       throw error;
     }
     while (true) {
-      const { done, value } = await reader.read();
-      signal?.throwIfAborted();
+      const { done, value } = await read();
+      throwIfAborted();
       if (done) break;
       const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
       total += chunk.byteLength;
