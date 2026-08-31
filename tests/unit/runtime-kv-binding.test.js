@@ -13,6 +13,7 @@ import { RUNTIME_METRICS_NOOP_URL } from "../helpers/mocks/runtime-metrics.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
 import { delay } from "../helpers/timing.js";
+import { withMockedProperty } from "../helpers/mock-global.js";
 
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
 const RUNTIME_LIB_URL = runtimeLibModuleDataUrl();
@@ -246,6 +247,76 @@ test("KV read capacity rejects concurrent large materialization and releases lea
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 
+test("KV canonical declared-length scalar reads use the native body consumer", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding();
+  const originalArrayBuffer = Response.prototype.arrayBuffer;
+  let nativeReads = 0;
+  await withMockedProperty(
+    Response.prototype,
+    "arrayBuffer",
+    /** @this {Response} */
+    function arrayBuffer() {
+      nativeReads += 1;
+      return Reflect.apply(originalArrayBuffer, this, []);
+    },
+    async () => {
+      const responses = [
+        { declared: 4, chunks: [[1, 2], [3, 4]] },
+        { declared: 2, chunks: [[1, 2], [3]] },
+        { declared: 4, chunks: [[1, 2, 3]] },
+      ];
+      setFetch(async () => {
+        const response = responses.shift();
+        assert.ok(response);
+        return new Response(new ReadableStream({
+          type: "bytes",
+          start(controller) {
+            for (const chunk of response.chunks) controller.enqueue(new Uint8Array(chunk));
+            controller.close();
+          },
+        }), { headers: { "content-length": String(response.declared) } });
+      });
+
+      const value = await makeKv(KV).get("exact", "arrayBuffer");
+      assert.deepEqual([...new Uint8Array(value)], [1, 2, 3, 4]);
+      for (const key of ["long", "short"]) {
+        await assert.rejects(
+          () => makeKv(KV).get(key),
+          (error) => error instanceof Error &&
+            error.message === "KV read response failed" &&
+            runtimeInfrastructure.isRuntimeInfrastructureError(error)
+        );
+      }
+    }
+  );
+
+  assert.equal(nativeReads, 3);
+  assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+}));
+
+test("KV native scalar path excludes unknown and legacy oversized lengths", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV } = await loadKvBinding([
+    [/export const KV_VALUE_MAX_BYTES = 25 \* 1024 \* 1024;/, "export const KV_VALUE_MAX_BYTES = 2;"],
+  ]);
+  const responses = [
+    new Response("a"),
+    new Response(new Uint8Array([1, 2, 3]), { headers: { "content-length": "3" } }),
+  ];
+  setFetch(async () => {
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+
+  await withMockedProperty(Response.prototype, "arrayBuffer", () => {
+    throw new Error("noncanonical scalar response must use the bounded reader");
+  }, async () => {
+    assert.equal(await makeKv(KV).get("unknown-length"), "a");
+    const legacy = await makeKv(KV).get("legacy-oversized", "arrayBuffer");
+    assert.deepEqual([...new Uint8Array(legacy)], [1, 2, 3]);
+  });
+}));
+
 test("KV rejects oversized host envelopes with a branded error and lease cleanup", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, KV_READ_RESPONSE_MAX_BYTES, kvCapacity, runtimeInfrastructure } =
     await loadKvBinding();
@@ -400,6 +471,42 @@ test("KV read capacity deadline releases a stalled body lease", withFetchStub(as
       error.message === kvCapacity.KV_READ_TIMEOUT_ERROR_MESSAGE &&
       runtimeInfrastructure.isRuntimeInfrastructureError(error)
   );
+  assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+}));
+
+test("KV native scalar deadline aborts the fetch-owned response", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding([], [
+    [/export const KV_READ_LEASE_MAX_MS = 5_000;/, "export const KV_READ_LEASE_MAX_MS = 20;"],
+  ]);
+  /** @type {AbortSignal | undefined} */
+  let fetchSignal;
+  let upstreamAborted = false;
+  setFetch(async (
+    /** @type {string | URL | Request} */ _url,
+    /** @type {RequestInit} */ init
+  ) => {
+    fetchSignal = init.signal ?? undefined;
+    const body = new ReadableStream({
+      start(controller) {
+        fetchSignal?.addEventListener("abort", () => {
+          upstreamAborted = true;
+          controller.error(fetchSignal?.reason);
+        }, { once: true });
+        controller.enqueue(new Uint8Array([1]));
+      },
+    });
+    return new Response(body, { headers: { "content-length": "2" } });
+  });
+
+  await assert.rejects(
+    () => makeKv(KV).get("stalled"),
+    (error) => error instanceof Error &&
+      error.message === kvCapacity.KV_READ_TIMEOUT_ERROR_MESSAGE &&
+      runtimeInfrastructure.isRuntimeInfrastructureError(error)
+  );
+
+  assert.equal(fetchSignal?.aborted, true);
+  assert.equal(upstreamAborted, true);
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 

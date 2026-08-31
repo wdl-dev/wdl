@@ -229,14 +229,45 @@ async function proxyFetch(kv, path, init, params) {
 }
 
 /**
+ * Uses workerd's native body consumer for the scalar producer's canonical
+ * Content-Length response. The fetch-owned signal remains the cancellation owner.
+ *
+ * @param {Response} response
+ * @param {number} expectedBytes
+ * @param {AbortSignal} signal
+ * @returns {Promise<Uint8Array>}
+ */
+async function readNativeKvResponseBytes(response, expectedBytes, signal) {
+  signal.throwIfAborted();
+  /** @type {(reason?: unknown) => void} */
+  let rejectAborted = () => {};
+  const aborted = new Promise((_, reject) => { rejectAborted = reject; });
+  const onAbort = () => { rejectAborted(signal.reason); };
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+
+  try {
+    const buffer = await Promise.race([response.arrayBuffer(), aborted]);
+    signal.throwIfAborted();
+    if (buffer.byteLength !== expectedBytes) {
+      throw new TypeError("Response body length does not match Content-Length");
+    }
+    return new Uint8Array(buffer);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
  * @template T
  * @param {KVBinding} kv
  * @param {Response} response
  * @param {(bytes: Uint8Array) => T} consume
+ * @param {{ aborter?: AbortController, nativeExact?: boolean }} [options]
  * @returns {Promise<T>}
  */
-async function consumeReadResponse(kv, response, consume) {
-  const aborter = new AbortController();
+async function consumeReadResponse(kv, response, consume, options = {}) {
+  const aborter = options.aborter ?? new AbortController();
   const lease = acquireKvReadLease(kv, response, () => {
     aborter.abort(kvReadTimeoutError());
   });
@@ -250,14 +281,25 @@ async function consumeReadResponse(kv, response, consume) {
       if (!response.body && lease.contentLength !== null && lease.contentLength > 0) {
         throw new TypeError("KV response body is missing despite a non-zero Content-Length");
       }
-      bytes = response.body
+      if (
+        options.nativeExact &&
+        lease.contentLength !== null &&
+        lease.contentLength <= KV_VALUE_MAX_BYTES
+      ) {
+        bytes = await readNativeKvResponseBytes(
+          response,
+          lease.contentLength,
+          aborter.signal
+        );
+      }
+      bytes ??= response.body
         ? await readBoundedStreamBytes(
-          response.body,
-          KV_READ_RESPONSE_MAX_BYTES,
-          () => runtimeInfrastructureError("KV read response is too large"),
-          aborter.signal,
-          lease.contentLength
-        )
+            response.body,
+            KV_READ_RESPONSE_MAX_BYTES,
+            () => runtimeInfrastructureError("KV read response is too large"),
+            aborter.signal,
+            lease.contentLength
+          )
         : new Uint8Array();
     } catch (error) {
       if (isRuntimeInfrastructureError(error)) throw error;
@@ -452,7 +494,8 @@ export class KV extends WorkerEntrypoint {
           }
         );
       }
-      const res = await proxyFetch(kv, "/kv/get", undefined, { key });
+      const aborter = new AbortController();
+      const res = await proxyFetch(kv, "/kv/get", { signal: aborter.signal }, { key });
       if (res.status === 404) {
         await discardResponseBody(res);
         return null;
@@ -460,7 +503,8 @@ export class KV extends WorkerEntrypoint {
       return consumeReadResponse(
         kv,
         res,
-        (bytes) => coerceValue(bytes, typeOrOpts)
+        (bytes) => coerceValue(bytes, typeOrOpts),
+        { aborter, nativeExact: true }
       );
     });
   }

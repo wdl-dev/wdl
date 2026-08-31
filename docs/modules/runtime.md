@@ -260,14 +260,18 @@ Data-plane bindings use their own storage:
   deployments map it to DB 1; without `DATA_REDIS_URL`, it reuses the control database.
 - Runtime applies a fixed 32 MiB aggregate wire-byte admission budget per task before
   materializing KV response bodies. A valid `Content-Length` reserves its advertised
-  bytes up to the full budget and lets the reader fill one exact allocation; missing or
-  larger lengths reserve the whole budget. Concurrent excess reads fail closed and
-  cancel their upstream body. Each individual host envelope also has a 36 MiB hard wire
-  cap; a larger declared or streamed body is cancelled and fails as a host
-  infrastructure error. The public 25 MiB per-value limit is unchanged. Runtime owns
-  the body reader, keeps JSON/Base64 result construction inside the lease, and applies a
-  5-second total deadline to every admitted host response body. The deadline rejects the
-  read independently of best-effort stream cancellation and releases its reservation.
+  bytes up to the full budget; missing or larger lengths reserve the whole budget.
+  Concurrent excess reads fail closed and cancel their upstream body. Redis-proxy owns
+  canonical scalar `get()` responses: values enter through the 25 MiB write bound and the
+  producer sends an exact `Content-Length`. Runtime uses workerd's native body consumer
+  for that shape under a fetch-owned abort signal, then verifies the resulting byte
+  length before returning it. Missing-length and legacy oversized scalar responses, plus
+  every JSON envelope route, use the defensive bounded reader; declared lengths fill one
+  exact allocation and a larger declared or streamed body is cancelled under the 36 MiB
+  hard wire cap. Runtime keeps JSON/Base64 result construction inside the lease and
+  applies a 5-second total deadline to every admitted host response body. The deadline
+  rejects independently of best-effort stream cancellation, aborts the scalar fetch when
+  applicable, and releases its reservation.
   Capacity rejection, body deadline/read failure, malformed host envelopes, host proxy
   URL/configuration failure, internal-auth `401`, fixed read-route `404`/`405`, and read
   proxy transport or 5xx failure carry one host-owned infrastructure code. Tenant-input

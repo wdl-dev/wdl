@@ -608,6 +608,21 @@ fn kv_list_response(keys: Vec<Value>, cursor: Option<String>) -> Json<Value> {
     }
 }
 
+fn kv_value_response(value: Vec<u8>) -> Response {
+    let len = value.len();
+    let mut response = Response::new(Body::from(value));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        CONTENT_LENGTH,
+        // `usize::to_string()` is decimal ASCII, which is always a valid header value.
+        HeaderValue::from_str(&len.to_string()).unwrap(),
+    );
+    response
+}
+
 pub(crate) fn escape_glob_literal(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -637,17 +652,7 @@ pub(crate) async fn kv_get(
 
     let len = value.len();
     record_kv_value_bytes(state.metrics(), "get", "value", len);
-    let mut response = Response::new(Body::from(value));
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
-    response.headers_mut().insert(
-        CONTENT_LENGTH,
-        // `usize::to_string()` is decimal ASCII, which is always a valid header value.
-        HeaderValue::from_str(&len.to_string()).unwrap(),
-    );
-    Ok(response)
+    Ok(kv_value_response(value))
 }
 
 pub(crate) async fn kv_get_with_metadata(
@@ -943,6 +948,32 @@ mod tests {
             err.message
                 .contains("KV batch raw value/metadata bytes exceed")
         );
+    }
+
+    #[test]
+    fn kv_batch_raw_budget_fits_runtime_wire_cap() {
+        let max_response_bytes = usize::try_from(
+            kv_host_response_fixture()["maxResponseBytes"]
+                .as_u64()
+                .expect("KV host response max bytes is an unsigned integer"),
+        )
+        .expect("KV host response max bytes fits usize");
+        let max_base64_bytes = KV_BATCH_RAW_BYTES_MAX.div_ceil(3) * 4;
+        // JSON escaping can expand each key byte to `\u00XX`; 64 bytes per
+        // entry conservatively covers field names, delimiters, and the outer envelope.
+        let structural_headroom = KV_BATCH_KEYS_MAX * (KV_KEY_MAX_BYTES * 6 + 64);
+
+        assert!(
+            max_base64_bytes + structural_headroom <= max_response_bytes,
+            "KV batch raw budget can exceed the Runtime host-response wire cap"
+        );
+    }
+
+    #[test]
+    fn kv_scalar_response_declares_its_exact_wire_length() {
+        let response = kv_value_response(vec![0, 1, 2, 3]);
+        assert_eq!(response.headers()[CONTENT_LENGTH], "4");
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/octet-stream");
     }
 
     #[test]
