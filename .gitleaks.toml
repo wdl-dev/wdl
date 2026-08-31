@@ -25,6 +25,17 @@ regexes = [
 condition = "AND"
 
 [[allowlists]]
+description = "Canonical Workflow keys are public identifiers in Runtime loader fixtures."
+regexTarget = "match"
+paths = [
+  '''^tests/unit/runtime-load\.test\.js$'''
+]
+regexes = [
+  '''wf_[0-9a-f]{32}'''
+]
+condition = "AND"
+
+[[allowlists]]
 description = "Fixed AWS SigV4 signature fixture generated from official example credentials."
 regexTarget = "secret"
 paths = [

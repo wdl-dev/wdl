@@ -100,7 +100,6 @@ function persistedStepErrorRecord(error) {
 const WORKFLOWS_BASE_URL = "http://workflows/internal/workflows";
 // Covers the 16 MiB instance payload aggregate plus one bounded replay page's metadata.
 export const WORKFLOW_BACKEND_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
-const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 export const WORKFLOW_BACKEND_UNAVAILABLE_CODE = "workflow_backend_unavailable";
 export const WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE = "Workflow backend is unavailable";
@@ -305,7 +304,9 @@ async function workflowBackendRequest(backend, path, body, requestId, deadlineMs
       `Workflow backend ${path} request exceeded the runtime dispatch deadline`
     );
   }
-  const signal = AbortSignal.timeout(Math.min(remainingMs, MAX_TIMER_DELAY_MS));
+  // Stock workerd timers support delays up to 100 years; Node's signed
+  // 32-bit timer ceiling does not apply to this Runtime path.
+  const signal = AbortSignal.timeout(remainingMs);
   /** @type {Record<string, string>} */
   const headers = { "content-type": "application/json" };
   if (requestId) headers["x-request-id"] = requestId;
