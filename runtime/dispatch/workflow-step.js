@@ -274,15 +274,17 @@ function workflowBackendExpectedBytes(response) {
  * @param {unknown} body
  * @param {string | null} requestId
  * @param {number} deadlineMs
+ * @param {() => AbortSignal} deadlineSignal
  * @returns {Promise<Record<string, unknown>>}
  */
-async function workflowBackendCall(backend, path, body, requestId, deadlineMs) {
+async function workflowBackendCall(backend, path, body, requestId, deadlineMs, deadlineSignal) {
   return await workflowBackendRequest(
     backend,
     path,
     workflowBackendBody(path, body),
     requestId,
-    deadlineMs
+    deadlineMs,
+    deadlineSignal
   );
 }
 
@@ -292,9 +294,17 @@ async function workflowBackendCall(backend, path, body, requestId, deadlineMs) {
  * @param {string} body
  * @param {string | null} requestId
  * @param {number} deadlineMs
+ * @param {() => AbortSignal} deadlineSignal
  * @returns {Promise<Record<string, unknown>>}
  */
-async function workflowBackendRequest(backend, path, body, requestId, deadlineMs) {
+async function workflowBackendRequest(
+  backend,
+  path,
+  body,
+  requestId,
+  deadlineMs,
+  deadlineSignal
+) {
   if (!backend || typeof backend.fetch !== "function") {
     throw workflowInfrastructureError("Workflow backend binding is not configured");
   }
@@ -304,9 +314,7 @@ async function workflowBackendRequest(backend, path, body, requestId, deadlineMs
       `Workflow backend ${path} request exceeded the runtime dispatch deadline`
     );
   }
-  // Stock workerd timers support delays up to 100 years; Node's signed
-  // 32-bit timer ceiling does not apply to this Runtime path.
-  const signal = AbortSignal.timeout(remainingMs);
+  const signal = deadlineSignal();
   /** @type {Record<string, string>} */
   const headers = { "content-type": "application/json" };
   if (requestId) headers["x-request-id"] = requestId;
@@ -392,15 +400,16 @@ async function workflowBackendRequest(backend, path, body, requestId, deadlineMs
  * @param {WorkflowReplayCache} cache
  * @param {number} ordinal
  * @param {string | null} requestId
+ * @param {() => AbortSignal} deadlineSignal
  */
-async function fetchReplayStepPage(backend, run, cache, ordinal, requestId) {
+async function fetchReplayStepPage(backend, run, cache, ordinal, requestId, deadlineSignal) {
   while (!cache.complete && ordinal >= cache.nextOrdinal) {
     const startOrdinal = cache.nextOrdinal;
     const page = await workflowBackendCall(backend, "replay-steps", {
       ...workflowReplayIdentity(run),
       startOrdinal,
       limit: WORKFLOW_REPLAY_PAGE_SIZE,
-    }, requestId, run.dispatchDeadlineMs);
+    }, requestId, run.dispatchDeadlineMs, deadlineSignal);
     const steps = Array.isArray(page?.steps) ? page.steps : [];
     const nextOrdinal = typeof page?.nextOrdinal === "number" && Number.isInteger(page.nextOrdinal)
       ? page.nextOrdinal
@@ -453,6 +462,18 @@ export function createStepController(
   const activeStepRecords = new Set();
   /** @type {Promise<void> | null} */
   let replayFetchPromise = null;
+  /** @type {AbortSignal | null} */
+  let backendDeadlineSignal = null;
+
+  const getBackendDeadlineSignal = () => {
+    if (backendDeadlineSignal === null) {
+      // Stock workerd timers support delays up to 100 years; Node's signed
+      // 32-bit timer ceiling does not apply to this Runtime path.
+      const remainingMs = Math.max(0, Math.floor(run.dispatchDeadlineMs - Date.now()));
+      backendDeadlineSignal = AbortSignal.timeout(remainingMs);
+    }
+    return backendDeadlineSignal;
+  };
 
   /** @param {unknown} reason @param {{ name: string, message: string } | null} [error] */
   const rememberTerminalStepFailure = (reason, error = null) => {
@@ -577,7 +598,7 @@ export function createStepController(
       const registered = await workflowBackendCall(backend, step.action, {
         ...step.identity,
         dueAtMs: step.dueAtMs,
-      }, requestId, run.dispatchDeadlineMs);
+      }, requestId, run.dispatchDeadlineMs, getBackendDeadlineSignal);
       assertRunStillOpen();
       if (registered?.state === "complete") {
         const output = step.returnsOutput
@@ -722,7 +743,14 @@ export function createStepController(
       replayCache.complete = false;
     }
     while (!replayCache.complete && targetOrdinal >= replayCache.nextOrdinal) {
-      replayFetchPromise ??= fetchReplayStepPage(backend, run, replayCache, targetOrdinal, requestId)
+      replayFetchPromise ??= fetchReplayStepPage(
+        backend,
+        run,
+        replayCache,
+        targetOrdinal,
+        requestId,
+        getBackendDeadlineSignal
+      )
         .finally(() => {
           replayFetchPromise = null;
         });
@@ -817,7 +845,8 @@ export function createStepController(
           "claim-step",
           identity,
           requestId,
-          run.dispatchDeadlineMs
+          run.dispatchDeadlineMs,
+          getBackendDeadlineSignal
         );
         assertRunStillOpen();
         if (claim?.state === "complete") {
@@ -875,7 +904,7 @@ export function createStepController(
             attempt,
             error,
             nonRetryable: error.name === "NonRetryableError" || error.name === "workflow_invalid_step",
-          }, requestId, run.dispatchDeadlineMs);
+          }, requestId, run.dispatchDeadlineMs, getBackendDeadlineSignal);
           if (committed?.state === "waiting") {
             cacheStep(identity, { status: "waiting", attempt, dueAtMs: committed.dueAtMs ?? null });
             suspended = true;
@@ -900,7 +929,8 @@ export function createStepController(
           "commit-step-success",
           committedStep.bodyJson,
           requestId,
-          run.dispatchDeadlineMs
+          run.dispatchDeadlineMs,
+          getBackendDeadlineSignal
         );
         if (committed?.state !== "complete") {
           throw unexpectedWorkflowBackendState("commit-step-success", committed?.state);

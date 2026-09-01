@@ -377,6 +377,15 @@ Runtime emits request logs and metrics for loading, binding operations, AI pool 
 emits structured stdout for console/exception capture and forwards to `wdl tail` only
 when a matching active tail session exists.
 
+KV response admission exposes
+`wdl_kv_read_capacity_events_total{service,outcome}` with fixed outcomes `acquired`,
+`saturated`, `completed`, `deadline`, and `setup_error`, plus the current
+`wdl_kv_read_in_flight_bytes{service}` and process-lifetime
+`wdl_kv_read_in_flight_high_water_bytes{service}` gauges. Scraping does not reset the
+high-water mark; it resets only when the Runtime task restarts. `completed` means the
+lease released before its deadline, not that value parsing or the binding operation
+succeeded; binding-operation metrics own that result.
+
 Cold-load duration metrics use workerd's request clock. The
 `bundle_load_stage_duration_ms` series therefore covers only the awaited
 `redis_proxy_load` stage. `bundle_load_duration_ms` remains useful for end-to-end

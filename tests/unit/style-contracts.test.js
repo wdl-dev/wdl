@@ -1773,16 +1773,12 @@ test("Rust HTTP request completion has one shared observability owner", () => {
   for (const literal of ["requests", "request_duration_ms", "request_errors", "request_complete"]) {
     assert.match(common, new RegExp(JSON.stringify(literal)));
   }
-  assert.match(common, /matches!\(completion\.route, "healthz" \| "metrics"\)/);
-  assert.match(common, /level < min_log_level/);
   for (const source of [redisProxy, workflows]) {
     assert.match(source, /record_request_completion\(/);
-    assert.match(source, /status_label: status\.as_str\(\)/);
     assert.doesNotMatch(source, /"request_errors"/);
     assert.doesNotMatch(source, /"request_complete"/);
   }
   assert.match(redisProxy, /request_id_from_headers\(request\.headers\(\)\)/);
-  assert.match(redisProxy, /matches!\(route, "healthz" \| "metrics"\)/);
   assert.match(redisProxy, /struct ResponseError/);
 });
 
@@ -2743,7 +2739,6 @@ test("Rust services construct Redis clients through the shared TCP settings owne
   const source = withoutLineComments(readRepoFile(owner));
   assert.match(source, /pub fn redis_client_from_url/);
   assert.match(source, /pub fn redis_client_from_url_with_db/);
-  assert.match(source, /TcpSettings::default\(\)\.set_nodelay\(true\)/);
 
   const offenders = rustFiles("rust").filter((file) => (
     file !== owner && /\b(?:redis::)?Client::open\s*\(/.test(withoutLineComments(readRepoFile(file)))

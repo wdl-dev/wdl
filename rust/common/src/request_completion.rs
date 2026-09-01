@@ -56,15 +56,9 @@ pub fn record_request_completion(
         );
     }
 
-    let probe = matches!(completion.route, "healthz" | "metrics");
-    let level = if server_error {
-        LogLevel::Error
-    } else {
-        LogLevel::Info
-    };
-    if (probe && !server_error) || level < min_log_level {
+    let Some(level) = request_log_level(completion.route, server_error, min_log_level) else {
         return;
-    }
+    };
 
     emit_log_line(
         service,
@@ -73,6 +67,16 @@ pub fn record_request_completion(
         "request_complete",
         request_log_fields(&completion),
     );
+}
+
+fn request_log_level(route: &str, server_error: bool, min_log_level: LogLevel) -> Option<LogLevel> {
+    let level = if server_error {
+        LogLevel::Error
+    } else {
+        LogLevel::Info
+    };
+    let successful_probe = matches!(route, "healthz" | "metrics") && !server_error;
+    (!successful_probe && level >= min_log_level).then_some(level)
 }
 
 fn request_log_fields(completion: &RequestCompletion<'_>) -> JsonValue {
@@ -158,6 +162,21 @@ mod tests {
             metrics.render_prometheus().contains(
                 r#"wdl_request_errors_total{route="kv_get",service="test",status="503"} 1"#
             )
+        );
+    }
+
+    #[test]
+    fn request_log_policy_suppresses_successful_probes_and_filtered_info() {
+        assert_eq!(request_log_level("healthz", false, LogLevel::Debug), None);
+        assert_eq!(request_log_level("metrics", false, LogLevel::Info), None);
+        assert_eq!(request_log_level("kv_get", false, LogLevel::Warn), None);
+        assert_eq!(
+            request_log_level("kv_get", false, LogLevel::Info),
+            Some(LogLevel::Info)
+        );
+        assert_eq!(
+            request_log_level("healthz", true, LogLevel::Error),
+            Some(LogLevel::Error)
         );
     }
 }

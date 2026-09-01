@@ -195,6 +195,13 @@ Common rules:
   bounded `service`/`operation`/`kind` labels. It records value, metadata, and raw
   batch byte counts so operators can decide whether large-value offload is needed;
   namespace, key, and object identity never enter metric labels.
+- Runtime KV admission publishes `kv_read_capacity_events` with bounded `service` and
+  `outcome` labels (`acquired`, `saturated`, `completed`, `deadline`, `setup_error`).
+  `kv_read_in_flight_bytes` is current reserved wire bytes;
+  `kv_read_in_flight_high_water_bytes` is the process-lifetime maximum and does not
+  reset on scrape. The shared registry adds the `wdl_` prefix and `_total` counter
+  suffix in Prometheus output. `completed` is a lease-lifecycle outcome, not a binding
+  success result; binding-operation metrics own success/error classification.
 - Rust `request_complete` logs report integer `duration_ms` values so log fields stay
   stable across services; Prometheus duration summaries keep their floating point
   values.

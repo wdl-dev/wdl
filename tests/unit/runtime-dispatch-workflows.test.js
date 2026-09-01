@@ -2551,12 +2551,17 @@ test("handleWorkflowNotifyDispatch invokes reserved workflow notify entrypoint",
 
 test("handleWorkflowRunDispatch allows concurrent step.do calls", async () => {
   const scope = makeScope();
+  const originalTimeout = AbortSignal.timeout;
+  let deadlineSignals = 0;
   const backend = makeWorkflowBackend(async (url) => {
     if (url.endsWith("/claim-step")) return Response.json({ state: "run" });
     if (url.endsWith("/commit-step-success")) return Response.json({ state: "complete" });
     return Response.json({ error: "unexpected", message: "unexpected backend call" }, { status: 500 });
   });
-  const res = await handleWorkflowRunDispatch({
+  const res = await withMockedProperty(AbortSignal, "timeout", (delayMs) => {
+    deadlineSignals += 1;
+    return originalTimeout(delayMs);
+  }, () => handleWorkflowRunDispatch({
     run: {
       ns: "demo",
       worker: "shop",
@@ -2584,7 +2589,7 @@ test("handleWorkflowRunDispatch allows concurrent step.do calls", async () => {
         },
       },
     }),
-  });
+  }));
 
   const body = await readJsonResponse(res, 200);
   assert.equal(body.outcome, "completed");
@@ -2608,6 +2613,7 @@ test("handleWorkflowRunDispatch allows concurrent step.do calls", async () => {
     { ordinal: 1, stepName: "b", dependencies: [] },
   ]);
   assert.deepEqual(scope.errors, []);
+  assert.equal(deadlineSignals, 1);
 });
 
 test("handleWorkflowRunDispatch rejects starting a step while another step callback is in flight", async () => {

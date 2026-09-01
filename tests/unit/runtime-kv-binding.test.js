@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   importRepositoryModule,
   freshRepositoryModuleDataUrl,
+  moduleDataUrl,
   readRepositoryJson,
   repositoryFileUrl,
   runtimeLibModuleDataUrl,
@@ -27,12 +28,17 @@ const kvHostResponse = /** @type {any} */ (
 /**
  * @param {Array<[RegExp | string, string]>} [replacements]
  * @param {Array<[RegExp | string, string]>} [capacityReplacements]
+ * @param {string} [capacityMetricsUrl]
  */
-async function loadKvBinding(replacements = [], capacityReplacements = []) {
+async function loadKvBinding(
+  replacements = [],
+  capacityReplacements = [],
+  capacityMetricsUrl = RUNTIME_METRICS_NOOP_URL
+) {
   const infrastructureErrorUrl = freshRepositoryModuleDataUrl("runtime/infrastructure-error.js");
   const capacityUrl = freshRepositoryModuleDataUrl("runtime/bindings/kv-capacity.js", [
     [/from "runtime-infrastructure-error";/, `from ${JSON.stringify(infrastructureErrorUrl)};`],
-    [/from "runtime-metrics";/, `from ${JSON.stringify(RUNTIME_METRICS_NOOP_URL)};`],
+    [/from "runtime-metrics";/, `from ${JSON.stringify(capacityMetricsUrl)};`],
     [/from "runtime-bindings-proxy";/, `from ${JSON.stringify(PROXY_BINDING_URL)};`],
     ...capacityReplacements,
   ]);
@@ -188,6 +194,95 @@ test("KV host response readers match the cross-language fixture", withFetchStub(
   assert.deepEqual(await kv.list({ metadata: true }), kvHostResponse.list.complete);
   assert.deepEqual(await kv.list(), kvHostResponse.list.incomplete);
 }));
+
+test("KV capacity metrics preserve outcome and process-lifetime gauge contracts", async () => {
+  const recordingMetricsUrl = moduleDataUrl(`
+export const calls = [];
+export const metrics = {
+  increment(name, labels, value = 1) {
+    calls.push({ kind: "increment", name, labels: { ...labels }, value });
+  },
+  setGauge(name, labels, value) {
+    calls.push({ kind: "gauge", name, labels: { ...labels }, value });
+  },
+};
+`);
+  const { kvCapacity } = await loadKvBinding([], [
+    [/export const KV_READ_LEASE_MAX_MS = 5_000;/, "export const KV_READ_LEASE_MAX_MS = 20;"],
+  ], recordingMetricsUrl);
+  const recording = /** @type {{ calls: Array<{
+   *   kind: "increment" | "gauge",
+   *   name: string,
+   *   labels: Record<string, string>,
+   *   value: number,
+   * }> }} */ (await import(recordingMetricsUrl));
+  kvCapacity.resetKvReadCapacityForTest();
+  /** @type {Promise<unknown>[]} */
+  const tasks = [];
+  const binding = {
+    env: { SERVICE_NAME: "unit" },
+    ctx: {
+      /** @param {Promise<unknown>} promise */
+      waitUntil(promise) { tasks.push(promise); },
+    },
+  };
+  /** @param {number} length */
+  const response = (length) => new Response(null, {
+    headers: { "content-length": String(length) },
+  });
+
+  const completed = kvCapacity.acquireKvReadLease(binding, response(8), () => {});
+  assert.ok(completed);
+  assert.equal(completed.release(), true);
+
+  const full = kvCapacity.acquireKvReadLease(
+    binding,
+    response(kvCapacity.KV_READ_IN_FLIGHT_MAX_BYTES),
+    () => {}
+  );
+  assert.ok(full);
+  assert.equal(kvCapacity.acquireKvReadLease(binding, response(1), () => {}), null);
+  assert.equal(full.release(), true);
+
+  let deadlineCalls = 0;
+  assert.ok(kvCapacity.acquireKvReadLease(binding, response(4), () => {
+    deadlineCalls += 1;
+  }));
+  await delay(30);
+  assert.equal(deadlineCalls, 1);
+
+  assert.throws(
+    () => kvCapacity.acquireKvReadLease({
+      env: binding.env,
+      ctx: { waitUntil() { throw new Error("waitUntil failed"); } },
+    }, response(2), () => {}),
+    /waitUntil failed/
+  );
+
+  kvCapacity.prepareKvReadCapacityMetrics(binding.env);
+  kvCapacity.prepareKvReadCapacityMetrics(binding.env);
+  await Promise.all(tasks);
+
+  const increments = recording.calls.filter((call) => call.kind === "increment");
+  assert.deepEqual(increments.map((call) => [call.name, call.labels, call.value]), [
+    ["kv_read_capacity_events", { service: "unit", outcome: "acquired" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "completed" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "acquired" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "saturated" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "completed" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "acquired" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "deadline" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "acquired" }, 1],
+    ["kv_read_capacity_events", { service: "unit", outcome: "setup_error" }, 1],
+  ]);
+  const gauges = recording.calls.filter((call) => call.kind === "gauge");
+  assert.deepEqual(gauges.map((call) => [call.name, call.labels, call.value]), [
+    ["kv_read_in_flight_bytes", { service: "unit" }, 0],
+    ["kv_read_in_flight_high_water_bytes", { service: "unit" }, kvCapacity.KV_READ_IN_FLIGHT_MAX_BYTES],
+    ["kv_read_in_flight_bytes", { service: "unit" }, 0],
+    ["kv_read_in_flight_high_water_bytes", { service: "unit" }, kvCapacity.KV_READ_IN_FLIGHT_MAX_BYTES],
+  ]);
+});
 
 test("KV read capacity rejects concurrent large materialization and releases leases", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding();

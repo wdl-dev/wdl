@@ -116,6 +116,8 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 
 Runtime 为 loading、binding operation、AI pool state、`redis-proxy` call、workflow replay cache、loader eviction 和 dispatch envelope 输出日志/metrics。Tail worker 总是为 console/exception capture 输出结构化 stdout；只有匹配的 active tail session 存在时才转发到 `wdl tail`。
 
+KV response admission 暴露 `wdl_kv_read_capacity_events_total{service,outcome}`，固定 outcome 为 `acquired`、`saturated`、`completed`、`deadline` 和 `setup_error`，并暴露当前值 `wdl_kv_read_in_flight_bytes{service}` 及进程生命周期 high-water `wdl_kv_read_in_flight_high_water_bytes{service}` gauge。Scrape 不会重置 high-water；只有 Runtime task 重启才会清零。`completed` 表示 lease 在 deadline 前释放，不表示 value parse 或 binding operation 成功；后者由 binding-operation metrics 拥有。
+
 Cold-load duration metric 使用 workerd request clock。因此 `bundle_load_stage_duration_ms` 只覆盖发生 await 的 `redis_proxy_load` 阶段。`bundle_load_duration_ms` 仍可表示 request 可观察的端到端 load latency，但两者都不用于分析连续执行的 bundle decode、env construction 或 wrapper generation CPU 时间；workerd 在这些同步阶段不会推进时钟。
 
 ## 部署 / Rollout 注意事项
