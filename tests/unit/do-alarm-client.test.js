@@ -39,6 +39,7 @@ const alarmResponseModule = await import(ALARM_RESPONSE_URL);
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
 const alarmResponseContract = /** @type {{
  * maxBytes: number,
+ * deadlineMs: number,
  * actorSuccessVariants: Record<string, Record<string, unknown>>,
  * dispatchSuccessVariants: Record<string, { ok: true, ignored: boolean }>,
  * dispatchErrorVariants: Record<string, { status: number, body: Record<string, unknown> }>,
@@ -76,7 +77,10 @@ beforeEach(() => {
 
 test("DO alarm response contract matches the cross-language fixture", async () => {
   assert.equal(alarmResponseModule.DO_ALARM_RESPONSE_MAX_BYTES, alarmResponseContract.maxBytes);
-  assert.equal(alarmResponseModule.DO_ALARM_RESPONSE_DEADLINE_MS, 5_000);
+  assert.equal(
+    alarmResponseModule.DO_ALARM_RESPONSE_DEADLINE_MS,
+    alarmResponseContract.deadlineMs,
+  );
   for (const [name, actorResponse] of Object.entries(alarmResponseContract.actorSuccessVariants)) {
     const expected = alarmResponseContract.dispatchSuccessVariants[name];
     assert.deepEqual(

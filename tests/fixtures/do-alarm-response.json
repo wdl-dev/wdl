@@ -1,5 +1,6 @@
 {
   "maxBytes": 16384,
+  "deadlineMs": 5000,
   "actorSuccessVariants": {
     "delivered": {
       "ok": true

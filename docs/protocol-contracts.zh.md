@@ -38,7 +38,7 @@
 | Workflow Runtime request、result 和 Workflow 自有的 retryable backend error | `tests/fixtures/workflow-runtime-request.json` 拥有 Rust 到 JavaScript 的 run request shape，包括绝对 dispatch deadline；`tests/fixtures/workflow-runtime-response.json` 拥有 Runtime dispatch 与 Rust Workflows 消费的 outcome literal、必需 terminal payload field 和 Workflow 自有 retryable error literal；internal-auth failure 使用共享的 `shared/internal-auth.js` 与 `tests/fixtures/internal-auth-contract.json` 合同。 |
 | Workflow step replay identity 与 terminal response | `tests/fixtures/workflow-step-response.json` 拥有 Rust Workflows 写入、Runtime 消费的 backend operation kind 与必需 claim/replay/register-wait terminal payload field。 |
 | Workflow tick response | `tests/fixtures/workflow-tick-response.json` 与 `rust/common/src/workflow_tick.rs` 拥有 executable shape；`rust/workflows/` 和 `rust/scheduler/` 消费该 shape，`docs/modules/workflows.zh.md` 记录外围行为。 |
-| Durable Object alarm response | `tests/fixtures/do-alarm-response.json` 拥有 JavaScript 与 Rust 消费的 16 KiB cap、精确 actor、dispatch、set/delete 和 cleanup success variant，以及 failed/result-unknown dispatch error；`shared/do-alarm-response.js` 拥有 JavaScript body deadline。 |
+| Durable Object alarm response | `tests/fixtures/do-alarm-response.json` 拥有 JavaScript 与 Rust 消费的 16 KiB cap、5 秒 body deadline、精确 actor、dispatch、set/delete 和 cleanup success variant，以及 failed/result-unknown dispatch error；`shared/do-alarm-response.js` 与 `rust/workflows/src/api/do_alarms/dispatch.rs` 分别拥有各自的 runtime reader。 |
 | Observability event 和 metric shape | `docs/modules/log-tail-observability.zh.md`、`shared/observability.js`、`wdl-rust-common` |
 
 如果某个 shape 由一个 tier 写、另一个 tier 读，同一改动必须同时更新 writer、reader、owning doc 和能抓漂移的测试。除非存在外部 rollout 要求，不要增加第二套 parser 或 fallback reader。

@@ -942,6 +942,7 @@ test("DO alarm response readers share one bounded fixture", () => {
   const fixture = "tests/fixtures/do-alarm-response.json";
   const contract = /** @type {{
    *   maxBytes: unknown,
+   *   deadlineMs: unknown,
    *   actorSuccessVariants: Record<string, unknown>,
    *   dispatchSuccessVariants: Record<string, unknown>,
    *   dispatchErrorVariants: Record<string, unknown>,
@@ -949,6 +950,7 @@ test("DO alarm response readers share one bounded fixture", () => {
    *   mutationRequiredFields: unknown[],
    * }} */ (readRepositoryJson(fixture));
   assert.equal(contract.maxBytes, 16 * 1024);
+  assert.equal(contract.deadlineMs, 5_000);
   assert.deepEqual(Object.keys(contract.actorSuccessVariants).sort(), [
     "delivered",
     "ignored",

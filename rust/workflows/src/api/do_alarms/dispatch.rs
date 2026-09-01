@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
+use tokio::time::timeout;
 use wdl_rust_common::internal_auth::INTERNAL_AUTH_HEADER;
 use wdl_rust_common::time::now_ms;
 use wdl_rust_common::worker_contract::{
@@ -26,6 +27,7 @@ use super::scripts::{
 
 const DO_ALARM_MOVE_DUE_LIMIT: usize = 100;
 const DO_ALARM_RESPONSE_MAX_BYTES: usize = 16 * 1024;
+const DO_ALARM_RESPONSE_DEADLINE: Duration = Duration::from_secs(5);
 const DO_ALARM_DISPATCH_FAILED: &str = "do_alarm_dispatch_failed";
 
 fn do_alarm_ready_admission_config(concurrency: usize) -> ReadyAdmissionConfig {
@@ -73,32 +75,42 @@ enum DoAlarmDispatchError {
 
 async fn read_do_alarm_dispatch_body(
     mut response: reqwest::Response,
+    deadline: Duration,
 ) -> Result<(reqwest::StatusCode, Vec<u8>), DoAlarmDispatchError> {
     let status = response.status();
-    if response
-        .content_length()
-        .is_some_and(|length| length > DO_ALARM_RESPONSE_MAX_BYTES as u64)
-    {
-        return Err(DoAlarmDispatchError::InFlightUnknown(format!(
-            "do-runtime returned {}: alarm response is too large",
-            status.as_u16()
-        )));
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| DoAlarmDispatchError::InFlightUnknown(err.to_string()))?
-    {
-        if body.len().saturating_add(chunk.len()) > DO_ALARM_RESPONSE_MAX_BYTES {
+    timeout(deadline, async move {
+        if response
+            .content_length()
+            .is_some_and(|length| length > DO_ALARM_RESPONSE_MAX_BYTES as u64)
+        {
             return Err(DoAlarmDispatchError::InFlightUnknown(format!(
                 "do-runtime returned {}: alarm response is too large",
                 status.as_u16()
             )));
         }
-        body.extend_from_slice(&chunk);
-    }
-    Ok((status, body))
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|err| DoAlarmDispatchError::InFlightUnknown(err.to_string()))?
+        {
+            if body.len().saturating_add(chunk.len()) > DO_ALARM_RESPONSE_MAX_BYTES {
+                return Err(DoAlarmDispatchError::InFlightUnknown(format!(
+                    "do-runtime returned {}: alarm response is too large",
+                    status.as_u16()
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok((status, body))
+    })
+    .await
+    .map_err(|_| {
+        DoAlarmDispatchError::InFlightUnknown(format!(
+            "do-runtime returned {}: alarm response body timed out",
+            status.as_u16()
+        ))
+    })?
 }
 
 fn parse_do_alarm_dispatch_success(body: &[u8]) -> Result<bool, DoAlarmDispatchError> {
@@ -321,25 +333,29 @@ async fn dispatch_do_alarm(
         retry_count: job.retry_count,
         token: &job.row_token,
     };
-    let response = app
-        .http
-        .post(url)
-        .header(
-            INTERNAL_AUTH_HEADER,
-            app.config.internal_auth_tokens.current.as_str(),
-        )
-        .timeout(Duration::from_millis(app.config.dispatch_timeout_ms))
-        .json(&request)
-        .send()
-        .await
-        .map_err(|err| {
-            if err.is_connect() {
-                DoAlarmDispatchError::Retryable(err.to_string())
-            } else {
-                DoAlarmDispatchError::InFlightUnknown(err.to_string())
-            }
-        })?;
-    let (status, body) = read_do_alarm_dispatch_body(response).await?;
+    let response = timeout(
+        Duration::from_millis(app.config.dispatch_timeout_ms),
+        app.http
+            .post(url)
+            .header(
+                INTERNAL_AUTH_HEADER,
+                app.config.internal_auth_tokens.current.as_str(),
+            )
+            .json(&request)
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        DoAlarmDispatchError::InFlightUnknown("do-runtime alarm dispatch timed out".to_string())
+    })?
+    .map_err(|err| {
+        if err.is_connect() {
+            DoAlarmDispatchError::Retryable(err.to_string())
+        } else {
+            DoAlarmDispatchError::InFlightUnknown(err.to_string())
+        }
+    })?;
+    let (status, body) = read_do_alarm_dispatch_body(response, DO_ALARM_RESPONSE_DEADLINE).await?;
     if !status.is_success() {
         return Err(do_alarm_dispatch_http_error(status, &body));
     }
@@ -731,14 +747,15 @@ pub(crate) async fn admit_ready_do_alarms(
 #[cfg(test)]
 mod tests {
     use super::{
-        AlarmDispatchVersionDecision, DO_ALARM_RESPONSE_MAX_BYTES, DoAlarmAdmissionResult,
-        DoAlarmDispatchError, ReadyAdmissionResult, alarm_dispatch_version_decision,
-        do_alarm_dispatch_http_error, do_alarm_ready_admission_config,
-        parse_do_alarm_dispatch_success, read_do_alarm_dispatch_body, retry_delay_ms_from_parts,
-        saturating_i64_ms,
+        AlarmDispatchVersionDecision, DO_ALARM_RESPONSE_DEADLINE, DO_ALARM_RESPONSE_MAX_BYTES,
+        DoAlarmAdmissionResult, DoAlarmDispatchError, ReadyAdmissionResult,
+        alarm_dispatch_version_decision, do_alarm_dispatch_http_error,
+        do_alarm_ready_admission_config, parse_do_alarm_dispatch_success,
+        read_do_alarm_dispatch_body, retry_delay_ms_from_parts, saturating_i64_ms,
     };
     use serde_json::Value as JsonValue;
     use std::io::{Read, Write};
+    use std::time::Duration;
     use wdl_rust_common::worker_contract::{SessionPolicyMode, SessionPolicyProjection};
 
     async fn raw_http_response(
@@ -773,6 +790,10 @@ mod tests {
         assert_eq!(
             fixture["maxBytes"].as_u64(),
             Some(DO_ALARM_RESPONSE_MAX_BYTES as u64)
+        );
+        assert_eq!(
+            fixture["deadlineMs"].as_u64(),
+            Some(DO_ALARM_RESPONSE_DEADLINE.as_millis() as u64)
         );
         for (name, expected) in [("delivered", false), ("ignored", true)] {
             let body = serde_json::to_vec(&fixture["dispatchSuccessVariants"][name])
@@ -853,7 +874,7 @@ mod tests {
         )
         .await;
 
-        let error = read_do_alarm_dispatch_body(response)
+        let error = read_do_alarm_dispatch_body(response, DO_ALARM_RESPONSE_DEADLINE)
             .await
             .expect_err("oversized successful alarm response");
         server.join().unwrap();
@@ -875,7 +896,7 @@ mod tests {
         )
         .await;
 
-        let error = read_do_alarm_dispatch_body(response)
+        let error = read_do_alarm_dispatch_body(response, DO_ALARM_RESPONSE_DEADLINE)
             .await
             .expect_err("oversized alarm response");
         server.join().unwrap();
@@ -898,7 +919,7 @@ mod tests {
         raw.extend_from_slice(b"\r\n0\r\n\r\n");
         let (response, server) = raw_http_response(raw).await;
 
-        let error = read_do_alarm_dispatch_body(response)
+        let error = read_do_alarm_dispatch_body(response, DO_ALARM_RESPONSE_DEADLINE)
             .await
             .expect_err("oversized chunked alarm response");
         server.join().unwrap();
@@ -906,6 +927,39 @@ mod tests {
             error,
             DoAlarmDispatchError::InFlightUnknown(message)
                 if message == "do-runtime returned 200: alarm response is too large"
+        ));
+    }
+
+    #[tokio::test]
+    async fn alarm_dispatch_reader_has_a_fresh_body_deadline_after_headers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nx")
+                .unwrap();
+            stream.flush().unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/alarm"))
+            .send()
+            .await
+            .unwrap();
+
+        let error = read_do_alarm_dispatch_body(response, Duration::from_millis(50))
+            .await
+            .expect_err("stalled alarm response body");
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+        assert!(matches!(
+            error,
+            DoAlarmDispatchError::InFlightUnknown(message)
+                if message == "do-runtime returned 200: alarm response body timed out"
         ));
     }
 
