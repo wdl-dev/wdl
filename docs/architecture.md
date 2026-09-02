@@ -174,10 +174,12 @@ Valkey logical DBs are split by authority:
 
 - DB 0: control-plane metadata, route state, lifecycle indexes, secrets, referrer
   indexes, D1/DO metadata, AI provider/credential records, cron config, and queue
-  consumer projections.
+  consumer projections, plus the Workflows-owned operator schema-reset state.
 - DB 1: data-plane KV, queue streams, delayed queues, log-tail streams, and cleanup
   queues.
 - DB 2: workflows workflow instance state.
+- DB 15: inactive schema-2 Workflow archive while an explicit migration is pending; no
+  normal service selects it.
 
 Indexes are usually rebuildable projections. Authority lives in the owning hash, stream,
 or lifecycle record named in each module doc. Do not add fallback SCAN paths or

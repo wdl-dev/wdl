@@ -2780,9 +2780,11 @@ test("workflow instance state is owned by workflows DB2", () => {
     "tests/integration/workflows-runtime-core.test.js",
     "tests/integration/workflows-runtime-scheduler.test.js",
     "tests/integration/workflows-runtime-pausing.test.js",
+    "tests/integration/workflows-schema-reset.test.js",
     "tests/unit/style-contracts.test.js",
     "rust/workflows/src/keys.rs",
     "rust/workflows/src/schema.rs",
+    "rust/workflows/src/schema_migration.rs",
     "rust/workflows/src/tests.rs",
   ]);
   const allowedFilePrefixes = new Set([
@@ -2814,6 +2816,32 @@ test("workflow instance state is owned by workflows DB2", () => {
     }
   }
   assert.deepEqual(offenders, []);
+});
+
+test("workflow schema reset DB0 state has one Workflows owner", () => {
+  const literal = "wf:schema3-reset";
+  const allowed = new Set([
+    "rust/workflows/src/keys.rs",
+    "tests/integration/workflows-schema-reset.test.js",
+    "tests/unit/style-contracts.test.js",
+  ]);
+  const files = [
+    ...jsFiles("control"),
+    ...jsFiles("runtime"),
+    ...jsFiles("gateway"),
+    ...jsFiles("auth"),
+    ...jsFiles("d1-runtime"),
+    ...jsFiles("do-runtime"),
+    ...jsFiles("tests/unit"),
+    ...jsFiles("tests/integration"),
+    ...rustFiles("rust"),
+  ];
+  const offenders = files.filter((file) => (
+    !allowed.has(file) && withoutLineComments(readRepoFile(file)).includes(literal)
+  ));
+  assert.deepEqual(offenders, []);
+  assert.match(readRepoFile("rust/workflows/src/schema_migration.rs"), /schema3_reset_key/);
+  assert.match(readRepoFile("rust/workflows/src/server.rs"), /workflow_migration_pending/);
 });
 
 test("host wrapper exposes only binding-scoped DO and Workflow capabilities", () => {

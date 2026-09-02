@@ -86,11 +86,14 @@ shared crate `wdl-rust-common`.
   identity stays exclusively in binding-scoped host props and is covered by the env
   budget; generated tenant facade code carries only public operation fields.
 - **DB split is intentional.** DB 0 is control metadata, DB 1 is data-plane KV/queue/log
-  streams, DB 2 is Workflows. See `docs/redis-key-layout.md`.
+  streams, DB 2 is active Workflows, and DB 15 is only an inactive schema-2 archive while
+  migration is pending. See `docs/redis-key-layout.md`.
 - **D1/DO correctness comes from owner lease + generation fence.** Service DNS only
   reaches a router task; it does not prove ownership.
-- **Workflows owns DB 2.** Control owns only DB 0 workflow definitions (`wf:defs:*`).
-  Runtime/control talk to the workflows service instead of writing DB 2 directly.
+- **Workflows owns DB 2.** Control owns DB 0 workflow definitions (`wf:defs:*`);
+  Workflows additionally owns only the operator schema-reset state `wf:schema3-reset` in
+  DB 0 of its configured endpoint. Runtime/control talk to the workflows service instead
+  of writing DB 2 directly.
 - **Queue main streams are not trimmed.** At-least-once delivery beats storage caps.
   Diagnostic streams may be bounded.
 - **Metrics labels must be bounded.** Namespace, worker, version, token id, raw key,

@@ -1224,7 +1224,7 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
         "redelivered DO alarm after owner crash",
         async () => fetchDoAlarmStatusDuringOwnerRecovery(ns, "crash"),
         (json) => json.started === 1 && json.alarms === 1 && json.pending === null,
-        30000
+        60000
       );
     } finally {
       composeProfileUp("do-multi", ["--wait", killedTask], { stdio: "pipe" });

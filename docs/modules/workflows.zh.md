@@ -46,7 +46,7 @@ Control / CLI：
 
 Workflows 独占 Valkey DB 2 作为 instance execution state；自定义 `WORKFLOWS_REDIS_URL` 选择 Redis endpoint，并且只能省略 database 或显式选择 DB 2；显式非 DB 2 selection 会被拒绝。Control 在 DB 0 拥有 `wf:defs:<ns>:<worker>`，用于 deploy-time workflow key allocation 和稳定 identity。该 Hash 会保留 retired name 直到 whole-worker delete；definition list 只会为当前 active worker 枚举这段 retired history，而 deploy 和单个 workflow 的 status/lifecycle 路径只读取自己需要的 name。
 
-Workflows 启动时会比较自身解析后的 connection address 与有效 DB 2，以及 `CONTROL_REDIS_URL` 和 Rust data plane 的有效 URL（`DATA_REDIS_URL ?? REDIS_URL`）；数据库 identity 相同会在连接前失败。使用独立 data plane 的部署必须把 canonical `DATA_REDIS_URL` 同时提供给 Workflows service，使 ownership check 能覆盖该数据库；URL credential 和无关 query setting 不改变数据库 identity。
+Workflows 正常启动以及 schema-reset command 连接前，都会把自身 active DB 2 与 reserved archive DB 15 的解析后 database identity，分别和 `CONTROL_REDIS_URL`、Rust data plane 的有效 URL（`DATA_REDIS_URL ?? REDIS_URL`）比较；任何重叠都会在连接前失败。使用独立 data plane 的部署必须把 canonical `DATA_REDIS_URL` 同时提供给 Workflows service，使 ownership check 能覆盖该数据库；URL credential 和无关 query setting 不改变 database identity。
 
 关键概念：
 
@@ -63,6 +63,7 @@ Key families：
 |---|---|---|---|---|
 | `wf:defs:<ns>:<worker>` | Hash | Control | deploy metadata 的 workflow definition/key allocation 权威记录。 | Worker delete 在 lifecycle check 通过后删除 definitions。 |
 | `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker。 | 当前值是 `3`；greenfield deployment 从 schema 3 开始。 |
+| `wf:schema3-reset` | String | workflows operator/service | configured Workflows endpoint DB 0 中的 reset ownership 与 archived-state gate。 | `in_progress:<token>` 由单个 reset task 通过 CAS 持有；`archive_pending` 保留到未来已验证 migration 清理 DB 15 与该 key。 |
 | `wf:instance:{<ns>:<workflowKey>:<instanceId>}:state` | Hash | workflows | instance state 权威记录。 | Terminal retention 和 lifecycle cleanup 删除过期 state。 |
 | `wf:instance:{...}:payloads` | Hash | workflows | aggregate cap 下的 payload ref storage。 | 随 instance state family 删除。 |
 | `wf:instance:{...}:steps`、`step-summaries`、`step-summary-index` | Hash/ZSET | workflows | step replay/history state 权威记录。 | 随 instance 删除；history read 有界，并拒绝 summary/index 数量不一致或请求页中 summary 缺失。 |
@@ -167,7 +168,12 @@ workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/
 - 必需的 runtime dispatch deadline 是一个 sender-first 例外。下述 schema-3 maintenance 会先清退全部旧 Workflows sender，再滚动 user-runtime 和 system-runtime，从而满足该约束。旧 Runtime 接受 additive field，新 Runtime 会拒绝缺少该字段的旧 sender。
 - DB 2 是 workflow instance state 边界；不要从 control/runtime/scheduler 直接写 DB 2。
 - workflows 在 DB 2 中持久化 `wf:schema_version`。Schema `3` 会在 step record 中存储 DAG dependency edges 与 backend-owned operation kind。缺失 kind 会 fail closed；schema-2 record 不做有歧义的原地 adoption。
-- Schema 3 是一次 maintenance reset。先暂停 tenant dispatch，并确认 DB 2 中不存在任何必须保留的 state，包括终态 Workflow 结果、step history 或 Durable Object alarm。停止 Scheduler、将 Workflows 缩容到零并等待全部旧 Workflows task 退出；清空专用 DB 2（包括 `wf:schema_version`）后，滚动 user-runtime、system-runtime 和 do-runtime，并等待全部旧 task drain。随后以无新旧 Workflows overlap 的方式启动新版 Workflows 与 Scheduler，最后恢复 dispatch。该顺序既避免新 alarm result-unknown writer 对接旧 Workflows reader，也避免新 Workflows reader 对接旧 do-runtime dispatch 行为。DB 0 的 `wf:defs:*` definition 不属于该 reset。
+- Schema 3 是一次 maintenance reset，不要求整个平台停机。先暂停 tenant Workflow state mutation/execution，并阻止新的 Durable Object alarm schedule。停止 Scheduler、等待其退出，并在旧 Workflows 与 do-runtime 仍可用时让已经 admission 的 alarm delivery settle 或等待其 claim lease 过期。然后停止并清退全部旧 Workflows instance，并确保部署系统不会重新启动该 release。部署必须能够在后续显式 migration 成功前暂不提供 schema-2 Workflow instance；该 reset 会保留 pending Durable Object alarm scheduling。
+- 使用最终 release 和 Workflows 相同的 Redis environment/network identity 启动一次性 `/workflows schema3-reset check` process。它要求专用 DB 2 的 schema 为 `2`、DB 15 为空、不存在未过期或 lease 非法的 running alarm claim，且没有带 Redis key TTL 的 key。Schema 2 中真正带 TTL 的只有 TTL 为 60 秒的 `wf:pending-version:*` restart-blocker key，以及 TTL 为 60 秒的 internal alarm cleanup snapshot；静默部署可以等待后重复 `check`，直到它们消退。Retention deadline、run/pending-create lease、sleep/retry deadline 和 alarm due time 都是 hash field 或 sorted-set score，不是 Redis TTL。JSON report 会提供全局 memory、`maxMemoryPolicy`、alarm COPY 估算值和 advisory warning；capacity data 缺失、eviction policy 或估算余量不足都不会阻止 `apply`，是否继续由 operator 根据实际 workload 决定。
+- 在全部 mutation surface 保持暂停时运行 `/workflows schema3-reset apply`。它会在 DB 0 获取 Workflows-owned `wf:schema3-reset` 单写者 state，通过原子的 `SWAPDB` 把 DB 2 移到 DB 15，复制并验证格式未变化的 `wf:internal:do-alarm:*` scheduling projection，最后才发布 schema marker `3`；完成后 DB 0 state 变成 `archive_pending`。并发 `apply` 会失败；确认崩溃 reset process 已退出后，`/workflows schema3-reset resume` 才会通过 exact-value CAS 接管其 `in_progress` token。完成后的 `apply` 是 no-op，不会用 DB 15 stale alarm 覆盖 live state。Durable Object SQLite alarm row 保持不变，并继续通过 row token fence 复制后的 job。该工具不转换 schema-2 Workflow instance、step、payload 或 history record。
+- Preservation reset 始终以 `archive_pending` 结束，即使 source 看起来只有 schema marker 或其它惰性 key；它不会推断持久状态可丢弃，也不提供自动 finalize。如果 operator 已独立确认专用 DB 2 中全部 Workflow state 与 Workflows-owned Durable Object alarm projection 均可丢弃，应跳过该 reset，清空该数据库，并把 schema 3 作为 greenfield database 启动。清空 DB 2 不会删除 Durable Object SQLite alarm row；后续 `getAlarm()` 仍可能修复其 backend projection。跳过 reset 只替代 `check|apply|resume`；相同的 quiescence、旧参与方清退和最终版本启动顺序仍然适用。
+- 两条 schema-3 maintenance 路径都必须把 user-runtime、system-runtime 和 do-runtime 滚动到最终 release，并清退全部旧 protocol participant。恢复容量前必须先把最终 immutable image/revision 写入部署系统的 desired state；只做临时 process 或直接更新运行中实例、而 desired state 仍指向旧 release，不算完成部署。在启动任何 Workflows instance 前先选择最终 Workflows release、确认旧 Workflows instance 无法运行，再以无新旧 overlap 的方式启动最终 Workflows 与 Scheduler。`archive_pending` 下 health、metrics、Scheduler tick 和 internal DO alarm mutation/delivery 保持可用；全部普通 Workflow endpoint 以及 worker/version delete lifecycle check 返回 `409 workflow_migration_pending`。这个全局 gate 无需在 DB 2 复制平行 identity index，即可避免显式 instance ID 重复并保留 archived version referrer。`COPY` 对被复制 value（包括无成员上限的 internal alarm Set/ZSET）是 O(N)；DB 0/1/2/15 共用一个 Valkey endpoint 时，低流量 reset 表示接受无关 Control、KV 或 Queue 工作可能出现短暂延迟，若不能接受该停顿则应暂停整个平台。只有独立的 Workflows endpoint 才能将无关流量与这些命令隔离。具体 stop、update 和 start 命令由部署系统决定。DB 0 的 `wf:defs:*` definition 不属于该 reset。
+- DB 15 会作为 immutable、inactive schema-2 source 保留，直到未来 migration tool 已把保留的 Workflow state 转换到 active DB 2，并且完整性校验成功。DB 15 的退出条件是已验证的 migration success，不是经过一段时间或完成外部 snapshot。正常运行期间没有 WDL service 选择 DB 15，而且它没有独立 memory isolation；整个保留期间都必须为共享 Valkey 容量并持续观测。外部 snapshot 只是可选 disaster recovery，不能替代 migration success。只有 migration 成功后 operator 才能清空 DB 15 并移除 DB 0 `archive_pending` gate；Workflows 必须重启后才会重新开放普通 route。
 - 遗留部署如果使用了任何非 DB 2 的 Workflows 数据库，必须把本次升级视为 configuration migration；schema 3 不迁移旧 runtime state。应先删除非 DB 2 的 `WORKFLOWS_REDIS_DB` override；旧数据库若与其它 owner 共享则绝不能清空。只有原 endpoint 的 DB 2 为空且由 Workflows 独占时才能直接使用，否则应把 `WORKFLOWS_REDIS_URL` 指向一个 DB 2 为空的新 endpoint。URL 应省略 database 或显式选择 `2`；显式非 DB 2 URL state 会被拒绝，而不是被静默丢下。
 - 只包含 schema-2 Workflows runtime state 的专用 DB 2 是支持的 reset 来源。包含其它 subsystem 所有 key 的共享 DB 2 属于不支持配置：不得做 prefix cleanup 或清空该库，必须把 Workflows 切换到一个 DB 2 为空的新 endpoint。非空但缺少 `wf:schema_version` 的 DB 2 会拒绝启动；只有 operator 确认该库由 Workflows 独占且可以丢弃后才能清空。WDL workflow definitions 位于 DB 0 的 `wf:defs:*`，不属于 DB 2 cleanup。
 
@@ -186,6 +192,7 @@ workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/
   `tests/integration/workflows-runtime-scheduler.test.js`、
   `tests/integration/workflows-runtime-pausing.test.js`、
   `tests/integration/workflows-runtime-retention.test.js`
+- `tests/integration/workflows-schema-reset.test.js`
 - `tests/integration/workflows-metadata.test.js`
 - `tests/integration/workflows-durable-objects.test.js`
 - `tests/unit/style-contracts.test.js`

@@ -116,7 +116,7 @@ are outside this map unless they own runtime or deployable service behavior.
 |---|---|
 | `rust/redis-proxy/` | Runtime sidecar for cold-load, secret decrypt, KV, queue producer, log-tail, and atomic AI provider/model resolution APIs. `src/ai.rs` owns persisted AI record validation, exact official destinations, credential decryption, and Lua snapshots. |
 | `rust/scheduler/` | Cron, queue, delayed queue, orphan migration, and workflow tick scheduler, including bounded Runtime/tick response readers. |
-| `rust/workflows/` | Workflows service, DB 2 state machine, and internal DO alarm backend jobs. |
+| `rust/workflows/` | Workflows service, DB 2 state machine, internal DO alarm backend jobs, and the operator-only schema-3 reset/archive command. |
 | `rust/supervisor/` | D1/DO supervisor binaries, including strict do-runtime actor-residency config selection before workerd starts and bounded local drain/renew response readers. |
 | `rust/common/` | Shared Rust utilities such as worker-contract grammar and keys, time, logging, internal-auth matching, Redis connection primitives, metrics primitives, small behavior-free cross-service wire shapes, and `request_completion.rs`, which owns HTTP completion metrics and structured completion-log policy shared by Rust services. |
 

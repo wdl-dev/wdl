@@ -160,6 +160,7 @@ Logical DB split:
 - DB 0: control-plane metadata.
 - DB 1: data-plane KV, queue, log-tail streams.
 - DB 2: workflows instance state.
+- DB 15: inactive schema-2 Workflow archive while migration is pending.
 
 Stateful storage:
 

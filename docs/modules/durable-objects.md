@@ -170,6 +170,16 @@ transaction reserves its position on this tail at the first alarm mutation and f
 that position with the final coalesced effect only after native commit, so a later
 non-transactional mutation cannot overtake it.
 
+The Workflows schema-3 maintenance reset does not enumerate or delete SQLite alarm rows.
+Its Workflows-owned `/workflows schema3-reset` operator command archives schema-2 DB 2
+and copies the unchanged `wf:internal:do-alarm:*` scheduling projection into schema-3
+DB 2 before alarm mutation or Scheduler dispatch resumes. Existing SQLite row tokens
+therefore continue to fence the copied jobs. A local-only row left by an already
+result-unknown mutation remains outside the confirmed delivery contract and may use the
+same best-effort `getAlarm()` repair as before the reset. The resulting
+`archive_pending` gate blocks ordinary Workflow state and lifecycle operations but leaves
+DO alarm mutation, dispatch, and tick available.
+
 Alarm mutation crosses object SQLite and Workflows DB 2 and is intentionally not a
 distributed transaction. A successfully completed `setAlarm()` enters the at-least-once
 delivery contract. Input validation fails before either store is mutated and preserves

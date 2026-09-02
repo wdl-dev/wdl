@@ -113,7 +113,7 @@
 |---|---|
 | `rust/redis-proxy/` | Runtime sidecar，提供 cold-load、secret decrypt、KV、queue producer、log-tail 和 AI provider/model 原子解析 API。`src/ai.rs` 负责持久 AI record 校验、官方 destination 精确约束、credential 解密和 Lua snapshot。 |
 | `rust/scheduler/` | Cron、queue、delayed queue、orphan migration 和 workflow tick scheduler，包括有界 Runtime/tick response reader。 |
-| `rust/workflows/` | Workflows service、DB 2 state machine 和 internal DO alarm backend jobs。 |
+| `rust/workflows/` | Workflows service、DB 2 state machine、internal DO alarm backend jobs，以及仅供 operator 使用的 schema-3 reset/archive command。 |
 | `rust/supervisor/` | D1/DO supervisor binaries，包括 workerd 启动前对 do-runtime actor-residency config 的严格选择，以及有界 local drain/renew response reader。 |
 | `rust/common/` | worker-contract grammar 与 keys、time、logging、internal-auth matching、Redis connection primitives、metrics primitives、小型无行为 cross-service wire shape，以及负责 Rust service 共享 HTTP completion metrics 和 structured completion-log policy 的 `request_completion.rs`。 |
 

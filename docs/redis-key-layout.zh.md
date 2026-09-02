@@ -6,16 +6,20 @@
 
 WDL 使用明确的逻辑切分：
 
-- **`DB 0`，控制面：**bundle、routes/patterns、auth、AI provider metadata/credential、D1/DO owner state、cron config、queue-consumer config、lifecycle metadata，以及 workflow definition（`wf:defs:*`）。
+- **`DB 0`，控制面：**bundle、routes/patterns、auth、AI provider metadata/credential、D1/DO owner state、cron config、queue-consumer config、lifecycle metadata、workflow definition（`wf:defs:*`），以及 Workflows schema-reset state。
 - **`DB 1`，数据面：**KV hash bucket、queue stream、delayed queue、orphan stream 和 live log-tail stream。
 - **`DB 2`，workflows：**`wf:schema_version`、instance state、step record/summary、ready/due shard、event 和 event-type index、payload ref、retention index、restart target-version blocker、run lease。
+- **`DB 15`，inactive Workflow schema archive：**正常运行期间没有 WDL service 选择该数据库。Workflows-owned schema-3 reset command 会保留空 DB 15，作为其 `SWAPDB 2 15` archive step 的目标。
 
-Local compose、Kubernetes 和 Terraform 都启用这个切分。Rust service 和 Rust `redis-proxy` 使用 `DATA_REDIS_URL` 选择完整的 data-plane Redis endpoint 与逻辑数据库；`DATA_REDIS_DB` 不影响这些 Rust client。嵌入的 JS control/log-tail 路径使用 `DATA_REDIS_ADDR` 加 `DATA_REDIS_DB`，因为它们的 RESP client 接收 host:port address。未设置对应路径变量的部署会把 data-plane key 留在 control Redis connection/database，直到显式 opt in。Workflows 不同：`WORKFLOWS_REDIS_URL` 可以选择其它 Redis endpoint，但必须省略 database 或显式选择 DB 2；显式非 DB 2 URL 会被拒绝。DB 2 必须由 Workflows runtime state 独占，不能与 control 或 data-plane state 共享。遗留 `WORKFLOWS_REDIS_DB` 配置只允许值 `2`，并应从 deployment configuration 中删除。Workflows 会比较解析后的 database identity 与 `CONTROL_REDIS_URL`，以及 Rust data plane 的有效 URL（`DATA_REDIS_URL ?? REDIS_URL`）；拆分 data plane 的部署必须把 canonical URL 传给 Workflows 以执行该启动检查。
+Local compose、Kubernetes 和 Terraform 都启用这个切分。Rust service 和 Rust `redis-proxy` 使用 `DATA_REDIS_URL` 选择完整的 data-plane Redis endpoint 与逻辑数据库；`DATA_REDIS_DB` 不影响这些 Rust client。嵌入的 JS control/log-tail 路径使用 `DATA_REDIS_ADDR` 加 `DATA_REDIS_DB`，因为它们的 RESP client 接收 host:port address。未设置对应路径变量的部署会把 data-plane key 留在 control Redis connection/database，直到显式 opt in。Workflows 不同：`WORKFLOWS_REDIS_URL` 可以选择其它 Redis endpoint，但必须省略 database 或显式选择 DB 2；显式非 DB 2 URL 会被拒绝。DB 2 必须由 Workflows runtime state 独占，不能与 control 或 data-plane state 共享。遗留 `WORKFLOWS_REDIS_DB` 配置只允许值 `2`，并应从 deployment configuration 中删除。Workflows 正常启动以及 schema-reset command 连接前，都会把 active DB 2 和 reserved archive DB 15 的解析后 identity 与 `CONTROL_REDIS_URL`、Rust data plane 的有效 URL（`DATA_REDIS_URL ?? REDIS_URL`）比较；拆分 data plane 的部署必须把 canonical URL 传给 Workflows 以执行这些 ownership check。
+
+DB 15 不是新的 active ownership tier。Reset 会把格式未变化的 `wf:internal:do-alarm:*` projection 复制回 schema-3 DB 2，但完整 schema-2 archive 会保持 immutable，供未来 Workflow-state migration 使用。全部 schema-2 writer 停止且两类 60 秒临时 key 消退后，archive 不带 Redis key TTL；逻辑 retention、lease 和 due timestamp 在没有旧 Workflows/Scheduler process 时不会让 key 自行过期。DB 15 与 DB 2 共享 endpoint 的 memory、persistence、eviction policy 和 failure domain；它会保留到未来 migration 及其完整性检查成功，外部 snapshot 不满足该退出条件。Reset command 输出的 capacity 与 eviction-policy 字段仅供建议，是否有足够余量由 operator 决定。
 
 ## 全局控制面 Keys
 
 ```text
 routes:<ns>                     Hash, { workerName -> activeVersion }
+wf:schema3-reset                String，Workflows-owned schema reset ownership/migration gate
 platform-domain-disabled:<ns>   Set, 不经 platform-domain route 公开的 active worker
 namespaces                      Set, 至少有一个 active worker 的 namespace
 workers:<ns>                    Set, 有 worker-owned lifecycle state 的 worker name

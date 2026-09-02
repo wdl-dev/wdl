@@ -88,12 +88,13 @@ identity. The hash retains retired names until whole-worker delete. Definition l
 enumerates that retired history for currently active workers; deploy and single-workflow
 status/lifecycle paths read only the names they need.
 
-At startup, Workflows compares its parsed connection address and effective DB 2 with
+At normal startup and before a schema-reset command connects, Workflows compares the
+parsed database identities of its active DB 2 and reserved archive DB 15 with
 `CONTROL_REDIS_URL` and with the effective Rust data-plane URL
-(`DATA_REDIS_URL ?? REDIS_URL`). Equal database identities fail before connecting.
-Deployments with a separate data plane must expose its canonical `DATA_REDIS_URL` to the
-Workflows service so this ownership check covers it; URL credentials and unrelated query
-settings do not change database identity.
+(`DATA_REDIS_URL ?? REDIS_URL`). Any overlap fails before connecting. Deployments with a
+separate data plane must expose its canonical `DATA_REDIS_URL` to the Workflows service
+so this ownership check covers it; URL credentials and unrelated query settings do not
+change database identity.
 
 Key concepts:
 
@@ -119,6 +120,7 @@ Key families:
 |---|---|---|---|---|
 | `wf:defs:<ns>:<worker>` | Hash | Control | Authoritative workflow definition/key allocation for deploy metadata. | Worker delete removes definitions after lifecycle checks pass. |
 | `wf:schema_version` | String | workflows | DB 2 workflow-state schema marker. | Current value is `3`; greenfield deployments start on schema 3. |
+| `wf:schema3-reset` | String | workflows operator/service | DB 0 reset ownership and archived-state gate on the configured Workflows endpoint. | `in_progress:<token>` is CAS-owned by one reset task; `archive_pending` remains until a future verified migration clears DB 15 and this key. |
 | `wf:instance:{<ns>:<workflowKey>:<instanceId>}:state` | Hash | workflows | Authoritative instance state. | Terminal retention and lifecycle cleanup remove expired state. |
 | `wf:instance:{...}:payloads` | Hash | workflows | Payload ref storage under aggregate caps. | Deleted with the instance state family. |
 | `wf:instance:{...}:steps`, `step-summaries`, `step-summary-index` | Hash/ZSET | workflows | Authoritative step replay/history state. | Deleted with the instance; history reads are bounded and reject mismatched summary/index counts or missing summaries in the requested page. |
@@ -480,15 +482,73 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 - Workflows persists `wf:schema_version` in DB 2. Schema `3` stores DAG dependency edges
   and backend-owned operation kinds on step records. Missing kinds fail closed; there is
   no ambiguous in-place adoption for schema-2 records.
-- Schema 3 is a maintenance reset. Quiesce tenant dispatch and confirm that DB 2 contains
-  no state that must be retained, including terminal Workflow results, step history, or
-  Durable Object alarms. Stop Scheduler, scale Workflows to zero, and wait for every old
-  Workflows task to exit. Clear the dedicated DB 2 including `wf:schema_version`, then
-  roll user-runtime, system-runtime, and do-runtime and wait for every old task to drain.
-  Start the new Workflows and Scheduler without old/new Workflows overlap, then resume
-  dispatch. This ordering keeps new alarm result-unknown writers away from old Workflows
-  readers and new Workflows readers away from old do-runtime dispatch behavior. DB 0
+- Schema 3 is a maintenance reset, not a required platform-wide stop. Quiesce tenant
+  Workflow state mutation/execution and prevent new Durable Object alarm schedules. Stop
+  Scheduler, wait for it to exit, and let already admitted alarm deliveries settle or
+  their claim leases expire while the old Workflows and do-runtime services remain
+  available. Then stop and drain every old Workflows instance and ensure that the
+  deployment system cannot restart that release. The deployment must be able to proceed
+  without serving schema-2 Workflow instances until a later explicit migration succeeds;
+  the reset does preserve pending Durable Object alarm scheduling.
+- Run the final release's `/workflows schema3-reset check` as a one-off process with the same
+  Redis environment and network identity as Workflows. It requires schema `2` in dedicated
+  DB 2, an empty DB 15, no unexpired or invalid running alarm claim, and no Redis key TTL.
+  The only schema-2 key TTLs are the 60-second `wf:pending-version:*` restart-blocker keys
+  and 60-second internal alarm cleanup snapshots, so a quiescent deployment can wait and
+  repeat `check` until they drain. Retention deadlines, run/pending-create leases,
+  sleep/retry deadlines, and alarm due times are hash fields or sorted-set scores rather
+  than Redis TTLs. The JSON report includes global memory values, `maxMemoryPolicy`, an
+  estimated alarm COPY size, and advisory warnings. Missing capacity data, an eviction
+  policy, or low estimated headroom does not block `apply`; the operator owns the capacity
+  decision for the actual workload.
+- Run `/workflows schema3-reset apply` while every mutation surface remains paused. It
+  acquires the single Workflows-owned `wf:schema3-reset` state in DB 0, uses atomic
+  `SWAPDB` to move DB 2 into DB 15, copies and verifies the unchanged
+  `wf:internal:do-alarm:*` scheduling projection, and publishes schema marker `3` last.
+  The DB 0 state becomes `archive_pending` only after completion. A concurrent `apply`
+  fails; after a crashed reset process has been confirmed stopped,
+  `/workflows schema3-reset resume` uses exact-value CAS to take over its `in_progress`
+  token. A completed `apply` is a no-op and never replays stale DB 15 alarm values over
+  live state. Durable Object SQLite alarm rows remain in place and continue to fence
+  copied jobs by row token. The tool does not convert schema-2 Workflow instance, step,
+  payload, or history records.
+- The preservation reset always finishes in `archive_pending`, including when the source
+  contains only its schema marker or other apparently inert keys. It deliberately does
+  not infer that persisted state is disposable or provide an automatic finalize path.
+  An operator who has independently confirmed that every Workflow state and
+  Workflows-owned Durable Object alarm projection in a dedicated DB 2 may be discarded
+  should skip this reset, clear that database, and start schema 3 as a greenfield
+  database instead. Clearing DB 2 does not delete Durable Object SQLite alarm rows;
+  subsequent `getAlarm()` calls may repair their backend projection. Skipping the reset
+  replaces only `check|apply|resume`; the same quiescence, old-participant drain, and
+  final-release startup order still apply.
+- During either schema-3 maintenance path, roll user-runtime,
+  system-runtime, and do-runtime to the final release and drain every old protocol
+  participant. Persist the final immutable image/revision in the deployment system's
+  desired state before restoring capacity; an ad hoc process or direct runtime update is
+  incomplete while that state still points at the old release. Select the final Workflows
+  release before starting any Workflows instance, ensure no old Workflows instance can
+  run, then start the final Workflows and Scheduler releases without old/new overlap.
+  Under `archive_pending`, health, metrics, Scheduler tick, and internal DO alarm
+  mutation/delivery remain available, while every ordinary Workflow endpoint and
+  worker/version delete lifecycle check returns `409 workflow_migration_pending`. This
+  global gate prevents duplicate explicit instance IDs and preserves archived version
+  referrers without copying parallel identity indexes into DB 2. `COPY` is O(N) in the
+  value being copied, including unbounded internal alarm sets/ZSETs. When DB 0/1/2/15
+  share one Valkey endpoint, a low-traffic reset accepts possible transient latency for
+  unrelated Control, KV, or Queue work; pause the full platform when that stall is
+  unacceptable. Only a separate Workflows endpoint isolates unrelated traffic from these
+  commands. Exact stop, update, and start commands are deployment-system-specific. DB 0
   `wf:defs:*` definitions are not part of the reset.
+- DB 15 remains an immutable, inactive schema-2 source until a future migration tool has
+  converted the retained Workflow state into active DB 2 and its completeness checks have
+  succeeded. That verified migration, not elapsed time or an external snapshot, is the
+  DB 15 exit condition. No WDL service selects DB 15 during normal operation, and it has no
+  per-database memory isolation: provision and monitor the shared Valkey capacity for the
+  entire retention period. An external snapshot is optional disaster recovery, not a
+  substitute for migration success. Only after successful migration may an operator clear
+  DB 15 and remove the DB 0 `archive_pending` gate; Workflows must restart before ordinary
+  routes reopen.
 - A legacy deployment that used any non-DB2 Workflows database must treat this as a
   configuration migration; schema 3 does not move old runtime state. Remove the non-DB2
   `WORKFLOWS_REDIS_DB` override first. Never clear the old database if it is shared. Use
@@ -518,6 +578,7 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
   `tests/integration/workflows-runtime-scheduler.test.js`,
   `tests/integration/workflows-runtime-pausing.test.js`,
   `tests/integration/workflows-runtime-retention.test.js`
+- `tests/integration/workflows-schema-reset.test.js`
 - `tests/integration/workflows-metadata.test.js`
 - `tests/integration/workflows-durable-objects.test.js`
 - `tests/unit/style-contracts.test.js`

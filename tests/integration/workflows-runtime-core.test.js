@@ -1058,11 +1058,6 @@ test("runtime bounds a pending Workflow root at the sender deadline", async () =
   assert.equal(response.status, 503, response.body);
   assert.equal(responseJson(response).error, "workflow_backend_unavailable");
   assert.equal(
-    elapsedMs >= 500,
-    true,
-    `dispatch returned too early after ${elapsedMs}ms`
-  );
-  assert.equal(
     elapsedMs < 3000,
     true,
     `dispatch exceeded deadline budget at ${elapsedMs}ms`

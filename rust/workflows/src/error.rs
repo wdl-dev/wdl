@@ -103,6 +103,14 @@ impl WorkflowError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
+
+    pub(crate) fn migration_pending(message: impl Into<String>) -> Self {
+        Self {
+            code: "workflow_migration_pending",
+            message: message.into(),
+            status: StatusCode::CONFLICT,
+        }
+    }
 }
 
 impl From<redis::RedisError> for WorkflowError {

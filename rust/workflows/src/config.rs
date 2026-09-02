@@ -11,6 +11,7 @@ use wdl_rust_common::redis_conn::redis_client_from_url_with_db;
 pub(crate) const WORKFLOW_READY_BATCH_SIZE: usize = 128;
 pub(crate) const DO_ALARM_READY_BATCH_MAX: usize = 100;
 pub(crate) const WORKFLOWS_REDIS_DB: i64 = 2;
+pub(crate) const WORKFLOWS_ARCHIVE_REDIS_DB: i64 = 15;
 
 #[derive(Clone)]
 pub(crate) struct Config {
@@ -111,7 +112,7 @@ fn redis_database_identity(
     (info.addr().clone(), info.redis_settings().db())
 }
 
-pub(crate) fn config_from_env() -> Config {
+pub(crate) fn validated_workflows_redis_urls() -> (String, String) {
     let redis_url = workflows_redis_url();
     let control_redis_url = control_redis_url();
     let workflows_identity = redis_database_identity(
@@ -119,10 +120,18 @@ pub(crate) fn config_from_env() -> Config {
         Some(WORKFLOWS_REDIS_DB),
         "Workflows Redis URL is invalid",
     );
+    let archive_identity = redis_database_identity(
+        &redis_url,
+        Some(WORKFLOWS_ARCHIVE_REDIS_DB),
+        "Workflows Redis URL is invalid",
+    );
     let control_identity =
         redis_database_identity(&control_redis_url, None, "Control Redis URL is invalid");
     if workflows_identity == control_identity {
         panic!("Workflows DB 2 must not share the Control Redis database");
+    }
+    if archive_identity == control_identity {
+        panic!("Workflows archive DB 15 must not share the Control Redis database");
     }
     let data_redis_url = optional_env("DATA_REDIS_URL")
         .unwrap_or_else(|| env::var("REDIS_URL").unwrap_or_else(|_| DEFAULT_REDIS_URL.to_string()));
@@ -130,6 +139,14 @@ pub(crate) fn config_from_env() -> Config {
     if workflows_identity == data_identity {
         panic!("Workflows DB 2 must not share the data-plane Redis database");
     }
+    if archive_identity == data_identity {
+        panic!("Workflows archive DB 15 must not share the data-plane Redis database");
+    }
+    (redis_url, control_redis_url)
+}
+
+pub(crate) fn config_from_env() -> Config {
+    let (redis_url, control_redis_url) = validated_workflows_redis_urls();
     let runtime_host = env::var("RUNTIME_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let runtime_port = env_u16("RUNTIME_PORT", 8088);
     let dispatch_timeout_ms = env_u64("WORKFLOWS_DISPATCH_TIMEOUT_MS", 60_000);

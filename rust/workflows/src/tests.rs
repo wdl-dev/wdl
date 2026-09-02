@@ -206,6 +206,46 @@ fn workflows_rejects_equivalent_data_plane_db2_urls_without_leaking_credentials(
 }
 
 #[test]
+fn workflows_rejects_control_or_data_plane_on_archive_db15_without_leaking_credentials() {
+    for (control_url, data_url, expected, secret) in [
+        (
+            "redis://control-user:control-secret@shared/15?protocol=resp2",
+            "redis://shared:6379/1",
+            "Workflows archive DB 15 must not share the Control Redis database",
+            "control-secret",
+        ),
+        (
+            "redis://shared:6379/0",
+            "redis://data-user:data-secret@shared/15?protocol=resp2",
+            "Workflows archive DB 15 must not share the data-plane Redis database",
+            "data-secret",
+        ),
+    ] {
+        temp_env(
+            &[
+                (
+                    "WORKFLOWS_REDIS_URL",
+                    Some("redis://workflow-user:workflow-secret@shared:6379/2?protocol=resp3"),
+                ),
+                ("CONTROL_REDIS_URL", Some(control_url)),
+                ("DATA_REDIS_URL", Some(data_url)),
+                ("WORKFLOWS_REDIS_DB", None),
+            ],
+            || {
+                let Err(panic) = std::panic::catch_unwind(config_from_env) else {
+                    panic!("shared owner and Workflows archive DB 15 must fail closed");
+                };
+                let message = panic_message(panic);
+                assert!(message.contains(expected));
+                assert!(!message.contains("workflow-secret"));
+                assert!(!message.contains(secret));
+                assert!(!message.contains("redis://"));
+            },
+        );
+    }
+}
+
+#[test]
 fn workflows_rejects_data_plane_db2_from_the_redis_url_fallback() {
     temp_env(
         &[

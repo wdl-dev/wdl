@@ -654,58 +654,94 @@ test("handleWorkflowRunDispatch rejects terminal outcomes settled after the dead
 });
 
 test("handleWorkflowRunDispatch bounds a root run Promise at the absolute deadline", async () => {
-  const scope = makeScope();
-  scope.requestId = "rid-hung-root";
+  let now = 1_000;
+  const deadlineMs = 1_100;
+  /** @type {(() => void) | null} */
+  let fireDeadline = null;
+  /** @type {number | null} */
+  let scheduledDelayMs = null;
+  let timerCleared = false;
+  const timerHandle = /** @type {ReturnType<typeof setTimeout>} */ ({});
+  const fakeSetTimeout = /** @type {typeof setTimeout} */ ((
+    /** @type {() => void} */ callback,
+    /** @type {number | undefined} */ delayMs
+  ) => {
+    fireDeadline = /** @type {() => void} */ (callback);
+    scheduledDelayMs = Number(delayMs);
+    return timerHandle;
+  });
+  const fakeClearTimeout = /** @type {typeof clearTimeout} */ ((handle) => {
+    assert.equal(handle, timerHandle);
+    timerCleared = true;
+  });
   const lateRun = Promise.withResolvers();
   /** @type {Array<{ report(code: string): Promise<void> | void }>} */
   const issuedReporters = [];
-  const dispatch = handleWorkflowRunDispatch({
-    run: {
-      ns: "demo",
-      worker: "shop",
-      frozenVersion: "v1",
-      workflowName: "orders",
-      workflowKey: "wf_hung-root",
-      className: "OrderWorkflow",
-      instanceId: "inst-hung-root",
-      generation: 1,
-      runToken: "run-1",
-      dispatchDeadlineMs: Date.now() + 100,
-      event: { payload: {} },
-    },
-    scope,
-    env: workflowEnv(null),
-    stub: makeStub({
-      entrypoints: {
-        OrderWorkflow: {
-          run() { return lateRun.promise; },
-        },
-      },
-    }, {
-      onGetEntrypoint(options) {
-        issuedReporters.push(workflowInfrastructureReporter(options));
-      },
-    }),
-  });
+  await withMockedProperty(Date, "now", () => now, async () => {
+    await withMockedProperty(globalThis, "setTimeout", fakeSetTimeout, async () => {
+      await withMockedProperty(globalThis, "clearTimeout", fakeClearTimeout, async () => {
+        const scope = makeScope();
+        scope.requestId = "rid-hung-root";
+        const dispatch = handleWorkflowRunDispatch({
+          run: {
+            ns: "demo",
+            worker: "shop",
+            frozenVersion: "v1",
+            workflowName: "orders",
+            workflowKey: "wf_hung-root",
+            className: "OrderWorkflow",
+            instanceId: "inst-hung-root",
+            generation: 1,
+            runToken: "run-1",
+            dispatchDeadlineMs: deadlineMs,
+            event: { payload: {} },
+          },
+          scope,
+          env: workflowEnv(null),
+          stub: makeStub({
+            entrypoints: {
+              OrderWorkflow: {
+                run() { return lateRun.promise; },
+              },
+            },
+          }, {
+            onGetEntrypoint(options) {
+              issuedReporters.push(workflowInfrastructureReporter(options));
+            },
+          }),
+        });
+        let dispatchSettled = false;
+        void dispatch.then(() => {
+          dispatchSettled = true;
+        });
 
-  const settled = await settlementWithin(dispatch, 1000);
-  assert.equal(settled.status, "fulfilled");
-  if (settled.status !== "fulfilled") throw new Error("workflow dispatch did not settle");
-  assert.equal(
-    (await readJsonResponse(settled.value, 503)).error,
-    "workflow_backend_unavailable"
-  );
-  assert.equal(scope.errors.length, 1);
-  const staleReporter = issuedReporters[0];
-  assert.ok(staleReporter);
-  assert.throws(
-    () => staleReporter.report(
-      runtimeInfrastructureError.KV_READ_INFRASTRUCTURE_ERROR_CODE
-    ),
-    /closed or invalid/
-  );
-  lateRun.reject(new Error("late tenant rejection"));
-  await delay(0);
+        await Promise.resolve();
+        assert.equal(scheduledDelayMs, 100);
+        assert.equal(dispatchSettled, false);
+        assert.ok(fireDeadline);
+        now = deadlineMs;
+        fireDeadline();
+
+        const response = await dispatch;
+        assert.equal(
+          (await readJsonResponse(response, 503)).error,
+          "workflow_backend_unavailable"
+        );
+        assert.equal(timerCleared, true);
+        assert.equal(scope.errors.length, 1);
+        const staleReporter = issuedReporters[0];
+        assert.ok(staleReporter);
+        assert.throws(
+          () => staleReporter.report(
+            runtimeInfrastructureError.KV_READ_INFRASTRUCTURE_ERROR_CODE
+          ),
+          /closed or invalid/
+        );
+        lateRun.reject(new Error("late tenant rejection"));
+        await Promise.resolve();
+      });
+    });
+  });
 });
 
 test("handleWorkflowRunDispatch rechecks the deadline after terminal response construction", async (t) => {

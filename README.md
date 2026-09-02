@@ -129,6 +129,7 @@ Valkey/Redis uses a deliberate logical split:
   workflow definitions.
 - DB 1: data-plane KV, queue streams, delayed queues, orphan streams, log-tail streams.
 - DB 2: workflow instance state, step records, ready/due shards, events, run leases.
+- DB 15: inactive schema-2 Workflow archive while explicit migration is pending.
 
 S3-compatible storage backs ASSETS and R2. D1 and Durable Object SQLite files live on
 workerd `localDisk` storage. In production-shaped environments, those map to managed or

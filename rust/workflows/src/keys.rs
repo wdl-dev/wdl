@@ -4,9 +4,14 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const DO_ALARM_READY_SHARDS: usize = 32;
 pub(crate) const WORKFLOW_READY_SHARDS: usize = 32;
+pub(crate) const DO_ALARM_KEY_PREFIX: &str = "wf:internal:do-alarm:";
 
 pub(crate) fn schema_version_key() -> &'static str {
     "wf:schema_version"
+}
+
+pub(crate) fn schema3_reset_key() -> &'static str {
+    "wf:schema3-reset"
 }
 
 pub(crate) fn workflow_defs_key(ns: &str, worker: &str) -> String {
@@ -201,11 +206,11 @@ pub(crate) fn do_alarm_ready_shard(job_id: &str) -> usize {
 }
 
 pub(crate) fn do_alarm_due_key(shard: usize) -> String {
-    format!("wf:internal:do-alarm:due:{shard}")
+    format!("{DO_ALARM_KEY_PREFIX}due:{shard}")
 }
 
 pub(crate) fn do_alarm_ready_key(shard: usize) -> String {
-    format!("wf:internal:do-alarm:ready:{shard}")
+    format!("{DO_ALARM_KEY_PREFIX}ready:{shard}")
 }
 
 pub(crate) fn do_alarm_ready_active_key() -> &'static str {
@@ -227,7 +232,11 @@ pub(crate) fn do_alarm_shard_queue_keys() -> ShardQueueKeys {
 }
 
 pub(crate) fn do_alarm_by_worker_key(ns: &str, worker: &str) -> String {
-    format!("wf:internal:do-alarm:by-worker:{ns}:{worker}")
+    format!("{DO_ALARM_KEY_PREFIX}by-worker:{ns}:{worker}")
+}
+
+pub(crate) fn is_do_alarm_key(key: &str) -> bool {
+    key.starts_with(DO_ALARM_KEY_PREFIX)
 }
 
 pub(crate) struct DoAlarmJobKeys {
@@ -247,7 +256,7 @@ impl DoAlarmJobKeys {
     }
 
     pub(crate) fn state(&self) -> String {
-        format!("wf:internal:do-alarm:{{{}}}:state", self.job_id)
+        format!("{DO_ALARM_KEY_PREFIX}{{{}}}:state", self.job_id)
     }
 
     pub(crate) fn due(&self) -> String {

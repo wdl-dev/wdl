@@ -637,6 +637,18 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
     timeoutMs: null,
   });
   if (!response.ok) {
+    if (
+      response.status === 409 &&
+      isRecord(body) &&
+      body.error === "workflow_migration_pending"
+    ) {
+      throw new ControlAbort(409, "workflow_migration_pending", {
+        message: typeof body.message === "string"
+          ? body.message
+          : "Workflow state migration is pending",
+        ...context,
+      });
+    }
     throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
       message: "Workflow lifecycle check failed",
       ...context,

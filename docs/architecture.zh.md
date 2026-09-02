@@ -116,9 +116,10 @@ Tenant-running Fargate task role 必须保持 least-privilege；tenant code 不�
 
 Valkey logical DB 按 authority 切分：
 
-- DB 0：control-plane metadata、route state、lifecycle index、secrets、referrer index、D1/DO metadata、AI provider/credential record、cron config、queue consumer projection。
+- DB 0：control-plane metadata、route state、lifecycle index、secrets、referrer index、D1/DO metadata、AI provider/credential record、cron config、queue consumer projection，以及 Workflows-owned operator schema-reset state。
 - DB 1：data-plane KV、queue streams、delayed queues、log-tail streams、cleanup queues。
 - DB 2：workflows workflow instance state。
+- DB 15：显式 migration pending 期间的 inactive schema-2 Workflow archive；正常 service 不会选择该数据库。
 
 Index 通常是可重建 projection。Authority 在每个模块文档列出的 owning hash、stream 或 lifecycle record 中。新增 fallback SCAN 或 secondary writer 前，必须说明 index 是权威还是可修复。
 

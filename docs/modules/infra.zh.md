@@ -86,6 +86,7 @@ Logical DB 切分：
 - DB 0：control-plane metadata。
 - DB 1：data-plane KV、queue、log-tail streams。
 - DB 2：workflows instance state。
+- DB 15：migration pending 期间的 inactive schema-2 Workflow archive。
 
 Stateful storage：
 

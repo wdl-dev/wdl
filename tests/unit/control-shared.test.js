@@ -688,6 +688,35 @@ test("assertWorkflowDeleteAllowed hides transport diagnostics from response deta
   });
 });
 
+test("assertWorkflowDeleteAllowed preserves the migration-pending conflict", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  state.workflows = {
+    async fetch() {
+      return Response.json(
+        {
+          error: "workflow_migration_pending",
+          message: "Workflow state migration from archive DB 15 has not completed",
+        },
+        { status: 409 }
+      );
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" }),
+    (err) => {
+      assert.ok(err instanceof ControlAbort);
+      const abort = /** @type {InstanceType<typeof ControlAbort>} */ (err);
+      assert.equal(abort.status, 409);
+      assert.equal(abort.code, "workflow_migration_pending");
+      assert.equal(abort.details.namespace, "demo");
+      assert.equal(abort.details.worker, "api");
+      return true;
+    }
+  );
+});
+
 test("assertWorkflowDeleteAllowed preserves active workflow blockers", async (t) => {
   restoreControlSharedStateAfter(t);
   state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
