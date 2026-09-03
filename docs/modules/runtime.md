@@ -288,16 +288,20 @@ Data-plane bindings use their own storage:
   Workflow `run()` Promise or wrapped `step.do()` callback Promise, the wrapper reports
   only when the capability also belongs to the current Workflow env. It uses the
   pre-captured native `ServiceStub.fetch` trampoline and Runtime returns retryable 503; a
-  callback report is observed before `commit-step-error`. The tenant receives an explicit
+  callback report is observed before `commit-step-error`. If the reporter transport
+  rejects before recording the failure, the wrapper encodes the active report nonce in
+  the boundary Error's standard message; Runtime accepts only an exact active-nonce
+  match and sets the same failure latch. The tenant receives an explicit
   null-prototype step facade, so reflection and `dup()` cannot recover the raw
-  reverse-JSRPC target. Catching the Error inside the corresponding boundary and returning
-  a fallback permits that fallback to commit. Once an Error escapes a step callback,
-  catching the rejected `step.do()` in outer `run()` does not undo the report.
+  reverse-JSRPC target. Catching the Error
+  inside the corresponding boundary and returning a fallback permits that fallback to
+  commit. Once an Error escapes a step callback, catching the rejected `step.do()` in
+  outer `run()` does not undo the report.
   Detaching a Promise likewise only keeps its settlement outside the current boundary;
   neither action erases the private Error-to-capability association. A replacement,
   wrapper, `cause`, or `AggregateError` does not inherit provenance. Rethrowing the exact
-  Error may report under the same capability-membership check. No message or
-  tenant-created error code is trusted.
+  Error may report under the same capability-membership check. No fixed message or
+  tenant-created error code is trusted by itself.
 - Workflow bindings call `workflows`; runtime does not read DB 2 directly. Frozen
   Workflow identity exists once in binding-scoped host props. The generated facade
   carries only public operation fields, and Node-compatible `process.env` cannot expose

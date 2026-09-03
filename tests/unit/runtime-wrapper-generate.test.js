@@ -20,6 +20,7 @@ import {
   moduleDataUrl,
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { withMockedPropertyDescriptor } from "../helpers/mock-global.js";
 
 const HOST_BINDING_RUNTIME_TEST_SOURCE = applyModuleReplacements(HOST_BINDING_RUNTIME_SOURCE, [
   [
@@ -28,7 +29,10 @@ const HOST_BINDING_RUNTIME_TEST_SOURCE = applyModuleReplacements(HOST_BINDING_RU
   ],
 ]);
 const KV_BINDINGS = ["CACHE"];
+const WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP =
+  `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}Id`;
 let workflowWrapperModuleEnvSequence = 0;
+let workflowReporterSequence = 0;
 
 function generatedWrappers() {
   return {
@@ -175,23 +179,30 @@ async function loadWorkflowWrapper(userSource, options = {}) {
   }
 }
 
-function workflowReporter() {
+/** @param {{ reject?: boolean }} [options] */
+function workflowReporter(options = {}) {
   /** @type {unknown[]} */
   const codes = [];
-  const capability = Object.create({
+  const reporter = Object.create({
     report() { codes.push("prototype-report-intercepted"); },
   });
-  capability.fetch = mockFetcherFetch;
+  reporter.fetch = mockFetcherFetch;
   /** @param {RequestInfo | URL} input */
-  capability.__fetch = (input) => {
+  reporter.__fetch = (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     assert.equal(url.origin, WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN);
+    if (options.reject === true) throw new Error("report transport failed");
     codes.push(url.pathname.slice(1));
     return new Response(null, { status: 204 });
   };
+  const reportId = `test-report-${workflowReporterSequence += 1}`;
   return {
     codes,
-    capability,
+    reportId,
+    props: {
+      [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: reporter,
+      [WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP]: reportId,
+    },
   };
 }
 
@@ -379,14 +390,14 @@ test("workflow wrappers brand cached KV failures only when the same Error escape
 
   const shadowReporter = workflowReporter();
   const shadow = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: shadowReporter.capability },
+    props: shadowReporter.props,
   }, { CACHE: rawKv });
   assert.equal(await shadow.run({ mode: "shadow-forged" }, {}), "value");
   assert.deepEqual(shadowReporter.codes, []);
 
   const optionsReporter = workflowReporter();
   const options = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: optionsReporter.capability },
+    props: optionsReporter.props,
   }, { CACHE: rawKv });
   assert.equal(await options.run({ mode: "get-options" }, {}), "value");
   assert.deepEqual(getCalls, [
@@ -397,7 +408,7 @@ test("workflow wrappers brand cached KV failures only when the same Error escape
 
   const timingReporter = workflowReporter();
   const timing = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: timingReporter.capability },
+    props: timingReporter.props,
   }, { CACHE: rawKv });
   assert.deepEqual(await timing.run({ mode: "projection-timing" }, {}), [
     {
@@ -414,7 +425,7 @@ test("workflow wrappers brand cached KV failures only when the same Error escape
 
   const nullableReporter = workflowReporter();
   const nullable = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: nullableReporter.capability },
+    props: nullableReporter.props,
   }, { CACHE: rawKv });
   assert.deepEqual(await nullable.run({ mode: "nullable-list" }, {}), {
     keys: [],
@@ -431,21 +442,72 @@ test("workflow wrappers brand cached KV failures only when the same Error escape
   failure = true;
 
   const caughtReporter = workflowReporter();
-  const caughtProps = {
-    [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: caughtReporter.capability,
-  };
+  const caughtProps = { ...caughtReporter.props };
   const caught = new wrapped.Flow({ props: caughtProps }, { CACHE: rawKv });
   assert.equal(await caught.run({ mode: "caught" }, {}), "fallback");
   assert.deepEqual(caughtReporter.codes, []);
   assert.deepEqual(user.observedProps[0], {});
   assert.equal(Object.hasOwn(caughtProps, WORKFLOW_INFRASTRUCTURE_REPORTER_PROP), false);
+  assert.equal(Object.hasOwn(caughtProps, WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP), false);
 
   const uncaughtReporter = workflowReporter();
   const uncaught = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: uncaughtReporter.capability },
+    props: uncaughtReporter.props,
   }, { CACHE: rawKv });
   await assert.rejects(() => uncaught.run({ mode: "uncaught" }, {}), /KV read failed/);
   assert.deepEqual(uncaughtReporter.codes, [KV_READ_INFRASTRUCTURE_ERROR_CODE]);
+
+  const unavailableReporter = workflowReporter({ reject: true });
+  const unavailable = new wrapped.Flow({
+    props: unavailableReporter.props,
+  }, { CACHE: rawKv });
+  let nonceSetterCalls = 0;
+  const throwingGetter = (/** @type {string} */ name) => ({
+    get() { throw new Error(`inherited ${name} getter must not run`); },
+  });
+  await withMockedPropertyDescriptor(
+    /** @type {any} */ (Object.prototype),
+    WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP,
+    { set() { nonceSetterCalls += 1; } },
+    () => withMockedPropertyDescriptor(
+      /** @type {any} */ (Error.prototype),
+      "stack",
+      throwingGetter("stack"),
+      () => withMockedPropertyDescriptor(
+        /** @type {any} */ (Error.prototype),
+        "overloaded",
+        throwingGetter("overloaded"),
+        () => withMockedPropertyDescriptor(
+          /** @type {any} */ (Error.prototype),
+          "retryable",
+          throwingGetter("retryable"),
+          () => assert.rejects(
+            () => unavailable.run({ mode: "uncaught" }, {}),
+            (error) => {
+              assert.ok(error instanceof Error);
+              assert.equal(Object.hasOwn(error, "name"), true);
+              assert.equal(Object.hasOwn(error, "message"), true);
+              assert.deepEqual(Reflect.ownKeys(error).toSorted(), ["message", "name"]);
+              assert.equal(error.stack, undefined);
+              assert.equal(Reflect.get(error, "overloaded"), false);
+              assert.equal(Reflect.get(error, "retryable"), false);
+              assert.equal(
+                error.message,
+                `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}:${unavailableReporter.reportId}`
+              );
+              assert.equal(
+                Object.hasOwn(error, WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP),
+                false
+              );
+              return true;
+            }
+          )
+        )
+      )
+    )
+  );
+  assert.equal(nonceSetterCalls, 0);
+  assert.deepEqual(unavailableReporter.codes, []);
 
   for (const mode of [
     "forged",
@@ -456,7 +518,7 @@ test("workflow wrappers brand cached KV failures only when the same Error escape
   ]) {
     const reporter = workflowReporter();
     const flow = new wrapped.Flow({
-      props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: reporter.capability },
+      props: reporter.props,
     }, { CACHE: rawKv });
     await assert.rejects(() => flow.run({ mode }, {}));
     assert.deepEqual(reporter.codes, []);
@@ -464,14 +526,14 @@ test("workflow wrappers brand cached KV failures only when the same Error escape
 
   const captureReporter = workflowReporter();
   const capture = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: captureReporter.capability },
+    props: captureReporter.props,
   }, { CACHE: rawKv });
   assert.equal(await capture.run({ mode: "capture" }, {}), "captured");
   assert.deepEqual(captureReporter.codes, []);
 
   const relayReporter = workflowReporter();
   const relay = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: relayReporter.capability },
+    props: relayReporter.props,
   }, { CACHE: rawKv });
   await assert.rejects(() => relay.run({ mode: "relay" }, {}), /KV read failed/);
   assert.deepEqual(relayReporter.codes, [KV_READ_INFRASTRUCTURE_ERROR_CODE]);
@@ -538,7 +600,7 @@ test("workflow wrappers report only KV Errors escaping the durable callback boun
   for (const mode of ["caught", "new-error", "forged", "detached"]) {
     const reporter = workflowReporter();
     const flow = new wrapped.Flow({
-      props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: reporter.capability },
+      props: reporter.props,
     }, { CACHE: rawKv });
     if (mode === "caught") {
       assert.equal(await flow.run({ mode }, step), "fallback");
@@ -552,7 +614,7 @@ test("workflow wrappers report only KV Errors escaping the durable callback boun
 
   const escapedReporter = workflowReporter();
   const escaped = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: escapedReporter.capability },
+    props: escapedReporter.props,
   }, { CACHE: rawKv });
   assert.equal(
     await escaped.run({ mode: "same-error", outerCatch: true }, step),
@@ -562,7 +624,7 @@ test("workflow wrappers report only KV Errors escaping the durable callback boun
 
   const descriptorReporter = workflowReporter();
   const descriptor = new wrapped.Flow({
-    props: { [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: descriptorReporter.capability },
+    props: descriptorReporter.props,
   }, { CACHE: rawKv });
   assert.equal(
     await descriptor.run({ mode: "descriptor", outerCatch: true }, step),
@@ -718,17 +780,13 @@ test("workflow KV facade preserves disallow_importable_env capability identity",
     /tenant constructor failed/
   );
   const first = new wrapped.Flow({
-    props: {
-      [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: workflowReporter().capability,
-    },
+    props: workflowReporter().props,
   }, { CACHE: rawKv });
   assert.deepEqual(await first.run({}, step), expected);
 
   const fakeRelayReporter = workflowReporter();
   const fakeRelay = new wrapped.Flow({
-    props: {
-      [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: fakeRelayReporter.capability,
-    },
+    props: fakeRelayReporter.props,
   }, { CACHE: rawKv });
   await assert.rejects(
     () => fakeRelay.run({ useFakeFacade: true }, step),
@@ -739,9 +797,7 @@ test("workflow KV facade preserves disallow_importable_env capability identity",
   failWithSharedHostError = true;
   const captureReporter = workflowReporter();
   const capture = new wrapped.Flow({
-    props: {
-      [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: captureReporter.capability,
-    },
+    props: captureReporter.props,
   }, { CACHE: rawKv });
   assert.equal(await capture.run({ captureHostError: true }, step), "captured");
   assert.deepEqual(captureReporter.codes, []);
@@ -749,18 +805,14 @@ test("workflow KV facade preserves disallow_importable_env capability identity",
 
   const relayReporter = workflowReporter();
   const relay = new wrapped.Flow({
-    props: {
-      [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: relayReporter.capability,
-    },
+    props: relayReporter.props,
   }, { CACHE: rawKv });
   await assert.rejects(() => relay.run({ relayHostError: true }, step), /KV read failed/);
   assert.deepEqual(relayReporter.codes, [KV_READ_INFRASTRUCTURE_ERROR_CODE]);
 
   const fakeOverwriteReporter = workflowReporter();
   const fakeOverwrite = new wrapped.Flow({
-    props: {
-      [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: fakeOverwriteReporter.capability,
-    },
+    props: fakeOverwriteReporter.props,
   }, { CACHE: rawKv });
   await assert.rejects(
     () => fakeOverwrite.run({ useFakeFacade: true, relayHostErrorThroughFake: true }, step),
@@ -772,9 +824,7 @@ test("workflow KV facade preserves disallow_importable_env capability identity",
     throw new Error("later KV method shadow must not replace the bound callable");
   };
   const second = new wrapped.Flow({
-    props: {
-      [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: workflowReporter().capability,
-    },
+    props: workflowReporter().props,
   }, { CACHE: rawKv });
   assert.deepEqual(await second.run({}, step), expected);
   assert.deepEqual(calls, [

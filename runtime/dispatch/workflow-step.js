@@ -432,7 +432,7 @@ async function fetchReplayStepPage(backend, run, cache, ordinal, requestId, dead
  * @param {WorkflowRun & { dispatchDeadlineMs: number }} run
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string | null} [requestId]
- * @param {() => boolean | Promise<boolean>} [infrastructureFailure]
+ * @param {(error?: unknown) => boolean | Promise<boolean>} [infrastructureFailure]
  */
 export function createStepController(
   run,
@@ -891,12 +891,12 @@ export function createStepController(
           }
           assertRunStillOpen();
         } catch (err) {
-          if (runReturned) throw err;
-          if (await infrastructureFailure()) {
+          if (await infrastructureFailure(err)) {
             throw workflowInfrastructureError(
               "Runtime KV infrastructure failure escaped tenant boundary"
             );
           }
+          if (runReturned) throw err;
           const error = workflowError(err);
           assertRunStillOpen();
           const committed = await workflowBackendCall(backend, "commit-step-error", {

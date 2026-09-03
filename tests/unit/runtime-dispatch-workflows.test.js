@@ -26,6 +26,8 @@ const {
   runtimeDispatchWorkflowStep,
   runtimeInfrastructureError,
 } = await loadRuntimeDispatch();
+const WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP =
+  `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}Id`;
 
 /** @param {{ props?: Record<string, unknown> } | undefined} options */
 function workflowInfrastructureReporter(options) {
@@ -33,8 +35,11 @@ function workflowInfrastructureReporter(options) {
     options?.props?.[WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]
   );
   assert.ok(reporter && typeof reporter.fetch === "function");
+  const reportId = options?.props?.[WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP];
+  assert.equal(typeof reportId, "string");
   const reporterFetch = /** @type {(request: Request) => unknown} */ (reporter.fetch);
   return {
+    reportId,
     /** @param {string} code */
     report(code) {
       reporterFetch.call(
@@ -45,6 +50,17 @@ function workflowInfrastructureReporter(options) {
       );
     },
   };
+}
+
+/**
+ * @param {{ props?: Record<string, unknown> } | undefined} options
+ * @param {string} [reportIdOverride]
+ */
+function workflowInfrastructureReportTransportError(options, reportIdOverride) {
+  const activeReportId = workflowInfrastructureReporter(options).reportId;
+  return new Error(
+    `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}:${reportIdOverride ?? activeReportId}`
+  );
 }
 const workflowJson = await importRepositoryModule(
   "runtime/dispatch/workflow-json.js",
@@ -100,6 +116,8 @@ function handleWorkflowRunDispatch(args) {
   });
 }
 const {
+  createStepController,
+  isWorkflowInfrastructureError,
   MAX_WORKFLOW_ACTIVE_STEPS_PER_RUN_TURN,
   MAX_WORKFLOW_STARTED_STEPS_PER_RUN_TURN,
   WORKFLOW_BACKEND_RESPONSE_MAX_BYTES,
@@ -3846,6 +3864,130 @@ test("handleWorkflowRunDispatch retries when the run boundary reports a KV failu
   assert.equal(
     /** @type {Error} */ (scope.errors[0]).message,
     "Runtime KV infrastructure failure escaped tenant boundary"
+  );
+});
+
+test("handleWorkflowRunDispatch fails closed when Workflow infrastructure reporting rejects", async () => {
+  const scope = makeScope();
+  /** @type {Error | null} */
+  let reportError = null;
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_report-transport-failure",
+      className: "OrderWorkflow",
+      instanceId: "inst-report-transport-failure",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope,
+    env: workflowEnv(null),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run() { throw reportError; },
+        },
+      },
+    }, {
+      onGetEntrypoint(options) {
+        reportError = workflowInfrastructureReportTransportError(options);
+      },
+    }),
+  });
+
+  assert.equal((await readJsonResponse(response, 503)).error, "workflow_backend_unavailable");
+  assert.equal(scope.errors.length, 1);
+  assert.equal(
+    /** @type {Error} */ (scope.errors[0]).message,
+    "Runtime KV infrastructure failure escaped tenant boundary"
+  );
+});
+
+test("handleWorkflowRunDispatch ignores a mismatched infrastructure report nonce", async () => {
+  /** @type {Error | null} */
+  let reportError = null;
+  const response = await handleWorkflowRunDispatch({
+    run: {
+      ns: "demo",
+      worker: "shop",
+      frozenVersion: "v1",
+      workflowName: "orders",
+      workflowKey: "wf_forged-report-transport",
+      className: "OrderWorkflow",
+      instanceId: "inst-forged-report-transport",
+      generation: 1,
+      runToken: "run-1",
+      event: { payload: {} },
+    },
+    scope: makeScope(),
+    env: workflowEnv(null),
+    stub: makeStub({
+      entrypoints: {
+        OrderWorkflow: {
+          async run() { throw reportError; },
+        },
+      },
+    }, {
+      onGetEntrypoint(options) {
+        reportError = workflowInfrastructureReportTransportError(options, "forged-report-id");
+      },
+    }),
+  });
+
+  const body = await readJsonResponse(response, 200);
+  assert.equal(body.outcome, "failed");
+  assert.deepEqual(body.error, {
+    name: "Error",
+    message: `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}:forged-report-id`,
+  });
+});
+
+test("step controller checks late callback infrastructure before run closure", async () => {
+  const reportError = new Error("Workflow infrastructure report transport failed");
+  const callbackStarted = Promise.withResolvers();
+  const releaseCallback = Promise.withResolvers();
+  /** @type {unknown[]} */
+  const observedErrors = [];
+  const backend = makeWorkflowBackend(async (url) => {
+    if (url.endsWith("/claim-step")) return Response.json({ state: "run", attempt: 1 });
+    if (url.endsWith("/commit-step-error")) {
+      throw new Error("report transport failure must not become a durable step error");
+    }
+    throw new Error(`unexpected backend call: ${url}`);
+  });
+  const controller = createStepController({
+    ns: "demo",
+    worker: "shop",
+    frozenVersion: "v1",
+    workflowName: "orders",
+    workflowKey: "wf_report-transport-step",
+    className: "OrderWorkflow",
+    instanceId: "inst-report-transport-step",
+    generation: 1,
+    runToken: "run-1",
+    createdAtMs: 1,
+    dispatchDeadlineMs: Date.now() + 60_000,
+  }, backend, null, (/** @type {unknown} */ error) => {
+    observedErrors.push(error);
+    return error === reportError;
+  });
+  const stepPromise = controller.facade.do("read", async () => {
+    callbackStarted.resolve(undefined);
+    await releaseCallback.promise;
+    throw reportError;
+  });
+  await callbackStarted.promise;
+  controller.closeForRunReturn();
+  releaseCallback.resolve(undefined);
+  await assert.rejects(stepPromise, isWorkflowInfrastructureError);
+  assert.deepEqual(observedErrors, [reportError]);
+  assert.equal(
+    backend.calls.some((call) => call.url.endsWith("/commit-step-error")),
+    false
   );
 });
 

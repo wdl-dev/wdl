@@ -17,6 +17,7 @@ import { sanitizeRequestId } from "./_wdl-request-id.js";
 
 const IntrinsicObject = Object;
 const IntrinsicArray = Array;
+const IntrinsicError = Error;
 const IntrinsicPromise = Promise;
 const IntrinsicProxy = Proxy;
 const IntrinsicReflect = Reflect;
@@ -33,6 +34,7 @@ const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectHasOwn = Object.hasOwn;
 const intrinsicObjectIsPrototypeOf = Object.prototype.isPrototypeOf;
 const intrinsicObjectKeys = Object.keys;
+const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicPromiseResolve = Promise.resolve;
 const intrinsicPromiseThen = Promise.prototype.then;
 const intrinsicReflectApply = Reflect.apply;
@@ -83,6 +85,49 @@ export function createPrivateIdentityMap() {
 
 export function createNullPrototypeObject() {
   return intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null]);
+}
+
+function defineIntrinsicDataProperty(target, name, value) {
+  const descriptor = intrinsicReflectApply(
+    intrinsicObjectCreate,
+    IntrinsicObject,
+    [null]
+  );
+  descriptor.value = value;
+  intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [
+    target,
+    name,
+    descriptor,
+  ]);
+}
+
+let privateErrorPrototype = null;
+
+function getPrivateErrorPrototype() {
+  if (privateErrorPrototype === null) {
+    // Workerd reads these through ordinary Get(), but copies generic own Error
+    // fields through a setter-sensitive temporary object during serialization.
+    privateErrorPrototype = intrinsicReflectApply(
+      intrinsicObjectCreate,
+      IntrinsicObject,
+      [IntrinsicError.prototype]
+    );
+    defineIntrinsicDataProperty(privateErrorPrototype, "stack", undefined);
+    defineIntrinsicDataProperty(privateErrorPrototype, "overloaded", false);
+    defineIntrinsicDataProperty(privateErrorPrototype, "retryable", false);
+  }
+  return privateErrorPrototype;
+}
+
+export function createError(message) {
+  const error = new IntrinsicError(message);
+  intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [
+    error,
+    getPrivateErrorPrototype(),
+  ]);
+  defineIntrinsicDataProperty(error, "name", "Error");
+  intrinsicReflectApply(intrinsicReflectDeleteProperty, IntrinsicReflect, [error, "stack"]);
+  return error;
 }
 
 export function captureRpcMethod(target, property, shadowPrototypes) {
@@ -624,26 +669,51 @@ function wrapKvBinding(binding, bindingIndex, requestContext) {
 function takeWorkflowInfrastructureReporter(ctx) {
   if (!ctx || typeof ctx !== "object") return null;
   const props = __WdlHostRuntime__.reflectGet(ctx, "props", ctx);
-  if (
-    !props ||
-    typeof props !== "object" ||
-    !__WdlHostRuntime__.objectHasOwn(props, WORKFLOW_INFRASTRUCTURE_REPORTER_PROP)
-  ) {
+  if (!props || typeof props !== "object") {
     return null;
+  }
+  const hasReporter = __WdlHostRuntime__.objectHasOwn(
+    props,
+    WORKFLOW_INFRASTRUCTURE_REPORTER_PROP
+  );
+  const hasReportId = __WdlHostRuntime__.objectHasOwn(
+    props,
+    WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP
+  );
+  if (!hasReporter && !hasReportId) return null;
+  if (!hasReporter || !hasReportId) {
+    throw new TypeError("Workflow infrastructure reporter is invalid");
   }
   const reporter = __WdlHostRuntime__.reflectGet(
     props,
     WORKFLOW_INFRASTRUCTURE_REPORTER_PROP,
     props
   );
-  if (!__WdlHostRuntime__.deleteProperty(props, WORKFLOW_INFRASTRUCTURE_REPORTER_PROP)) {
+  const reportId = __WdlHostRuntime__.reflectGet(
+    props,
+    WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP,
+    props
+  );
+  if (
+    !__WdlHostRuntime__.deleteProperty(props, WORKFLOW_INFRASTRUCTURE_REPORTER_PROP) ||
+    !__WdlHostRuntime__.deleteProperty(props, WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP)
+  ) {
     throw new TypeError("Workflow infrastructure reporter could not be consumed");
   }
-  if (!reporter || (typeof reporter !== "object" && typeof reporter !== "function")) {
+  if (
+    !reporter ||
+    (typeof reporter !== "object" && typeof reporter !== "function") ||
+    typeof reportId !== "string" ||
+    reportId.length === 0
+  ) {
     throw new TypeError("Workflow infrastructure reporter is invalid");
   }
   ${needsWorkflowKvFacade
-    ? "return __WdlBindWorkflowInfrastructureReporter__(reporter);"
+    ? `const bound = __WdlBindWorkflowInfrastructureReporter__(reporter);
+  __WdlHostRuntime__.defineProperty(bound, WORKFLOW_INFRASTRUCTURE_REPORT_ID, {
+    value: reportId,
+  });
+  return bound;`
     : "return true;"}
 }
 
@@ -684,11 +754,25 @@ ${needsWorkflowKvFacade ? `async function invokeWorkflowBoundary(callback, reque
       if (!report) {
         throw new TypeError("Workflow infrastructure reporter is unavailable");
       }
-      await __WdlHostRuntime__.applyFunction(
-        report,
-        undefined,
-        [KV_READ_INFRASTRUCTURE_ERROR_CODE]
-      );
+      try {
+        await __WdlHostRuntime__.applyFunction(
+          report,
+          undefined,
+          [KV_READ_INFRASTRUCTURE_ERROR_CODE]
+        );
+      } catch {
+        // Preserve fail-closed classification when the report side-channel
+        // rejects before its host-local latch is set.
+        const reportError = __WdlHostRuntime__.createError(
+          WORKFLOW_INFRASTRUCTURE_REPORT_FAILURE_PREFIX +
+          __WdlHostRuntime__.reflectGet(
+            report,
+            WORKFLOW_INFRASTRUCTURE_REPORT_ID,
+            report
+          )
+        );
+        throw reportError;
+      }
     }
     throw error;
   }
@@ -801,6 +885,9 @@ const IMPORTABLE_ENV_DISABLED = ${JSON.stringify(importableEnvDisabled)};
 const AI_CATALOG_SCOPE = {};
 const HOST_BINDINGS_WRAPPED = __WdlHostRuntime__.createPrivateSymbol("wdl.host-bindings-wrapped");
 ${hasWorkflowClasses ? `const WORKFLOW_INFRASTRUCTURE_REPORTER_PROP = ${workflowInfrastructureReporterPropJson};` : ""}
+${hasWorkflowClasses ? "const WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP = WORKFLOW_INFRASTRUCTURE_REPORTER_PROP + \"Id\";" : ""}
+${needsWorkflowKvFacade ? "const WORKFLOW_INFRASTRUCTURE_REPORT_FAILURE_PREFIX = WORKFLOW_INFRASTRUCTURE_REPORTER_PROP + \":\";" : ""}
+${needsWorkflowKvFacade ? "const WORKFLOW_INFRASTRUCTURE_REPORT_ID = __WdlHostRuntime__.createPrivateSymbol(\"wdl.workflow-infrastructure-report-id\");" : ""}
 const INTERNAL_BINDING_RE = /^__WDL_[A-Za-z0-9_]*__$/;
 
 function requestIdFromEventArg(arg) {

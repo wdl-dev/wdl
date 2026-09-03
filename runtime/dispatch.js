@@ -40,6 +40,12 @@ import {
   WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
 } from "runtime-infrastructure-error";
 import { WORKFLOW_INFRASTRUCTURE_REPORTER_PROP } from "runtime-load-module-rewrite";
+
+const WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP =
+  `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}Id`;
+const WORKFLOW_INFRASTRUCTURE_REPORT_FAILURE_PREFIX =
+  `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}:`;
+
 /**
  * @typedef {{ respond(response: Response): Response, markError(err: unknown): void, requestId: string }} DispatchScope
  * @typedef {{ fetch(request: Request): Promise<Response>, scheduled?(controller: unknown): Promise<unknown>, queue?(queueName: string, messages: unknown[]): Promise<unknown>, run?(event: unknown, step: unknown): Promise<unknown> }} LoadedEntrypoint
@@ -125,6 +131,19 @@ function recordWorkflowInfrastructureReport(props, code) {
   state.reported = true;
 }
 
+/** @param {unknown} error @param {string} reportId */
+function isWorkflowInfrastructureReportFailure(error, reportId) {
+  if (error === null || (typeof error !== "object" && typeof error !== "function")) {
+    return false;
+  }
+  try {
+    return /** @type {Record<string, unknown>} */ (error).message ===
+      `${WORKFLOW_INFRASTRUCTURE_REPORT_FAILURE_PREFIX}${reportId}`;
+  } catch {
+    return false;
+  }
+}
+
 export class WorkflowInfrastructureReporter extends WorkerEntrypoint {
   /** @param {Request} request */
   fetch(request) {
@@ -150,7 +169,13 @@ function beginWorkflowInfrastructureReport() {
   workflowInfrastructureReports.set(id, state);
   return {
     id,
-    reported: () => state.reported,
+    /** @param {unknown} [error] */
+    reported: (error) => {
+      if (!state.reported && isWorkflowInfrastructureReportFailure(error, id)) {
+        state.reported = true;
+      }
+      return state.reported;
+    },
     close: () => workflowInfrastructureReports.delete(id),
   };
 }
@@ -357,6 +382,7 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
     const entry = stub.getEntrypoint(run.className, {
       props: {
         [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: reporter,
+        [WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP]: infrastructureReport.id,
       },
     });
     const stepController = createStepController(
@@ -434,7 +460,7 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
       }
     }
     step?.closeForRunReturn();
-    if (infrastructureReport.reported()) {
+    if (infrastructureReport.reported(caught)) {
       caught = workflowInfrastructureError(
         "Runtime KV infrastructure failure escaped tenant boundary"
       );

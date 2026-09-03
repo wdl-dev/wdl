@@ -163,8 +163,10 @@ and review must follow these defaults:
   binding identity. Making an Error affect a boundary it does not re-escape requires an
   explicit host-owned protocol instead of more ambient bookkeeping.
 - Keep correctness state in the host isolate or authoritative service. A private
-  capability may carry only a low-cardinality operation into that owner; opaque ids and
-  mutable state stay host-side, are bounded by active operations, and are removed on
+  capability may carry only a low-cardinality operation into that owner. Mutable state
+  stays host-side; an opaque id may cross only through a hidden prop consumed before
+  tenant construction or a generated boundary Error's standard name/message fields,
+  must remain scoped to one active operation, and is removed from the host registry on
   every terminal path.
 - Do not assume a local `RpcTarget` or a stub returned by one RPC can be serialized into
   Dynamic Worker env/props. Evaluate native compatibility flags before building a WDL

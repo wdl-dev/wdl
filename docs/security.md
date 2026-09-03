@@ -120,7 +120,10 @@ property name, symbol, or storage key is unavailable to ordinary tenant code:
   tenant-visible behavior. The current reporter design does not enable
   `allow_irrevocable_stub_storage`: using it here would require extending irrevocable
   stub persistence into the tenant worker, which is broader than the report-only
-  capability. Use a host-owned `ctx.exports` loopback/service stub for this boundary.
+  capability. Use a host-owned `ctx.exports` loopback/service stub for this boundary. A
+  reporter transport rejection may carry the active report nonce back only in the
+  generated boundary Error's standard message; the host requires an exact active-registry
+  match before changing the failure latch.
   Verify workerd-owned serialization, constructor ordering, and reverse JSRPC in real
   workerd before treating any flag or capability as a boundary. Once that transport has
   a real-workerd gate and no stale capability crosses a product boundary, host-local
