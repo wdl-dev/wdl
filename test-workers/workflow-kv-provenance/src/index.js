@@ -15,6 +15,8 @@ let poisonRpcPromiseThen = false;
 let poisonServiceStubFetch = false;
 let cachedFakeKv = null;
 let savedInfrastructureError = null;
+let descriptorAccessorCalls = 0;
+let captureArrayIndexSetterCalls = 0;
 const observation = {
   captured: null,
   defineSucceeded: false,
@@ -53,13 +55,29 @@ Reflect.defineProperty(ServiceStub.prototype, "list", {
     throw error;
   },
 });
+const serviceStubInvokeShadow = function() {
+  observation.serviceStubInvokeCalls += 1;
+  const error = new Error("tenant ServiceStub KV trampoline");
+  error.code = KV_READ_INFRASTRUCTURE_ERROR_CODE;
+  throw error;
+};
 Reflect.defineProperty(ServiceStub.prototype, KV_FACADE_RPC_METHOD, {
   configurable: true,
-  value() {
-    observation.serviceStubInvokeCalls += 1;
-    const error = new Error("tenant ServiceStub KV trampoline");
-    error.code = KV_READ_INFRASTRUCTURE_ERROR_CODE;
-    throw error;
+  value: serviceStubInvokeShadow,
+});
+Reflect.defineProperty(Array.prototype, "0", {
+  configurable: true,
+  set(value) {
+    if (value === ServiceStub.prototype) {
+      captureArrayIndexSetterCalls += 1;
+      throw new Error("tenant Array.prototype[0] setter");
+    }
+    const descriptor = Object.create(null);
+    descriptor.value = value;
+    descriptor.writable = true;
+    descriptor.enumerable = true;
+    descriptor.configurable = true;
+    Reflect.defineProperty(this, "0", descriptor);
   },
 });
 const nativeServiceStubFetch = ServiceStub.prototype.fetch;
@@ -91,6 +109,22 @@ Reflect.defineProperty(RpcPromise.prototype, "then", {
     return Reflect.apply(nativeRpcPromiseThen, this, args);
   },
 });
+
+async function withPoisonedDescriptorPrototype(callback) {
+  descriptorAccessorCalls = 0;
+  Reflect.defineProperty(Object.prototype, "get", {
+    configurable: true,
+    get() {
+      descriptorAccessorCalls += 1;
+      throw new Error("tenant descriptor getter");
+    },
+  });
+  try {
+    return await callback();
+  } finally {
+    Reflect.deleteProperty(Object.prototype, "get");
+  }
+}
 
 function poisonNextNativePromiseSettlement() {
   const constructorDescriptor = Object.getOwnPropertyDescriptor(
@@ -269,6 +303,7 @@ export class Flow extends WorkflowEntrypoint {
       return step.do("prototype-list", async () => {
         const result = await this.env.CACHE.list();
         return {
+          captureArrayIndexSetterCalls,
           listComplete: result.list_complete,
           prototypeListCalls: observation.prototypeListCalls,
           serviceStubListCalls: observation.serviceStubListCalls,
@@ -304,6 +339,13 @@ export class Flow extends WorkflowEntrypoint {
         return await this.env.CACHE.get("promise-prototype-missing");
       });
     }
+    if (event.payload.descriptorPrototype) {
+      return step.do("descriptor-prototype", async () =>
+        withPoisonedDescriptorPrototype(async () => ({
+          descriptorAccessorCalls,
+          value: await this.env.CACHE.get("descriptor-prototype-missing"),
+        })));
+    }
     if (event.payload.stepBypass) {
       if (Object.getPrototypeOf(step) !== null || typeof step.dup === "function") {
         throw new Error("Workflow step facade exposed its raw target");
@@ -311,6 +353,9 @@ export class Flow extends WorkflowEntrypoint {
       const stepDo = Object.getOwnPropertyDescriptor(step, "do")?.value;
       if (typeof stepDo !== "function") {
         throw new Error("Workflow step facade omitted do descriptor");
+      }
+      if (Object.hasOwn(stepDo, "prototype")) {
+        throw new Error("Workflow step facade exposed a constructable do method");
       }
       return stepDo("descriptor-capacity", async () => {
         if (await this.env.CACHE.get("descriptor-capacity-ran") === "1") {
@@ -449,6 +494,7 @@ export default {
       const capacityUncaught = url.searchParams.get("capacityUncaught") === "1";
       const directRunInfrastructure =
         url.searchParams.get("directRunInfrastructure") === "1";
+      const descriptorPrototype = url.searchParams.get("descriptorPrototype") === "1";
       const captureInfrastructureError =
         url.searchParams.get("captureInfrastructureError") === "1";
       const fakeFacade = url.searchParams.get("fakeFacade") === "1";
@@ -465,6 +511,7 @@ export default {
         url.searchParams.get("relayInfrastructureError") === "1";
       const stepBypass = url.searchParams.get("stepBypass") === "1";
       const id = stepBypass ? "step-bypass"
+        : descriptorPrototype ? "descriptor-prototype"
         : fakeRelayInfrastructureError ? "fake-relay-infrastructure"
         : relayInfrastructureError ? "relay-infrastructure"
         : captureInfrastructureError ? "capture-infrastructure"
@@ -486,6 +533,7 @@ export default {
           capacityRetry,
           capacityUncaught,
           captureInfrastructureError,
+          descriptorPrototype,
           directRunInfrastructure,
           fakeFacade,
           fakeRelayInfrastructureError,

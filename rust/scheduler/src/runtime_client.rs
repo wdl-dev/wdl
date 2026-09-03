@@ -123,7 +123,10 @@ mod tests {
             let _ = stream.read(&mut request).unwrap();
             let _ = stream.write_all(&response);
         });
-        let response = reqwest::Client::new()
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
             .get(format!("http://{addr}/runtime"))
             .send()
             .await

@@ -26,7 +26,6 @@ const IntrinsicWeakMap = WeakMap;
 const IntrinsicWeakSet = WeakSet;
 const intrinsicArrayForEach = Array.prototype.forEach;
 const intrinsicArrayIsArray = Array.isArray;
-const intrinsicArrayPush = Array.prototype.push;
 const intrinsicFunctionToString = Function.prototype.toString;
 const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectCreate = Object.create;
@@ -87,13 +86,23 @@ export function createNullPrototypeObject() {
   return intrinsicReflectApply(intrinsicObjectCreate, IntrinsicObject, [null]);
 }
 
-function defineIntrinsicDataProperty(target, name, value) {
+export function defineDataProperty(
+  target,
+  name,
+  value,
+  writable = false,
+  enumerable = false,
+  configurable = false
+) {
   const descriptor = intrinsicReflectApply(
     intrinsicObjectCreate,
     IntrinsicObject,
     [null]
   );
   descriptor.value = value;
+  descriptor.writable = writable;
+  descriptor.enumerable = enumerable;
+  descriptor.configurable = configurable;
   intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [
     target,
     name,
@@ -112,9 +121,9 @@ function getPrivateErrorPrototype() {
       IntrinsicObject,
       [IntrinsicError.prototype]
     );
-    defineIntrinsicDataProperty(privateErrorPrototype, "stack", undefined);
-    defineIntrinsicDataProperty(privateErrorPrototype, "overloaded", false);
-    defineIntrinsicDataProperty(privateErrorPrototype, "retryable", false);
+    defineDataProperty(privateErrorPrototype, "stack", undefined);
+    defineDataProperty(privateErrorPrototype, "overloaded", false);
+    defineDataProperty(privateErrorPrototype, "retryable", false);
   }
   return privateErrorPrototype;
 }
@@ -125,7 +134,7 @@ export function createError(message) {
     error,
     getPrivateErrorPrototype(),
   ]);
-  defineIntrinsicDataProperty(error, "name", "Error");
+  defineDataProperty(error, "name", "Error");
   intrinsicReflectApply(intrinsicReflectDeleteProperty, IntrinsicReflect, [error, "stack"]);
   return error;
 }
@@ -142,6 +151,10 @@ export function captureRpcMethod(target, property, shadowPrototypes) {
         [prototype, property]
       );
       if (descriptor === undefined) continue;
+      intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [
+        descriptor,
+        null,
+      ]);
       if (descriptor.configurable !== true) {
         throw new TypeError("RPC method is shadowed by a non-configurable prototype property");
       }
@@ -151,8 +164,8 @@ export function captureRpcMethod(target, property, shadowPrototypes) {
         [prototype, property]
       );
       if (!deleted) throw new TypeError("RPC method shadow could not be removed");
-      intrinsicReflectApply(intrinsicArrayPush, hiddenPrototypes, [prototype]);
-      intrinsicReflectApply(intrinsicArrayPush, hiddenDescriptors, [descriptor]);
+      pushArray(hiddenPrototypes, prototype);
+      pushArray(hiddenDescriptors, descriptor);
     }
     const fn = intrinsicReflectApply(intrinsicReflectGet, IntrinsicReflect, [
       target,
@@ -184,10 +197,6 @@ export function createProxy(target, handler) {
   return new IntrinsicProxy(target, handler);
 }
 
-export function defineProperty(target, property, descriptor) {
-  return intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [target, property, descriptor]);
-}
-
 export function deleteProperty(target, property) {
   return intrinsicReflectApply(intrinsicReflectDeleteProperty, IntrinsicReflect, [target, property]);
 }
@@ -201,7 +210,12 @@ export function isArray(value) {
 }
 
 export function pushArray(values, value) {
-  intrinsicReflectApply(intrinsicArrayPush, values, [value]);
+  const length = intrinsicReflectApply(intrinsicReflectGet, IntrinsicReflect, [
+    values,
+    "length",
+    values,
+  ]);
+  defineDataProperty(values, length, value, true, true, true);
 }
 
 export function functionSource(fn) {
@@ -320,16 +334,16 @@ function settleHostResult(result, onRejected = null) {
   if (__WdlHostRuntime__.isPrototypeOf(RPC_PROMISE_PROTOTYPE, result)) {
     then = RPC_PROMISE_THEN;
   } else if (__WdlHostRuntime__.isPrototypeOf(PROMISE_PROTOTYPE, result)) {
-    __WdlHostRuntime__.defineProperty(result, "constructor", {
-      value: undefined,
-    });
+    __WdlHostRuntime__.defineDataProperty(result, "constructor", undefined);
     then = PROMISE_THEN;
   }
   if (then === null) return result;
   // Keep downstream await away from tenant-mutated native Promise settlement.
   const settlement = __WdlHostRuntime__.createNullPrototypeObject();
-  __WdlHostRuntime__.defineProperty(settlement, "then", {
-    value(resolve, reject) {
+  __WdlHostRuntime__.defineDataProperty(
+    settlement,
+    "then",
+    (resolve, reject) => {
       return __WdlHostRuntime__.applyFunction(then, result, [
         resolve,
         (error) => {
@@ -343,8 +357,8 @@ function settleHostResult(result, onRejected = null) {
           return __WdlHostRuntime__.applyFunction(reject, undefined, [error]);
         },
       ]);
-    },
-  });
+    }
+  );
   return settlement;
 }
 
@@ -710,9 +724,11 @@ function takeWorkflowInfrastructureReporter(ctx) {
   }
   ${needsWorkflowKvFacade
     ? `const bound = __WdlBindWorkflowInfrastructureReporter__(reporter);
-  __WdlHostRuntime__.defineProperty(bound, WORKFLOW_INFRASTRUCTURE_REPORT_ID, {
-    value: reportId,
-  });
+  __WdlHostRuntime__.defineDataProperty(
+    bound,
+    WORKFLOW_INFRASTRUCTURE_REPORT_ID,
+    reportId
+  );
   return bound;`
     : "return true;"}
 }
@@ -799,9 +815,10 @@ function wrapWorkflowStep(step, requestContext, wrappedEnv) {
     return value;
   };
   const facade = __WdlHostRuntime__.createNullPrototypeObject();
-  __WdlHostRuntime__.defineProperty(facade, "do", {
-    enumerable: true,
-    value(name, configOrCallback, maybeCallback) {
+  __WdlHostRuntime__.defineDataProperty(
+    facade,
+    "do",
+    (name, configOrCallback, maybeCallback) => {
       const rawDo = method("do");
       if (typeof configOrCallback === "function") {
         return __WdlHostRuntime__.applyFunction(rawDo, step, [
@@ -817,15 +834,20 @@ function wrapWorkflowStep(step, requestContext, wrappedEnv) {
           : maybeCallback,
       ]);
     },
-  });
+    false,
+    true
+  );
   __WdlHostRuntime__.forEachArray(["sleep", "sleepUntil", "waitForEvent"], (name) => {
-    __WdlHostRuntime__.defineProperty(facade, name, {
-      enumerable: true,
-      value(...args) {
+    __WdlHostRuntime__.defineDataProperty(
+      facade,
+      name,
+      (...args) => {
         const rawMethod = method(name);
         return __WdlHostRuntime__.applyFunction(rawMethod, step, args);
       },
-    });
+      false,
+      true
+    );
   });
   return facade;
 }
@@ -1009,7 +1031,7 @@ ${kvEnvWrappingSource}
   __WdlHostRuntime__.forEachArray(WORKFLOW_BINDINGS, (name) => {
     out[name] = new Workflow(out[name], requestIdOptions(requestIdOrContext));
   });
-  __WdlHostRuntime__.defineProperty(out, HOST_BINDINGS_WRAPPED, { value: true });
+  __WdlHostRuntime__.defineDataProperty(out, HOST_BINDINGS_WRAPPED, true);
   return out;
 }
 
@@ -1075,12 +1097,14 @@ if (raw && typeof raw === "object") {
   const wrapDefaultFunctionKey = (key) => {
     const fn = raw[key];
     if (typeof fn === "function") {
-      __WdlHostRuntime__.defineProperty(wrappedDefault, key, {
-        value: wrapHandler(raw, fn),
-        writable: true,
-        enumerable: true,
-        configurable: true,
-      });
+      __WdlHostRuntime__.defineDataProperty(
+        wrappedDefault,
+        key,
+        wrapHandler(raw, fn),
+        true,
+        true,
+        true
+      );
     }
   };
   __WdlHostRuntime__.forEachArray(HOST_WRAPPED_HANDLER_KEYS, (key) => {

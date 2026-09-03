@@ -891,6 +891,7 @@ test("disallow_importable_env KV provenance preserves host capability identity",
     }
     if (body.status !== "completed") return false;
     assert.deepEqual(body.output, {
+      captureArrayIndexSetterCalls: 0,
       listComplete: true,
       prototypeListCalls: 0,
       serviceStubListCalls: 0,
@@ -1130,6 +1131,34 @@ test("native Promise prototype pollution cannot forge Workflow KV provenance", a
     name: "Error",
     message: "tenant Promise.prototype.then",
   });
+});
+
+test("descriptor prototype pollution cannot intercept Workflow host settlement", async () => {
+  const ns = uniqueNs("wfrt-descriptor-prototype");
+  await deployAndPromote(ns, "shop", {
+    code: WORKFLOW_KV_PROVENANCE_PROBE_CODE,
+    bindings: { CACHE: { type: "kv", id: "workflow-descriptor-prototype" } },
+    workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }],
+  });
+
+  await readIntegrationJson(
+    await gatewayFetch(ns, "/shop/create?descriptorPrototype=1"),
+    200,
+    "workflow descriptor prototype create"
+  );
+  await waitUntil("workflow bypasses tenant descriptor accessors", async () => {
+    const body = await readIntegrationJson(
+      await gatewayFetch(ns, "/shop/get?id=descriptor-prototype"),
+      200,
+      "workflow descriptor prototype status"
+    );
+    if (body.status === "failed") {
+      throw new Error(`descriptor prototype workflow failed: ${JSON.stringify(body.error)}`);
+    }
+    if (body.status !== "completed") return false;
+    assert.deepEqual(body.output, { descriptorAccessorCalls: 0, value: null });
+    return true;
+  }, { timeoutMs: 60_000, intervalMs: 250 });
 });
 
 test("native Promise prototype pollution cannot intercept Workflow reporter settlement", async () => {

@@ -259,20 +259,23 @@ Data-plane bindings use their own storage:
 - KV and queue producers use the data logical pool through `redis-proxy`. Split
   deployments map it to DB 1; without `DATA_REDIS_URL`, it reuses the control database.
 - Runtime applies a fixed 32 MiB aggregate wire-byte admission budget per task before
-  materializing KV response bodies. A valid `Content-Length` reserves its advertised
-  bytes up to the full budget; missing or larger lengths reserve the whole budget.
+  materializing KV response bodies. On identity-encoded responses, a valid
+  `Content-Length` reserves its advertised bytes up to the full budget; missing, larger,
+  or non-identity-encoded lengths reserve the whole budget.
   Concurrent excess reads fail closed and cancel their upstream body. Redis-proxy owns
   canonical scalar `get()` responses: values enter through the 25 MiB write bound and the
   producer sends an exact `Content-Length`. Runtime uses workerd's native body consumer
-  for that shape under a fetch-owned abort signal, then verifies the resulting byte
-  length before returning it. Missing-length and legacy oversized scalar responses, plus
-  every JSON envelope route, use the defensive bounded reader; declared lengths fill one
-  exact allocation and a larger declared or streamed body is cancelled under the 36 MiB
-  hard wire cap. Runtime keeps JSON/Base64 result construction inside the lease and
-  applies a 5-second total deadline to every admitted host response body. The deadline
-  rejects independently of best-effort stream cancellation, aborts the scalar fetch when
-  applicable, and releases its reservation.
-  Capacity rejection, body deadline/read failure, malformed host envelopes, host proxy
+  for that shape under the read-operation abort signal, then verifies the resulting byte
+  length before returning it. Missing-length and non-identity `Content-Encoding` scalar
+  responses use the defensive reader under the same 25 MiB value cap. JSON envelope
+  routes use a separate 36 MiB wire cap for Base64 and structural overhead; a larger
+  declared or streamed body is cancelled. The canonical colocated redis-proxy hop is
+  identity-encoded. An intermediary that adds compression forces conservative full-budget
+  admission and should be disabled on that internal hop. Runtime keeps JSON/Base64 result
+  construction inside the lease and starts one 5-second total deadline before each host
+  read. Request/header wait and response-body consumption share that deadline. It rejects
+  independently of best-effort fetch or stream cancellation and releases any reservation.
+  Capacity rejection, read deadline/body failure, malformed host envelopes, host proxy
   URL/configuration failure, internal-auth `401`, fixed read-route `404`/`405`, and read
   proxy transport or 5xx failure carry one host-owned infrastructure code. Tenant-input
   `400`/`413` responses and tenant value decoding, including `type: "json"`, remain

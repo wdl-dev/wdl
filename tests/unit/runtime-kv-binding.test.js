@@ -13,7 +13,7 @@ import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
 import { RUNTIME_METRICS_NOOP_URL } from "../helpers/mocks/runtime-metrics.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { runtimeProxyBindingStubUrl } from "../helpers/runtime-proxy-stub.js";
-import { delay } from "../helpers/timing.js";
+import { delay, waitUntil } from "../helpers/timing.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
 
 const PROXY_BINDING_URL = runtimeProxyBindingStubUrl();
@@ -168,7 +168,8 @@ test("KV batch get calls the batch proxy endpoint and returns a Map", withFetchS
 }));
 
 test("KV host response readers match the cross-language fixture", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
-  const { KV, KV_READ_RESPONSE_MAX_BYTES } = await loadKvBinding();
+  const { KV, KV_READ_RESPONSE_MAX_BYTES, KV_VALUE_MAX_BYTES } = await loadKvBinding();
+  assert.equal(KV_VALUE_MAX_BYTES, kvHostResponse.maxValueBytes);
   assert.equal(KV_READ_RESPONSE_MAX_BYTES, kvHostResponse.maxResponseBytes);
   const responses = [
     kvHostResponse.batch.response,
@@ -208,7 +209,7 @@ export const metrics = {
 };
 `);
   const { kvCapacity } = await loadKvBinding([], [
-    [/export const KV_READ_LEASE_MAX_MS = 5_000;/, "export const KV_READ_LEASE_MAX_MS = 20;"],
+    [/export const KV_READ_DEADLINE_MS = 5_000;/, "export const KV_READ_DEADLINE_MS = 20;"],
   ], recordingMetricsUrl);
   const recording = /** @type {{ calls: Array<{
    *   kind: "increment" | "gauge",
@@ -231,31 +232,35 @@ export const metrics = {
     headers: { "content-length": String(length) },
   });
 
-  const completed = kvCapacity.acquireKvReadLease(binding, response(8), () => {});
+  const completed = kvCapacity.acquireKvReadLease(
+    binding,
+    response(8),
+    new AbortController().signal
+  );
   assert.ok(completed);
   assert.equal(completed.release(), true);
 
   const full = kvCapacity.acquireKvReadLease(
     binding,
     response(kvCapacity.KV_READ_IN_FLIGHT_MAX_BYTES),
-    () => {}
+    new AbortController().signal
   );
   assert.ok(full);
-  assert.equal(kvCapacity.acquireKvReadLease(binding, response(1), () => {}), null);
+  assert.equal(
+    kvCapacity.acquireKvReadLease(binding, response(1), new AbortController().signal),
+    null
+  );
   assert.equal(full.release(), true);
 
-  let deadlineCalls = 0;
-  assert.ok(kvCapacity.acquireKvReadLease(binding, response(4), () => {
-    deadlineCalls += 1;
-  }));
-  await delay(30);
-  assert.equal(deadlineCalls, 1);
+  const deadline = new AbortController();
+  assert.ok(kvCapacity.acquireKvReadLease(binding, response(4), deadline.signal));
+  deadline.abort();
 
   assert.throws(
     () => kvCapacity.acquireKvReadLease({
       env: binding.env,
       ctx: { waitUntil() { throw new Error("waitUntil failed"); } },
-    }, response(2), () => {}),
+    }, response(2), new AbortController().signal),
     /waitUntil failed/
   );
 
@@ -389,13 +394,19 @@ test("KV canonical declared-length scalar reads use the native body consumer", w
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 
-test("KV native scalar path excludes unknown and legacy oversized lengths", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
-  const { KV } = await loadKvBinding([
+test("KV scalar reads enforce the value cap on unknown, declared, and compressed bodies", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, runtimeInfrastructure } = await loadKvBinding([
     [/export const KV_VALUE_MAX_BYTES = 25 \* 1024 \* 1024;/, "export const KV_VALUE_MAX_BYTES = 2;"],
   ]);
   const responses = [
     new Response("a"),
     new Response(new Uint8Array([1, 2, 3]), { headers: { "content-length": "3" } }),
+    new Response(new Uint8Array([4, 5]), {
+      headers: { "content-encoding": "gzip", "content-length": "1" },
+    }),
+    new Response(new Uint8Array([6, 7, 8]), {
+      headers: { "content-encoding": "br", "content-length": "1" },
+    }),
   ];
   setFetch(async () => {
     const response = responses.shift();
@@ -407,9 +418,56 @@ test("KV native scalar path excludes unknown and legacy oversized lengths", with
     throw new Error("noncanonical scalar response must use the bounded reader");
   }, async () => {
     assert.equal(await makeKv(KV).get("unknown-length"), "a");
-    const legacy = await makeKv(KV).get("legacy-oversized", "arrayBuffer");
-    assert.deepEqual([...new Uint8Array(legacy)], [1, 2, 3]);
+    await assert.rejects(
+      () => makeKv(KV).get("declared-oversized", "arrayBuffer"),
+      (error) => error instanceof Error &&
+        error.message === "KV read response is too large" &&
+        runtimeInfrastructure.isRuntimeInfrastructureError(error)
+    );
+    const compressed = await makeKv(KV).get("compressed", "arrayBuffer");
+    assert.deepEqual([...new Uint8Array(compressed)], [4, 5]);
+    await assert.rejects(
+      () => makeKv(KV).get("compressed-oversized", "arrayBuffer"),
+      (error) => error instanceof Error &&
+        error.message === "KV read response is too large" &&
+        runtimeInfrastructure.isRuntimeInfrastructureError(error)
+    );
   });
+}));
+
+test("KV metadata and batch envelopes reject decoded values above the value cap", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, runtimeInfrastructure } = await loadKvBinding([
+    [/export const KV_VALUE_MAX_BYTES = 25 \* 1024 \* 1024;/, "export const KV_VALUE_MAX_BYTES = 2;"],
+  ]);
+  const value_b64 = btoa("abc");
+  const responses = [
+    Response.json({ value_b64, metadata: null }),
+    Response.json({ entries: [{ key: "key", value_b64, metadata: null }] }),
+    Response.json({
+      entries: [
+        { key: "bad-json", value_b64: btoa("{"), metadata: null },
+        { key: "oversized", value_b64, metadata: null },
+      ],
+    }),
+  ];
+  setFetch(async () => {
+    const response = responses.shift();
+    assert.ok(response);
+    return response;
+  });
+
+  for (const read of [
+    () => makeKv(KV).getWithMetadata("key"),
+    () => makeKv(KV).get(["key"]),
+    () => makeKv(KV).get(["bad-json", "oversized"], "json"),
+  ]) {
+    await assert.rejects(
+      read,
+      (error) => error instanceof Error &&
+        error.message === "KV read response is invalid" &&
+        runtimeInfrastructure.isRuntimeInfrastructureError(error)
+    );
+  }
 }));
 
 test("KV rejects oversized host envelopes with a branded error and lease cleanup", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
@@ -554,7 +612,7 @@ test("KV read capacity rejects a missing declared response body", withFetchStub(
 
 test("KV read capacity deadline releases a stalled body lease", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding([], [
-    [/export const KV_READ_LEASE_MAX_MS = 5_000;/, "export const KV_READ_LEASE_MAX_MS = 20;"],
+    [/export const KV_READ_DEADLINE_MS = 5_000;/, "export const KV_READ_DEADLINE_MS = 20;"],
   ]);
   setFetch(async () => new Response(new ReadableStream({}), {
     headers: { "content-length": String(20 * 1024 * 1024) },
@@ -569,9 +627,58 @@ test("KV read capacity deadline releases a stalled body lease", withFetchStub(as
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 
-test("KV native scalar deadline aborts the fetch-owned response", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+test("KV read deadline rejects a response stalled before headers", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding([], [
-    [/export const KV_READ_LEASE_MAX_MS = 5_000;/, "export const KV_READ_LEASE_MAX_MS = 20;"],
+    [/export const KV_READ_DEADLINE_MS = 5_000;/, "export const KV_READ_DEADLINE_MS = 20;"],
+  ]);
+  /** @type {AbortSignal | undefined} */
+  let fetchSignal;
+  setFetch((
+    /** @type {string | URL | Request} */ _url,
+    /** @type {RequestInit} */ init
+  ) => {
+    fetchSignal = init.signal ?? undefined;
+    return new Promise(() => {});
+  });
+
+  await assert.rejects(
+    () => makeKv(KV).get("stalled-before-headers"),
+    (error) => error instanceof Error &&
+      error.message === kvCapacity.KV_READ_TIMEOUT_ERROR_MESSAGE &&
+      runtimeInfrastructure.isRuntimeInfrastructureError(error)
+  );
+  assert.equal(fetchSignal?.aborted, true);
+  assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+}));
+
+test("KV read deadline discards a successful response that arrives after timeout", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding([], [
+    [/export const KV_READ_DEADLINE_MS = 5_000;/, "export const KV_READ_DEADLINE_MS = 20;"],
+  ]);
+  /** @type {(response: Response) => void} */
+  let resolveFetch = () => {};
+  let cancelled = false;
+  setFetch(() => new Promise((resolve) => { resolveFetch = resolve; }));
+
+  await assert.rejects(
+    () => makeKv(KV).get("late-response"),
+    (error) => error instanceof Error &&
+      error.message === kvCapacity.KV_READ_TIMEOUT_ERROR_MESSAGE &&
+      runtimeInfrastructure.isRuntimeInfrastructureError(error)
+  );
+  resolveFetch(new Response(new ReadableStream({
+    cancel() { cancelled = true; },
+  })));
+  await waitUntil("late KV response body cancellation", () => cancelled, {
+    timeoutMs: 100,
+    intervalMs: 1,
+  });
+  assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+}));
+
+test("KV native scalar deadline aborts the read-operation response", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding([], [
+    [/export const KV_READ_DEADLINE_MS = 5_000;/, "export const KV_READ_DEADLINE_MS = 20;"],
   ]);
   /** @type {AbortSignal | undefined} */
   let fetchSignal;

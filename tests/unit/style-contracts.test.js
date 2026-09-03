@@ -842,6 +842,23 @@ test("Workflow Runtime results and Workflow-owned retryable backend errors share
   }
 });
 
+test("Workflow migration-pending errors share one JS and Rust fixture", () => {
+  const fixture = "tests/fixtures/workflow-service-errors.json";
+  const contract = /** @type {{
+   *   migrationPending: { code?: unknown, status?: unknown },
+   * }} */ (readRepositoryJson(fixture));
+  assert.deepEqual(Object.keys(contract), ["migrationPending"]);
+  assert.deepEqual(Object.keys(contract.migrationPending).sort(), ["code", "status"]);
+  assert.equal(contract.migrationPending.code, "workflow_migration_pending");
+  assert.equal(contract.migrationPending.status, 409);
+  for (const reader of [
+    "tests/unit/control-shared.test.js",
+    "rust/workflows/src/error.rs",
+  ]) {
+    assert.match(readRepoFile(reader), /workflow-service-errors\.json/, reader);
+  }
+});
+
 test("Workflow Runtime run requests share one JS and Rust fixture", () => {
   const fixture = "tests/fixtures/workflow-runtime-request.json";
   const contract = /** @type {{ run: Record<string, unknown> }} */ (
@@ -915,12 +932,14 @@ test("Workflow step terminal responses share one JS and Rust fixture", () => {
 test("Runtime KV host responses share one JS and Rust fixture", () => {
   const fixture = "tests/fixtures/kv-host-response.json";
   const contract = /** @type {{
+   *   maxValueBytes: number,
    *   maxResponseBytes: number,
    *   batch: { requestedKeys: string[], response: { entries: unknown[] } },
    *   metadata: Record<string, unknown>,
    *   list: Record<string, unknown>,
    *   invalid: Record<string, unknown>,
    * }} */ (readRepositoryJson(fixture));
+  assert.equal(contract.maxValueBytes, 25 * 1024 * 1024);
   assert.equal(contract.maxResponseBytes, 36 * 1024 * 1024);
   assert.equal(contract.batch.requestedKeys.length, contract.batch.response.entries.length);
   assert.deepEqual(Object.keys(contract.metadata).sort(), ["found", "missing"]);
@@ -1782,6 +1801,22 @@ test("Rust HTTP request completion has one shared observability owner", () => {
   }
   assert.match(redisProxy, /request_id_from_headers\(request\.headers\(\)\)/);
   assert.match(redisProxy, /struct ResponseError/);
+});
+
+test("Rust private HTTP clients disable ambient proxies and redirects", () => {
+  for (const file of [
+    "rust/scheduler/src/server.rs",
+    "rust/workflows/src/server.rs",
+    "rust/supervisor/src/process.rs",
+  ]) {
+    const source = readRepoFile(file);
+    for (const policy of [
+      ".no_proxy()",
+      ".redirect(reqwest::redirect::Policy::none())",
+    ]) {
+      assert.ok(source.includes(policy), `${file}: missing ${policy}`);
+    }
+  }
 });
 
 test("active docs and sources do not point at note paths", () => {

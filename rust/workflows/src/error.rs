@@ -122,3 +122,24 @@ impl From<redis::RedisError> for WorkflowError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::WorkflowError;
+
+    #[test]
+    fn migration_pending_matches_the_cross_language_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/workflow-service-errors.json"
+        ))
+        .expect("Workflow service error fixture parses");
+        let expected = &fixture["migrationPending"];
+        let error = WorkflowError::migration_pending("migration pending");
+
+        assert_eq!(expected["code"].as_str(), Some(error.code));
+        assert_eq!(
+            expected["status"].as_u64(),
+            Some(error.status.as_u16().into())
+        );
+    }
+}

@@ -41,6 +41,16 @@ function generatedWrappers() {
   };
 }
 
+/** @param {unknown[]} values @param {number} index @param {unknown} value */
+function defineTestArrayElement(values, index, value) {
+  const descriptor = Object.create(null);
+  descriptor.value = value;
+  descriptor.writable = true;
+  descriptor.enumerable = true;
+  descriptor.configurable = true;
+  Reflect.defineProperty(values, String(index), descriptor);
+}
+
 test("host wrapper runtime exports only helpers consumed by generated wrappers", () => {
   const exported = [...HOST_BINDING_RUNTIME_SOURCE.matchAll(/^export function (\w+)\(/gm)]
     .map((match) => match[1])
@@ -85,6 +95,122 @@ test("host wrapper RPC capture restores earlier prototype shadows on failure", a
     /non-configurable prototype property/
   );
   assert.equal(Object.getOwnPropertyDescriptor(inner, "list")?.value, "inner-shadow");
+});
+
+test("host wrapper array append bypasses inherited index setters", async () => {
+  const hostRuntime = await import(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE));
+  const values = /** @type {unknown[]} */ ([]);
+  let setterCalls = 0;
+
+  await withMockedPropertyDescriptor(
+    /** @type {any} */ (Array.prototype),
+    "0",
+    {
+      /** @this {unknown[]} */
+      set(value) {
+        if (this === values) setterCalls += 1;
+        else defineTestArrayElement(this, 0, value);
+      },
+    },
+    () => withMockedPropertyDescriptor(
+      /** @type {any} */ (Array.prototype),
+      "1",
+      {
+        /** @this {unknown[]} */
+        set(value) {
+          if (this === values) setterCalls += 1;
+          else defineTestArrayElement(this, 1, value);
+        },
+      },
+      () => {
+        hostRuntime.pushArray(values, "first");
+        hostRuntime.pushArray(values, "second");
+      }
+    )
+  );
+
+  assert.equal(setterCalls, 0);
+  assert.deepEqual(values, ["first", "second"]);
+});
+
+test("deferred Workflow KV capture restores descriptors without inherited fields", async () => {
+  const rawKv = completeKvBinding();
+  const { wrapped, cloudflare } = await loadWorkflowWrapper(`
+    export class Flow {}
+    export default {};
+  `, { importableEnvDisabled: true });
+  const shadow = () => "tenant shadow";
+  let descriptorGetterCalls = 0;
+
+  await withMockedPropertyDescriptor(
+    cloudflare.ServiceStub.prototype,
+    KV_FACADE_RPC_METHOD,
+    { value: shadow },
+    () => withMockedPropertyDescriptor(
+      /** @type {any} */ (Object.prototype),
+      "get",
+      {
+        get() {
+          descriptorGetterCalls += 1;
+          throw new Error("tenant descriptor getter must not run");
+        },
+      },
+      () => {
+        new wrapped.Flow({ props: workflowReporter().props }, { CACHE: rawKv });
+        assert.equal(
+          Object.getOwnPropertyDescriptor(
+            cloudflare.ServiceStub.prototype,
+            KV_FACADE_RPC_METHOD
+          )?.value,
+          shadow
+        );
+      }
+    )
+  );
+
+  assert.equal(descriptorGetterCalls, 0);
+});
+
+test("deferred Workflow KV capture bypasses inherited array index setters", async () => {
+  const rawKv = completeKvBinding();
+  const { wrapped, cloudflare } = await loadWorkflowWrapper(`
+    export class Flow {}
+    export default {};
+  `, { importableEnvDisabled: true });
+  const shadow = () => "tenant shadow";
+  let setterCalls = 0;
+
+  await withMockedPropertyDescriptor(
+    cloudflare.ServiceStub.prototype,
+    KV_FACADE_RPC_METHOD,
+    { value: shadow },
+    () => withMockedPropertyDescriptor(
+      /** @type {any} */ (Array.prototype),
+      "0",
+      {
+        /** @this {unknown[]} */
+        set(value) {
+          if (value === cloudflare.ServiceStub.prototype) {
+            setterCalls += 1;
+            return;
+          }
+          defineTestArrayElement(this, 0, value);
+        },
+      },
+      () => {
+        new wrapped.Flow({ props: workflowReporter().props }, { CACHE: rawKv });
+        assert.equal(
+          Object.getOwnPropertyDescriptor(
+            cloudflare.ServiceStub.prototype,
+            KV_FACADE_RPC_METHOD
+          )?.value,
+          shadow
+        );
+      }
+    )
+  );
+
+  assert.equal(setterCalls, 0);
 });
 
 /**
@@ -250,6 +376,75 @@ function completeKvBinding(overrides = {}) {
   });
   return binding;
 }
+
+test("workflow reporter nonce bypasses tenant descriptor accessors", async () => {
+  const rawKv = completeKvBinding();
+  const { wrapped } = await loadWorkflowWrapper(`
+    export class Flow {
+      run() { return "ok"; }
+    }
+    export default {};
+  `, { moduleEnv: { CACHE: rawKv } });
+  const reporter = workflowReporter();
+  /** @type {unknown[]} */
+  const observedDescriptorValues = [];
+
+  await withMockedPropertyDescriptor(
+    /** @type {any} */ (Object.prototype),
+    "enumerable",
+    {
+      /** @this {{ value?: unknown }} */
+      get() {
+        observedDescriptorValues.push(this.value);
+        return false;
+      },
+    },
+    () => {
+      new wrapped.Flow({ props: reporter.props }, { CACHE: rawKv });
+    }
+  );
+
+  assert.equal(observedDescriptorValues.includes(reporter.reportId), false);
+});
+
+test("workflow host data properties bypass tenant descriptor accessors", async () => {
+  const rawKv = completeKvBinding({
+    get() { return Promise.resolve("value"); },
+  });
+  const { wrapped } = await loadWorkflowWrapper(`
+    export class Flow {
+      constructor(_ctx, env) { this.env = env; }
+      run(_event, step) {
+        return step.do("read", async () => await this.env.CACHE.get("key"));
+      }
+    }
+    export default {};
+  `, { moduleEnv: { CACHE: rawKv } });
+  const reporter = workflowReporter();
+  let descriptorAccessorCalls = 0;
+
+  await withMockedPropertyDescriptor(
+    /** @type {any} */ (Object.prototype),
+    "get",
+    {
+      get() {
+        descriptorAccessorCalls += 1;
+        throw new Error("tenant descriptor getter must not run");
+      },
+    },
+    async () => {
+      const flow = new wrapped.Flow({ props: reporter.props }, { CACHE: rawKv });
+      const step = {
+        /** @param {string} _name @param {() => unknown} callback */
+        do(_name, callback) { return callback(); },
+      };
+      assert.equal(await flow.run({}, step), "value");
+    }
+  );
+
+  assert.equal(descriptorAccessorCalls, 0);
+  assert.deepEqual(reporter.codes, []);
+});
 
 test("workflow wrappers brand cached KV failures only when the same Error escapes run", async () => {
   let failure = false;
@@ -561,6 +756,9 @@ test("workflow wrappers report only KV Errors escaping the durable callback boun
             stepDo = Object.getOwnPropertyDescriptor(step, "do")?.value;
             if (typeof stepDo !== "function") {
               throw new Error("Workflow step facade omitted wrapped do");
+            }
+            if (Object.hasOwn(stepDo, "prototype")) {
+              throw new Error("Workflow step facade exposed a constructable do method");
             }
           }
           return await stepDo("read", async () => {

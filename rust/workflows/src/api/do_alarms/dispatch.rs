@@ -758,6 +758,10 @@ mod tests {
     use std::time::Duration;
     use wdl_rust_common::worker_contract::{SessionPolicyMode, SessionPolicyProjection};
 
+    fn loopback_http_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
     async fn raw_http_response(
         response: Vec<u8>,
     ) -> (reqwest::Response, std::thread::JoinHandle<()>) {
@@ -769,7 +773,7 @@ mod tests {
             let _ = stream.read(&mut request).unwrap();
             let _ = stream.write_all(&response);
         });
-        let response = reqwest::Client::new()
+        let response = loopback_http_client()
             .get(format!("http://{addr}/alarm"))
             .send()
             .await
@@ -945,7 +949,7 @@ mod tests {
             stream.flush().unwrap();
             let _ = release_rx.recv_timeout(Duration::from_secs(2));
         });
-        let response = reqwest::Client::new()
+        let response = loopback_http_client()
             .get(format!("http://{addr}/alarm"))
             .send()
             .await

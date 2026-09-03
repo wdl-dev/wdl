@@ -149,6 +149,11 @@ tenant-originated forwarding paths. The token stays in host-owned Durable Object
 proxies and host-side backend capabilities; it is not embedded in generated
 tenant facade code or tenant-visible `env`.
 
+Rust clients for private service and loopback HTTP calls disable ambient proxy discovery
+and automatic redirects. Internal-auth headers must travel directly to the configured
+private endpoint, not through an operator-shell or container `HTTP_PROXY`/`ALL_PROXY`
+value or a response-selected redirect target.
+
 Do not expose these endpoints through gateway or an internet-facing load balancer.
 The shared internal token authenticates in-tree platform callers on the private mesh; it
 does not authorize arbitrary external callers. If a new caller is outside the trusted

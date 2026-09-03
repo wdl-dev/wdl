@@ -49,7 +49,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         redis: Redis::new(conn),
         data_redis: Redis::new(data_conn),
         data_redis_client,
-        http: reqwest::Client::new(),
+        http: reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
         metrics: Arc::new(Metrics::default()),
         queues: Arc::new(QueueState::default()),
         shutdown: Arc::new(ShutdownState::default()),

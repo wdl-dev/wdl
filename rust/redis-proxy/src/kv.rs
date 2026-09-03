@@ -26,7 +26,8 @@ const META_FIELD_PREFIX: &str = "m:";
 const KV_KEY_MAX_BYTES: usize = 512;
 const KV_BATCH_KEYS_MAX: usize = 100;
 const KV_EXPIRATION_MAX: u64 = wdl_rust_common::JS_MAX_SAFE_INTEGER;
-pub(crate) const KV_BATCH_RAW_BYTES_MAX: usize = 25 * 1024 * 1024;
+const KV_VALUE_BYTES_MAX: usize = 25 * 1024 * 1024;
+pub(crate) const KV_BATCH_RAW_BYTES_MAX: usize = KV_VALUE_BYTES_MAX;
 const KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT: &str = r#"
 if ARGV[3] == "EX" then
   redis.call("HSETEX", KEYS[1], "EX", ARGV[4], "FIELDS", 1, ARGV[1], ARGV[5])
@@ -266,6 +267,15 @@ fn raw_bytes_too_large() -> AppError {
     AppError::payload_too_large(format!(
         "KV batch raw value/metadata bytes exceed {KV_BATCH_RAW_BYTES_MAX} byte limit"
     ))
+}
+
+fn validate_stored_kv_value_size(bytes: usize) -> AppResult<()> {
+    if bytes > KV_VALUE_BYTES_MAX {
+        return Err(AppError::internal_error(format!(
+            "stored KV value exceeds {KV_VALUE_BYTES_MAX} byte limit"
+        )));
+    }
+    Ok(())
 }
 
 fn record_kv_value_bytes(
@@ -651,6 +661,7 @@ pub(crate) async fn kv_get(
     };
 
     let len = value.len();
+    validate_stored_kv_value_size(len)?;
     record_kv_value_bytes(state.metrics(), "get", "value", len);
     Ok(kv_value_response(value))
 }
@@ -681,6 +692,7 @@ pub(crate) async fn kv_get_with_metadata(
             value_b64: None,
         }));
     };
+    validate_stored_kv_value_size(bytes.len())?;
     record_kv_value_bytes(state.metrics(), "get_with_metadata", "value", bytes.len());
     if let Some(metadata) = metadata.as_ref() {
         record_kv_value_bytes(
@@ -952,12 +964,20 @@ mod tests {
 
     #[test]
     fn kv_batch_raw_budget_fits_runtime_wire_cap() {
+        let max_value_bytes = usize::try_from(
+            kv_host_response_fixture()["maxValueBytes"]
+                .as_u64()
+                .expect("KV host value max bytes is an unsigned integer"),
+        )
+        .expect("KV host value max bytes fits usize");
         let max_response_bytes = usize::try_from(
             kv_host_response_fixture()["maxResponseBytes"]
                 .as_u64()
                 .expect("KV host response max bytes is an unsigned integer"),
         )
         .expect("KV host response max bytes fits usize");
+        assert_eq!(KV_VALUE_BYTES_MAX, max_value_bytes);
+        assert_eq!(KV_BATCH_RAW_BYTES_MAX, max_value_bytes);
         let max_base64_bytes = KV_BATCH_RAW_BYTES_MAX.div_ceil(3) * 4;
         // JSON escaping can expand each key byte to `\u00XX`; 64 bytes per
         // entry conservatively covers field names, delimiters, and the outer envelope.
@@ -974,6 +994,14 @@ mod tests {
         let response = kv_value_response(vec![0, 1, 2, 3]);
         assert_eq!(response.headers()[CONTENT_LENGTH], "4");
         assert_eq!(response.headers()[CONTENT_TYPE], "application/octet-stream");
+    }
+
+    #[test]
+    fn stored_scalar_values_enforce_the_product_limit() {
+        validate_stored_kv_value_size(KV_VALUE_BYTES_MAX).unwrap();
+        let error = validate_stored_kv_value_size(KV_VALUE_BYTES_MAX + 1).unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "internal_error");
     }
 
     #[test]

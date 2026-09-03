@@ -157,7 +157,10 @@ binding to the deterministic fake provider Worker.
 
 Logical DB split:
 
-- DB 0: control-plane metadata.
+- DB 0 on the Control endpoint: control-plane metadata.
+- DB 0 on the Workflows endpoint: only the Workflows-owned schema-reset state. It is
+  the same logical database when Control and Workflows share an endpoint, but a different
+  server when `WORKFLOWS_REDIS_URL` selects a dedicated endpoint.
 - DB 1: data-plane KV, queue, log-tail streams.
 - DB 2: workflows instance state.
 - DB 15: inactive schema-2 Workflow archive while migration is pending.

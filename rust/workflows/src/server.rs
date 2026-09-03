@@ -477,7 +477,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         redis: Redis::new(redis_conn),
         control_redis: Redis::new(control_redis_conn),
-        http: reqwest::Client::new(),
+        http: reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
         metrics: Arc::new(Metrics::default()),
         shutdown: Arc::new(ShutdownState::default()),
         dispatch: Arc::new(DispatchSemaphores::new(

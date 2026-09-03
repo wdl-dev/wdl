@@ -164,7 +164,10 @@ mod tests {
                 .unwrap();
         });
 
-        let response = reqwest::Client::new()
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
             .post(format!("http://{addr}/internal/workflows/tick"))
             .body("{}")
             .send()

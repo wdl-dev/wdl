@@ -116,7 +116,8 @@ Tenant-running Fargate task role 必须保持 least-privilege；tenant code 不�
 
 Valkey logical DB 按 authority 切分：
 
-- DB 0：control-plane metadata、route state、lifecycle index、secrets、referrer index、D1/DO metadata、AI provider/credential record、cron config、queue consumer projection，以及 Workflows-owned operator schema-reset state。
+- Control endpoint 的 DB 0：control-plane metadata、route state、lifecycle index、secrets、referrer index、D1/DO metadata、AI provider/credential record、cron config 和 queue consumer projection。
+- Workflows endpoint 的 DB 0：只保存 Workflows-owned operator schema-reset state。Control 与 Workflows 共用 endpoint 时，它们指向同一个逻辑数据库；`WORKFLOWS_REDIS_URL` 选择专用 endpoint 时，则位于不同服务器。
 - DB 1：data-plane KV、queue streams、delayed queues、log-tail streams、cleanup queues。
 - DB 2：workflows workflow instance state。
 - DB 15：显式 migration pending 期间的 inactive schema-2 Workflow archive；正常 service 不会选择该数据库。

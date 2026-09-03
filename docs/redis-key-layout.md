@@ -8,9 +8,13 @@ families, and ownership rules that span modules.
 
 WDL uses a deliberate logical split:
 
-- **`DB 0`, control plane:** bundles, routes/patterns, auth, AI provider metadata and
+- **`DB 0`, control endpoint:** bundles, routes/patterns, auth, AI provider metadata and
   credentials, D1/DO owner state, cron config, queue-consumer config, lifecycle
-  metadata, workflow definitions (`wf:defs:*`), and the Workflows schema-reset state.
+  metadata, and workflow definitions (`wf:defs:*`).
+- **`DB 0`, Workflows endpoint:** Workflows itself owns only the `wf:schema3-reset`
+  operator state there. It is the same logical database as control when both services
+  share an endpoint, but a different server when `WORKFLOWS_REDIS_URL` selects a dedicated
+  endpoint.
 - **`DB 1`, data plane:** KV hash buckets, queue streams, delayed queues, orphan streams,
   and live log-tail streams.
 - **`DB 2`, workflows:** `wf:schema_version`, instance state, step records/summaries,
@@ -48,11 +52,16 @@ completeness checks succeed; an external snapshot does not satisfy that exit con
 Capacity and eviction-policy fields emitted by the reset command are advisory; the
 operator decides whether the actual endpoint has sufficient headroom.
 
+## Workflows Endpoint DB 0 Key
+
+```text
+wf:schema3-reset                String, Workflows-owned schema reset ownership/migration gate
+```
+
 ## Global Control Keys
 
 ```text
 routes:<ns>                     Hash, { workerName -> activeVersion }
-wf:schema3-reset                String, Workflows-owned schema reset ownership/migration gate
 platform-domain-disabled:<ns>   Set, active workers hidden from platform-domain routing
 namespaces                      Set, namespaces with at least one active worker
 workers:<ns>                    Set, worker names with worker-owned lifecycle state

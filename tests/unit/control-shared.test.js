@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { moduleDataUrl } from "../helpers/load-shared-module.js";
+import { moduleDataUrl, readRepositoryJson } from "../helpers/load-shared-module.js";
 import { compileControlSharedGraph } from "../helpers/load-control-shared.js";
 import {
   createFakeRedis,
@@ -17,6 +17,9 @@ import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
+const workflowServiceErrors = /** @type {{
+ *   migrationPending: { code: string, status: number },
+ * }} */ (readRepositoryJson("tests/fixtures/workflow-service-errors.json"));
 
 const sharedRedisUrl = sharedRedisStubUrl(`
   export class RedisClient {}
@@ -695,10 +698,10 @@ test("assertWorkflowDeleteAllowed preserves the migration-pending conflict", asy
     async fetch() {
       return Response.json(
         {
-          error: "workflow_migration_pending",
+          error: workflowServiceErrors.migrationPending.code,
           message: "Workflow state migration from archive DB 15 has not completed",
         },
-        { status: 409 }
+        { status: workflowServiceErrors.migrationPending.status }
       );
     },
   };
@@ -708,8 +711,8 @@ test("assertWorkflowDeleteAllowed preserves the migration-pending conflict", asy
     (err) => {
       assert.ok(err instanceof ControlAbort);
       const abort = /** @type {InstanceType<typeof ControlAbort>} */ (err);
-      assert.equal(abort.status, 409);
-      assert.equal(abort.code, "workflow_migration_pending");
+      assert.equal(abort.status, workflowServiceErrors.migrationPending.status);
+      assert.equal(abort.code, workflowServiceErrors.migrationPending.code);
       assert.equal(abort.details.namespace, "demo");
       assert.equal(abort.details.worker, "api");
       return true;

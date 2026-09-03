@@ -95,11 +95,24 @@ export function canonicalBase64ToBytes(value) {
   return decodeBase64(value);
 }
 
-/** @param {readonly (string | null)[]} values */
-export function prepareCanonicalBase64Values(values) {
+/** @param {string} value */
+function canonicalBase64DecodedLength(value) {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
+
+/**
+ * @param {readonly (string | null)[]} values
+ * @param {number} [maxDecodedBytes]
+ */
+export function prepareCanonicalBase64Values(values, maxDecodedBytes = Infinity) {
   const prepared = Array.from(values);
   for (const value of prepared) {
-    if (value !== null) assertCanonicalBase64(value);
+    if (value === null) continue;
+    assertCanonicalBase64(value);
+    if (canonicalBase64DecodedLength(value) > maxDecodedBytes) {
+      throw new TypeError("Canonical base64 value exceeds decoded byte limit");
+    }
   }
   return {
     /**

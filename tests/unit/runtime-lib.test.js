@@ -96,6 +96,17 @@ test("prepared canonical base64 values are isolated from caller array mutation",
   assert.deepEqual(decoded, ["f", "g"]);
 });
 
+test("prepared canonical base64 values enforce decoded limits before mapping", () => {
+  assert.deepEqual(
+    prepareCanonicalBase64Values(["YWI="], 2).map((value) => value),
+    [new Uint8Array([97, 98])]
+  );
+  assert.throws(
+    () => prepareCanonicalBase64Values(["YWI=", "YWJj"], 2),
+    /exceeds decoded byte limit/
+  );
+});
+
 test("toBytes: string → Uint8Array utf8", () => {
   const r = toBytes("hi");
   assert.ok(r instanceof Uint8Array);

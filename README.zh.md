@@ -79,7 +79,8 @@ WDL 首先是基础设施项目：operator 运行自己的 platform，tenant 用
 
 Valkey/Redis 使用明确的逻辑切分：
 
-- DB 0：control metadata、bundle、route、auth、lifecycle、D1/DO owner state、workflow definition。
+- Control endpoint 的 DB 0：control metadata、bundle、route、auth、lifecycle、D1/DO owner state 和 workflow definition。
+- Workflows endpoint 的 DB 0：Workflows schema-reset state；只有两个服务共用 endpoint 时才与 Control 位于同一数据库。
 - DB 1：data-plane KV、queue stream、delayed queue、orphan stream、log-tail stream。
 - DB 2：workflow instance state、step record、ready/due shard、event、run lease。
 - DB 15：显式 migration pending 期间的 inactive schema-2 Workflow archive。

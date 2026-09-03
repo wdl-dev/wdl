@@ -65,6 +65,8 @@ Tenant execution context 不是 host authenticity boundary；即使普通 tenant
 
 这些 endpoint 要求 `x-wdl-internal-auth` header，取值来自注入到每个平台注册服务 task 的共享 `WDL_INTERNAL_AUTH_TOKEN` secret。Tenant-originated forwarding path 会剥离这个 header；token 保留在 host-owned Durable Object proxy 和 host-side backend capability 中，不嵌入 generated tenant facade code，也不进入 tenant-visible `env`。
 
+Rust 的私有 service 与 loopback HTTP client 会禁用 ambient proxy discovery 和自动 redirect。Internal-auth header 必须直接发送到配置的私有 endpoint，不能经过 operator shell/container 的 `HTTP_PROXY`/`ALL_PROXY` 值或 response 指定的 redirect target。
+
 不要通过 gateway 或 internet-facing load balancer 暴露这些 endpoint。共享 internal token 只认证私有 mesh 内的 in-tree 平台 caller，不授权任意外部 caller。如果新 caller 不在可信 mesh 内，应设计显式认证和授权，而不是直接复用 internal protocol。
 
 “私有 mesh 可信”不等于信任 tenant 输入。Runtime 和 stateful service 在协议边界仍要校验 worker id、namespace/worker grammar、owner header、generation fence、content type、request size 和 metadata shape。
