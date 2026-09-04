@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(parse_reset_state(None).unwrap(), ResetState::None);
         assert_eq!(
             parse_reset_state(Some(&in_progress)).unwrap(),
-            ResetState::InProgress(in_progress)
+            ResetState::InProgress(in_progress.clone())
         );
         assert_eq!(
             parse_reset_state(Some(RESET_ARCHIVE_PENDING)).unwrap(),
@@ -914,9 +914,19 @@ mod tests {
         assert!(parse_reset_state(Some("in_progress:bad")).is_err());
         assert!(validate_state_phase(&ResetState::None, ResetPhase::Schema2Active).is_ok());
         assert!(
+            validate_state_phase(
+                &ResetState::InProgress(in_progress.clone()),
+                ResetPhase::Schema2Active
+            )
+            .is_ok()
+        );
+        assert!(
             validate_state_phase(&ResetState::ArchivePending, ResetPhase::Schema3Prepared).is_ok()
         );
         assert!(validate_state_phase(&ResetState::None, ResetPhase::AlarmCopying).is_err());
+        assert!(
+            validate_state_phase(&ResetState::ArchivePending, ResetPhase::Schema2Active).is_err()
+        );
     }
 
     #[test]

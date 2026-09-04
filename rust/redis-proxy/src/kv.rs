@@ -27,6 +27,8 @@ const KV_KEY_MAX_BYTES: usize = 512;
 const KV_BATCH_KEYS_MAX: usize = 100;
 const KV_EXPIRATION_MAX: u64 = wdl_rust_common::JS_MAX_SAFE_INTEGER;
 const KV_VALUE_BYTES_MAX: usize = 25 * 1024 * 1024;
+const KV_METADATA_BYTES_MAX: usize = 1024;
+const KV_METADATA_BASE64_BYTES_MAX: usize = KV_METADATA_BYTES_MAX.div_ceil(3) * 4;
 pub(crate) const KV_BATCH_RAW_BYTES_MAX: usize = KV_VALUE_BYTES_MAX;
 const KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT: &str = r#"
 if ARGV[3] == "EX" then
@@ -273,6 +275,15 @@ fn validate_stored_kv_value_size(bytes: usize) -> AppResult<()> {
     if bytes > KV_VALUE_BYTES_MAX {
         return Err(AppError::internal_error(format!(
             "stored KV value exceeds {KV_VALUE_BYTES_MAX} byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_kv_metadata_size(bytes: usize) -> AppResult<()> {
+    if bytes > KV_METADATA_BYTES_MAX {
+        return Err(AppError::internal_error(format!(
+            "stored KV metadata exceeds {KV_METADATA_BYTES_MAX} byte limit"
         )));
     }
     Ok(())
@@ -537,8 +548,30 @@ fn field_to_user_key(field: &str) -> AppResult<&str> {
 
 fn decode_metadata(bytes: Option<Vec<u8>>) -> AppResult<Option<Value>> {
     bytes
-        .map(|raw| serde_json::from_slice::<Value>(&raw).map_err(AppError::internal_json))
+        .map(|raw| {
+            validate_stored_kv_metadata_size(raw.len())?;
+            serde_json::from_slice::<Value>(&raw).map_err(AppError::internal_json)
+        })
         .transpose()
+}
+
+fn decode_metadata_header(raw: &str) -> AppResult<Vec<u8>> {
+    if raw.len() > KV_METADATA_BASE64_BYTES_MAX {
+        return Err(AppError::bad_request(format!(
+            "KV metadata exceeds {KV_METADATA_BYTES_MAX} byte limit"
+        )));
+    }
+    let metadata = STANDARD
+        .decode(raw)
+        .map_err(|_| AppError::bad_request("invalid metadata base64"))?;
+    if metadata.len() > KV_METADATA_BYTES_MAX {
+        return Err(AppError::bad_request(format!(
+            "KV metadata exceeds {KV_METADATA_BYTES_MAX} byte limit"
+        )));
+    }
+    serde_json::from_slice::<Value>(&metadata)
+        .map_err(|_| AppError::bad_request("invalid metadata JSON"))?;
+    Ok(metadata)
 }
 
 struct Base64Bytes(Vec<u8>);
@@ -758,11 +791,7 @@ pub(crate) async fn kv_put(
             value
                 .to_str()
                 .map_err(|_| AppError::bad_request("invalid metadata base64"))
-                .and_then(|raw| {
-                    STANDARD
-                        .decode(raw)
-                        .map_err(|_| AppError::bad_request("invalid metadata base64"))
-                })
+                .and_then(decode_metadata_header)
         })
         .transpose()?;
     let redis_key = hash_key_for_user_key(&q.ns, &q.id, &key);
@@ -970,6 +999,12 @@ mod tests {
                 .expect("KV host value max bytes is an unsigned integer"),
         )
         .expect("KV host value max bytes fits usize");
+        let max_metadata_bytes = usize::try_from(
+            kv_host_response_fixture()["maxMetadataBytes"]
+                .as_u64()
+                .expect("KV host metadata max bytes is an unsigned integer"),
+        )
+        .expect("KV host metadata max bytes fits usize");
         let max_response_bytes = usize::try_from(
             kv_host_response_fixture()["maxResponseBytes"]
                 .as_u64()
@@ -977,6 +1012,7 @@ mod tests {
         )
         .expect("KV host response max bytes fits usize");
         assert_eq!(KV_VALUE_BYTES_MAX, max_value_bytes);
+        assert_eq!(KV_METADATA_BYTES_MAX, max_metadata_bytes);
         assert_eq!(KV_BATCH_RAW_BYTES_MAX, max_value_bytes);
         let max_base64_bytes = KV_BATCH_RAW_BYTES_MAX.div_ceil(3) * 4;
         // JSON escaping can expand each key byte to `\u00XX`; 64 bytes per
@@ -1002,6 +1038,60 @@ mod tests {
         let error = validate_stored_kv_value_size(KV_VALUE_BYTES_MAX + 1).unwrap_err();
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(error.code, "internal_error");
+    }
+
+    #[test]
+    fn stored_kv_metadata_enforces_the_product_limit() {
+        let exact = format!(r#"{{"v":"{}"}}"#, "x".repeat(1016)).into_bytes();
+        assert_eq!(exact.len(), KV_METADATA_BYTES_MAX);
+        decode_metadata(Some(exact)).unwrap();
+
+        let oversized = format!(r#"{{"v":"{}"}}"#, "x".repeat(1017)).into_bytes();
+        assert_eq!(oversized.len(), KV_METADATA_BYTES_MAX + 1);
+        let error = decode_metadata(Some(oversized)).unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "internal_error");
+        assert_eq!(error.message, "stored KV metadata exceeds 1024 byte limit");
+    }
+
+    #[test]
+    fn kv_metadata_must_be_readable_by_the_rust_json_owner() {
+        let valid = STANDARD.encode(br#"{"kind":"valid"}"#);
+        assert_eq!(
+            decode_metadata_header(&valid).unwrap(),
+            br#"{"kind":"valid"}"#
+        );
+        let invalid = STANDARD.encode(br#""\ud800""#);
+        let error = decode_metadata_header(&invalid).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.message, "invalid metadata JSON");
+    }
+
+    #[test]
+    fn kv_metadata_enforces_the_serialized_json_byte_limit() {
+        for json in [
+            format!(r#"{{"v":"{}"}}"#, "x".repeat(1016)),
+            format!(r#"{{"v":"{}xx"}}"#, "汉".repeat(338)),
+        ] {
+            assert_eq!(json.len(), KV_METADATA_BYTES_MAX);
+            let encoded = STANDARD.encode(json.as_bytes());
+            assert_eq!(decode_metadata_header(&encoded).unwrap(), json.as_bytes());
+        }
+        for json in [
+            format!(r#"{{"v":"{}"}}"#, "x".repeat(1017)),
+            format!(r#"{{"v":"{}xxx"}}"#, "汉".repeat(338)),
+        ] {
+            assert_eq!(json.len(), KV_METADATA_BYTES_MAX + 1);
+            let encoded = STANDARD.encode(json.as_bytes());
+            let error = decode_metadata_header(&encoded).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_request");
+            assert_eq!(error.message, "KV metadata exceeds 1024 byte limit");
+        }
+        let error =
+            decode_metadata_header(&"A".repeat(KV_METADATA_BASE64_BYTES_MAX + 1)).unwrap_err();
+        assert_eq!(error.message, "KV metadata exceeds 1024 byte limit");
     }
 
     #[test]

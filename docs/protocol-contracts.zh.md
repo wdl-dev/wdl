@@ -26,7 +26,7 @@
 | Redis key 和逻辑 DB split | `docs/redis-key-layout.zh.md` 加共享 key helper |
 | Route 和 pattern projection | `shared/route-projection.js`、`control/routing.js`、`gateway/` |
 | D1 query/facade protocol | `docs/modules/d1.zh.md`、`shared/d1-*`、`d1-runtime/`、runtime D1 binding |
-| Runtime KV host response | `tests/fixtures/kv-host-response.json` 拥有 Rust redis-proxy 写入、Runtime KV 消费的有界 batch、metadata 与 list response shape。 |
+| Runtime KV host contract | `tests/fixtures/kv-host-response.json` 拥有 Runtime KV 与 Rust redis-proxy 共享的 value、serialized-metadata、response byte limit，以及有界 batch、metadata 与 list response shape。 |
 | AI provider record 和 resolver snapshot | `docs/modules/ai.zh.md`、`shared/ai-contract.js`、`control/handlers/ai.js`、`rust/redis-proxy/src/ai.rs`、`tests/fixtures/ai-contract.json` |
 | AI tenant/provider HTTP、SSE、WebSocket 和 facade protocol | `docs/modules/ai.zh.md`、`runtime/bindings/ai*.js`、`runtime/ai-client.js` |
 | 内部 WebSocket backend reconnect policy | `docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`gateway/websocket.js` |

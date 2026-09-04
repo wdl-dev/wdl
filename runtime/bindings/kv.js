@@ -41,6 +41,7 @@ import {
 } from "runtime-bindings-proxy";
 
 export const KV_VALUE_MAX_BYTES = 25 * 1024 * 1024;
+export const KV_METADATA_MAX_BYTES = 1024;
 export const KV_READ_RESPONSE_MAX_BYTES = 36 * 1024 * 1024;
 export const KV_LIST_LIMIT_MAX = 1000;
 const KV_LIST_LIMIT_DEFAULT = 1000;
@@ -66,7 +67,7 @@ function kvBinding(kv) {
  * @template T
  * @param {KVBinding} kv
  * @param {"get" | "getWithMetadata" | "list"} operation
- * @param {(aborter: AbortController) => Promise<T>} callback
+ * @param {(aborter: AbortController, assertWithinDeadline: () => void) => Promise<T>} callback
  * @returns {Promise<T>}
  */
 function recordKvReadOperation(kv, operation, callback) {
@@ -101,12 +102,19 @@ function requirePositiveInteger(value, name) {
 }
 
 /** @param {unknown} value */
-function stringifyKvMetadata(value) {
+function encodeKvMetadata(value) {
   const json = JSON.stringify(value);
   if (json === undefined) {
     throw new TypeError("KV put: metadata must be JSON-serializable");
   }
-  return json;
+  if (json.length > KV_METADATA_MAX_BYTES) {
+    throw new TypeError(`KV put: metadata exceeds ${KV_METADATA_MAX_BYTES} byte limit`);
+  }
+  const bytes = utf8Encoder.encode(json);
+  if (bytes.byteLength > KV_METADATA_MAX_BYTES) {
+    throw new TypeError(`KV put: metadata exceeds ${KV_METADATA_MAX_BYTES} byte limit`);
+  }
+  return bytes;
 }
 
 /**
@@ -280,7 +288,7 @@ async function readNativeKvResponseBytes(response, expectedBytes, signal) {
  * @param {KVBinding} kv
  * @param {Response} response
  * @param {(bytes: Uint8Array) => T} consume
- * @param {{ aborter: AbortController, nativeExact?: boolean, maxBytes?: number }} options
+ * @param {{ aborter: AbortController, assertWithinDeadline: () => void, nativeExact?: boolean, maxBytes?: number }} options
  * @returns {Promise<T>}
  */
 async function consumeReadResponse(kv, response, consume, options) {
@@ -321,7 +329,11 @@ async function consumeReadResponse(kv, response, consume, options) {
       if (isRuntimeInfrastructureError(error)) throw error;
       throw runtimeInfrastructureError("KV read response failed");
     }
-    return consume(bytes);
+    try {
+      return consume(bytes);
+    } finally {
+      options.assertWithinDeadline();
+    }
   } finally {
     lease.release(aborter.signal.aborted ? "deadline" : "completed");
   }
@@ -496,7 +508,7 @@ export class KV extends WorkerEntrypoint {
    */
   async get(key, typeOrOpts) {
     const kv = kvBinding(this);
-    return recordKvReadOperation(kv, "get", async (aborter) => {
+    return recordKvReadOperation(kv, "get", async (aborter, assertWithinDeadline) => {
       if (Array.isArray(key)) {
         assertBatchType(typeOrOpts);
         const res = await proxyFetch(kv, "/kv/get-batch", {
@@ -518,7 +530,7 @@ export class KV extends WorkerEntrypoint {
               ])
             );
           },
-          { aborter }
+          { aborter, assertWithinDeadline }
         );
       }
       const res = await proxyFetch(kv, "/kv/get", { signal: aborter.signal }, { key });
@@ -530,7 +542,7 @@ export class KV extends WorkerEntrypoint {
         kv,
         res,
         (bytes) => coerceValue(bytes, typeOrOpts),
-        { aborter, nativeExact: true, maxBytes: KV_VALUE_MAX_BYTES }
+        { aborter, assertWithinDeadline, nativeExact: true, maxBytes: KV_VALUE_MAX_BYTES }
       );
     });
   }
@@ -541,7 +553,7 @@ export class KV extends WorkerEntrypoint {
    */
   async getWithMetadata(key, typeOrOpts) {
     const kv = kvBinding(this);
-    return recordKvReadOperation(kv, "getWithMetadata", async (aborter) => {
+    return recordKvReadOperation(kv, "getWithMetadata", async (aborter, assertWithinDeadline) => {
       if (Array.isArray(key)) {
         assertBatchType(typeOrOpts);
         const res = await proxyFetch(kv, "/kv/get-batch", {
@@ -566,7 +578,7 @@ export class KV extends WorkerEntrypoint {
               ])
             );
           },
-          { aborter }
+          { aborter, assertWithinDeadline }
         );
       }
       const res = await proxyFetch(
@@ -583,7 +595,7 @@ export class KV extends WorkerEntrypoint {
           const value = body.value === null ? null : coerceValue(body.value, typeOrOpts);
           return { value, metadata: body.metadata };
         },
-        { aborter }
+        { aborter, assertWithinDeadline }
       );
     });
   }
@@ -620,7 +632,7 @@ export class KV extends WorkerEntrypoint {
         // Metadata rides a base64 header because the body slot is taken by
         // the raw value bytes and HTTP headers need ASCII-safe transport.
         headers["x-kv-metadata-b64"] = bytesToBase64(
-          utf8Encoder.encode(stringifyKvMetadata(opts.metadata))
+          encodeKvMetadata(opts.metadata)
         );
       }
       await proxyFetch(kv, "/kv/put", {
@@ -646,7 +658,7 @@ export class KV extends WorkerEntrypoint {
    */
   async list(opts = {}) {
     const kv = kvBinding(this);
-    return recordKvReadOperation(kv, "list", async (aborter) => {
+    return recordKvReadOperation(kv, "list", async (aborter, assertWithinDeadline) => {
       const { prefix = "", cursor, metadata } = opts;
       const limit = normalizeListLimit(opts.limit);
       const res = await proxyFetch(
@@ -659,7 +671,7 @@ export class KV extends WorkerEntrypoint {
         kv,
         res,
         (bytes) => parseKvListEnvelope(bytes, metadata === true),
-        { aborter }
+        { aborter, assertWithinDeadline }
       );
     });
   }

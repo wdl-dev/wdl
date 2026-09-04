@@ -91,11 +91,11 @@ test("schema3 reset archives Workflow state and preserves live DO alarms", async
     assert.equal(redisCommand(["DBSIZE"], { db: ARCHIVE_DB }), "0");
 
     redisSet("wf:unknown", "foreign", { db: ACTIVE_DB });
-    assert.throws(() => schema3Reset("check"), /schema3-reset|not dedicated/);
+    assert.throws(() => schema3Reset("check"), /not dedicated/);
     redisDel("wf:unknown", { db: ACTIVE_DB });
 
     redisSetEx("wf:pending-version:reset:alarms:1", "pending", 60, { db: ACTIVE_DB });
-    assert.throws(() => schema3Reset("check"), /schema3-reset|expiring Redis keys/);
+    assert.throws(() => schema3Reset("check"), /expiring Redis keys/);
     redisDel("wf:pending-version:reset:alarms:1", { db: ACTIVE_DB });
 
     const activeLeaseExpiresAtMs = Date.now() + 60_000;
@@ -110,7 +110,7 @@ test("schema3 reset archives Workflow state and preserves live DO alarms", async
     );
     redisAddDoAlarmDue(activeLeaseExpiresAtMs, jobId);
     assert.equal(redisDoAlarmReadyIncludes(jobId), false);
-    assert.throws(() => schema3Reset("check"), /schema3-reset|unexpired running DO alarm/);
+    assert.throws(() => schema3Reset("check"), /unexpired running DO alarm/);
     const expiredLeaseAtMs = Date.now() - 1;
     redisHSet(
       alarmStateKey,
@@ -178,6 +178,33 @@ test("schema3 reset archives Workflow state and preserves live DO alarms", async
   }
 });
 
+test("schema3 reset resumes after ownership acquisition before SWAPDB", () => {
+  composeStop("scheduler");
+  try {
+    redisSet(SCHEMA_KEY, "2", { db: ACTIVE_DB });
+    redisHSet(
+      CRASH_ALARM_KEY,
+      { status: "waiting", updatedAtMs: "before-swap" },
+      { db: ACTIVE_DB }
+    );
+    redisSet(RESET_KEY, "in_progress:0000000000000000");
+    assert.equal(redisCommand(["DBSIZE"], { db: ARCHIVE_DB }), "0");
+
+    assert.throws(() => schema3Reset("apply"), /Another schema3 reset task/);
+    const resumed = schema3Reset("resume");
+    assert.equal(resumed.phase, "schema3_prepared");
+    assert.equal(resumed.resetState, "archive_pending");
+    assert.equal(redisGet(SCHEMA_KEY, { db: ACTIVE_DB }), "3");
+    assert.equal(redisGet(SCHEMA_KEY, { db: ARCHIVE_DB }), "2");
+    assert.deepEqual(
+      redisHGetAll(CRASH_ALARM_KEY, { db: ACTIVE_DB }),
+      redisHGetAll(CRASH_ALARM_KEY, { db: ARCHIVE_DB })
+    );
+  } finally {
+    restoreSchema3Stack();
+  }
+});
+
 test("schema3 reset resumes after SWAPDB before alarm copy", () => {
   composeStop("scheduler");
   try {
@@ -197,7 +224,7 @@ test("schema3 reset resumes after SWAPDB before alarm copy", () => {
       { db: ACTIVE_DB }
     );
 
-    assert.throws(() => schema3Reset("apply"), /schema3-reset|Another schema3 reset task/);
+    assert.throws(() => schema3Reset("apply"), /Another schema3 reset task/);
     const resumed = schema3Reset("resume");
     assert.equal(resumed.phase, "schema3_prepared");
     assert.equal(resumed.resetState, "archive_pending");

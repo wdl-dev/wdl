@@ -19,7 +19,7 @@ export function runtimeInfrastructureError(message) { return new Error(message);
 const KV_CAPACITY_STUB_URL = moduleDataUrl(`
 export function acquireKvReadLease() { return { contentLength: null, release() {} }; }
 export function kvReadCapacityError() { return new Error("capacity"); }
-export function withKvReadDeadline(callback) { return callback(new AbortController()); }
+export function withKvReadDeadline(callback) { return callback(new AbortController(), () => {}); }
 `);
 
 const toBytesStub = `const toBytes = (value) => {

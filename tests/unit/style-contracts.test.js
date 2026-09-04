@@ -933,6 +933,7 @@ test("Runtime KV host responses share one JS and Rust fixture", () => {
   const fixture = "tests/fixtures/kv-host-response.json";
   const contract = /** @type {{
    *   maxValueBytes: number,
+   *   maxMetadataBytes: number,
    *   maxResponseBytes: number,
    *   batch: { requestedKeys: string[], response: { entries: unknown[] } },
    *   metadata: Record<string, unknown>,
@@ -940,6 +941,7 @@ test("Runtime KV host responses share one JS and Rust fixture", () => {
    *   invalid: Record<string, unknown>,
    * }} */ (readRepositoryJson(fixture));
   assert.equal(contract.maxValueBytes, 25 * 1024 * 1024);
+  assert.equal(contract.maxMetadataBytes, 1024);
   assert.equal(contract.maxResponseBytes, 36 * 1024 * 1024);
   assert.equal(contract.batch.requestedKeys.length, contract.batch.response.entries.length);
   assert.deepEqual(Object.keys(contract.metadata).sort(), ["found", "missing"]);

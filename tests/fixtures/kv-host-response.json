@@ -1,5 +1,6 @@
 {
   "maxValueBytes": 26214400,
+  "maxMetadataBytes": 1024,
   "maxResponseBytes": 37748736,
   "batch": {
     "requestedKeys": ["binary", "empty", "missing"],

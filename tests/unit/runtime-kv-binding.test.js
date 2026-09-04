@@ -168,8 +168,9 @@ test("KV batch get calls the batch proxy endpoint and returns a Map", withFetchS
 }));
 
 test("KV host response readers match the cross-language fixture", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
-  const { KV, KV_READ_RESPONSE_MAX_BYTES, KV_VALUE_MAX_BYTES } = await loadKvBinding();
+  const { KV, KV_METADATA_MAX_BYTES, KV_READ_RESPONSE_MAX_BYTES, KV_VALUE_MAX_BYTES } = await loadKvBinding();
   assert.equal(KV_VALUE_MAX_BYTES, kvHostResponse.maxValueBytes);
+  assert.equal(KV_METADATA_MAX_BYTES, kvHostResponse.maxMetadataBytes);
   assert.equal(KV_READ_RESPONSE_MAX_BYTES, kvHostResponse.maxResponseBytes);
   const responses = [
     kvHostResponse.batch.response,
@@ -627,6 +628,31 @@ test("KV read capacity deadline releases a stalled body lease", withFetchStub(as
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
 }));
 
+test("KV read deadline rejects synchronous result construction that crosses its budget", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding([], [
+    [/export const KV_READ_DEADLINE_MS = 5_000;/, "export const KV_READ_DEADLINE_MS = 20;"],
+  ]);
+  setFetch(async () => Response.json(kvHostResponse.metadata.found));
+  const originalParse = JSON.parse;
+  let now = 1_000;
+
+  await withMockedProperty(Date, "now", () => now, async () => {
+    await withMockedProperty(JSON, "parse", (text) => {
+      const parsed = originalParse(text);
+      now += 20;
+      return parsed;
+    }, async () => {
+      await assert.rejects(
+        () => makeKv(KV).getWithMetadata("late-materialization"),
+        (error) => error instanceof Error &&
+          error.message === kvCapacity.KV_READ_TIMEOUT_ERROR_MESSAGE &&
+          runtimeInfrastructure.isRuntimeInfrastructureError(error)
+      );
+    });
+  });
+  assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+}));
+
 test("KV read deadline rejects a response stalled before headers", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
   const { KV, kvCapacity, runtimeInfrastructure } = await loadKvBinding([], [
     [/export const KV_READ_DEADLINE_MS = 5_000;/, "export const KV_READ_DEADLINE_MS = 20;"],
@@ -840,6 +866,38 @@ test("KV put rejects non-serializable metadata before proxy work", withFetchStub
     () => makeKv(KV).put("bad-metadata", "value", { metadata: () => {} }),
     /KV put: metadata must be JSON-serializable/
   );
+}));
+
+test("KV put enforces the serialized metadata byte limit before proxy work", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {
+  const { KV, KV_METADATA_MAX_BYTES } = await loadKvBinding();
+  /** @type {any[]} */
+  const calls = [];
+  setFetch(makeRecordingFetch(calls));
+  const kv = makeKv(KV);
+  const accepted = [
+    { v: "x".repeat(1016) },
+    { v: `${"汉".repeat(338)}xx` },
+  ];
+
+  for (const [index, metadata] of accepted.entries()) {
+    const json = JSON.stringify(metadata);
+    assert.equal(new TextEncoder().encode(json).byteLength, KV_METADATA_MAX_BYTES);
+    await kv.put(`accepted-${index}`, "value", { metadata });
+    const header = new Headers(calls[index].init.headers).get("x-kv-metadata-b64");
+    assert.ok(header);
+    assert.equal(Buffer.from(header, "base64").byteLength, KV_METADATA_MAX_BYTES);
+  }
+
+  for (const metadata of [
+    { v: "x".repeat(1017) },
+    { v: `${"汉".repeat(338)}xxx` },
+  ]) {
+    await assert.rejects(
+      () => kv.put("too-large", "value", { metadata }),
+      /KV put: metadata exceeds 1024 byte limit/
+    );
+  }
+  assert.equal(calls.length, accepted.length);
 }));
 
 test("KV put rejects explicit zero expiration before proxy work", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {

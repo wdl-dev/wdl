@@ -35,7 +35,7 @@ Every protocol shape needs one owning module and one current written source:
 | Redis keys and logical DB split | `docs/redis-key-layout.md` plus shared key helpers |
 | Route and pattern projections | `shared/route-projection.js`, `control/routing.js`, `gateway/` |
 | D1 query/facade protocol | `docs/modules/d1.md`, `shared/d1-*`, `d1-runtime/`, runtime D1 binding |
-| Runtime KV host responses | `tests/fixtures/kv-host-response.json` owns the bounded batch, metadata, and list response shapes emitted by Rust redis-proxy and consumed by Runtime KV. |
+| Runtime KV host contract | `tests/fixtures/kv-host-response.json` owns the value, serialized-metadata, and response byte limits plus bounded batch, metadata, and list response shapes shared by Runtime KV and Rust redis-proxy. |
 | AI provider records and resolver snapshots | `docs/modules/ai.md`, `shared/ai-contract.js`, `control/handlers/ai.js`, `rust/redis-proxy/src/ai.rs`, `tests/fixtures/ai-contract.json` |
 | AI tenant/provider HTTP, SSE, WebSocket, and facade protocol | `docs/modules/ai.md`, `runtime/bindings/ai*.js`, `runtime/ai-client.js` |
 | Internal WebSocket backend reconnect policy | `docs/modules/gateway.md`, `shared/worker-contract.js`, `gateway/websocket.js` |

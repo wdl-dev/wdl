@@ -151,7 +151,8 @@ tracking, common JSON log-line emission, wall-clock millisecond helpers, short
 non-cryptographic random hex suffixes, stable non-cryptographic hashes, queue Redis key
 builders, worker version / bundle-key parsing, Prometheus metric storage/formatting,
 Prometheus text responses, structured error field merging, internal-auth token/header
-matching, Redis command construction helpers, a neutral Redis connection execution
+matching, shared request-completion emission, Redis client construction and TCP
+settings, Redis command construction helpers, a neutral Redis connection execution
 wrapper, small behavior-free cross-service wire shapes, and UTF-8-safe string
 truncation. It must not become a dumping ground for service behavior. Axum-facing and
 Redis-facing helpers sit behind the `axum` and `redis` features so consumers such as
@@ -166,7 +167,7 @@ builds leave this feature disabled.
 Local explicit code is still preferable when sidecars have different behavior around:
 
 - service-specific shutdown/drain timing and shutdown log events
-- logging call sites, event names, and request completion semantics
+- logging call sites, event names, and service-specific request completion semantics
 - Redis access patterns
 - runtime dispatch and retry semantics
 - protocol-specific error mapping
@@ -189,10 +190,10 @@ Rules for shared primitives:
 - Do not add service-specific lifecycle, retry, Redis transaction, or protocol-response
   behavior to `wdl-rust-common`; keep those in the service crate that owns the state
   machine.
-- Redis helpers in `wdl-rust-common` may only build commands from explicit keys and
-  args or run caller-provided closures against an explicit `ConnectionManager`. Service
-  crates still own script bodies, which connection is selected, retry/timeout behavior,
-  error mapping, and state ownership.
+- Redis helpers in `wdl-rust-common` may construct clients with shared transport settings,
+  build commands from explicit keys and args, or run caller-provided closures against an
+  explicit `ConnectionManager`. Service crates still own script bodies, pool topology,
+  which connection is selected, retry/timeout behavior, error mapping, and state ownership.
 - HTTP framework helpers in `wdl-rust-common` must stay behind the crate's `axum`
   feature, and Redis connection/EVAL helpers behind its `redis` feature. Sidecars that
   only need the plain primitives should opt out of default features.

@@ -74,22 +74,35 @@ export function acquireKvReadLease(binding, response, deadlineSignal) {
 
 /**
  * @template T
- * @param {(aborter: AbortController) => Promise<T>} callback
+ * @param {(aborter: AbortController, assertWithinDeadline: () => void) => Promise<T>} callback
  * @returns {Promise<T>}
  */
 export async function withKvReadDeadline(callback) {
   const aborter = new AbortController();
+  const deadlineAtMs = Date.now() + KV_READ_DEADLINE_MS;
   /** @type {(reason?: unknown) => void} */
   let rejectDeadline = () => {};
   /** @type {Promise<never>} */
   const deadline = new Promise((_, reject) => { rejectDeadline = reject; });
+  // Timer callbacks cannot preempt synchronous decode/parse, so callers also
+  // invoke this check before releasing their materialization lease.
+  const assertWithinDeadline = () => {
+    if (!aborter.signal.aborted && Date.now() < deadlineAtMs) return;
+    const error = aborter.signal.aborted
+      ? aborter.signal.reason
+      : kvReadTimeoutError();
+    if (!aborter.signal.aborted) aborter.abort(error);
+    throw error;
+  };
   const timer = setTimeout(() => {
     const error = kvReadTimeoutError();
     rejectDeadline(error);
     aborter.abort(error);
-  }, KV_READ_DEADLINE_MS);
+  }, Math.max(0, deadlineAtMs - Date.now()));
   try {
-    return await Promise.race([callback(aborter), deadline]);
+    const result = await Promise.race([callback(aborter, assertWithinDeadline), deadline]);
+    assertWithinDeadline();
+    return result;
   } finally {
     clearTimeout(timer);
   }

@@ -135,7 +135,12 @@ in the runtime shim before proxying, and stream values are read with the same ca
 are capped at 512 UTF-8 bytes at the redis-proxy boundary for all KV operations,
 including list prefixes and batch reads. `put()` expiration and expiration-TTL values
 must be positive JavaScript safe integers; the proxy applies an expiring value-only
-write and stale-metadata removal atomically.
+write and stale-metadata removal atomically. redis-proxy validates metadata bytes with
+the same Rust JSON parser used by metadata reads before persisting them; unsupported JSON
+cannot turn a later metadata read into a permanent host failure. The serialized metadata
+JSON is capped at 1024 UTF-8 bytes before Runtime Base64/header allocation and again before
+redis-proxy persistence. Persisted reads independently enforce the same cap and fail closed
+on oversized legacy or repair-written metadata.
 `list()` is backed by Redis `HSCAN`, not a Cloudflare ordered B-tree: keys are not
 sorted, cursors are opaque WDL cursors, and concurrent writes may appear out of order or
 be re-seen. A page with `list_complete: false` may contain fewer than `limit` keys,
@@ -273,8 +278,10 @@ Data-plane bindings use their own storage:
   identity-encoded. An intermediary that adds compression forces conservative full-budget
   admission and should be disabled on that internal hop. Runtime keeps JSON/Base64 result
   construction inside the lease and starts one 5-second total deadline before each host
-  read. Request/header wait and response-body consumption share that deadline. It rejects
-  independently of best-effort fetch or stream cancellation and releases any reservation.
+  read. Request/header wait, response-body consumption, and synchronous result construction
+  share that deadline; an absolute check after construction rejects work that crosses the
+  budget before returning it. The deadline rejects independently of best-effort fetch or
+  stream cancellation and releases any reservation.
   Capacity rejection, read deadline/body failure, malformed host envelopes, host proxy
   URL/configuration failure, internal-auth `401`, fixed read-route `404`/`405`, and read
   proxy transport or 5xx failure carry one host-owned infrastructure code. Tenant-input
@@ -394,11 +401,10 @@ lease released before its deadline, not that value parsing or the binding operat
 succeeded; binding-operation metrics own that result.
 
 Cold-load duration metrics use workerd's request clock. The
-`bundle_load_stage_duration_ms` series therefore covers only the awaited
-`redis_proxy_load` stage. `bundle_load_duration_ms` remains useful for end-to-end
-request-visible load latency, but neither metric profiles uninterrupted bundle decode,
-env construction, or wrapper generation CPU time; workerd does not advance the clock
-during those synchronous stages.
+`bundle_load_stage_duration_ms` series covers only the awaited `redis_proxy_load` stage.
+`bundle_load_duration_ms` covers end-to-end request-visible load latency, including
+synchronous bundle decode, env construction, and wrapper generation under stock workerd's
+advancing request clock; it remains one aggregate rather than a per-stage CPU profile.
 
 ## Deployment / Rollout Notes
 

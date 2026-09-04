@@ -122,6 +122,56 @@ test("metadata stored and retrieved", async () => {
   assert.deepEqual(json.metadata, { author: "alice" });
 });
 
+test("put enforces metadata JSON grammar and serialized byte limits", async () => {
+  await setup("kvns4-invalid-meta");
+  for (const { key, metadata } of [
+    { key: "ascii-limit", metadata: { v: "x".repeat(1016) } },
+    { key: "cjk-limit", metadata: { v: `${"汉".repeat(338)}xx` } },
+  ]) {
+    const json = JSON.stringify(metadata);
+    assert.equal(new TextEncoder().encode(json).byteLength, 1024);
+    const accepted = await call("kvns4-invalid-meta", {
+      op: "put",
+      key,
+      val: "v",
+      meta: json,
+    });
+    assert.equal(accepted.status, 200, await accepted.text());
+    const stored = await call("kvns4-invalid-meta", { op: "getMeta", key });
+    assert.deepEqual((await responseJson(stored)).metadata, metadata);
+  }
+
+  const invalid = await call("kvns4-invalid-meta", {
+    op: "put",
+    key: "invalid-json",
+    val: "v",
+    meta: '"\\ud800"',
+  });
+  assert.equal(invalid.status, 500);
+  assert.equal(await invalid.text(), "err: KV proxy /kv/put failed with 400");
+
+  for (const { key, metadata } of [
+    { key: "ascii-too-large", metadata: { v: "x".repeat(1017) } },
+    { key: "cjk-too-large", metadata: { v: `${"汉".repeat(338)}xxx` } },
+  ]) {
+    const json = JSON.stringify(metadata);
+    assert.equal(new TextEncoder().encode(json).byteLength, 1025);
+    const rejected = await call("kvns4-invalid-meta", {
+      op: "put",
+      key,
+      val: "v",
+      meta: json,
+    });
+    assert.equal(rejected.status, 500);
+    assert.equal(await rejected.text(), "err: KV put: metadata exceeds 1024 byte limit");
+  }
+
+  for (const key of ["invalid-json", "ascii-too-large", "cjk-too-large"]) {
+    const missing = await call("kvns4-invalid-meta", { op: "get", key });
+    assert.equal(await missing.text(), "__null__");
+  }
+});
+
 test("put without metadata clears prior metadata", async () => {
   await setup("kvns5");
   await call("kvns5", {
