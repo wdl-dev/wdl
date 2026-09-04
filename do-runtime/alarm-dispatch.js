@@ -1,10 +1,12 @@
 import { DoRuntimeError, normalizeDoInvokeRequest, readJsonBody } from "do-runtime-protocol";
 import { json } from "do-runtime-http";
+import { log } from "do-runtime-state";
 import {
   DO_ALARM_RESPONSE_DEADLINE_MS,
   parseDoAlarmDispatchSuccess,
   readDoAlarmResponseText,
 } from "shared-do-alarm-response";
+import { formatError } from "shared-observability";
 import { ownerHintFromHeaders } from "runtime-do-transport";
 
 /**
@@ -18,6 +20,16 @@ function alarmDispatchResultUnknown() {
     503,
     "do_alarm_dispatch_result_unknown",
     "DO alarm dispatch result is unknown"
+  );
+}
+
+/** @param {unknown} [details] */
+function alarmDispatchFailed(details = undefined) {
+  return new DoRuntimeError(
+    503,
+    "do_alarm_dispatch_failed",
+    "DO alarm dispatch failed",
+    details
   );
 }
 
@@ -65,7 +77,18 @@ export async function handleAlarmDispatch(request, env, dispatchInvoke, requestI
     if (dispatchStarted) {
       throw alarmDispatchResultUnknown();
     }
-    throw error;
+    log("warn", "do_alarm_pre_dispatch_failed", {
+      request_id: requestId || undefined,
+      namespace: invoke.ns,
+      worker: invoke.worker,
+      version: invoke.version,
+      class_name: invoke.className,
+      object_name: invoke.objectName,
+      host_id: invoke.hostId,
+      retry_count: invoke.alarm.retryCount,
+      ...formatError(error),
+    });
+    throw alarmDispatchFailed();
   }
   let text;
   try {
@@ -81,7 +104,7 @@ export async function handleAlarmDispatch(request, env, dispatchInvoke, requestI
     if (responseOwner?.ownerKey !== invoke.hostId) {
       throw alarmDispatchResultUnknown();
     }
-    throw new DoRuntimeError(503, "do_alarm_dispatch_failed", "DO alarm dispatch failed", {
+    throw alarmDispatchFailed({
       upstream_status: response.status,
       upstream_body: text.slice(0, 1024),
     });

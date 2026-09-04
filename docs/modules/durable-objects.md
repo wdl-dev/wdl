@@ -378,8 +378,12 @@ deletable.
   (default `6`), then discard and increment
   `do_alarm_dispatches{outcome="discarded"}`.
 - Only a connect failure before the Workflows request reaches do-runtime or a trusted,
-  complete `do_alarm_dispatch_failed` response schedules an immediate alarm retry. A timeout,
-  explicit `do_alarm_dispatch_result_unknown`, owner-forward transport failure, or
+  complete `do_alarm_dispatch_failed` response schedules an immediate alarm retry.
+  do-runtime emits that failed response when task/owner resolution rejects before owner
+  forwarding or actor fetch starts, and when a trusted owner response proves the alarm
+  settled as failure. The pre-dispatch conversion logs the normalized alarm identity and
+  original internal error without its fence token. A timeout, explicit
+  `do_alarm_dispatch_result_unknown`, owner-forward transport failure, or
   response that cannot be read and classified keeps the running claim until
   `WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS` expires. A running job is removed from ready and
   indexed in due at that lease expiry, so repeated ticks do not resample it while the

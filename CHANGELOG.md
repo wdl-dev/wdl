@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Hardened Workflow step and replay contracts with schema-3 operation kinds, exact terminal variants, bounded backend responses, and sender-owned absolute dispatch deadlines.
-- Bounded Durable Object alarm responses to 16 KiB with 5-second body deadlines and exact variants; ambiguous results now retain parked claims until lease expiry instead of retrying immediately.
+- Bounded Durable Object alarm responses to 16 KiB with 5-second body deadlines and exact variants; explicit pre-dispatch resolution failures retry normally, while ambiguous results retain parked claims until lease expiry.
 - Reduced Redis latency with shared `TCP_NODELAY`, two managers per redis-proxy logical pool, concurrent connection initialization, and fewer KV key allocations; private Rust HTTP clients bypass ambient proxies and reject redirects.
 - Added bounded Runtime KV admission, response envelopes, and deadlines; enforced the 25 MiB value cap on reads and writes, restored native scalar-read performance, tightened batch validation, and limited Workflow retries to direct host failures escaping reviewed boundaries. Dynamic Workers now reject `no_rpc`.
 - Unified canonical Base64 and secret-envelope decoding, reused owned ciphertext buffers, and reduced suppressed JavaScript/Rust request-completion work without changing success logs or metrics.

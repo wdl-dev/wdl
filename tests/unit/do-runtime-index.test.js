@@ -35,6 +35,7 @@ const alarmResponseContract = /** @type {{
 /** @type {any} */ (globalThis).__doIndexForwardCalls = null;
 /** @type {any} */ (globalThis).__doIndexForwardResponse = null;
 /** @type {any} */ (globalThis).__doIndexResolveCalls = null;
+/** @type {any} */ (globalThis).__doIndexLogs = null;
 
 /** @param {string} src */
 function stub(src) {
@@ -72,14 +73,6 @@ const alarmResponseUrl = repositoryModuleDataUrl("shared/do-alarm-response.js", 
 const { DO_ALARM_RESPONSE_MAX_BYTES } = await import(alarmResponseUrl);
 const doTransportUrl = doTransportDataUrl();
 const { ownerHintHeaders } = await import(doTransportUrl);
-const alarmDispatchUrl = stub(readRepositoryModuleSource("do-runtime/alarm-dispatch.js", importSpecifierReplacements({
-  "shared-worker-id": workerIdUrl,
-  "shared-worker-contract": workerContractUrl,
-  "do-runtime-protocol": protocolUrl,
-  "do-runtime-http": httpUrl,
-  "shared-do-alarm-response": alarmResponseUrl,
-  "runtime-do-transport": doTransportUrl,
-})));
 const objectRegistryUrl = stub(`
 export function parseObjectRegistryMember(member) {
   if (member === "Room:room-a:0") return { className: "Room", objectName: "room-a", shard: 0 };
@@ -95,7 +88,7 @@ export function currentInFlightDispatches() {
   return /** @type {any} */ (globalThis).__doIndexCurrentInFlightDispatches || 0;
 }
 export function isDraining() { return draining; }
-export function log() {}
+export function log(...args) { globalThis.__doIndexLogs.push(args); }
 export function prepareDoRuntimeMetrics() { globalThis.__doIndexPrepareDoMetrics += 1; }
 export async function recordDoInvoke(_kind, fn) { return await fn(); }
 export async function recordDoWebSocketUpgrade(fn) { return await fn(); }
@@ -104,6 +97,16 @@ export async function waitForInFlightDispatches() {
   return /** @type {any} */ (globalThis).__doIndexWaitForInFlightResult || { drained: true, inFlight: 0, waitedMs: 0 };
 }
 `);
+const alarmDispatchUrl = stub(readRepositoryModuleSource("do-runtime/alarm-dispatch.js", importSpecifierReplacements({
+  "shared-worker-id": workerIdUrl,
+  "shared-worker-contract": workerContractUrl,
+  "do-runtime-protocol": protocolUrl,
+  "do-runtime-http": httpUrl,
+  "do-runtime-state": stateUrl,
+  "shared-do-alarm-response": alarmResponseUrl,
+  "shared-observability": OBSERVABILITY_NOOP_URL,
+  "runtime-do-transport": doTransportUrl,
+})));
 const aiCapacityUrl = stub(`
 export function prepareAiCapacityMetrics(env) {
   globalThis.__doIndexPrepareAiMetrics.push(env);
@@ -207,6 +210,7 @@ beforeEach(() => {
   /** @type {any} */ (globalThis).__doIndexForwardCalls = [];
   /** @type {any} */ (globalThis).__doIndexForwardResponse = null;
   /** @type {any} */ (globalThis).__doIndexResolveCalls = 0;
+  /** @type {any} */ (globalThis).__doIndexLogs = [];
   /** @type {any} */ (globalThis).__doIndexCurrentInFlightDispatches = 0;
   /** @type {any} */ (globalThis).__doIndexWaitForInFlightResult = null;
   doState.ownedScopes.clear();
@@ -425,6 +429,67 @@ test("do-runtime preserves unknown alarm results across local and owner failures
       );
     });
   }
+});
+
+test("do-runtime marks owner resolution failure before alarm dispatch as retryable", async () => {
+  const failed = alarmResponseContract.dispatchErrorVariants.failed;
+  /** @type {any} */ (globalThis).__doIndexOwnerError = new DoRuntimeError(
+    503,
+    "owner_unavailable",
+    "DO owner is unavailable"
+  );
+
+  const response = await app.fetch(internalRequest(
+    "https://do-runtime/internal/do/alarms/dispatch",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-request-id": "alarm-pre-dispatch-rid",
+      },
+      body: JSON.stringify({
+        ns: "tenant",
+        worker: "alarms",
+        version: "v7",
+        doStorageId: "do_0123456789abcdef0123456789abcdef",
+        className: "Room",
+        objectName: "alice",
+        retryCount: 2,
+        token: "row-token",
+      }),
+    }
+  ), env());
+
+  assert.deepEqual(
+    await readJsonResponse(response, failed.status, "pre-dispatch owner failure"),
+    failed.body
+  );
+  const hostFetches = /** @type {any[]} */ (
+    /** @type {any} */ (globalThis).__doIndexHostFetches
+  );
+  const forwardCalls = /** @type {any[]} */ (
+    /** @type {any} */ (globalThis).__doIndexForwardCalls
+  );
+  const logs = /** @type {any[]} */ (/** @type {any} */ (globalThis).__doIndexLogs);
+  assert.equal(hostFetches.length, 0);
+  assert.equal(forwardCalls.length, 0);
+  assert.deepEqual(logs, [[
+    "warn",
+    "do_alarm_pre_dispatch_failed",
+    {
+      request_id: "alarm-pre-dispatch-rid",
+      namespace: "tenant",
+      worker: "alarms",
+      version: "v7",
+      class_name: "Room",
+      object_name: "alice",
+      host_id: "do_0123456789abcdef0123456789abcdef:Room:shard7",
+      retry_count: 2,
+      error_name: "DoRuntimeError",
+      error_message: "DO owner is unavailable",
+      error_code: "owner_unavailable",
+    },
+  ]]);
 });
 
 test("do-runtime alarm dispatch rejects malformed successful actor envelopes", async (t) => {
