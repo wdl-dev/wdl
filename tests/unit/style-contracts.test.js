@@ -968,6 +968,7 @@ test("DO alarm response readers share one bounded fixture", () => {
    *   dispatchSuccessVariants: Record<string, unknown>,
    *   dispatchErrorVariants: Record<string, unknown>,
    *   mutationSuccessVariants: Record<string, unknown>,
+   *   mutationFailureClasses: Record<string, unknown>,
    *   mutationRequiredFields: unknown[],
    * }} */ (readRepositoryJson(fixture));
   assert.equal(contract.maxBytes, 16 * 1024);
@@ -989,6 +990,18 @@ test("DO alarm response readers share one bounded fixture", () => {
     "delete",
     "set",
   ]);
+  assert.deepEqual(contract.mutationFailureClasses, {
+    definitePreMutationRejection: {
+      minStatus: 400,
+      maxStatus: 499,
+      runtimeCode: "do_alarm_backend_failed",
+    },
+    resultUnknown: {
+      minStatus: 500,
+      maxStatus: 599,
+      runtimeCode: "do_alarm_result_unknown",
+    },
+  });
   assert.deepEqual(contract.mutationRequiredFields, ["changed", "deleted", "jobId", "ok"]);
   for (const reader of [
     "tests/unit/do-alarm-client.test.js",

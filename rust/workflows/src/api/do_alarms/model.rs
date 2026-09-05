@@ -414,6 +414,23 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(response["ok"], true);
+
+        let failure_classes = &fixture["mutationFailureClasses"];
+        for (error, class_name) in [
+            (
+                WorkflowError::invalid_request("pre-mutation rejection"),
+                "definitePreMutationRejection",
+            ),
+            (
+                WorkflowError::internal_error("post-mutation failure"),
+                "resultUnknown",
+            ),
+        ] {
+            let class = &failure_classes[class_name];
+            let status = u64::from(error.status.as_u16());
+            assert!(status >= class["minStatus"].as_u64().expect("minimum status"));
+            assert!(status <= class["maxStatus"].as_u64().expect("maximum status"));
+        }
     }
 
     #[test]

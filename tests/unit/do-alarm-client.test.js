@@ -10,14 +10,16 @@ import {
 } from "../helpers/load-shared-module.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { sharedInternalAuthUrl } from "../helpers/runtime-proxy-stub.js";
+import { settlementWithin } from "../helpers/timing.js";
 
 const PROTOCOL_STUB_URL = moduleDataUrl(`
 export class DoRuntimeError extends Error {
-  constructor(status, code, message, details = {}) {
+  details;
+  constructor(status, code, message, details = undefined) {
     super(message);
     this.status = status;
     this.code = code;
-    this.details = details;
+    if (details !== undefined) this.details = details;
   }
 }
 export function nonEmptyAlarmString(value) {
@@ -25,6 +27,11 @@ export function nonEmptyAlarmString(value) {
 }
 export function isWellFormedUnicodeString(value) {
   return typeof value === "string" && value.isWellFormed();
+}
+`);
+const STATE_STUB_URL = moduleDataUrl(`
+export function log(...args) {
+  globalThis.__doAlarmClientLogs.push(args);
 }
 `);
 const SHARED_INTERNAL_AUTH_URL = sharedInternalAuthUrl();
@@ -48,12 +55,17 @@ const alarmResponseContract = /** @type {{
  *   delete: Record<string, unknown>,
  *   cleanup: Record<string, unknown>,
  * },
+ * mutationFailureClasses: Record<string, {
+ *   minStatus: number,
+ *   maxStatus: number,
+ *   runtimeCode: string,
+ * }>,
  * mutationRequiredFields: string[],
  * }} */ (
   readRepositoryJson("tests/fixtures/do-alarm-response.json")
 );
 
-/** @param {{ WORKFLOWS_BACKEND?: unknown }} env */
+/** @param {{ WORKFLOWS_BACKEND?: unknown, WDL_INTERNAL_AUTH_TOKEN?: unknown }} env */
 function alarmEnv(env) {
   return { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN, ...env };
 }
@@ -61,9 +73,11 @@ function alarmEnv(env) {
 function loadAlarmModule() {
   const source = applyModuleReplacements(readRepositoryFile("do-runtime/alarm.js"), [
     [/from "do-runtime-protocol";/, `from ${JSON.stringify(PROTOCOL_STUB_URL)};`],
+    [/from "do-runtime-state";/, `from ${JSON.stringify(STATE_STUB_URL)};`],
     [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
-    [/from "shared-errors";/, `from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};`],
     [/from "shared-do-alarm-response";/, `from ${JSON.stringify(ALARM_RESPONSE_URL)};`],
+    [/from "shared-observability";/, `from ${JSON.stringify(repositoryFileUrl("shared/observability.js"))};`],
+    [/from "shared-respond";/, `from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};`],
   ]);
   return import(moduleDataUrl(source));
 }
@@ -73,7 +87,15 @@ let calls;
 
 beforeEach(() => {
   calls = [];
+  /** @type {any} */ (globalThis).__doAlarmClientLogs = [];
 });
+
+/** @returns {Array<[string, string, Record<string, unknown>]>} */
+function alarmClientLogs() {
+  return /** @type {Array<[string, string, Record<string, unknown>]>} */ (
+    /** @type {any} */ (globalThis).__doAlarmClientLogs
+  );
+}
 
 test("DO alarm response contract matches the cross-language fixture", async () => {
   assert.equal(alarmResponseModule.DO_ALARM_RESPONSE_MAX_BYTES, alarmResponseContract.maxBytes);
@@ -268,12 +290,15 @@ test("alarm backend is required", async () => {
   );
 });
 
-test("alarm backend failures are surfaced as DO runtime errors", async () => {
+test("alarm backend request setup failures are sanitized before dispatch", async () => {
   const mod = await loadAlarmModule();
 
   await assert.rejects(
     () => mod.setAlarmIndex(
-      alarmEnv({ WORKFLOWS_BACKEND: workflowsBackend(Response.json({ error: "boom" }, { status: 500 })) }),
+      alarmEnv({
+        WDL_INTERNAL_AUTH_TOKEN: "invalid token",
+        WORKFLOWS_BACKEND: workflowsBackend(),
+      }),
       props,
       {
         className: "Room",
@@ -282,7 +307,194 @@ test("alarm backend failures are surfaced as DO runtime errors", async () => {
         token: "row-token",
       },
     ),
-    { status: 503, code: "do_alarm_backend_failed" },
+    (error) => {
+      const record = /** @type {{ status?: unknown, code?: unknown, details?: unknown }} */ (error);
+      assert.equal(record.status, 503);
+      assert.equal(record.code, "do_alarm_backend_unavailable");
+      assert.equal(record.details, undefined);
+      return true;
+    },
+  );
+  assert.equal(calls.length, 0);
+  const log = alarmClientLogs().at(-1);
+  assert.ok(log);
+  assert.equal(log[1], "do_alarm_backend_mutation_failed");
+  assert.equal(log[2].phase, "request_setup");
+  assert.match(String(log[2].error_message), /WDL_INTERNAL_AUTH_TOKEN/);
+  assert.equal(JSON.stringify(log[2]).includes("invalid token"), false);
+  assert.equal(JSON.stringify(log[2]).includes("row-token"), false);
+});
+
+test("alarm backend 5xx responses are result-unknown and sanitized", async (t) => {
+  const failureClass = alarmResponseContract.mutationFailureClasses.resultUnknown;
+  for (const operation of ["setAlarmIndex", "deleteAlarmIndex"]) {
+    for (const status of [failureClass.minStatus, failureClass.maxStatus]) {
+      await t.test(`${operation}: ${status}`, async () => {
+        const mod = await loadAlarmModule();
+        const input = operation === "setAlarmIndex"
+          ? {
+              className: "Room",
+              objectName: "alice",
+              scheduledTime: 123456,
+              token: "row-token",
+            }
+          : { className: "Room", objectName: "alice", token: "row-token" };
+        const mutate = operation === "setAlarmIndex"
+          ? mod.setAlarmIndex
+          : mod.deleteAlarmIndex;
+
+        await assert.rejects(
+          () => mutate(
+            alarmEnv({
+              WORKFLOWS_BACKEND: workflowsBackend(Response.json({
+                error: "redis_error",
+                message: "internal Redis diagnostic",
+              }, { status })),
+            }),
+            props,
+            input,
+          ),
+          (error) => {
+            const record = /** @type {{ status?: unknown, code?: unknown, details?: unknown }} */ (error);
+            assert.equal(record.status, 503);
+            assert.equal(record.code, failureClass.runtimeCode);
+            assert.equal(record.details, undefined);
+            return true;
+          },
+        );
+      });
+    }
+  }
+});
+
+test("alarm backend 4xx responses remain definite sanitized rejections", async (t) => {
+  const failureClass = alarmResponseContract
+    .mutationFailureClasses.definitePreMutationRejection;
+
+  for (const status of [failureClass.minStatus, failureClass.maxStatus]) {
+    await t.test(String(status), async () => {
+      const mod = await loadAlarmModule();
+      await assert.rejects(
+        () => mod.setAlarmIndex(
+          alarmEnv({ WORKFLOWS_BACKEND: workflowsBackend(Response.json({
+            error: "invalid_request",
+            message: "internal validation diagnostic",
+          }, { status })) }),
+          props,
+          {
+            className: "Room",
+            objectName: "alice",
+            scheduledTime: 123456,
+            token: "row-token",
+          },
+        ),
+        (error) => {
+          const record = /** @type {{ status?: unknown, code?: unknown, details?: unknown }} */ (error);
+          assert.equal(record.status, 503);
+          assert.equal(record.code, failureClass.runtimeCode);
+          assert.equal(record.details, undefined);
+          return true;
+        },
+      );
+    });
+  }
+});
+
+test("alarm backend non-2xx responses are classified without waiting for the body", async () => {
+  const mod = await loadAlarmModule();
+  let cancelled = false;
+  const response = new Response(new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      cancelled = true;
+    },
+  }), { status: 500 });
+
+  const outcome = await settlementWithin(mod.deleteAlarmIndex(
+    alarmEnv({ WORKFLOWS_BACKEND: workflowsBackend(response) }),
+    props,
+    { className: "Room", objectName: "alice", token: "row-token" },
+  ));
+  assert.equal(outcome.status, "rejected");
+  if (outcome.status !== "rejected") return;
+  const record = /** @type {{ code?: unknown, details?: unknown }} */ (outcome.reason);
+  assert.equal(record.code, "do_alarm_result_unknown");
+  assert.equal(record.details, undefined);
+  assert.equal(cancelled, true);
+});
+
+test("alarm backend fetch rejections are result-unknown after mutation dispatch begins", async (t) => {
+  for (const operation of ["setAlarmIndex", "deleteAlarmIndex"]) {
+    await t.test(operation, async () => {
+      const mod = await loadAlarmModule();
+      const backend = {
+        /** @param {RequestInfo | URL} input @param {RequestInit} [init] */
+        fetch(input, init) {
+          calls.push({ input, init });
+          return Promise.reject(new Error("backend response lost"));
+        },
+      };
+      const input = operation === "setAlarmIndex"
+        ? {
+            className: "Room",
+            objectName: "alice",
+            scheduledTime: 123456,
+            token: "row-token",
+          }
+        : { className: "Room", objectName: "alice", token: "row-token" };
+      const mutate = operation === "setAlarmIndex"
+        ? mod.setAlarmIndex
+        : mod.deleteAlarmIndex;
+
+      await assert.rejects(
+        () => mutate(alarmEnv({ WORKFLOWS_BACKEND: backend }), props, input),
+        (error) => {
+          const record = /** @type {{ status?: unknown, code?: unknown, details?: unknown }} */ (error);
+          assert.equal(record.status, 503);
+          assert.equal(record.code, "do_alarm_result_unknown");
+          assert.equal(record.details, undefined);
+          return true;
+        },
+      );
+      const log = alarmClientLogs().at(-1);
+      assert.ok(log);
+      assert.equal(log[0], "warn");
+      assert.equal(log[1], "do_alarm_backend_mutation_failed");
+      assert.equal(log[2].operation, operation === "setAlarmIndex" ? "set" : "delete");
+      assert.equal(log[2].namespace, "demo");
+      assert.equal(log[2].worker, "alarms");
+      assert.equal(log[2].class_name, "Room");
+      assert.equal(log[2].object_name, "alice");
+      assert.equal(log[2].phase, "transport");
+      assert.equal(log[2].error_message, "backend response lost");
+      assert.equal(JSON.stringify(log[2]).includes("row-token"), false);
+    });
+  }
+});
+
+test("unreadable alarm backend 2xx responses are result-unknown", async () => {
+  const mod = await loadAlarmModule();
+  const response = new Response(new ReadableStream({
+    start(controller) {
+      controller.error(new Error("internal response-body diagnostic"));
+    },
+  }), { status: 200 });
+
+  await assert.rejects(
+    () => mod.deleteAlarmIndex(
+      alarmEnv({ WORKFLOWS_BACKEND: workflowsBackend(response) }),
+      props,
+      { className: "Room", objectName: "alice", token: "row-token" },
+    ),
+    (error) => {
+      const record = /** @type {{ status?: unknown, code?: unknown, details?: unknown }} */ (error);
+      assert.equal(record.status, 503);
+      assert.equal(record.code, "do_alarm_result_unknown");
+      assert.equal(record.details, undefined);
+      return true;
+    },
   );
 });
 

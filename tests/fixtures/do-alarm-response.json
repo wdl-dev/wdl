@@ -56,6 +56,18 @@
       "deleted": 2
     }
   },
+  "mutationFailureClasses": {
+    "definitePreMutationRejection": {
+      "minStatus": 400,
+      "maxStatus": 499,
+      "runtimeCode": "do_alarm_backend_failed"
+    },
+    "resultUnknown": {
+      "minStatus": 500,
+      "maxStatus": 599,
+      "runtimeCode": "do_alarm_result_unknown"
+    }
+  },
   "mutationRequiredFields": [
     "changed",
     "deleted",
