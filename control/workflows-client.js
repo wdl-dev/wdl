@@ -21,6 +21,7 @@ export const WORKFLOWS_INTERNAL_TIMEOUT_MS = 5_000;
  *   logFields?: Record<string, unknown>,
  *   timeoutMs: number | null,
  *   makeError: (failure: WorkflowTransportFailure) => Error,
+ *   readBody?: (response: Response, signal?: AbortSignal) => Promise<unknown>,
  * }} args
  * @returns {Promise<{ response: Response, body: unknown }>}
  */
@@ -35,6 +36,7 @@ export async function postWorkflowsInternalRequest({
   logFields = {},
   timeoutMs,
   makeError,
+  readBody = async (response) => await response.json().catch(() => null),
 }) {
   if (!workflows || typeof workflows.fetch !== "function") {
     throw makeError("unavailable");
@@ -45,15 +47,16 @@ export async function postWorkflowsInternalRequest({
     if (typeof requestId === "string" && requestId) {
       requestHeaders.set("x-request-id", requestId);
     }
+    const signal = timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs);
     const response = await workflows.fetch(`http://workflows/internal/${endpoint}`, {
       method: "POST",
       headers: requestHeaders,
       body: JSON.stringify(body),
-      ...(timeoutMs === null ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
+      ...(signal === undefined ? {} : { signal }),
     });
     return {
       response,
-      body: await response.json().catch(() => null),
+      body: await readBody(response, signal),
     };
   } catch (err) {
     log?.("error", logEvent, {
@@ -84,6 +87,7 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
    *   timeoutMs: number | null,
    *   unavailableMessage?: string,
    *   requestFailedMessage?: string,
+   *   readBody?: (response: Response, signal?: AbortSignal) => Promise<unknown>,
    * }} args
    */
   return async function postWorkflowsInternal({
@@ -96,6 +100,7 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
     timeoutMs,
     unavailableMessage = "Workflow backend is unavailable",
     requestFailedMessage = "Workflow backend request failed",
+    readBody,
   }) {
     return await postWorkflowsInternalRequest({
       workflows: getWorkflows(),
@@ -107,6 +112,7 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
       logEvent,
       logFields,
       timeoutMs,
+      readBody,
       makeError: (failure) => new ControlAbort(503, "workflow_internal_dispatch_failed", {
         ...errorDetails,
         message: failure === "unavailable"

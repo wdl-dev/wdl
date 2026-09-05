@@ -77,6 +77,58 @@ workerd isolate boundaries and continues with WDL-specific wrapper and network r
   reserve tenant-visible paths like `/_scheduled`; the socket boundary is the security
   boundary.
 
+## Tenant-Realm Provenance Boundaries
+
+Tenant execution context is not a host authenticity boundary. This applies even when a
+property name, symbol, or storage key is unavailable to ordinary tenant code:
+
+- Imported env, nested `withEnv()`, `AsyncLocalStorage`, and captured async frames are
+  tenant-controlled ambient state. Tenant code can replace an env and can restore a
+  previously captured frame. None of these mechanisms may own authorization, fencing,
+  deduplication, host-failure attribution, or another durable platform decision.
+- A private `Symbol` prevents accidental naming collisions, but a tenant `Proxy` trap
+  can observe the property key and return a forged value. `WeakMap` or `WeakSet` identity
+  can prove that the wrapper previously saw the exact same object; it cannot prove which
+  invocation originally produced or later relayed that object.
+- JSRPC wildcard methods are also tenant-realm property lookups: an inherited property
+  can suppress wildcard resolution. Platform wrappers must bind reviewed callables before
+  exposing the corresponding object to tenant code and must not use a raw RPC object as a
+  facade target whose descriptors or `dup()` reveal the underlying capability.
+- Host-only context must stay in the host isolate, a binding with immutable host props,
+  or an authoritative backend state machine. Hidden entrypoint props must be consumed
+  before the tenant constructor runs, and persisted metadata that controls wrapper
+  generation must fail closed before tenant execution.
+- Error provenance is intentionally narrow. A generated facade may privately brand the
+  exact Error rejected by a direct host call together with that call's bound capability.
+  A reviewed `run()` or callback Promise boundary may act only when the same object
+  escapes and the recorded capability belongs to the current Workflow env. Catching the
+  Error and returning a fallback prevents that boundary from reporting and permits the
+  fallback to commit; detaching its Promise likewise removes it only from that boundary's
+  settlement. Neither action erases the private Error-to-capability association. A
+  replacement, wrapper, `cause`, `AggregateError`, or other object does not inherit that
+  provenance. Rethrowing the exact Error may report under the same
+  capability-membership check, including from another invocation using the same binding
+  identity. It can only make that tenant retry its own Workflow and grants no additional
+  capability. Making a caught Error affect a boundary it does not escape requires moving
+  the decision into a tenant-inaccessible host execution realm or explicit host
+  protocol, not adding ambient-context heuristics.
+- Dynamic Worker env and props may carry only capability forms supported by the pinned
+  workerd configuration. Compatibility flags are valid design inputs: platform-owned
+  static workers should actively consider a flag when it replaces WDL machinery or
+  gives a simpler native boundary. A flag that changes tenant Dynamic Workers needs a
+  stricter product, security, compatibility, and rollout review because it expands
+  tenant-visible behavior. The current reporter design does not enable
+  `allow_irrevocable_stub_storage`: using it here would require extending irrevocable
+  stub persistence into the tenant worker, which is broader than the report-only
+  capability. Use a host-owned `ctx.exports` loopback/service stub for this boundary. A
+  reporter transport rejection may carry the active report nonce back only in the
+  generated boundary Error's standard message; the host requires an exact active-registry
+  match before changing the failure latch.
+  Verify workerd-owned serialization, constructor ordering, and reverse JSRPC in real
+  workerd before treating any flag or capability as a boundary. Once that transport has
+  a real-workerd gate and no stale capability crosses a product boundary, host-local
+  registry concurrency and terminal cleanup may remain unit-tested.
+
 ## Internal Mesh Trust
 
 Many internal endpoints are private platform protocols, not public APIs:
@@ -96,6 +148,11 @@ callers still send only the current token. The header is stripped from
 tenant-originated forwarding paths. The token stays in host-owned Durable Object
 proxies and host-side backend capabilities; it is not embedded in generated
 tenant facade code or tenant-visible `env`.
+
+Rust clients for private service and loopback HTTP calls disable ambient proxy discovery
+and automatic redirects. Internal-auth headers must travel directly to the configured
+private endpoint, not through an operator-shell or container `HTTP_PROXY`/`ALL_PROXY`
+value or a response-selected redirect target.
 
 Do not expose these endpoints through gateway or an internet-facing load balancer.
 The shared internal token authenticates in-tree platform callers on the private mesh; it
@@ -239,8 +296,12 @@ propagation.
 - `tests/unit/auth-lib.test.js`, `tests/unit/auth-index.test.js`,
   `tests/integration/auth-worker.test.js`, `tests/integration/auth-platform.test.js`:
   token and role boundaries.
-- `tests/unit/runtime-load.test.js`, `tests/unit/runtime-binding-surface.test.js`,
-  `tests/integration/service-bindings.test.js`: wrapper and binding exposure.
+- `tests/unit/runtime-load.test.js`, `tests/unit/runtime-wrapper-generate.test.js`,
+  `tests/unit/runtime-binding-surface.test.js`,
+  `tests/unit/runtime-dispatch-workflows.test.js`, and
+  `tests/integration/workflows-runtime-core.test.js`: wrapper/binding exposure,
+  tenant-realm provenance, private reporter lifetime, and real-workerd JSRPC behavior.
+- `tests/integration/service-bindings.test.js`: service-binding capability delegation.
 - `tests/unit/runtime-ai-binding.test.js`, `tests/unit/control-ai-handler.test.js`, and
   `tests/integration/ai-binding.test.js`: credential non-exposure, exact destination,
   public-only egress plumbing, bounded lifecycle, and DO teardown behavior.

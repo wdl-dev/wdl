@@ -26,6 +26,7 @@
 | Redis key 和逻辑 DB split | `docs/redis-key-layout.zh.md` 加共享 key helper |
 | Route 和 pattern projection | `shared/route-projection.js`、`control/routing.js`、`gateway/` |
 | D1 query/facade protocol | `docs/modules/d1.zh.md`、`shared/d1-*`、`d1-runtime/`、runtime D1 binding |
+| Runtime KV host contract | `tests/fixtures/kv-host-response.json` 拥有 Runtime KV 与 Rust redis-proxy 共享的 value、serialized-metadata、response byte limit，以及有界 batch、metadata 与 list response shape。 |
 | AI provider record 和 resolver snapshot | `docs/modules/ai.zh.md`、`shared/ai-contract.js`、`control/handlers/ai.js`、`rust/redis-proxy/src/ai.rs`、`tests/fixtures/ai-contract.json` |
 | AI tenant/provider HTTP、SSE、WebSocket 和 facade protocol | `docs/modules/ai.zh.md`、`runtime/bindings/ai*.js`、`runtime/ai-client.js` |
 | 内部 WebSocket backend reconnect policy | `docs/modules/gateway.zh.md`、`shared/worker-contract.js`、`gateway/websocket.js` |
@@ -34,8 +35,11 @@
 | Queue、cron、delayed queue record | `docs/modules/queues-cron.zh.md`、`shared/queue-keys.js`、scheduler/proxy Rust modules |
 | Queue Runtime outcome | `tests/fixtures/queue-runtime-response.json` 拥有 Runtime dispatch 与 Rust Scheduler 消费的跨语言 outer/inner outcome literal 和 required result field；`rust/scheduler/src/queue/delivery/outcome.rs` 负责 destructive acknowledge 前的 Queue decision grammar validation。 |
 | Workflow definition 和 instance state | `docs/modules/workflows.zh.md`、`rust/workflows/`、runtime workflow dispatch |
-| Workflow Runtime result 和 Workflow 自有的 retryable backend error | `tests/fixtures/workflow-runtime-response.json` 拥有 Runtime dispatch 与 Rust Workflows 消费的跨语言 outcome literal、必需 terminal payload field 和 Workflow 自有 retryable error literal；internal-auth failure 使用共享的 `shared/internal-auth.js` 与 `tests/fixtures/internal-auth-contract.json` 合同。 |
+| Workflow Runtime request、result 和 Workflow 自有的 retryable backend error | `tests/fixtures/workflow-runtime-request.json` 拥有 Rust 到 JavaScript 的 run request shape，包括绝对 dispatch deadline；`tests/fixtures/workflow-runtime-response.json` 拥有 Runtime dispatch 与 Rust Workflows 消费的 outcome literal、必需 terminal payload field 和 Workflow 自有 retryable error literal；internal-auth failure 使用共享的 `shared/internal-auth.js` 与 `tests/fixtures/internal-auth-contract.json` 合同。 |
+| Workflow service lifecycle error | `tests/fixtures/workflow-service-errors.json` 拥有 Rust Workflows 发出并由 Control lifecycle check 保留的 migration-pending status 与 error code。 |
+| Workflow step replay identity 与 terminal response | `tests/fixtures/workflow-step-response.json` 拥有 Rust Workflows 写入、Runtime 消费的 backend operation kind 与必需 claim/replay/register-wait terminal payload field。 |
 | Workflow tick response | `tests/fixtures/workflow-tick-response.json` 与 `rust/common/src/workflow_tick.rs` 拥有 executable shape；`rust/workflows/` 和 `rust/scheduler/` 消费该 shape，`docs/modules/workflows.zh.md` 记录外围行为。 |
+| Durable Object alarm response | `tests/fixtures/do-alarm-response.json` 拥有 JavaScript 与 Rust 消费的 16 KiB cap、5 秒 body deadline、精确 actor、dispatch、set/delete 和 cleanup success variant、failed/result-unknown dispatch error，以及 mutation 的 pre-mutation 4xx 与 result-unknown 5xx class；`shared/do-alarm-response.js`、`do-runtime/alarm.js` 与 `rust/workflows/src/api/do_alarms/` 分别拥有 runtime reader 和 producer。 |
 | Observability event 和 metric shape | `docs/modules/log-tail-observability.zh.md`、`shared/observability.js`、`wdl-rust-common` |
 
 如果某个 shape 由一个 tier 写、另一个 tier 读，同一改动必须同时更新 writer、reader、owning doc 和能抓漂移的测试。除非存在外部 rollout 要求，不要增加第二套 parser 或 fallback reader。

@@ -47,6 +47,11 @@ export function prepareAiCapacityMetrics(env) {
   globalThis.__runtimeInternalPrepareAiMetrics.push(env);
 }
 `);
+const kvCapacityUrl = moduleDataUrl(`
+export function prepareKvReadCapacityMetrics(env) {
+  globalThis.__runtimeInternalPrepareKvMetrics.push(env);
+}
+`);
 const workflowReplayCacheUrl = moduleDataUrl(`
 export function prepareWorkflowReplayCacheMetrics() {
   globalThis.__runtimeInternalPrepareWorkflowMetrics += 1;
@@ -73,6 +78,7 @@ const IMPORT_STUBS = {
   "runtime-dispatch": runtimeDispatchUrl,
   "runtime-dispatch-workflow-replay-cache": workflowReplayCacheUrl,
   "runtime-bindings-ai-capacity": aiCapacityUrl,
+  "runtime-bindings-kv-capacity": kvCapacityUrl,
   "runtime-load": runtimeLoadUrl,
   "runtime-state": runtimeStateUrl,
 };
@@ -90,6 +96,7 @@ function runtimeInternal() {
     LOADER: { get() { throw new Error("unexpected loader access"); } },
   };
   /** @type {any} */ (globalThis).__runtimeInternalPrepareAiMetrics = [];
+  /** @type {any} */ (globalThis).__runtimeInternalPrepareKvMetrics = [];
   /** @type {any} */ (globalThis).__runtimeInternalPrepareWorkflowMetrics = 0;
   return new RuntimeInternal();
 }
@@ -102,6 +109,10 @@ test("runtime internal publishes derived gauges immediately before metrics rende
   assert.equal(await response.text(), "# HELP runtime_internal_test_metric\n");
   assert.deepEqual(
     /** @type {any} */ (globalThis).__runtimeInternalPrepareAiMetrics,
+    [/** @type {any} */ (globalThis).__runtimeInternalEnv]
+  );
+  assert.deepEqual(
+    /** @type {any} */ (globalThis).__runtimeInternalPrepareKvMetrics,
     [/** @type {any} */ (globalThis).__runtimeInternalEnv]
   );
   assert.equal(/** @type {any} */ (globalThis).__runtimeInternalPrepareWorkflowMetrics, 1);

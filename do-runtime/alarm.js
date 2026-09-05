@@ -3,8 +3,15 @@ import {
   isWellFormedUnicodeString,
   nonEmptyAlarmString,
 } from "do-runtime-protocol";
-import { errorMessage } from "shared-errors";
+import { log } from "do-runtime-state";
 import { withInternalAuth } from "shared-internal-auth";
+import {
+  DO_ALARM_RESPONSE_DEADLINE_MS,
+  parseDoAlarmMutationSuccess,
+  readDoAlarmResponseText,
+} from "shared-do-alarm-response";
+import { formatError } from "shared-observability";
+import { discardResponseBody } from "shared-respond";
 
 /**
  * @typedef {{
@@ -57,35 +64,94 @@ function workflowsBackend(env) {
   return backend;
 }
 
+/** @param {number | undefined} status */
+function alarmBackendMutationError(status = undefined) {
+  if (status !== undefined && status >= 400 && status < 500) {
+    return new DoRuntimeError(503, "do_alarm_backend_failed", "DO alarm backend rejected the request");
+  }
+  return new DoRuntimeError(503, "do_alarm_result_unknown", "DO alarm backend result is unknown");
+}
+
+/**
+ * @param {string} path
+ * @param {Record<string, unknown>} body
+ * @param {string} phase
+ * @param {{ error?: unknown, upstreamStatus?: number }} [diagnostic]
+ */
+function logAlarmBackendMutationFailure(path, body, phase, diagnostic = {}) {
+  log("warn", "do_alarm_backend_mutation_failed", {
+    operation: path.endsWith("/set") ? "set" : "delete",
+    namespace: body.ns,
+    worker: body.worker,
+    ...(typeof body.version === "string" ? { version: body.version } : {}),
+    class_name: body.className,
+    object_name: body.objectName,
+    ...(typeof body.retryCount === "number" ? { retry_count: body.retryCount } : {}),
+    phase,
+    ...(diagnostic.upstreamStatus === undefined
+      ? {}
+      : { upstream_status: diagnostic.upstreamStatus }),
+    ...(diagnostic.error === undefined ? {} : formatError(diagnostic.error)),
+  });
+}
+
 /**
  * @param {DoEnv} env
  * @param {string} path
  * @param {Record<string, unknown>} body
  */
 async function postWorkflowsAlarm(env, path, body) {
-  let response;
-  let parsed;
+  const signal = AbortSignal.timeout(DO_ALARM_RESPONSE_DEADLINE_MS);
+  let backend;
+  let headers;
+  let requestBody;
   try {
-    response = await workflowsBackend(env).fetch(`http://workflows${path}`, {
-      method: "POST",
-      headers: withInternalAuth({ "content-type": "application/json" }, env),
-      body: JSON.stringify(body),
-    });
-    parsed = await response.json().catch(() => null);
+    backend = workflowsBackend(env);
+    headers = withInternalAuth({ "content-type": "application/json" }, env);
+    requestBody = JSON.stringify(body);
   } catch (err) {
-    throw new DoRuntimeError(503, "do_alarm_backend_unavailable", "DO alarm backend request failed", {
-      error_message: errorMessage(err),
+    logAlarmBackendMutationFailure(path, body, "request_setup", { error: err });
+    if (err instanceof DoRuntimeError) throw err;
+    throw new DoRuntimeError(503, "do_alarm_backend_unavailable", "DO alarm backend is unavailable");
+  }
+  let response;
+  try {
+    response = await backend.fetch(`http://workflows${path}`, {
+      method: "POST",
+      headers,
+      body: requestBody,
+      signal,
     });
+  } catch (err) {
+    logAlarmBackendMutationFailure(path, body, "transport", { error: err });
+    throw alarmBackendMutationError();
   }
   if (!response.ok) {
-    throw new DoRuntimeError(503, "do_alarm_backend_failed", "DO alarm backend rejected the request", {
-      upstream_status: response.status,
-      upstream_error: parsed && typeof parsed === "object" && "error" in parsed
-        ? /** @type {{ error?: unknown }} */ (parsed).error
-        : null,
+    logAlarmBackendMutationFailure(path, body, "response_status", {
+      upstreamStatus: response.status,
     });
+    void discardResponseBody(response);
+    throw alarmBackendMutationError(response.status);
   }
-  return parsed;
+  let text;
+  try {
+    text = await readDoAlarmResponseText(response, signal);
+  } catch (err) {
+    logAlarmBackendMutationFailure(path, body, "response_body", {
+      error: err,
+      upstreamStatus: response.status,
+    });
+    throw alarmBackendMutationError();
+  }
+  try {
+    return parseDoAlarmMutationSuccess(text);
+  } catch (err) {
+    logAlarmBackendMutationFailure(path, body, "response_parse", {
+      error: err,
+      upstreamStatus: response.status,
+    });
+    throw alarmBackendMutationError();
+  }
 }
 
 /**

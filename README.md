@@ -125,10 +125,13 @@ The platform is split into seven app services plus shared state:
 
 Valkey/Redis uses a deliberate logical split:
 
-- DB 0: control metadata, bundles, routes, auth, lifecycle, D1/DO owner state,
-  workflow definitions.
+- DB 0 on the Control endpoint: control metadata, bundles, routes, auth, lifecycle,
+  D1/DO owner state, and workflow definitions.
+- DB 0 on the Workflows endpoint: the Workflows schema-reset state. It shares the
+  Control database only when both services use the same endpoint.
 - DB 1: data-plane KV, queue streams, delayed queues, orphan streams, log-tail streams.
 - DB 2: workflow instance state, step records, ready/due shards, events, run leases.
+- DB 15: inactive schema-2 Workflow archive while explicit migration is pending.
 
 S3-compatible storage backs ASSETS and R2. D1 and Durable Object SQLite files live on
 workerd `localDisk` storage. In production-shaped environments, those map to managed or

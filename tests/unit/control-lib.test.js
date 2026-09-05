@@ -305,12 +305,14 @@ test("normalizeModule: string → module", () => {
 test("normalizeModule: data_b64 decoded to bytes", () => {
   const r = normalizeModule({ data_b64: Buffer.from([1, 2, 3]).toString("base64") });
   assert.equal(r.type, "data");
+  assert.equal(Buffer.isBuffer(r.bytes), true);
   assert.deepEqual(Array.from(r.bytes), [1, 2, 3]);
 });
 
 test("normalizeModule: wasm_b64", () => {
   const r = normalizeModule({ wasm_b64: Buffer.from([0, 97, 115, 109]).toString("base64") });
   assert.equal(r.type, "wasm");
+  assert.equal(Buffer.isBuffer(r.bytes), true);
   assert.deepEqual(Array.from(r.bytes), [0, 97, 115, 109]);
 });
 
@@ -324,6 +326,10 @@ test("normalizeModule: empty base64 is allowed", () => {
 test("normalizeModule: invalid base64 is rejected", () => {
   assert.throws(() => normalizeModule({ data_b64: "@@@" }), /Invalid base64 in data_b64/);
   assert.throws(() => normalizeModule({ wasm_b64: "!!!!AQ==" }), /Invalid base64 in wasm_b64/);
+  assert.throws(() => normalizeModule({ data_b64: "Zg" }), /Invalid base64 in data_b64/);
+  assert.throws(() => normalizeModule({ data_b64: "Z g==" }), /Invalid base64 in data_b64/);
+  assert.throws(() => normalizeModule({ data_b64: "Zh==" }), /Invalid base64 in data_b64/);
+  assert.throws(() => normalizeModule({ data_b64: "Zm9=" }), /Invalid base64 in data_b64/);
 });
 
 test("normalizeModule: text", () => {
@@ -1001,6 +1007,7 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.deepEqual(WDL_UNSUPPORTED_COMPAT_FLAGS, [
     "allow_irrevocable_stub_storage",
     "new_module_registry",
+    "no_rpc",
     "streams_disable_constructors",
   ]);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("unique_ctx_per_invocation"), false);

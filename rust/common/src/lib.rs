@@ -2,12 +2,13 @@
 //!
 //! This crate owns small behavior that must stay identical across Rust crates:
 //! environment parsing, log-level parsing and common log-line formatting, HTTP
-//! health probes, shutdown/in-flight tracking, metric storage/formatting, FNV hashing,
-//! request-id sanitization, internal-auth constants/token matching, identity grammar,
-//! worker contract and queue-key helpers, Redis connection and EVAL command helpers, time
-//! helpers, structured error fields, small behavior-free cross-crate wire shapes,
-//! test-only process-environment overrides, and UTF-8-safe text helpers. It should not
-//! own service protocol behavior, Redis schemas, dispatch policy, or lifecycle behavior.
+//! health probes, shutdown/in-flight tracking, metric storage/formatting, canonical HTTP
+//! request-completion observability, FNV hashing, request-id sanitization, internal-auth
+//! constants/token matching, identity grammar, worker contract and queue-key helpers,
+//! Redis connection and EVAL command helpers, time helpers, structured error fields,
+//! small behavior-free cross-crate wire shapes, test-only process-environment overrides,
+//! and UTF-8-safe text helpers. It should not own service protocol behavior, Redis
+//! schemas, dispatch policy, or lifecycle behavior.
 
 /// Largest integer that round-trips exactly through a JavaScript `Number`.
 pub const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -25,6 +26,7 @@ pub mod queue_keys;
 pub mod redis_conn;
 #[cfg(feature = "redis")]
 pub mod redis_eval;
+pub mod request_completion;
 pub mod request_id;
 pub mod shutdown;
 #[cfg(any(test, feature = "test-support"))]

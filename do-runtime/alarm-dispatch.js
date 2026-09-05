@@ -1,11 +1,37 @@
 import { DoRuntimeError, normalizeDoInvokeRequest, readJsonBody } from "do-runtime-protocol";
 import { json } from "do-runtime-http";
+import { log } from "do-runtime-state";
+import {
+  DO_ALARM_RESPONSE_DEADLINE_MS,
+  parseDoAlarmDispatchSuccess,
+  readDoAlarmResponseText,
+} from "shared-do-alarm-response";
+import { formatError } from "shared-observability";
+import { ownerHintFromHeaders } from "runtime-do-transport";
 
 /**
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  * @typedef {Record<string, unknown> & { DO_HOSTS: DurableObjectNamespace }} DoEnv
- * @typedef {(env: DoEnv, invoke: DoInvoke, requestId?: string | null) => Promise<Response>} AlarmDispatcher
+ * @typedef {(env: DoEnv, invoke: DoInvoke, requestId?: string | null, hopCount?: number, onDispatchStart?: () => void) => Promise<Response>} AlarmDispatcher
  */
+
+function alarmDispatchResultUnknown() {
+  return new DoRuntimeError(
+    503,
+    "do_alarm_dispatch_result_unknown",
+    "DO alarm dispatch result is unknown"
+  );
+}
+
+/** @param {unknown} [details] */
+function alarmDispatchFailed(details = undefined) {
+  return new DoRuntimeError(
+    503,
+    "do_alarm_dispatch_failed",
+    "DO alarm dispatch failed",
+    details
+  );
+}
 
 /**
  * @param {Request} request
@@ -37,20 +63,57 @@ export async function handleAlarmDispatch(request, env, dispatchInvoke, requestI
   if (invoke.kind !== "alarm" || invoke.alarm.token == null) {
     throw new DoRuntimeError(400, "invalid_request", "alarm.token is required");
   }
-  const response = await dispatchInvoke(env, invoke, requestId);
-  const text = await response.text();
+  let dispatchStarted = false;
+  let response;
+  try {
+    response = await dispatchInvoke(
+      env,
+      invoke,
+      requestId,
+      0,
+      () => { dispatchStarted = true; }
+    );
+  } catch (error) {
+    if (dispatchStarted) {
+      throw alarmDispatchResultUnknown();
+    }
+    log("warn", "do_alarm_pre_dispatch_failed", {
+      request_id: requestId || undefined,
+      namespace: invoke.ns,
+      worker: invoke.worker,
+      version: invoke.version,
+      class_name: invoke.className,
+      object_name: invoke.objectName,
+      host_id: invoke.hostId,
+      retry_count: invoke.alarm.retryCount,
+      ...formatError(error),
+    });
+    throw alarmDispatchFailed();
+  }
+  let text;
+  try {
+    text = await readDoAlarmResponseText(
+      response,
+      AbortSignal.timeout(DO_ALARM_RESPONSE_DEADLINE_MS)
+    );
+  } catch {
+    throw alarmDispatchResultUnknown();
+  }
   if (!response.ok) {
-    throw new DoRuntimeError(503, "do_alarm_dispatch_failed", "DO alarm dispatch failed", {
+    const responseOwner = ownerHintFromHeaders(response.headers);
+    if (responseOwner?.ownerKey !== invoke.hostId) {
+      throw alarmDispatchResultUnknown();
+    }
+    throw alarmDispatchFailed({
       upstream_status: response.status,
       upstream_body: text.slice(0, 1024),
     });
   }
-  let parsed = null;
+  let parsed;
   try {
-    parsed = text ? JSON.parse(text) : null;
-  } catch {}
-  return json({
-    ok: true,
-    ignored: parsed && typeof parsed === "object" && /** @type {{ ignored?: unknown }} */ (parsed).ignored === true,
-  });
+    parsed = parseDoAlarmDispatchSuccess(text);
+  } catch {
+    throw alarmDispatchResultUnknown();
+  }
+  return json({ ok: true, ignored: parsed.ignored });
 }

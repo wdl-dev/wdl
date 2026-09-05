@@ -25,6 +25,7 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<Config>,
     pub(crate) instance_id: String,
     pub(crate) run_claim_counter: Arc<AtomicU64>,
+    pub(crate) workflow_migration_pending: bool,
 }
 
 pub(crate) struct DispatchSemaphores {

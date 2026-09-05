@@ -51,16 +51,29 @@ export function proxyEndpoint(base, path, params = {}) {
 /**
  * @param {URL | string} url
  * @param {RequestInit | undefined} init
- * @param {{ env: RuntimeProxyEnv | null | undefined, failurePrefix: string, okStatuses?: readonly number[] }} opts
+ * @param {{
+ *   env: RuntimeProxyEnv | null | undefined,
+ *   failurePrefix: string,
+ *   okStatuses?: readonly number[],
+ *   transportError?: (error: unknown) => unknown,
+ *   statusError?: (status: number) => unknown,
+ * }} opts
  */
 export async function proxyFetch(url, init, opts) {
   const env = opts.env;
-  const res = await fetch(url, {
-    ...init,
-    headers: withInternalAuth(init?.headers, env),
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: withInternalAuth(init?.headers, env),
+    });
+  } catch (error) {
+    if (opts.transportError) throw opts.transportError(error);
+    throw error;
+  }
   if (!res.ok && !opts.okStatuses?.includes(res.status)) {
     await discardResponseBody(res);
+    if (opts.statusError) throw opts.statusError(res.status);
     throw new Error(`${opts.failurePrefix} failed with ${res.status}`);
   }
   return res;

@@ -22,18 +22,25 @@ export function makeScope() {
   };
 }
 
-/** @param {any} entrypoint */
-export function makeStub(entrypoint) {
+/**
+ * @param {any} entrypoint
+ * @param {{ onGetEntrypoint?: (options: { props?: Record<string, unknown> } | undefined) => void }} [stubOptions]
+ */
+export function makeStub(entrypoint, stubOptions = {}) {
   return {
-    /** @param {string} [name] */
-    getEntrypoint(name) {
-      if (name && entrypoint?.entrypoints) return entrypoint.entrypoints[name];
+    /** @param {string} [name] @param {{ props?: Record<string, unknown> }} [options] */
+    getEntrypoint(name, options) {
+      stubOptions.onGetEntrypoint?.(options);
+      if (name && entrypoint?.entrypoints) {
+        return entrypoint.entrypoints[name];
+      }
       return entrypoint;
     },
   };
 }
 
-export function makeCtx() {
+/** @param {new (ctx: any, env: any) => unknown} [WorkflowInfrastructureReporter] */
+export function makeCtx(WorkflowInfrastructureReporter) {
   /** @type {Promise<unknown>[]} */
   const tasks = [];
   return {
@@ -41,6 +48,17 @@ export function makeCtx() {
     waitUntil(promise) {
       tasks.push(promise);
     },
+    exports: WorkflowInfrastructureReporter
+      ? {
+          /** @param {{ props: Record<string, unknown> }} options */
+          WorkflowInfrastructureReporter(options) {
+            return new WorkflowInfrastructureReporter(
+              { props: options.props },
+              {}
+            );
+          },
+        }
+      : {},
     tasks,
   };
 }

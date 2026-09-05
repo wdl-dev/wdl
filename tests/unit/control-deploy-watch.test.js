@@ -290,6 +290,7 @@ const runtimeLoadCodeBudgetUrl = moduleDataUrl(readRepositoryModuleSource(
     "shared-ns-pattern": repositoryFileUrl("shared/ns-pattern.js"),
     "runtime-load-module-rewrite": repositoryFileUrl("runtime/load/module-rewrite.js"),
     "runtime-load-wrapper-generate": repositoryFileUrl("runtime/load/wrapper-generate.js"),
+    "runtime-infrastructure-error": repositoryFileUrl("runtime/infrastructure-error.js"),
   })
 ));
 const runtimeLoadInjectionSourcesUrl = realRuntimeInjectionSourcesUrl();

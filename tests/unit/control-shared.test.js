@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { moduleDataUrl } from "../helpers/load-shared-module.js";
+import { moduleDataUrl, readRepositoryJson } from "../helpers/load-shared-module.js";
 import { compileControlSharedGraph } from "../helpers/load-control-shared.js";
 import {
   createFakeRedis,
@@ -17,6 +17,9 @@ import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
+const workflowServiceErrors = /** @type {{
+ *   migrationPending: { code: string, status: number },
+ * }} */ (readRepositoryJson("tests/fixtures/workflow-service-errors.json"));
 
 const sharedRedisUrl = sharedRedisStubUrl(`
   export class RedisClient {}
@@ -688,6 +691,35 @@ test("assertWorkflowDeleteAllowed hides transport diagnostics from response deta
   });
 });
 
+test("assertWorkflowDeleteAllowed preserves the migration-pending conflict", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  state.workflows = {
+    async fetch() {
+      return Response.json(
+        {
+          error: workflowServiceErrors.migrationPending.code,
+          message: "Workflow state migration from archive DB 15 has not completed",
+        },
+        { status: workflowServiceErrors.migrationPending.status }
+      );
+    },
+  };
+
+  await assert.rejects(
+    () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" }),
+    (err) => {
+      assert.ok(err instanceof ControlAbort);
+      const abort = /** @type {InstanceType<typeof ControlAbort>} */ (err);
+      assert.equal(abort.status, workflowServiceErrors.migrationPending.status);
+      assert.equal(abort.code, workflowServiceErrors.migrationPending.code);
+      assert.equal(abort.details.namespace, "demo");
+      assert.equal(abort.details.worker, "api");
+      return true;
+    }
+  );
+});
+
 test("assertWorkflowDeleteAllowed preserves active workflow blockers", async (t) => {
   restoreControlSharedStateAfter(t);
   state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
@@ -760,7 +792,12 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
       assert.equal(new Headers(init?.headers).get("x-request-id"), "rid-cleanup");
       fetchSignals.push(init.signal);
       requestBodies.cleanup = parseJsonObjectRequestBody(init, "DO alarm cleanup request body");
-      return Response.json({ ok: true });
+      return Response.json({
+        ok: true,
+        jobId: null,
+        changed: true,
+        deleted: 2,
+      });
     },
   };
 
@@ -783,6 +820,39 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
     lifecycle: { ns: "demo", worker: "api", version: "v2" },
     cleanup: { ns: "demo", worker: "api", doStorageId: "do_old" },
   });
+});
+
+test("DO alarm cleanup rejects malformed or oversized success envelopes", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+
+  for (const response of [
+    Response.json({ ok: true }),
+    Response.json({ ok: true, jobId: "doa-wrong", changed: true, deleted: 1 }),
+    Response.json({ ok: true, jobId: null, changed: true, deleted: 1, extra: true }),
+    new Response("not-json", { headers: { "content-type": "application/json" } }),
+  ]) {
+    state.workflows = { fetch: async () => response };
+    await assert.rejects(
+      () => cleanupDoAlarmsForWorker({ ns: "demo", worker: "api", doStorageId: "do_old" }),
+      (error) => error instanceof Error && /** @type {any} */ (error).status === 503
+    );
+  }
+
+  let cancelled = false;
+  state.workflows = {
+    fetch: async () => new Response(new ReadableStream({
+      cancel() { cancelled = true; },
+    }), {
+      headers: { "content-length": String(16 * 1024 + 1) },
+    }),
+  };
+  await assert.rejects(
+    () => cleanupDoAlarmsForWorker({ ns: "demo", worker: "api", doStorageId: "do_old" }),
+    (error) => error instanceof Error && /** @type {any} */ (error).status === 503
+  );
+  await Promise.resolve();
+  assert.equal(cancelled, true);
 });
 
 test("workflows transport requires an explicit timeout selection at runtime", async () => {

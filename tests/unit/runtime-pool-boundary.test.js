@@ -46,6 +46,7 @@ export function evictSiblings() { return Promise.resolve(); }
 export function recordLoadedWorker() {}
 `);
 const runtimeDispatchUrl = moduleDataUrl(`
+export class WorkflowInfrastructureReporter {}
 export async function handleFetchDispatch() { return new Response("unexpected dispatch"); }
 export async function handleQueuedDispatch() { return new Response("unexpected queued dispatch"); }
 export async function handleScheduledDispatch() { return new Response("unexpected scheduled dispatch"); }
@@ -64,6 +65,7 @@ const emptyBindingUrl = moduleDataUrl(RUNTIME_BINDING_STUB_SOURCE);
 const emptyInternalUrl = moduleDataUrl(`export default class RuntimeInternal {}`);
 const emptyMetricsPreparationUrl = moduleDataUrl(`
 export function prepareAiCapacityMetrics() {}
+export function prepareKvReadCapacityMetrics() {}
 export function prepareWorkflowReplayCacheMetrics() {}
 `);
 
@@ -75,6 +77,7 @@ const IMPORT_STUBS = {
   "runtime-dispatch": runtimeDispatchUrl,
   "runtime-dispatch-workflow-replay-cache": emptyMetricsPreparationUrl,
   "runtime-bindings-ai-capacity": emptyMetricsPreparationUrl,
+  "runtime-bindings-kv-capacity": emptyMetricsPreparationUrl,
   "runtime-load": runtimeLoadUrl,
   "runtime-state": runtimeStateUrl,
   "runtime-internal": emptyInternalUrl,

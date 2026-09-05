@@ -14,10 +14,11 @@ use super::super::{
     validate_identity,
 };
 use super::{
-    StepRecord, StepRecordCommit, WorkflowStepRequest, commit_step_record, ensure_step_script_ok,
-    inline_step_payload, log_step_event, observe_step_duration, read_step_payload_for_claim,
-    read_step_record_for_claim, step_event_ref, step_record_json, step_summary_json,
-    validate_step_request, verify_step_record, write_waiting_record,
+    STEP_KIND_WAIT_FOR_EVENT, StepRecord, StepRecordCommit, WorkflowStepRequest,
+    commit_step_record, ensure_step_script_ok, inline_step_payload, log_step_event,
+    observe_step_duration, read_step_payload_for_claim, read_step_record_for_claim, step_event_ref,
+    step_record_json, step_summary_json, validate_step_request, verify_step_record,
+    write_waiting_record,
 };
 
 pub(crate) const SEND_EVENT_SCRIPT: &str = r#"
@@ -382,6 +383,10 @@ async fn cleanup_stale_event_index_members(
     ensure_step_script_ok(code)
 }
 
+fn completed_wait_response(output: JsonValue) -> JsonValue {
+    json!({ "state": "complete", "output": output })
+}
+
 async fn complete_wait_with_payload(
     state: &AppState,
     req: &WorkflowStepRequest,
@@ -399,6 +404,7 @@ async fn complete_wait_with_payload(
         step_name: req.step_name.clone(),
         name_count: req.name_count,
         dependencies: req.dependencies.clone(),
+        kind: STEP_KIND_WAIT_FOR_EVENT.to_string(),
         config,
         status: "completed".to_string(),
         attempt: 1,
@@ -453,7 +459,7 @@ async fn complete_wait_with_payload(
     observe_step_duration(state, req, now);
     log_step_event(state, "workflow_step_completed", req, 1);
     spawn_progress_from_step(state, req, "workflow_step_completed", "completed", 1);
-    Ok(json!({ "state": "complete", "output": output }))
+    Ok(completed_wait_response(output))
 }
 
 async fn write_waiting_record_and_recheck_event(
@@ -501,7 +507,7 @@ pub(crate) async fn register_wait(
         let record: StepRecord = serde_json::from_str(&raw).map_err(|err| {
             WorkflowError::invalid_state(format!("Workflow wait step record is corrupt: {err}"))
         })?;
-        verify_step_record(&req, &config, &record)?;
+        verify_step_record(&req, &config, &record, STEP_KIND_WAIT_FOR_EVENT)?;
         match record.status.as_str() {
             "completed" => {
                 let output = if let Some(output) = record.output {
@@ -524,7 +530,7 @@ pub(crate) async fn register_wait(
                         ))
                     })?
                 };
-                return Ok(json!({ "state": "complete", "output": output }));
+                return Ok(completed_wait_response(output));
             }
             "waiting" => {
                 if let Some((event_field, event_record, payload)) =
@@ -605,6 +611,7 @@ pub(crate) async fn register_wait(
         step_name: req.step_name.clone(),
         name_count: req.name_count,
         dependencies: req.dependencies.clone(),
+        kind: STEP_KIND_WAIT_FOR_EVENT.to_string(),
         config: config.clone(),
         status: "waiting".to_string(),
         attempt: 1,
@@ -708,6 +715,21 @@ pub(crate) async fn send_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_wait_variant_matches_the_cross_language_contract() {
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/workflow-step-response.json"
+        ))
+        .expect("workflow step response fixture parses");
+        let response = completed_wait_response(JsonValue::Null);
+        let variant = &fixture["registerWaitTerminalVariants"]["completed"];
+        let payload_field = variant["payloadField"]
+            .as_str()
+            .expect("register-wait payload field is a string");
+        assert_eq!(response["state"], variant["state"]);
+        assert!(response.get(payload_field).is_some());
+    }
 
     #[test]
     fn send_event_state_read_is_atomic_and_bounded() {

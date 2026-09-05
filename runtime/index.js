@@ -22,6 +22,7 @@ export { default as internal } from "runtime-internal";
 // Capability adapters re-exported here so `ctx.exports.<Name>` sees them
 // at load time; adding a new binding type = one more export line.
 export { KV } from "runtime-bindings-kv";
+export { WorkflowInfrastructureReporter } from "runtime-dispatch";
 export { Assets } from "runtime-bindings-assets";
 export { ServiceBinding } from "runtime-bindings-service";
 export { QueueProducer } from "runtime-bindings-queue";

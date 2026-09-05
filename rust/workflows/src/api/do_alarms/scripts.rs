@@ -143,6 +143,8 @@ redis.call("HSET", KEYS[1],
   "runLeaseExpiresAtMs", ARGV[4],
   "updatedAtMs", ARGV[2]
 )
+redis.call("ZADD", KEYS[2], ARGV[4], ARGV[1])
+redis.call("SREM", KEYS[3], ARGV[1])
 return redis.call("HGETALL", KEYS[1])
 "#;
 
@@ -255,6 +257,22 @@ mod tests {
 
         assert!(ready_pos < remove_pos);
         assert!(active_pos < remove_pos);
+    }
+
+    #[test]
+    fn claim_script_parks_running_jobs_until_lease_expiry() {
+        let running_pos = CLAIM_DO_ALARM_SCRIPT
+            .find("\"status\", \"running\"")
+            .expect("claim must mark the job running");
+        let due_pos = CLAIM_DO_ALARM_SCRIPT[running_pos..]
+            .find("redis.call(\"ZADD\", KEYS[2], ARGV[4], ARGV[1])")
+            .expect("claim must index lease expiry")
+            + running_pos;
+        let ready_pos = CLAIM_DO_ALARM_SCRIPT[running_pos..]
+            .find("redis.call(\"SREM\", KEYS[3], ARGV[1])")
+            .expect("claim must remove the ready hint")
+            + running_pos;
+        assert!(running_pos < due_pos && due_pos < ready_pos);
     }
 
     #[test]

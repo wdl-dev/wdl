@@ -170,16 +170,32 @@ transaction reserves its position on this tail at the first alarm mutation and f
 that position with the final coalesced effect only after native commit, so a later
 non-transactional mutation cannot overtake it.
 
+The Workflows schema-3 maintenance reset does not enumerate or delete SQLite alarm rows.
+Its Workflows-owned `/workflows schema3-reset` operator command archives schema-2 DB 2
+and copies the unchanged `wf:internal:do-alarm:*` scheduling projection into schema-3
+DB 2 before alarm mutation or Scheduler dispatch resumes. Existing SQLite row tokens
+therefore continue to fence the copied jobs. A local-only row left by an already
+result-unknown mutation remains outside the confirmed delivery contract and may use the
+same best-effort `getAlarm()` repair as before the reset. The resulting
+`archive_pending` gate blocks ordinary Workflow state and lifecycle operations but leaves
+DO alarm mutation, dispatch, and tick available.
+
 Alarm mutation crosses object SQLite and Workflows DB 2 and is intentionally not a
 distributed transaction. A successfully completed `setAlarm()` enters the at-least-once
 delivery contract. Input validation fails before either store is mutated and preserves
-the current alarm. Once backend index mutation begins, a rejected `setAlarm()` has an
-unknown final state; a replacement attempt may also leave the previous alarm unable to
-fire. A caller that still requires an alarm must call `setAlarm()` again. `getAlarm()`
-repair applies only while a SQLite alarm row remains and does not confirm a failed set
-mutation. A rejected `deleteAlarm()` after backend mutation begins is also
-outcome-unknown: token-fenced compensation may restore the SQLite row after the backend
-job was already removed. A caller that still requires deletion must call `deleteAlarm()`
+the current alarm. Backend request setup failures surface
+`do_alarm_backend_unavailable`; a backend 4xx response surfaces
+`do_alarm_backend_failed`; transport rejection, 5xx, or an unreadable or malformed 2xx
+response surfaces `do_alarm_result_unknown`. These tenant-visible errors provide stable
+`status`, `code`, and `message` fields without raw backend details. Caught internal
+exceptions are recorded in do-runtime structured logs. For non-2xx responses, do-runtime
+logs the status and alarm identity, then discards the body. Once backend index mutation
+begins, a rejected `setAlarm()` has an unknown final state; a replacement attempt may also
+leave the previous alarm unable to fire. A caller that still requires an alarm must call
+`setAlarm()` again. `getAlarm()` repair applies only while a SQLite alarm row remains and
+does not confirm a failed set mutation. A rejected `deleteAlarm()` after backend mutation
+begins is also outcome-unknown: token-fenced compensation may restore the SQLite row
+after the backend job was already removed. A caller that still requires deletion must call `deleteAlarm()`
 again. A caller that requires the alarm to remain must call `setAlarm(desiredTime)` again
 and observe success; `getAlarm()` may expose a surviving local time and trigger
 best-effort repair, but neither a timestamp nor `null` confirms backend state. Async
@@ -338,7 +354,21 @@ deletable.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due
   internal alarm jobs to ready, claims one job under a DB 2 run token, and calls
   do-runtime `/internal/do/alarms/dispatch`. do-runtime constructs a native
-  `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path.
+  `DoInvoke{kind:"alarm"}` request and uses the normal owner router/fence path. Delivery
+  correctness does not depend on HTTP caller-disconnect signals; dispatch timeout and the
+  Workflows-owned claim lease bound unknown results.
+- Alarm mutations use one 5-second fetch/body deadline. Alarm delivery keeps tenant
+  execution under the Workflows dispatch-timeout and claim-lease contract, then applies
+  an independent 5-second deadline to the returned body. Body reads reject independently
+  of best-effort stream cancellation. Responses are capped at 16 KiB and use strict
+  UTF-8 JSON variants. do-runtime accepts only the shim's exact `{ok:true}` or
+  `{ok:true,ignored:true}` actor result, then preserves the established
+  `{ok:true,ignored:boolean}` Workflows wire. Workflows validates that outer shape before
+  finalizing a claimed job. Mutation success requires exact typed `ok`, `jobId`,
+  `changed`, and `deleted` fields: set/delete require a non-empty job id, while
+  whole-worker cleanup requires `jobId:null`. An unreadable or malformed 2xx response
+  rejects into the existing operation-specific compensation and unknown-outcome
+  contract.
 - Alarm mutation, retarget, dispatch, and whole-worker storage cleanup accept only the
   canonical positive JavaScript-safe-integer worker version grammar. Invalid internal or
   persisted versions fail before a job is stored or a worker invoke is attempted.
@@ -353,10 +383,18 @@ deletable.
   `WORKFLOWS_DO_ALARM_RETRY_JITTER` up to `WORKFLOWS_DO_ALARM_RETRY_MAX_TRIES`
   (default `6`), then discard and increment
   `do_alarm_dispatches{outcome="discarded"}`.
-- If the Workflows client times out after calling do-runtime, the backend keeps the
-  running claim until `WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS` expires instead of
-  immediately scheduling a retry. The default is five minutes, and the configured value
-  is clamped above `WORKFLOWS_DISPATCH_TIMEOUT_MS` so normal timeout handling avoids
+- Only a connect failure before the Workflows request reaches do-runtime or a trusted,
+  complete `do_alarm_dispatch_failed` response schedules an immediate alarm retry.
+  do-runtime emits that failed response when task/owner resolution rejects before owner
+  forwarding or actor fetch starts, and when a trusted owner response proves the alarm
+  settled as failure. The pre-dispatch conversion logs the normalized alarm identity and
+  original internal error without its fence token. A timeout, explicit
+  `do_alarm_dispatch_result_unknown`, owner-forward transport failure, or
+  response that cannot be read and classified keeps the running claim until
+  `WORKFLOWS_DO_ALARM_CLAIM_LEASE_MS` expires. A running job is removed from ready and
+  indexed in due at that lease expiry, so repeated ticks do not resample it while the
+  result remains unknown. The default lease is five minutes, and the configured value is
+  clamped above `WORKFLOWS_DISPATCH_TIMEOUT_MS` so unknown-result handling avoids
   overlapping alarm bodies while do-runtime may still be executing the original
   dispatch. Operators should size the claim lease for the longest expected alarm handler
   body, not only for the HTTP dispatch timeout; alarm bodies remain at-least-once and
@@ -574,6 +612,7 @@ logs do not measure the lifetime of backend WebSocket recovery after the initial
 - `tests/unit/do-object-registry.test.js`
 - `tests/unit/do-runtime-actor.test.js`
 - `tests/unit/do-runtime-http.test.js`
+- `tests/unit/do-runtime-index.test.js`
 - `tests/unit/do-runtime-load.test.js`
 - `tests/unit/do-runtime-protocol.test.js`
 - `tests/unit/do-state.test.js`

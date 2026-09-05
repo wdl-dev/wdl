@@ -1,0 +1,77 @@
+{
+  "maxBytes": 16384,
+  "deadlineMs": 5000,
+  "actorSuccessVariants": {
+    "delivered": {
+      "ok": true
+    },
+    "ignored": {
+      "ok": true,
+      "ignored": true
+    }
+  },
+  "dispatchSuccessVariants": {
+    "delivered": {
+      "ok": true,
+      "ignored": false
+    },
+    "ignored": {
+      "ok": true,
+      "ignored": true
+    }
+  },
+  "dispatchErrorVariants": {
+    "failed": {
+      "status": 503,
+      "body": {
+        "error": "do_alarm_dispatch_failed",
+        "message": "DO alarm dispatch failed"
+      }
+    },
+    "resultUnknown": {
+      "status": 503,
+      "body": {
+        "error": "do_alarm_dispatch_result_unknown",
+        "message": "DO alarm dispatch result is unknown"
+      }
+    }
+  },
+  "mutationSuccessVariants": {
+    "set": {
+      "ok": true,
+      "jobId": "doa-test",
+      "changed": true,
+      "deleted": 0
+    },
+    "delete": {
+      "ok": true,
+      "jobId": "doa-test",
+      "changed": true,
+      "deleted": 1
+    },
+    "cleanup": {
+      "ok": true,
+      "jobId": null,
+      "changed": true,
+      "deleted": 2
+    }
+  },
+  "mutationFailureClasses": {
+    "definitePreMutationRejection": {
+      "minStatus": 400,
+      "maxStatus": 499,
+      "runtimeCode": "do_alarm_backend_failed"
+    },
+    "resultUnknown": {
+      "minStatus": 500,
+      "maxStatus": 599,
+      "runtimeCode": "do_alarm_result_unknown"
+    }
+  },
+  "mutationRequiredFields": [
+    "changed",
+    "deleted",
+    "jobId",
+    "ok"
+  ]
+}

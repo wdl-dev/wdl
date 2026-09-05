@@ -25,6 +25,33 @@ const HOST_BINDING_ENV_WORKER = readFileSync(
   new URL("../../test-workers/host-binding-env/src/index.js", import.meta.url),
   "utf8"
 );
+const SHARED_BASE64_WORKER = readFileSync(
+  new URL("../../shared/base64.js", import.meta.url),
+  "utf8"
+);
+const BASE64_PROBE_WORKER = `
+  import { base64ToBytes, canonicalBase64ToBytes } from "./base64.js";
+  function probe(decode, value) {
+    try {
+      return { value, ok: true, bytes: Array.from(decode(value)) };
+    } catch {
+      return { value, ok: false };
+    }
+  }
+  export default {
+    fetch() {
+      return Response.json({
+        bufferType: typeof Buffer,
+        forgiving: ["Zg==", "Zg", "Z g ==", "Zh==", "Zm9=", "%%%", "Zg=", "-_8="].map(
+          (value) => probe(base64ToBytes, value)
+        ),
+        canonical: ["", "Zg==", "Zm8=", "Zm9v", "Zg", "Z g==", "Zh==", "Zm9=", "-_8="].map(
+          (value) => probe(canonicalBase64ToBytes, value)
+        ),
+      });
+    },
+  };
+`;
 
 /**
  * @typedef {{
@@ -38,6 +65,15 @@ const HOST_BINDING_ENV_WORKER = readFileSync(
  *   nodeGlobals: Record<string, string>,
  *   urlParsing: { nonUts46XnLabel: string },
  * }} WorkerdCompatResult
+ */
+
+/**
+ * @typedef {{ value: string, ok: boolean, bytes?: number[] }} Base64ProbeEntry
+ * @typedef {{
+ *   bufferType: string,
+ *   forgiving: Base64ProbeEntry[],
+ *   canonical: Base64ProbeEntry[],
+ * }} Base64ProbeResult
  */
 
 /** @param {string} ns @param {string} path @param {Buffer} body */
@@ -263,6 +299,59 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
 
   const healthy = await gatewayFetch(ns, "/node-default");
   assert.equal(healthy.status, 200);
+});
+
+test("shared base64 grammar agrees across workerd web and Node branches", async () => {
+  const ns = uniqueNs("base64-grammar");
+  for (const variant of [
+    { name: "web", compatibilityDate: "2026-04-24" },
+    { name: "node", compatibilityDate: "2026-08-04" },
+  ]) {
+    await deployAndPromote(ns, variant.name, {
+      mainModule: "worker.js",
+      modules: {
+        "worker.js": BASE64_PROBE_WORKER,
+        "base64.js": SHARED_BASE64_WORKER,
+      },
+      compatibilityDate: variant.compatibilityDate,
+    });
+  }
+
+  /** @type {Record<string, Base64ProbeResult>} */
+  const results = {};
+  for (const name of ["web", "node"]) {
+    const response = await gatewayFetch(ns, `/${name}`);
+    assert.equal(response.status, 200);
+    results[name] = /** @type {Base64ProbeResult} */ (await responseJson(response));
+  }
+  assert.equal(results.web.bufferType, "undefined");
+  assert.equal(results.node.bufferType, "function");
+  const { bufferType: _webBufferType, ...webResult } = results.web;
+  const { bufferType: _nodeBufferType, ...nodeResult } = results.node;
+  assert.deepEqual(webResult, nodeResult);
+  assert.deepEqual(webResult, {
+    forgiving: [
+      { value: "Zg==", ok: true, bytes: [102] },
+      { value: "Zg", ok: true, bytes: [102] },
+      { value: "Z g ==", ok: true, bytes: [102] },
+      { value: "Zh==", ok: true, bytes: [102] },
+      { value: "Zm9=", ok: true, bytes: [102, 111] },
+      { value: "%%%", ok: false },
+      { value: "Zg=", ok: false },
+      { value: "-_8=", ok: false },
+    ],
+    canonical: [
+      { value: "", ok: true, bytes: [] },
+      { value: "Zg==", ok: true, bytes: [102] },
+      { value: "Zm8=", ok: true, bytes: [102, 111] },
+      { value: "Zm9v", ok: true, bytes: [102, 111, 111] },
+      { value: "Zg", ok: false },
+      { value: "Z g==", ok: false },
+      { value: "Zh==", ok: false },
+      { value: "Zm9=", ok: false },
+      { value: "-_8=", ok: false },
+    ],
+  });
 });
 
 test("Workflow identity stays out of Node-compatible process.env", async () => {

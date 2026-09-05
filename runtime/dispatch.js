@@ -3,6 +3,7 @@
 // invocation events, and outcome response shaping; runtime/index.js delegates
 // worker-event routes here.
 
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { internalErrorResponse, jsonError, jsonResponse } from "shared-respond";
 import { BodyTooLargeError, readBoundedText } from "shared-bounded-body";
 import { withInternalAuthEntries } from "shared-internal-auth";
@@ -31,14 +32,26 @@ import {
   WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
   workflowError,
   workflowInFlightSettleTimeoutError,
+  workflowInfrastructureError,
   workflowInfrastructureLogError,
 } from "runtime-dispatch-workflow-step";
+import {
+  KV_READ_INFRASTRUCTURE_ERROR_CODE,
+  WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
+} from "runtime-infrastructure-error";
+import { WORKFLOW_INFRASTRUCTURE_REPORTER_PROP } from "runtime-load-module-rewrite";
+
+const WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP =
+  `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}Id`;
+const WORKFLOW_INFRASTRUCTURE_REPORT_FAILURE_PREFIX =
+  `${WORKFLOW_INFRASTRUCTURE_REPORTER_PROP}:`;
+
 /**
  * @typedef {{ respond(response: Response): Response, markError(err: unknown): void, requestId: string }} DispatchScope
  * @typedef {{ fetch(request: Request): Promise<Response>, scheduled?(controller: unknown): Promise<unknown>, queue?(queueName: string, messages: unknown[]): Promise<unknown>, run?(event: unknown, step: unknown): Promise<unknown> }} LoadedEntrypoint
- * @typedef {{ getEntrypoint(name?: string): LoadedEntrypoint }} LoadedWorkerStub
+ * @typedef {{ getEntrypoint(name?: string, options?: { props?: Record<string, unknown> }): LoadedEntrypoint }} LoadedWorkerStub
  * @typedef {{ namespace: string, workerName: string, workerId: string, requestId: string | null }} RuntimeIdentity
- * @typedef {{ waitUntil?(promise: Promise<unknown>): void }} RuntimeCtx
+ * @typedef {{ waitUntil?(promise: Promise<unknown>): void, exports?: unknown }} RuntimeCtx
  * @typedef {{ WORKFLOWS_BACKEND?: { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> } | null, WDL_INTERNAL_AUTH_TOKEN?: unknown, [key: string]: unknown }} RuntimeEnv
  * @typedef {{ ns: string, worker: string, frozenVersion: string, workflowName: string, workflowKey: string, className: string, instanceId: string, generation: number, runToken: string, createdAtMs: number, dispatchDeadlineMs: number, event: unknown }} WorkflowRunDispatch
  * @typedef {{ request: Request, stub: LoadedWorkerStub, scope: DispatchScope, env: RuntimeEnv, ctx: RuntimeCtx, identity: RuntimeIdentity }} WorkerDispatchArgs
@@ -69,6 +82,101 @@ function workflowBackendForStep(env) {
         headers: withInternalAuthEntries(init?.headers, env),
       });
     },
+  };
+}
+
+/** @param {number} deadlineMs @param {string} diagnostic */
+function assertWorkflowDispatchDeadline(deadlineMs, diagnostic) {
+  if (Date.now() >= deadlineMs) {
+    throw workflowInfrastructureError(diagnostic);
+  }
+}
+
+/**
+ * @template T
+ * @param {() => T | Promise<T>} invoke
+ * @param {number} deadlineMs
+ * @returns {Promise<T>}
+ */
+async function runWorkflowBeforeDeadline(invoke, deadlineMs) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(workflowInfrastructureError(
+      "Workflow dispatch deadline expired before terminal outcome"
+    )), Math.max(0, deadlineMs - Date.now()));
+  });
+  try {
+    return await Promise.race([invoke(), deadline]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
+/** @type {Map<string, { reported: boolean }>} */
+const workflowInfrastructureReports = new Map();
+
+/** @param {unknown} props @param {unknown} code */
+function recordWorkflowInfrastructureReport(props, code) {
+  if (code !== KV_READ_INFRASTRUCTURE_ERROR_CODE) {
+    throw new TypeError("Workflow infrastructure report code is invalid");
+  }
+  const reportId = /** @type {Record<string, unknown> | null | undefined} */ (props)?.reportId;
+  const state = typeof reportId === "string"
+    ? workflowInfrastructureReports.get(reportId)
+    : undefined;
+  if (!state) {
+    throw new TypeError("Workflow infrastructure report is closed or invalid");
+  }
+  state.reported = true;
+}
+
+/** @param {unknown} error @param {string} reportId */
+function isWorkflowInfrastructureReportFailure(error, reportId) {
+  if (error === null || (typeof error !== "object" && typeof error !== "function")) {
+    return false;
+  }
+  try {
+    return /** @type {Record<string, unknown>} */ (error).message ===
+      `${WORKFLOW_INFRASTRUCTURE_REPORT_FAILURE_PREFIX}${reportId}`;
+  } catch {
+    return false;
+  }
+}
+
+export class WorkflowInfrastructureReporter extends WorkerEntrypoint {
+  /** @param {Request} request */
+  fetch(request) {
+    const url = new URL(request.url);
+    if (
+      request.method !== "GET" ||
+      url.origin !== WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN ||
+      url.pathname !== `/${KV_READ_INFRASTRUCTURE_ERROR_CODE}`
+    ) {
+      throw new TypeError("Workflow infrastructure report request is invalid");
+    }
+    recordWorkflowInfrastructureReport(this.ctx.props, KV_READ_INFRASTRUCTURE_ERROR_CODE);
+    return new Response(null, { status: 204 });
+  }
+}
+
+function beginWorkflowInfrastructureReport() {
+  let id;
+  do {
+    id = crypto.randomUUID();
+  } while (workflowInfrastructureReports.has(id));
+  const state = { reported: false };
+  workflowInfrastructureReports.set(id, state);
+  return {
+    id,
+    /** @param {unknown} [error] */
+    reported: (error) => {
+      if (!state.reported && isWorkflowInfrastructureReportFailure(error, id)) {
+        state.reported = true;
+      }
+      return state.reported;
+    },
+    close: () => workflowInfrastructureReports.delete(id),
   };
 }
 
@@ -224,22 +332,92 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
     phase: "start",
     fields,
   });
+  const infrastructureReport = beginWorkflowInfrastructureReport();
+  /** @type {ReturnType<typeof createStepController> | null} */
   let step = null;
+  /** @param {unknown} error */
+  const finishInfrastructureFailure = (error) => {
+    const durationMs = Date.now() - startedAt;
+    scope.markError(workflowInfrastructureLogError(error));
+    emitRuntimeTailEvent({
+      env, ctx, identity,
+      event: "worker_workflow",
+      phase: "finish",
+      after: startTailEvent,
+      fields: {
+        ...fields,
+        outcome: "error",
+        error: WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
+        duration_ms: durationMs,
+      },
+    });
+    return scope.respond(internalErrorResponse(
+      503,
+      WORKFLOW_BACKEND_UNAVAILABLE_CODE,
+      WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
+      scope.requestId
+    ));
+  };
+  const finishDeadlineFailure = () => finishInfrastructureFailure(
+    workflowInfrastructureError(
+      "Workflow dispatch deadline expired before terminal outcome"
+    )
+  );
   try {
-    const entry = stub.getEntrypoint(run.className);
-    step = createStepController(run, workflowBackendForStep(env), scope.requestId);
-    if (typeof entry.run !== "function") {
+    assertWorkflowDispatchDeadline(
+      run.dispatchDeadlineMs,
+      "Workflow dispatch deadline expired before tenant execution"
+    );
+    const runtimeExports = /** @type {{ WorkflowInfrastructureReporter?: (options: { props: { reportId: string } }) => unknown }} */ (
+      ctx.exports
+    );
+    if (typeof runtimeExports?.WorkflowInfrastructureReporter !== "function") {
+      throw workflowInfrastructureError(
+        "Workflow infrastructure reporter binding is unavailable"
+      );
+    }
+    const reporter = runtimeExports.WorkflowInfrastructureReporter({
+      props: { reportId: infrastructureReport.id },
+    });
+    const entry = stub.getEntrypoint(run.className, {
+      props: {
+        [WORKFLOW_INFRASTRUCTURE_REPORTER_PROP]: reporter,
+        [WORKFLOW_INFRASTRUCTURE_REPORT_ID_PROP]: infrastructureReport.id,
+      },
+    });
+    const stepController = createStepController(
+      run,
+      workflowBackendForStep(env),
+      scope.requestId,
+      infrastructureReport.reported
+    );
+    step = stepController;
+    const runEntrypoint = entry.run;
+    if (typeof runEntrypoint !== "function") {
       throw workflowStepError("workflow_invalid_step", `workflow class ${run.className} does not expose run()`);
     }
-    const output = await entry.run(run.event, step.facade);
+    assertWorkflowDispatchDeadline(
+      run.dispatchDeadlineMs,
+      "Workflow dispatch deadline expired before tenant execution"
+    );
+    // Workerd RPC callables are receiver-independent. Binding the dynamic
+    // entrypoint as `this` attempts to transfer that entrypoint over JSRPC.
+    const output = await runWorkflowBeforeDeadline(
+      () => runEntrypoint(run.event, stepController.facade),
+      run.dispatchDeadlineMs
+    );
+    step.closeForRunReturn();
     if (step.hasInFlightSteps()) {
-      step.closeForRunReturn();
       throw workflowStepError("workflow_invalid_step", "workflow run returned while workflow steps were still in flight");
     }
     if (step.hasTerminalStepFailure()) throw step.terminalStepFailure();
     if (step.isSuspended()) {
       throw workflowStepError("workflow_invalid_step", "workflow run returned after a step suspension was registered");
     }
+    assertWorkflowDispatchDeadline(
+      run.dispatchDeadlineMs,
+      "Workflow dispatch deadline expired before terminal outcome"
+    );
     const durationMs = Date.now() - startedAt;
     const response = workflowJsonResponse(
       200,
@@ -249,6 +427,7 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
       "output",
       durationMs
     );
+    if (Date.now() >= run.dispatchDeadlineMs) return finishDeadlineFailure();
     emitRuntimeTailEvent({
       env, ctx, identity,
       event: "worker_workflow",
@@ -280,6 +459,17 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
         caught = workflowInFlightSettleTimeoutError();
       }
     }
+    step?.closeForRunReturn();
+    if (infrastructureReport.reported(caught)) {
+      caught = workflowInfrastructureError(
+        "Runtime KV infrastructure failure escaped tenant boundary"
+      );
+    }
+    if (!isWorkflowInfrastructureError(caught) && Date.now() >= run.dispatchDeadlineMs) {
+      caught = workflowInfrastructureError(
+        "Workflow dispatch deadline expired before terminal outcome"
+      );
+    }
     let terminalStepError = null;
     if (step?.hasTerminalStepFailure()) {
       const recordedFailure = step.terminalStepFailure();
@@ -291,34 +481,21 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
         terminalStepError = step.terminalStepError();
       }
     }
-    if (isWorkflowInfrastructureError(caught)) {
-      const durationMs = Date.now() - startedAt;
-      scope.markError(workflowInfrastructureLogError(caught));
-      emitRuntimeTailEvent({
-        env, ctx, identity,
-        event: "worker_workflow",
-        phase: "finish",
-        after: startTailEvent,
-        fields: {
-          ...fields,
-          outcome: "error",
-          error: WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
-          duration_ms: durationMs,
-        },
-      });
-      return scope.respond(internalErrorResponse(
-        503,
-        WORKFLOW_BACKEND_UNAVAILABLE_CODE,
-        WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE,
-        scope.requestId
-      ));
-    }
-    if (
+    const caughtIsSuspension = Boolean(
       !terminalStepError &&
       step?.isSuspended() &&
       isWorkflowSuspensionSignal(caught)
-    ) {
+    );
+    if (isWorkflowInfrastructureError(caught)) {
+      return finishInfrastructureFailure(caught);
+    }
+    if (caughtIsSuspension) {
       const durationMs = Date.now() - startedAt;
+      const response = jsonResponse(200, {
+        outcome: "suspended",
+        duration_ms: durationMs,
+      });
+      if (Date.now() >= run.dispatchDeadlineMs) return finishDeadlineFailure();
       emitRuntimeTailEvent({
         env, ctx, identity,
         event: "worker_workflow",
@@ -330,26 +507,10 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
           duration_ms: durationMs,
         },
       });
-      return scope.respond(jsonResponse(200, {
-        outcome: "suspended",
-        duration_ms: durationMs,
-      }));
+      return scope.respond(response);
     }
     const durationMs = Date.now() - startedAt;
     const error = terminalStepError ?? workflowError(caught);
-    scope.markError(caught);
-    emitRuntimeTailEvent({
-      env, ctx, identity,
-      event: "worker_workflow",
-      phase: "finish",
-      after: startTailEvent,
-      fields: {
-        ...fields,
-        outcome: "failed",
-        error: error.message,
-        duration_ms: durationMs,
-      },
-    });
     let response;
     try {
       response = workflowJsonResponse(
@@ -370,9 +531,27 @@ export async function handleWorkflowRunDispatch({ run, stub, scope, env, ctx, id
         durationMs
       );
     }
+    if (Date.now() >= run.dispatchDeadlineMs) return finishDeadlineFailure();
+    scope.markError(caught);
+    emitRuntimeTailEvent({
+      env, ctx, identity,
+      event: "worker_workflow",
+      phase: "finish",
+      after: startTailEvent,
+      fields: {
+        ...fields,
+        outcome: "failed",
+        error: error.message,
+        duration_ms: durationMs,
+      },
+    });
     return scope.respond(response);
   } finally {
-    step?.closeForRunReturn();
+    try {
+      step?.closeForRunReturn();
+    } finally {
+      infrastructureReport.close();
+    }
   }
 }
 

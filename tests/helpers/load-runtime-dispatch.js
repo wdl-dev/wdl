@@ -17,6 +17,16 @@ const BOUNDED_BODY_URL = repositoryFileUrl("shared/bounded-body.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
 const SHARED_UTF8_URL = repositoryFileUrl("shared/utf8.js");
 const RUNTIME_LIB_URL = runtimeLibModuleDataUrl();
+const RUNTIME_INFRASTRUCTURE_ERROR_URL = repositoryFileUrl("runtime/infrastructure-error.js");
+const RUNTIME_LOAD_MODULE_REWRITE_URL = repositoryFileUrl("runtime/load/module-rewrite.js");
+const CLOUDFLARE_WORKERS_URL = moduleDataUrl(`
+export class WorkerEntrypoint {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
+}
+`);
 const METRICS_MOCK_URL = moduleDataUrl(`
 export const metrics = {
   increment() {},
@@ -39,7 +49,10 @@ export async function loadRuntimeDispatch() {
       [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
     ]);
     const workflowStepUrl = repositoryModuleDataUrl("runtime/dispatch/workflow-step.js", [
+      [/from "shared-bounded-body";/, `from ${JSON.stringify(BOUNDED_BODY_URL)};`],
       [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
+      [/from "shared-respond";/, `from ${JSON.stringify(RESPOND_URL)};`],
+      [/from "runtime-infrastructure-error";/, `from ${JSON.stringify(RUNTIME_INFRASTRUCTURE_ERROR_URL)};`],
       [/from "runtime-dispatch-workflow-json";/g, `from ${JSON.stringify(workflowJsonUrl)};`],
       [/from "runtime-dispatch-workflow-replay-cache";/g, `from ${JSON.stringify(workflowReplayCacheUrl)};`],
     ]);
@@ -50,22 +63,31 @@ export async function loadRuntimeDispatch() {
       [/from "shared-utf8";/, `from ${JSON.stringify(SHARED_UTF8_URL)};`],
     ]);
 
-    const [runtimeDispatchWorkflowReplayCache, runtimeDispatchWorkflowStep, runtimeDispatch] = await Promise.all([
+    const [runtimeInfrastructureError, runtimeDispatchWorkflowReplayCache, runtimeDispatchWorkflowStep, runtimeDispatch] = await Promise.all([
+      import(RUNTIME_INFRASTRUCTURE_ERROR_URL),
       import(workflowReplayCacheUrl),
       import(workflowStepUrl),
       importRepositoryModule("runtime/dispatch.js", [
+        [/from "cloudflare:workers";/, `from ${JSON.stringify(CLOUDFLARE_WORKERS_URL)};`],
         [/from "shared-respond";/, `from ${JSON.stringify(RESPOND_URL)};`],
         [/from "shared-bounded-body";/, `from ${JSON.stringify(BOUNDED_BODY_URL)};`],
         [/from "shared-errors";/, `from ${JSON.stringify(SHARED_ERRORS_URL)};`],
         [/from "shared-internal-auth";/, `from ${JSON.stringify(SHARED_INTERNAL_AUTH_URL)};`],
         [/from "runtime-lib";/, `from ${JSON.stringify(RUNTIME_LIB_URL)};`],
+        [/from "runtime-infrastructure-error";/, `from ${JSON.stringify(RUNTIME_INFRASTRUCTURE_ERROR_URL)};`],
+        [/from "runtime-load-module-rewrite";/, `from ${JSON.stringify(RUNTIME_LOAD_MODULE_REWRITE_URL)};`],
         [/from "runtime-metrics";/, `from ${JSON.stringify(METRICS_MOCK_URL)};`],
         [/from "runtime-dispatch-workflow-json";/g, `from ${JSON.stringify(workflowJsonUrl)};`],
         [/from "runtime-dispatch-workflow-step";/g, `from ${JSON.stringify(workflowStepUrl)};`],
         [/from "runtime-tail-forwarder";/, `from ${JSON.stringify(tailForwarderUrl)};`],
       ]),
     ]);
-    return { runtimeDispatch, runtimeDispatchWorkflowReplayCache, runtimeDispatchWorkflowStep };
+    return {
+      runtimeDispatch,
+      runtimeDispatchWorkflowReplayCache,
+      runtimeDispatchWorkflowStep,
+      runtimeInfrastructureError,
+    };
   })();
   return dispatchPromise;
 }

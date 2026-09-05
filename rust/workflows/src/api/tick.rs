@@ -9,6 +9,7 @@ use crate::{
     workflow_shard_queue_keys,
 };
 
+use super::do_alarms::DoAlarmAdmissionResult;
 use super::payload::{parse_payload_ref, payload_storage_key_for_ref};
 use super::{
     InstanceRouteKeys, ReadyAdmissionConfig, ReadyAdmissionOutcome, RunClaim,
@@ -317,26 +318,8 @@ fn log_dispatch_error(app: &AppState, identity: &InstanceIdentity, err: &Workflo
     );
 }
 
-pub(crate) async fn tick_workflows(
-    app: &AppState,
-    request_id: Option<&str>,
-) -> WorkflowResult<WorkflowTickResponse> {
-    let due_moved = move_due_tokens(app).await?;
-    let retention_cleaned = cleanup_retention(app).await?;
-    let workflow_admission = admit_ready_members(
-        app,
-        workflow_shard_queue_keys(),
-        ReadyAdmissionConfig {
-            batch_size: WORKFLOW_READY_BATCH_SIZE,
-            concurrency: app.config.ready_dispatch_concurrency,
-            prune_on_error: false,
-        },
-        0,
-        |shard, token| process_ready_workflow_token(app, shard, token, request_id),
-        merge_admitted,
-    );
-    let (result, do_alarm_result) = tokio::join!(workflow_admission, admit_ready_do_alarms(app));
-    let do_alarm_counters = match do_alarm_result {
+async fn admit_do_alarm_tick(app: &AppState) -> DoAlarmAdmissionResult {
+    match admit_ready_do_alarms(app).await {
         Ok(result) => {
             if let Some(err) = &result.error {
                 log(
@@ -357,7 +340,40 @@ pub(crate) async fn tick_workflows(
             );
             Default::default()
         }
-    };
+    }
+}
+
+pub(crate) async fn tick_workflows(
+    app: &AppState,
+    request_id: Option<&str>,
+) -> WorkflowResult<WorkflowTickResponse> {
+    if app.workflow_migration_pending {
+        let do_alarm_counters = admit_do_alarm_tick(app).await;
+        return Ok(WorkflowTickResponse {
+            workflow_admitted: 0,
+            workflow_capacity_blocked: false,
+            due_moved: 0,
+            retention_cleaned: 0,
+            do_alarm_due_moved: do_alarm_counters.due_moved,
+            do_alarm_admitted: do_alarm_counters.admitted,
+            do_alarm_capacity_blocked: do_alarm_counters.capacity_blocked,
+        });
+    }
+    let due_moved = move_due_tokens(app).await?;
+    let retention_cleaned = cleanup_retention(app).await?;
+    let workflow_admission = admit_ready_members(
+        app,
+        workflow_shard_queue_keys(),
+        ReadyAdmissionConfig {
+            batch_size: WORKFLOW_READY_BATCH_SIZE,
+            concurrency: app.config.ready_dispatch_concurrency,
+            prune_on_error: false,
+        },
+        0,
+        |shard, token| process_ready_workflow_token(app, shard, token, request_id),
+        merge_admitted,
+    );
+    let (result, do_alarm_counters) = tokio::join!(workflow_admission, admit_do_alarm_tick(app));
     let result = result?;
     if let Some(err) = result.error {
         return Err(err);

@@ -8,24 +8,55 @@ families, and ownership rules that span modules.
 
 WDL uses a deliberate logical split:
 
-- **`DB 0`, control plane:** bundles, routes/patterns, auth, AI provider metadata and
+- **`DB 0`, control endpoint:** bundles, routes/patterns, auth, AI provider metadata and
   credentials, D1/DO owner state, cron config, queue-consumer config, lifecycle
   metadata, and workflow definitions (`wf:defs:*`).
+- **`DB 0`, Workflows endpoint:** Workflows itself owns only the `wf:schema3-reset`
+  operator state there. It is the same logical database as control when both services
+  share an endpoint, but a different server when `WORKFLOWS_REDIS_URL` selects a dedicated
+  endpoint.
 - **`DB 1`, data plane:** KV hash buckets, queue streams, delayed queues, orphan streams,
   and live log-tail streams.
 - **`DB 2`, workflows:** `wf:schema_version`, instance state, step records/summaries,
   ready/due shards, events and event-type indexes, payload refs, retention indexes,
   restart target-version blockers, and run leases.
+- **`DB 15`, inactive Workflow schema archive:** no WDL service selects this database
+  during normal operation. The Workflows-owned schema-3 reset command reserves empty
+  DB 15 as the destination of its `SWAPDB 2 15` archive step.
 
-Local compose, Kubernetes, and Terraform enable this split. Rust services and the
-Rust `redis-proxy` use `DATA_REDIS_URL` / `DATA_REDIS_DB` to select the
-data-plane Redis connection/database; embedded JS control/log-tail paths use
-`DATA_REDIS_ADDR` plus `DATA_REDIS_DB` because their RESP client accepts a
-host:port address. Deployments that omit those data-plane variables keep
-data-plane keys on the control Redis connection/database until they opt in.
-Workflows is different: when `WORKFLOWS_REDIS_URL` is omitted, the workflows
-service still defaults to DB 2; it uses DB 0 only when `WORKFLOWS_REDIS_DB=0` is
-set explicitly.
+Local compose, Kubernetes, and Terraform enable this split. Rust services and the Rust
+`redis-proxy` use `DATA_REDIS_URL` to select the complete data-plane Redis endpoint and
+logical database; `DATA_REDIS_DB` does not affect those Rust clients. Embedded JS
+control/log-tail paths use `DATA_REDIS_ADDR` plus `DATA_REDIS_DB` because their RESP
+client accepts a host:port address. Deployments that omit the variables for their path
+keep data-plane keys on the control Redis connection/database until they opt in.
+Workflows is different: `WORKFLOWS_REDIS_URL` may select another Redis endpoint, but it
+must omit the database or explicitly select DB 2; explicit non-DB2 URLs are rejected.
+DB 2 must remain dedicated to Workflows
+runtime state and must not share control or data-plane state. The legacy
+`WORKFLOWS_REDIS_DB` setting is accepted only when its value is `2` and should be
+removed from deployment configuration. At normal startup and before schema-reset
+commands connect, Workflows compares the parsed identities of active DB 2 and reserved
+archive DB 15 with `CONTROL_REDIS_URL` and the effective Rust data-plane URL
+(`DATA_REDIS_URL ?? REDIS_URL`); deployments that separate the data plane must pass its
+canonical URL to Workflows for these ownership checks.
+
+DB 15 is not an additional active ownership tier. The reset copies the unchanged
+`wf:internal:do-alarm:*` projection back into schema-3 DB 2 but leaves the complete
+schema-2 archive immutable for a future Workflow-state migration. After all schema-2
+writers stop and its two 60-second transient key families drain, the archive has no Redis
+key TTL; logical retention, lease, and due timestamps do not expire keys without the old
+Workflows/Scheduler processes. DB 15 shares the endpoint's memory, persistence, eviction
+policy, and failure domain with DB 2. It remains until a future migration and its
+completeness checks succeed; an external snapshot does not satisfy that exit condition.
+Capacity and eviction-policy fields emitted by the reset command are advisory; the
+operator decides whether the actual endpoint has sufficient headroom.
+
+## Workflows Endpoint DB 0 Key
+
+```text
+wf:schema3-reset                String, Workflows-owned schema reset ownership/migration gate
+```
 
 ## Global Control Keys
 

@@ -83,7 +83,7 @@ WDL 在 JS workerd tier 和 Rust 服务中使用同一套可观测性策略：�
 中心 owner：
 
 - JS 服务通过 `shared/observability.js`（`createLogger`、`createHttpRequestScope` 和 `recordRequestComplete`）输出平台日志。生产 JS 中直接使用 `console.*` 仅限这个 primitive，以及无法 import module 的 embedded source string。
-- Rust 服务通过 `wdl-rust-common::log::emit_log_line` 或其薄 wrapper 输出日志，并通过 `wdl-rust-common::metrics::MetricStore` 暴露 metrics。
+- Rust 服务通过 `wdl-rust-common::log::emit_log_line` 或其薄 wrapper 输出日志，通过 `wdl-rust-common::metrics::MetricStore` 暴露 metrics，并通过 `wdl-rust-common::request_completion::record_request_completion` 共享 HTTP completion metrics/log fields。
 - HTTP request completion 统一由 request-scope helper 或 service middleware 记录，避免 request counter、duration summary、probe suppression、request-id field 和 `request_complete` 日志在各 tier 之间漂移。
 - 服务特定 metrics 应优先使用一个 metric family，并用有界的 `outcome`、`reason`、`kind`、`mode`、`stage`、`status`、`scope`、`operation` 或有限 machine `code` label 区分结果；只有真正提供不同信号时才拆出独立 family。
 
@@ -100,11 +100,12 @@ WDL 在 JS workerd tier 和 Rust 服务中使用同一套可观测性策略：�
 - 暴露 request metrics 的 Rust HTTP sidecar 使用同一组 `requests`、`request_duration_ms` 和 `request_errors` metric family，以及有界的 `service`/`route`/`status` labels；per-route error context 只进入 `request_complete` 日志中的 `error_code` / `error_message`。
 - JS 和 Rust observability 实现刻意共享 metric prefix `wdl`、request metric families `requests` / `request_duration_ms` / `request_errors`、cardinality warning threshold `100`、Prometheus content type `text/plain; version=0.0.4; charset=utf-8`，以及结构化日志的 key 顺序、level priority、stream routing 和 timestamp shape；共享 fixture `tests/fixtures/observability-contract.json` pin 住这些值，但不引入 runtime observability owner。
 - redis-proxy 用 `kv_value_bytes` summary 记录 KV payload size，label 只有有界的 `service`/`operation`/`kind`。它记录 value、metadata 和 raw batch byte count，用来判断是否需要 large-value offload；namespace、key 和 object identity 不进入 metric label。
+- Runtime KV admission 发布带有界 `service`/`outcome` label 的 `kv_read_capacity_events`，固定 outcome 为 `acquired`、`saturated`、`completed`、`deadline`、`setup_error`。`kv_read_in_flight_bytes` 表示当前预留 wire bytes；`kv_read_in_flight_high_water_bytes` 是进程生命周期最大值，不会随 scrape 重置。共享 registry 会在 Prometheus 输出中添加 `wdl_` prefix 和 counter 的 `_total` suffix。`completed` 是 lease lifecycle outcome，不代表 binding 成功；binding-operation metrics 拥有 success/error 分类。
 - Rust `request_complete` log 输出整数 `duration_ms`，让各服务日志字段保持稳定；Prometheus duration summary 仍保留浮点值。
 - JS `MetricsRegistry` 在单个 metric name 达到 100 个 series 时输出一次结构化 `metric_cardinality_warning` 日志，之后会丢弃该 metric 的全新 series，但继续更新已有 series。Rust `MetricStore` 当前仍保持同一 warning-only tripwire。该 warning 携带 metric name、观测到的 series 数和配置 limit；tenant-specific 细节本来就不应进入 label。因为这条 warning 由 metrics registry 输出，所以不会被 `LOG_LEVEL` 抑制。
 - `*_max` 是单独的 gauge family，不是 Prometheus summary family 下的额外 sample。Summary 只能输出 `_count`、`_sum` 和 quantile sample。
 - 成功的 probe route（`healthz`、`metrics`、`/_healthz`、`/_metrics`）会抑制 `request_complete` 日志，但 counter 仍会增加；错误仍会记录日志。
-- `LOG_LEVEL` 只控制日志输出，不影响 metrics。高 QPS 部署可以设 `LOG_LEVEL=warn` 来关闭 per-request access log，同时保留 Prometheus signal。
+- `LOG_LEVEL` 只控制日志输出，不影响 metrics。高 QPS 部署可以设 `LOG_LEVEL=warn` 来关闭 per-request access log，同时保留 Prometheus signal。JS request scope 会在求值 lazy extras 前检查 canonical logger，Rust completion middleware 会在构造 integer-duration 和 JSON log fields 前检查相同策略；实际输出的 success line 仍是同步 structured stdout。
 - Service-binding trace propagation 由 caller 显式完成。`ServiceBinding#fetch` 会强制 `x-worker-id` 指向 target，但只有 caller 在 Request 上转发 `x-request-id` 时才保留它；JSRPC 不会跨 isolate 携带 Node async context。
 
 Tail event families：

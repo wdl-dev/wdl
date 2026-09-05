@@ -24,6 +24,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+url.workspace = true
 wdl-rust-common = { workspace = true, features = ["axum", "redis", "serde"] }
 
 [dev-dependencies]

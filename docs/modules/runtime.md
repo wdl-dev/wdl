@@ -135,7 +135,12 @@ in the runtime shim before proxying, and stream values are read with the same ca
 are capped at 512 UTF-8 bytes at the redis-proxy boundary for all KV operations,
 including list prefixes and batch reads. `put()` expiration and expiration-TTL values
 must be positive JavaScript safe integers; the proxy applies an expiring value-only
-write and stale-metadata removal atomically.
+write and stale-metadata removal atomically. redis-proxy validates metadata bytes with
+the same Rust JSON parser used by metadata reads before persisting them; unsupported JSON
+cannot turn a later metadata read into a permanent host failure. The serialized metadata
+JSON is capped at 1024 UTF-8 bytes before Runtime Base64/header allocation and again before
+redis-proxy persistence. Persisted reads independently enforce the same cap and fail closed
+on oversized legacy or repair-written metadata.
 `list()` is backed by Redis `HSCAN`, not a Cloudflare ordered B-tree: keys are not
 sorted, cursors are opaque WDL cursors, and concurrent writes may appear out of order or
 be re-seen. A page with `list_complete: false` may contain fewer than `limit` keys,
@@ -177,13 +182,23 @@ is `https://ai.wdl`; provider aliases, official destinations, Redis shapes, byte
 bounds, WebSocket rules, and non-goals are owned by [`ai.md`](ai.md).
 
 Generated host-facade wrappers preserve the Worker's importable-env compatibility
-contract. They use workerd `withEnv()` only when `disallow_importable_env` is absent.
-With importable env enabled, tenant modules may retain the imported env proxy at module
-scope and read bindings from that proxy during an invocation. Capturing an individual
-binding during module evaluation is not a facade contract: evaluation precedes wrapper
-invocation and can observe only the raw binding-scoped host adapter. With
-`disallow_importable_env`, imported env remains empty at module scope and during
-invocations, while positional env still receives generated facades.
+contract. With importable env enabled, tenant modules may retain the imported env proxy
+at module scope and read bindings from that proxy during an invocation. Capturing an
+individual binding during module evaluation is not a facade contract: evaluation
+precedes wrapper invocation and can observe only the raw binding-scoped host adapter.
+With `disallow_importable_env`, imported env remains empty at module scope and during
+invocations, while positional env still receives generated facades. Bundles that
+declare both Workflow classes and KV bindings statically wrap those invocation-provided
+KV bindings, so a facade cached by an ordinary handler remains wrapped when reused by a
+Workflow. A generated support module captures the native `ServiceStub` prototype chain,
+its `fetch` method, `RpcPromise.then`, and `Promise.prototype.then` before tenant module
+evaluation. With importable env enabled it also binds one WDL-owned KV RPC trampoline at
+that point. With `disallow_importable_env`, each facade materialization binds that
+trampoline from its invocation-provided KV adapter before entering the tenant handler or
+constructor while excluding properties on the saved native prototype chain. Each facade
+then uses only its closed-over trampoline. Tenant code that directly captures and invokes
+the raw adapter remains outside the facade contract, and those failures are ordinary
+binding errors.
 
 ASSETS is a deploy-artifact helper, not a full Cloudflare Pages asset pipeline. Control
 uploads files to `assets/<ns>/<worker>/<token>/<path>`, injects an `ASSETS` binding, and
@@ -228,6 +243,13 @@ public traffic for platform-tier namespaces before Redis lookup.
 Runtime reads immutable bundle and metadata keys from DB 0 through `redis-proxy`.
 Data-plane bindings use their own storage:
 
+- Each redis-proxy keeps two physical connection managers in its control logical pool
+  and two in its data logical pool, selecting one manager per operation in round-robin
+  order. Split deployments normally map those pools to DB 0 and DB 1; when
+  `DATA_REDIS_URL` is absent, the data pool reuses the `REDIS_URL` endpoint and database.
+  A command, transaction, Lua invocation, or packed pipeline never crosses managers;
+  the second connection limits small-request head-of-line blocking behind a large
+  ordered Redis reply.
 - Secret hash values in DB 0 are envelope ciphertext. redis-proxy decrypts them during
   runtime-load and fails closed when provider configuration or envelope validation
   fails.
@@ -237,9 +259,59 @@ Data-plane bindings use their own storage:
 - Loaded host-binding wrappers cache only the stripped template for a stable workerd env
   object. Default object/function handlers receive a fresh top-level env copy and fresh
   facade instances per event. Persistent class entrypoints receive one wrapped env and
-  facade set at construction and reuse it; only their diagnostic context is refreshed
+  facade set at construction and reuse it; only their request-id context is refreshed
   per invocation as described below.
-- KV and queue producers use DB 1 through `redis-proxy`.
+- KV and queue producers use the data logical pool through `redis-proxy`. Split
+  deployments map it to DB 1; without `DATA_REDIS_URL`, it reuses the control database.
+- Runtime applies a fixed 32 MiB aggregate wire-byte admission budget per task before
+  materializing KV response bodies. On identity-encoded responses, a valid
+  `Content-Length` reserves its advertised bytes up to the full budget; missing, larger,
+  or non-identity-encoded lengths reserve the whole budget.
+  Concurrent excess reads fail closed and cancel their upstream body. Redis-proxy owns
+  canonical scalar `get()` responses: values enter through the 25 MiB write bound and the
+  producer sends an exact `Content-Length`. Runtime uses workerd's native body consumer
+  for that shape under the read-operation abort signal, then verifies the resulting byte
+  length before returning it. Missing-length and non-identity `Content-Encoding` scalar
+  responses use the defensive reader under the same 25 MiB value cap. JSON envelope
+  routes use a separate 36 MiB wire cap for Base64 and structural overhead; a larger
+  declared or streamed body is cancelled. The canonical colocated redis-proxy hop is
+  identity-encoded. An intermediary that adds compression forces conservative full-budget
+  admission and should be disabled on that internal hop. Runtime keeps JSON/Base64 result
+  construction inside the lease and starts one 5-second total deadline before each host
+  read. Request/header wait, response-body consumption, and synchronous result construction
+  share that deadline; an absolute check after construction rejects work that crosses the
+  budget before returning it. The deadline rejects independently of best-effort fetch or
+  stream cancellation and releases any reservation.
+  Capacity rejection, read deadline/body failure, malformed host envelopes, host proxy
+  URL/configuration failure, internal-auth `401`, fixed read-route `404`/`405`, and read
+  proxy transport or 5xx failure carry one host-owned infrastructure code. Tenant-input
+  `400`/`413` responses and tenant value decoding, including `type: "json"`, remain
+  ordinary errors.
+  Batch envelopes must match requested key count and order; only scalar `get()` treats
+  proxy `404` as a missing value. The generated facade first projects supported KV read
+  arguments into accessor-free plain shapes, invokes a prototype-independent bound RPC
+  method, and settles the returned `RpcPromise` through the pre-captured native `then`
+  without exposing an intermediate native Promise assimilation step. Reporter completion
+  likewise uses the captured `Promise.prototype.then` without consulting tenant Promise
+  constructor or species hooks. The facade privately associates the exact Error rejected
+  by that host call with its bound KV capability. If that same Error identity escapes a
+  Workflow `run()` Promise or wrapped `step.do()` callback Promise, the wrapper reports
+  only when the capability also belongs to the current Workflow env. It uses the
+  pre-captured native `ServiceStub.fetch` trampoline and Runtime returns retryable 503; a
+  callback report is observed before `commit-step-error`. If the reporter transport
+  rejects before recording the failure, the wrapper encodes the active report nonce in
+  the boundary Error's standard message; Runtime accepts only an exact active-nonce
+  match and sets the same failure latch. The tenant receives an explicit
+  null-prototype step facade, so reflection and `dup()` cannot recover the raw
+  reverse-JSRPC target. Catching the Error
+  inside the corresponding boundary and returning a fallback permits that fallback to
+  commit. Once an Error escapes a step callback, catching the rejected `step.do()` in
+  outer `run()` does not undo the report.
+  Detaching a Promise likewise only keeps its settlement outside the current boundary;
+  neither action erases the private Error-to-capability association. A replacement,
+  wrapper, `cause`, or `AggregateError` does not inherit provenance. Rethrowing the exact
+  Error may report under the same capability-membership check. No fixed message or
+  tenant-created error code is trusted by itself.
 - Workflow bindings call `workflows`; runtime does not read DB 2 directly. Frozen
   Workflow identity exists once in binding-scoped host props. The generated facade
   carries only public operation fields, and Node-compatible `process.env` cannot expose
@@ -319,12 +391,20 @@ Runtime emits request logs and metrics for loading, binding operations, AI pool 
 emits structured stdout for console/exception capture and forwards to `wdl tail` only
 when a matching active tail session exists.
 
+KV response admission exposes
+`wdl_kv_read_capacity_events_total{service,outcome}` with fixed outcomes `acquired`,
+`saturated`, `completed`, `deadline`, and `setup_error`, plus the current
+`wdl_kv_read_in_flight_bytes{service}` and process-lifetime
+`wdl_kv_read_in_flight_high_water_bytes{service}` gauges. Scraping does not reset the
+high-water mark; it resets only when the Runtime task restarts. `completed` means the
+lease released before its deadline, not that value parsing or the binding operation
+succeeded; binding-operation metrics own that result.
+
 Cold-load duration metrics use workerd's request clock. The
-`bundle_load_stage_duration_ms` series therefore covers only the awaited
-`redis_proxy_load` stage. `bundle_load_duration_ms` remains useful for end-to-end
-request-visible load latency, but neither metric profiles uninterrupted bundle decode,
-env construction, or wrapper generation CPU time; workerd does not advance the clock
-during those synchronous stages.
+`bundle_load_stage_duration_ms` series covers only the awaited `redis_proxy_load` stage.
+`bundle_load_duration_ms` covers end-to-end request-visible load latency, including
+synchronous bundle decode, env construction, and wrapper generation under stock workerd's
+advancing request clock; it remains one aggregate rather than a per-stage CPU profile.
 
 ## Deployment / Rollout Notes
 
@@ -349,13 +429,14 @@ during those synchronous stages.
   enables them. Workerd 2026-08-25 accepts that redundant spelling because it produces the
   same compiled flag set; WDL does not duplicate upstream's date-to-flag table.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
-  `allow_irrevocable_stub_storage`, `new_module_registry`, and
+  `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and
   `streams_disable_constructors` deny policy at deploy; runtime rejects retained metadata
   containing either class. The new module registry graduated upstream, but WDL keeps it
   disabled because every dynamic Worker runs through `_wdl-wrapper.js`, which would make
-  tenant `import.meta.main` false. Static host workers also omit the irrevocable-stub
-  flag. Disable-style flags such as `no_*` are not part of the experimental mirror unless
-  WDL explicitly rejects them or upstream marks the enable flag itself experimental.
+  tenant `import.meta.main` false. WDL also requires Fetcher RPC for generated binding
+  facades. Static host workers omit the irrevocable-stub flag. Disable-style flags such
+  as `no_*` are not part of the experimental mirror unless WDL explicitly rejects them
+  or upstream marks the enable flag itself experimental.
 - Python Workers modules are not supported. Upstream's `python_workers_20260610` flag is
   no longer experimental and is no longer implied by date; `python_workers_20260817` is
   experimental. Control still rejects new `py` module manifests and runtime/do-runtime
@@ -390,6 +471,9 @@ during those synchronous stages.
 ## Tests That Protect This Module
 
 - `tests/unit/runtime-load.test.js`
+- `tests/unit/runtime-binding-surface.test.js`
+- `tests/unit/runtime-kv-binding.test.js`
+- `tests/unit/runtime-wrapper-generate.test.js`
 - `tests/unit/runtime-dispatch-handlers.test.js`
 - `tests/unit/runtime-dispatch-workflows.test.js`
 - `tests/unit/runtime-service-binding.test.js`

@@ -17,12 +17,14 @@ chrono = { version = "0.4", default-features = false }
 futures-util = { version = "0.3", default-features = false }
 getrandom = "0.4"
 redis = { version = "1.3", default-features = false, features = ["script"] }
+# Private HTTP clients keep TLS off and explicitly disable proxies and redirects.
 reqwest = { version = "0.13", default-features = false }
 serde = "1"
 serde_json = "1"
 sha2 = "0.11.0"
 subtle = "2.6"
 tokio = "1"
+url = "2"
 wdl-rust-common = { path = "common", default-features = false }
 
 [workspace.lints.clippy]

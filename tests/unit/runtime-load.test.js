@@ -40,9 +40,19 @@ const RUNTIME_ENV_BUILD_URL = repositoryModuleDataUrl(
     "shared-worker-contract": WORKER_CONTRACT_URL,
   })
 );
+const RUNTIME_CODE_BUDGET_URL = repositoryModuleDataUrl(
+  "runtime/load/code-budget.js",
+  importSpecifierReplacements({
+    "runtime-load-module-rewrite": repositoryFileUrl("runtime/load/module-rewrite.js"),
+    "runtime-load-wrapper-generate": repositoryFileUrl("runtime/load/wrapper-generate.js"),
+    "runtime-infrastructure-error": repositoryFileUrl("runtime/infrastructure-error.js"),
+    "shared-ns-pattern": SHARED_NS_PATTERN_URL,
+  })
+);
 const versionFixture = readRepositoryJson("tests/fixtures/version-tags.json");
 const { estimatedWorkerLoaderEnv } = await importRepositoryModule("control/env-budget.js", importSpecifierReplacements({
   "control-lib": CONTROL_LIB_URL,
+  "runtime-load-code-budget": RUNTIME_CODE_BUDGET_URL,
   "runtime-load-env-build": RUNTIME_ENV_BUILD_URL,
   "shared-secret-envelope": SHARED_SECRET_ENVELOPE_URL,
   "shared-worker-contract": WORKER_CONTRACT_URL,
@@ -120,6 +130,7 @@ for (const name of ["env-build.js", "code-budget.js", "module-rewrite.js", "wrap
     : readRepositoryModuleSource(`runtime/load/${name}`, importSpecifierReplacements({
       "runtime-load-module-rewrite": pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "module-rewrite.js")).href,
       "runtime-load-wrapper-generate": pathToFileURL(path.join(LOAD_TEST_SUBMODULE_DIR, "wrapper-generate.js")).href,
+      "runtime-infrastructure-error": repositoryFileUrl("runtime/infrastructure-error.js"),
       "shared-ns-pattern": SHARED_NS_PATTERN_URL,
     }));
   writeFileSync(
@@ -158,6 +169,10 @@ const CLOUDFLARE_WORKERS_HOST_WRAPPER_STUB = `
       return envStorage.getStore()?.[property];
     },
   });
+  export class ServiceStub {
+    fetch(input) { return this.__fetch(input); }
+  }
+  export class RpcPromise extends Promise {}
   export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }
   export function abortIsolate() {}
   export function withEnv(value, fn) { return envStorage.run(value, fn); }
@@ -336,6 +351,25 @@ test("buildWorkerEnv stays aligned with control env budget binding estimates", (
       doStorageId: "do_0123456789abcdef0123456789abcdef",
     },
   });
+});
+
+test("control env budget rejects malformed retained binding metadata", () => {
+  for (const meta of [
+    { bindings: { CACHE: { type: "kv", id: "bad:id" } } },
+    {
+      workflows: [{
+        name: "flow",
+        binding: "FLOW",
+        className: "Flow",
+        workflowKey: "wf_bad",
+      }],
+    },
+  ]) {
+    assert.throws(
+      () => estimatedWorkerLoaderEnv({ ns: "demo", worker: "app", meta }),
+      /invalid/
+    );
+  }
 });
 
 test("buildWorkerEnv: service binding with named entrypoint sets targetEntrypoint prop", () => {
@@ -1641,7 +1675,12 @@ test("runtime injected source rewrites produce a closed module graph", () => {
       OBJECTS: { type: "do", className: "Counter" },
       AI: { type: "ai" },
     },
-    workflows: [{ binding: "FLOW", className: "FlowHandler" }],
+    workflows: [{
+      binding: "FLOW",
+      name: "flow",
+      className: "FlowHandler",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }],
   };
   /** @type {{ mainModule: string, modules: Record<string, string> }} */
   const workerCode = {
@@ -1680,7 +1719,12 @@ test("workerLoader code estimator matches runtime wrapper injection exactly", ()
     modules: { "src/worker.js": { type: "module" } },
     bindings: { DB: { type: "d1", databaseId: "main" } },
     exports: [{ entrypoint }],
-    workflows: [{ binding: "FLOW", name: "flow", className: "FlowHandler" }],
+    workflows: [{
+      binding: "FLOW",
+      name: "flow",
+      className: "FlowHandler",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }],
   };
   /** @type {{ mainModule: string, modules: Record<string, string> }} */
   const workerCode = {
@@ -1778,7 +1822,12 @@ test("workerLoader code estimator does not rewrite CommonJS workflow strings", (
   const meta = {
     mainModule: "src/worker.cjs",
     modules: { "src/worker.cjs": { type: "cjs" } },
-    workflows: [{ binding: "FLOW", name: "flow", className: "FlowHandler" }],
+    workflows: [{
+      binding: "FLOW",
+      name: "flow",
+      className: "FlowHandler",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }],
   };
   /** @type {{ mainModule: string, modules: Record<string, string | { cjs: string }> }} */
   const injectedWorkerCode = {
@@ -2347,12 +2396,27 @@ test("wrapWorkerCodeForHostBindings: persisted Workflow binding collisions fail 
   for (const meta of [
     {
       bindings: { FLOW: { type: "do", className: "FlowActor", doStorageId: "storage" } },
-      workflows: [{ binding: "FLOW", name: "flow", className: "Flow" }],
+      workflows: [{
+        binding: "FLOW",
+        name: "flow",
+        className: "Flow",
+        workflowKey: "wf_0123456789abcdef0123456789abcdef",
+      }],
     },
     {
       workflows: [
-        { binding: "FLOW", name: "flow-a", className: "FlowA" },
-        { binding: "FLOW", name: "flow-b", className: "FlowB" },
+        {
+          binding: "FLOW",
+          name: "flow-a",
+          className: "FlowA",
+          workflowKey: "wf_0123456789abcdef0123456789abcdef",
+        },
+        {
+          binding: "FLOW",
+          name: "flow-b",
+          className: "FlowB",
+          workflowKey: "wf_fedcba9876543210fedcba9876543210",
+        },
       ],
     },
   ]) {
@@ -2365,6 +2429,48 @@ test("wrapWorkerCodeForHostBindings: persisted Workflow binding collisions fail 
         meta
       ),
       /Persisted Workflow binding "FLOW" collides with another binding/
+    );
+  }
+});
+
+test("wrapWorkerCodeForHostBindings: malformed persisted Workflow metadata fails closed", () => {
+  for (const [workflows, expected] of [
+    [{ flow: { binding: "FLOW", className: "Flow" } }, /must be an array/],
+    [[{
+      name: "flow",
+      className: "Flow",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }], /Workflow binding undefined is invalid/],
+    [[{
+      binding: "FLOW",
+      name: "constructor",
+      className: "Flow",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
+    }], /Workflow name "constructor" is invalid/],
+    [[
+      {
+        binding: "FLOW_A",
+        name: "flow-a",
+        className: "FlowA",
+        workflowKey: "wf_0123456789abcdef0123456789abcdef",
+      },
+      {
+        binding: "FLOW_B",
+        name: "flow-b",
+        className: "FlowB",
+        workflowKey: "wf_0123456789abcdef0123456789abcdef",
+      },
+    ], /Workflow key "wf_0123456789abcdef0123456789abcdef" is duplicated/],
+  ]) {
+    assert.throws(
+      () => wrapWorkerCodeForHostBindings(
+        {
+          mainModule: "worker.js",
+          modules: { "worker.js": "export class Flow {}; export default {};" },
+        },
+        { workflows }
+      ),
+      expected
     );
   }
 });
@@ -2401,6 +2507,7 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
     },
   };
   wrapWorkerCodeForHostBindings(workerCode, {
+    bindings: { CACHE: { type: "kv", id: "cache" } },
     workflows: [
       {
         name: "orders",
@@ -2422,12 +2529,27 @@ test("wrapWorkerCodeForHostBindings: injects local Workflow facade and wraps wor
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /export \{ WorkflowEntrypoint \}/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-cloudflare-workflows.js"], /this\.name = "NonRetryableError"/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /import \{ Workflow \}/);
+  assert.match(
+    /** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"],
+    /const KV_BINDINGS = \["CACHE"\]/
+  );
+  assert.match(
+    /** @type {any} */ (workerCode.modules)["_wdl-workflow-kv-capture.js"],
+    /const KV_BINDINGS = \["CACHE"\]/
+  );
+  assert.match(
+    /** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"],
+    /from "\.\/_wdl-workflow-kv-capture\.js"/
+  );
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /const WORKFLOW_BINDINGS = \["ORDERS"\]/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /new Workflow\(out\[name\], requestIdOptions\(requestIdOrContext\)\)/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /internalAuthToken|__WDL_INTERNAL_AUTH_TOKEN__/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /notifyWorkflowCallback\(request, wrapEnv\(this\.env, requestIdFromEventArg\(request\)\)\)/);
   assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /class extends __WdlUserModule__\.OrderWorkflow/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /takeWorkflowInfrastructureReporter\(ctx\)/);
+  assert.match(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /invokeWorkflowBoundary/);
+  assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /__WdlRunWorkflow__/);
   assert.doesNotMatch(/** @type {any} */ (workerCode.modules)["_wdl-wrapper.js"], /export \* from "\.\/worker\.js";/);
 });
 
@@ -2735,7 +2857,7 @@ test("wrapWorkerCodeForHostBindings: workflow wrappers hide internal backend fro
       name: "orders",
       binding: "ORDERS",
       className: "OrderWorkflow",
-      workflowKey: "wf_test",
+      workflowKey: "wf_0123456789abcdef0123456789abcdef",
     }],
   });
 

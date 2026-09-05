@@ -8,7 +8,7 @@ use crate::SERVICE;
 
 pub(crate) type Metrics = wdl_rust_common::metrics::MetricStore;
 
-fn current_level() -> LogLevel {
+pub(crate) fn current_level() -> LogLevel {
     static LEVEL: OnceLock<LogLevel> = OnceLock::new();
     *LEVEL.get_or_init(log_level_from_env)
 }
@@ -21,11 +21,17 @@ pub(crate) fn log_info(event: &str, fields: Value) {
     log_event(LogLevel::Info, event, fields);
 }
 
-pub(crate) fn started_log(port: u16, redis_configured: bool, data_redis_configured: bool) -> Value {
+pub(crate) fn started_log(
+    port: u16,
+    redis_configured: bool,
+    data_redis_configured: bool,
+    redis_connections_per_pool: usize,
+) -> Value {
     json!({
         "port": port,
         "redis_configured": redis_configured,
         "data_redis_configured": data_redis_configured,
+        "redis_connections_per_pool": redis_connections_per_pool,
     })
 }
 
@@ -72,9 +78,10 @@ mod tests {
 
     #[test]
     fn started_log_reports_configured_urls() {
-        let fields = started_log(7070, true, false);
+        let fields = started_log(7070, true, false, 4);
         assert_eq!(fields["port"], 7070);
         assert_eq!(fields["redis_configured"], true);
         assert_eq!(fields["data_redis_configured"], false);
+        assert_eq!(fields["redis_connections_per_pool"], 4);
     }
 }

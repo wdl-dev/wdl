@@ -21,8 +21,9 @@ pub(super) use history::{read_step_history, workflow_step_options};
 #[cfg(test)]
 pub(crate) use model::canonical_json;
 use model::{
-    StepRecord, StepSummary, inline_step_payload, log_step_event, observe_step_duration,
-    request_attempt, step_error_ref, step_event_ref, step_field, step_output_ref, step_record_json,
+    STEP_KIND_DO, STEP_KIND_SLEEP, STEP_KIND_SLEEP_UNTIL, STEP_KIND_WAIT_FOR_EVENT, StepRecord,
+    StepSummary, inline_step_payload, log_step_event, observe_step_duration, request_attempt,
+    step_error_ref, step_event_ref, step_field, step_output_ref, step_record_json,
     step_summary_json, validate_step_request, verify_step_record,
 };
 pub(crate) use model::{WorkflowStepRequest, read_workflow_step_request};
@@ -41,6 +42,14 @@ static COMMIT_STEP_SUCCESS: StaticRedisScript = StaticRedisScript::new(COMMIT_ST
 static COMMIT_STEP_ERROR: StaticRedisScript = StaticRedisScript::new(COMMIT_STEP_ERROR_SCRIPT);
 static COMMIT_STEP_RECORD: StaticRedisScript = StaticRedisScript::new(COMMIT_STEP_RECORD_SCRIPT);
 static RESTORE_WAITING_DUE: StaticRedisScript = StaticRedisScript::new(RESTORE_WAITING_DUE_SCRIPT);
+
+fn completed_step_claim_response(output: JsonValue) -> JsonValue {
+    json!({ "state": "complete", "output": output })
+}
+
+fn failed_step_claim_response(error: JsonValue) -> JsonValue {
+    json!({ "state": "failed", "error": error })
+}
 
 const READ_STEP_RECORD_SCRIPT: &str = r#"
 local generation = redis.call("HGET", KEYS[1], "generation")
@@ -350,7 +359,7 @@ pub(crate) async fn claim_step(
     let record: StepRecord = serde_json::from_str(&raw).map_err(|err| {
         WorkflowError::invalid_state(format!("Workflow step record is corrupt: {err}"))
     })?;
-    verify_step_record(&req, &config, &record)?;
+    verify_step_record(&req, &config, &record, STEP_KIND_DO)?;
     match record.status.as_str() {
         "completed" => {
             let output = if let Some(output) = record.output {
@@ -371,7 +380,7 @@ pub(crate) async fn claim_step(
                     WorkflowError::invalid_state(format!("Workflow step output is corrupt: {err}"))
                 })?
             };
-            Ok(json!({ "state": "complete", "output": output }))
+            Ok(completed_step_claim_response(output))
         }
         "waiting" => {
             let due_at_ms = record.due_at_ms.ok_or_else(|| {
@@ -405,7 +414,7 @@ pub(crate) async fn claim_step(
                     WorkflowError::invalid_state(format!("Workflow step error is corrupt: {err}"))
                 })?
             };
-            Ok(json!({ "state": "failed", "error": error }))
+            Ok(failed_step_claim_response(error))
         }
         _ => Err(WorkflowError::invalid_state(
             "Workflow step status is invalid",
@@ -436,6 +445,7 @@ pub(crate) async fn commit_step_success(
         step_name: req.step_name.clone(),
         name_count: req.name_count,
         dependencies: req.dependencies.clone(),
+        kind: STEP_KIND_DO.to_string(),
         config,
         status: "completed".to_string(),
         attempt,
@@ -518,6 +528,7 @@ pub(crate) async fn commit_step_error(
         step_name: req.step_name.clone(),
         name_count: req.name_count,
         dependencies: req.dependencies.clone(),
+        kind: STEP_KIND_DO.to_string(),
         config,
         status: if terminal { "failed" } else { "waiting" }.to_string(),
         attempt,
@@ -725,6 +736,25 @@ async fn write_waiting_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_terminal_variants_match_the_cross_language_contract() {
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/workflow-step-response.json"
+        ))
+        .expect("workflow step response fixture parses");
+        for (name, response) in [
+            ("completed", completed_step_claim_response(JsonValue::Null)),
+            ("failed", failed_step_claim_response(JsonValue::Null)),
+        ] {
+            let variant = &fixture["claimTerminalVariants"][name];
+            let payload_field = variant["payloadField"]
+                .as_str()
+                .expect("claim payload field is a string");
+            assert_eq!(response["state"], variant["state"]);
+            assert!(response.get(payload_field).is_some());
+        }
+    }
 
     #[test]
     fn active_claim_field_script_checks_the_full_fence_before_reading() {

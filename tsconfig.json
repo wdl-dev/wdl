@@ -12,6 +12,7 @@
     "lib": ["ES2025", "DOM", "DOM.Iterable"],
     "types": ["@cloudflare/workers-types"],
     "paths": {
+      "base64.js": ["./shared/base64.js"],
       "shared-*": ["./shared/*.js"],
       "gateway-*": ["./gateway/*.js"],
       "runtime-bindings-*": ["./runtime/bindings/*.js"],

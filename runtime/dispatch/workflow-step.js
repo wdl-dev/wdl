@@ -1,5 +1,10 @@
 import { INTERNAL_AUTH_FAILURE_CODE } from "shared-internal-auth";
 import {
+  readBoundedBytes,
+  readBoundedStreamBytes,
+} from "shared-bounded-body";
+import { discardResponseBody } from "shared-respond";
+import {
   workflowBackendBody,
   workflowStepSuccessBackendBody,
   workflowStepError,
@@ -29,10 +34,13 @@ import {
  *   runToken: string,
  *   createdAtMs: number,
  * }} WorkflowRun
- * @typedef {{ ordinal: number, stepName: string, nameCount: number, dependencies: number[], config: unknown }} StepIdentity
+ * @typedef {"do" | "sleep" | "sleepUntil" | "waitForEvent"} WorkflowStepKind
+ * @typedef {{ ordinal: number, stepName: string, nameCount: number, dependencies: number[], kind: WorkflowStepKind, config: unknown }} StepIdentity
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayStepRecord} WorkflowReplayStepRecord
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayCache} WorkflowReplayCache
  */
+
+const intrinsicObjectHasOwn = Object.hasOwn;
 
 /** @param {unknown} value @param {"name" | "message"} field */
 function readThrowableField(value, field) {
@@ -90,15 +98,24 @@ function persistedStepErrorRecord(error) {
 }
 
 const WORKFLOWS_BASE_URL = "http://workflows/internal/workflows";
+// Covers the 16 MiB instance payload aggregate plus one bounded replay page's metadata.
+export const WORKFLOW_BACKEND_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 export const WORKFLOW_BACKEND_UNAVAILABLE_CODE = "workflow_backend_unavailable";
 export const WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE = "Workflow backend is unavailable";
 export const MAX_WORKFLOW_STARTED_STEPS_PER_RUN_TURN = 1000;
 export const MAX_WORKFLOW_ACTIVE_STEPS_PER_RUN_TURN = 1000;
+export const WORKFLOW_STEP_KINDS = Object.freeze({
+  do: "do",
+  sleep: "sleep",
+  sleepUntil: "sleepUntil",
+  waitForEvent: "waitForEvent",
+});
 
 const workflowInfrastructureDiagnostics = new WeakMap();
 
 /** @param {string} diagnostic */
-function workflowInfrastructureError(diagnostic) {
+export function workflowInfrastructureError(diagnostic) {
   const err = new Error(WORKFLOW_BACKEND_UNAVAILABLE_MESSAGE);
   err.name = WORKFLOW_BACKEND_UNAVAILABLE_CODE;
   workflowInfrastructureDiagnostics.set(err, diagnostic);
@@ -149,6 +166,32 @@ function unexpectedWorkflowBackendState(path, state) {
   return workflowInfrastructureError(
     `Workflow backend ${path} returned invalid state ${JSON.stringify(state)}`
   );
+}
+
+/**
+ * @param {string} path
+ * @param {Record<string, unknown>} record
+ * @param {string} variant
+ * @param {"output" | "error"} field
+ */
+function requiredWorkflowBackendPayload(path, record, variant, field) {
+  if (!intrinsicObjectHasOwn(record, field)) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} returned ${variant} without required ${field}`
+    );
+  }
+  return record[field];
+}
+
+/** @param {unknown} step */
+function validateWorkflowReplayStepPayload(step) {
+  if (step === null || typeof step !== "object" || Array.isArray(step)) return;
+  const record = /** @type {Record<string, unknown>} */ (step);
+  if (record.status === "completed") {
+    requiredWorkflowBackendPayload("replay-steps", record, "completed", "output");
+  } else if (record.status === "failed") {
+    requiredWorkflowBackendPayload("replay-steps", record, "failed", "error");
+  }
 }
 
 class WorkflowSuspended extends Error {
@@ -205,19 +248,43 @@ function parseSleepUntilMs(value) {
   throw workflowStepError("workflow_invalid_step", "workflow sleepUntil target must be a Date, timestamp, or date string");
 }
 
+/** @param {Response} response */
+function workflowBackendExpectedBytes(response) {
+  const contentEncoding = response.headers.get("content-encoding");
+  if (
+    contentEncoding !== null &&
+    contentEncoding.trim().toLowerCase() !== "identity"
+  ) {
+    return null;
+  }
+  const contentLength = response.headers.get("content-length");
+  if (
+    contentLength === null ||
+    !/^(?:0|[1-9][0-9]*)$/.test(contentLength)
+  ) {
+    return null;
+  }
+  const expectedBytes = Number(contentLength);
+  return Number.isSafeInteger(expectedBytes) ? expectedBytes : null;
+}
+
 /**
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string} path
  * @param {unknown} body
- * @param {string | null} [requestId]
+ * @param {string | null} requestId
+ * @param {number} deadlineMs
+ * @param {() => AbortSignal} deadlineSignal
  * @returns {Promise<Record<string, unknown>>}
  */
-async function workflowBackendCall(backend, path, body, requestId = null) {
+async function workflowBackendCall(backend, path, body, requestId, deadlineMs, deadlineSignal) {
   return await workflowBackendRequest(
     backend,
     path,
     workflowBackendBody(path, body),
-    requestId
+    requestId,
+    deadlineMs,
+    deadlineSignal
   );
 }
 
@@ -225,13 +292,29 @@ async function workflowBackendCall(backend, path, body, requestId = null) {
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string} path
  * @param {string} body
- * @param {string | null} [requestId]
+ * @param {string | null} requestId
+ * @param {number} deadlineMs
+ * @param {() => AbortSignal} deadlineSignal
  * @returns {Promise<Record<string, unknown>>}
  */
-async function workflowBackendRequest(backend, path, body, requestId = null) {
+async function workflowBackendRequest(
+  backend,
+  path,
+  body,
+  requestId,
+  deadlineMs,
+  deadlineSignal
+) {
   if (!backend || typeof backend.fetch !== "function") {
     throw workflowInfrastructureError("Workflow backend binding is not configured");
   }
+  const remainingMs = Math.floor(deadlineMs - Date.now());
+  if (remainingMs <= 0) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} request exceeded the runtime dispatch deadline`
+    );
+  }
+  const signal = deadlineSignal();
   /** @type {Record<string, string>} */
   const headers = { "content-type": "application/json" };
   if (requestId) headers["x-request-id"] = requestId;
@@ -241,18 +324,45 @@ async function workflowBackendRequest(backend, path, body, requestId = null) {
       method: "POST",
       headers,
       body,
+      signal,
     });
   } catch (err) {
     throw workflowInfrastructureError(
       `Workflow backend ${path} request failed: ${workflowError(err).message}`
     );
   }
+  if (Date.now() >= deadlineMs) {
+    void discardResponseBody(response);
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} response exceeded the runtime dispatch deadline`
+    );
+  }
   let parsed;
   try {
-    parsed = await response.json();
-  } catch {
+    const expectedBytes = workflowBackendExpectedBytes(response);
+    const bytes = expectedBytes !== null && response.body
+      ? await readBoundedStreamBytes(
+        response.body,
+        WORKFLOW_BACKEND_RESPONSE_MAX_BYTES,
+        undefined,
+        signal,
+        expectedBytes
+      )
+      : await readBoundedBytes(
+        response,
+        WORKFLOW_BACKEND_RESPONSE_MAX_BYTES,
+        signal
+      );
+    parsed = JSON.parse(strictUtf8Decoder.decode(bytes));
+  } catch (err) {
+    void discardResponseBody(response);
     throw workflowInfrastructureError(
-      `Workflow backend ${path} returned invalid JSON with HTTP ${response.status}`
+      `Workflow backend ${path} response failed with HTTP ${response.status}: ${workflowError(err).message}`
+    );
+  }
+  if (Date.now() >= deadlineMs) {
+    throw workflowInfrastructureError(
+      `Workflow backend ${path} response exceeded the runtime dispatch deadline`
     );
   }
   const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
@@ -286,36 +396,50 @@ async function workflowBackendRequest(backend, path, body, requestId = null) {
 
 /**
  * @param {WorkflowBackend | null | undefined} backend
- * @param {WorkflowRun} run
+ * @param {WorkflowRun & { dispatchDeadlineMs: number }} run
  * @param {WorkflowReplayCache} cache
  * @param {number} ordinal
  * @param {string | null} requestId
+ * @param {() => AbortSignal} deadlineSignal
  */
-async function fetchReplayStepPage(backend, run, cache, ordinal, requestId) {
+async function fetchReplayStepPage(backend, run, cache, ordinal, requestId, deadlineSignal) {
   while (!cache.complete && ordinal >= cache.nextOrdinal) {
+    const startOrdinal = cache.nextOrdinal;
     const page = await workflowBackendCall(backend, "replay-steps", {
       ...workflowReplayIdentity(run),
-      startOrdinal: cache.nextOrdinal,
+      startOrdinal,
       limit: WORKFLOW_REPLAY_PAGE_SIZE,
-    }, requestId);
+    }, requestId, run.dispatchDeadlineMs, deadlineSignal);
     const steps = Array.isArray(page?.steps) ? page.steps : [];
+    const nextOrdinal = typeof page?.nextOrdinal === "number" && Number.isInteger(page.nextOrdinal)
+      ? page.nextOrdinal
+      : startOrdinal + steps.length;
+    if (!page?.done && steps.length > 0 && nextOrdinal <= startOrdinal) {
+      throw workflowInfrastructureError(
+        "Workflow backend replay-steps returned a non-advancing cursor"
+      );
+    }
+    for (const step of steps) validateWorkflowReplayStepPayload(step);
     for (const step of steps) {
       if (Number.isInteger(step?.ordinal)) rememberWorkflowReplayStep(cache, step.ordinal, step);
     }
-    const nextOrdinal = typeof page?.nextOrdinal === "number" && Number.isInteger(page.nextOrdinal)
-      ? page.nextOrdinal
-      : cache.nextOrdinal + steps.length;
     cache.nextOrdinal = Math.max(cache.nextOrdinal, nextOrdinal);
-    cache.complete = Boolean(page?.done) || steps.length === 0;
+    if (page?.done || steps.length === 0) cache.complete = true;
   }
 }
 
 /**
- * @param {WorkflowRun} run
+ * @param {WorkflowRun & { dispatchDeadlineMs: number }} run
  * @param {WorkflowBackend | null | undefined} backend
  * @param {string | null} [requestId]
+ * @param {(error?: unknown) => boolean | Promise<boolean>} [infrastructureFailure]
  */
-export function createStepController(run, backend, requestId = null) {
+export function createStepController(
+  run,
+  backend,
+  requestId = null,
+  infrastructureFailure = () => false
+) {
   let ordinal = 0;
   let startedSteps = 0;
   let suspendingStepInFlight = false;
@@ -338,6 +462,18 @@ export function createStepController(run, backend, requestId = null) {
   const activeStepRecords = new Set();
   /** @type {Promise<void> | null} */
   let replayFetchPromise = null;
+  /** @type {AbortSignal | null} */
+  let backendDeadlineSignal = null;
+
+  const getBackendDeadlineSignal = () => {
+    if (backendDeadlineSignal === null) {
+      // Stock workerd timers support delays up to 100 years; Node's signed
+      // 32-bit timer ceiling does not apply to this Runtime path.
+      const remainingMs = Math.max(0, Math.floor(run.dispatchDeadlineMs - Date.now()));
+      backendDeadlineSignal = AbortSignal.timeout(remainingMs);
+    }
+    return backendDeadlineSignal;
+  };
 
   /** @param {unknown} reason @param {{ name: string, message: string } | null} [error] */
   const rememberTerminalStepFailure = (reason, error = null) => {
@@ -462,15 +598,23 @@ export function createStepController(run, backend, requestId = null) {
       const registered = await workflowBackendCall(backend, step.action, {
         ...step.identity,
         dueAtMs: step.dueAtMs,
-      }, requestId);
+      }, requestId, run.dispatchDeadlineMs, getBackendDeadlineSignal);
       assertRunStillOpen();
       if (registered?.state === "complete") {
+        const output = step.returnsOutput
+          ? requiredWorkflowBackendPayload(
+              step.action,
+              registered,
+              "complete",
+              "output"
+            )
+          : undefined;
         /** @type {Record<string, unknown>} */
         const record = { status: "completed", attempt: 1 };
-        if (step.returnsOutput) record.output = registered.output ?? null;
+        if (step.returnsOutput) record.output = output;
         cacheStep(step.identity, record);
         markStepCompleted(step.identity);
-        return step.returnsOutput ? registered.output ?? null : undefined;
+        return output;
       }
       if (registered?.state !== "waiting") {
         throw unexpectedWorkflowBackendState(step.action, registered?.state);
@@ -546,10 +690,11 @@ export function createStepController(run, backend, requestId = null) {
 
   /**
    * @param {string} name
+   * @param {WorkflowStepKind} kind
    * @param {unknown} config
    * @returns {StepIdentity & WorkflowRun & { startedAtMs: number }}
    */
-  const nextStepIdentity = (name, config) => {
+  const nextStepIdentity = (name, kind, config) => {
     const nameCount = (nameCounts.get(name) || 0) + 1;
     nameCounts.set(name, nameCount);
     const dependencies = [...dependencyFrontier].toSorted((a, b) => a - b);
@@ -568,6 +713,7 @@ export function createStepController(run, backend, requestId = null) {
       stepName: name,
       nameCount,
       dependencies,
+      kind,
       config,
       startedAtMs: Date.now(),
     };
@@ -583,6 +729,7 @@ export function createStepController(run, backend, requestId = null) {
       name: identity.stepName,
       nameCount: identity.nameCount,
       dependencies: identity.dependencies,
+      kind: identity.kind,
       config: canonicalJson(identity.config),
       ...record,
     });
@@ -596,7 +743,14 @@ export function createStepController(run, backend, requestId = null) {
       replayCache.complete = false;
     }
     while (!replayCache.complete && targetOrdinal >= replayCache.nextOrdinal) {
-      replayFetchPromise ??= fetchReplayStepPage(backend, run, replayCache, targetOrdinal, requestId)
+      replayFetchPromise ??= fetchReplayStepPage(
+        backend,
+        run,
+        replayCache,
+        targetOrdinal,
+        requestId,
+        getBackendDeadlineSignal
+      )
         .finally(() => {
           replayFetchPromise = null;
         });
@@ -624,6 +778,7 @@ export function createStepController(run, backend, requestId = null) {
       cached.nameCount !== identity.nameCount ||
       !Array.isArray(cached.dependencies) ||
       !sameDependencies(cached.dependencies, identity.dependencies) ||
+      cached.kind !== identity.kind ||
       cached.config !== canonicalJson(identity.config)
     ) {
       recordWorkflowReplayCacheOutcome("miss");
@@ -666,7 +821,7 @@ export function createStepController(run, backend, requestId = null) {
         const config = typeof configOrCallback === "function"
           ? null
           : configOrCallback ?? null;
-        identity = nextStepIdentity(name, config);
+        identity = nextStepIdentity(name, WORKFLOW_STEP_KINDS.do, config);
         assertCanStartStep({ stepDo: true, stepDependencies: identity.dependencies });
       } catch (err) {
         if (!isWorkflowSuspended(err)) rememberTerminalStepFailure(err);
@@ -685,12 +840,25 @@ export function createStepController(run, backend, requestId = null) {
         }
         assertRunStillOpen();
         reserveStartedStep();
-        const claim = await workflowBackendCall(backend, "claim-step", identity, requestId);
+        const claim = await workflowBackendCall(
+          backend,
+          "claim-step",
+          identity,
+          requestId,
+          run.dispatchDeadlineMs,
+          getBackendDeadlineSignal
+        );
         assertRunStillOpen();
         if (claim?.state === "complete") {
-          cacheStep(identity, { status: "completed", attempt: 1, output: claim.output ?? null });
+          const output = requiredWorkflowBackendPayload(
+            "claim-step",
+            claim,
+            "complete",
+            "output"
+          );
+          cacheStep(identity, { status: "completed", attempt: 1, output });
           markStepCompleted(identity);
-          return claim.output ?? null;
+          return output;
         }
         if (claim?.state === "waiting") {
           cacheStep(identity, { status: "waiting", attempt: 1, dueAtMs: claim.dueAtMs ?? null });
@@ -698,8 +866,14 @@ export function createStepController(run, backend, requestId = null) {
           throw new WorkflowSuspended();
         }
         if (claim?.state === "failed") {
-          cacheStep(identity, { status: "failed", attempt: 1, error: claim.error ?? null });
-          throw persistedStepError(persistedStepErrorRecord(claim.error), "Workflow step failed");
+          const error = requiredWorkflowBackendPayload(
+            "claim-step",
+            claim,
+            "failed",
+            "error"
+          );
+          cacheStep(identity, { status: "failed", attempt: 1, error });
+          throw persistedStepError(persistedStepErrorRecord(error), "Workflow step failed");
         }
         if (claim?.state !== "run") {
           throw unexpectedWorkflowBackendState("claim-step", claim?.state);
@@ -717,14 +891,20 @@ export function createStepController(run, backend, requestId = null) {
           }
           assertRunStillOpen();
         } catch (err) {
+          if (await infrastructureFailure(err)) {
+            throw workflowInfrastructureError(
+              "Runtime KV infrastructure failure escaped tenant boundary"
+            );
+          }
           if (runReturned) throw err;
           const error = workflowError(err);
+          assertRunStillOpen();
           const committed = await workflowBackendCall(backend, "commit-step-error", {
             ...identity,
             attempt,
             error,
             nonRetryable: error.name === "NonRetryableError" || error.name === "workflow_invalid_step",
-          }, requestId);
+          }, requestId, run.dispatchDeadlineMs, getBackendDeadlineSignal);
           if (committed?.state === "waiting") {
             cacheStep(identity, { status: "waiting", attempt, dueAtMs: committed.dueAtMs ?? null });
             suspended = true;
@@ -743,11 +923,14 @@ export function createStepController(run, backend, requestId = null) {
           attempt,
           output: output ?? null,
         });
+        assertRunStillOpen();
         const committed = await workflowBackendRequest(
           backend,
           "commit-step-success",
           committedStep.bodyJson,
-          requestId
+          requestId,
+          run.dispatchDeadlineMs,
+          getBackendDeadlineSignal
         );
         if (committed?.state !== "complete") {
           throw unexpectedWorkflowBackendState("commit-step-success", committed?.state);
@@ -773,7 +956,11 @@ export function createStepController(run, backend, requestId = null) {
         assertCanStartStep({ suspending: true });
         const durationMs = parseSleepDurationMs(duration);
         const dueAtMs = Date.now() + durationMs;
-        const identity = nextStepIdentity(name, { type: "sleep", durationMs });
+        const identity = nextStepIdentity(
+          name,
+          WORKFLOW_STEP_KINDS.sleep,
+          { type: "sleep", durationMs }
+        );
         await runSuspendingStep({
           identity,
           action: "register-sleep",
@@ -796,7 +983,11 @@ export function createStepController(run, backend, requestId = null) {
           throw workflowStepError("workflow_invalid_step", "workflow sleepUntil target is invalid");
         }
         const dueAtMsCeil = Math.ceil(dueAtMs);
-        const identity = nextStepIdentity(name, { type: "sleepUntil", dueAtMs });
+        const identity = nextStepIdentity(
+          name,
+          WORKFLOW_STEP_KINDS.sleepUntil,
+          { type: "sleepUntil", dueAtMs }
+        );
         await runSuspendingStep({
           identity,
           action: "register-sleep",
@@ -824,7 +1015,11 @@ export function createStepController(run, backend, requestId = null) {
         }
         const timeoutMs = waitOptions.timeout == null ? null : parseSleepDurationMs(waitOptions.timeout);
         const dueAtMs = timeoutMs == null ? null : Date.now() + timeoutMs;
-        const identity = nextStepIdentity(name, { type: "waitForEvent", eventType, timeoutMs });
+        const identity = nextStepIdentity(
+          name,
+          WORKFLOW_STEP_KINDS.waitForEvent,
+          { type: "waitForEvent", eventType, timeoutMs }
+        );
         return await runSuspendingStep({
           identity,
           action: "register-wait",

@@ -26,6 +26,7 @@ import {
 import { DO_FORWARD_HEADERS, DO_OWNER_HEADERS } from "_wdl-do-scoped-request.js";
 import { json, jsonError } from "do-runtime-http";
 import { prepareAiCapacityMetrics } from "runtime-bindings-ai-capacity";
+import { prepareKvReadCapacityMetrics } from "runtime-bindings-kv-capacity";
 import {
   parseObjectRegistryMember,
 } from "do-runtime-object-registry";
@@ -84,7 +85,7 @@ const STORAGE_DELETE_REQUEST = {
  * @typedef {Record<string, unknown> & { LOG_LEVEL?: unknown, REDIS_ADDR?: string, DO_HOSTS: DurableObjectNamespace, DO_DRAIN_IN_FLIGHT_TIMEOUT_MS?: unknown, DO_RENEW_INTERVAL_MS?: unknown }} DoEnv
  * @typedef {import("do-runtime-protocol").DoInvoke} DoInvoke
  * @typedef {{ ownerKey: string, hostId?: string, className?: string, ns: string, worker: string, doStorageId: string, taskId: string, endpoint: string, generation: number, leaseExpiresAt?: number }} DoOwner
- * @typedef {{ requestId?: string | null, hopCount?: number, forwardPath?: string, localUrl?: string, request?: { method: string, url: string, headers: Array<[string, string]> } | null, metricKind?: string | null, allowSupersededVersion?: boolean }} DispatchOptions
+ * @typedef {{ requestId?: string | null, hopCount?: number, forwardPath?: string, localUrl?: string, request?: { method: string, url: string, headers: Array<[string, string]> } | null, metricKind?: string | null, allowSupersededVersion?: boolean, onDispatchStart?: () => void }} DispatchOptions
  * @typedef {{ ns?: unknown, worker?: unknown, version?: unknown, doStorageId?: unknown, members?: unknown }} StorageDeleteInput
  */
 
@@ -211,9 +212,21 @@ function acceptsOwnerHint(request) {
  * @param {DoInvoke} invoke
  * @param {string | null} [requestId]
  * @param {number} [hopCount]
+ * @param {() => void} [onDispatchStart]
  */
-async function dispatchInvoke(env, invoke, requestId = null, hopCount = 0) {
-  return await dispatchToOwner(env, invoke, { requestId, hopCount, metricKind: invoke.kind });
+async function dispatchInvoke(
+  env,
+  invoke,
+  requestId = null,
+  hopCount = 0,
+  onDispatchStart = undefined
+) {
+  return await dispatchToOwner(env, invoke, {
+    requestId,
+    hopCount,
+    metricKind: invoke.kind,
+    onDispatchStart,
+  });
 }
 
 /**
@@ -240,6 +253,7 @@ async function dispatchToOwner(
     request = null,
     metricKind = null,
     allowSupersededVersion = false,
+    onDispatchStart = undefined,
   } = {}
 ) {
   const localTask = await resolveTaskIdentity(env);
@@ -247,13 +261,24 @@ async function dispatchToOwner(
     await resolveDoOwner(env, invoke, { allowSupersededVersion });
   const dispatchPayload = withRequestOverride(invoke, request);
   if (owner.taskId !== localTask.taskId) {
-    return await forwardToOwner(dispatchPayload, env, owner, requestId, hopCount, forwardPath);
+    onDispatchStart?.();
+    return await forwardToOwner(
+      dispatchPayload,
+      env,
+      owner,
+      requestId,
+      hopCount,
+      forwardPath
+    );
   }
 
   const id = env.DO_HOSTS.idFromName(invoke.hostId);
   const stub = env.DO_HOSTS.get(id);
   const fencedInvoke = { ...dispatchPayload, owner: ownerFence(owner) };
-  const fetchLocal = () => stub.fetch(buildLocalActorRequest(localUrl, fencedInvoke, requestId));
+  const fetchLocal = () => {
+    onDispatchStart?.();
+    return stub.fetch(buildLocalActorRequest(localUrl, fencedInvoke, requestId));
+  };
   const response = metricKind != null ? await recordDoInvoke(metricKind, fetchLocal) : await fetchLocal();
   return withOwnerHintHeaders(response, owner);
 }
@@ -548,6 +573,7 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/_metrics") {
         prepareAiCapacityMetrics(env);
+        prepareKvReadCapacityMetrics(env);
         prepareDoRuntimeMetrics();
         return scope.respond(prometheusResponse(metrics));
       }

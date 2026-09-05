@@ -59,6 +59,8 @@ pub(crate) async fn run(
 
     let client = Arc::new(
         reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client must build"),
     );

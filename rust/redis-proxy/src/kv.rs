@@ -26,7 +26,10 @@ const META_FIELD_PREFIX: &str = "m:";
 const KV_KEY_MAX_BYTES: usize = 512;
 const KV_BATCH_KEYS_MAX: usize = 100;
 const KV_EXPIRATION_MAX: u64 = wdl_rust_common::JS_MAX_SAFE_INTEGER;
-pub(crate) const KV_BATCH_RAW_BYTES_MAX: usize = 25 * 1024 * 1024;
+const KV_VALUE_BYTES_MAX: usize = 25 * 1024 * 1024;
+const KV_METADATA_BYTES_MAX: usize = 1024;
+const KV_METADATA_BASE64_BYTES_MAX: usize = KV_METADATA_BYTES_MAX.div_ceil(3) * 4;
+pub(crate) const KV_BATCH_RAW_BYTES_MAX: usize = KV_VALUE_BYTES_MAX;
 const KV_PUT_EXPIRING_VALUE_ONLY_SCRIPT: &str = r#"
 if ARGV[3] == "EX" then
   redis.call("HSETEX", KEYS[1], "EX", ARGV[4], "FIELDS", 1, ARGV[1], ARGV[5])
@@ -170,16 +173,12 @@ pub(crate) fn add_batch_raw_bytes(total: &mut usize, bytes: usize) -> AppResult<
     Ok(())
 }
 
-pub(crate) fn key_base(ns: &str, id: &str) -> String {
-    format!("kvh:{ns}:{id}:")
-}
-
 pub(crate) fn bucket_for_key(key: &str) -> u32 {
     fnv1a32(key.as_bytes()) % KV_HASH_BUCKETS
 }
 
 pub(crate) fn hash_key(ns: &str, id: &str, bucket: u32) -> String {
-    format!("{}b:{bucket}", key_base(ns, id))
+    format!("kvh:{ns}:{id}:b:{bucket}")
 }
 
 fn hash_key_for_user_key(ns: &str, id: &str, key: &str) -> String {
@@ -270,6 +269,24 @@ fn raw_bytes_too_large() -> AppError {
     AppError::payload_too_large(format!(
         "KV batch raw value/metadata bytes exceed {KV_BATCH_RAW_BYTES_MAX} byte limit"
     ))
+}
+
+fn validate_stored_kv_value_size(bytes: usize) -> AppResult<()> {
+    if bytes > KV_VALUE_BYTES_MAX {
+        return Err(AppError::internal_error(format!(
+            "stored KV value exceeds {KV_VALUE_BYTES_MAX} byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_kv_metadata_size(bytes: usize) -> AppResult<()> {
+    if bytes > KV_METADATA_BYTES_MAX {
+        return Err(AppError::internal_error(format!(
+            "stored KV metadata exceeds {KV_METADATA_BYTES_MAX} byte limit"
+        )));
+    }
+    Ok(())
 }
 
 fn record_kv_value_bytes(
@@ -531,8 +548,30 @@ fn field_to_user_key(field: &str) -> AppResult<&str> {
 
 fn decode_metadata(bytes: Option<Vec<u8>>) -> AppResult<Option<Value>> {
     bytes
-        .map(|raw| serde_json::from_slice::<Value>(&raw).map_err(AppError::internal_json))
+        .map(|raw| {
+            validate_stored_kv_metadata_size(raw.len())?;
+            serde_json::from_slice::<Value>(&raw).map_err(AppError::internal_json)
+        })
         .transpose()
+}
+
+fn decode_metadata_header(raw: &str) -> AppResult<Vec<u8>> {
+    if raw.len() > KV_METADATA_BASE64_BYTES_MAX {
+        return Err(AppError::bad_request(format!(
+            "KV metadata exceeds {KV_METADATA_BYTES_MAX} byte limit"
+        )));
+    }
+    let metadata = STANDARD
+        .decode(raw)
+        .map_err(|_| AppError::bad_request("invalid metadata base64"))?;
+    if metadata.len() > KV_METADATA_BYTES_MAX {
+        return Err(AppError::bad_request(format!(
+            "KV metadata exceeds {KV_METADATA_BYTES_MAX} byte limit"
+        )));
+    }
+    serde_json::from_slice::<Value>(&metadata)
+        .map_err(|_| AppError::bad_request("invalid metadata JSON"))?;
+    Ok(metadata)
 }
 
 struct Base64Bytes(Vec<u8>);
@@ -601,6 +640,32 @@ fn normalize_list_prefix(prefix: Option<String>) -> AppResult<String> {
     Ok(prefix)
 }
 
+fn kv_list_response(keys: Vec<Value>, cursor: Option<String>) -> Json<Value> {
+    match cursor {
+        Some(cursor) => Json(json!({
+            "keys": keys,
+            "list_complete": false,
+            "cursor": cursor,
+        })),
+        None => Json(json!({ "keys": keys, "list_complete": true })),
+    }
+}
+
+fn kv_value_response(value: Vec<u8>) -> Response {
+    let len = value.len();
+    let mut response = Response::new(Body::from(value));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        CONTENT_LENGTH,
+        // `usize::to_string()` is decimal ASCII, which is always a valid header value.
+        HeaderValue::from_str(&len.to_string()).unwrap(),
+    );
+    response
+}
+
 pub(crate) fn escape_glob_literal(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -629,18 +694,9 @@ pub(crate) async fn kv_get(
     };
 
     let len = value.len();
+    validate_stored_kv_value_size(len)?;
     record_kv_value_bytes(state.metrics(), "get", "value", len);
-    let mut response = Response::new(Body::from(value));
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
-    response.headers_mut().insert(
-        CONTENT_LENGTH,
-        // `usize::to_string()` is decimal ASCII, which is always a valid header value.
-        HeaderValue::from_str(&len.to_string()).unwrap(),
-    );
-    Ok(response)
+    Ok(kv_value_response(value))
 }
 
 pub(crate) async fn kv_get_with_metadata(
@@ -669,6 +725,7 @@ pub(crate) async fn kv_get_with_metadata(
             value_b64: None,
         }));
     };
+    validate_stored_kv_value_size(bytes.len())?;
     record_kv_value_bytes(state.metrics(), "get_with_metadata", "value", bytes.len());
     if let Some(metadata) = metadata.as_ref() {
         record_kv_value_bytes(
@@ -734,11 +791,7 @@ pub(crate) async fn kv_put(
             value
                 .to_str()
                 .map_err(|_| AppError::bad_request("invalid metadata base64"))
-                .and_then(|raw| {
-                    STANDARD
-                        .decode(raw)
-                        .map_err(|_| AppError::bad_request("invalid metadata base64"))
-                })
+                .and_then(decode_metadata_header)
         })
         .transpose()?;
     let redis_key = hash_key_for_user_key(&q.ns, &q.id, &key);
@@ -889,15 +942,12 @@ pub(crate) async fn kv_list(
             }
         })
         .collect::<Vec<_>>();
-    if bucket >= KV_HASH_BUCKETS && overflow.is_empty() {
-        Ok(Json(json!({ "keys": keys, "list_complete": true })))
+    let cursor = if bucket >= KV_HASH_BUCKETS && overflow.is_empty() {
+        None
     } else {
-        Ok(Json(json!({
-            "keys": keys,
-            "list_complete": false,
-            "cursor": encode_list_cursor(bucket, scan_cursor, overflow)?,
-        })))
-    }
+        Some(encode_list_cursor(bucket, scan_cursor, overflow)?)
+    };
+    Ok(kv_list_response(keys, cursor))
 }
 
 #[cfg(test)]
@@ -912,6 +962,13 @@ mod tests {
         KV_LIST_CURSOR_OVERFLOW_MAX, KV_LIST_CURSOR_PREFIX, KV_LIST_LIMIT_DEFAULT,
         KV_LIST_LIMIT_MAX,
     };
+
+    fn kv_host_response_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/kv-host-response.json"
+        ))
+        .expect("KV host response fixture parses")
+    }
     use wdl_rust_common::test_support::parse_packed_commands;
 
     #[test]
@@ -932,6 +989,109 @@ mod tests {
             err.message
                 .contains("KV batch raw value/metadata bytes exceed")
         );
+    }
+
+    #[test]
+    fn kv_batch_raw_budget_fits_runtime_wire_cap() {
+        let max_value_bytes = usize::try_from(
+            kv_host_response_fixture()["maxValueBytes"]
+                .as_u64()
+                .expect("KV host value max bytes is an unsigned integer"),
+        )
+        .expect("KV host value max bytes fits usize");
+        let max_metadata_bytes = usize::try_from(
+            kv_host_response_fixture()["maxMetadataBytes"]
+                .as_u64()
+                .expect("KV host metadata max bytes is an unsigned integer"),
+        )
+        .expect("KV host metadata max bytes fits usize");
+        let max_response_bytes = usize::try_from(
+            kv_host_response_fixture()["maxResponseBytes"]
+                .as_u64()
+                .expect("KV host response max bytes is an unsigned integer"),
+        )
+        .expect("KV host response max bytes fits usize");
+        assert_eq!(KV_VALUE_BYTES_MAX, max_value_bytes);
+        assert_eq!(KV_METADATA_BYTES_MAX, max_metadata_bytes);
+        assert_eq!(KV_BATCH_RAW_BYTES_MAX, max_value_bytes);
+        let max_base64_bytes = KV_BATCH_RAW_BYTES_MAX.div_ceil(3) * 4;
+        // JSON escaping can expand each key byte to `\u00XX`; 64 bytes per
+        // entry conservatively covers field names, delimiters, and the outer envelope.
+        let structural_headroom = KV_BATCH_KEYS_MAX * (KV_KEY_MAX_BYTES * 6 + 64);
+
+        assert!(
+            max_base64_bytes + structural_headroom <= max_response_bytes,
+            "KV batch raw budget can exceed the Runtime host-response wire cap"
+        );
+    }
+
+    #[test]
+    fn kv_scalar_response_declares_its_exact_wire_length() {
+        let response = kv_value_response(vec![0, 1, 2, 3]);
+        assert_eq!(response.headers()[CONTENT_LENGTH], "4");
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/octet-stream");
+    }
+
+    #[test]
+    fn stored_scalar_values_enforce_the_product_limit() {
+        validate_stored_kv_value_size(KV_VALUE_BYTES_MAX).unwrap();
+        let error = validate_stored_kv_value_size(KV_VALUE_BYTES_MAX + 1).unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "internal_error");
+    }
+
+    #[test]
+    fn stored_kv_metadata_enforces_the_product_limit() {
+        let exact = format!(r#"{{"v":"{}"}}"#, "x".repeat(1016)).into_bytes();
+        assert_eq!(exact.len(), KV_METADATA_BYTES_MAX);
+        decode_metadata(Some(exact)).unwrap();
+
+        let oversized = format!(r#"{{"v":"{}"}}"#, "x".repeat(1017)).into_bytes();
+        assert_eq!(oversized.len(), KV_METADATA_BYTES_MAX + 1);
+        let error = decode_metadata(Some(oversized)).unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "internal_error");
+        assert_eq!(error.message, "stored KV metadata exceeds 1024 byte limit");
+    }
+
+    #[test]
+    fn kv_metadata_must_be_readable_by_the_rust_json_owner() {
+        let valid = STANDARD.encode(br#"{"kind":"valid"}"#);
+        assert_eq!(
+            decode_metadata_header(&valid).unwrap(),
+            br#"{"kind":"valid"}"#
+        );
+        let invalid = STANDARD.encode(br#""\ud800""#);
+        let error = decode_metadata_header(&invalid).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.message, "invalid metadata JSON");
+    }
+
+    #[test]
+    fn kv_metadata_enforces_the_serialized_json_byte_limit() {
+        for json in [
+            format!(r#"{{"v":"{}"}}"#, "x".repeat(1016)),
+            format!(r#"{{"v":"{}xx"}}"#, "汉".repeat(338)),
+        ] {
+            assert_eq!(json.len(), KV_METADATA_BYTES_MAX);
+            let encoded = STANDARD.encode(json.as_bytes());
+            assert_eq!(decode_metadata_header(&encoded).unwrap(), json.as_bytes());
+        }
+        for json in [
+            format!(r#"{{"v":"{}"}}"#, "x".repeat(1017)),
+            format!(r#"{{"v":"{}xxx"}}"#, "汉".repeat(338)),
+        ] {
+            assert_eq!(json.len(), KV_METADATA_BYTES_MAX + 1);
+            let encoded = STANDARD.encode(json.as_bytes());
+            let error = decode_metadata_header(&encoded).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_request");
+            assert_eq!(error.message, "KV metadata exceeds 1024 byte limit");
+        }
+        let error =
+            decode_metadata_header(&"A".repeat(KV_METADATA_BASE64_BYTES_MAX + 1)).unwrap_err();
+        assert_eq!(error.message, "KV metadata exceeds 1024 byte limit");
     }
 
     #[test]
@@ -1127,23 +1287,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(entries).unwrap(),
-            json!([
-                {
-                    "key": "binary",
-                    "value_b64": "AP8Q",
-                    "metadata": { "kind": "binary" },
-                },
-                {
-                    "key": "empty",
-                    "value_b64": "",
-                    "metadata": { "kind": "empty" },
-                },
-                {
-                    "key": "missing",
-                    "value_b64": null,
-                    "metadata": null,
-                },
-            ])
+            kv_host_response_fixture()["batch"]["response"]["entries"]
         );
 
         let Err(err) = decode_batch_entries(vec!["key".to_string()], true, vec![None]) else {
@@ -1160,10 +1304,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(found).unwrap(),
-            json!({
-                "value_b64": "/wA=",
-                "metadata": { "kind": "binary" },
-            })
+            kv_host_response_fixture()["metadata"]["found"]
         );
 
         let missing = KvValueWithMetadataResponse {
@@ -1172,10 +1313,24 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(missing).unwrap(),
-            json!({
-                "value_b64": null,
-                "metadata": null,
-            })
+            kv_host_response_fixture()["metadata"]["missing"]
+        );
+    }
+
+    #[test]
+    fn list_response_variants_match_cross_language_fixture() {
+        let fixture = kv_host_response_fixture();
+        assert_eq!(
+            kv_list_response(
+                vec![json!({ "name": "alpha", "metadata": { "kind": "listed" } })],
+                None,
+            )
+            .0,
+            fixture["list"]["complete"],
+        );
+        assert_eq!(
+            kv_list_response(Vec::new(), Some("v1:opaque".to_string())).0,
+            fixture["list"]["incomplete"],
         );
     }
 

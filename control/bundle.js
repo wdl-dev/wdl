@@ -20,6 +20,7 @@ import {
 } from "shared-workerd-compat-flags";
 import { normalizeBindings, validateBindings } from "control-bindings";
 import { parseWorkerdDependencyVersion } from "control-lib";
+import { assertCanonicalBase64 } from "base64.js";
 import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
 
 export class BundleConfigError extends Error {
@@ -104,19 +105,14 @@ export function validateCompatibilityDate(value, today = new Date()) {
   return value;
 }
 
-// Canonical base64 only — re-encoding must match the input, which
-// rejects the non-canonical variants both atob and Buffer silently accept.
 /** @param {string} value @param {string} fieldName */
 function decodeBase64Strict(value, fieldName) {
-  if (value === "") return nodeBuffer.alloc(0);
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
+  try {
+    assertCanonicalBase64(value);
+    return nodeBuffer.from(value, "base64");
+  } catch {
     throw new Error(`Invalid base64 in ${fieldName}`);
   }
-  const bytes = nodeBuffer.from(value, "base64");
-  if (bytes.toString("base64") !== value) {
-    throw new Error(`Invalid base64 in ${fieldName}`);
-  }
-  return bytes;
 }
 
 /** @param {unknown} value */

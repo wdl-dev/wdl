@@ -50,6 +50,10 @@ import {
 import { runOptimistic, withOptimisticRetries } from "control-optimistic";
 import { readJsonBody } from "control-json-body";
 import {
+  parseDoAlarmCleanupSuccess,
+  readDoAlarmResponseText,
+} from "shared-do-alarm-response";
+import {
   acquireTokenLock,
   createTokenLock,
   releaseTokenLock,
@@ -633,6 +637,18 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
     timeoutMs: null,
   });
   if (!response.ok) {
+    if (
+      response.status === 409 &&
+      isRecord(body) &&
+      body.error === "workflow_migration_pending"
+    ) {
+      throw new ControlAbort(409, "workflow_migration_pending", {
+        message: typeof body.message === "string"
+          ? body.message
+          : "Workflow state migration is pending",
+        ...context,
+      });
+    }
     throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
       message: "Workflow lifecycle check failed",
       ...context,
@@ -674,8 +690,17 @@ export async function cleanupDoAlarmsForWorker({ ns, worker, doStorageId, reques
     requestFailedMessage: "Workflow DO alarm cleanup failed",
     // This endpoint was already bounded before transport consolidation.
     timeoutMs: WORKFLOWS_INTERNAL_TIMEOUT_MS,
+    readBody: async (response, signal) => {
+      const text = await readDoAlarmResponseText(response, signal);
+      if (response.ok) return parseDoAlarmCleanupSuccess(text);
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    },
   });
-  if (!response.ok || !isRecord(body) || body.ok !== true) {
+  if (!response.ok) {
     throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
       message: "Workflow DO alarm cleanup failed",
       ...context,

@@ -370,6 +370,70 @@ mod tests {
     }
 
     #[test]
+    fn do_alarm_mutation_response_matches_the_cross_language_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/do-alarm-response.json"
+        ))
+        .expect("DO alarm response fixture parses");
+        let response = serde_json::to_value(DoAlarmMutationResponse {
+            ok: true,
+            job_id: Some("doa-test".to_string()),
+            changed: true,
+            deleted: 0,
+        })
+        .expect("DO alarm mutation response serializes");
+        assert_eq!(response, fixture["mutationSuccessVariants"]["set"]);
+        let cleanup_response = serde_json::to_value(DoAlarmMutationResponse {
+            ok: true,
+            job_id: None,
+            changed: true,
+            deleted: 2,
+        })
+        .expect("DO alarm cleanup response serializes");
+        assert_eq!(
+            cleanup_response,
+            fixture["mutationSuccessVariants"]["cleanup"]
+        );
+        let mut fields = response
+            .as_object()
+            .expect("DO alarm mutation response is an object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(
+            fields,
+            fixture["mutationRequiredFields"]
+                .as_array()
+                .expect("mutation required fields is an array")
+                .iter()
+                .map(|field| field
+                    .as_str()
+                    .expect("mutation field is a string")
+                    .to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(response["ok"], true);
+
+        let failure_classes = &fixture["mutationFailureClasses"];
+        for (error, class_name) in [
+            (
+                WorkflowError::invalid_request("pre-mutation rejection"),
+                "definitePreMutationRejection",
+            ),
+            (
+                WorkflowError::internal_error("post-mutation failure"),
+                "resultUnknown",
+            ),
+        ] {
+            let class = &failure_classes[class_name];
+            let status = u64::from(error.status.as_u16());
+            assert!(status >= class["minStatus"].as_u64().expect("minimum status"));
+            assert!(status <= class["maxStatus"].as_u64().expect("maximum status"));
+        }
+    }
+
+    #[test]
     fn do_alarm_mutation_ingress_rejects_noncanonical_identity() {
         for (field, value) in [
             ("ns", "Demo"),

@@ -1,11 +1,8 @@
 use crate::{AppState, Redis, WorkflowError, WorkflowResult, schema_version_key};
 
-pub(crate) const WORKFLOWS_SCHEMA_VERSION: &str = "2";
-const WORKFLOWS_SCHEMA_SCAN_COUNT: usize = 100;
-
-pub(crate) fn is_workflow_data_key(key: &str) -> bool {
-    key.starts_with("wf:") && key != schema_version_key() && !key.starts_with("wf:defs:")
-}
+pub(crate) const WORKFLOWS_SCHEMA_VERSION: &str = "3";
+const SCHEMA_RECOVERY_GUIDANCE: &str = "point WORKFLOWS_REDIS_URL at an endpoint with an empty dedicated DB 2, or clear DB 2 only after confirming it is dedicated and disposable";
+const SCHEMA2_RESET_GUIDANCE: &str = "follow the documented quiescence, old-participant drain, and final-release startup order; preserve state with the final release's `/workflows schema3-reset check`, then `apply` or `resume`, or clear dedicated DB 2 instead if all Workflow state and Workflows-owned Durable Object alarm projection there are independently confirmed disposable";
 
 pub(crate) async fn ensure_workflows_schema(state: &AppState) -> WorkflowResult<()> {
     ensure_schema_on(&state.redis).await
@@ -16,20 +13,19 @@ async fn ensure_schema_on(redis: &Redis) -> WorkflowResult<()> {
     let version: Option<String> = redis
         .with_conn(async |mut conn| redis::cmd("GET").arg(key).query_async(&mut conn).await)
         .await?;
-    match version.as_deref() {
-        Some(WORKFLOWS_SCHEMA_VERSION) => return Ok(()),
-        Some(found) => {
-            return Err(schema_mismatch(format!(
-                "workflows DB2 schema is {found}, expected {WORKFLOWS_SCHEMA_VERSION}; clear workflow runtime state before starting this build"
-            )));
-        }
-        None => {}
+    if version.is_some() {
+        return validate_installed_schema(version.as_deref());
     }
 
-    if !runtime_state_is_empty_before_schema_bootstrap(redis).await? {
-        return Err(schema_mismatch(format!(
-            "workflows DB2 has unversioned workflow runtime state; clear workflow runtime state before starting schema {WORKFLOWS_SCHEMA_VERSION}"
-        )));
+    let key_count: u64 = redis
+        .with_conn(async |mut conn| redis::cmd("DBSIZE").query_async(&mut conn).await)
+        .await?;
+    if key_count != 0 {
+        // Another new replica may install the marker between the initial GET and DBSIZE.
+        let concurrent_version: Option<String> = redis
+            .with_conn(async |mut conn| redis::cmd("GET").arg(key).query_async(&mut conn).await)
+            .await?;
+        return validate_installed_schema(concurrent_version.as_deref());
     }
 
     let _: Option<String> = redis
@@ -46,49 +42,22 @@ async fn ensure_schema_on(redis: &Redis) -> WorkflowResult<()> {
     let adopted: Option<String> = redis
         .with_conn(async |mut conn| redis::cmd("GET").arg(key).query_async(&mut conn).await)
         .await?;
-    if adopted.as_deref() == Some(WORKFLOWS_SCHEMA_VERSION) {
-        Ok(())
-    } else {
-        Err(schema_mismatch(format!(
-            "workflows DB2 schema changed while bootstrapping; found {:?}, expected {WORKFLOWS_SCHEMA_VERSION}",
-            adopted
-        )))
-    }
+    validate_installed_schema(adopted.as_deref())
 }
 
-async fn runtime_state_is_empty_before_schema_bootstrap(redis: &Redis) -> WorkflowResult<bool> {
-    let mut cursor = String::from("0");
-    loop {
-        let (next_cursor, page) = scan_workflow_key_page(redis, cursor).await?;
-        for key in page {
-            if is_workflow_data_key(&key) {
-                return Ok(false);
-            }
-        }
-        if next_cursor == "0" {
-            return Ok(true);
-        }
-        cursor = next_cursor;
+fn validate_installed_schema(version: Option<&str>) -> WorkflowResult<()> {
+    match version {
+        Some(WORKFLOWS_SCHEMA_VERSION) => Ok(()),
+        Some("2") => Err(schema_mismatch(format!(
+            "Workflows DB 2 schema is 2, expected {WORKFLOWS_SCHEMA_VERSION}; {SCHEMA2_RESET_GUIDANCE}"
+        ))),
+        Some(found) => Err(schema_mismatch(format!(
+            "Workflows DB 2 schema is {found}, expected {WORKFLOWS_SCHEMA_VERSION}; {SCHEMA_RECOVERY_GUIDANCE}"
+        ))),
+        None => Err(schema_mismatch(format!(
+            "Workflows DB 2 is not empty and has no schema marker; {SCHEMA_RECOVERY_GUIDANCE} before starting schema {WORKFLOWS_SCHEMA_VERSION}"
+        ))),
     }
-}
-
-async fn scan_workflow_key_page(
-    redis: &Redis,
-    cursor: String,
-) -> WorkflowResult<(String, Vec<String>)> {
-    redis
-        .with_conn(async move |mut conn| {
-            redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg("wf:*")
-                .arg("COUNT")
-                .arg(WORKFLOWS_SCHEMA_SCAN_COUNT)
-                .query_async(&mut conn)
-                .await
-        })
-        .await
-        .map_err(WorkflowError::from)
 }
 
 fn schema_mismatch(message: String) -> WorkflowError {
@@ -100,26 +69,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workflow_data_key_filter_excludes_schema_marker_only() {
-        assert!(!is_workflow_data_key(schema_version_key()));
-        assert!(!is_workflow_data_key("wf:defs:demo:worker"));
-        assert!(is_workflow_data_key("wf:instance:{demo:wf:one}:state"));
-        assert!(is_workflow_data_key("wf:ready:0"));
-        assert!(!is_workflow_data_key("routes:demo"));
-    }
+    fn installed_schema_accepts_only_the_current_version() {
+        validate_installed_schema(Some(WORKFLOWS_SCHEMA_VERSION))
+            .expect("current schema must be accepted");
 
-    #[test]
-    fn schema_bootstrap_requires_empty_runtime_state() {
-        let source = include_str!("schema.rs");
-        assert!(source.contains("runtime_state_is_empty_before_schema_bootstrap"));
-        assert!(source.contains("if is_workflow_data_key(&key)"));
-        assert!(source.contains("return Ok(false)"));
-    }
-
-    #[test]
-    fn schema_scan_uses_page_helper_instead_of_collecting_all_keys() {
-        let source = include_str!("schema.rs");
-        assert!(source.contains("fn scan_workflow_key_page"));
-        assert!(source.contains("let (next_cursor, page) = scan_workflow_key_page(redis, cursor)"));
+        for version in [None, Some("2")] {
+            let error = validate_installed_schema(version)
+                .expect_err("missing or stale schema must fail closed");
+            assert_eq!(error.code, "workflow_schema_mismatch");
+            if version == Some("2") {
+                assert!(error.message.contains("schema3-reset check"));
+                assert!(error.message.contains("independently confirmed disposable"));
+            } else {
+                assert!(error.message.contains(SCHEMA_RECOVERY_GUIDANCE));
+            }
+        }
     }
 }

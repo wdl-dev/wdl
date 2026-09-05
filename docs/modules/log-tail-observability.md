@@ -130,7 +130,9 @@ Central owners:
   production JS is limited to that primitive and to embedded source strings that cannot
   import modules.
 - Rust services emit logs through `wdl-rust-common::log::emit_log_line` or a thin
-  wrapper over it, and expose metrics through `wdl-rust-common::metrics::MetricStore`.
+  wrapper over it, expose metrics through `wdl-rust-common::metrics::MetricStore`, and
+  share HTTP completion metrics/log fields through
+  `wdl-rust-common::request_completion::record_request_completion`.
 - HTTP request completion is recorded once through the request-scope helper or service
   middleware so request counters, duration summaries, probe suppression, request-id
   fields, and `request_complete` logs do not drift per tier.
@@ -193,6 +195,13 @@ Common rules:
   bounded `service`/`operation`/`kind` labels. It records value, metadata, and raw
   batch byte counts so operators can decide whether large-value offload is needed;
   namespace, key, and object identity never enter metric labels.
+- Runtime KV admission publishes `kv_read_capacity_events` with bounded `service` and
+  `outcome` labels (`acquired`, `saturated`, `completed`, `deadline`, `setup_error`).
+  `kv_read_in_flight_bytes` is current reserved wire bytes;
+  `kv_read_in_flight_high_water_bytes` is the process-lifetime maximum and does not
+  reset on scrape. The shared registry adds the `wdl_` prefix and `_total` counter
+  suffix in Prometheus output. `completed` is a lease-lifecycle outcome, not a binding
+  success result; binding-operation metrics own success/error classification.
 - Rust `request_complete` logs report integer `duration_ms` values so log fields stay
   stable across services; Prometheus duration summaries keep their floating point
   values.
@@ -207,7 +216,10 @@ Common rules:
 - Successful probe routes (`healthz`, `metrics`, `/_healthz`, `/_metrics`) suppress
   `request_complete` logs while still incrementing counters; errors still log.
 - `LOG_LEVEL` gates log output only. Metrics bypass it, so high-QPS deployments may set
-  `LOG_LEVEL=warn` without losing Prometheus signal.
+  `LOG_LEVEL=warn` without losing Prometheus signal. JS request scopes check the
+  canonical logger before resolving lazy extras; Rust completion middleware checks the
+  same policy before constructing integer-duration and JSON log fields. Emitted success
+  lines remain synchronous structured stdout.
 - Service-binding trace propagation is caller-explicit. `ServiceBinding#fetch` forces
   `x-worker-id` to the target but only preserves `x-request-id` when the caller forwards
   it on the Request; JSRPC does not carry Node async context across isolates.

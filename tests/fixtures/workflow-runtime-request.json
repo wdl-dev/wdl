@@ -1,0 +1,18 @@
+{
+  "run": {
+    "ns": "demo",
+    "worker": "shop",
+    "frozenVersion": "v7",
+    "workflowName": "orders",
+    "workflowKey": "wf_0123456789abcdef0123456789abcdef",
+    "className": "OrderWorkflow",
+    "instanceId": "order-123",
+    "generation": 3,
+    "createdAtMs": 1700000000000,
+    "runToken": "run-token",
+    "dispatchDeadlineMs": 2000000000000,
+    "params": {
+      "orderId": 123
+    }
+  }
+}

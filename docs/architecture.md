@@ -172,12 +172,17 @@ receive broad cloud credentials through task metadata.
 
 Valkey logical DBs are split by authority:
 
-- DB 0: control-plane metadata, route state, lifecycle indexes, secrets, referrer
-  indexes, D1/DO metadata, AI provider/credential records, cron config, and queue
-  consumer projections.
+- DB 0 on the Control endpoint: control-plane metadata, route state, lifecycle indexes,
+  secrets, referrer indexes, D1/DO metadata, AI provider/credential records, cron config,
+  and queue consumer projections.
+- DB 0 on the Workflows endpoint: only the Workflows-owned operator schema-reset state.
+  This is the same logical database when Control and Workflows share an endpoint, but a
+  different server when `WORKFLOWS_REDIS_URL` selects a dedicated endpoint.
 - DB 1: data-plane KV, queue streams, delayed queues, log-tail streams, and cleanup
   queues.
 - DB 2: workflows workflow instance state.
+- DB 15: inactive schema-2 Workflow archive while an explicit migration is pending; no
+  normal service selects it.
 
 Indexes are usually rebuildable projections. Authority lives in the owning hash, stream,
 or lifecycle record named in each module doc. Do not add fallback SCAN paths or

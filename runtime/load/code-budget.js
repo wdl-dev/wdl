@@ -1,5 +1,11 @@
 import {
+  BINDING_NAME_RE,
+  RESERVED_OBJECT_KEYS,
+  WDL_RESERVED_BINDING_RE,
   WDL_RESERVED_ENTRYPOINT_RE,
+  WORKFLOW_KEY_RE,
+  WORKFLOW_NAME_RE,
+  isValidKvId,
   isValidJsClassDeclarationName,
 } from "shared-ns-pattern";
 import {
@@ -8,14 +14,22 @@ import {
   WDL_RESERVED_MODULE_PREFIX,
   WORKFLOWS_MODULE_NAME,
   WORKFLOWS_MODULE_SOURCE,
+  WORKFLOW_INFRASTRUCTURE_REPORTER_PROP,
   isWdlReservedModuleName,
   rewriteCloudflareWorkflowsImports,
 } from "runtime-load-module-rewrite";
 import {
+  KV_FACADE_RPC_METHOD,
+  KV_READ_INFRASTRUCTURE_ERROR_CODE,
+  WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
+} from "runtime-infrastructure-error";
+import {
   HOST_BINDING_RUNTIME_MODULE_NAME,
   HOST_BINDING_RUNTIME_SOURCE,
+  WORKFLOW_KV_CAPTURE_MODULE_NAME,
   generateAbortShimWrapperModule,
   generateHostBindingWrapperModule,
+  generateWorkflowKvCaptureModule,
 } from "runtime-load-wrapper-generate";
 
 const nodeBuffer = /** @type {{ Buffer: WdlNodeBufferConstructor }} */ (
@@ -35,17 +49,19 @@ const utf8Decoder = new TextDecoder();
  * @typedef {string | { cjs: string } | { text: string } | { json: unknown } | { wasm: Uint8Array } | { data: Uint8Array }} WorkerModuleValue
  * @typedef {{ modules: Record<string, WorkerModuleValue>, mainModule: string, [key: string]: unknown }} WorkerCodeShape
  * @typedef {Record<string, unknown> & { type?: string, className?: unknown }} RuntimeBindingSpec
- * @typedef {{ binding?: unknown, className?: unknown }} RuntimeWorkflowSpec
+ * @typedef {{ binding?: unknown, name?: unknown, className?: unknown, workflowKey?: unknown }} RuntimeWorkflowSpec
  * @typedef {{ entrypoint?: unknown }} RuntimeExportSpec
  * @typedef {{ bindings?: Record<string, RuntimeBindingSpec> | null, workflows?: RuntimeWorkflowSpec[] | null, exports?: RuntimeExportSpec[] | null, modules?: Record<string, { type?: unknown }> | null, compatibilityFlags?: unknown }} RuntimeBundleMeta
  * @typedef {{
  *   bindingEntries: Array<[string, RuntimeBindingSpec]>,
  *   workflows: RuntimeWorkflowSpec[],
+ *   kvBindings: string[],
  *   d1Bindings: string[],
  *   r2Bindings: string[],
  *   doBindings: string[],
  *   aiBindings: string[],
  *   workflowBindings: Record<string, unknown>,
+ *   workflowClassNames: string[],
  *   hostWrappedClassNames: string[],
  *   needsHostBindingWrapper: boolean,
  * }} RuntimeMetaPlan
@@ -233,20 +249,33 @@ function hostWrappedClassNames(meta, bindingEntries, workflows) {
 export function analyzeRuntimeMeta(meta) {
   const bindingEntries = Object.entries(meta.bindings || {});
   const bindingNames = new Set(bindingEntries.map(([name]) => name));
+  if (meta.workflows !== undefined && meta.workflows !== null && !Array.isArray(meta.workflows)) {
+    throw new Error("Persisted Workflow metadata must be an array (redeploy worker)");
+  }
   const workflows = Array.isArray(meta.workflows) ? meta.workflows : [];
   /** @type {RuntimeMetaPlan} */
   const plan = {
     bindingEntries,
     workflows,
+    kvBindings: [],
     d1Bindings: [],
     r2Bindings: [],
     doBindings: [],
     aiBindings: [],
     workflowBindings: Object.create(null),
+    workflowClassNames: [],
     hostWrappedClassNames: [],
     needsHostBindingWrapper: false,
   };
   for (const [name, spec] of bindingEntries) {
+    if (spec?.type === "kv") {
+      if (!isValidKvId(spec.id)) {
+        throw new Error(
+          `Persisted KV binding ${JSON.stringify(name)} has an invalid id (redeploy worker)`
+        );
+      }
+      plan.kvBindings.push(name);
+    }
     if (spec?.type === "ai") {
       if (Object.keys(spec).length !== 1) {
         throw new Error(
@@ -259,18 +288,68 @@ export function analyzeRuntimeMeta(meta) {
     }
     addHostFacadeBinding(plan, spec, name);
   }
+  const workflowNames = new Set();
+  const workflowKeys = new Set();
   for (const workflow of workflows) {
-    if (typeof workflow?.binding === "string" && workflow.binding) {
-      if (
-        bindingNames.has(workflow.binding) ||
-        Object.hasOwn(plan.workflowBindings, workflow.binding)
-      ) {
-        throw new Error(
-          `Persisted Workflow binding ${JSON.stringify(workflow.binding)} collides with another binding (redeploy worker)`
-        );
-      }
-      plan.workflowBindings[workflow.binding] = workflow;
+    if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) {
+      throw new Error("Persisted Workflow metadata contains a non-object entry (redeploy worker)");
     }
+    const { binding, name, className, workflowKey } = workflow;
+    if (
+      typeof binding !== "string" ||
+      !BINDING_NAME_RE.test(binding) ||
+      WDL_RESERVED_BINDING_RE.test(binding) ||
+      RESERVED_OBJECT_KEYS.has(binding)
+    ) {
+      throw new Error(
+        `Persisted Workflow binding ${JSON.stringify(binding)} is invalid (redeploy worker)`
+      );
+    }
+    if (
+      typeof name !== "string" ||
+      !WORKFLOW_NAME_RE.test(name) ||
+      RESERVED_OBJECT_KEYS.has(name)
+    ) {
+      throw new Error(
+        `Persisted Workflow name ${JSON.stringify(name)} is invalid (redeploy worker)`
+      );
+    }
+    if (
+      typeof className !== "string" ||
+      !isValidJsClassDeclarationName(className) ||
+      WDL_RESERVED_ENTRYPOINT_RE.test(className)
+    ) {
+      throw new Error(
+        `Persisted Workflow class ${JSON.stringify(className)} is invalid (redeploy worker)`
+      );
+    }
+    if (
+      workflowKey !== undefined &&
+      (typeof workflowKey !== "string" || !WORKFLOW_KEY_RE.test(workflowKey))
+    ) {
+      throw new Error(
+        `Persisted Workflow key ${JSON.stringify(workflowKey)} is invalid (redeploy worker)`
+      );
+    }
+    if (bindingNames.has(binding) || Object.hasOwn(plan.workflowBindings, binding)) {
+      throw new Error(
+        `Persisted Workflow binding ${JSON.stringify(binding)} collides with another binding (redeploy worker)`
+      );
+    }
+    if (workflowNames.has(name)) {
+      throw new Error(
+        `Persisted Workflow name ${JSON.stringify(name)} is duplicated (redeploy worker)`
+      );
+    }
+    if (workflowKey !== undefined && workflowKeys.has(workflowKey)) {
+      throw new Error(
+        `Persisted Workflow key ${JSON.stringify(workflowKey)} is duplicated (redeploy worker)`
+      );
+    }
+    workflowNames.add(name);
+    if (workflowKey !== undefined) workflowKeys.add(workflowKey);
+    plan.workflowClassNames.push(className);
+    plan.workflowBindings[binding] = workflow;
   }
   plan.needsHostBindingWrapper =
     hasHostFacadeBindings(plan) || Object.keys(plan.workflowBindings).length > 0;
@@ -293,6 +372,8 @@ function runtimeInjectedModuleSources(
   plan = analyzeRuntimeMeta(meta)
 ) {
   const injections = runtimeModuleInjections(runtimeSources);
+  const importableEnvDisabled = Array.isArray(meta.compatibilityFlags) &&
+    meta.compatibilityFlags.includes("disallow_importable_env");
   /** @type {Map<string, string>} */
   const out = new Map();
   /** @param {RuntimeModuleInjection[]} modules */
@@ -309,6 +390,16 @@ function runtimeInjectedModuleSources(
   if (plan.needsHostBindingWrapper) {
     out.set(HOST_BINDING_RUNTIME_MODULE_NAME, HOST_BINDING_RUNTIME_SOURCE);
   }
+  if (plan.kvBindings.length > 0 && plan.workflowClassNames.length > 0) {
+    out.set(
+      WORKFLOW_KV_CAPTURE_MODULE_NAME,
+      generateWorkflowKvCaptureModule(plan.kvBindings, {
+        importableEnvDisabled,
+        rpcMethod: KV_FACADE_RPC_METHOD,
+        reportOrigin: WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
+      })
+    );
+  }
   // `_wdl-wrapper.js` is always injected: host bindings use the larger wrapper,
   // and otherwise the abort shim still rewrites the user main module.
   out.set(
@@ -317,14 +408,19 @@ function runtimeInjectedModuleSources(
       ? generateHostBindingWrapperModule(
           mainModule,
           {
+            kvBindings: plan.kvBindings,
             d1Bindings: plan.d1Bindings,
             r2Bindings: plan.r2Bindings,
             doBindings: plan.doBindings,
             workflowBindings: plan.workflowBindings,
+            workflowClassNames: plan.workflowClassNames,
+            workflowInfrastructureReporterProp:
+              WORKFLOW_INFRASTRUCTURE_REPORTER_PROP,
+            kvReadInfrastructureErrorCode:
+              KV_READ_INFRASTRUCTURE_ERROR_CODE,
             entrypointNames: plan.hostWrappedClassNames,
             aiBindings: plan.aiBindings,
-            importableEnvDisabled: Array.isArray(meta.compatibilityFlags) &&
-              meta.compatibilityFlags.includes("disallow_importable_env"),
+            importableEnvDisabled,
           }
         )
       : generateAbortShimWrapperModule(mainModule)

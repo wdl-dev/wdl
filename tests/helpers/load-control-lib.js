@@ -15,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // version used by control.
 const moduleRequire = createRequire(path.resolve(__dirname, "../../package.json"));
 const SHARED_NS_URL = repositoryFileUrl("shared/ns-pattern.js");
+const SHARED_BASE64_URL = repositoryFileUrl("shared/base64.js");
 const SHARED_QUEUE_KEYS_URL = repositoryFileUrl("shared/queue-keys.js");
 const WORKER_CONTRACT_URL = repositoryFileUrl("shared/worker-contract.js");
 const SHARED_ERRORS_URL = repositoryFileUrl("shared/errors.js");
@@ -79,6 +80,7 @@ export async function compileControlGraph(opts = {}) {
   const bundleUrl = freshRepositoryModuleDataUrl("control/bundle.js", [
     ...importSpecifierReplacements({
       "shared-ns-pattern": SHARED_NS_URL,
+      "base64.js": SHARED_BASE64_URL,
       "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
       "control-lib": libUrl,
     }),

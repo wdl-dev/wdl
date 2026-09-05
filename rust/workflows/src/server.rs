@@ -12,6 +12,7 @@ use crate::{
     read_replay_step_page, read_workflow_replay_request, read_workflow_request,
     read_workflow_step_request, register_sleep, register_wait, restart_instance, resume_instance,
     send_event, status_instance, terminate_instance, tick_workflows, workflow_error_fields,
+    workflow_migration_pending,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -30,9 +31,10 @@ use wdl_rust_common::internal_auth::{
     internal_auth_headers_match,
 };
 use wdl_rust_common::metrics::prometheus_response;
+use wdl_rust_common::redis_conn::{redis_client_from_url, redis_client_from_url_with_db};
+use wdl_rust_common::request_completion::{RequestCompletion, record_request_completion};
 use wdl_rust_common::request_id::request_id_from_headers;
 use wdl_rust_common::shutdown::shutdown_signal;
-use wdl_rust_common::time::duration_ms_for_log;
 
 const WORKFLOW_SERVER_ERROR_MESSAGE: &str = "Workflow service request failed";
 
@@ -315,56 +317,20 @@ fn record_request_complete(
     started_at: Instant,
     error: Option<(&str, &str)>,
 ) {
-    let elapsed = started_at.elapsed();
-    let duration_ms = elapsed.as_secs_f64() * 1000.0;
-    let log_duration_ms = duration_ms_for_log(elapsed);
-    let status_label = status.as_u16().to_string();
-    state.metrics.increment(
-        "requests",
-        &[
-            ("service", SERVICE),
-            ("route", route),
-            ("status", &status_label),
-        ],
-        1.0,
+    record_request_completion(
+        &state.metrics,
+        SERVICE,
+        state.config.log_level,
+        RequestCompletion {
+            method,
+            route,
+            status: status.as_u16(),
+            status_label: status.as_str(),
+            request_id,
+            duration: started_at.elapsed(),
+            error,
+        },
     );
-    state.metrics.observe(
-        "request_duration_ms",
-        &[("service", SERVICE), ("route", route)],
-        duration_ms,
-    );
-    if status.is_server_error() {
-        state.metrics.increment(
-            "request_errors",
-            &[
-                ("service", SERVICE),
-                ("route", route),
-                ("status", &status_label),
-            ],
-            1.0,
-        );
-    }
-    let probe = matches!(route, "healthz" | "metrics");
-    if !probe || status.is_server_error() {
-        log(
-            state,
-            if status.is_server_error() {
-                LogLevel::Error
-            } else {
-                LogLevel::Info
-            },
-            "request_complete",
-            json!({
-                "request_id": request_id,
-                "method": method,
-                "route": route,
-                "status": status.as_u16(),
-                "duration_ms": log_duration_ms,
-                "error_code": error.map(|(code, _)| code),
-                "error_message": error.map(|(_, message)| message),
-            }),
-        );
-    }
 }
 
 fn response_error(response: &Response) -> Option<(&'static str, &str)> {
@@ -372,6 +338,18 @@ fn response_error(response: &Response) -> Option<(&'static str, &str)> {
         .extensions()
         .get::<ResponseError>()
         .map(|err| (err.code, err.message.as_str()))
+}
+
+fn migration_blocks_route(route: &str) -> bool {
+    !matches!(
+        route,
+        "healthz"
+            | "metrics"
+            | "workflow_tick"
+            | "do_alarm_set"
+            | "do_alarm_delete"
+            | "do_alarm_cleanup_worker"
+    )
 }
 
 async fn track_request(
@@ -395,6 +373,23 @@ async fn track_request(
             request_id.as_deref(),
             started_at,
             Some((INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE)),
+        );
+        return response;
+    }
+    if state.workflow_migration_pending && migration_blocks_route(route) {
+        let response = WorkflowError::migration_pending(
+            "Workflow state migration from archive DB 15 has not completed",
+        )
+        .into_response();
+        let error = response_error(&response);
+        record_request_complete(
+            &state,
+            method.as_str(),
+            route,
+            response.status(),
+            request_id.as_deref(),
+            started_at,
+            error,
         );
         return response;
     }
@@ -464,14 +459,28 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config_from_env());
     let redis_configured =
         optional_env("WORKFLOWS_REDIS_URL").is_some() || optional_env("REDIS_URL").is_some();
-    let redis_client = redis::Client::open(config.redis_url.as_str())?;
-    let redis_conn = redis_client.get_connection_manager().await?;
-    let control_redis_client = redis::Client::open(config.control_redis_url.as_str())?;
-    let control_redis_conn = control_redis_client.get_connection_manager().await?;
+    let redis_client =
+        redis_client_from_url_with_db(&config.redis_url, Some(crate::config::WORKFLOWS_REDIS_DB))?;
+    let migration_client = redis_client_from_url_with_db(&config.redis_url, Some(0))?;
+    let control_redis_client = redis_client_from_url(&config.control_redis_url)?;
+    let (redis_conn, migration_conn, control_redis_conn) = tokio::try_join!(
+        redis_client.get_connection_manager(),
+        migration_client.get_connection_manager(),
+        control_redis_client.get_connection_manager(),
+    )?;
+    let workflow_migration_pending = {
+        let migration_redis = Redis::new(migration_conn);
+        workflow_migration_pending(&migration_redis)
+            .await
+            .map_err(|err| std::io::Error::other(format!("{}: {}", err.code, err.message)))?
+    };
     let state = AppState {
         redis: Redis::new(redis_conn),
         control_redis: Redis::new(control_redis_conn),
-        http: reqwest::Client::new(),
+        http: reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
         metrics: Arc::new(Metrics::default()),
         shutdown: Arc::new(ShutdownState::default()),
         dispatch: Arc::new(DispatchSemaphores::new(
@@ -486,6 +495,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config: config.clone(),
         instance_id: random_instance_id(),
         run_claim_counter: Arc::new(AtomicU64::new(0)),
+        workflow_migration_pending,
     };
     ensure_workflows_schema(&state)
         .await
@@ -503,6 +513,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "do_alarm_dispatch_concurrency": config.do_alarm_dispatch_concurrency,
             "progress_callback_lookup_concurrency": config.progress_callback_lookup_concurrency,
             "progress_callback_concurrency": config.progress_callback_concurrency,
+            "workflow_migration_pending": workflow_migration_pending,
         }),
     );
 
@@ -625,6 +636,29 @@ mod tests {
             route_name(&Method::GET, "/internal/workflows/tick"),
             "unknown"
         );
+    }
+
+    #[test]
+    fn archive_pending_blocks_workflow_routes_but_not_alarm_tick_or_probes() {
+        for route in [
+            "workflow_create",
+            "workflow_status",
+            "workflow_check_delete",
+            "workflow_claim_step",
+        ] {
+            assert!(migration_blocks_route(route), "{route}");
+        }
+        for route in [
+            "workflow_tick",
+            "do_alarm_set",
+            "do_alarm_delete",
+            "do_alarm_cleanup_worker",
+            "healthz",
+            "metrics",
+        ] {
+            assert!(!migration_blocks_route(route), "{route}");
+        }
+        assert!(migration_blocks_route("unknown"));
     }
 
     #[test]

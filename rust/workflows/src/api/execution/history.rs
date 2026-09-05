@@ -11,7 +11,12 @@ use crate::{
 };
 
 use super::super::{InstanceRouteKeys, eval_script, read_json_request};
-use super::{STEP_SCRIPT_OK, StepRecord, StepSummary, active_claim_error};
+#[cfg(test)]
+use super::{STEP_KIND_DO, STEP_KIND_WAIT_FOR_EVENT};
+use super::{
+    STEP_KIND_SLEEP, STEP_KIND_SLEEP_UNTIL, STEP_SCRIPT_OK, StepRecord, StepSummary,
+    active_claim_error,
+};
 
 const DEFAULT_STATUS_STEP_LIMIT: usize = 100;
 const MAX_STATUS_STEP_LIMIT: usize = 1000;
@@ -274,15 +279,26 @@ fn replay_payload_from_map(
     })
 }
 
+fn is_completed_sleep_record(record: &StepRecord) -> bool {
+    record.status == "completed"
+        && matches!(
+            record.kind.as_str(),
+            STEP_KIND_SLEEP | STEP_KIND_SLEEP_UNTIL
+        )
+}
+
 fn replay_entry(
     record: StepRecord,
     payloads: &HashMap<String, JsonValue>,
 ) -> WorkflowResult<JsonValue> {
+    let completed_sleep = is_completed_sleep_record(&record);
     let mut output = None;
     if let Some(inline) = record.output {
         output = Some(inline);
     } else if let Some(output_ref) = &record.output_ref {
         output = Some(replay_payload_from_map(payloads, output_ref)?);
+    } else if completed_sleep {
+        output = Some(JsonValue::Null);
     }
     let mut error = None;
     if let Some(inline) = record.error {
@@ -290,11 +306,22 @@ fn replay_entry(
     } else if let Some(error_ref) = &record.error_ref {
         error = Some(replay_payload_from_map(payloads, error_ref)?);
     }
+    if record.status == "completed" && output.is_none() {
+        return Err(WorkflowError::invalid_state(
+            "Workflow completed replay step is missing output",
+        ));
+    }
+    if record.status == "failed" && error.is_none() {
+        return Err(WorkflowError::invalid_state(
+            "Workflow failed replay step is missing error",
+        ));
+    }
     Ok(json!({
         "ordinal": record.ordinal,
         "name": record.step_name,
         "nameCount": record.name_count,
         "dependencies": record.dependencies,
+        "kind": record.kind,
         "config": record.config,
         "status": record.status,
         "attempt": record.attempt,
@@ -370,6 +397,121 @@ async fn read_replay_payloads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replay_record(
+        status: &str,
+        output: Option<JsonValue>,
+        error: Option<JsonValue>,
+    ) -> StepRecord {
+        StepRecord {
+            ordinal: 0,
+            step_name: "step".to_string(),
+            name_count: 1,
+            dependencies: Vec::new(),
+            kind: STEP_KIND_DO.to_string(),
+            config: "null".to_string(),
+            status: status.to_string(),
+            attempt: 1,
+            output_ref: None,
+            error_ref: None,
+            output,
+            error,
+            completed_at_ms: None,
+            failed_at_ms: None,
+            due_at_ms: None,
+        }
+    }
+
+    fn persisted_replay_record(record: StepRecord) -> StepRecord {
+        serde_json::from_str(
+            &serde_json::to_string(&record).expect("step record serializes for persistence"),
+        )
+        .expect("persisted step record deserializes")
+    }
+
+    #[test]
+    fn replay_terminal_variants_match_the_cross_language_contract() {
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/workflow-step-response.json"
+        ))
+        .expect("workflow step response fixture parses");
+        let mut completed = replay_record("completed", None, None);
+        completed.output_ref = Some("output-ref".to_string());
+        let mut failed = replay_record("failed", None, None);
+        failed.error_ref = Some("error-ref".to_string());
+        let payloads = HashMap::from([
+            ("output-ref".to_string(), JsonValue::Null),
+            ("error-ref".to_string(), JsonValue::Null),
+        ]);
+        for (name, response) in [
+            (
+                "completed",
+                replay_entry(persisted_replay_record(completed), &payloads)
+                    .expect("completed replay response"),
+            ),
+            (
+                "failed",
+                replay_entry(persisted_replay_record(failed), &payloads)
+                    .expect("failed replay response"),
+            ),
+        ] {
+            let variant = &fixture["replayTerminalVariants"][name];
+            let payload_field = variant["payloadField"]
+                .as_str()
+                .expect("replay payload field is a string");
+            assert_eq!(response["status"], variant["status"]);
+            assert!(response.get(payload_field).is_some());
+        }
+    }
+
+    #[test]
+    fn replay_terminal_variants_reject_missing_payloads_after_persistence() {
+        for status in ["completed", "failed"] {
+            let error = replay_entry(
+                persisted_replay_record(replay_record(status, None, None)),
+                &HashMap::new(),
+            )
+            .expect_err("terminal replay without a payload must fail closed");
+            assert_eq!(error.code, "workflow_invalid_state", "{status}");
+        }
+    }
+
+    #[test]
+    fn replay_completed_sleep_records_emit_void_null() {
+        for (kind, config) in [
+            (
+                STEP_KIND_SLEEP,
+                json!({ "type": "sleep", "durationMs": 1000 }),
+            ),
+            (
+                STEP_KIND_SLEEP_UNTIL,
+                json!({ "type": "sleepUntil", "dueAtMs": 2000 }),
+            ),
+        ] {
+            let mut record = replay_record("completed", None, None);
+            record.kind = kind.to_string();
+            record.config = config.to_string();
+            record.due_at_ms = Some(2000);
+            let response = replay_entry(persisted_replay_record(record), &HashMap::new())
+                .expect("completed sleep replay response");
+            assert_eq!(response["output"], JsonValue::Null);
+        }
+    }
+
+    #[test]
+    fn workflow_step_kinds_match_the_cross_language_contract() {
+        let fixture: JsonValue = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/workflow-step-response.json"
+        ))
+        .expect("workflow step response fixture parses");
+        assert_eq!(fixture["stepKinds"]["do"], STEP_KIND_DO);
+        assert_eq!(fixture["stepKinds"]["sleep"], STEP_KIND_SLEEP);
+        assert_eq!(fixture["stepKinds"]["sleepUntil"], STEP_KIND_SLEEP_UNTIL);
+        assert_eq!(
+            fixture["stepKinds"]["waitForEvent"],
+            STEP_KIND_WAIT_FOR_EVENT
+        );
+    }
 
     fn step_summary_json(ordinal: u32, attempt: u32) -> String {
         json!({
