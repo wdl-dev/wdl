@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20260905.1` and `5.20260905.1`, including native stream, WebSocket, and SQLite lifetime fixes; refreshed experimental flags while keeping static compatibility dates and autogates unchanged. SQL DEFAULT expressions now enforce function authorization even for retained schemas, so previously accepted defaults using disallowed functions can fail on insertion. Host-binding wrappers resolve event handlers once without evaluating unrelated default-export getters, and lazy accessors retain their original receiver. Added compatibility coverage for tracing and explicit listener-exception semantics.
 - Hardened Workflow step and replay contracts with schema-3 operation kinds, exact terminal variants, bounded backend responses, and sender-owned absolute dispatch deadlines.
 - Bounded Durable Object alarm responses to 16 KiB with 5-second body deadlines and exact variants; explicit pre-dispatch resolution failures retry normally, while ambiguous results retain parked claims until lease expiry.
 - Reduced Redis latency with shared `TCP_NODELAY`, two managers per redis-proxy logical pool, concurrent connection initialization, and fewer KV key allocations; private Rust HTTP clients bypass ambient proxies and reject redirects.

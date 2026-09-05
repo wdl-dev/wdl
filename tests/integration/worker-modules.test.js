@@ -55,10 +55,39 @@ const BASE64_PROBE_WORKER = `
 
 /**
  * @typedef {{
+ *   listeners: string[],
+ *   reports: boolean[],
+ *   threw: boolean,
+ *   caughtSameError: boolean,
+ *   dispatchResult: boolean | null,
+ * }} ListenerExceptionResult
+ *
+ * @typedef {{
  *   moduleClock: { dateNow: number, dateValue: number, performanceNow: number },
  *   requestClock: { dateNow: number, dateValue: number, performanceNow: number },
  *   abortType: string,
- *   tracing: { startSpanType: string, setAttributeChained: boolean, setAttributesChained: boolean },
+ *   tracing: {
+ *     invocationSpanPresent: boolean,
+ *     startSpanType: string,
+ *     setAttributeChained: boolean,
+ *     setAttributesChained: boolean,
+ *     startSpanPreservesActive: boolean,
+ *     activeSpan: {
+ *       beforeAwait: boolean,
+ *       afterAwait: boolean,
+ *       recordException: {
+ *         errorReturnedVoid: boolean,
+ *         stringReturnedVoid: boolean,
+ *         codeZeroReturnedVoid: boolean,
+ *       },
+ *       callerPreservedWhilePending: boolean,
+ *       callerRestoredAfterAwait: boolean,
+ *     },
+ *   },
+ *   listenerExceptions: {
+ *     eventTarget: ListenerExceptionResult,
+ *     abortSignal: ListenerExceptionResult & { aborted: boolean, reasonPreserved: boolean },
+ *   },
  *   htmlRewriter: { uppercaseAttributeMatches: number },
  *   byob: { firstDone: boolean, firstBytes: number[], finalDone: boolean, finalBytes: number[] },
  *   importMetaPathHelpers: { dirname: string, filename: string },
@@ -181,6 +210,11 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
   const ns = uniqueNs("workerd-compat");
   const variants = [
     { name: "before-node-default", compatibilityDate: "2026-04-24", compatibilityFlags: [] },
+    {
+      name: "spec-compliant-dispatch-exceptions",
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags: ["spec_compliant_dispatch_exceptions"],
+    },
     { name: "node-default", compatibilityDate: "2026-08-04", compatibilityFlags: [] },
     { name: "single-node-optout", compatibilityDate: "2026-08-04", compatibilityFlags: ["no_nodejs_compat"] },
     {
@@ -223,9 +257,22 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
     assert.ok(result.requestClock.performanceNow > 0);
     assert.equal(result.abortType, "function");
     assert.deepEqual(result.tracing, {
+      invocationSpanPresent: true,
       startSpanType: "function",
       setAttributeChained: true,
       setAttributesChained: true,
+      startSpanPreservesActive: true,
+      activeSpan: {
+        beforeAwait: true,
+        afterAwait: true,
+        recordException: {
+          errorReturnedVoid: true,
+          stringReturnedVoid: true,
+          codeZeroReturnedVoid: true,
+        },
+        callerPreservedWhilePending: true,
+        callerRestoredAfterAwait: true,
+      },
     });
     assert.deepEqual(result.htmlRewriter, {
       uppercaseAttributeMatches: 1,
@@ -245,6 +292,21 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
     });
   }
 
+  for (const variant of variants) {
+    const reportsExceptions = variant.compatibilityFlags.includes("spec_compliant_dispatch_exceptions");
+    const expected = {
+      listeners: reportsExceptions ? ["first", "second"] : ["first"],
+      reports: reportsExceptions ? [true] : [],
+      threw: !reportsExceptions,
+      caughtSameError: !reportsExceptions,
+      dispatchResult: null,
+    };
+    assert.deepEqual(results[variant.name].listenerExceptions, {
+      eventTarget: { ...expected, dispatchResult: reportsExceptions ? true : null },
+      abortSignal: { ...expected, aborted: true, reasonPreserved: true },
+    }, variant.name);
+  }
+
   const disabledGlobals = {
     Buffer: "undefined",
     process: "undefined",
@@ -258,6 +320,7 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
     setImmediate: "function",
   };
   assert.deepEqual(results["before-node-default"].nodeGlobals, disabledGlobals);
+  assert.deepEqual(results["spec-compliant-dispatch-exceptions"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["byob-pending-read"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["node-default"].nodeGlobals, enabledGlobals);
   assert.deepEqual(results["single-node-optout"].nodeGlobals, enabledGlobals);

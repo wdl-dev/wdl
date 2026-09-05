@@ -4,6 +4,107 @@ const moduleClock = {
   performanceNow: performance.now(),
 };
 
+async function tracingProbe(ctx) {
+  const previousSpan = ctx.tracing.getActiveSpan();
+  const span = ctx.tracing.startSpan("wdl-workerd-compat-probe");
+  const setAttributeChained = span.setAttribute("probe", "one") === span;
+  const setAttributesChained = span.setAttributes({ second: 2, omitted: undefined }) === span;
+  const startSpanPreservesActive = ctx.tracing.getActiveSpan() === previousSpan;
+  span.end();
+
+  const pending = ctx.tracing.startActiveSpan("wdl-workerd-compat-active", async (activeSpan) => {
+    try {
+      const beforeAwait = ctx.tracing.getActiveSpan() === activeSpan;
+      await Promise.resolve();
+      const afterAwait = ctx.tracing.getActiveSpan() === activeSpan;
+
+      // Fixed, bounded inputs probe acceptance, not exported exception payloads.
+      const handledError = new Error("workerd compatibility handled error");
+      handledError.stack = "Error: workerd compatibility handled error";
+      let errorReturnedVoid = false;
+      try {
+        throw handledError;
+      } catch (error) {
+        errorReturnedVoid = activeSpan.recordException(error) === undefined;
+      }
+      const stringReturnedVoid = activeSpan.recordException("workerd compatibility string") === undefined;
+      const codeZeroReturnedVoid = activeSpan.recordException({ code: 0 }) === undefined;
+      return {
+        beforeAwait,
+        afterAwait,
+        recordException: { errorReturnedVoid, stringReturnedVoid, codeZeroReturnedVoid },
+      };
+    } finally {
+      activeSpan.end();
+    }
+  });
+  const callerPreservedWhilePending = ctx.tracing.getActiveSpan() === previousSpan;
+  const activeSpanResult = await pending;
+  return {
+    invocationSpanPresent: previousSpan !== undefined,
+    startSpanType: typeof ctx.tracing.startSpan,
+    setAttributeChained,
+    setAttributesChained,
+    startSpanPreservesActive,
+    activeSpan: {
+      ...activeSpanResult,
+      callerPreservedWhilePending,
+      callerRestoredAfterAwait: ctx.tracing.getActiveSpan() === previousSpan,
+    },
+  };
+}
+
+function listenerExceptionProbe(target, type, dispatch) {
+  const listenerError = new Error(`workerd compatibility ${type} listener`);
+  const listeners = [];
+  const reports = [];
+  target.addEventListener(type, () => {
+    listeners.push("first");
+    throw listenerError;
+  });
+  target.addEventListener(type, () => {
+    listeners.push("second");
+  });
+  const onError = (event) => {
+    reports.push(event.error === listenerError);
+    if (event.error === listenerError) event.preventDefault();
+  };
+  let threw = false;
+  let caughtSameError = false;
+  let dispatchResult = null;
+  // Reporting is synchronous; never retain this global listener across an await.
+  globalThis.addEventListener("error", onError);
+  try {
+    dispatchResult = dispatch() ?? null;
+  } catch (error) {
+    threw = true;
+    caughtSameError = error === listenerError;
+  } finally {
+    globalThis.removeEventListener("error", onError);
+  }
+  return { listeners, reports, threw, caughtSameError, dispatchResult };
+}
+
+function listenerExceptionsProbe() {
+  const target = new EventTarget();
+  const eventTarget = listenerExceptionProbe(
+    target, "probe", () => target.dispatchEvent(new Event("probe"))
+  );
+  const controller = new AbortController();
+  const reason = new Error("workerd compatibility abort reason");
+  const abortSignal = listenerExceptionProbe(
+    controller.signal, "abort", () => controller.abort(reason)
+  );
+  return {
+    eventTarget,
+    abortSignal: {
+      ...abortSignal,
+      aborted: controller.signal.aborted,
+      reasonPreserved: controller.signal.reason === reason,
+    },
+  };
+}
+
 async function byobProbe() {
   const stream = new ReadableStream({
     type: "bytes",
@@ -89,10 +190,7 @@ export default {
       return new Response("unreachable");
     }
 
-    const span = ctx.tracing.startSpan("wdl-workerd-compat-probe");
-    const setAttributeChained = span.setAttribute("probe", "one") === span;
-    const setAttributesChained = span.setAttributes({ second: 2, omitted: undefined }) === span;
-    span.end();
+    const tracing = await tracingProbe(ctx);
 
     return Response.json({
       moduleClock,
@@ -102,11 +200,8 @@ export default {
         performanceNow: performance.now(),
       },
       abortType: typeof ctx.abort,
-      tracing: {
-        startSpanType: typeof ctx.tracing.startSpan,
-        setAttributeChained,
-        setAttributesChained,
-      },
+      tracing,
+      listenerExceptions: listenerExceptionsProbe(),
       htmlRewriter: await htmlRewriterProbe(),
       byob: await byobProbe(),
       importMetaPathHelpers: {

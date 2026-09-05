@@ -33,6 +33,7 @@ const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectHasOwn = Object.hasOwn;
 const intrinsicObjectIsPrototypeOf = Object.prototype.isPrototypeOf;
 const intrinsicObjectKeys = Object.keys;
+const intrinsicObjectPropertyIsEnumerable = Object.prototype.propertyIsEnumerable;
 const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicPromiseResolve = Promise.resolve;
 const intrinsicPromiseThen = Promise.prototype.then;
@@ -40,6 +41,7 @@ const intrinsicReflectApply = Reflect.apply;
 const intrinsicReflectDeleteProperty = Reflect.deleteProperty;
 const intrinsicReflectGet = Reflect.get;
 const intrinsicReflectGetPrototypeOf = Reflect.getPrototypeOf;
+const intrinsicReflectOwnKeys = Reflect.ownKeys;
 const intrinsicRegExpTest = RegExp.prototype.test;
 const intrinsicWeakSetAdd = WeakSet.prototype.add;
 const intrinsicWeakSetHas = WeakSet.prototype.has;
@@ -228,6 +230,40 @@ export function objectKeys(record) {
 
 export function objectHasOwn(record, property) {
   return intrinsicReflectApply(intrinsicObjectHasOwn, IntrinsicObject, [record, property]);
+}
+
+export function objectPropertyIsEnumerable(record, property) {
+  return intrinsicReflectApply(intrinsicObjectPropertyIsEnumerable, record, [property]);
+}
+
+export function copyEnumerableOwnDescriptors(source, target) {
+  const properties = intrinsicReflectApply(intrinsicReflectOwnKeys, IntrinsicReflect, [source]);
+  for (let index = 0; index < properties.length; index += 1) {
+    const property = properties[index];
+    if (objectHasOwn(target, property)) continue;
+    const descriptor = intrinsicReflectApply(
+      intrinsicObjectGetOwnPropertyDescriptor,
+      IntrinsicObject,
+      [source, property]
+    );
+    if (descriptor === undefined) continue;
+    intrinsicReflectApply(intrinsicObjectSetPrototypeOf, IntrinsicObject, [descriptor, null]);
+    if (descriptor.enumerable !== true) continue;
+    // Preserve the source receiver without evaluating accessors during copying.
+    const getter = descriptor.get;
+    const setter = descriptor.set;
+    if (typeof getter === "function") {
+      descriptor.get = () => intrinsicReflectApply(getter, source, []);
+    }
+    if (typeof setter === "function") {
+      descriptor.set = (value) => intrinsicReflectApply(setter, source, [value]);
+    }
+    intrinsicReflectApply(intrinsicObjectDefineProperty, IntrinsicObject, [
+      target,
+      property,
+      descriptor,
+    ]);
+  }
 }
 
 export function reflectGet(target, property, receiver) {
@@ -1093,23 +1129,25 @@ const raw = __WdlUserModule__.default;
 let wrappedDefault = raw;
 
 if (raw && typeof raw === "object") {
-  wrappedDefault = { ...raw };
+  wrappedDefault = {};
   const wrapDefaultFunctionKey = (key) => {
     const fn = raw[key];
-    if (typeof fn === "function") {
-      __WdlHostRuntime__.defineDataProperty(
-        wrappedDefault,
-        key,
-        wrapHandler(raw, fn),
-        true,
-        true,
-        true
-      );
-    }
+    const callable = typeof fn === "function";
+    // Snapshot non-functions too; absent handlers must not become enumerable.
+    __WdlHostRuntime__.defineDataProperty(
+      wrappedDefault,
+      key,
+      callable ? wrapHandler(raw, fn) : fn,
+      true,
+      callable || __WdlHostRuntime__.objectPropertyIsEnumerable(raw, key),
+      true
+    );
   };
   __WdlHostRuntime__.forEachArray(HOST_WRAPPED_HANDLER_KEYS, (key) => {
     wrapDefaultFunctionKey(key);
   });
+  // Install handlers first so frozen source descriptors cannot prevent wrapping.
+  __WdlHostRuntime__.copyEnumerableOwnDescriptors(raw, wrappedDefault);
 } else if (typeof raw === "function") {
   const source = __WdlHostRuntime__.functionSource(raw);
   if (__WdlHostRuntime__.regexpTest(/^\\s*class\\b/, source)) {

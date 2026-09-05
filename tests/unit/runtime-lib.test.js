@@ -579,19 +579,22 @@ test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibil
 });
 
 test("bundleToWorkerCode: experimental workerd compatibility flags fail closed", () => {
-  assert.throws(
-    () => bundleToWorkerCode(
-      mkBundle(
-        {
-          mainModule: "w.js",
-          compatibilityFlags: ["nodejs_compat", "unsafe_module"],
-          modules: { "w.js": { type: "module" } },
-        },
-        { "w.js": enc.encode("x") }
-      )
-    ),
-    /meta\.compatibilityFlags contains experimental workerd flag "unsafe_module"/
-  );
+  for (const flag of ["unsafe_module", "auto_inject_python_workers"]) {
+    assert.throws(
+      () => bundleToWorkerCode(
+        mkBundle(
+          {
+            mainModule: "w.js",
+            compatibilityFlags: ["nodejs_compat", flag],
+            modules: { "w.js": { type: "module" } },
+          },
+          { "w.js": enc.encode("x") }
+        )
+      ),
+      (error) => error instanceof Error &&
+        error.message.includes(`meta.compatibilityFlags contains experimental workerd flag "${flag}"`)
+    );
+  }
 });
 
 test("bundleToWorkerCode: WDL-unsupported compatibility flags fail closed", () => {

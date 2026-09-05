@@ -181,6 +181,16 @@ same facade. The host entrypoint itself exposes only `fetch()`. The virtual raw 
 is `https://ai.wdl`; provider aliases, official destinations, Redis shapes, byte/time
 bounds, WebSocket rules, and non-goals are owned by [`ai.md`](ai.md).
 
+Object default exports preserve their other enumerable own properties without evaluating
+unrelated getters. Forwarded getters and setters remain lazy and use the original
+default-export object as their receiver. Host wrappers snapshot `fetch`, `scheduled`,
+`queue`, and `tail` once, including absent or non-function values, so later reads cannot
+re-evaluate those accessors. Other custom function-valued properties are passed through
+without adapting their RPC invocation ABI. Object wrappers do not provide a general
+custom-RPC env facade; class-based `WorkerEntrypoint` methods receive generated binding
+facades through `this.env`. Frozen exports remain supported, and no event routing is
+added.
+
 Generated host-facade wrappers preserve the Worker's importable-env compatibility
 contract. With importable env enabled, tenant modules may retain the imported env proxy
 at module scope and read bindings from that proxy during an invocation. Capturing an
@@ -389,7 +399,9 @@ upstream flags during cold load.
 Runtime emits request logs and metrics for loading, binding operations, AI pool state,
 `redis-proxy` calls, workflow replay cache, loader evictions, and dispatch envelopes. Tail worker
 emits structured stdout for console/exception capture and forwards to `wdl tail` only
-when a matching active tail session exists.
+when a matching active tail session exists. This buffered tail pipeline does not export
+tracing spans; WDL has no streaming-tail span sink. `tail_worker_user_spans` is obsolete
+and would not supply that sink.
 
 KV response admission exposes
 `wdl_kv_read_capacity_events_total{service,outcome}` with fixed outcomes `acquired`,
@@ -419,15 +431,23 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
 - Bundled workerd returns `0` from `Date.now()`, zero-argument `new Date()`, and
   `performance.now()` outside an active request, including dynamic module evaluation.
   Generated wrappers pass through the request-owned
-  `ExecutionContext`, so `ctx.abort(reason?)`, `ctx.tracing.startSpan()`, and span
-  attribute setters are available without a WDL shim. `ctx.abort()` terminates only the
-  current stateless invocation; it is unrelated to host-only `abortIsolate()` eviction.
+  `ExecutionContext`, so `ctx.abort(reason?)`, `ctx.tracing.startSpan()`,
+  `ctx.tracing.getActiveSpan()`, `Span.recordException()`, and span attribute setters
+  are available without a WDL shim. The tracing methods need no additional tracing
+  flag, but their availability does not imply span export. `ctx.abort()` terminates
+  only the current stateless invocation; it is unrelated to host-only `abortIsolate()`
+  eviction.
 - At compatibility date `2026-08-04` or later, workerd enables both `nodejs_compat` and
   `nodejs_compat_v2` by default. A tenant that needs neither surface must specify both
   `no_nodejs_compat` and `no_nodejs_compat_v2`.
 - WDL preserves explicit positive compatibility flags even when the selected date already
   enables them. Workerd 2026-08-25 accepts that redundant spelling because it produces the
   same compiled flag set; WDL does not duplicate upstream's date-to-flag table.
+- `spec_compliant_dispatch_exceptions` is a supported non-experimental explicit
+  opt-in at an earlier valid date. Its date default is `2026-09-15`, beyond the
+  bundled workerd maximum of `2026-09-12`; the calendar does not enable it.
+  WDL static workers use `2026-04-24` without this opt-in. Native autogates remain
+  at their defaults.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
   `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and
   `streams_disable_constructors` deny policy at deploy; runtime rejects retained metadata
@@ -437,11 +457,12 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
   facades. Static host workers omit the irrevocable-stub flag. Disable-style flags such
   as `no_*` are not part of the experimental mirror unless WDL explicitly rejects them
   or upstream marks the enable flag itself experimental.
-- Python Workers modules are not supported. Upstream's `python_workers_20260610` flag is
-  no longer experimental and is no longer implied by date; `python_workers_20260817` is
-  experimental. Control still rejects new `py` module manifests and runtime/do-runtime
-  reject retained metadata that contains them instead of letting workerd bootstrap
-  Pyodide during cold load.
+- Python Workers modules are not supported. Upstream's `python_workers_314` flag is
+  non-experimental and is implied by `python_workers` at compatibility dates on or
+  after `2026-09-08`; `auto_inject_python_workers` is experimental and
+  `python_workers_20260817` is removed. Control rejects new `py` module manifests and
+  runtime/do-runtime reject retained metadata that contains them instead of letting
+  workerd bootstrap Pyodide during cold load.
 - Since WDL's 2026-07-01 workerd pin, runtime processes have used process-level
   `--experimental` because upstream gates `workerLoader` bindings on that switch.
   Do not add the `experimental` compatibility flag or `allowExperimental` to loaded

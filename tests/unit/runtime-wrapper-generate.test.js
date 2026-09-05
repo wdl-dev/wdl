@@ -1146,6 +1146,211 @@ test("generated host wrappers alias legal entrypoint names without declaration c
   }
 });
 
+test("default host wrappers preserve unrelated descriptors without evaluating getters", async () => {
+  const userUrl = moduleDataUrl(`
+    export const marker = Symbol("default export marker");
+    export const reads = { fetch: 0, unrelated: 0 };
+    const raw = {
+      get fetch() {
+        reads.fetch += 1;
+        return function(_request, env) {
+          return { receiverPreserved: this === raw, binding: env.DB.binding };
+        };
+      },
+      get unrelated() {
+        reads.unrelated += 1;
+        throw new Error("unrelated default export getter must not run");
+      },
+      [marker]: "symbol value",
+    };
+    Object.defineProperty(raw, "hidden", { value: "not enumerable" });
+    export default Object.freeze(raw);
+  `);
+  const cloudflareUrl = moduleDataUrl(`
+    export class WorkerEntrypoint {}
+    export function abortIsolate() {}
+    export function withEnv(_env, fn) { return fn(); }
+  `);
+  const d1Url = moduleDataUrl(`
+    export class D1Database {
+      constructor(binding) { this.binding = binding; }
+    }
+  `);
+  const source = applyModuleReplacements(
+    generateHostBindingWrapperModule("worker.js", { d1Bindings: ["DB"] }),
+    [
+      ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
+      ['from "./_wdl-d1-client.js"', `from ${JSON.stringify(d1Url)}`],
+      [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+    ]
+  );
+  const wrapped = await import(moduleDataUrl(source));
+  const user = await import(userUrl);
+  assert.deepEqual(user.reads, { fetch: 1, unrelated: 0 });
+  const unrelated = Object.getOwnPropertyDescriptor(wrapped.default, "unrelated");
+  assert.ok(unrelated);
+  assert.equal(typeof unrelated.get, "function");
+  assert.equal(unrelated.set, undefined);
+  assert.equal(unrelated.enumerable, true);
+  assert.equal(unrelated.configurable, false);
+  assert.deepEqual(
+    Object.getOwnPropertyDescriptor(wrapped.default, user.marker),
+    Object.getOwnPropertyDescriptor(user.default, user.marker)
+  );
+  assert.equal(Object.hasOwn(wrapped.default, "hidden"), false);
+  assert.deepEqual(Object.keys(wrapped.default), ["fetch", "unrelated"]);
+  const binding = { name: "db" };
+  assert.deepEqual(wrapped.default.fetch(null, { DB: binding }, {}), {
+    receiverPreserved: true,
+    binding,
+  });
+  assert.deepEqual(user.reads, { fetch: 1, unrelated: 0 });
+  assert.throws(() => wrapped.default.unrelated, /unrelated default export getter must not run/);
+  assert.deepEqual(user.reads, { fetch: 1, unrelated: 1 });
+});
+
+test("default host wrappers snapshot non-function handlers before descriptor copying", async () => {
+  const userUrl = moduleDataUrl(`
+    export const initial = { fetch: undefined, scheduled: null, queue: false, tail: 0 };
+    export const reads = { fetch: 0, scheduled: 0, queue: 0, tail: 0 };
+    const raw = {};
+    for (const key of Object.keys(initial)) {
+      Object.defineProperty(raw, key, {
+        enumerable: key === "fetch" || key === "scheduled",
+        get() {
+          reads[key] += 1;
+          return reads[key] === 1
+            ? initial[key]
+            : function(_request, env) { return env; };
+        },
+      });
+    }
+    export default raw;
+  `);
+  const cloudflareUrl = moduleDataUrl(`
+    export class WorkerEntrypoint {}
+    export function abortIsolate() {}
+    export function withEnv(_env, fn) { return fn(); }
+  `);
+  const d1Url = moduleDataUrl("export class D1Database {}");
+  const source = applyModuleReplacements(
+    generateHostBindingWrapperModule("worker.js", { d1Bindings: ["DB"] }),
+    [
+      ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
+      ['from "./_wdl-d1-client.js"', `from ${JSON.stringify(d1Url)}`],
+      [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+    ]
+  );
+  const wrapped = await import(moduleDataUrl(source));
+  const user = await import(userUrl);
+  for (const key of Object.keys(user.initial)) {
+    assert.equal(wrapped.default[key], user.initial[key], key);
+    assert.equal(wrapped.default[key], user.initial[key], key);
+    const descriptor = Object.getOwnPropertyDescriptor(wrapped.default, key);
+    assert.ok(descriptor);
+    assert.equal(Object.hasOwn(descriptor, "get"), false);
+    assert.equal(descriptor.value, user.initial[key]);
+  }
+  assert.deepEqual(user.reads, { fetch: 1, scheduled: 1, queue: 1, tail: 1 });
+  assert.deepEqual(Object.keys(wrapped.default), ["fetch", "scheduled"]);
+});
+
+test("default host wrappers preserve lazy accessor receivers", async () => {
+  const userUrl = moduleDataUrl(`
+    const states = new WeakMap();
+    export const calls = { test: 0, inspect: 0, get: 0, set: 0 };
+    function state(receiver) {
+      if (!states.has(receiver)) throw new Error("default export accessor receiver changed");
+      return states.get(receiver);
+    }
+    const raw = {
+      fetch() { return "ok"; },
+      get test() {
+        calls.test += 1;
+        state(this);
+        return undefined;
+      },
+      get inspect() {
+        calls.inspect += 1;
+        const current = state(this);
+        return () => current.value;
+      },
+      get value() {
+        calls.get += 1;
+        return state(this).value;
+      },
+      set value(value) {
+        calls.set += 1;
+        state(this).value = value;
+      },
+    };
+    states.set(raw, { value: 1 });
+    export default Object.freeze(raw);
+  `);
+  const cloudflareUrl = moduleDataUrl(`
+    export class WorkerEntrypoint {}
+    export function abortIsolate() {}
+    export function withEnv(_env, fn) { return fn(); }
+  `);
+  const d1Url = moduleDataUrl("export class D1Database {}");
+  const source = applyModuleReplacements(
+    generateHostBindingWrapperModule("worker.js", { d1Bindings: ["DB"] }),
+    [
+      ['from "cloudflare:workers"', `from ${JSON.stringify(cloudflareUrl)}`],
+      [`from "./${HOST_BINDING_RUNTIME_MODULE_NAME}"`, `from ${JSON.stringify(moduleDataUrl(HOST_BINDING_RUNTIME_TEST_SOURCE))}`],
+      ['from "./_wdl-d1-client.js"', `from ${JSON.stringify(d1Url)}`],
+      [/from "\.\/worker\.js"/g, `from ${JSON.stringify(userUrl)}`],
+    ]
+  );
+  const wrapped = await import(moduleDataUrl(source));
+  const user = await import(userUrl);
+  assert.deepEqual(user.calls, { test: 0, inspect: 0, get: 0, set: 0 });
+  assert.equal(wrapped.default.test, undefined);
+  assert.equal(wrapped.default.inspect(), 1);
+  wrapped.default.value = 2;
+  assert.equal(wrapped.default.value, 2);
+  assert.equal(wrapped.default.inspect(), 2);
+  assert.deepEqual(user.calls, { test: 1, inspect: 2, get: 1, set: 1 });
+  const descriptor = Object.getOwnPropertyDescriptor(wrapped.default, "value");
+  assert.ok(descriptor);
+  assert.equal(descriptor.enumerable, true);
+  assert.equal(descriptor.configurable, false);
+  assert.equal(user.default.value, 2);
+});
+
+test("object default exports pass custom functions through without rewriting calls", async () => {
+  const { wrapped, user } = await loadWorkflowWrapper(`
+    export class Flow {}
+    export let getterReads = 0;
+    function inspect(...args) { return { receiver: this, args }; }
+    const raw = {
+      inspect,
+      api: { inspect },
+      get viaGetter() {
+        getterReads += 1;
+        if (this !== raw) throw new Error("RPC getter receiver changed");
+        return inspect;
+      },
+    };
+    export default Object.freeze(raw);
+  `, { moduleEnv: { CACHE: completeKvBinding() } });
+  assert.equal(user.getterReads, 0);
+  assert.equal(wrapped.default.inspect, user.default.inspect);
+  assert.equal(wrapped.default.api, user.default.api);
+  const extracted = wrapped.default.viaGetter;
+  assert.equal(extracted, user.default.inspect);
+  assert.equal(user.getterReads, 1);
+  const receiver = { name: "caller receiver" };
+  const args = [1, { payload: 2 }, { payload: 3 }, 4, 5];
+  for (const fn of [wrapped.default.inspect, wrapped.default.api.inspect, extracted]) {
+    const result = Reflect.apply(fn, receiver, args);
+    assert.equal(result.receiver, receiver);
+    assert.deepEqual(result.args, args);
+  }
+});
+
 test("default host wrappers reuse stripping work without sharing request-scoped facades", async () => {
   const userUrl = moduleDataUrl(`
     export default {

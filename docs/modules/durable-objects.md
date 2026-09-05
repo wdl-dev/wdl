@@ -140,6 +140,12 @@ case-insensitively. WDL's best-effort `ctx.storage.deleteAll()` skips those name
 so old variants such as `_CF_*` remain inaccessible upgrade debris until the private
 do-runtime facet-deletion owner removes the complete database.
 
+SQLite `DEFAULT` expressions honor workerd's existing function authorization at
+declaration and use, including retained schemas. Defaults using disallowed functions
+such as `sqlite_version()` can fail when used; `CURRENT_TIMESTAMP` remains supported.
+This enforcement is not gated by compatibility date or autogate. WDL performs no
+schema scan or migration for it and provides no legacy authorization bypass.
+
 Pinned stock workerd's native SQLite reset path assumes a root actor while recursively
 deleting child facets, but WDL tenant objects are facets. WDL therefore implements the
 historical `deleteAll()` surface through public storage operations: list/delete KV, drop

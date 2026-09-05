@@ -76,13 +76,53 @@ async function batchError(env) {
   return { error: null, rows: (await env.DB.prepare("select * from batch_items").all()).results };
 }
 
-export default {
+async function sqlDefaults(env) {
+  await resetTable(env.DB,
+    "create table if not exists allowed_defaults (id integer, stamp text default CURRENT_TIMESTAMP, value integer default 7)",
+    "allowed_defaults");
+  await env.DB.prepare("insert into allowed_defaults(id) values (1)").run();
+  const allowed = await env.DB.prepare("select stamp, value from allowed_defaults").first();
+
+  let error = null;
+  try {
+    await env.DB.prepare(
+      "create table blocked_defaults (id integer, value text default (sqlite_version()))"
+    ).run();
+    await env.DB.prepare("insert into blocked_defaults(id) values (1)").run();
+  } catch (err) {
+    error = {
+      name: err.name,
+      code: err.code,
+      category: err.category,
+      retryable: err.retryable,
+    };
+  }
+  const tableExists = await env.DB.prepare(
+    "select count(*) as count from sqlite_master where name = ?"
+  ).bind("blocked_defaults").first("count");
+  const blockedRows = tableExists
+    ? await env.DB.prepare("select count(*) as count from blocked_defaults").first("count")
+    : 0;
+  return { allowed, error, blockedRows };
+}
+
+const worker = {
   async fetch(request, env) {
     const url = new URL(request.url);
     const op = url.searchParams.get("op");
     if (op === "blob") return Response.json(await blobParams(env));
     if (op === "raw") return Response.json(await rawEdges(env));
     if (op === "batch-error") return Response.json(await batchError(env));
+    if (op === "sql-defaults") return Response.json(await sqlDefaults(env));
     return new Response("unknown D1 compat op", { status: 400 });
   },
+  get test() {
+    if (this !== worker) throw new Error("default export accessor receiver changed");
+    return undefined;
+  },
+  get unrelated() {
+    throw new Error("unrelated default export getter evaluated");
+  },
 };
+
+export default Object.freeze(worker);

@@ -346,9 +346,13 @@ test("gateway-proxied Durable Object WebSocket proactively reconnects backend fo
       text: "open",
     });
 
+    // Preserve unsolicited frames while the router health check yields.
+    socket.pause();
     await recreateDoSingleRuntime();
 
-    assert.deepEqual(await readJsonServerFrame(socket, { timeoutMs: 15_000 }), {
+    const reopenedFrame = readJsonServerFrame(socket, { timeoutMs: 15_000 });
+    socket.resume();
+    assert.deepEqual(await reopenedFrame, {
       objectId: "push",
       memory: 1,
       storage: 2,
