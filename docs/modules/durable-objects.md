@@ -183,13 +183,19 @@ DO alarm mutation, dispatch, and tick available.
 Alarm mutation crosses object SQLite and Workflows DB 2 and is intentionally not a
 distributed transaction. A successfully completed `setAlarm()` enters the at-least-once
 delivery contract. Input validation fails before either store is mutated and preserves
-the current alarm. Once backend index mutation begins, a rejected `setAlarm()` has an
-unknown final state; a replacement attempt may also leave the previous alarm unable to
-fire. A caller that still requires an alarm must call `setAlarm()` again. `getAlarm()`
-repair applies only while a SQLite alarm row remains and does not confirm a failed set
-mutation. A rejected `deleteAlarm()` after backend mutation begins is also
-outcome-unknown: token-fenced compensation may restore the SQLite row after the backend
-job was already removed. A caller that still requires deletion must call `deleteAlarm()`
+the current alarm. Backend request setup failures surface
+`do_alarm_backend_unavailable`; a backend 4xx response surfaces
+`do_alarm_backend_failed`; transport rejection, 5xx, or an unreadable or malformed 2xx
+response surfaces `do_alarm_result_unknown`. These tenant-visible errors provide stable
+`status`, `code`, and `message` fields without raw backend details. Caught internal
+exceptions are recorded in do-runtime structured logs. For non-2xx responses, do-runtime
+logs the status and alarm identity, then discards the body. Once backend index mutation
+begins, a rejected `setAlarm()` has an unknown final state; a replacement attempt may also
+leave the previous alarm unable to fire. A caller that still requires an alarm must call
+`setAlarm()` again. `getAlarm()` repair applies only while a SQLite alarm row remains and
+does not confirm a failed set mutation. A rejected `deleteAlarm()` after backend mutation
+begins is also outcome-unknown: token-fenced compensation may restore the SQLite row
+after the backend job was already removed. A caller that still requires deletion must call `deleteAlarm()`
 again. A caller that requires the alarm to remain must call `setAlarm(desiredTime)` again
 and observe success; `getAlarm()` may expose a surviving local time and trigger
 best-effort repair, but neither a timestamp nor `null` confirms backend state. Async
