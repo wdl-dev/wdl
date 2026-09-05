@@ -35,17 +35,24 @@ export class AlarmCounter extends DurableObject {
     const url = new URL(request.url);
     if (url.pathname === "/schedule-blocking") {
       await this.ctx.storage.put("block-once-ms", numberParamOr(url.searchParams, "ms", 300000));
+      await this.ctx.storage.put("start-delay-ms", numberParamOr(url.searchParams, "startDelayMs", 0));
       await this.ctx.storage.setAlarm(Date.now() + 200);
       return Response.json({ pending: typeof (await this.ctx.storage.getAlarm()) === "number" });
     }
-    return Response.json({
+    const progress = {
       started: this.read("started"),
       alarms: this.read("alarms"),
+    };
+    if (url.pathname === "/progress") return Response.json(progress);
+    return Response.json({
+      ...progress,
       pending: await this.ctx.storage.getAlarm(),
     });
   }
 
   async alarm() {
+    const startDelayMs = Number((await this.ctx.storage.get("start-delay-ms")) ?? 0);
+    if (startDelayMs > 0) await sleep(startDelayMs);
     const blockMs = Number((await this.ctx.storage.get("block-once-ms")) ?? 0);
     if (blockMs > 0) {
       await this.ctx.storage.delete("block-once-ms");

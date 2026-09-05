@@ -185,7 +185,8 @@ distributed transaction. A successfully completed `setAlarm()` enters the at-lea
 delivery contract. Input validation fails before either store is mutated and preserves
 the current alarm. Backend request setup failures surface
 `do_alarm_backend_unavailable`; a backend 4xx response surfaces
-`do_alarm_backend_failed`; transport rejection, 5xx, or an unreadable or malformed 2xx
+`do_alarm_backend_failed`, meaning the backend rejected the request before mutating its
+index; transport rejection, 5xx, or an unreadable or malformed 2xx
 response surfaces `do_alarm_result_unknown`. These tenant-visible errors provide stable
 `status`, `code`, and `message` fields without raw backend details. Caught internal
 exceptions are recorded in do-runtime structured logs. For non-2xx responses, do-runtime
@@ -195,10 +196,11 @@ leave the previous alarm unable to fire. A caller that still requires an alarm m
 `setAlarm()` again. `getAlarm()` repair applies only while a SQLite alarm row remains and
 does not confirm a failed set mutation. A rejected `deleteAlarm()` after backend mutation
 begins is also outcome-unknown: token-fenced compensation may restore the SQLite row
-after the backend job was already removed. A caller that still requires deletion must call `deleteAlarm()`
-again. A caller that requires the alarm to remain must call `setAlarm(desiredTime)` again
-and observe success; `getAlarm()` may expose a surviving local time and trigger
-best-effort repair, but neither a timestamp nor `null` confirms backend state. Async
+after the backend job was already removed. A caller that still requires deletion must
+call `deleteAlarm()` again. A caller that requires the alarm to remain must call
+`setAlarm(desiredTime)` again and observe success; `getAlarm()` may expose a surviving
+local time and trigger best-effort repair, but neither a timestamp nor `null` confirms
+backend state. Async
 `ctx.storage.transaction()` commits its local writes before the post-commit backend alarm
 flush. If a transactional `setAlarm()` or `deleteAlarm()` flush rejects, other tenant
 storage writes from the callback remain committed while the alarm row undergoes its

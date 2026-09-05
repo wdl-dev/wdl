@@ -7,6 +7,7 @@ import {
   composeScale,
   delay,
   deployAndPromote,
+  envoyStat,
   gatewayFetch,
   sh,
   serviceInternalPost,
@@ -164,9 +165,10 @@ function waitForDoAlarmAdmission(description) {
 /**
  * @param {string} ns
  * @param {string} name
+ * @param {string} [path]
  */
-async function fetchDoAlarmStatusDuringOwnerRecovery(ns, name) {
-  const status = await gatewayFetch(ns, `/alarms/status?name=${name}`);
+async function fetchDoAlarmStatusDuringOwnerRecovery(ns, name, path = "/status") {
+  const status = await gatewayFetch(ns, `/alarms${path}?name=${name}`);
   const statusText = await status.text();
   if (status.status === 502 || status.status === 503 || status.status === 504) {
     return { transientStatus: status.status, body: statusText };
@@ -1168,8 +1170,15 @@ test("routed DO alarm failures retain the actual owner provenance", async () => 
   });
 });
 
-test("leased DO alarm redelivers after owner task crash before completion", async () => {
+test("leased DO alarm redelivers after owner task crash before completion", async (t) => {
   await withDoMultiRuntimes(async () => {
+    // Establish the full set before testing the three-to-two removal transition.
+    await waitForJson(
+      "DO router observes all three tasks before owner crash",
+      async () => envoyStat("cluster.do_router.membership_total"),
+      (members) => members === 3,
+      10000
+    );
     const ns = uniqueNs("do-alarm-crash");
     await deployAndPromote(ns, "alarms", {
       mainModule: "worker.js",
@@ -1179,12 +1188,20 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
       },
     });
 
-    const scheduled = await gatewayFetch(ns, "/alarms/schedule-blocking?name=crash");
+    const scheduled = await gatewayFetch(ns, "/alarms/schedule-blocking?name=crash&startDelayMs=1500");
     const scheduledText = await scheduled.text();
     assert.equal(scheduled.status, 200, scheduledText);
     assert.deepEqual(responseJson({ body: scheduledText }), { pending: true });
 
     const jobId = doAlarmJobId(ns, "alarms", "AlarmCounter", "crash");
+    // A backend claim does not prove the handler consumed its one-time block.
+    // Observe counters without getAlarm(), whose read-repair mutates the backend.
+    await waitForJson(
+      "DO alarm handler started before owner crash",
+      async () => fetchDoAlarmStatusDuringOwnerRecovery(ns, "crash", "/progress"),
+      (json) => json.started === 1 && json.alarms === 0,
+      20000
+    );
     const claimed = await waitForJson(
       "DO alarm Workflows claim lease",
       async () => redisGetDoAlarmJob(ns, "alarms", "AlarmCounter", "crash"),
@@ -1207,6 +1224,14 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
         stdio: "pipe",
         env: { COMPOSE_PROFILES: "do-multi" },
       });
+      // A stale DNS endpoint can turn the forced redelivery into another unknown
+      // attempt, legitimately parking its claim for the full lease again.
+      await waitForJson(
+        "DO router removes the crashed task",
+        async () => envoyStat("cluster.do_router.membership_total"),
+        (members) => members === 2,
+        10000
+      );
       redisSetDoOwner(ownerKey, { ...owner, leaseExpiresAt: Date.now() - 1000 });
 
       const retryDue = Date.now() - 1000;
@@ -1226,6 +1251,32 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
         (json) => json.started === 1 && json.alarms === 1 && json.pending === null,
         60000
       );
+    } catch (err) {
+      const job = redisGetDoAlarmJob(ns, "alarms", "AlarmCounter", "crash");
+      const currentOwner = redisGetDoOwner(ownerKey);
+      t.diagnostic(JSON.stringify({
+        event: "do_alarm_owner_crash_failure",
+        namespace: ns,
+        killedTask,
+        owner: {
+          taskId: currentOwner?.taskId,
+          generation: currentOwner?.generation,
+          leaseExpiresAt: currentOwner?.leaseExpiresAt,
+        },
+        job: {
+          status: job.status,
+          generation: job.generation,
+          dueAtMs: job.dueAtMs,
+          runLeaseExpiresAtMs: job.runLeaseExpiresAtMs,
+          retryCount: job.retryCount,
+          sameRunToken: job.runToken === claimed.runToken,
+          sameRowToken: job.rowToken === claimed.rowToken,
+        },
+        dueScore: redisDoAlarmDueScore(jobId),
+        ready: redisDoAlarmReadyIncludes(jobId),
+        routerMembers: envoyStat("cluster.do_router.membership_total"),
+      }));
+      throw err;
     } finally {
       composeProfileUp("do-multi", ["--wait", killedTask], { stdio: "pipe" });
     }
