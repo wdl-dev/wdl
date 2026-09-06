@@ -77,6 +77,11 @@ export function composeExec(service, args) {
   return sh(["docker", "compose", "exec", "-T", service, ...args]);
 }
 
+/** @param {string} service @param {string[]} args */
+export function composeRun(service, args) {
+  return sh(["docker", "compose", "run", "--rm", "--no-deps", "-T", service, ...args]);
+}
+
 /** @param {string} service */
 export function composeStop(service) {
   return sh(["docker", "compose", "stop", service]);

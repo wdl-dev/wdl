@@ -21,7 +21,7 @@ export const SLOW_FIRST_FILES = [
   "workflows-runtime-scheduler.test.js",
   "queues-retry-and-delay.test.js",
   "cron-triggers.test.js",
-  "workflows-schema-reset.test.js",
+  "workflows-schema-migration.test.js",
   "queues-orphan-and-control.test.js",
   "queues-delivery.test.js",
   "ai-binding.test.js",

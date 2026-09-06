@@ -2,6 +2,7 @@ mod events;
 mod history;
 mod model;
 mod retry;
+mod schema2;
 mod sleep;
 use serde_json::{Value as JsonValue, json};
 use wdl_rust_common::{redis_eval::StaticRedisScript, time::now_ms};
@@ -28,6 +29,7 @@ use model::{
 };
 pub(crate) use model::{WorkflowStepRequest, read_workflow_step_request};
 pub(crate) use retry::{retry_due_at_ms, retry_policy};
+pub(crate) use schema2::migrate_schema2_steps;
 pub(crate) use sleep::register_sleep;
 
 const STEP_SCRIPT_STALE_CLAIM: i64 = 0;

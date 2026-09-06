@@ -80,10 +80,10 @@ WDL 首先是基础设施项目：operator 运行自己的 platform，tenant 用
 Valkey/Redis 使用明确的逻辑切分：
 
 - Control endpoint 的 DB 0：control metadata、bundle、route、auth、lifecycle、D1/DO owner state 和 workflow definition。
-- Workflows endpoint 的 DB 0：Workflows schema-reset state；只有两个服务共用 endpoint 时才与 Control 位于同一数据库。
+- Workflows endpoint 的 DB 0：Workflows schema-migration state；只有两个服务共用 endpoint 时才与 Control 位于同一数据库。
 - DB 1：data-plane KV、queue stream、delayed queue、orphan stream、log-tail stream。
 - DB 2：workflow instance state、step record、ready/due shard、event、run lease。
-- DB 15：显式 migration pending 期间的 inactive schema-2 Workflow archive。
+- DB 15：inactive schema-2 Workflow archive，迁移后仍保留，直到用户显式删除。
 
 S3-compatible storage 承载 ASSETS 和 R2。D1 和 Durable Object SQLite 文件使用 workerd `localDisk`。在 production-shaped 环境里，这些会映射到 managed 或 provisioned storage；本地 compose 使用 volume 和 `s3mock`。
 

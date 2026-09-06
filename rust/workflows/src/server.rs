@@ -6,13 +6,13 @@ use std::time::Instant;
 use crate::{
     AppState, DispatchSemaphores, LogLevel, Metrics, Redis, SERVICE, ShutdownState, WorkflowError,
     WorkflowResult, check_delete_lifecycle, claim_step, commit_step_error, commit_step_success,
-    config_from_env, create_batch, create_instance, ensure_workflows_schema, get_instance,
-    list_instances, log, pause_instance, read_do_alarm_cleanup_request,
-    read_do_alarm_delete_request, read_do_alarm_set_request, read_lifecycle_check_request,
-    read_replay_step_page, read_workflow_replay_request, read_workflow_request,
-    read_workflow_step_request, register_sleep, register_wait, restart_instance, resume_instance,
-    send_event, status_instance, terminate_instance, tick_workflows, workflow_error_fields,
-    workflow_migration_pending,
+    config_from_env, create_batch, create_instance, ensure_schema_migration_complete,
+    ensure_workflows_schema, get_instance, list_instances, log, pause_instance,
+    read_do_alarm_cleanup_request, read_do_alarm_delete_request, read_do_alarm_set_request,
+    read_lifecycle_check_request, read_replay_step_page, read_workflow_replay_request,
+    read_workflow_request, read_workflow_step_request, register_sleep, register_wait,
+    restart_instance, resume_instance, send_event, status_instance, terminate_instance,
+    tick_workflows, workflow_error_fields,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -340,18 +340,6 @@ fn response_error(response: &Response) -> Option<(&'static str, &str)> {
         .map(|err| (err.code, err.message.as_str()))
 }
 
-fn migration_blocks_route(route: &str) -> bool {
-    !matches!(
-        route,
-        "healthz"
-            | "metrics"
-            | "workflow_tick"
-            | "do_alarm_set"
-            | "do_alarm_delete"
-            | "do_alarm_cleanup_worker"
-    )
-}
-
 async fn track_request(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -373,23 +361,6 @@ async fn track_request(
             request_id.as_deref(),
             started_at,
             Some((INTERNAL_AUTH_FAILURE_CODE, INTERNAL_AUTH_FAILURE_MESSAGE)),
-        );
-        return response;
-    }
-    if state.workflow_migration_pending && migration_blocks_route(route) {
-        let response = WorkflowError::migration_pending(
-            "Workflow state migration from archive DB 15 has not completed",
-        )
-        .into_response();
-        let error = response_error(&response);
-        record_request_complete(
-            &state,
-            method.as_str(),
-            route,
-            response.status(),
-            request_id.as_deref(),
-            started_at,
-            error,
         );
         return response;
     }
@@ -468,12 +439,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         migration_client.get_connection_manager(),
         control_redis_client.get_connection_manager(),
     )?;
-    let workflow_migration_pending = {
+    {
         let migration_redis = Redis::new(migration_conn);
-        workflow_migration_pending(&migration_redis)
+        ensure_schema_migration_complete(&migration_redis)
             .await
-            .map_err(|err| std::io::Error::other(format!("{}: {}", err.code, err.message)))?
-    };
+            .map_err(|err| std::io::Error::other(format!("{}: {}", err.code, err.message)))?;
+    }
     let state = AppState {
         redis: Redis::new(redis_conn),
         control_redis: Redis::new(control_redis_conn),
@@ -495,7 +466,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config: config.clone(),
         instance_id: random_instance_id(),
         run_claim_counter: Arc::new(AtomicU64::new(0)),
-        workflow_migration_pending,
     };
     ensure_workflows_schema(&state)
         .await
@@ -513,7 +483,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "do_alarm_dispatch_concurrency": config.do_alarm_dispatch_concurrency,
             "progress_callback_lookup_concurrency": config.progress_callback_lookup_concurrency,
             "progress_callback_concurrency": config.progress_callback_concurrency,
-            "workflow_migration_pending": workflow_migration_pending,
         }),
     );
 
@@ -636,29 +605,6 @@ mod tests {
             route_name(&Method::GET, "/internal/workflows/tick"),
             "unknown"
         );
-    }
-
-    #[test]
-    fn archive_pending_blocks_workflow_routes_but_not_alarm_tick_or_probes() {
-        for route in [
-            "workflow_create",
-            "workflow_status",
-            "workflow_check_delete",
-            "workflow_claim_step",
-        ] {
-            assert!(migration_blocks_route(route), "{route}");
-        }
-        for route in [
-            "workflow_tick",
-            "do_alarm_set",
-            "do_alarm_delete",
-            "do_alarm_cleanup_worker",
-            "healthz",
-            "metrics",
-        ] {
-            assert!(!migration_blocks_route(route), "{route}");
-        }
-        assert!(migration_blocks_route("unknown"));
     }
 
     #[test]

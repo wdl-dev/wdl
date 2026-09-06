@@ -1,0 +1,38 @@
+{
+  "sourceSchema": "2",
+  "targetSchema": "3",
+  "defaults": {
+    "ordinal": 0,
+    "stepName": "checkpoint",
+    "nameCount": 1,
+    "dependencies": [],
+    "config": "null",
+    "status": "completed",
+    "attempt": 1,
+    "outputRef": null,
+    "errorRef": null,
+    "completedAtMs": 123,
+    "failedAtMs": null,
+    "dueAtMs": null
+  },
+  "cases": [
+    { "id": "do-inline", "kind": "do", "record": { "output": { "saved": true } } },
+    { "id": "do-null", "kind": "do", "record": { "outputRef": "step:0:output" }, "payloads": { "step:0:output": null } },
+    { "id": "do-wait-shaped-config", "kind": "do", "record": { "config": "{\"eventType\":\"approved\",\"timeoutMs\":5000,\"type\":\"waitForEvent\"}", "output": { "saved": true } } },
+    { "id": "do-sleep-shaped-config", "kind": "do", "record": { "config": "{\"durationMs\":5000,\"type\":\"sleep\"}", "outputRef": "step:0:output" }, "payloads": { "step:0:output": null } },
+    { "id": "do-retry", "kind": "do", "record": { "status": "waiting", "completedAtMs": null, "attempt": 2, "dueAtMs": 999, "error": { "message": "retry" } } },
+    { "id": "do-failed-null", "kind": "do", "record": { "status": "failed", "completedAtMs": null, "failedAtMs": 123, "attempt": 3, "errorRef": "step:0:error" }, "payloads": { "step:0:error": null } },
+    { "id": "sleep-completed", "kind": "sleep", "record": { "config": "{\"durationMs\":5000,\"type\":\"sleep\"}", "dueAtMs": 120 } },
+    { "id": "sleep-until-waiting", "kind": "sleepUntil", "record": { "status": "waiting", "completedAtMs": null, "config": "{\"dueAtMs\":999,\"type\":\"sleepUntil\"}", "dueAtMs": 999 } },
+    { "id": "event-waiting", "kind": "waitForEvent", "record": { "status": "waiting", "completedAtMs": null, "config": "{\"eventType\":\"approved\",\"timeoutMs\":null,\"type\":\"waitForEvent\"}" } },
+    { "id": "event-inline", "kind": "waitForEvent", "record": { "config": "{\"eventType\":\"approved\",\"timeoutMs\":5000,\"type\":\"waitForEvent\"}", "output": { "saved": true } }, "payloads": { "event:1": { "saved": true } }, "events": { "1": { "id": "1", "type": "approved", "payloadRef": "event:1", "consumedByOrdinal": 0, "createdAtMs": 100 } } },
+    { "id": "event-null", "kind": "waitForEvent", "record": { "config": "{\"eventType\":\"approved\",\"timeoutMs\":null,\"type\":\"waitForEvent\"}", "outputRef": "step:0:event" }, "payloads": { "event:1": null, "step:0:event": null }, "events": { "1": { "id": "1", "type": "approved", "payloadRef": "event:1", "consumedByOrdinal": 0, "createdAtMs": 100 } } },
+    { "id": "event-timeout", "kind": "waitForEvent", "record": { "config": "{\"eventType\":\"approved\",\"timeoutMs\":5000,\"type\":\"waitForEvent\"}", "outputRef": "step:0:event" }, "payloads": { "step:0:event": null } }
+  ],
+  "rawCases": [
+    { "id": "float-output", "kind": "do", "recordJson": "{\"ordinal\":0,\"stepName\":\"checkpoint\",\"nameCount\":1,\"dependencies\":[],\"config\":\"null\",\"status\":\"completed\",\"attempt\":1,\"outputRef\":null,\"errorRef\":null,\"completedAtMs\":123,\"failedAtMs\":null,\"dueAtMs\":null,\"output\":-5.417765023398954e-10}" },
+    { "id": "float-config", "kind": "do", "recordJson": "{\"ordinal\":0,\"stepName\":\"checkpoint\",\"nameCount\":1,\"dependencies\":[],\"config\":\"{\\\"threshold\\\":-5.417765023398954e-10}\",\"status\":\"completed\",\"attempt\":1,\"outputRef\":null,\"errorRef\":null,\"completedAtMs\":123,\"failedAtMs\":null,\"dueAtMs\":null,\"output\":1}" },
+    { "id": "nested-float-output", "kind": "do", "recordJson": "{\"ordinal\":0,\"stepName\":\"checkpoint\",\"nameCount\":1,\"dependencies\":[],\"config\":\"null\",\"status\":\"completed\",\"attempt\":1,\"outputRef\":null,\"errorRef\":null,\"completedAtMs\":123,\"failedAtMs\":null,\"dueAtMs\":null,\"output\":{\"values\":[-5.417765023398954e-10,-0.0,18446744073709551615,5e-324]}}" },
+    { "id": "float-error", "kind": "do", "recordJson": "{\"ordinal\":0,\"stepName\":\"checkpoint\",\"nameCount\":1,\"dependencies\":[],\"config\":\"null\",\"status\":\"failed\",\"attempt\":1,\"outputRef\":null,\"errorRef\":null,\"completedAtMs\":null,\"failedAtMs\":123,\"dueAtMs\":null,\"error\":{\"value\":-5.417765023398954e-10}}" }
+  ]
+}

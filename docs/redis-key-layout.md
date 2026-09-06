@@ -11,7 +11,7 @@ WDL uses a deliberate logical split:
 - **`DB 0`, control endpoint:** bundles, routes/patterns, auth, AI provider metadata and
   credentials, D1/DO owner state, cron config, queue-consumer config, lifecycle
   metadata, and workflow definitions (`wf:defs:*`).
-- **`DB 0`, Workflows endpoint:** Workflows itself owns only the `wf:schema3-reset`
+- **`DB 0`, Workflows endpoint:** Workflows itself owns only the `wf:schema3-migration`
   operator state there. It is the same logical database as control when both services
   share an endpoint, but a different server when `WORKFLOWS_REDIS_URL` selects a dedicated
   endpoint.
@@ -21,7 +21,7 @@ WDL uses a deliberate logical split:
   ready/due shards, events and event-type indexes, payload refs, retention indexes,
   restart target-version blockers, and run leases.
 - **`DB 15`, inactive Workflow schema archive:** no WDL service selects this database
-  during normal operation. The Workflows-owned schema-3 reset command reserves empty
+  during normal operation. The Workflows-owned schema-3 migration command reserves empty
   DB 15 as the destination of its `SWAPDB 2 15` archive step.
 
 Local compose, Kubernetes, and Terraform enable this split. Rust services and the Rust
@@ -35,27 +35,31 @@ must omit the database or explicitly select DB 2; explicit non-DB2 URLs are reje
 DB 2 must remain dedicated to Workflows
 runtime state and must not share control or data-plane state. The legacy
 `WORKFLOWS_REDIS_DB` setting is accepted only when its value is `2` and should be
-removed from deployment configuration. At normal startup and before schema-reset
+removed from deployment configuration. At normal startup and before schema-migration
 commands connect, Workflows compares the parsed identities of active DB 2 and reserved
 archive DB 15 with `CONTROL_REDIS_URL` and the effective Rust data-plane URL
 (`DATA_REDIS_URL ?? REDIS_URL`); deployments that separate the data plane must pass its
 canonical URL to Workflows for these ownership checks.
 
-DB 15 is not an additional active ownership tier. The reset copies the unchanged
-`wf:internal:do-alarm:*` projection back into schema-3 DB 2 but leaves the complete
-schema-2 archive immutable for a future Workflow-state migration. After all schema-2
+DB 15 is not an additional active ownership tier. Migration converts Workflow history
+and copies unchanged state and `wf:internal:do-alarm:*` projection into schema-3 DB 2,
+leaving the full schema-2 archive immutable. After all schema-2
 writers stop and its two 60-second transient key families drain, the archive has no Redis
 key TTL; logical retention, lease, and due timestamps do not expire keys without the old
 Workflows/Scheduler processes. DB 15 shares the endpoint's memory, persistence, eviction
-policy, and failure domain with DB 2. It remains until a future migration and its
-completeness checks succeed; an external snapshot does not satisfy that exit condition.
-Capacity and eviction-policy fields emitted by the reset command are advisory; the
+policy, and failure domain with DB 2. Successful migration restores normal service
+without deleting DB 15. Only the operator's explicit `--delete-archive` flag removes it
+after verified completion, including via a later no-op `apply`; neither elapsed time nor
+an external snapshot triggers deletion. The DB 0 completion record remains.
+Archive deletion uses `FLUSHDB ASYNC`; logical removal does not imply that physical
+memory has already been reclaimed when the command reports success.
+Capacity and eviction-policy fields emitted by the migration command are advisory; the
 operator decides whether the actual endpoint has sufficient headroom.
 
 ## Workflows Endpoint DB 0 Key
 
 ```text
-wf:schema3-reset                String, Workflows-owned schema reset ownership/migration gate
+wf:schema3-migration            String, Workflows-owned in_progress:<token> / complete
 ```
 
 ## Global Control Keys

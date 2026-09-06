@@ -15,6 +15,15 @@ export function redisCommand(args, options = {}) {
   return composeExec("redis", ["redis-cli", ...dbArgs, ...args]).trim();
 }
 
+/** @param {string} section @param {string} field */
+export function redisInfoInteger(section, field) {
+  const line = redisCommand(["INFO", section]).split(/\r?\n/)
+    .find((value) => value.startsWith(`${field}:`));
+  const value = line == null ? NaN : Number(line.slice(field.length + 1));
+  if (!Number.isSafeInteger(value)) throw new Error(`missing or invalid Redis INFO ${field}`);
+  return value;
+}
+
 /**
  * @param {string} script
  * @param {string[]} keys

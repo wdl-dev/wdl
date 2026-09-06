@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { moduleDataUrl, readRepositoryJson } from "../helpers/load-shared-module.js";
+import { moduleDataUrl } from "../helpers/load-shared-module.js";
 import { compileControlSharedGraph } from "../helpers/load-control-shared.js";
 import {
   createFakeRedis,
@@ -17,9 +17,6 @@ import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 
 const TEST_INTERNAL_AUTH_TOKEN = "test-internal-auth-token";
-const workflowServiceErrors = /** @type {{
- *   migrationPending: { code: string, status: number },
- * }} */ (readRepositoryJson("tests/fixtures/workflow-service-errors.json"));
 
 const sharedRedisUrl = sharedRedisStubUrl(`
   export class RedisClient {}
@@ -689,35 +686,6 @@ test("assertWorkflowDeleteAllowed hides transport diagnostics from response deta
       error_message: "connect ECONNREFUSED workflows",
     },
   });
-});
-
-test("assertWorkflowDeleteAllowed preserves the migration-pending conflict", async (t) => {
-  restoreControlSharedStateAfter(t);
-  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
-  state.workflows = {
-    async fetch() {
-      return Response.json(
-        {
-          error: workflowServiceErrors.migrationPending.code,
-          message: "Workflow state migration from archive DB 15 has not completed",
-        },
-        { status: workflowServiceErrors.migrationPending.status }
-      );
-    },
-  };
-
-  await assert.rejects(
-    () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" }),
-    (err) => {
-      assert.ok(err instanceof ControlAbort);
-      const abort = /** @type {InstanceType<typeof ControlAbort>} */ (err);
-      assert.equal(abort.status, workflowServiceErrors.migrationPending.status);
-      assert.equal(abort.code, workflowServiceErrors.migrationPending.code);
-      assert.equal(abort.details.namespace, "demo");
-      assert.equal(abort.details.worker, "api");
-      return true;
-    }
-  );
 });
 
 test("assertWorkflowDeleteAllowed preserves active workflow blockers", async (t) => {

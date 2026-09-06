@@ -2,7 +2,7 @@ use crate::{AppState, Redis, WorkflowError, WorkflowResult, schema_version_key};
 
 pub(crate) const WORKFLOWS_SCHEMA_VERSION: &str = "3";
 const SCHEMA_RECOVERY_GUIDANCE: &str = "point WORKFLOWS_REDIS_URL at an endpoint with an empty dedicated DB 2, or clear DB 2 only after confirming it is dedicated and disposable";
-const SCHEMA2_RESET_GUIDANCE: &str = "follow the documented quiescence, old-participant drain, and final-release startup order; preserve state with the final release's `/workflows schema3-reset check`, then `apply` or `resume`, or clear dedicated DB 2 instead if all Workflow state and Workflows-owned Durable Object alarm projection there are independently confirmed disposable";
+const SCHEMA2_MIGRATION_GUIDANCE: &str = "follow the documented quiescence, old-participant drain, and final-release startup order; migrate with `/workflows schema3-migrate check`, then `apply` or `resume`; DB 15 is retained unless --delete-archive is explicitly selected after verified completion. Clear dedicated DB 2 instead only if its Workflow state and Workflows-owned Durable Object alarm projection are independently confirmed disposable";
 
 pub(crate) async fn ensure_workflows_schema(state: &AppState) -> WorkflowResult<()> {
     ensure_schema_on(&state.redis).await
@@ -49,7 +49,7 @@ fn validate_installed_schema(version: Option<&str>) -> WorkflowResult<()> {
     match version {
         Some(WORKFLOWS_SCHEMA_VERSION) => Ok(()),
         Some("2") => Err(schema_mismatch(format!(
-            "Workflows DB 2 schema is 2, expected {WORKFLOWS_SCHEMA_VERSION}; {SCHEMA2_RESET_GUIDANCE}"
+            "Workflows DB 2 schema is 2, expected {WORKFLOWS_SCHEMA_VERSION}; {SCHEMA2_MIGRATION_GUIDANCE}"
         ))),
         Some(found) => Err(schema_mismatch(format!(
             "Workflows DB 2 schema is {found}, expected {WORKFLOWS_SCHEMA_VERSION}; {SCHEMA_RECOVERY_GUIDANCE}"
@@ -78,7 +78,7 @@ mod tests {
                 .expect_err("missing or stale schema must fail closed");
             assert_eq!(error.code, "workflow_schema_mismatch");
             if version == Some("2") {
-                assert!(error.message.contains("schema3-reset check"));
+                assert!(error.message.contains("schema3-migrate check"));
                 assert!(error.message.contains("independently confirmed disposable"));
             } else {
                 assert!(error.message.contains(SCHEMA_RECOVERY_GUIDANCE));

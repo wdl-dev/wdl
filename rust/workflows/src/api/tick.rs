@@ -347,18 +347,6 @@ pub(crate) async fn tick_workflows(
     app: &AppState,
     request_id: Option<&str>,
 ) -> WorkflowResult<WorkflowTickResponse> {
-    if app.workflow_migration_pending {
-        let do_alarm_counters = admit_do_alarm_tick(app).await;
-        return Ok(WorkflowTickResponse {
-            workflow_admitted: 0,
-            workflow_capacity_blocked: false,
-            due_moved: 0,
-            retention_cleaned: 0,
-            do_alarm_due_moved: do_alarm_counters.due_moved,
-            do_alarm_admitted: do_alarm_counters.admitted,
-            do_alarm_capacity_blocked: do_alarm_counters.capacity_blocked,
-        });
-    }
     let due_moved = move_due_tokens(app).await?;
     let retention_cleaned = cleanup_retention(app).await?;
     let workflow_admission = admit_ready_members(

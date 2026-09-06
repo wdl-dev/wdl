@@ -18,8 +18,8 @@ pub(crate) use error::*;
 pub(crate) use keys::*;
 pub(crate) use observability::*;
 pub(crate) use schema::*;
-pub(crate) use schema_migration::workflow_migration_pending;
-pub use schema_migration::{Schema3ResetMode, run_schema3_reset};
+pub(crate) use schema_migration::ensure_schema_migration_complete;
+pub use schema_migration::{Schema3MigrationMode, run_schema3_migration};
 pub use server::{healthcheck, run};
 pub(crate) use state::*;
 

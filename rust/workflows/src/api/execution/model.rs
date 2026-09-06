@@ -15,7 +15,7 @@ use super::super::{
 // Keep inline step payloads small so step records stay cheap to replay and
 // summaries/indexes never become a backdoor for large tenant payload storage.
 pub(super) const INLINE_STEP_PAYLOAD_BYTES_MAX: usize = 2 * 1024;
-const MAX_STEP_DEPENDENCIES: usize = 1000;
+pub(super) const MAX_STEP_DEPENDENCIES: usize = 1000;
 pub(super) const STEP_KIND_DO: &str = "do";
 pub(super) const STEP_KIND_SLEEP: &str = "sleep";
 pub(super) const STEP_KIND_SLEEP_UNTIL: &str = "sleepUntil";

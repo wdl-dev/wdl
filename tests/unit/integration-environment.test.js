@@ -38,6 +38,13 @@ test("integration preflight builds the shared image owners", () => {
   assert.deepEqual(DOCKER_COMPOSE_BUILD_ARGS, ["compose", "build", "gateway", "workflows"]);
 });
 
+test("one-off compose commands do not restart stopped services or publish ports", () => {
+  assert.deepEqual(composeHelper.composeRun("workflows", ["/workflows", "schema3-migrate", "check"]), {
+    argv: ["docker", "compose", "run", "--rm", "--no-deps", "-T", "workflows", "/workflows", "schema3-migrate", "check"],
+    opts: {},
+  });
+});
+
 test("compose helpers consume the shared preflight no-build flag", async () => {
   await withMockedProperty(process.env, "WDL_INTEGRATION_NO_BUILD", "1", () => {
     assert.deepEqual(

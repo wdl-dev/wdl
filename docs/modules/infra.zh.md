@@ -84,10 +84,10 @@ AI client source 只由三个 base module owner 嵌入：`runtime/config-user.ca
 Logical DB 切分：
 
 - Control endpoint 的 DB 0：control-plane metadata。
-- Workflows endpoint 的 DB 0：只保存 Workflows-owned schema-reset state。Control 与 Workflows 共用 endpoint 时，它们指向同一个逻辑数据库；`WORKFLOWS_REDIS_URL` 选择专用 endpoint 时，则位于不同服务器。
+- Workflows endpoint 的 DB 0：只保存 Workflows-owned schema-migration state。Control 与 Workflows 共用 endpoint 时，它们指向同一个逻辑数据库；`WORKFLOWS_REDIS_URL` 选择专用 endpoint 时，则位于不同服务器。
 - DB 1：data-plane KV、queue、log-tail streams。
 - DB 2：workflows instance state。
-- DB 15：migration pending 期间的 inactive schema-2 Workflow archive。
+- DB 15：inactive schema-2 Workflow archive，迁移后仍保留到用户显式删除。
 
 Stateful storage：
 

@@ -21,6 +21,7 @@ mod progress;
 mod redis_script;
 mod retention;
 mod routing;
+mod schema2;
 mod sharded_dispatch;
 mod status;
 mod tick;
@@ -35,9 +36,9 @@ pub(crate) use do_alarms::{
 };
 use execution::{StepHistory, read_step_history, workflow_step_options};
 pub(crate) use execution::{
-    claim_step, commit_step_error, commit_step_success, read_replay_step_page,
-    read_workflow_replay_request, read_workflow_step_request, register_sleep, register_wait,
-    send_event,
+    claim_step, commit_step_error, commit_step_success, migrate_schema2_steps,
+    read_replay_step_page, read_workflow_replay_request, read_workflow_step_request,
+    register_sleep, register_wait, send_event,
 };
 #[cfg(test)]
 pub(crate) use identity::validate_instance_id_value;
@@ -86,6 +87,7 @@ use routing::{
     InstanceRouteKeys, bundle_key, parse_ready_token, parse_workflow_referrer_member,
     workflow_referrer_member,
 };
+pub(crate) use schema2::read_schema2_instance;
 use sharded_dispatch::{
     ReadyAdmissionConfig, ReadyAdmissionOutcome, ReadyAdmissionResult, admit_ready_members,
     due_shards_with_due_members, remove_ready_member_if_state_missing,

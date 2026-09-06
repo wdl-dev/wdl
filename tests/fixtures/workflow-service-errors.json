@@ -1,6 +1,0 @@
-{
-  "migrationPending": {
-    "code": "workflow_migration_pending",
-    "status": 409
-  }
-}

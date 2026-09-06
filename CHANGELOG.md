@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added offline `schema3-migrate check|apply|resume` to restore schema-2 Workflow state/history and DO alarm jobs into schema 3 while preserving replay values and identities. Ordinary Workflow APIs and deletion checks resume after verified migration; DB 15 remains archived unless explicitly deleted with `--delete-archive`.
+- **Deployment:** Follow the [schema-3 migration runbook](https://github.com/wdl-dev/wdl/blob/main/docs/modules/workflows.md#deployment--rollout-notes): quiesce affected surfaces, drain old participants, and complete migration before starting final Workflows, Runtime participants, and Scheduler in order. Review shared-Valkey COPY stalls and archive memory costs; never migrate a shared database.
+
 ## wdl.20260905.1 - 2026-09-06
 
 - Updated workerd and Workers types to `1.20260905.1` and `5.20260905.1`, raising the bundled maximum compatibility date from `2026-09-02` to `2026-09-12`. Refreshed experimental flags and documented the existing `spec_compliant_dispatch_exceptions` opt-in; static compatibility dates and autogates remain unchanged. Added active-span lookup and exception recording without span export. Object default exports preserve lazy unrelated accessors with original receivers and snapshot four wrapped handlers once.
@@ -10,7 +13,7 @@
 - Bounded Durable Object alarm responses to 16 KiB with 5-second body deadlines, sanitized mutation failures, and retained ambiguous-result claims until lease expiry; confirmed pre-dispatch failures and settled handler errors retry normally.
 - Reduced Redis head-of-line blocking with two connections per redis-proxy logical pool and shared `TCP_NODELAY`; reduced Base64, secret-buffer, and suppressed logging allocations. Private Rust HTTP clients bypass ambient proxies and reject redirects.
 - **Compatibility:** `no_rpc` is rejected. Retained SQLite defaults using disallowed functions may fail on insertion. Oversized legacy KV metadata fails closed; no DB 1 scan or migration is included.
-- **Deployment:** Follow the [schema-3 runbook](https://github.com/wdl-dev/wdl/blob/wdl.20260905.1/docs/modules/workflows.md#deployment--rollout-notes): quiesce affected surfaces, drain old Scheduler/Workflows, update user-runtime, system-runtime, and do-runtime, then start new Workflows/Scheduler. Dedicated DB 2 supports preservation into empty DB 15 or confirmed-disposable greenfield. Preservation retains DO alarm jobs but gates ordinary Workflows and deletion in `archive_pending`; migration/finalize tooling is not included. Review shared-Valkey COPY stalls and archive memory costs; never reset a shared database.
+- **Deployment:** Follow the [schema-3 runbook](https://github.com/wdl-dev/wdl/blob/134e512e13cc03d3c94a8927d154c36ccc100d3f/docs/modules/workflows.md#deployment--rollout-notes): quiesce affected surfaces, drain old Scheduler/Workflows, update user-runtime, system-runtime, and do-runtime, then start new Workflows/Scheduler. Dedicated DB 2 supports preservation into empty DB 15 or confirmed-disposable greenfield. Preservation retains DO alarm jobs but gates ordinary Workflows and deletion in `archive_pending`; migration/finalize tooling is not included. Review shared-Valkey COPY stalls and archive memory costs; never reset a shared database.
 
 ## wdl.20260826.1 - 2026-08-27
 

@@ -842,21 +842,27 @@ test("Workflow Runtime results and Workflow-owned retryable backend errors share
   }
 });
 
-test("Workflow migration-pending errors share one JS and Rust fixture", () => {
-  const fixture = "tests/fixtures/workflow-service-errors.json";
-  const contract = /** @type {{
-   *   migrationPending: { code?: unknown, status?: unknown },
-   * }} */ (readRepositoryJson(fixture));
-  assert.deepEqual(Object.keys(contract), ["migrationPending"]);
-  assert.deepEqual(Object.keys(contract.migrationPending).sort(), ["code", "status"]);
-  assert.equal(contract.migrationPending.code, "workflow_migration_pending");
-  assert.equal(contract.migrationPending.status, 409);
-  for (const reader of [
-    "tests/unit/control-shared.test.js",
-    "rust/workflows/src/error.rs",
-  ]) {
-    assert.match(readRepoFile(reader), /workflow-service-errors\.json/, reader);
+test("offline Workflow step conversion shares legacy shapes with service integration", () => {
+  const contract = /** @type {{ sourceSchema: string, targetSchema: string, defaults: Record<string, unknown>, cases: Array<{ id: string, kind: string, record: Record<string, unknown> }>, rawCases: Array<{ id: string, kind: string, recordJson: string }> }} */ (
+    readRepositoryJson("tests/fixtures/workflow-schema2-steps.json")
+  );
+  assert.equal(contract.sourceSchema, "2");
+  assert.equal(contract.targetSchema, "3");
+  assert.equal(Object.hasOwn(contract.defaults, "kind"), false);
+  assert.equal(new Set(contract.cases.map((entry) => entry.id)).size, contract.cases.length);
+  assert.deepEqual([...new Set(contract.cases.map((entry) => entry.kind))].sort(), ["do", "sleep", "sleepUntil", "waitForEvent"]);
+  for (const entry of contract.cases) assert.equal(Object.hasOwn(entry.record, "kind"), false);
+  const cases = [...contract.cases, ...contract.rawCases];
+  assert.equal(new Set(cases.map((entry) => entry.id)).size, cases.length);
+  assert.ok(contract.rawCases.length > 0);
+  for (const entry of contract.rawCases) {
+    assert.equal(typeof entry.recordJson, "string");
+    assert.equal(typeof entry.kind, "string");
   }
+  for (const reader of [
+    "rust/workflows/src/api/execution/schema2.rs",
+    "tests/integration/workflows-schema-migration.test.js",
+  ]) assert.match(readRepoFile(reader), /workflow-schema2-steps\.json/, reader);
 });
 
 test("Workflow Runtime run requests share one JS and Rust fixture", () => {
@@ -2830,7 +2836,7 @@ test("workflow instance state is owned by workflows DB2", () => {
     "tests/integration/workflows-runtime-core.test.js",
     "tests/integration/workflows-runtime-scheduler.test.js",
     "tests/integration/workflows-runtime-pausing.test.js",
-    "tests/integration/workflows-schema-reset.test.js",
+    "tests/integration/workflows-schema-migration.test.js",
     "tests/unit/style-contracts.test.js",
     "rust/workflows/src/keys.rs",
     "rust/workflows/src/schema.rs",
@@ -2868,11 +2874,11 @@ test("workflow instance state is owned by workflows DB2", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("workflow schema reset DB0 state has one Workflows owner", () => {
-  const literal = "wf:schema3-reset";
+test("workflow schema migration DB0 state has one Workflows owner", () => {
+  const literal = "wf:schema3-migration";
   const allowed = new Set([
     "rust/workflows/src/keys.rs",
-    "tests/integration/workflows-schema-reset.test.js",
+    "tests/integration/workflows-schema-migration.test.js",
     "tests/unit/style-contracts.test.js",
   ]);
   const files = [
@@ -2890,8 +2896,8 @@ test("workflow schema reset DB0 state has one Workflows owner", () => {
     !allowed.has(file) && withoutLineComments(readRepoFile(file)).includes(literal)
   ));
   assert.deepEqual(offenders, []);
-  assert.match(readRepoFile("rust/workflows/src/schema_migration.rs"), /schema3_reset_key/);
-  assert.match(readRepoFile("rust/workflows/src/server.rs"), /workflow_migration_pending/);
+  assert.match(readRepoFile("rust/workflows/src/schema_migration.rs"), /schema3_migration_key/);
+  assert.match(readRepoFile("rust/workflows/src/server.rs"), /ensure_schema_migration_complete/);
 });
 
 test("host wrapper exposes only binding-scoped DO and Workflow capabilities", () => {

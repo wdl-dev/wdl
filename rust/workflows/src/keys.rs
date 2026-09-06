@@ -10,8 +10,8 @@ pub(crate) fn schema_version_key() -> &'static str {
     "wf:schema_version"
 }
 
-pub(crate) fn schema3_reset_key() -> &'static str {
-    "wf:schema3-reset"
+pub(crate) fn schema3_migration_key() -> &'static str {
+    "wf:schema3-migration"
 }
 
 pub(crate) fn workflow_defs_key(ns: &str, worker: &str) -> String {
