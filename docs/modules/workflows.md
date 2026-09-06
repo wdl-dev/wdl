@@ -335,7 +335,8 @@ Scheduling is hint-based but state-authoritative:
    every authoritative Workflows backend response;
    canonical identity-encoded `Content-Length` responses fill one exact buffer. A direct
    host KV read infrastructure Error that escapes `run()` or a step callback with the
-   same identity reports a retryable dispatch failure. A step callback report is observed
+   same identity reports a retryable dispatch failure only when its recorded source
+   capability belongs to the current Workflow env. A step callback report is observed
    before its error can be committed; catching the rejected `step.do()` in outer `run()`
    cannot convert it back to success. Errors caught inside the relevant boundary and
    converted to a fallback are ordinary Workflow results.

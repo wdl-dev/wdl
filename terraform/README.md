@@ -191,9 +191,16 @@ The default image variables pull public release images from Docker Hub:
 
 Pin immutable release tags or mirror these images into a private registry for
 production. Terraform compares the image reference string, not the digest behind
-a mutable tag. Repushing `:latest` does not roll unchanged services; use
-`aws ecs update-service --force-new-deployment` when intentionally keeping a
-mutable tag.
+a mutable tag. Repushing `:latest` does not roll unchanged services; for
+protocol-compatible updates, use `aws ecs update-service --force-new-deployment`
+when intentionally keeping a mutable tag.
+
+Schema or cross-tier protocol changes require the owning module's maintenance
+procedure. In particular, the
+[Workflow schema-3 runbook](../docs/modules/workflows.md#deployment--rollout-notes)
+requires affected-surface quiescence, old-participant drain, and a coordinated
+state reset and startup sequence. Updating image references or forcing a rolling
+deployment does not perform those steps.
 
 ## Services
 
@@ -225,12 +232,13 @@ The ECS cluster enables both `FARGATE` and `FARGATE_SPOT` capacity providers:
   place overflow according to `od_weight` / `spot_weight`.
 - scheduler, workflows, d1-runtime, and do-runtime run on on-demand Fargate only.
 - All task definitions use ARM64 Linux Fargate-compatible CPU and memory defaults.
-- All seven services use start-before-stop rolling replacement
+- All seven services default to start-before-stop rolling replacement
   (`maximum_percent = 200`, `minimum_healthy_percent = 100`). Fargate can place the
   temporary replacement capacity without waiting for fixed EC2 host headroom.
+  This is for protocol-compatible updates, not the schema-3 maintenance path above.
 - D1/DO hand ownership over through supervisor drain and owner fencing. Scheduler
-  dispatch paths are multi-replica safe, so its default single replica can overlap its
-  replacement without a scheduling gap.
+  dispatch paths are multi-replica safe under compatible protocols, so its default
+  single replica can overlap its replacement without a scheduling gap.
 - D1, DO, and scheduler keep Availability Zone rebalancing disabled. This prevents
   unrelated service rebalancing from relocating stateful owners or the control loop;
   it does not serialize an explicit rolling deployment.
