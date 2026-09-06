@@ -31,7 +31,7 @@
 
 WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary 只能 cold-load 其支持的 `compatibility_date` 对应的 retained Dynamic Worker version；具体说明见 [infra rollout 注意事项](modules/infra.zh.md#部署--rollout-注意事项)。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-09-12`，因此当前无法通过日期选择该默认行为；Control 还限制日期不能晚于当前 UTC 日期。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-09-13`，因此当前无法通过日期选择该默认行为；Control 还限制日期不能晚于当前 UTC 日期。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
 Node.js TLS 行为跟随 bundled workerd binary。从 WDL 的 2026-07-01 workerd pin 开始，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此所有日期的证书 hostname 校验都跟随 bundled workerd 行为。
 
