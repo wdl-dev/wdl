@@ -2,10 +2,13 @@
 
 ## Unreleased
 
+## wdl.20260906.1 - 2026-09-07
+
 - Updated workerd and Workers types to `1.20260906.1` and `5.20260906.1`, advancing the maximum compatibility date to `2026-09-13`; upstream runtime behavior, experimental flags, static dates, and autogates are unchanged.
 - Upgraded Rust to `1.98.1` for the trait-object vtable miscompilation fix and refreshed compatible Rust dependencies.
+- Refreshed the pinned Distroless `base-debian13` runtime image.
 - Added offline `schema3-migrate check|apply|resume` to restore schema-2 Workflow state/history and DO alarm jobs into schema 3 while preserving replay values and identities. Ordinary Workflow APIs and deletion checks resume after verified migration; DB 15 remains archived unless explicitly deleted with `--delete-archive`.
-- **Deployment:** Follow the [schema-3 migration runbook](https://github.com/wdl-dev/wdl/blob/main/docs/modules/workflows.md#deployment--rollout-notes): quiesce affected surfaces, drain old participants, and complete migration before starting final Workflows, Runtime participants, and Scheduler in order. Review shared-Valkey COPY stalls and archive memory costs; never migrate a shared database.
+- **Deployment:** Follow the [schema-3 migration runbook](https://github.com/wdl-dev/wdl/blob/wdl.20260906.1/docs/modules/workflows.md#deployment--rollout-notes): quiesce affected surfaces, drain old participants, and complete migration before starting final Workflows, Runtime participants, and Scheduler in order. Review shared-Valkey COPY stalls and archive memory costs; never migrate a shared database.
 
 ## wdl.20260905.1 - 2026-09-06
 
