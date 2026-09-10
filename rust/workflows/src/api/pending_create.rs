@@ -50,7 +50,7 @@ return 1
 
 static FINALIZE_CREATE_INSTANCE: StaticRedisScript =
     StaticRedisScript::new(FINALIZE_CREATE_INSTANCE_SCRIPT);
-static CLEANUP_PENDING_CREATE: StaticRedisScript =
+pub(super) static CLEANUP_PENDING_CREATE: StaticRedisScript =
     StaticRedisScript::new(CLEANUP_PENDING_CREATE_SCRIPT);
 
 pub(super) fn pending_create_token(state: &AppState, req: &WorkflowRequest, id: &str) -> String {
@@ -173,35 +173,31 @@ pub(super) async fn cleanup_pending_create_identity(
     identity: &InstanceIdentity,
     pending_create_token: &str,
 ) -> WorkflowResult<bool> {
-    let keys = InstanceRouteKeys::new(&identity.ns, &identity.workflow_key, &identity.instance_id);
-    let state_key = keys.state();
-    let payloads_key = keys.payloads();
-    let steps_key = keys.steps();
-    let summaries_key = keys.step_summaries();
-    let summary_index_key = keys.step_summary_index();
-    let events_key = keys.events();
-    let event_index_key = keys.event_type_index();
-    let by_worker = by_worker_key(&identity.ns, &identity.worker);
-    let by_version = by_version_key(&identity.ns, &identity.worker, &identity.frozen_version);
+    let keys = pending_create_cleanup_keys(identity);
     let referrer_member = workflow_referrer_member(&identity.workflow_key, &identity.instance_id);
     let removed: i64 = eval_script(
         state,
         &CLEANUP_PENDING_CREATE,
-        &[
-            &state_key,
-            &payloads_key,
-            &steps_key,
-            &events_key,
-            &summaries_key,
-            &summary_index_key,
-            &event_index_key,
-            &by_worker,
-            &by_version,
-        ],
+        &keys.each_ref().map(String::as_str),
         &[&referrer_member, pending_create_token],
     )
     .await?;
     Ok(removed == 1)
+}
+
+pub(super) fn pending_create_cleanup_keys(identity: &InstanceIdentity) -> [String; 9] {
+    let keys = InstanceRouteKeys::new(&identity.ns, &identity.workflow_key, &identity.instance_id);
+    [
+        keys.state(),
+        keys.payloads(),
+        keys.steps(),
+        keys.events(),
+        keys.step_summaries(),
+        keys.step_summary_index(),
+        keys.event_type_index(),
+        by_worker_key(&identity.ns, &identity.worker),
+        by_version_key(&identity.ns, &identity.worker, &identity.frozen_version),
+    ]
 }
 
 pub(super) struct PendingCreateCleanup {

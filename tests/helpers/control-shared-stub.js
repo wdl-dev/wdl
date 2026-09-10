@@ -23,6 +23,7 @@ const {
 const CONTROL_SHARED_BASE = `
 import { jsonError, jsonResponse, sanitizeJsonErrorDetails } from ${JSON.stringify(SHARED_RESPOND_URL)};
 import { createPostWorkflowsInternal } from ${JSON.stringify(CONTROL_WORKFLOWS_CLIENT_URL)};
+export { WORKFLOWS_INTERNAL_TIMEOUT_MS, readWorkflowInstancesResponse } from ${JSON.stringify(CONTROL_WORKFLOWS_CLIENT_URL)};
 import { ControlAbort, codedErrorLogFields, codedErrorResponse, controlAbortResponse, secretEnvelopeErrorResponse } from ${JSON.stringify(CONTROL_ERRORS_URL)};
 import { runOptimistic, withOptimisticRetries } from ${JSON.stringify(CONTROL_OPTIMISTIC_URL)};
 import { readJsonBody } from ${JSON.stringify(CONTROL_JSON_BODY_URL)};

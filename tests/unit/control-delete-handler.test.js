@@ -697,7 +697,7 @@ test("worker delete reports cleanup_queue_failed when data-plane cleanup enqueue
   );
   assert.deepEqual(testState.lockKinds, ["whole"]);
   assert.deepEqual(testState.workflowChecks, [{
-    ns: "demo", worker: "api", allowCleanup: true, requestId: "rid-delete",
+    ns: "demo", worker: "api", allowCleanup: true, requestId: "rid-delete", lockToken: "lock-token",
   }]);
   assert.deepEqual(testState.doAlarmCleanups, [{
     ns: "demo", worker: "api", doStorageId: "do_old", requestId: "rid-delete",
@@ -1477,6 +1477,7 @@ test("worker delete reports workflow and version referrer blockers together", as
       worker: "api",
       allowCleanup: true,
       requestId: "rid-delete-both-blockers",
+      lockToken: "lock-token",
     }]);
     assert.deepEqual(testState.doAlarmCleanups, []);
     assert.equal(testState.releaseCalls, 1);
@@ -1517,6 +1518,7 @@ test("worker delete keeps DO alarm jobs when version referrers block deletion", 
     worker: "api",
     allowCleanup: true,
     requestId: "rid-delete-version-blocker",
+    lockToken: "lock-token",
   }]);
   assert.deepEqual(testState.doAlarmCleanups, []);
   assert.equal(testState.multiCalls.length, 0);
@@ -1591,6 +1593,7 @@ test("worker delete keeps workflow blocker even when worker lifecycle is already
       worker: "api",
       allowCleanup: true,
       requestId: "rid-delete-workflow-no-lifecycle",
+      lockToken: "lock-token",
     }]);
     assert.equal(testState.releaseCalls, 1);
     assert.deepEqual(testState.cleanupIntents, []);
@@ -1786,7 +1789,7 @@ test("worker delete reports queueHint none when no content cleanup is needed", a
   const body = await readJsonResponse(response, 200);
   assert.equal(body.deleted, true);
   assert.deepEqual(testState.workflowChecks, [{
-    ns: "demo", worker: "api", allowCleanup: true, requestId: "rid-delete-no-cleanup",
+    ns: "demo", worker: "api", allowCleanup: true, requestId: "rid-delete-no-cleanup", lockToken: "lock-token",
   }]);
   assert.deepEqual(testState.doAlarmCleanups, [{
     ns: "demo", worker: "api", doStorageId: "do_old", requestId: "rid-delete-no-cleanup",
@@ -1823,6 +1826,7 @@ test("version delete reports cleanup_queue_failed when data-plane cleanup enqueu
     version: "v1",
     allowCleanup: true,
     requestId: "rid-version-delete",
+    lockToken: "lock-token",
   }]);
   assert.equal(body.assets.queueHint, "failed");
   assert.deepEqual(body.assets.warnings, [{
@@ -2035,6 +2039,7 @@ test("version delete reports queueHint none when no content cleanup is needed", 
     version: "v1",
     allowCleanup: true,
     requestId: "rid-version-delete-no-cleanup",
+    lockToken: "lock-token",
   }]);
   assert.equal(body.assets.queueHint, "none");
   assert.deepEqual(body.assets.warnings, []);

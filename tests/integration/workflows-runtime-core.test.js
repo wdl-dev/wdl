@@ -6,15 +6,21 @@ import {
   KV_READ_INFRASTRUCTURE_ERROR_CODE,
   WORKFLOW_INFRASTRUCTURE_REPORT_ORIGIN,
 } from "../../runtime/infrastructure-error.js";
-import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
-import { prometheusCounter } from "./helpers/prometheus.js";
+import { importSpecifierReplacements, readRepositoryJson, readRepositoryModuleSource } from "../helpers/load-shared-module.js";
+import { redisEval } from "./helpers/redis.js";
+import { sh } from "./helpers/cli.js";
+import { parseCounters, prometheusCounter } from "./helpers/prometheus.js";
 import {
   WORKER_CODE,
+  adminFetch,
+  delay,
   deployAndPromote,
   dispatchWorkflowReplay,
   gatewayFetch,
   gatewayWorkerId,
   redisSMembers,
+  redisDel,
+  redisWorkflowStateHGet,
   redisWorkflowStateHDel,
   redisWorkflowStateHSet,
   redisZAdd,
@@ -30,10 +36,61 @@ import {
   uniqueNs,
   waitUntil,
   workflowEventTypeIndexKey,
+  workflowInstanceStateKey,
   workerMeta,
 } from "./helpers/workflows-scenarios.js";
 
 setupIntegrationSuite();
+
+const REPLAY_CAPACITY_WORKER = readRepositoryModuleSource("test-workers/workflow-replay-capacity/src/index.js");
+
+test("closing a Workflow controller releases a pending replay lease across real JSRPC", async () => {
+  const ns = uniqueNs("wfreplayclose");
+  await deployAndPromote(ns, "root", {
+    code: readRepositoryModuleSource("test-workers/workflow-replay-lifetime/src/root.js"),
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/root/"), 200), { ready: true });
+  const sources = {
+    "workflow-step.js": "runtime/dispatch/workflow-step.js",
+    "workflow-replay-cache.js": "runtime/dispatch/workflow-replay-cache.js",
+    "workflow-json.js": "runtime/dispatch/workflow-json.js",
+    "bounded-body.js": "shared/bounded-body.js",
+    "respond.js": "shared/respond.js",
+    "internal-auth.js": "shared/internal-auth.js",
+    "utf8.js": "shared/utf8.js",
+    "metrics.js": "test-workers/workflow-replay-lifetime/src/metrics.js",
+    "worker.js": "test-workers/workflow-replay-lifetime/src/index.js",
+  };
+  const replacements = importSpecifierReplacements({
+    "runtime-dispatch-workflow-json": "./workflow-json.js",
+    "runtime-dispatch-workflow-replay-cache": "./workflow-replay-cache.js",
+    "runtime-metrics": "./metrics.js",
+    "shared-bounded-body": "./bounded-body.js",
+    "shared-respond": "./respond.js",
+    "shared-internal-auth": "./internal-auth.js",
+    "shared-utf8": "./utf8.js",
+  });
+  await deployAndPromote(ns, "probe", {
+    mainModule: "worker.js",
+    modules: Object.fromEntries(Object.entries(sources).map(([name, source]) => [name, readRepositoryModuleSource(source, replacements)])),
+    bindings: { ROOT: { type: "service", service: "root" } },
+  });
+  for (let iteration = 1; iteration <= 3; iteration += 1) {
+    const response = await readIntegrationJson(await gatewayFetch(ns, "/probe/run"), 503);
+    assert.match(response.rootError, /^root escaped\b/);
+    assert.equal(response.before.bytes, 1024 * 1024);
+    assert.equal(response.after.bytes, 0);
+    assert.equal(response.after.invocations, iteration);
+    assert.equal(response.after.cancellations, iteration);
+  }
+  await delay(2_100);
+  const after = await readIntegrationJson(await gatewayFetch(ns, "/probe/state"), 200);
+  assert.deepEqual(after, { invocations: 3, cancellations: 3, bytes: 0 });
+});
+
+const workflowLimits = /** @type {{ instancesResponseBytesMax: number, resultBytesMax: number }} */ (
+  readRepositoryJson("tests/fixtures/workflow-limits.json")
+);
 
 const WORKFLOW_KV_PROVENANCE_PROBE_CODE = readRepositoryModuleSource(
   "test-workers/workflow-kv-provenance/src/index.js",
@@ -49,6 +106,152 @@ const WORKFLOW_KV_PROVENANCE_PROBE_CODE = readRepositoryModuleSource(
     ],
   ]
 );
+
+test("concurrent large Workflow replay stays admitted and releases detached state", async (t) => {
+  const ns = uniqueNs("wfreplaycap");
+  const version = await deployAndPromote(ns, "shop", {
+    code: REPLAY_CAPACITY_WORKER,
+    bindings: { STATE: { type: "kv", id: "7".repeat(32) } },
+    workflows: [{ name: "capacity", binding: "CAPACITY", className: "ReplayCapacityWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  const metrics = () => serviceInternalGet("user-runtime", 8088, "/_metrics").body;
+  const gauge = (/** @type {string} */ body, /** @type {string} */ name) => {
+    const value = parseCounters(body).get(`wdl_${name}`);
+    assert.ok(typeof value === "number", `missing replay gauge ${name}`);
+    return value;
+  };
+  const saturated = (/** @type {string} */ body) => prometheusCounter(body, "wdl_workflow_replay_cache_total", { outcome: "saturated" });
+  const before = saturated(metrics());
+  const container = sh(["docker", "compose", "ps", "-q", "user-runtime"]).trim();
+  const memory = () => sh(["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container]).trim();
+  t.diagnostic(`Runtime container memory before replay pressure: ${memory()}`);
+  const entries = Array.from({ length: 20 }, (_, index) => ({ instanceId: `capacity-${index}`, params: { id: `capacity-${index}` } }));
+  const created = serviceInternalPost("workflows", 9120, "/internal/workflows/create-batch", {
+    ns, worker: "shop", frozenVersion: version, workflowName: "capacity", workflowKey,
+    className: "ReplayCapacityWorkflow", entries,
+  });
+  assert.equal(created.status, 200, created.body);
+  try {
+    await waitUntil("replay pressure is visible while roots remain active", async () => {
+      const body = metrics();
+      assert.ok(gauge(body, "workflow_replay_working_set_bytes") <= 64 * 1024 * 1024);
+      return saturated(body) > before && gauge(body, "workflow_replay_detached_bytes") > 0;
+    });
+    const body = metrics();
+    assert.ok(gauge(body, "workflow_replay_working_set_high_water_bytes") > 32 * 1024 * 1024);
+    assert.ok(gauge(body, "workflow_replay_working_set_high_water_bytes") <= 64 * 1024 * 1024);
+    t.diagnostic(`Runtime container memory with admitted replay pressure: ${memory()}`);
+  } finally {
+    await readIntegrationJson(await gatewayFetch(ns, "/shop/release"), 200, "release replay roots");
+  }
+  await waitUntil("all replay-capacity instances recover and finish", async () => Number(redisEval(`
+local completed = 0
+for _, key in ipairs(KEYS) do
+  if redis.call('HGET', key, 'status') == 'completed' then completed = completed + 1 end
+end
+return completed`, entries.map((entry) => workflowInstanceStateKey(ns, workflowKey, entry.instanceId)), [], { db: 2 })) === entries.length);
+  for (const entry of entries) {
+    const response = serviceInternalPost("workflows", 9120, "/internal/workflows/status", {
+      ns, worker: "shop", frozenVersion: version, workflowName: "capacity", workflowKey,
+      className: "ReplayCapacityWorkflow", instanceId: entry.instanceId,
+    });
+    assert.equal(response.status, 200, response.body);
+    assert.deepEqual(responseJson(response).output, { id: entry.instanceId, callbacks: 6 });
+  }
+  await waitUntil("replay readers and detached caches are released", async () => {
+    const body = metrics();
+    return gauge(body, "workflow_replay_active_bytes") === 0 && gauge(body, "workflow_replay_detached_bytes") === 0 && gauge(body, "workflow_replay_read_in_flight_bytes") === 0;
+  });
+  assert.ok(gauge(metrics(), "workflow_replay_working_set_bytes") <= 16 * 1024 * 1024);
+  t.diagnostic(`Runtime container memory after replay roots completed: ${memory()}`);
+});
+
+test("workflow instance pages bound payload bytes without skipping an index gap or duplicate ref", async () => {
+  const ns = uniqueNs("wflist");
+  const version = await deployAndPromote(ns, "shop", {
+    code: `
+import { WorkflowEntrypoint } from "cloudflare:workers";
+export class OrderWorkflow extends WorkflowEntrypoint {
+  async run(event) { return "x".repeat(event.payload.bytes); }
+}
+export default { fetch() { return new Response("ok"); } };
+`,
+    workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  const entries = Array.from({ length: 40 }, (_, index) => ({
+    instanceId: `item-${String(index).padStart(2, "0")}`,
+    params: { bytes: index < 12 ? workflowLimits.resultBytesMax - 2 : 16 },
+  }));
+  const created = serviceInternalPost("workflows", 9120, "/internal/workflows/create-batch", {
+    ns, worker: "shop", frozenVersion: version, workflowName: "orders",
+    workflowKey, className: "OrderWorkflow", entries,
+  });
+  assert.equal(created.status, 200, created.body);
+  await waitUntil("all list payload fixtures are durable", async () => {
+    const completed = redisEval(`
+local completed = 0
+for _, key in ipairs(KEYS) do
+  if redis.call('HGET', key, 'status') == 'completed' then completed = completed + 1 end
+end
+return completed`, entries.map((entry) => workflowInstanceStateKey(ns, workflowKey, entry.instanceId)), [], { db: 2 });
+    return Number(completed) === entries.length;
+  });
+
+  // Keep an index gap and a duplicate payload reference across a 32-ref read boundary.
+  redisDel(workflowInstanceStateKey(ns, workflowKey, entries[1].instanceId), { db: 2 });
+  const last = entries.at(-1);
+  assert.ok(last);
+  redisWorkflowStateHSet(ns, workflowKey, last.instanceId, [
+    "errorRef", redisWorkflowStateHGet(ns, workflowKey, last.instanceId, "outputRef"),
+  ]);
+
+  const expected = entries.filter((_, index) => index !== 1);
+  /** @type {string[]} */
+  const seen = [];
+  /** @type {string | null} */
+  let cursor = "";
+  let pages = 0;
+  do {
+    const response = await adminFetch(`/ns/${ns}/workflows/shop/orders/instances?limit=1000&cursor=${cursor}`);
+    const text = await response.text();
+    assert.equal(response.status, 200, text.slice(0, 500));
+    assert.ok(Buffer.byteLength(text) <= workflowLimits.instancesResponseBytesMax);
+    const page = responseJson({ body: text });
+    assert.ok(page.instances.length > 0);
+    for (const instance of page.instances) {
+      const entry = expected[seen.length];
+      assert.equal(instance.id, entry.instanceId);
+      assert.equal(instance.status, "completed");
+      assert.equal(instance.output, "x".repeat(entry.params.bytes));
+      assert.equal(instance.error, entry === last ? instance.output : null);
+      seen.push(instance.id);
+    }
+    if (pages === 0) assert.equal(page.cursor, "8");
+    assert.ok(page.cursor === null || Number(page.cursor) > Number(cursor));
+    cursor = page.cursor;
+    pages += 1;
+    assert.ok(pages <= entries.length);
+  } while (cursor !== null);
+  assert.equal(pages, 2);
+  assert.deepEqual(seen, expected.map((entry) => entry.instanceId));
+
+  const payloadsKey = redisWorkflowStateHGet(ns, workflowKey, last.instanceId, "payloadsKey");
+  const outputRef = redisWorkflowStateHGet(ns, workflowKey, last.instanceId, "outputRef");
+  redisEval(`
+redis.call('HSET', KEYS[1], ARGV[1], '"' .. string.rep('x', tonumber(ARGV[2]) - 1) .. '"')
+return 1`, [payloadsKey], [outputRef, String(workflowLimits.resultBytesMax)], { db: 2 });
+  for (const endpoint of ["get", "status", "instances"]) {
+    const invalid = serviceInternalPost("workflows", 9120, `/internal/workflows/${endpoint}`, {
+      ns, worker: "shop", frozenVersion: version, workflowName: "orders",
+      workflowKey, className: "OrderWorkflow", instanceId: last.instanceId,
+      options: { cursor: "39" },
+    });
+    assert.equal(invalid.status, 500, invalid.body);
+    assert.equal(responseJson(invalid).error, "workflow_invalid_state");
+  }
+});
 
 test("workflow binding creates and reads an instance through workflows", async () => {
   const ns = uniqueNs("wfrt");

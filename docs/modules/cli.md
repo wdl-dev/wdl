@@ -193,7 +193,7 @@ Supported config surfaces:
 | `workers_dev` | `false` opts the worker out of the `<ns>.<platform-domain>/<worker>/` subdomain route while keeping pattern routes active; requires at least one `route`/`routes` entry. Defaults to enabled. |
 | `[triggers] crons` and `[[triggers.schedules]]` | UTC Cloudflare-compatible crons plus WDL timezone extension. |
 | `[[queues.producers]]` and `[[queues.consumers]]` | Producer and consumer metadata. `max_concurrency` is rejected. |
-| `[[workflows]]` | Same-worker Workflows V2 bindings. |
+| `[[workflows]]` | Same-worker Workflow bindings. |
 | `[ai]` | Declares one tenant binding name, for example `binding = "AI"`. Provider metadata and credentials remain namespace resources managed separately through `wdl ai`; they are not embedded in the bundle or inherited into selected environments. |
 
 `[[analytics_engine_datasets]]` is rejected at deploy at both top level and selected-env

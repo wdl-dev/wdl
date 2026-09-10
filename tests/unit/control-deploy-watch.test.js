@@ -14,12 +14,14 @@ import {
 import { createFakeRedisSession, sharedRedisStubUrl } from "../helpers/mocks/fake-redis.js";
 import { readJsonResponse } from "../helpers/response-json.js";
 import { realRuntimeInjectionSourcesUrl } from "../helpers/runtime-injection-sources.js";
+import { workflowDefinitionsUrl, workflowDefinitionRedisEval } from "../helpers/workflow-definitions.js";
 
 const {
   libUrl: controlLibUrl,
   lifecycleIndexesUrl,
   sharedAuthRolesUrl,
 } = await compileControlGraph();
+const { WORKFLOW_DEFINITION_ADMISSION_SCRIPT } = await import(workflowDefinitionsUrl);
 
 /** @type {any} */
 const CONTROL_DEPLOY_TEST_STATE = {
@@ -331,6 +333,7 @@ const { commitWithWatch, handle } = await importControlHandler("control/handlers
   extraSharedSource: controlSharedExtraSource,
   replacements: {
     "control-lib": controlLibUrl,
+    "control-workflow-definitions": workflowDefinitionsUrl,
     "control-lifecycle-indexes": lifecycleIndexesUrl,
     "control-bundle": controlBundleUrl,
     "control-bindings": controlBindingsUrl,
@@ -419,6 +422,7 @@ function makeSession() {
     nowMs: Date.now(),
   };
   const session = createFakeRedisSession(fakeState, {
+    eval: workflowDefinitionRedisEval,
     onExecFailure() {
       state.execFailures = fakeState.execFailures;
       state.strings.set("d1:database-name:tenant-a:main", "d1_new");
@@ -1825,7 +1829,7 @@ test("commitWithWatch assigns stable workflow keys into bundle meta and wf:defs"
   ]);
 });
 
-test("commitWithWatch reads only workflow definitions declared by the new bundle", async () => {
+test("commitWithWatch materializes only declared workflow definitions during quota checks", async () => {
   const duplicateKey = "wf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   /** @type {unknown[][]} */
   const workflowDefReads = [];
@@ -1844,10 +1848,10 @@ test("commitWithWatch reads only workflow definitions declared by the new bundle
     /** @param {(s: ReturnType<typeof makeSession>) => Promise<unknown>} fn */
     async session(fn) {
       const session = makeSession();
-      const hMGet = session.hMGet.bind(session);
-      session.hMGet = async (key, fields) => {
-        workflowDefReads.push([key, [...fields]]);
-        return await hMGet(key, fields);
+      const evaluate = session.eval.bind(session);
+      session.eval = async (script, keys = [], args = []) => {
+        if (script === WORKFLOW_DEFINITION_ADMISSION_SCRIPT) workflowDefReads.push([keys[0], args.slice(2)]);
+        return await evaluate(script, keys, args);
       };
       return await fn(session);
     },

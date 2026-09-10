@@ -14,8 +14,8 @@ under `runtime/dispatch/workflow-*.js`. Control parses workflow metadata and own
 deploy-time workflow definition keys. This module doc is the current workflows design
 reference.
 
-The V2 name distinguishes the current DAG-capable engine from the earlier test-only V1
-engine. New environments should be treated as greenfield schema-3 workflows state.
+New deployments initialize schema 3 in dedicated DB 2. Existing schema-2 state requires
+the offline [migration procedure](#deployment--rollout-notes).
 
 workerd provides the user-code execution environment, `WorkflowEntrypoint` class shape,
 module loading, and the ability for runtime to invoke a workflow class in a frozen
@@ -40,8 +40,24 @@ User-facing:
 Control / CLI:
 
 - `GET /ns/<ns>/workflows` lists workflow definitions and uses `workflow.list`.
+  It accepts `limit` (default 100, maximum 1000) and an opaque `cursor`. A page
+  processes at most 16 workers, at most 16 MiB of source snapshots plus one bounded
+  lookahead, and returns at most 8 MiB of JSON. Results are
+  sorted within the page, not globally across the namespace scan. Follow the
+  cursor until it is `null`, including after empty or short pages. If a route
+  segment or partially returned definition set changes, restart without a cursor
+  after `workflow_metadata_contention`; pagination is not a durable snapshot.
+  Concurrent namespace changes can repeat scan entries across pages; consumers
+  collecting a complete view should deduplicate by worker/name or restart.
 - `GET /ns/<ns>/workflows/<worker>/<workflow>/instances` lists instances and uses
-  `workflow.read`.
+  `workflow.read`. `limit` defaults to 100 and accepts 1-1000; each page is also bounded
+  to 8 MiB of serialized JSON, including output/error payloads and the cursor envelope.
+  A byte-limited page can contain fewer than `limit` instances: continue with the returned
+  `cursor` until it is `null`, not until a short page. The rank cursor counts consumed
+  index entries, including missing/invisible instances, and resumes at the first
+  unreturned instance when the byte budget fills. It does not provide snapshot isolation
+  from concurrent index changes. Payload-ref errors for an instance being read fail
+  closed rather than silently omitting that instance.
 - `GET /ns/<ns>/workflows/<worker>/<workflow>/instances/<id>` returns instance status
   and uses `workflow.read`. Optional query parameters use camelCase only:
   `includeSteps=true|false` includes step records, and `stepLimit=<n>` limits returned
@@ -88,6 +104,21 @@ identity. The hash retains retired names until whole-worker delete. Definition l
 enumerates that retired history for currently active workers; deploy and single-workflow
 status/lifecycle paths read only the names they need.
 
+Each worker may retain at most 1024 definition names and 1 MiB of hash field/value
+bytes. The active declaration array also has a 1 MiB JSON cap, including materialized
+workflow keys. Deploy checks aggregate quota under the existing WATCH before committing;
+only declared definition values are returned to the writer, while bounded size accounting
+includes retired names. Quota rejection uses `workflow_definitions_too_large`.
+Definition-list snapshots check cardinality and byte lengths inside Valkey before
+returning values. The same snapshot atomically checks the worker's expected active
+route and returns the byte total for page accounting; Control does not issue a separate
+per-worker route read or re-encode the returned strings to count them. The final route
+page fingerprint is still rechecked before returning the page.
+Their per-version bundle metadata read budget is 8 MiB; exceeding it
+returns `workflow_listing_metadata_too_large`, not an unbounded read. This is a listing
+budget, not a new size limit on unrelated Worker code. Oversized retained definition
+state fails closed rather than being truncated or silently adopted.
+
 At normal startup and before a schema-migration command connects, Workflows compares the
 parsed database identities of its active DB 2 and reserved archive DB 15 with
 `CONTROL_REDIS_URL` and with the effective Rust data-plane URL
@@ -104,6 +135,18 @@ Key concepts:
   retention indexes, and callbacks live in DB 2.
 - Workflow payloads are JSON data under explicit byte caps. Large application data
   should live in R2/S3/D1/KV and be referenced from workflow payloads.
+- Persisted result refs are checked against the 1 MiB result limit before JSON parsing
+  through the shared reader used by list, get, and status. Oversized stored results are
+  invalid state, not caller input errors. Dispatch and restart params use the shared
+  JSON parser with their own 1 MiB read cap. Restart validates before creating its
+  pending marker or changing instance state and preserves the original JSON bytes.
+- Instance listing reads payload refs in batches of at most 32 and releases each parsed
+  instance after serializing it into the bounded page. It does not retain all selected
+  payload JSON trees or build a second response tree. Control reads the page under the
+  same 8 MiB cap and a five-second backend deadline, then forwards successful JSON bytes
+  without re-encoding them. Oversized, unreadable, or timed-out backend pages fail as
+  `503 workflow_internal_dispatch_failed`; valid backend error codes retain their
+  existing sanitized mapping. This deadline does not change mutation retry semantics.
 - DB 2 keys for one instance share the `{ns:workflowKey:instanceId}` hash tag, but
   workflow state also uses global ready/due/retention keys. Current deployments therefore
   require a single non-cluster Valkey shard (`num_node_groups = 1`) rather than Redis
@@ -140,7 +183,7 @@ Key families:
 
 ## Ownership / Concurrency / Failure Semantics
 
-- Workflows are same-worker only in V2.
+- Workflow bindings target definitions in the same worker.
 - Instances freeze the worker version/class identity they were created with.
 - Control fails closed on malformed active workflow entries and malformed `wf:defs`
   records encountered by an operation; management paths return `corrupt_meta`, while
@@ -150,6 +193,24 @@ Key families:
   historical definitions.
 - Workflows lifecycle checks reject malformed referrer members instead of treating
   them as absent.
+- Lifecycle preflight processes one bounded SSCAN page per backend call: COUNT 128
+  is a hint, and pages above 512 members or 128 KiB of member bytes fail closed before
+  transfer. At most 20 blockers are returned; dry-run treats expired pending creates
+  as blockers without accumulating the whole set. Cleanup immediately applies the
+  existing create-token fence and prunes missing-state referrers with an atomic
+  absence check. Within each 20-member chunk, mutations share one pipeline; only
+  failed mutation slots are reread in a second batch and remain blocking while state
+  exists. Pipelines are not replayed after ambiguous failures.
+  An unfinished scan returns `allowed:false` with an internal cursor; it never
+  authorizes deletion. Control starts at zero, follows only backend cursors, renews
+  the held delete lock before each page, and limits a check to 16 pages / ten seconds
+  with five-second per-call and 64 KiB response bounds. Budget exhaustion returns
+  `workflow_lifecycle_check_incomplete`; retrying deletion preserves completed cleanup.
+  Lock-renewal waits use the same remaining ten-second budget; this is not a deadline
+  for the entire public delete request or for unrelated Redis operations.
+  Public request cursors are not accepted as deletion authorization.
+  Cleanup requires the referrer set to be empty before granting permission, so a
+  cursor traversal interrupted by Redis failover cannot silently skip a live referrer.
 - Scheduler only wakes workflows; workflows owns admission, fairness, shard ticks,
   ready/due movement, and runtime dispatch. Scheduler reads the tick response under a
   64 KiB cap and requires a valid JSON object root; individual missing or unknown fields
@@ -217,9 +278,18 @@ Key families:
   not cached and older caches are evicted under pressure. The
   `workflow_replay_cache_bytes` gauge reports that cross-request retained size and is
   published from the authoritative counters when `/_metrics` renders. Global eviction
-  stops cross-request retention; an in-flight controller keeps a bounded
-  controller-local replay working set so eviction cannot turn replay hits into fresh
-  claims, then releases that detached working set when dispatch ends. A new claim
+  stops cross-request retention; active controllers retain their detached state until
+  release. Retained and detached serialized bytes plus in-flight replay read reservations
+  share a 64 MiB budget per Runtime isolate. Identity response lengths reserve their
+  declared bytes; unknown/compressed responses reserve the 32 MiB reader ceiling, then
+  shrink to actual bytes. The reservation remains until page validation/cache admission
+  finishes. Unused retained caches are reclaimed first; saturation returns retryable
+  `workflow_backend_unavailable`, never an advisory miss or fresh claim. The last
+  controller releases detached state. Controller closure also cancels its pending
+  replay read and synchronously releases that reservation; cleanup does not depend
+  on an async finally running after workerd has ended the request. These are accounted
+  bytes, not an RSS limit.
+  A new claim
   reopens bounded paging so records committed by another isolate remain discoverable.
   Backend replay records are projected to the fields Runtime actually consumes before
   byte accounting and retention, so unconsumed response metadata cannot bypass the
@@ -386,9 +456,10 @@ The step facade implements durable replay:
   run-token, creation-time, lease, and active-status fence. A referenced payload is
   resolved only while that fence remains valid, so restart cannot mix payloads from
   another execution generation into the page.
-- V2 records a durable DAG for `step.do`. The runtime assigns ordinals synchronously in
-  call order, treats completed steps as the current dependency frontier, and stores the
-  frontier on each later step. `Promise.all([step.do(...), step.do(...)])` produces
+- The workflow engine records a durable DAG for `step.do`. Runtime assigns ordinals
+  synchronously in call order, treats completed steps as the current dependency
+  frontier, and stores that frontier on each later step.
+  `Promise.all([step.do(...), step.do(...)])` produces
   sibling nodes with the same parents; a later `step.do` after the join depends on both
   siblings. Dependency scheduling, joins, and cancellation remain expressed by normal
   user-code `await` / `Promise` structure; workflows persists the resulting graph
@@ -461,6 +532,15 @@ best-effort callback and records a dropped outcome; delivery is not transactiona
 
 ## Observability
 
+Runtime publishes `wdl_workflow_replay_active_bytes`,
+`wdl_workflow_replay_detached_bytes`, `wdl_workflow_replay_read_in_flight_bytes`,
+`wdl_workflow_replay_working_set_bytes`, and
+`wdl_workflow_replay_working_set_high_water_bytes`. Working set equals retained
+cache bytes plus detached bytes plus read reservations; active bytes overlap the
+retained/detached views and must not be added again. High-water lasts for the
+process lifetime and is not reset by scraping. Saturation increments
+`wdl_workflow_replay_cache_total{outcome="saturated"}`.
+
 workflows follows the Rust service observability shape: JSON logs, `/_healthz`,
 `/_metrics`, request in-flight tracking, shutdown drain, and bounded labels. Runtime
 emits workflow dispatch, replay cache, payload-limit, and callback outcomes. Workflows
@@ -471,6 +551,16 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 
 ## Deployment / Rollout Notes
 
+- Update clients that consume Workflow definition lists to follow cursors before
+  deploying the paginated Control endpoint. The companion CLI supports `--limit`
+  and `--cursor` for both list commands. During a mixed Control/Workflows rollout,
+  an older Control may conservatively reject deletion on an unfinished lifecycle
+  page; quiesce deletion until both are updated if uninterrupted deletion is needed.
+- The instance-list byte ceiling is a writer-first exception: update Workflows
+  before the Control worker in system-runtime. Existing readers accept shorter
+  pages and the unchanged cursor shape; the bounded reader must not precede the
+  writer that guarantees the response ceiling. This change requires no
+  persisted-state migration.
 - Cross-tier Workflow protocol changes follow the reader-before-writer procedure in the
   [infra rollout notes](infra.md#deployment--rollout-notes). The release changelog names
   the affected services.
@@ -588,8 +678,7 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 
 ## Known Constraints And Non-Goals
 
-- V2 is not full Cloudflare Workflows compatibility.
-- No cross-worker or `script_name` workflows.
+- No `locationHint` placement, cross-worker or `script_name` workflows.
 - WDL's custom binding facade does not expose native workerd
   `WorkflowInstance.delete()` or `Workflow.deleteBatch()`; instance lifecycle remains
   owned by the documented WDL APIs and retention engine.

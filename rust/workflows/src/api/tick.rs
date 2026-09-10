@@ -12,10 +12,10 @@ use crate::{
 use super::do_alarms::DoAlarmAdmissionResult;
 use super::payload::{parse_payload_ref, payload_storage_key_for_ref};
 use super::{
-    InstanceRouteKeys, ReadyAdmissionConfig, ReadyAdmissionOutcome, RunClaim,
-    admit_ready_do_alarms, admit_ready_members, claim_run, eval_script, identity_from_state,
-    log_instance_event, parse_ready_token, release_run_claim, requeue_expired_run_claim,
-    spawn_progress_from_identity,
+    InstanceRouteKeys, MAX_WORKFLOW_PARAMS_BYTES, ReadyAdmissionConfig, ReadyAdmissionOutcome,
+    RunClaim, admit_ready_do_alarms, admit_ready_members, claim_run, eval_script,
+    identity_from_state, log_instance_event, parse_ready_token, release_run_claim,
+    requeue_expired_run_claim, spawn_progress_from_identity,
 };
 
 mod dispatch;
@@ -107,7 +107,10 @@ fn params_from_ready_snapshot(
             "Workflow payload storage key is invalid",
         ));
     }
-    Ok(parse_payload_ref(raw_params, params_ref)?.unwrap_or(JsonValue::Null))
+    Ok(
+        parse_payload_ref(raw_params, params_ref, MAX_WORKFLOW_PARAMS_BYTES)?
+            .unwrap_or(JsonValue::Null),
+    )
 }
 
 async fn read_ready_state_and_params(

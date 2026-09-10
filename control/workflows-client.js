@@ -1,7 +1,36 @@
 import { errorMessage } from "shared-errors";
+import { readBoundedBytes } from "shared-bounded-body";
+import { discardResponseBody } from "shared-respond";
 import { ControlAbort } from "control-errors";
 
 export const WORKFLOWS_INTERNAL_TIMEOUT_MS = 5_000;
+export const MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const WORKFLOW_LIFECYCLE_MAX_PAGES = 16;
+export const WORKFLOW_LIFECYCLE_TIMEOUT_MS = 10_000;
+export const WORKFLOW_LIFECYCLE_RESPONSE_MAX_BYTES = 64 * 1024;
+
+const workflowResponseDecoder = new TextDecoder("utf-8", { fatal: true });
+
+/** @param {Response} response @param {number} maxBytes @param {AbortSignal} [signal] */
+async function readWorkflowResponse(response, maxBytes, signal) {
+  try {
+    const bytes = await readBoundedBytes(response, maxBytes, signal);
+    return { body: JSON.parse(workflowResponseDecoder.decode(bytes)), bytes };
+  } catch (err) {
+    await discardResponseBody(response);
+    throw err;
+  }
+}
+
+/** @param {Response} response @param {AbortSignal} [signal] */
+export async function readWorkflowInstancesResponse(response, signal) {
+  return await readWorkflowResponse(response, MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES, signal);
+}
+
+/** @param {Response} response @param {AbortSignal} [signal] */
+export async function readWorkflowLifecycleResponse(response, signal) {
+  return (await readWorkflowResponse(response, WORKFLOW_LIFECYCLE_RESPONSE_MAX_BYTES, signal)).body;
+}
 
 /**
  * @typedef {{ fetch: typeof fetch }} WorkflowBackend
@@ -47,6 +76,7 @@ export async function postWorkflowsInternalRequest({
     if (typeof requestId === "string" && requestId) {
       requestHeaders.set("x-request-id", requestId);
     }
+    const deadline = timeoutMs === null ? null : Date.now() + timeoutMs;
     const signal = timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs);
     const response = await workflows.fetch(`http://workflows/internal/${endpoint}`, {
       method: "POST",
@@ -54,9 +84,14 @@ export async function postWorkflowsInternalRequest({
       body: JSON.stringify(body),
       ...(signal === undefined ? {} : { signal }),
     });
+    const responseBody = await readBody(response, signal);
+    signal?.throwIfAborted();
+    if (deadline !== null && Date.now() >= deadline) {
+      throw new DOMException("Workflow backend request timed out", "TimeoutError");
+    }
     return {
       response,
-      body: await readBody(response, signal),
+      body: responseBody,
     };
   } catch (err) {
     log?.("error", logEvent, {

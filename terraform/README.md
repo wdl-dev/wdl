@@ -226,6 +226,12 @@ private plus public mesh reach.
 
 ## Capacity
 
+All seven service families expose desired-count inputs, including
+`system_runtime_desired_count` (default `1`). Operators can set every count to `0`
+for full-stop maintenance. Wait for old tasks to stop, apply and converge the
+selected image revisions at zero capacity, then restore capacity separately in
+the release's required startup order.
+
 The ECS cluster enables both `FARGATE` and `FARGATE_SPOT` capacity providers:
 
 - gateway, user-runtime, and system-runtime keep `base = 1` on on-demand Fargate and

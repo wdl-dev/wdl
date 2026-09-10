@@ -124,7 +124,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 | `workers_dev` | `false` 让该 worker 退出 `<ns>.<platform-domain>/<worker>/` subdomain route，同时保留 pattern route；要求至少有一条 `route`/`routes`。默认启用。 |
 | `[triggers] crons` 和 `[[triggers.schedules]]` | Cloudflare-compatible UTC cron 加 WDL timezone extension。 |
 | `[[queues.producers]]` 和 `[[queues.consumers]]` | Producer 和 consumer metadata。`max_concurrency` 被拒绝。 |
-| `[[workflows]]` | Same-worker Workflows V2 binding。 |
+| `[[workflows]]` | Same-worker Workflow binding。 |
 | `[ai]` | 声明一个 tenant binding name，例如 `binding = "AI"`。Provider metadata 和 credential 是由 `wdl ai` 单独管理的 namespace resource，不会进入 bundle，也不会继承到 selected environment。 |
 
 `[[analytics_engine_datasets]]` 在 top level 和 selected-env level 都会被 deploy 拒绝。Unsupported field 不应在暗示 WDL 未实现的平台行为时被静默忽略。

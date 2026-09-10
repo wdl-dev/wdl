@@ -41,6 +41,7 @@
 | `control/shared.js` | Control singletons、auth wrapper、Redis publish helpers、state-bound workflow transport wiring 和共享 lifecycle/delete helpers。Direct `state.*` access 只应在这里或 dispatcher。 |
 | `control/errors.js`、`control/json-body.js`、`control/optimistic.js` | 由 `control/shared.js` re-export 的纯 Control error-response、bounded JSON request-body contract，以及 shared optimistic retry loop 上的 strict `WatchError`/Redis-session adapter。 |
 | `control/workflows-client.js` | timeout 由 caller 显式选择的 Control-to-Workflows internal POST transport；endpoint-specific response interpretation 仍由 caller 持有。 |
+| `control/workflow-definitions.js` | Control listing 与 deploy 共用的 Workflow definition quota、有界 Redis snapshot、route-scan page 和 deploy admission accounting。 |
 | `control/lib.js` | 纯 Control data-shaping：route-to-action classification、key helpers、canonical bundle `__meta__` parsing 和 referrer redaction。 |
 | `control/bundle.js` | Bundle/module normalization、compatibility metadata、vars 和 emitted module manifest construction。 |
 | `control/bindings.js` | 通用 binding validation 和 normalization（包括 singleton AI binding），以及 service/platform parsing、ACL evaluation 和 linker helpers。 |

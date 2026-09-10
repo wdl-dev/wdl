@@ -67,7 +67,7 @@ pub(crate) struct CreateBatchResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ListInstancesResponse {
-    pub(crate) instances: Vec<InstanceResponse>,
+    pub(crate) instances: Vec<Box<serde_json::value::RawValue>>,
     pub(crate) cursor: Option<String>,
 }
 
@@ -79,6 +79,8 @@ pub(crate) struct LifecycleCheckRequest {
     pub(crate) version: Option<String>,
     #[serde(default)]
     pub(crate) allow_cleanup: bool,
+    #[serde(default)]
+    pub(crate) cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -87,6 +89,8 @@ pub(crate) struct LifecycleCheckResponse {
     pub(crate) allowed: bool,
     pub(crate) count: usize,
     pub(crate) blockers: Vec<LifecycleBlocker>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cursor: Option<String>,
 }
 
 #[derive(Serialize)]

@@ -116,6 +116,8 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 
 ## 可观测性
 
+Workflow replay 输出 retained、active、detached、在途 read bytes，以及总 working-set 和进程级 high-water gauges。64 MiB working-set 预算覆盖 retained/detached serialized record 与 replay response reservation，不是 RSS 测量；容量不足沿现有 retryable dispatch failure 路径处理。指标名与视图重叠规则见 [Workflow 可观测性](workflows.zh.md#可观测性)。
+
 Runtime 为 loading、binding operation、AI pool state、`redis-proxy` call、workflow replay cache、loader eviction 和 dispatch envelope 输出日志/metrics。Tail worker 总是为 console/exception capture 输出结构化 stdout；只有匹配的 active tail session 存在时才转发到 `wdl tail`。该 buffered tail pipeline 不导出 tracing span；WDL 没有 streaming-tail span sink。`tail_worker_user_spans` 已废弃，启用它也不会提供该 sink。
 
 KV response admission 暴露 `wdl_kv_read_capacity_events_total{service,outcome}`，固定 outcome 为 `acquired`、`saturated`、`completed`、`deadline` 和 `setup_error`，并暴露当前值 `wdl_kv_read_in_flight_bytes{service}` 及进程生命周期 high-water `wdl_kv_read_in_flight_high_water_bytes{service}` gauge。Scrape 不会重置 high-water；只有 Runtime task 重启才会清零。`completed` 表示 lease 在 deadline 前释放，不表示 value parse 或 binding operation 成功；后者由 binding-operation metrics 拥有。

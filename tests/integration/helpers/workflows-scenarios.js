@@ -14,6 +14,7 @@ import { readMeta } from "./misc.js";
 import {
   redisCommandCalls,
   redisDel,
+  redisEval,
   redisHDel,
   redisHGet,
   redisHSet,
@@ -63,6 +64,42 @@ export const WORKER_CODE = readFileSync(
   new URL("../../../test-workers/workflows-demo/src/index.js", import.meta.url),
   "utf8"
 );
+
+/** @param {string} ns @param {string} worker */
+export function workflowByWorkerKey(ns, worker) {
+  return `wf:by-worker:${ns}:${worker}`;
+}
+
+/** @param {string} ns @param {string} worker @param {string} version */
+export function workflowByVersionKey(ns, worker, version) {
+  return `wf:by-version:${ns}:${worker}:${version}`;
+}
+
+/** @param {string} ns @param {string} worker @param {string} version */
+export function workflowPendingVersionKey(ns, worker, version) {
+  return `wf:pending-version:${ns}:${worker}:${version}`;
+}
+
+
+/** @param {string} ns @param {string} workflowKey @param {string} version @param {number} pending @param {number} stale */
+export function seedWorkflowLifecycleMembers(ns, workflowKey, version, pending, stale) {
+  return redisEval(`
+for i = 1, tonumber(ARGV[4]) do
+  local id = 'pending-' .. i
+  local key = 'wf:instance:{' .. ARGV[1] .. ':' .. ARGV[2] .. ':' .. id .. '}:state'
+  redis.call('HSET', key, 'ns', ARGV[1], 'worker', 'shop', 'workflowKey', ARGV[2],
+    'instanceId', id, 'frozenVersion', ARGV[3], 'workflowName', 'orders',
+    'className', 'OrderWorkflow', 'status', 'pending_create', 'generation', '1',
+    'createdAtMs', '1', 'pendingCreateToken', id, 'pendingExpiresAtMs', '1')
+  redis.call('SADD', KEYS[1], ARGV[2] .. '\\t' .. id)
+  redis.call('SADD', KEYS[2], ARGV[2] .. '\\t' .. id)
+end
+for i = 1, tonumber(ARGV[5]) do
+  redis.call('SADD', KEYS[1], ARGV[2] .. '\\tstale-' .. i)
+end
+return 1`, [workflowByWorkerKey(ns, "shop"), workflowByVersionKey(ns, "shop", version)],
+  [ns, workflowKey, version, String(pending), String(stale)], { db: 2 });
+}
 
 /** @param {string} ns @param {string} worker @param {string} version */
 export function workerMeta(ns, worker, version) {

@@ -202,6 +202,10 @@ Common rules:
   reset on scrape. The shared registry adds the `wdl_` prefix and `_total` counter
   suffix in Prometheus output. `completed` is a lease-lifecycle outcome, not a binding
   success result; binding-operation metrics own success/error classification.
+- Workflow replay separates retained cache, active/detached state, and in-flight read
+  reservations. Its working-set/high-water gauges and `saturated` outcome are defined
+  in [Workflow observability](workflows.md#observability); do not add overlapping active
+  and retained views together or treat accounted bytes as RSS.
 - Rust `request_complete` logs report integer `duration_ms` values so log fields stay
   stable across services; Prometheus duration summaries keep their floating point
   values.

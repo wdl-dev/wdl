@@ -97,7 +97,7 @@ pub(super) async fn read_payload_ref(
                 .await
         })
         .await?;
-    parse_payload_ref(raw, &payload_ref)
+    parse_payload_ref(raw, &payload_ref, MAX_WORKFLOW_RESULT_BYTES)
 }
 
 pub(super) fn canonical_instance_payloads_key(
@@ -129,16 +129,24 @@ pub(super) fn canonical_instance_payloads_key(
 pub(super) fn parse_payload_ref(
     raw: Option<String>,
     payload_ref: &str,
+    max_bytes: usize,
 ) -> WorkflowResult<Option<JsonValue>> {
     let Some(raw) = raw else {
         return Err(WorkflowError::payload_missing(format!(
             "Workflow payload reference {payload_ref} is missing"
         )));
     };
-    let parsed = serde_json::from_str(&raw).map_err(|err| {
-        WorkflowError::invalid_state(format!("Workflow payload is corrupt: {err}"))
-    })?;
-    Ok(Some(parsed))
+    parse_payload_json(&raw, max_bytes).map(Some)
+}
+
+pub(super) fn parse_payload_json(raw: &str, max_bytes: usize) -> WorkflowResult<JsonValue> {
+    if raw.len() > max_bytes {
+        return Err(WorkflowError::invalid_state(format!(
+            "Workflow payload exceeds the {max_bytes} byte limit"
+        )));
+    }
+    serde_json::from_str(raw)
+        .map_err(|err| WorkflowError::invalid_state(format!("Workflow payload is corrupt: {err}")))
 }
 
 pub(super) fn payload_storage_key_for_ref(
@@ -162,10 +170,50 @@ mod tests {
 
     #[test]
     fn payload_ref_missing_fails_closed() {
-        let err =
-            parse_payload_ref(None, "output").expect_err("dangling payload ref should fail closed");
+        let err = parse_payload_ref(None, "output", MAX_WORKFLOW_RESULT_BYTES)
+            .expect_err("dangling payload ref should fail closed");
         assert_eq!(err.code, "workflow_payload_missing");
         assert!(err.message.contains("output"));
+    }
+
+    #[test]
+    fn payload_ref_byte_limit_is_shared_by_result_and_params_readers() {
+        for (field, limit) in [
+            ("output", MAX_WORKFLOW_RESULT_BYTES),
+            ("error", MAX_WORKFLOW_RESULT_BYTES),
+            ("params", MAX_WORKFLOW_PARAMS_BYTES),
+        ] {
+            let value = "x".repeat(limit - 2);
+            let exact = serde_json::to_string(&value).unwrap();
+            assert_eq!(exact.len(), limit);
+            assert_eq!(
+                parse_payload_ref(Some(exact), field, limit).unwrap(),
+                Some(JsonValue::String(value))
+            );
+            let oversized = serde_json::to_string(&"x".repeat(limit - 1)).unwrap();
+            let error = parse_payload_ref(Some(oversized), field, limit).unwrap_err();
+            assert_eq!(error.code, "workflow_invalid_state");
+            assert_eq!(
+                error.message,
+                format!("Workflow payload exceeds the {limit} byte limit")
+            );
+        }
+        let error = parse_payload_ref(Some("not-json".to_string()), "output", 1).unwrap_err();
+        assert_eq!(error.message, "Workflow payload exceeds the 1 byte limit");
+    }
+
+    #[test]
+    fn persisted_payload_json_rejects_corruption_before_reuse() {
+        for raw in ["", "{broken", "null trailing", r#""\ud800""#, "NaN"] {
+            let error = parse_payload_json(raw, MAX_WORKFLOW_PARAMS_BYTES).unwrap_err();
+            assert_eq!(error.code, "workflow_invalid_state");
+            assert_eq!(
+                parse_payload_ref(Some(raw.to_string()), "params", MAX_WORKFLOW_PARAMS_BYTES)
+                    .unwrap_err()
+                    .message,
+                error.message,
+            );
+        }
     }
 
     #[test]

@@ -340,7 +340,7 @@ async function executeWholeDelete({ redis, ns, name, principal, requestId, log, 
     assertActiveVersionRetained(collected);
     let workflowBlocker = null;
     try {
-      await assertWorkflowDeleteAllowed({ ns, worker: name, allowCleanup: true, requestId });
+      await assertWorkflowDeleteAllowed({ ns, worker: name, allowCleanup: true, requestId, lockToken });
     } catch (err) {
       if (err instanceof ControlAbort && err.code === "workflow_instances_active") {
         workflowBlocker = err;

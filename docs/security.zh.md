@@ -82,7 +82,7 @@ Auth token 是 bearer token。Auth 在 Redis 中保存 token record 和 token ha
 - `ns` role 绑定 tenant namespace。
 - `platform` 和 `platform-observer` role 绑定 platform-tier reserved namespace。
 - `token-issuer` 不绑定 namespace；除 `/whoami` self-introspection 外，它唯一 non-diagnostic action 是 `auth.delegated_token.issue`。它不能 direct issue token、list/revoke token 或访问 tenant resource。Delegated issue 返回短期 credential；namespace resource lifecycle 不属于 auth token lifecycle。
-- Delegated namespace safety 假设常规 namespace-scoped 写操作使用 namespace-bound credential。Full-plane unbound credential 目前仍能执行 namespace-scoped 写，而且 active worker gate 清空后这些写可能不留下 auth-visible namespace fact；这是 V1 接受的 residual risk，直到存在持久 namespace fact index。
+- Delegated namespace safety 假设常规 namespace-scoped 写操作使用 namespace-bound credential。Full-plane unbound credential 目前仍能执行 namespace-scoped 写，而且 active worker gate 清空后这些写可能不留下 auth-visible namespace fact；这是已接受的 residual risk，直到存在持久 namespace fact index。
 - Platform 跨 namespace 可见性必须同时满足 role kind 和绑定 namespace 的 platform-tier 规则；不要用 route-name check 替代。
 
 Control handler 不应从 URL prefix 自己推断权限。应使用 `parseControlRoute()` action classification 和 auth verify。

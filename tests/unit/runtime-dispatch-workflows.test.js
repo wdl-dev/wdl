@@ -1763,6 +1763,81 @@ test("handleWorkflowRunDispatch does not replay a completed sleep as step.do", a
   ]);
 });
 
+test("step controller synchronously releases and cancels pending replay reads on closure", async () => {
+  const reading = Promise.withResolvers();
+  let cancelled = false;
+  let callbacks = 0;
+  /** @type {string[]} */
+  const calls = [];
+  const controller = createStepController({
+    ns: "demo", worker: "shop", frozenVersion: "v1", workflowName: "orders",
+    workflowKey: "wf_pending_read", className: "OrderWorkflow", instanceId: "pending",
+    generation: 1, runToken: "run-1", createdAtMs: 1, dispatchDeadlineMs: Date.now() + 60_000,
+  }, {
+    async fetch(/** @type {string} */ url) {
+      calls.push(url);
+      return new Response(new ReadableStream({
+        pull() { reading.resolve(undefined); },
+        cancel() { cancelled = true; },
+      }, { highWaterMark: 0 }), { headers: { "content-length": String(1024 * 1024) } });
+    },
+  });
+  const pending = controller.facade.do("pending", async () => { callbacks += 1; });
+  const rejection = assert.rejects(pending, (error) => error instanceof Error && error.name === "workflow_invalid_step");
+  await reading.promise;
+  const probe = runtimeDispatchWorkflowReplayCache.createWorkflowReplayReadLease();
+  const max = runtimeDispatchWorkflowReplayCache.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES;
+  try {
+    assert.throws(() => probe.reserve(max), runtimeDispatchWorkflowReplayCache.WorkflowReplayCapacityError);
+    controller.closeForRunReturn();
+    assert.equal(cancelled, true);
+    assert.doesNotThrow(() => probe.reserve(max), "release must not wait for the read finally");
+    controller.closeForRunReturn();
+    await rejection;
+    assert.equal(callbacks, 0);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].endsWith("/replay-steps"));
+  } finally {
+    controller.closeForRunReturn();
+    probe.release();
+  }
+});
+
+test("replay capacity pressure is retryable without a fresh claim and recovers after release", async () => {
+  const capacity = runtimeDispatchWorkflowReplayCache.createWorkflowReplayReadLease();
+  capacity.reserve(runtimeDispatchWorkflowReplayCache.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES);
+  let callbackCalls = 0;
+  const run = {
+    ns: "demo", worker: "shop", frozenVersion: "v1", workflowName: "orders",
+    workflowKey: "wf_capacity", className: "OrderWorkflow", instanceId: "capacity",
+    generation: 1, createdAtMs: 12345, runToken: "run-1", event: { payload: {} },
+  };
+  const backend = makeWorkflowBackend(async () => {
+    throw new Error("capacity refusal must not call claim or commit");
+  }, {
+    replayPage: () => ({
+      steps: [{ ordinal: 0, name: "cached", nameCount: 1, dependencies: [], kind: "do", config: "null", status: "completed", output: "stored" }],
+      nextOrdinal: 1, done: true,
+    }),
+  });
+  const stub = makeStub({ entrypoints: { OrderWorkflow: {
+    async run(/** @type {unknown} */ _event, /** @type {any} */ step) {
+      return await step.do("cached", async () => { callbackCalls += 1; return "fresh"; });
+    },
+  } } });
+  try {
+    const failed = await handleWorkflowRunDispatch({ run, scope: makeScope(), env: workflowEnv(backend), stub });
+    assert.equal((await readJsonResponse(failed, 503)).error, "workflow_backend_unavailable");
+  } finally {
+    capacity.release();
+  }
+  const completed = await handleWorkflowRunDispatch({ run: { ...run, runToken: "run-2" }, scope: makeScope(), env: workflowEnv(backend), stub });
+  assert.equal((await readJsonResponse(completed, 200)).output, "stored");
+  assert.equal(callbackCalls, 0);
+  assert.equal(backend.calls.length, 2);
+  assert.ok(backend.calls.every((call) => call.url.endsWith("/replay-steps")));
+});
+
 test("handleWorkflowRunDispatch keeps an evicted in-flight replay page locally usable", async () => {
   const scope = makeScope();
   const stepCount = 40;

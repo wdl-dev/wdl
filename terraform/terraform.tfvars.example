@@ -23,6 +23,10 @@ alb_security_group_id  = "sg-xxxxxxxxxxxxxxxxx"
 d1_test_hooks_enabled = false
 do_prevent_eviction   = true
 
+# Defaults to one; set to zero alongside the other service counts for full-stop
+# maintenance, then restore it before reopening control-plane traffic.
+system_runtime_desired_count = 1
+
 # Stateless gateway/user-runtime/system-runtime keep at least one on-demand
 # Fargate task and place overflow according to these weights. Stateful runtimes,
 # scheduler, and workflows stay on on-demand Fargate.

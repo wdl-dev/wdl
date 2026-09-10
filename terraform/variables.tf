@@ -149,6 +149,11 @@ variable "runtime_desired_count" {
   default = 2
 }
 
+variable "system_runtime_desired_count" {
+  type    = number
+  default = 1
+}
+
 variable "d1_runtime_desired_count" {
   type    = number
   default = 2

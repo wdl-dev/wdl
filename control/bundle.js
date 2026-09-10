@@ -20,6 +20,7 @@ import {
 } from "shared-workerd-compat-flags";
 import { normalizeBindings, validateBindings } from "control-bindings";
 import { parseWorkerdDependencyVersion } from "control-lib";
+import { WORKFLOW_DEFINITIONS_MAX_COUNT, workflowDeclarationsFit } from "control-workflow-definitions";
 import { assertCanonicalBase64 } from "base64.js";
 import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
 
@@ -196,6 +197,9 @@ export function normalizeWorkflows(workflows) {
   if (!Array.isArray(workflows)) {
     throw new Error("workflows must be an array of entries");
   }
+  if (workflows.length > WORKFLOW_DEFINITIONS_MAX_COUNT) {
+    throw new BundleConfigError(413, "workflow_definitions_too_large", "Workflow declaration count exceeds the per-worker limit");
+  }
   const out = [];
   const seenNames = new Set();
   const seenBindings = new Set();
@@ -207,7 +211,7 @@ export function normalizeWorkflows(workflows) {
       throw new BundleConfigError(
         400,
         "workflow_script_name_unsupported",
-        "workflows script_name is not supported in WDL Workflows V2"
+        "workflows script_name is not supported in WDL Workflows"
       );
     }
     if (typeof entry.name !== "string" || !WORKFLOW_NAME_RE.test(entry.name)) {
@@ -255,6 +259,9 @@ export function normalizeWorkflows(workflows) {
       );
     }
     out.push({ name: entry.name, binding: entry.binding, className });
+  }
+  if (!workflowDeclarationsFit(out)) {
+    throw new BundleConfigError(413, "workflow_definitions_too_large", "Workflow declarations exceed the per-worker byte limit");
   }
   return out;
 }

@@ -11,8 +11,10 @@ import {
 } from "runtime-dispatch-workflow-json";
 import {
   WORKFLOW_REPLAY_PAGE_SIZE,
+  WorkflowReplayCapacityError,
   acquireWorkflowReplayCache,
   canonicalJson,
+  createWorkflowReplayReadLease,
   readWorkflowReplayStepOutput,
   recordWorkflowReplayCacheOutcome,
   releaseWorkflowReplayCache,
@@ -38,6 +40,7 @@ import {
  * @typedef {{ ordinal: number, stepName: string, nameCount: number, dependencies: number[], kind: WorkflowStepKind, config: unknown }} StepIdentity
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayStepRecord} WorkflowReplayStepRecord
  * @typedef {import("runtime-dispatch-workflow-replay-cache").WorkflowReplayCache} WorkflowReplayCache
+ * @typedef {ReturnType<typeof createWorkflowReplayReadLease>} WorkflowReplayReadLease
  */
 
 const intrinsicObjectHasOwn = Object.hasOwn;
@@ -275,16 +278,18 @@ function workflowBackendExpectedBytes(response) {
  * @param {string | null} requestId
  * @param {number} deadlineMs
  * @param {() => AbortSignal} deadlineSignal
+ * @param {WorkflowReplayReadLease} [replayLease]
  * @returns {Promise<Record<string, unknown>>}
  */
-async function workflowBackendCall(backend, path, body, requestId, deadlineMs, deadlineSignal) {
+async function workflowBackendCall(backend, path, body, requestId, deadlineMs, deadlineSignal, replayLease) {
   return await workflowBackendRequest(
     backend,
     path,
     workflowBackendBody(path, body),
     requestId,
     deadlineMs,
-    deadlineSignal
+    deadlineSignal,
+    replayLease
   );
 }
 
@@ -295,6 +300,7 @@ async function workflowBackendCall(backend, path, body, requestId, deadlineMs, d
  * @param {string | null} requestId
  * @param {number} deadlineMs
  * @param {() => AbortSignal} deadlineSignal
+ * @param {WorkflowReplayReadLease} [replayLease]
  * @returns {Promise<Record<string, unknown>>}
  */
 async function workflowBackendRequest(
@@ -303,7 +309,8 @@ async function workflowBackendRequest(
   body,
   requestId,
   deadlineMs,
-  deadlineSignal
+  deadlineSignal,
+  replayLease
 ) {
   if (!backend || typeof backend.fetch !== "function") {
     throw workflowInfrastructureError("Workflow backend binding is not configured");
@@ -340,6 +347,7 @@ async function workflowBackendRequest(
   let parsed;
   try {
     const expectedBytes = workflowBackendExpectedBytes(response);
+    replayLease?.reserve(Math.min(expectedBytes ?? WORKFLOW_BACKEND_RESPONSE_MAX_BYTES, WORKFLOW_BACKEND_RESPONSE_MAX_BYTES));
     const bytes = expectedBytes !== null && response.body
       ? await readBoundedStreamBytes(
         response.body,
@@ -353,9 +361,11 @@ async function workflowBackendRequest(
         WORKFLOW_BACKEND_RESPONSE_MAX_BYTES,
         signal
       );
+    replayLease?.reserve(bytes.byteLength);
     parsed = JSON.parse(strictUtf8Decoder.decode(bytes));
   } catch (err) {
     void discardResponseBody(response);
+    if (err instanceof WorkflowReplayCapacityError) throw err;
     throw workflowInfrastructureError(
       `Workflow backend ${path} response failed with HTTP ${response.status}: ${workflowError(err).message}`
     );
@@ -401,15 +411,17 @@ async function workflowBackendRequest(
  * @param {number} ordinal
  * @param {string | null} requestId
  * @param {() => AbortSignal} deadlineSignal
+ * @param {WorkflowReplayReadLease} lease
  */
-async function fetchReplayStepPage(backend, run, cache, ordinal, requestId, deadlineSignal) {
+async function fetchReplayStepPage(backend, run, cache, ordinal, requestId, deadlineSignal, lease) {
   while (!cache.complete && ordinal >= cache.nextOrdinal) {
     const startOrdinal = cache.nextOrdinal;
     const page = await workflowBackendCall(backend, "replay-steps", {
       ...workflowReplayIdentity(run),
       startOrdinal,
       limit: WORKFLOW_REPLAY_PAGE_SIZE,
-    }, requestId, run.dispatchDeadlineMs, deadlineSignal);
+    }, requestId, run.dispatchDeadlineMs, deadlineSignal, lease);
+    deadlineSignal().throwIfAborted();
     const steps = Array.isArray(page?.steps) ? page.steps : [];
     const nextOrdinal = typeof page?.nextOrdinal === "number" && Number.isInteger(page.nextOrdinal)
       ? page.nextOrdinal
@@ -425,6 +437,7 @@ async function fetchReplayStepPage(backend, run, cache, ordinal, requestId, dead
     }
     cache.nextOrdinal = Math.max(cache.nextOrdinal, nextOrdinal);
     if (page?.done || steps.length === 0) cache.complete = true;
+    lease.reserve(0);
   }
 }
 
@@ -462,6 +475,8 @@ export function createStepController(
   const activeStepRecords = new Set();
   /** @type {Promise<void> | null} */
   let replayFetchPromise = null;
+  /** @type {{ controller: AbortController, lease: WorkflowReplayReadLease } | null} */
+  let replayRead = null;
   /** @type {AbortSignal | null} */
   let backendDeadlineSignal = null;
 
@@ -724,15 +739,20 @@ export function createStepController(
    * @param {Record<string, unknown>} record
    */
   const cacheStep = (identity, record) => {
-    rememberWorkflowReplayStep(replayCache, identity.ordinal, {
-      ordinal: identity.ordinal,
-      name: identity.stepName,
-      nameCount: identity.nameCount,
-      dependencies: identity.dependencies,
-      kind: identity.kind,
-      config: canonicalJson(identity.config),
-      ...record,
-    });
+    try {
+      rememberWorkflowReplayStep(replayCache, identity.ordinal, {
+        ordinal: identity.ordinal,
+        name: identity.stepName,
+        nameCount: identity.nameCount,
+        dependencies: identity.dependencies,
+        kind: identity.kind,
+        config: canonicalJson(identity.config),
+        ...record,
+      });
+    } catch (err) {
+      if (err instanceof WorkflowReplayCapacityError) throw workflowInfrastructureError(err.message);
+      throw err;
+    }
     if (identity.ordinal === replayCache.nextOrdinal) replayCache.nextOrdinal += 1;
   };
 
@@ -743,17 +763,26 @@ export function createStepController(
       replayCache.complete = false;
     }
     while (!replayCache.complete && targetOrdinal >= replayCache.nextOrdinal) {
-      replayFetchPromise ??= fetchReplayStepPage(
-        backend,
-        run,
-        replayCache,
-        targetOrdinal,
-        requestId,
-        getBackendDeadlineSignal
-      )
-        .finally(() => {
+      assertRunStillOpen();
+      if (replayFetchPromise === null) {
+        const controller = new AbortController();
+        const signal = AbortSignal.any([getBackendDeadlineSignal(), controller.signal]);
+        const read = { controller, lease: createWorkflowReplayReadLease() };
+        replayRead = read;
+        replayFetchPromise = fetchReplayStepPage(
+          backend,
+          run,
+          replayCache,
+          targetOrdinal,
+          requestId,
+          () => signal,
+          read.lease
+        ).finally(() => {
+          read.lease.release();
+          if (replayRead === read) replayRead = null;
           replayFetchPromise = null;
         });
+      }
       await replayFetchPromise;
     }
   };
@@ -763,7 +792,9 @@ export function createStepController(
     if (!replayCache.steps.has(identity.ordinal)) {
       try {
         await fetchReplayThrough(identity.ordinal);
-      } catch {
+      } catch (err) {
+        assertRunStillOpen();
+        if (err instanceof WorkflowReplayCapacityError) throw workflowInfrastructureError(err.message);
         recordWorkflowReplayCacheOutcome("error");
         return null;
       }
@@ -1057,6 +1088,13 @@ export function createStepController(
     closeForRunReturn() {
       stepAdmissionClosed = true;
       runReturned = true;
+      if (replayRead !== null) {
+        const read = replayRead;
+        replayRead = null;
+        // Workerd may discard pending continuations when the request ends.
+        read.lease.release();
+        read.controller.abort();
+      }
       if (!replayCacheReleased) {
         replayCacheReleased = true;
         releaseWorkflowReplayCache(replayCache);
