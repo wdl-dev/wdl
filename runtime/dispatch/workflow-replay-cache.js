@@ -53,7 +53,15 @@ function canonicalJsonValue(value) {
 export const WORKFLOW_REPLAY_PAGE_SIZE = 64;
 export const WORKFLOW_REPLAY_CACHE_MAX_INSTANCES = 256;
 export const WORKFLOW_REPLAY_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+export const WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES = 64 * 1024 * 1024;
 const WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE = 256;
+
+export class WorkflowReplayCapacityError extends Error {
+  constructor() {
+    super("Workflow replay working-set capacity is exhausted");
+    this.name = "WorkflowReplayCapacityError";
+  }
+}
 /**
  * @typedef {{
  *   name?: unknown,
@@ -75,16 +83,36 @@ const WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE = 256;
 
 /** @type {Map<string, WorkflowReplayCache>} */
 const workflowReplayCaches = new Map();
+/** @type {Set<WorkflowReplayCache>} */
+const detachedReplayCaches = new Set();
+/** @type {Set<{ reserve: (bytes: number) => void, release: () => void }>} */
+const replayReadLeases = new Set();
 let workflowReplayCacheSteps = 0;
 let workflowReplayCacheBytes = 0;
+let workflowReplayActiveBytes = 0;
+let workflowReplayDetachedBytes = 0;
+let workflowReplayReadBytes = 0;
+let workflowReplayHighWaterBytes = 0;
 /** @type {WeakMap<WorkflowReplayStepRecord, number>} */
 let workflowReplayStepBytes = new WeakMap();
 
 /** @lintignore data-URL unit tests import this hook from a rewritten module. */
 export function _resetWorkflowReplayCacheForTest() {
+  for (const lease of replayReadLeases) lease.release();
+  for (const cache of new Set([...workflowReplayCaches.values(), ...detachedReplayCaches])) {
+    cache.steps.clear();
+    cache.bytes = 0;
+    cache.activeControllers = 0;
+    cache.released = true;
+  }
   workflowReplayCaches.clear();
+  detachedReplayCaches.clear();
   workflowReplayCacheSteps = 0;
   workflowReplayCacheBytes = 0;
+  workflowReplayActiveBytes = 0;
+  workflowReplayDetachedBytes = 0;
+  workflowReplayReadBytes = 0;
+  workflowReplayHighWaterBytes = 0;
   workflowReplayStepBytes = new WeakMap();
 }
 
@@ -92,6 +120,54 @@ export function prepareWorkflowReplayCacheMetrics() {
   metrics.setGauge("workflow_replay_cache_instances", {}, workflowReplayCaches.size);
   metrics.setGauge("workflow_replay_cache_steps", {}, workflowReplayCacheSteps);
   metrics.setGauge("workflow_replay_cache_bytes", {}, workflowReplayCacheBytes);
+  metrics.setGauge("workflow_replay_active_bytes", {}, workflowReplayActiveBytes);
+  metrics.setGauge("workflow_replay_detached_bytes", {}, workflowReplayDetachedBytes);
+  metrics.setGauge("workflow_replay_read_in_flight_bytes", {}, workflowReplayReadBytes);
+  metrics.setGauge("workflow_replay_working_set_bytes", {}, replayWorkingSetBytes());
+  metrics.setGauge("workflow_replay_working_set_high_water_bytes", {}, workflowReplayHighWaterBytes);
+}
+
+function replayWorkingSetBytes() {
+  return workflowReplayCacheBytes + workflowReplayDetachedBytes + workflowReplayReadBytes;
+}
+
+function recordReplayHighWater() {
+  workflowReplayHighWaterBytes = Math.max(workflowReplayHighWaterBytes, replayWorkingSetBytes());
+}
+
+/** @param {number} bytes @param {WorkflowReplayCache} [keep] */
+function reserveWorkingSet(bytes, keep) {
+  if (replayWorkingSetBytes() + bytes <= WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES) return;
+  for (const [key, cache] of workflowReplayCaches) {
+    if (cache === keep || cache.activeControllers > 0) continue;
+    evictWorkflowReplayCache(key);
+    if (replayWorkingSetBytes() + bytes <= WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES) return;
+  }
+  recordWorkflowReplayCacheOutcome("saturated");
+  throw new WorkflowReplayCapacityError();
+}
+
+export function createWorkflowReplayReadLease() {
+  let reservedBytes = 0;
+  let released = false;
+  const lease = {
+    /** @param {number} bytes */
+    reserve(bytes) {
+      if (released) throw new WorkflowReplayCapacityError();
+      reserveWorkingSet(Math.max(0, bytes - reservedBytes));
+      workflowReplayReadBytes += bytes - reservedBytes;
+      reservedBytes = bytes;
+      recordReplayHighWater();
+    },
+    release() {
+      if (released) return;
+      released = true;
+      workflowReplayReadBytes -= reservedBytes;
+      replayReadLeases.delete(lease);
+    },
+  };
+  replayReadLeases.add(lease);
+  return lease;
 }
 
 /** @param {string} outcome */
@@ -149,6 +225,8 @@ function deleteReplayStep(cache, ordinal) {
   if (!step || !cache.steps.delete(ordinal)) return;
   const bytes = workflowReplayStepBytes.get(step) ?? 0;
   cache.bytes -= bytes;
+  if (cache.activeControllers > 0) workflowReplayActiveBytes -= bytes;
+  if (detachedReplayCaches.has(cache)) workflowReplayDetachedBytes -= bytes;
   if (workflowReplayCaches.get(cache.key) === cache) {
     workflowReplayCacheSteps -= 1;
     workflowReplayCacheBytes -= bytes;
@@ -157,6 +235,7 @@ function deleteReplayStep(cache, ordinal) {
 
 /** @param {WorkflowReplayCache} cache */
 function clearWorkflowReplayCache(cache) {
+  if (detachedReplayCaches.delete(cache)) workflowReplayDetachedBytes -= cache.bytes;
   cache.released = true;
   cache.steps.clear();
   cache.nextOrdinal = 0;
@@ -171,7 +250,12 @@ function evictWorkflowReplayCache(key) {
   workflowReplayCacheSteps -= cache.steps.size;
   workflowReplayCacheBytes -= cache.bytes;
   workflowReplayCaches.delete(key);
-  if (cache.activeControllers === 0) clearWorkflowReplayCache(cache);
+  if (cache.activeControllers === 0) {
+    clearWorkflowReplayCache(cache);
+  } else {
+    detachedReplayCaches.add(cache);
+    workflowReplayDetachedBytes += cache.bytes;
+  }
 }
 
 function evictOldestWorkflowReplayCache() {
@@ -212,13 +296,17 @@ export function getWorkflowReplayCache(run) {
 /** @param {{ ns: string, workflowKey: string, instanceId: string, generation: number, createdAtMs: number, runToken: string }} run */
 export function acquireWorkflowReplayCache(run) {
   const cache = getWorkflowReplayCache(run);
+  if (cache.activeControllers === 0) workflowReplayActiveBytes += cache.bytes;
   cache.activeControllers += 1;
   return cache;
 }
 
 /** @param {WorkflowReplayCache} cache */
 export function releaseWorkflowReplayCache(cache) {
-  if (cache.activeControllers > 0) cache.activeControllers -= 1;
+  if (cache.activeControllers > 0) {
+    cache.activeControllers -= 1;
+    if (cache.activeControllers === 0) workflowReplayActiveBytes -= cache.bytes;
+  }
   if (cache.activeControllers > 0 || workflowReplayCaches.get(cache.key) === cache) return;
   clearWorkflowReplayCache(cache);
 }
@@ -246,23 +334,31 @@ export function rememberWorkflowReplayStep(cache, ordinal, step) {
   if (storedStep.status === "completed" && typeof storedStep.outputJson !== "string") {
     storedStep.outputJson = JSON.stringify(step.output ?? null) ?? "null";
   }
-  if (cache.steps.has(ordinal)) deleteReplayStep(cache, ordinal);
   const bytes = serializedReplayStepBytes(storedStep);
   if (bytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
+    deleteReplayStep(cache, ordinal);
     return;
   }
+  const previous = cache.steps.get(ordinal);
+  const oldest = !previous && cache.steps.size >= WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE
+    ? cache.steps.keys().next().value
+    : undefined;
+  const evicted = oldest === undefined ? undefined : cache.steps.get(oldest);
+  const replacedBytes = (previous ? workflowReplayStepBytes.get(previous) ?? 0 : 0) +
+    (evicted ? workflowReplayStepBytes.get(evicted) ?? 0 : 0);
+  reserveWorkingSet(Math.max(0, bytes - replacedBytes), cache);
+  deleteReplayStep(cache, ordinal);
+  if (oldest !== undefined) deleteReplayStep(cache, oldest);
   workflowReplayStepBytes.set(storedStep, bytes);
   cache.steps.set(ordinal, storedStep);
   cache.bytes += bytes;
+  if (cache.activeControllers > 0) workflowReplayActiveBytes += bytes;
+  if (detachedReplayCaches.has(cache)) workflowReplayDetachedBytes += bytes;
   if (countInGlobalCache) {
     workflowReplayCacheSteps += 1;
     workflowReplayCacheBytes += bytes;
   }
-  while (cache.steps.size > WORKFLOW_REPLAY_CACHE_MAX_STEPS_PER_INSTANCE) {
-    const oldest = cache.steps.keys().next().value;
-    if (oldest === undefined) break;
-    deleteReplayStep(cache, oldest);
-  }
+  recordReplayHighWater();
   if (countInGlobalCache) {
     while (workflowReplayCacheBytes > WORKFLOW_REPLAY_CACHE_MAX_BYTES) {
       evictOldestWorkflowReplayCache();

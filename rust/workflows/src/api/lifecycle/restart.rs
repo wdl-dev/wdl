@@ -6,11 +6,12 @@ use crate::{
 };
 
 use super::super::{
-    InstanceResponse, InstanceRouteKeys, PendingRestartMarker, WorkflowRequest,
-    create_pending_restart, ensure_worker_not_deleting, eval_script, identity_from_state,
-    instance_id, payload_bytes_arg, pending_restart_marker, read_public_state,
-    remove_pending_restart, request_with_active_version, validate_identity,
-    verify_active_workflow_current, verify_workflow_def, workflow_referrer_member,
+    InstanceResponse, InstanceRouteKeys, MAX_WORKFLOW_PARAMS_BYTES, PendingRestartMarker,
+    WorkflowRequest, create_pending_restart, ensure_worker_not_deleting, eval_script,
+    identity_from_state, instance_id, parse_payload_json, payload_bytes_arg,
+    pending_restart_marker, read_public_state, remove_pending_restart, request_with_active_version,
+    validate_identity, verify_active_workflow_current, verify_workflow_def,
+    workflow_referrer_member,
 };
 
 use super::common::{
@@ -109,6 +110,7 @@ pub(crate) async fn restart_instance(
         })
         .await?
         .ok_or_else(|| WorkflowError::payload_missing("Workflow params payload is missing"))?;
+    parse_payload_json(&params_json, MAX_WORKFLOW_PARAMS_BYTES)?;
     ensure_worker_not_deleting(state, &req.ns, &req.worker).await?;
     let pending_restart = pending_restart_marker(state, &req, &id);
     create_pending_restart(state, &pending_restart).await?;

@@ -44,6 +44,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `control/shared.js` | Control singletons, auth wrapper, Redis publish helpers, state-bound workflow transport wiring, and shared lifecycle/delete helpers. Direct `state.*` access belongs here or in the dispatcher. |
 | `control/errors.js`, `control/json-body.js`, `control/optimistic.js` | Pure Control error-response and bounded JSON request-body contracts plus the strict `WatchError`/Redis-session adapter over the shared optimistic retry loop, re-exported by `control/shared.js`. |
 | `control/workflows-client.js` | Internal Control-to-Workflows POST transport with explicit caller-owned timeout selection; callers own endpoint-specific response interpretation. |
+| `control/workflow-definitions.js` | Workflow definition quotas, bounded Redis snapshots, route-scan pages, and deploy admission accounting shared by Control listing and deploy. |
 | `control/lib.js` | Pure Control data-shaping: route-to-action classification, key helpers, canonical bundle `__meta__` parsing, and referrer redaction. |
 | `control/bundle.js` | Bundle/module normalization, compatibility metadata, vars, and emitted module manifest construction. |
 | `control/bindings.js` | Generic binding validation and normalization, including the singleton AI binding, plus service/platform parsing, ACL evaluation, and linker helpers. |

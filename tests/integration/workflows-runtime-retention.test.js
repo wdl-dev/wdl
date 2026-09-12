@@ -1,6 +1,7 @@
 // WDL Workflows retention, frozen-version, and delete-blocker paths.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   WORKER_CODE,
   adminFetch,
@@ -24,11 +25,170 @@ import {
   waitUntil,
   withServiceStopped,
   workflowRetentionKey,
+  workflowByWorkerKey,
+  workflowInstanceStateKey,
+  workflowPendingVersionKey,
+  seedWorkflowLifecycleMembers,
   workerMeta,
 } from "./helpers/workflows-scenarios.js";
-import { redisZAdd, redisZScore } from "./helpers/redis.js";
+import { redisZAdd, redisZScore, redisSCard, redisCommandCalls, redisEval, redisHGetAll, redisHSet, redisZCard } from "./helpers/redis.js";
 
 setupIntegrationSuite();
+
+test("Workflow restart rejects invalid persisted params before any mutation", async () => {
+  const ns = uniqueNs("wfrestartparams");
+  const version = await deployAndPromote(ns, "shop", { code: WORKER_CODE,
+    workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  const instanceId = "params";
+  await readIntegrationJson(await gatewayFetch(ns, `/shop/create?id=${instanceId}`), 200);
+  await waitUntil("restart params fixture completes", async () =>
+    redisWorkflowStateHGet(ns, workflowKey, instanceId, "status") === "completed");
+  const stateKey = workflowInstanceStateKey(ns, workflowKey, instanceId);
+  const payloadsKey = redisWorkflowStateHGet(ns, workflowKey, instanceId, "payloadsKey");
+  const paramsRef = redisWorkflowStateHGet(ns, workflowKey, instanceId, "paramsRef");
+  const markerKey = workflowPendingVersionKey(ns, "shop", version);
+  const { paramsBytesMax } = /** @type {{paramsBytesMax: number}} */ (readRepositoryJson("tests/fixtures/workflow-limits.json"));
+  const request = { ns, worker: "shop", frozenVersion: version, workflowName: "orders", workflowKey, className: "OrderWorkflow", instanceId };
+  await withServiceStopped("scheduler", async () => {
+    const before = redisHGetAll(stateKey, { db: 2 });
+    for (const invalid of ["oversized", "malformed"]) {
+      if (invalid === "oversized") {
+        redisEval(`return redis.call('HSET', KEYS[1], ARGV[1], '"' .. string.rep('x', tonumber(ARGV[2]) - 1) .. '"')`,
+          [payloadsKey], [paramsRef, String(paramsBytesMax)], { db: 2 });
+      } else {
+        redisHSet(payloadsKey, { [paramsRef]: "{broken" }, { db: 2 });
+      }
+      const writes = redisCommandCalls("zadd");
+      const result = serviceInternalPost("workflows", 9120, "/internal/workflows/restart", request);
+      assert.equal(result.status, 500, result.body);
+      assert.equal(responseJson(result).error, "workflow_invalid_state");
+      assert.deepEqual(redisHGetAll(stateKey, { db: 2 }), before);
+      assert.equal(redisZCard(markerKey, { db: 2 }), 0);
+      assert.equal(redisCommandCalls("zadd"), writes, "invalid params must fail before creating a pending-restart marker");
+    }
+    const digest = redisEval(`
+local prefix = '{ "id":"params", "number":1e+0, "padding":"'
+local raw = prefix .. string.rep('x', tonumber(ARGV[2]) - #prefix - 2) .. '"}'
+redis.call('HSET', KEYS[1], ARGV[1], raw)
+return redis.sha1hex(raw)`, [payloadsKey], [paramsRef, String(paramsBytesMax)], { db: 2 });
+    const restarted = serviceInternalPost("workflows", 9120, "/internal/workflows/restart", request);
+    assert.equal(restarted.status, 200, restarted.body);
+    assert.equal(responseJson(restarted).status, "queued");
+    assert.equal(redisWorkflowStateHGet(ns, workflowKey, instanceId, "generation"), "2");
+    assert.equal(redisEval("return redis.sha1hex(redis.call('HGET', KEYS[1], 'params'))", [payloadsKey], [], { db: 2 }), digest);
+  });
+  await waitUntil("exact-limit params dispatch after restart", async () =>
+    redisWorkflowStateHGet(ns, workflowKey, instanceId, "status") === "completed");
+});
+
+test("Workflow lifecycle dry-run stays bounded and cleanup resumes across pages", async () => {
+  const ns = uniqueNs("wflifepage");
+  const version = await deployAndPromote(ns, "shop", { code: WORKER_CODE,
+    workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  seedWorkflowLifecycleMembers(ns, workflowKey, version, 2000, 0);
+  const beforeReads = redisCommandCalls("hgetall");
+  const dry = serviceInternalPost("workflows", 9120, "/internal/workflows/lifecycle/check-delete", { ns, worker: "shop" });
+  assert.equal(dry.status, 200, dry.body);
+  const dryBody = responseJson(dry);
+  assert.equal(dryBody.allowed, false);
+  assert.equal(dryBody.blockers.length, 20);
+  assert.ok(redisCommandCalls("hgetall") - beforeReads < 1000, "dry-run must not materialize the complete pending set");
+  assert.equal(redisSCard(workflowByWorkerKey(ns, "shop"), { db: 2 }), 2000);
+  seedWorkflowLifecycleMembers(ns, workflowKey, version, 0, 2000);
+  const partial = serviceInternalPost("workflows", 9120, "/internal/workflows/lifecycle/check-delete", { ns, worker: "shop", allowCleanup: true });
+  assert.equal(partial.status, 200, partial.body);
+  const partialBody = responseJson(partial);
+  assert.equal(partialBody.allowed, false);
+  assert.equal(partialBody.blockers.length, 0);
+  assert.equal(typeof partialBody.cursor, "string");
+  const remaining = redisSCard(workflowByWorkerKey(ns, "shop"), { db: 2 });
+  assert.ok(remaining > 0 && remaining < 4000);
+  await waitUntil("bounded cleanup eventually permits deletion", async () => {
+    const response = await adminFetch(`/ns/${ns}/worker/shop/delete`, { method: "POST" });
+    if (response.status === 503) {
+      assert.equal((await readIntegrationJson(response, 503)).error, "workflow_lifecycle_check_incomplete");
+      return false;
+    }
+    await readIntegrationJson(response, 200);
+    return true;
+  });
+  assert.equal(redisSCard(workflowByWorkerKey(ns, "shop"), { db: 2 }), 0);
+});
+
+test("Workflow lifecycle continuation never skips a live blocker among stale members", async () => {
+  const ns = uniqueNs("wflivepage");
+  const version = await deployAndPromote(ns, "shop", { code: WORKER_CODE,
+    workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  await readIntegrationJson(await gatewayFetch(ns, "/shop/create?id=live&wait=1&noWaitTimeout=1&retentionMs=1000"), 200);
+  await waitUntil("live deletion blocker waits", async () => redisWorkflowStateHGet(ns, workflowKey, "live", "status") === "waiting");
+  seedWorkflowLifecycleMembers(ns, workflowKey, version, 0, 2000);
+  let blocked = false;
+  for (let attempt = 0; attempt < 4 && !blocked; attempt += 1) {
+    const response = await adminFetch(`/ns/${ns}/worker/shop/delete`, { method: "POST" });
+    if (response.status === 503) {
+      assert.equal((await readIntegrationJson(response, 503)).error, "workflow_lifecycle_check_incomplete");
+      continue;
+    }
+    const body = await readIntegrationJson(response, 409);
+    assert.equal(body.error, "workflow_instances_active");
+    assert.ok(body.blockers.some((/** @type {{instanceId: string}} */ entry) => entry.instanceId === "live"));
+    blocked = true;
+  }
+  assert.equal(blocked, true);
+  assert.equal(redisWorkflowStateHGet(ns, workflowKey, "live", "status"), "waiting");
+  await readIntegrationJson(await gatewayFetch(ns, "/shop/terminate?id=live"), 200);
+  await waitUntil("retention removes the final live blocker", async () => {
+    const response = await adminFetch(`/ns/${ns}/worker/shop/delete`, { method: "POST" });
+    if (response.status === 409 || response.status === 503) return false;
+    await readIntegrationJson(response, 200);
+    return true;
+  });
+});
+
+test("Workflow lifecycle final membership check requires a fresh scan after skipped pages", async () => {
+  const ns = uniqueNs("wfliferescan");
+  const version = await deployAndPromote(ns, "shop", { code: WORKER_CODE,
+    workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  seedWorkflowLifecycleMembers(ns, workflowKey, version, 0, 2000);
+  const key = workflowByWorkerKey(ns, "shop");
+  const contract = /** @type {{limits: {scanCount: number}, responses: {rescanRequired: Record<string, unknown>}}} */ (
+    readRepositoryJson("tests/fixtures/workflow-lifecycle-check.json")
+  );
+  // Resume at the last native scan page while retaining members from earlier pages.
+  const cursor = redisEval(`
+local cursor = '0'
+repeat
+  local page = redis.call('SSCAN', KEYS[1], cursor, 'COUNT', ARGV[1])
+  if page[1] == '0' then return cursor end
+  cursor = page[1]
+until false`, [key], [String(contract.limits.scanCount)], { db: 2 });
+  assert.notEqual(cursor, "0");
+  const response = serviceInternalPost("workflows", 9120, "/internal/workflows/lifecycle/check-delete", {
+    ns, worker: "shop", allowCleanup: true, cursor,
+  });
+  assert.equal(response.status, 200, response.body);
+  const remaining = redisSCard(key, { db: 2 });
+  assert.ok(remaining > 0);
+  assert.deepEqual(responseJson(response), { ...contract.responses.rescanRequired, count: remaining });
+  await waitUntil("fresh cleanup traverses the remaining referrers", async () => {
+    const deleted = await adminFetch(`/ns/${ns}/worker/shop/delete`, { method: "POST" });
+    if (deleted.status === 503) {
+      assert.equal((await readIntegrationJson(deleted, 503)).error, "workflow_lifecycle_check_incomplete");
+      return false;
+    }
+    await readIntegrationJson(deleted, 200);
+    return true;
+  });
+  assert.equal(redisSCard(key, { db: 2 }), 0);
+});
 
 test("stale workflow run cannot commit after restart generation changes", async () => {
   const ns = uniqueNs("wfstale");

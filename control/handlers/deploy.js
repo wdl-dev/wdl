@@ -1,3 +1,4 @@
+import { readWorkflowDefinitionAdmission, workflowDeclarationsFit, workflowDefinitionUpdatesFit } from "control-workflow-definitions";
 import {
   jsonResponse, jsonError, readJsonBody, formatError,
   requireControlLog, requireControlRedis,
@@ -1252,10 +1253,15 @@ async function materializeCommittedMetadata(iso, { ns, name, prepared, resolvedD
   const workflowDefUpdates = [];
   if (Array.isArray(committedMeta.workflows) && committedMeta.workflows.length) {
     const defsKey = workflowDefsKey(ns, name);
-    const existingDefRaws = await iso.hMGet(
+    const admission = await readWorkflowDefinitionAdmission(
+      iso,
       defsKey,
       committedMeta.workflows.map((workflow) => workflow.name)
     );
+    if (admission.status !== 1) {
+      throw new DeployAbort(500, "workflow_definition_corrupt", { message: "Stored Workflow definitions exceed their bounds" });
+    }
+    const existingDefRaws = admission.values;
     for (let index = 0; index < committedMeta.workflows.length; index += 1) {
       const workflow = committedMeta.workflows[index];
       const existingDef = parsePersistedWorkflowDef(workflow.name, existingDefRaws[index]);
@@ -1271,6 +1277,9 @@ async function materializeCommittedMetadata(iso, { ns, name, prepared, resolvedD
         workflow.name,
         JSON.stringify({ workflowKey, className: workflow.className }),
       ]);
+    }
+    if (!workflowDeclarationsFit(committedMeta.workflows) || !workflowDefinitionUpdatesFit(admission, workflowDefUpdates.map(([, field, value]) => [field, value]))) {
+      throw new DeployAbort(413, "workflow_definitions_too_large", { message: "Workflow definitions exceed the per-worker count or byte limit" });
     }
   }
 

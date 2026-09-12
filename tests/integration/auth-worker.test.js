@@ -55,7 +55,7 @@ test("whoami returns current principal without exposing token material", async (
   assert.equal(ops.json.tokenId, "bootstrap");
   assert.equal(typeof ops.json.requestId, "string");
   assert.equal(ops.json.platformVersion, expectedPlatformVersion);
-  assert.equal(ops.json.minCliVersion, "1.8.0");
+  assert.equal(ops.json.minCliVersion, "1.9.0");
   assert.equal(Object.hasOwn(ops.json, "workerdVersion"), false);
   assert.deepEqual(ops.json.urls, {
     control: `http://${ADMIN_HOST_HEADER}`,
@@ -73,7 +73,7 @@ test("whoami returns current principal without exposing token material", async (
   assert.deepEqual(tenant.json.principal, { kind: "ns", ns });
   assert.equal(tenant.json.tokenId, issued.json.tokenId);
   assert.equal(tenant.json.platformVersion, expectedPlatformVersion);
-  assert.equal(tenant.json.minCliVersion, "1.8.0");
+  assert.equal(tenant.json.minCliVersion, "1.9.0");
   assert.deepEqual(tenant.json.urls, {
     control: `http://${ADMIN_HOST_HEADER}`,
     namespace: `http://${ns}.workers.local`,

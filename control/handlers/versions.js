@@ -100,7 +100,7 @@ async function handleDelete({ ns, name, version, principal, requestId }) {
     let result;
     try {
       await assertWorkflowDeleteAllowed({
-        ns, worker: name, version, allowCleanup: true, requestId,
+        ns, worker: name, version, allowCleanup: true, requestId, lockToken,
       });
       if (!await renewDeleteLock(redis, ns, name, lockToken)) {
         throw new VersionDeleteError(409, "deleting", deleteLockExpiredDetails(ns, name, version));

@@ -4,15 +4,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::{
-    AppState, DispatchSemaphores, LogLevel, Metrics, Redis, SERVICE, ShutdownState, WorkflowError,
-    WorkflowResult, check_delete_lifecycle, claim_step, commit_step_error, commit_step_success,
-    config_from_env, create_batch, create_instance, ensure_schema_migration_complete,
-    ensure_workflows_schema, get_instance, list_instances, log, pause_instance,
-    read_do_alarm_cleanup_request, read_do_alarm_delete_request, read_do_alarm_set_request,
-    read_lifecycle_check_request, read_replay_step_page, read_workflow_replay_request,
-    read_workflow_request, read_workflow_step_request, register_sleep, register_wait,
-    restart_instance, resume_instance, send_event, status_instance, terminate_instance,
-    tick_workflows, workflow_error_fields,
+    AppState, DispatchSemaphores, ListInstancesResponse, LogLevel, Metrics, Redis, SERVICE,
+    ShutdownState, WorkflowError, WorkflowResult, check_delete_lifecycle, claim_step,
+    commit_step_error, commit_step_success, config_from_env, create_batch, create_instance,
+    ensure_schema_migration_complete, ensure_workflows_schema, get_instance, list_instances, log,
+    pause_instance, read_do_alarm_cleanup_request, read_do_alarm_delete_request,
+    read_do_alarm_set_request, read_lifecycle_check_request, read_replay_step_page,
+    read_workflow_replay_request, read_workflow_request, read_workflow_step_request,
+    register_sleep, register_wait, restart_instance, resume_instance, send_event, status_instance,
+    terminate_instance, tick_workflows, workflow_error_fields,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -105,10 +105,10 @@ async fn get_handler(State(state): State<AppState>, body: Body) -> WorkflowResul
 async fn instances_handler(
     State(state): State<AppState>,
     body: Body,
-) -> WorkflowResult<Json<JsonValue>> {
+) -> WorkflowResult<Json<ListInstancesResponse>> {
     let req = read_workflow_request(body).await?;
     let response = list_instances(&state, req).await?;
-    workflow_json(response, "workflow instances response serializes")
+    Ok(Json(response))
 }
 
 async fn status_handler(

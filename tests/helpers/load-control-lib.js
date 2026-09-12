@@ -9,6 +9,7 @@ import {
   repositoryFileUrl,
 } from "./load-shared-module.js";
 import { compileSharedAuthRoles } from "./load-auth-roles.js";
+import { workflowDefinitionsUrl } from "./workflow-definitions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Resolve croner against the root package so tests pick up the hoisted
@@ -83,6 +84,7 @@ export async function compileControlGraph(opts = {}) {
       "base64.js": SHARED_BASE64_URL,
       "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,
       "control-lib": libUrl,
+      "control-workflow-definitions": workflowDefinitionsUrl,
     }),
     [/from "control-bindings"/g, `from ${JSON.stringify(bindingsUrl)}`],
     [/from "wdl-package-json-source"/g, `from ${JSON.stringify(packageJsonSourceUrl)}`],
@@ -104,6 +106,7 @@ export async function compileControlGraph(opts = {}) {
     cronIndexUrl,
     routePlanUrl,
     bundleUrl,
+    workflowDefinitionsUrl,
   };
 }
 

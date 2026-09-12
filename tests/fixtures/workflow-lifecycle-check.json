@@ -1,0 +1,28 @@
+{
+  "limits": {
+    "blockers": 20,
+    "scanCount": 128,
+    "scanMembersMax": 512,
+    "scanBytesMax": 131072,
+    "responseBytesMax": 65536,
+    "controlPagesMax": 16,
+    "controlTimeoutMs": 10000
+  },
+  "request": {
+    "ns": "demo",
+    "worker": "api",
+    "version": "v2",
+    "allowCleanup": true,
+    "cursor": "128"
+  },
+  "responses": {
+    "complete": { "allowed": true, "count": 0, "blockers": [] },
+    "blocked": {
+      "allowed": false,
+      "count": 123,
+      "blockers": [{ "workflowKey": "wf_11111111111111111111111111111111", "instanceId": "item" }]
+    },
+    "continuation": { "allowed": false, "count": 123, "blockers": [], "cursor": "128" },
+    "rescanRequired": { "allowed": false, "count": 123, "blockers": [] }
+  }
+}

@@ -5,19 +5,140 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { sessionPolicyKey } from "../../shared/worker-contract.js";
 import { withTempDir } from "../helpers/temp-dir.js";
-import { redisGetJson } from "./helpers/redis.js";
+import { workflowDefinitionsUrl } from "../helpers/workflow-definitions.js";
+import { redisDel, redisGetJson } from "./helpers/redis.js";
+import { WORKER_CODE, workerMeta, workflowInstanceStateKey } from "./helpers/workflows-scenarios.js";
 import {
   adminGetFresh,
   assertOk,
+  deployAndPromote,
   gatewayFetch,
   parseStdoutJson,
+  readIntegrationJson,
   responseJson,
   runWdlCli,
   uniqueNs,
   setupIntegrationSuite,
+  waitUntil,
 } from "./helpers/index.js";
 
 setupIntegrationSuite();
+
+const { WORKFLOW_DEFINITION_PAGE_MAX_WORKERS } = await import(workflowDefinitionsUrl);
+
+test("wdl CLI follows definition cursors through empty and short pages", async () => {
+  const ns = uniqueNs("wdl-wf-pages");
+  const middleWorker = `page-${String(WORKFLOW_DEFINITION_PAGE_MAX_WORKERS).padStart(2, "0")}`;
+  for (let index = 0; index < 2 * WORKFLOW_DEFINITION_PAGE_MAX_WORKERS; index += 1) {
+    const name = `page-${String(index).padStart(2, "0")}`;
+    await deployAndPromote(ns, name, name === middleWorker ? {
+      code: WORKER_CODE,
+      workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+    } : { code: 'export default { fetch() { return new Response("ok"); } };' });
+  }
+  await deployAndPromote(ns, "z-flow", { code: WORKER_CODE, workflows: [
+    { name: "orders", binding: "ORDERS", className: "OrderWorkflow" },
+    { name: "refunds", binding: "REFUNDS", className: "OrderWorkflow" },
+  ] });
+
+  const expected = [[], [`${middleWorker}/orders`], ["z-flow/orders", "z-flow/refunds"]];
+  /** @type {string | null} */
+  let cursor = null;
+  let pages = 0;
+  do {
+    assert.ok(pages < expected.length, "definition pagination must terminate");
+    const args = ["workflows", "list", "--ns", ns, "--limit", "2"];
+    if (cursor !== null) args.push("--cursor", cursor);
+    const json = runWdlCli([...args, "--json"]);
+    assertOk(json);
+    const page = parseStdoutJson(json.stdout, "Workflow definition page");
+    assert.equal(page.namespace, ns);
+    assert.deepEqual(page.workflows.map((/** @type {{worker: string, name: string}} */ entry) =>
+      `${entry.worker}/${entry.name}`), expected[pages]);
+    const human = runWdlCli(args);
+    assertOk(human);
+    if (pages === 0) assert.match(human.stdout, /^\(no workflows on this page\)$/m);
+    for (const name of expected[pages]) assert.ok(human.stdout.includes(`${name}\t`));
+    if (pages < expected.length - 1) {
+      assert.equal(typeof page.cursor, "string");
+      assert.ok(page.cursor.length > 0);
+      assert.notEqual(page.cursor, cursor);
+      assert.ok(human.stdout.split(/\r?\n/).includes(`Next cursor: ${page.cursor}`));
+    } else {
+      assert.equal(page.cursor, null);
+      assert.doesNotMatch(human.stdout, /^Next cursor:/m);
+    }
+    cursor = page.cursor;
+    pages += 1;
+  } while (cursor !== null);
+  assert.equal(pages, expected.length);
+});
+
+test("wdl CLI follows instance cursors after an empty page without skipping results", async () => {
+  const ns = uniqueNs("wdl-wf-instances");
+  const version = await deployAndPromote(ns, "shop", {
+    code: WORKER_CODE,
+    vars: { LABEL: "cli-pagination" },
+    workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+  });
+  const ids = ["item-0", "item-1", "item-2"];
+  for (const id of ids) {
+    const created = await readIntegrationJson(await gatewayFetch(ns, `/shop/create?id=${id}`), 200);
+    assert.equal(created.id, id);
+  }
+  const command = ["workflows", "instances", "shop", "orders", "--ns", ns];
+  await waitUntil("CLI pagination fixtures have durable outputs", async () => {
+    const result = runWdlCli([...command, "--json"]);
+    assertOk(result);
+    const page = parseStdoutJson(result.stdout, "Workflow instances before pagination");
+    return page.instances.length === ids.length && page.instances.every(
+      (/** @type {{status: string}} */ instance) => instance.status === "completed"
+    );
+  });
+  // Model a state disappearing after its rank-index entry was selected.
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  redisDel(workflowInstanceStateKey(ns, workflowKey, ids[0]), { db: 2 });
+
+  /** @type {string[]} */
+  const seen = [];
+  /** @type {string | null} */
+  let cursor = null;
+  let pages = 0;
+  do {
+    assert.ok(pages < ids.length, "instance pagination must terminate");
+    const args = [...command, "--limit", "1"];
+    if (cursor !== null) args.push("--cursor", cursor);
+    const json = runWdlCli([...args, "--json"]);
+    assertOk(json);
+    const page = parseStdoutJson(json.stdout, "Workflow instance page");
+    const human = runWdlCli(args);
+    assertOk(human);
+    if (pages === 0) {
+      assert.deepEqual(page.instances, []);
+      assert.match(human.stdout, /^\(no workflow instances on this page\)$/m);
+    } else {
+      assert.equal(page.instances.length, 1);
+      const instance = page.instances[0];
+      assert.equal(instance.id, ids[pages]);
+      assert.equal(instance.status, "completed");
+      assert.equal(instance.output.instanceId, instance.id);
+      assert.equal(instance.output.fromEnv, "cli-pagination");
+      assert.ok(human.stdout.split(/\r?\n/).includes(`${instance.id}\tstatus=completed`));
+      seen.push(instance.id);
+    }
+    if (pages < ids.length - 1) {
+      assert.equal(page.cursor, String(pages + 1));
+      assert.ok(human.stdout.split(/\r?\n/).includes(`Next cursor: ${page.cursor}`));
+    } else {
+      assert.equal(page.cursor, null);
+      assert.doesNotMatch(human.stdout, /^Next cursor:/m);
+    }
+    cursor = page.cursor;
+    pages += 1;
+  } while (cursor !== null);
+  assert.equal(pages, ids.length);
+  assert.deepEqual(seen, ids.slice(1));
+});
 
 test("wdl CLI exercises deploy, workers, secrets, and delete lifecycle", async () => {
   const ns = uniqueNs("wdl-smoke");

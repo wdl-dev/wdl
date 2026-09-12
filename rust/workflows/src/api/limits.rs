@@ -3,6 +3,7 @@ pub(crate) const MAX_WORKFLOW_PARAMS_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_WORKFLOW_RESULT_BYTES: usize = 1024 * 1024;
 pub(crate) const WORKFLOW_PAYLOAD_TOO_LARGE_CODE: &str = "workflow_payload_too_large";
 pub(crate) const MAX_WORKFLOW_RUNTIME_RESPONSE_BYTES: usize = MAX_WORKFLOW_RESULT_BYTES + 16 * 1024;
+pub(crate) const MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_WORKFLOW_EVENT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_WORKFLOW_EVENT_TYPE_BYTES: usize = 512;
 pub(crate) const MAX_WORKFLOW_INSTANCE_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -17,18 +18,20 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        MAX_CREATE_BATCH_SIZE, MAX_WORKFLOW_JSON_BODY_BYTES, MAX_WORKFLOW_RESULT_BYTES,
-        WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
+        MAX_CREATE_BATCH_SIZE, MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES, MAX_WORKFLOW_JSON_BODY_BYTES,
+        MAX_WORKFLOW_PARAMS_BYTES, MAX_WORKFLOW_RESULT_BYTES, WORKFLOW_PAYLOAD_TOO_LARGE_CODE,
     };
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct WorkflowLimitsContract {
         result_bytes_max: usize,
+        params_bytes_max: usize,
         backend_request_bytes_max: usize,
         json_container_depth_max: usize,
         reject_lone_surrogates: bool,
         create_batch_max: usize,
+        instances_response_bytes_max: usize,
         payload_too_large_code: String,
     }
 
@@ -44,6 +47,7 @@ mod tests {
         .expect("workflow limits fixture");
 
         assert_eq!(contract.result_bytes_max, MAX_WORKFLOW_RESULT_BYTES);
+        assert_eq!(contract.params_bytes_max, MAX_WORKFLOW_PARAMS_BYTES);
         assert_eq!(
             contract.backend_request_bytes_max,
             MAX_WORKFLOW_JSON_BODY_BYTES
@@ -51,6 +55,10 @@ mod tests {
         assert_eq!(contract.json_container_depth_max, 127);
         assert!(contract.reject_lone_surrogates);
         assert_eq!(contract.create_batch_max, MAX_CREATE_BATCH_SIZE);
+        assert_eq!(
+            contract.instances_response_bytes_max,
+            MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES
+        );
         assert_eq!(
             contract.payload_too_large_code,
             WORKFLOW_PAYLOAD_TOO_LARGE_CODE

@@ -8,7 +8,7 @@ Workflows 提供 Cloudflare-shaped workflow API，但由 WDL 自己的 Rust engi
 
 Workflow engine 是独立 axum 服务 `workflows`，监听 `:9120`。Runtime 通过 `runtime/workflows-client.js` 暴露 workflow binding，并通过 `runtime/dispatch/workflow-*.js` 处理 dispatch。Control 解析 workflow metadata，并拥有 deploy-time workflow definition keys。本模块文档是当前 workflows 设计参考。
 
-V2 这个名称用于区分当前支持 DAG 的 engine 和早期仅测试使用的 V1 engine。新环境应按 greenfield schema 3 workflows state 组织。
+新部署在专用 DB 2 中初始化 schema 3。现有 schema-2 state 需要执行离线[迁移流程](#部署--rollout-注意事项)。
 
 workerd 提供用户代码执行环境、`WorkflowEntrypoint` class shape、module loading，以及让 runtime 在 frozen worker version 中调用 workflow class 的能力。它不提供 WDL 可复用的本地 workflow engine。WDL 在 workflows 中补齐外部 engine：DB 2 persistence、leases、ready/due scheduling、step replay、sleep、wait、event buffering、lifecycle transition、retention，以及 dispatch 回 runtime。
 
@@ -24,7 +24,10 @@ workerd 提供用户代码执行环境、`WorkflowEntrypoint` class shape、modu
 Control / CLI：
 
 - `GET /ns/<ns>/workflows` 列 workflow definition，使用 `workflow.list`。
-- `GET /ns/<ns>/workflows/<worker>/<workflow>/instances` 列 instance，使用 `workflow.read`。
+- Definition list 接受 `limit`（默认 100，最多 1000）和不透明 `cursor`；每页最多处理 16 个 worker、16 MiB source snapshot 加一个有界 lookahead，并返回至多 8 MiB JSON。只保证页内排序，不保证整个 namespace 扫描的全局排序；空页或短页也必须沿 cursor 继续，直到它为 `null`。Route segment 或尚未返回完的 definition set 变化时返回 `workflow_metadata_contention`，应去掉 cursor 重新开始；这不是持久 snapshot。
+- 并发 namespace 变化可能使扫描 entry 在不同页重复；需要收集完整视图的 consumer 应按 worker/name 去重或重新扫描。
+- Cursor 输入最多 2048 个 ASCII 字节。Route discovery 使用 `HSCAN COUNT 32` 作为 hint；原生 page 超过 512 个 field/value pair 或 128 KiB field/value 总字节时，会在 transfer 前拒绝。Compact hash encoding 可能不论 COUNT 都返回整个 Hash；调高 `hash-max-listpack-entries` 等 compact-encoding threshold 因而可能让 listing fail closed。WDL 不强制这些 Valkey 配置项的取值。
+- `GET /ns/<ns>/workflows/<worker>/<workflow>/instances` 列 instance，使用 `workflow.read`。`limit` 默认 100，范围为 1-1000；每页 serialized JSON 还受 8 MiB 上限约束，包括 output/error payload 和 cursor envelope。字节预算可能使一页少于 `limit` 项；必须沿返回的 `cursor` 继续，直到它为 `null`，不能用短页判断结束。Rank cursor 计入已消费的 index entry（包括 missing/invisible instance），字节预算耗尽时从首个未返回的 instance 继续；它不提供针对并发 index 变化的 snapshot isolation。正在读取的 instance 若存在 payload-ref 错误会 fail closed，而不是静默跳过。
 - `GET /ns/<ns>/workflows/<worker>/<workflow>/instances/<id>` 返回 instance status，使用 `workflow.read`。可选查询参数只接受 camelCase：`includeSteps=true|false` 会返回 step 记录，`stepLimit=<n>` 限制返回的 step 数。
 - `POST /ns/<ns>/workflows/<worker>/<workflow>/instances/<id>/{pause,resume,restart,terminate}` 使用 `workflow.write`。
 - CLI `wdl workflows list|instances|status|pause|resume|restart|terminate` 是 control API 的薄封装。
@@ -48,12 +51,19 @@ Workflows 独占 Valkey DB 2 作为 instance execution state；自定义 `WORKFL
 
 Workflows 正常启动以及 schema-migration command 连接前，都会把自身 active DB 2 与 reserved archive DB 15 的解析后 database identity，分别和 `CONTROL_REDIS_URL`、Rust data plane 的有效 URL（`DATA_REDIS_URL ?? REDIS_URL`）比较；任何重叠都会在连接前失败。使用独立 data plane 的部署必须把 canonical `DATA_REDIS_URL` 同时提供给 Workflows service，使 ownership check 能覆盖该数据库；URL credential 和无关 query setting 不改变 database identity。
 
+每个 worker 最多保留 1024 个 definition name，Hash field/value 总字节数最多 1 MiB；包含 materialized workflow key 的 active declaration array 也有 1 MiB JSON 上限。Deploy 在现有 WATCH 内检查累计配额后才提交；只把当前声明对应的 definition value 返回给 writer，但计数和字节统计包含 retired name。配额超限返回 `workflow_definitions_too_large`。Definition-list snapshot 在 Valkey 内先检查 cardinality 和字节数，再返回数据；单个版本的 bundle metadata 读取预算为 8 MiB，超限返回 `workflow_listing_metadata_too_large`。这是 listing 预算，不是对无关 Worker code 新增大小限制。超限存量 definition state 会 fail closed，不截断或静默兼容。
+
+Definition-list snapshot 在同一个 Valkey Lua 中核验 worker 的预期 active route，并返回已经计算的总字节数用于 page accounting；Control 不再额外逐 worker 读取 route，也不重新编码已返回的字符串计数。返回 page 前仍会复核 route page fingerprint。
+
 关键概念：
 
 - `workflowKey` 是 physical workflow identity。
 - `(ns, worker, workflowName)` 在 redeploy 间保持稳定 workflowKey。
 - Instance state、step records、payload refs、events、ready/due indexes、run leases、retention indexes 和 callbacks 存在 DB 2。
 - Workflow payload 是有显式 byte cap 的 JSON data。大型 application data 应放在 R2/S3/D1/KV，再在 workflow payload 中保存引用。
+- List、get 和 status 共用 persisted result ref reader，在 JSON parse 前检查 1 MiB result limit；超限存量 result 属于 invalid state，不是当前 caller 的输入错误。Dispatch 和 restart params 复用 JSON parser，并使用自身的 1 MiB read cap。Restart 在创建 pending marker 或改变 instance state 前校验，并保留原始 JSON 字节。
+- Instance list 的 payload 缺失、超限或 JSON 非法时，会在既有服务端 `request_complete.error_message` 中包含有界的 instance-id 和 payload-ref 诊断；不记录 payload 内容，公开 5xx response 仍使用通用 message。
+- Instance list 每批最多读取 32 个 payload ref，每个 instance 在序列化进有界 page 后就释放解析后的对象，不保留全部选中 payload 的 JSON tree，也不构造第二棵 response tree。Control 使用相同的 8 MiB cap 和五秒 backend deadline 读取 page，成功时直接转发 JSON bytes，不重新编码。超限、不可读或超时的 backend page 返回 `503 workflow_internal_dispatch_failed`；合法 backend error code 沿用现有脱敏映射。该 deadline 不改变 mutation retry 语义。
 - 同一个 instance 的 DB 2 key 共享 `{ns:workflowKey:instanceId}` hash tag，但 workflow state 也会使用 global ready/due/retention keys。因此当前部署要求单个非 cluster 的 Valkey 分片（`num_node_groups = 1`），而不是 Redis Cluster；为 HA 配一个 primary/replica 对是可以的，因为复制不会对 keyspace 分片，但多分片会把未加 hash tag 的 global key 拆到不同 slot 并触发 CROSSSLOT。
 - Internal Durable Object alarm jobs 也存在 DB 2 的 `wf:internal:do-alarm:*` 下。它们是 Workflows-owned backend jobs，不是 tenant workflow instances，只能通过 do-runtime/workflows internal endpoints 访问。
 
@@ -83,10 +93,16 @@ Key families：
 
 ## Ownership / 并发 / 失败语义
 
-- V2 workflow 只支持 same-worker。
+- Workflow binding 只引用同一个 worker 中的 definition。
 - Instance 冻结创建时的 worker version/class identity。
 - Control 会对当前操作实际读到的 malformed active workflow entry 和 malformed `wf:defs` record fail closed；管理路径返回 `corrupt_meta`，deploy 在复用损坏的历史 definition 时返回 `workflow_definition_corrupt`。损坏的权威 metadata 不会被暴露为正常的 missing 或 retired workflow。正常 deploy 和单个 workflow 路径不会扫描无关的历史 definition。
 - Workflows lifecycle check 会拒绝 malformed referrer member，而不是把它当成不存在。
+- Lifecycle preflight 每次 backend call 只处理一个有界 SSCAN page：COUNT 128 是 hint，超过 512 个 member 或 128 KiB member bytes 的原生 page 会在 transfer 前 fail closed。最多返回 20 个 blocker；dry-run 把 expired pending create 当作 blocker，不累计整个集合。Cleanup 应用现有 create-token fence，并用原子 absence check 清除 missing-state referrer；每个 20-member chunk 的 mutation 共用一个 pipeline，只对失败槽位再批量读取一次，state 仍存在就继续阻止删除。结果不明时不重放 pipeline。可续接的扫描页返回 `allowed:false` 与内部 cursor，不能授权删除。Control 从零开始，只跟随后端 cursor，每页前续租已有 delete lock；一次检查最多 16 页 / 十秒，每次 backend call 最多五秒、response 最多 64 KiB。预算耗尽返回 `workflow_lifecycle_check_incomplete`；再次删除会保留已完成的 cleanup 进度。公开请求中的 cursor 不作为删除授权。
+- Cleanup 授权删除前还要求 referrer set 为空，不能仅因 cursor 遍历结束就在 Redis failover 后跳过仍存活的 referrer。
+- 绝对预算同样约束在途 page：预算到期返回相同的 incomplete code，并在 transport log 中记为 warning。总预算到期前的单次请求 timeout，以及真实 backend/read failure，仍返回 `workflow_internal_dispatch_failed` 并记录 error 级 transport 诊断。Dry-run 不 prune referrer；陈旧 entry 超出扫描预算时，重复 dry-run 不保证收敛，实际删除才执行 fenced cleanup。
+- 请求建立时固定生效的 deadline；rejection 延迟送达不会把先触发的单次请求 timeout 改成总预算耗尽。两个 deadline 相同时使用总预算分类。
+- 如果最终复核仍发现 member、但没有已识别的 blocker，response 会返回 `allowed:false`、空 blocker 列表且不带 cursor。Control 返回 `workflow_lifecycle_check_incomplete`，要求重新发起删除请求，而不是报告 active-instance conflict 或自动从头重扫。
+- 续租 delete lock 的等待也受同一个十秒预算的剩余时间约束；这不是整条公开 delete request 或其他 Redis 操作的统一 deadline。
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。Scheduler 会在 64 KiB 上限内读取 tick response，并要求合法 JSON object 根节点；单个缺失或未知字段仍保持 forward-compatible，并按未报告 progress 处理。
 - Scheduler 也通过同一个 `/internal/workflows/tick` endpoint 唤醒 Workflows-owned internal DO alarm jobs；scheduler 不直接读写 DO alarm state。
 - Workflows 在持久化 DO alarm job 前拒绝 non-canonical alarm identity，并在 dispatch 前重新校验持久化 alarm identity。一个 Control DB Lua snapshot 会同时读取当前 storage pointer、active route、retained-version score 和 active session policy projection。当前 `restart` projection 会把 superseded alarm retarget 到 active version，即使其 scheduled version 仍 retained；后续 `preserve` projection 会覆盖尚未观察到的 restart，并让 retained alarm 继续使用 scheduled version。Malformed session policy projection、route/projection 不一致，以及 retarget 需要使用的 malformed active version 会 fail closed。其中 namespace、worker、version 校验复用 `wdl-rust-common`；do-runtime protocol grammar 与 identity helper 拥有 canonical alarm-specific field 和 aggregate 512-byte DO host-id 合同，Workflows 在持久化和 dispatch 前镜像并重新校验该合同。Runtime run dispatch 与 progress callback 在 workflows crate 内共用同一个 system-vs-user runtime endpoint selector。
@@ -94,9 +110,10 @@ Key families：
 - Ready token 是去重 hint；instance hash state 是权威状态。
 - Runtime terminal response 是 tagged variant：`completed` 必须包含 `output` 字段，`failed` 必须包含 `error` 字段，显式 JSON `null` 仍是合法 payload。`suspended` response 只有在权威 step backend 已把同一 generation/run token 转为 `waiting` 后才会清除 run claim；格式正确但乱序的 response 会成为 fenced no-op。
 - Execution commit 同时用 `generation`、`runToken`、active instance status 和未过期 run lease fence。Step commit/register 接受同一 run 的 `running` 或 `waiting` 状态，因此一个并行 sibling 进入 retry/wait 后，另一个 sibling 仍可完成；completed runtime terminal 要求 `running`，failed runtime terminal 在 run lease 仍有效时也可以关闭由非法未 await suspending step 造成的同一 run `waiting` 状态。如果 lease 已过期，workflows 只恢复 ready hint，让下一次 claim 在新 lease 下 replay。首次 run admission、过期 run requeue、lifecycle commit、`sendEvent` 与 retention cleanup 还会同时比较持久化的 `createdAtMs` 和 `generation`，避免旧 snapshot 修改同 ID 下、creation timestamp 不同的后来 incarnation；会 invalidate in-flight execution 的 lifecycle path 会在同一个 Lua commit 内 rotate `generation`。
-- Runtime replay cache 只是 advisory。DB 2 step state 是权威。同一个 runtime isolate 可以在同一 instance incarnation 的不同 run claim 间复用 terminal step record；成功 output 会保存为序列化 snapshot，并在每次 replay 时重新解码，因此租户修改返回对象不会污染后续 claim。每个 runtime isolate 的 module-level 跨请求 cache 最多保留 16 MiB serialized data；过大的 record 不进入 cache，压力下会逐出旧 cache，`workflow_replay_cache_bytes` gauge 在 `/_metrics` render 时从权威 counter 发布这部分跨请求保留量。全局逐出会停止跨请求保留；正在执行的 controller 仍可使用有界的 controller-local replay working set，避免逐出把 replay hit 变成 fresh claim，并在 dispatch 结束时释放 detached working set。Backend replay record 会先投影为 Runtime 实际消费的字段，再参与 byte accounting 和 retention，因此未消费的 response metadata 不能绕过 cache budget。新 claim 会重新开放有界分页，以发现其他 isolate 已提交的 record。
+- Runtime replay cache 只是 advisory。DB 2 step state 是权威。同一个 runtime isolate 可以在同一 instance incarnation 的不同 run claim 间复用 terminal step record；成功 output 会保存为序列化 snapshot，并在每次 replay 时重新解码，因此租户修改返回对象不会污染后续 claim。每个 runtime isolate 的 module-level 跨请求 cache 最多保留 16 MiB serialized data；过大的 record 不进入 cache，压力下会逐出旧 cache，`workflow_replay_cache_bytes` gauge 在 `/_metrics` render 时从权威 counter 发布这部分跨请求保留量。全局逐出会停止跨请求保留；active controller 保留 detached state，直到最后一个 controller 释放。Retained/detached serialized bytes 与在途 replay read reservation 共同受每个 Runtime isolate 64 MiB 预算约束。Identity response 按声明长度预留，未知长度或压缩 response 先预留 32 MiB reader ceiling，读取结束后缩到实际字节数，直到 page 校验与 cache admission 完成才释放。先回收无 active controller 的 retained cache；容量不足返回 retryable `workflow_backend_unavailable`，不转成 advisory miss 或 fresh claim。计费字节不等于 RSS。Backend replay record 会先投影为 Runtime 实际消费的字段，再参与 byte accounting 和 retention，因此未消费的 response metadata 不能绕过 cache budget。新 claim 会重新开放有界分页，以发现其他 isolate 已提交的 record。
 - Runtime 可以并发发起多个 `step.do`，常见形式是 `Promise.all`；每次调用按用户代码调用顺序分配 deterministic ordinal，从当前已完成 step frontier 记录 DAG dependencies，并在 run fence 下独立 commit。Step config 是通过 workerLoader JSRPC 边界按值传递的 JSON data，callable hook 不属于该合同；Workflows 拥有 canonical config encoding 与精确的 64 KiB 上限。`step.do` callback 不能启动另一个 workflow step，即使在 callback 的 `await` 之后也不允许；并行 sibling promise 应在 run body 中、callback 代码进入 in-flight 之前创建。如果 run 在已启动 step settle 前返回，会按 invalid run 失败，所以用户代码必须 await 并发 step promise。Suspending operation（`step.sleep`、`step.sleepUntil`、`step.waitForEvent`）仍保持互斥，不能和其它 in-flight step 重叠，因为它们会 suspend 整个 workflow run。
 - Completed instance 使用 success retention；failed 和 terminated instance 使用 error retention。新建 instance 的两类 retention 默认都是 8 小时，可以通过 `create({ retention: { successRetention, errorRetention } })` 覆盖。
+- Controller 关闭时会显式取消其在途 replay read，并同步、幂等地释放 read reservation；不能依赖 workerd 结束 request 后继续执行异步 finally。
 - Bundled Workers types 暴露 best-effort `locationHint` create option，但 WDL 没有 regional Workflow placement plane；`create()` 与 `createBatch()` 会在 backend I/O 前拒绝自有 `locationHint` field，而不是静默丢弃。
 - `Workflow.createBatch()` 每次调用最多接受 100 项；Runtime prevalidation 与 Rust admission 共享这项 pinned limit。Rust 通过一个有界 pipeline 读取去重后的 instance-state snapshot，并在各项间共享 mutation preflight；每个新 instance 仍保留独立的 create token、create 后 control-plane revalidation、cleanup 与 finalize fence。
 - 单个 workflow result 的上限是 1 MiB，runtime-to-workflows backend JSON request 的上限是 2 MiB。Runtime prevalidation 和 Rust backend 共享 pinned `workflow_payload_too_large` contract。每个 instance 的 aggregate payload cap 是 16 MiB。Runtime dispatch 会在转发前限制 serialized result 与 workflows-backend request bytes；这些文档最多包含 127 层 object/array（包括平台 envelope），并拒绝 key 或 value 中的孤立 UTF-16 surrogate，与锁定的 Rust JSON parser 保持一致。Workflows 拥有 backend JSON parsing、canonical step config 和 persisted aggregate accounting。Step/event 超 cap 写入会让请求失败；runtime terminal result 超 cap 会在同一事务内把 instance 转成 failed。
@@ -129,7 +146,7 @@ Step facade 实现 durable replay：
 - Runtime 从头 replay 用户代码。它会 lazy fetch replay pages，也可以在进程内 advisory cache，但 DB 2 step state 始终是权威。
 - Workflows step response 是 tagged variant：`claim-step` 或 `register-wait` 的 `complete` response 和 replay 的 `completed` record 必须各自拥有 `output` 字段，failed variant 必须拥有 `error` 字段。显式 JSON `null` 是合法 payload。畸形 advisory replay record 会回退到权威 `claim-step`；畸形 authoritative response 属于 result-unknown，Runtime 会重试 run，而不是伪造 null。每个新 step record 还会携带 backend-owned operation kind（`do`、`sleep`、`sleepUntil` 或 `waitForEvent`）；缺失或不匹配的 replay kind 会视为 cache miss，并回退到对应的权威 endpoint。
 - Replay step record 与它引用的 payload 共用完整的 generation、run-token、creation-time、lease 和 active-status fence。只有该 fence 仍有效时才会解析引用的 payload，因此 restart 不会把另一 execution generation 的 payload 混入当前 page。
-- V2 会为 `step.do` 持久化 DAG。runtime 按同步调用顺序分配 ordinal，把已完成 step 视作当前 dependency frontier，并把 frontier 存到后续 step 上。`Promise.all([step.do(...), step.do(...)])` 会产生拥有相同 parent 的 sibling nodes；join 后再调用的 `step.do` 会依赖这两个 sibling。依赖调度、join、cancel 仍由用户代码的 `await` / `Promise` 结构表达；workflows 持久化最终 graph，不另跑一个独立 graph planner。
+- Workflows 会为 `step.do` 持久化 DAG。runtime 按同步调用顺序分配 ordinal，把已完成 step 视作当前 dependency frontier，并把 frontier 存到后续 step 上。`Promise.all([step.do(...), step.do(...)])` 会产生拥有相同 parent 的 sibling nodes；join 后再调用的 `step.do` 会依赖这两个 sibling。依赖调度、join、cancel 仍由用户代码的 `await` / `Promise` 结构表达；workflows 持久化最终 graph，不另跑一个独立 graph planner。
 
 Fence 模型：
 
@@ -160,9 +177,14 @@ Progress callback 是 best-effort same-worker Durable Object push。Create reque
 
 ## 可观测性
 
+Runtime 发布 `wdl_workflow_replay_active_bytes`、`wdl_workflow_replay_detached_bytes`、`wdl_workflow_replay_read_in_flight_bytes`、`wdl_workflow_replay_working_set_bytes` 和 `wdl_workflow_replay_working_set_high_water_bytes`。Working set 等于 retained cache、detached 与 read reservation 之和；active 是与 retained/detached 重叠的视图，不应再次相加。High-water 按进程生命周期保留，不随 scrape 重置；容量拒绝增加 `wdl_workflow_replay_cache_total{outcome="saturated"}`。
+
 workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/_metrics`、request in-flight tracking、shutdown drain 和有界 labels。Runtime 输出 workflow dispatch、replay cache、payload-limit 和 callback outcome。Workflows 通过有界 `workflow_dispatches` 输出包括 fenced no-op commit 在内的 completion outcome，并通过 `do_alarm_dispatches` 输出 internal DO alarm delivery/retry/discard/in-flight-unknown outcome。Scheduler tick 日志记录 admission 与 dispatch-pool capacity pressure，并把 workflow tick failure 与 queue/cron dispatch 分开记录。
 
 ## 部署 / Rollout 注意事项
+
+- 部署分页 Control endpoint 前，先更新 definition-list client 使其沿 cursor 读取；使用 companion CLI 时，需要安装 `1.9.0` 或更高版本，升级 WDL service 不会升级已安装的 CLI client。Control 与 Workflows 混版时，旧 Control 可能对尚未完成的 lifecycle page 保守拒绝删除；若不能接受短暂拒绝，应暂停删除，直到两端更新完成。
+- Instance-list byte ceiling 是 writer-first 例外：先更新 Workflows，再更新 system-runtime 中的 Control worker。旧 reader 已接受较短 page 和不变的 cursor shape；有界 reader 不应早于保证 response ceiling 的 writer 上线。这项变更不需要 persisted-state migration。
 
 - 跨 tier Workflow protocol 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程；受影响的具体 service 写入该版本 CHANGELOG。
 - 必需的 runtime dispatch deadline 是一个 sender-first 例外。下述 schema-3 maintenance 会先清退全部旧 Workflows sender，再滚动 user-runtime 和 system-runtime，从而满足该约束。旧 Runtime 接受 additive field，新 Runtime 会拒绝缺少该字段的旧 sender。
@@ -201,8 +223,7 @@ workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/
 
 ## 已知约束和非目标
 
-- V2 不宣称完整 Cloudflare Workflows compatibility。
-- 不支持 cross-worker 或 `script_name` workflows。
+- 不支持 `locationHint` placement、cross-worker 或 `script_name` workflows。
 - WDL 自有 binding facade 不暴露原生 workerd 的 `WorkflowInstance.delete()` 或 `Workflow.deleteBatch()`；instance lifecycle 仍由本文记录的 WDL API 和 retention engine 持有。
 - 不提供平台托管的大 payload object-storage spill。
 - 不使用 tenant Durable Object storage 作为 workflow backend。

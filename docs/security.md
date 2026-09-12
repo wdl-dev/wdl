@@ -188,7 +188,7 @@ Important role boundaries:
 - Delegated namespace safety assumes routine namespace-scoped writes use
   namespace-bound credentials. Full-plane unbound credentials can still perform
   namespace-scoped writes today, and those writes may leave no auth-visible namespace
-  fact once the active worker gate is cleared; this is an accepted V1 residual risk
+  fact once the active worker gate is cleared; this is an accepted residual risk
   until a persistent namespace fact index exists.
 - Platform cross-namespace visibility requires the role kind and bound namespace to
   match the platform-tier rule; do not replace this with route-name checks.

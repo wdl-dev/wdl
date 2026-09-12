@@ -865,6 +865,53 @@ test("offline Workflow step conversion shares legacy shapes with service integra
   ]) assert.match(readRepoFile(reader), /workflow-schema2-steps\.json/, reader);
 });
 
+test("Workflow payload and instance-list limits share a cross-language fixture", () => {
+  const contract = /** @type {Record<string, unknown>} */ (
+    readRepositoryJson("tests/fixtures/workflow-limits.json")
+  );
+  assert.deepEqual(Object.keys(contract).toSorted(), [
+    "backendRequestBytesMax",
+    "createBatchMax",
+    "instancesResponseBytesMax",
+    "jsonContainerDepthMax",
+    "paramsBytesMax",
+    "payloadTooLargeCode",
+    "rejectLoneSurrogates",
+    "resultBytesMax",
+  ]);
+  for (const key of ["backendRequestBytesMax", "createBatchMax", "instancesResponseBytesMax", "jsonContainerDepthMax", "paramsBytesMax", "resultBytesMax"]) {
+    assert.ok(Number.isSafeInteger(contract[key]) && Number(contract[key]) > 0, key);
+  }
+  assert.equal(typeof contract.payloadTooLargeCode, "string");
+  assert.equal(contract.rejectLoneSurrogates, true);
+  for (const reader of [
+    "rust/workflows/src/api/limits.rs",
+    "tests/unit/control-shared.test.js",
+    "tests/unit/runtime-workflows-client.test.js",
+    "tests/unit/runtime-dispatch-workflows.test.js",
+    "tests/integration/workflows-runtime-retention.test.js",
+  ]) {
+    assert.match(readRepoFile(reader), /workflow-limits\.json/, reader);
+  }
+});
+
+test("Workflow lifecycle continuation is shared by Rust and Control", () => {
+  const fixture = "tests/fixtures/workflow-lifecycle-check.json";
+  const contract = /** @type {{ request: Record<string, unknown>, responses: Record<string, {allowed: boolean, blockers: unknown[], cursor?: string}>, limits: Record<string, number> }} */ (readRepositoryJson(fixture));
+  assert.deepEqual(Object.keys(contract.responses).toSorted(), ["blocked", "complete", "continuation", "rescanRequired"]);
+  assert.equal(contract.responses.complete.allowed, true);
+  assert.equal(contract.responses.blocked.allowed, false);
+  assert.equal(contract.responses.continuation.allowed, false);
+  assert.equal(typeof contract.responses.continuation.cursor, "string");
+  assert.equal(contract.responses.rescanRequired.allowed, false);
+  assert.deepEqual(contract.responses.rescanRequired.blockers, []);
+  assert.equal(Object.hasOwn(contract.responses.rescanRequired, "cursor"), false);
+  for (const limit of Object.values(contract.limits)) assert.ok(Number.isSafeInteger(limit) && limit > 0);
+  for (const reader of ["rust/workflows/src/api/lifecycle/cleanup.rs", "tests/unit/control-shared.test.js"]) {
+    assert.match(readRepoFile(reader), /workflow-lifecycle-check\.json/, reader);
+  }
+});
+
 test("Workflow Runtime run requests share one JS and Rust fixture", () => {
   const fixture = "tests/fixtures/workflow-runtime-request.json";
   const contract = /** @type {{ run: Record<string, unknown> }} */ (
@@ -3205,6 +3252,19 @@ test("D1 and DO deployments keep explicit runtime memory ceilings", () => {
     assert.ok(container, `${serviceName} StatefulSet container must exist`);
     assert.equal(container.resources?.limits?.memory, "1Gi", `${serviceName} memory limit`);
   }
+});
+
+test("Terraform system-runtime exposes operator-controlled capacity", () => {
+  const name = "system_runtime_desired_count";
+  const rootVars = withoutLineComments(readRepoFile("terraform/variables.tf"));
+  const moduleVars = withoutLineComments(readRepoFile("terraform/modules/compute/variables.tf"));
+  const main = withoutLineComments(readRepoFile("terraform/main.tf"));
+  const service = withoutLineComments(readRepoFile("terraform/modules/compute/system_runtime_service.tf"));
+
+  assert.match(rootVars, new RegExp(`variable "${name}"\\s*\\{[^}]*default\\s*=\\s*1\\b`));
+  assert.match(moduleVars, new RegExp(`variable "${name}"`));
+  assert.match(main, new RegExp(`${name}\\s*=\\s*var\\.${name}\\b`));
+  assert.match(service, new RegExp(`desired_count\\s*=\\s*var\\.${name}\\b`));
 });
 
 test("Terraform ECS services keep Fargate placement and start-before-stop rollout", () => {

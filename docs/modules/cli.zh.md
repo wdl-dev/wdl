@@ -58,11 +58,13 @@ CLI 可以展示：
 
 | WDL source line | 最低支持 CLI | CI-qualified CLI |
 | --- | --- | --- |
-| 当前 `main` / 下一次 release | `1.8.0` | `1.8.1` |
+| 当前 `main` / 下一次 release | `1.9.0` | `1.9.0` |
+
+Workflow definition 分页要求 CLI `1.9.0` 或更高版本，以传递 opaque cursor 并在短页或空页后显示 continuation。部署分页 Control endpoint 前应先升级已安装的 CLI client；升级 WDL service 不会升级 CLI。
 
 最低版本是对完整 CLI surface 的支持声明；CI-qualified 版本是 WDL CLI integration job 使用的精确已发布 package。两者都不是 request negotiation 或执行门禁：普通 CLI 命令不会预检 `/whoami`，Control 也不会按 CLI 版本拒绝请求。`whoami` 和 `doctor` 可以比较当前 CLI 与 `minCliVersion` 并报告兼容结果；每个请求仍由服务端执行 canonical validation。
 
-已发布版本使用以下按能力推导的兼容矩阵。最低完整 CLI 是能够表达对应 WDL 区间所引入全部稳定 CLI 管理能力的最早已发布版本，不取决于 release CI 当时可能滞后的 package。应使用不低于表中边界的最新 patch release。较新的 CLI 仍可能提供旧 WDL 没有实现的命令，因此服务端 validation 继续作为 canonical contract。最后一行保持开放，直到后续 WDL release 提高最低完整 CLI 时再闭合。
+已发布版本使用以下按能力推导的兼容矩阵。最低完整 CLI 是能够表达对应 WDL 区间所引入全部稳定 CLI 管理能力的最早已发布版本，不取决于 release CI 当时可能滞后的 package。应使用不低于表中边界的最新 patch release。较新的 CLI 仍可能提供旧 WDL 没有实现的命令，因此服务端 validation 继续作为 canonical contract。此矩阵覆盖已发布的 WDL release；未发布变更使用上方 source-line 声明。
 
 | WDL release range | 最低完整 CLI | 能力边界 |
 | --- | --- | --- |
@@ -72,7 +74,7 @@ CLI 可以展示：
 | `wdl.20260724.1` - `wdl.20260801.1` | `1.6.0` | `workers_dev = false` 与 route URL reporting。 |
 | `wdl.20260801.2` - `wdl.20260804.1` | 无（基础命令为 `1.6.0`） | 既有 CLI 命令仍可用，但短暂存在的 `durableObjectRollout` opt-in 仅有 Control API，从未发布对应 CLI spelling。 |
 | `wdl.20260804.2` - `wdl.20260815.1` | `1.7.0` | `[wdl] session_policy` deploy 支持。 |
-| `wdl.20260817.1` 及后续版本 | `1.8.0` | AI binding manifest 与 namespace AI provider management。 |
+| `wdl.20260817.1` - `wdl.20260906.1` | `1.8.0` | AI binding manifest 与 namespace AI provider management。 |
 
 CLI 应把其余 discovery 字段当作 diagnostics 和 user-facing guidance 的默认值，而不是替代用户显式配置。可选 URL hint 缺失时，应展示为 unavailable，不应自行猜测。
 
@@ -124,7 +126,7 @@ WDL 遵循 Wrangler selected-env 继承规则：
 | `workers_dev` | `false` 让该 worker 退出 `<ns>.<platform-domain>/<worker>/` subdomain route，同时保留 pattern route；要求至少有一条 `route`/`routes`。默认启用。 |
 | `[triggers] crons` 和 `[[triggers.schedules]]` | Cloudflare-compatible UTC cron 加 WDL timezone extension。 |
 | `[[queues.producers]]` 和 `[[queues.consumers]]` | Producer 和 consumer metadata。`max_concurrency` 被拒绝。 |
-| `[[workflows]]` | Same-worker Workflows V2 binding。 |
+| `[[workflows]]` | Same-worker Workflow binding。 |
 | `[ai]` | 声明一个 tenant binding name，例如 `binding = "AI"`。Provider metadata 和 credential 是由 `wdl ai` 单独管理的 namespace resource，不会进入 bundle，也不会继承到 selected environment。 |
 
 `[[analytics_engine_datasets]]` 在 top level 和 selected-env level 都会被 deploy 拒绝。Unsupported field 不应在暗示 WDL 未实现的平台行为时被静默忽略。
@@ -173,5 +175,7 @@ Tail 是 live debug 路径，不是 audit storage。Tail protocol 细节见 [Log
 - `tests/integration/r2-cli-binding.test.js`
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`
+
+CLI smoke tests 直接验证平台的 definition 与 instance 分页，包括 text/JSON 输出、短页或空页的续接，以及最终 cursor。
 
 CLI 仓库负责 `[ai]` parsing、extension stripping、provider command tests 和 `examples/ai-agent-demo` packaging path；平台侧 runtime/Control 合同由 `tests/integration/ai-binding.test.js` 保护。

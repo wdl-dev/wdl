@@ -396,6 +396,13 @@ upstream flags during cold load.
 
 ## Observability
 
+Workflow replay publishes retained, active, detached, and in-flight read byte views,
+plus total working-set and process-lifetime high-water gauges. The 64 MiB working-set
+budget includes retained/detached serialized records and replay response reservations;
+it is not an RSS measurement. Saturation uses the existing retryable dispatch failure
+path. See [Workflow observability](workflows.md#observability) for exact metric names
+and overlap/accounting rules.
+
 Runtime emits request logs and metrics for loading, binding operations, AI pool state,
 `redis-proxy` calls, workflow replay cache, loader evictions, and dispatch envelopes. Tail worker
 emits structured stdout for console/exception capture and forwards to `wdl tail` only

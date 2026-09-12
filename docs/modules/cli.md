@@ -94,7 +94,12 @@ The maintained compatibility declaration for current `main` and its next release
 
 | WDL source line | Minimum supported CLI | CI-qualified CLI |
 | --- | --- | --- |
-| Current `main` / next release | `1.8.0` | `1.8.1` |
+| Current `main` / next release | `1.9.0` | `1.9.0` |
+
+Workflow definition pagination requires CLI `1.9.0` or later to pass opaque cursors
+and display continuation after short or empty pages. Upgrade installed CLI clients
+before deploying the paginated Control endpoint; upgrading WDL services does not
+upgrade the CLI.
 
 The minimum is a support declaration for the full CLI surface. The CI-qualified version
 is the exact published package used by WDL's CLI integration job. These values are not
@@ -108,8 +113,8 @@ minimum complete CLI is the earliest published CLI that can express all stable
 CLI-managed capabilities introduced by that WDL range; it is not the possibly lagging
 package that happened to run in release CI. Use the latest patch release at or above the
 listed boundary. A newer CLI can still expose commands that an older WDL release does
-not implement, so server-side validation remains canonical. The final row remains open
-until a later WDL release raises the minimum complete CLI.
+not implement, so server-side validation remains canonical. This matrix covers
+published WDL releases; the source-line declaration above covers unreleased changes.
 
 | WDL release range | Minimum complete CLI | Capability boundary |
 | --- | --- | --- |
@@ -119,7 +124,7 @@ until a later WDL release raises the minimum complete CLI.
 | `wdl.20260724.1` - `wdl.20260801.1` | `1.6.0` | `workers_dev = false` and route URL reporting. |
 | `wdl.20260801.2` - `wdl.20260804.1` | None (`1.6.0` baseline) | Existing CLI commands remain usable, but the transient `durableObjectRollout` opt-in was Control-API-only and never had a published CLI spelling. |
 | `wdl.20260804.2` - `wdl.20260815.1` | `1.7.0` | `[wdl] session_policy` deploy support. |
-| `wdl.20260817.1` and later | `1.8.0` | AI binding manifests and namespace AI provider management. |
+| `wdl.20260817.1` - `wdl.20260906.1` | `1.8.0` | AI binding manifests and namespace AI provider management. |
 
 The CLI must treat the remaining discovery fields as diagnostics and defaults for
 user-facing guidance, not as a replacement for explicit user configuration. Missing
@@ -193,7 +198,7 @@ Supported config surfaces:
 | `workers_dev` | `false` opts the worker out of the `<ns>.<platform-domain>/<worker>/` subdomain route while keeping pattern routes active; requires at least one `route`/`routes` entry. Defaults to enabled. |
 | `[triggers] crons` and `[[triggers.schedules]]` | UTC Cloudflare-compatible crons plus WDL timezone extension. |
 | `[[queues.producers]]` and `[[queues.consumers]]` | Producer and consumer metadata. `max_concurrency` is rejected. |
-| `[[workflows]]` | Same-worker Workflows V2 bindings. |
+| `[[workflows]]` | Same-worker Workflow bindings. |
 | `[ai]` | Declares one tenant binding name, for example `binding = "AI"`. Provider metadata and credentials remain namespace resources managed separately through `wdl ai`; they are not embedded in the bundle or inherited into selected environments. |
 
 `[[analytics_engine_datasets]]` is rejected at deploy at both top level and selected-env
@@ -266,6 +271,9 @@ integration files marked `// @wdl-cli-integration`:
 - `tests/integration/r2-cli-binding.test.js`
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`
+
+CLI smoke tests cover definition and instance pagination against the platform,
+including text/JSON output, short or empty continuation pages, and final cursors.
 
 The CLI repository owns `[ai]` parsing, extension stripping, provider command tests,
 and the `examples/ai-agent-demo` packaging path. The platform-side runtime and Control

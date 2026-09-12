@@ -40,6 +40,8 @@ export function compileControlSharedDependencies({ sharedRedisUrl }) {
     "control/workflows-client.js",
     importSpecifierReplacements({
       "shared-errors": SHARED_ERRORS_URL,
+      "shared-bounded-body": SHARED_BOUNDED_BODY_URL,
+      "shared-respond": SHARED_RESPOND_URL,
       "control-errors": controlErrorsUrl,
     }),
   );

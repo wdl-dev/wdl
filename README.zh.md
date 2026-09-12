@@ -75,7 +75,7 @@ WDL 首先是基础设施项目：operator 运行自己的 platform，tenant 用
 | `d1-runtime` | D1 SQLite execution，使用 owner lease 和 supervisor 管理 workerd process。 |
 | `do-runtime` | Durable Object native facet、SQLite storage、alarm、owner lease 和 WebSocket。 |
 | `scheduler` | cron、queue 和 workflow tick dispatch。 |
-| `workflows` | Workflows V2 state machine、DB 2 owner 和 DO alarm delivery backend。 |
+| `workflows` | Workflow state machine、DB 2 owner 和 DO alarm delivery backend。 |
 
 Valkey/Redis 使用明确的逻辑切分：
 
@@ -104,7 +104,7 @@ Clone 仓库，安装 standalone `wdl` CLI 和仓库依赖，编译本地 worker
 ```bash
 git clone https://github.com/wdl-dev/wdl.git
 cd wdl
-npm install -g @wdl-dev/cli@1.8.1
+npm install -g @wdl-dev/cli@1.9.0
 npm ci
 npm install --ignore-scripts --prefix examples/hello-jsonc
 npm run compile:workerd:local

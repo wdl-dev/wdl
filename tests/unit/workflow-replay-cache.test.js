@@ -53,6 +53,83 @@ async function loadReplayCacheModule() {
 const CREATED_AT_BASE_MS = 1700000000000;
 const WORKFLOW_REPLAY_CACHE_STEP_LIMIT = 256;
 
+test("replay working-set admission counts detached state and releases the last controller", async () => {
+  const mod = await loadReplayCacheModule();
+  /** @type {import("../../runtime/dispatch/workflow-replay-cache.js").WorkflowReplayCache[]} */
+  const caches = [];
+  let shared;
+  for (let index = 0; index < 6; index += 1) {
+    const cache = mod.acquireWorkflowReplayCache(run(index));
+    if (index === 0) shared = mod.acquireWorkflowReplayCache(run(index));
+    mod.rememberWorkflowReplayStep(cache, 0, { status: "completed", output: "x".repeat(8 * 1024 * 1024) });
+    caches.push(cache);
+  }
+  assert.equal(shared, caches[0]);
+  assert.ok(shared);
+  const activeBytes = caches.reduce((sum, cache) => sum + cache.bytes, 0);
+  assert.equal(latestGauge("workflow_replay_active_bytes"), activeBytes);
+  assert.equal(latestGauge("workflow_replay_working_set_bytes"), activeBytes);
+  assert.ok(latestGauge("workflow_replay_detached_bytes") > 0);
+  assert.equal(
+    latestGauge("workflow_replay_cache_bytes") + latestGauge("workflow_replay_detached_bytes"),
+    activeBytes,
+  );
+  const lease = mod.createWorkflowReplayReadLease();
+  lease.reserve(mod.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES - activeBytes);
+  assert.throws(() => mod.rememberWorkflowReplayStep(caches[0], 1, { status: "completed", output: "new" }), mod.WorkflowReplayCapacityError);
+  assert.equal(caches[0].steps.size, 1);
+  assert.equal(latestGauge("workflow_replay_working_set_bytes"), mod.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES);
+  mod.releaseWorkflowReplayCache(caches[0]);
+  assert.equal(latestGauge("workflow_replay_active_bytes"), activeBytes);
+  const firstBytes = shared.bytes;
+  mod.releaseWorkflowReplayCache(shared);
+  assert.equal(latestGauge("workflow_replay_active_bytes"), activeBytes - firstBytes);
+  assert.equal(shared.bytes, 0);
+  mod.rememberWorkflowReplayStep(caches[1], 1, { status: "completed", output: "recovered" });
+  for (const cache of caches.slice(1)) mod.releaseWorkflowReplayCache(cache);
+  lease.release();
+  lease.release();
+  assert.equal(latestGauge("workflow_replay_active_bytes"), 0);
+  assert.equal(latestGauge("workflow_replay_detached_bytes"), 0);
+  assert.equal(latestGauge("workflow_replay_read_in_flight_bytes"), 0);
+  assert.equal(latestGauge("workflow_replay_working_set_bytes"), latestGauge("workflow_replay_cache_bytes"));
+  assert.equal(latestGauge("workflow_replay_working_set_high_water_bytes"), mod.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES);
+  assert.ok(metricsState().increments.some((/** @type {any} */ entry) => entry.labels.outcome === "saturated"));
+});
+
+test("replay read admission evicts unused retained caches and shrinks unknown-length reservations", async () => {
+  const mod = await loadReplayCacheModule();
+  const cache = mod.getWorkflowReplayCache(run(0));
+  mod.rememberWorkflowReplayStep(cache, 0, { status: "completed", output: "retained" });
+  const lease = mod.createWorkflowReplayReadLease();
+  lease.reserve(mod.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES);
+  assert.equal(cache.released, true);
+  assert.equal(latestGauge("workflow_replay_cache_bytes"), 0);
+  lease.reserve(128);
+  assert.equal(latestGauge("workflow_replay_read_in_flight_bytes"), 128);
+  lease.release();
+  assert.equal(latestGauge("workflow_replay_working_set_bytes"), 0);
+  assert.equal(latestGauge("workflow_replay_working_set_high_water_bytes"), mod.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES);
+});
+
+test("replay admission preserves replaced records on refusal and accounts for step eviction", async () => {
+  const mod = await loadReplayCacheModule();
+  const cache = mod.acquireWorkflowReplayCache(run(0));
+  for (let ordinal = 0; ordinal < WORKFLOW_REPLAY_CACHE_STEP_LIMIT; ordinal += 1) {
+    mod.rememberWorkflowReplayStep(cache, ordinal, { status: "completed", output: "old" });
+  }
+  const lease = mod.createWorkflowReplayReadLease();
+  lease.reserve(mod.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES - cache.bytes);
+  assert.throws(() => mod.rememberWorkflowReplayStep(cache, 0, { status: "completed", output: "larger" }), mod.WorkflowReplayCapacityError);
+  assert.equal(mod.readWorkflowReplayStepOutput(cache.steps.get(0)), "old");
+  mod.rememberWorkflowReplayStep(cache, WORKFLOW_REPLAY_CACHE_STEP_LIMIT, { status: "completed", output: "old" });
+  assert.equal(cache.steps.has(0), false);
+  assert.equal(cache.steps.size, WORKFLOW_REPLAY_CACHE_STEP_LIMIT);
+  assert.equal(latestGauge("workflow_replay_working_set_bytes"), mod.WORKFLOW_REPLAY_WORKING_SET_MAX_BYTES);
+  mod.releaseWorkflowReplayCache(cache);
+  lease.release();
+});
+
 /** @param {number} index */
 function run(index) {
   return {

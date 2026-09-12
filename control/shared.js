@@ -38,7 +38,11 @@ import {
 } from "shared-observability";
 import {
   WORKFLOWS_INTERNAL_TIMEOUT_MS,
+  WORKFLOW_LIFECYCLE_MAX_PAGES,
+  WORKFLOW_LIFECYCLE_TIMEOUT_MS,
   createPostWorkflowsInternal,
+  readWorkflowInstancesResponse,
+  readWorkflowLifecycleResponse,
 } from "control-workflows-client";
 import {
   ControlAbort,
@@ -106,6 +110,7 @@ export {
 };
 export { runOptimistic, withOptimisticRetries };
 export { readJsonBody };
+export { WORKFLOWS_INTERNAL_TIMEOUT_MS, readWorkflowInstancesResponse };
 
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function isRecord(value) {
@@ -609,48 +614,81 @@ export async function recordCleanupIntentOrWarn({
 }
 
 /**
- * @param {{ ns: string, worker: string, version?: string, allowCleanup?: boolean, requestId?: string | null }} args
+ * @param {{ ns: string, worker: string, version?: string, allowCleanup?: boolean, requestId?: string | null, lockToken?: string }} args
  */
-export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefined, allowCleanup = false, requestId = null }) {
+export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefined, allowCleanup = false, requestId = null, lockToken }) {
   const context = {
     namespace: ns,
     worker,
     ...(version ? { version } : {}),
   };
-  const { response, body } = await postWorkflowsInternal({
-    endpoint: "workflows/lifecycle/check-delete",
-    body: {
-      ns,
-      worker,
-      ...(version ? { version } : {}),
-      ...(allowCleanup ? { allowCleanup: true } : {}),
-    },
-    requestId,
-    logEvent: "workflow_lifecycle_check_failed",
-    logFields: context,
-    errorDetails: context,
-    unavailableMessage: "Workflow lifecycle check is unavailable",
-    requestFailedMessage: "Workflow lifecycle check failed",
-    // The lifecycle scan is unbounded by namespace size. Preserve its
-    // pre-consolidation behavior instead of imposing the ordinary short
-    // control-to-workflows request timeout.
-    timeoutMs: null,
-  });
-  if (!response.ok) {
-    throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
-      message: "Workflow lifecycle check failed",
-      ...context,
-      upstream_status: response.status,
-      upstream_error: isRecord(body) && typeof body.error === "string" ? body.error : null,
+  const deadline = Date.now() + WORKFLOW_LIFECYCLE_TIMEOUT_MS;
+  let cursor;
+  for (let page = 0; page < WORKFLOW_LIFECYCLE_MAX_PAGES; page += 1) {
+    if (Date.now() >= deadline) break;
+    if (lockToken) {
+      /** @type {ReturnType<typeof setTimeout> | undefined} */
+      let renewalTimeout;
+      try {
+        const renewed = await Promise.race([
+          renewDeleteLock(requireControlRedis(), ns, worker, lockToken),
+          new Promise((resolve) => {
+            renewalTimeout = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
+          }),
+        ]);
+        if (renewed === null || Date.now() >= deadline) break;
+        if (!renewed) throw new ControlAbort(409, "deleting", deleteLockExpiredDetails(ns, worker, version));
+      } finally {
+        if (renewalTimeout !== undefined) clearTimeout(renewalTimeout);
+      }
+    }
+    if (Date.now() >= deadline) break;
+    const { response, body } = await postWorkflowsInternal({
+      endpoint: "workflows/lifecycle/check-delete",
+      body: {
+        ns,
+        worker,
+        ...(version ? { version } : {}),
+        ...(allowCleanup ? { allowCleanup: true } : {}),
+        ...(cursor === undefined ? {} : { cursor }),
+      },
+      requestId,
+      logEvent: "workflow_lifecycle_check_failed",
+      logFields: context,
+      errorDetails: context,
+      unavailableMessage: "Workflow lifecycle check is unavailable",
+      requestFailedMessage: "Workflow lifecycle check failed",
+      timeoutMs: WORKFLOWS_INTERNAL_TIMEOUT_MS,
+      deadlineMs: deadline,
+      deadlineErrorCode: "workflow_lifecycle_check_incomplete",
+      readBody: readWorkflowLifecycleResponse,
     });
-  }
-  if (!isRecord(body) || typeof body.allowed !== "boolean") {
-    throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
-      message: "Workflow lifecycle check returned an invalid response",
-      ...context,
-    });
-  }
-  if (body.allowed !== true) {
+    if (!response.ok) {
+      throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
+        message: "Workflow lifecycle check failed",
+        ...context,
+        upstream_status: response.status,
+        upstream_error: isRecord(body) && typeof body.error === "string" ? body.error : null,
+      });
+    }
+    if (!isRecord(body) || typeof body.allowed !== "boolean" || (body.allowed && body.cursor != null)) {
+      throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
+        message: "Workflow lifecycle check returned an invalid response",
+        ...context,
+      });
+    }
+    if (body.allowed) return;
+    if (Array.isArray(body.blockers) && body.blockers.length === 0) {
+      if (body.cursor === undefined) break;
+      if (typeof body.cursor !== "string" || !/^[1-9][0-9]*$/.test(body.cursor) || body.cursor === cursor) {
+        throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
+          message: "Workflow lifecycle check returned an invalid cursor",
+          ...context,
+        });
+      }
+      cursor = body.cursor;
+      continue;
+    }
     throw new ControlAbort(409, "workflow_instances_active", {
       message: version
         ? `${ns}/${worker}/${version} has active workflow instances`
@@ -660,6 +698,10 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
       blockers: Array.isArray(body.blockers) ? body.blockers : [],
     });
   }
+  throw new ControlAbort(503, "workflow_lifecycle_check_incomplete", {
+    message: "Workflow lifecycle check is incomplete; retry the deletion request",
+    ...context,
+  });
 }
 
 /**

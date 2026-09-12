@@ -1,16 +1,29 @@
 import { parseBundleMeta, workflowDefsKey } from "control-lib";
 import {
   ControlAbort,
+  WORKFLOWS_INTERNAL_TIMEOUT_MS,
   codedErrorLogFields,
   controlAbortResponse,
   errorMessage,
   jsonError,
   jsonResponse,
   postWorkflowsInternal,
+  readWorkflowInstancesResponse,
   requireControlLog,
   requireControlRedis,
 } from "control-shared";
 import { bundleKey, routesKey } from "shared-worker-contract";
+import { bytesToBase64, canonicalBase64ToBytes } from "base64.js";
+import { utf8ByteLength } from "shared-utf8";
+import {
+  WORKFLOW_DEFINITION_CURSOR_MAX_BYTES,
+  WORKFLOW_DEFINITION_PAGE_MAX_BYTES,
+  WORKFLOW_DEFINITION_PAGE_READ_MAX_BYTES,
+  WORKFLOW_DEFINITION_PAGE_MAX_WORKERS,
+  readWorkflowDefinitionSnapshot,
+  readWorkflowRoutePage,
+  workflowDeclarationsFit,
+} from "control-workflow-definitions";
 import {
   BINDING_NAME_RE,
   WORKER_NAME_RE,
@@ -23,6 +36,8 @@ import {
 
 const LIFECYCLE_ACTIONS = new Set(["pause", "resume", "restart", "terminate"]);
 const MAX_WORKFLOW_SNAPSHOT_ATTEMPTS = 2;
+const cursorEncoder = new TextEncoder();
+const cursorDecoder = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * @typedef {import("shared-redis").RedisClient} RedisClient
@@ -47,6 +62,7 @@ const MAX_WORKFLOW_SNAPSHOT_ATTEMPTS = 2;
  * }} WorkflowRequest
  * @typedef {{ workflow: WorkflowEntry, request: WorkflowRequest }} ResolvedWorkflow
  * @typedef {{ error: string, message?: unknown, [key: string]: unknown }} UpstreamErrorBody
+ * @typedef {{ scan: string, worker?: string, name?: string, fingerprint?: string, definitions?: string }} DefinitionCursor
  */
 
 /** @param {WorkflowsHandlerArgs} args */
@@ -79,7 +95,7 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
   const log = requireControlLog();
   const deps = { redis };
   if (method === "GET" && subPath.length === 0) {
-    const body = await listWorkflowDefinitions(deps, ns);
+    const body = await listWorkflowDefinitions(deps, ns, listOptions(url));
     log("info", "workflows_listed", {
       request_id: requestId,
       namespace: ns,
@@ -93,7 +109,7 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
     const workflow = await resolveWorkflow(deps, ns, worker, workflowName);
 
     if (method === "GET" && subPath.length === 3) {
-      const body = await callWorkflowsRust("instances", {
+      const { body, responseBytes } = await callWorkflowsRust("instances", {
         ...workflow.request,
         options: listOptions(url),
         requestId,
@@ -105,13 +121,15 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
         workflow: workflowName,
         count: Array.isArray(body.instances) ? body.instances.length : 0,
       });
-      return jsonResponse(200, body);
+      return new Response(/** @type {BodyInit | null} */ (responseBytes), {
+        headers: { "content-type": "application/json" },
+      });
     }
 
     if (subPath.length >= 4) {
       const instanceId = decodePathSegment(subPath[3], "workflow instance id");
       if (method === "GET" && subPath.length === 4) {
-        const body = await callWorkflowsRust("status", {
+        const { body } = await callWorkflowsRust("status", {
           ...workflow.request,
           instanceId,
           options: statusOptions(url),
@@ -135,7 +153,7 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
             message: `Workflow ${ns}/${worker}/${workflowName} is not exported by the active worker version`,
           });
         }
-        const body = await callWorkflowsRust(action, {
+        const { body } = await callWorkflowsRust(action, {
           ...workflow.request,
           instanceId,
           requestId,
@@ -160,100 +178,169 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
 /**
  * @param {{ redis: RedisClient }} deps
  * @param {string} ns
+ * @param {Record<string, unknown>} options
  */
-async function listWorkflowDefinitions({ redis }, ns) {
-  return await redis.session(async (session) =>
-    listWorkflowDefinitionsFromSession({ redis: session }, ns));
+async function listWorkflowDefinitions({ redis }, ns, options) {
+  const limit = options.limit ?? 100;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 1000) {
+    throw new ControlAbort(400, "invalid_request", { message: "Workflow definition limit must be in [1, 1000]" });
+  }
+  const cursor = decodeDefinitionCursor(options.cursor);
+  try {
+    return await redis.session(async (session) =>
+      listWorkflowDefinitionsFromSession({ redis: session }, ns, limit, cursor));
+  } catch (err) {
+    if (err instanceof ControlAbort) throw err;
+    requireControlLog()("error", "workflow_metadata_unavailable", { namespace: ns, error_message: errorMessage(err) });
+    throw new ControlAbort(500, "workflow_metadata_unavailable", { namespace: ns, message: "Workflow metadata is unavailable" });
+  }
+}
+
+/** @param {Uint8Array} bytes */
+function base64Url(bytes) {
+  return bytesToBase64(bytes).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+/** @param {unknown} value */
+async function definitionFingerprint(value) {
+  return base64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", cursorEncoder.encode(JSON.stringify(value)))));
+}
+
+/** @param {DefinitionCursor} cursor */
+function encodeDefinitionCursor(cursor) {
+  return base64Url(cursorEncoder.encode(JSON.stringify(cursor)));
+}
+
+/** @param {unknown} raw @returns {DefinitionCursor} */
+function decodeDefinitionCursor(raw) {
+  if (raw === undefined || raw === "") return { scan: "0" };
+  try {
+    if (typeof raw !== "string" || raw.length > WORKFLOW_DEFINITION_CURSOR_MAX_BYTES || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new Error("cursor");
+    const base64 = raw.replaceAll("-", "+").replaceAll("_", "/");
+    const parsed = JSON.parse(cursorDecoder.decode(canonicalBase64ToBytes(base64 + "=".repeat((4 - base64.length % 4) % 4))));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || typeof parsed.scan !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(parsed.scan) || BigInt(parsed.scan) > 18446744073709551615n) throw new Error("cursor");
+    if (parsed.worker !== undefined && (!isValidWorkerName(parsed.worker) || typeof parsed.fingerprint !== "string")) throw new Error("cursor");
+    if (parsed.name !== undefined && (parsed.worker === undefined || !isValidWorkflowName(parsed.name) || typeof parsed.definitions !== "string")) throw new Error("cursor");
+    return parsed;
+  } catch {
+    throw new ControlAbort(400, "invalid_request", { message: "Workflow definition cursor is invalid" });
+  }
 }
 
 /**
  * @param {{ redis: RedisSession }} deps
  * @param {string} ns
+ * @param {number} limit
+ * @param {DefinitionCursor} cursor
  */
-async function listWorkflowDefinitionsFromSession({ redis }, ns) {
+async function listWorkflowDefinitionsFromSession({ redis }, ns, limit, cursor) {
   for (let attempt = 0; attempt < MAX_WORKFLOW_SNAPSHOT_ATTEMPTS; attempt += 1) {
-    const routes = await redis.hGetAll(routesKey(ns));
-    /** @type {Array<[string, string]>} */
-    const routeEntries = [];
-    for (const [worker, activeVersion] of Object.entries(routes)) {
-      if (typeof activeVersion === "string" && activeVersion) routeEntries.push([worker, activeVersion]);
-    }
-    if (routeEntries.length === 0) return { namespace: ns, workflows: [] };
-    const [metaRaws, defsRaws] = await readWorkflowListRaws({ redis }, ns, routeEntries);
-    const currentRoutes = await redis.hGetAll(routesKey(ns));
-    /** @type {Array<Record<string, unknown> | undefined>} */
-    const metas = new Array(routeEntries.length);
-    for (let index = 0; index < routeEntries.length; index += 1) {
-      const [worker, activeVersion] = routeEntries[index];
-      if (currentRoutes[worker] === activeVersion) {
-        metas[index] = workflowBundleMeta(ns, worker, activeVersion, metaRaws[index]);
+    const routePage = await readWorkflowRoutePage(redis, routesKey(ns), cursor.scan);
+    const entries = Object.entries(routePage.routes).filter(([, version]) => version).toSorted(([a], [b]) => a.localeCompare(b));
+    const fingerprint = await definitionFingerprint([routePage.next, entries]);
+    if (cursor.fingerprint && cursor.fingerprint !== fingerprint) break;
+    /** @type {ListedWorkflowEntry[]} */
+    const workflows = [];
+    /** @type {DefinitionCursor} */
+    let progress = { ...cursor, fingerprint };
+    /** @type {DefinitionCursor | null} */
+    let next = routePage.next === "0" ? null : { scan: routePage.next };
+    let bytes = utf8ByteLength(JSON.stringify({ namespace: ns, workflows: [], cursor: "" })) + WORKFLOW_DEFINITION_CURSOR_MAX_BYTES;
+    let workers = 0;
+    let inputBytes = 0;
+    let changed = false;
+    for (const [worker, version] of entries) {
+      const order = cursor.worker === undefined ? 1 : worker.localeCompare(cursor.worker);
+      if (order < 0 || (order === 0 && cursor.name === undefined)) continue;
+      if (workers === WORKFLOW_DEFINITION_PAGE_MAX_WORKERS || workflows.length === limit) { next = progress; break; }
+      workers += 1;
+      const snapshot = await readWorkflowListSnapshot(redis, ns, worker, version, entries.length);
+      if (snapshot.status === 2) { changed = true; break; }
+      if (snapshot.status === -1) {
+        throw new ControlAbort(413, "workflow_listing_metadata_too_large", { namespace: ns, worker, message: "Worker metadata exceeds the Workflow listing read budget" });
       }
+      if (snapshot.status !== 1) {
+        throw new ControlAbort(500, "corrupt_meta", { namespace: ns, worker, message: "Workflow listing metadata exceeds its read bounds" });
+      }
+      if (inputBytes + snapshot.bytes > WORKFLOW_DEFINITION_PAGE_READ_MAX_BYTES) {
+        if (inputBytes === 0) {
+          throw new ControlAbort(413, "workflow_listing_metadata_too_large", { namespace: ns, worker, message: "Worker metadata exceeds the Workflow listing read budget" });
+        }
+        next = progress;
+        break;
+      }
+      inputBytes += snapshot.bytes;
+      const meta = workflowBundleMeta(ns, worker, version, snapshot.metaRaw);
+      const definitions = buildWorkerWorkflowDefinitions(ns, worker, version, meta, snapshot.defs);
+      const defsFingerprint = await definitionFingerprint(definitions);
+      if (order === 0 && cursor.name !== undefined && cursor.definitions !== defsFingerprint) { changed = true; break; }
+      let pageFull = false;
+      for (const definition of definitions) {
+        if (order === 0 && cursor.name !== undefined && definition.name.localeCompare(cursor.name) <= 0) continue;
+        const size = utf8ByteLength(JSON.stringify(definition)) + (workflows.length > 0 ? 1 : 0);
+        if (workflows.length === limit || bytes + size > WORKFLOW_DEFINITION_PAGE_MAX_BYTES) {
+          if (workflows.length === 0) throw new ControlAbort(500, "corrupt_meta", { namespace: ns, worker, message: "Workflow definition exceeds the page byte limit" });
+          next = progress;
+          pageFull = true;
+          break;
+        }
+        workflows.push(definition);
+        bytes += size;
+        progress = { scan: cursor.scan, fingerprint, worker, name: definition.name, definitions: defsFingerprint };
+      }
+      if (pageFull) break;
+      progress = { scan: cursor.scan, fingerprint, worker };
     }
-    if (!sameRouteSnapshot(routes, currentRoutes)) continue;
-    return buildWorkflowDefinitionList(
-      ns,
-      routeEntries,
-      /** @type {Record<string, unknown>[]} */ (metas),
-      defsRaws
-    );
+    if (changed) continue;
+    const after = await readWorkflowRoutePage(redis, routesKey(ns), cursor.scan);
+    const afterEntries = Object.entries(after.routes).filter(([, version]) => version).toSorted(([a], [b]) => a.localeCompare(b));
+    if (await definitionFingerprint([after.next, afterEntries]) !== fingerprint) continue;
+    return { namespace: ns, workflows, cursor: next === null ? null : encodeDefinitionCursor(next) };
   }
   throw new ControlAbort(503, "workflow_metadata_contention", {
-    message: "Workflow metadata changed while it was being read",
+    message: "Workflow metadata changed; restart definition listing without a cursor",
     namespace: ns,
   });
 }
 
 /**
  * @param {string} ns
- * @param {Array<[string, string]>} routeEntries
- * @param {Array<Record<string, unknown>>} metas
- * @param {Array<Record<string, string | null | undefined>>} defsRaws
+ * @param {string} worker
+ * @param {string} activeVersion
+ * @param {Record<string, unknown>} meta
+ * @param {Record<string, string | null | undefined>} defsRaw
  */
-function buildWorkflowDefinitionList(ns, routeEntries, metas, defsRaws) {
+function buildWorkerWorkflowDefinitions(ns, worker, activeVersion, meta, defsRaw) {
   /** @type {ListedWorkflowEntry[]} */
   const workflows = [];
-  for (let i = 0; i < routeEntries.length; i += 1) {
-    const [worker, activeVersion] = routeEntries[i];
-    const meta = metas[i];
-    const activeByName = new Map();
-    for (const workflow of workflowsFromMeta(meta)) {
-      activeByName.set(workflow.name, workflow);
-      workflows.push({
-        namespace: ns,
-        worker,
-        activeVersion,
-        name: workflow.name,
-        binding: workflow.binding,
-        className: workflow.className,
-        workflowKey: workflow.workflowKey,
-      });
-    }
-    const defs = parseWorkflowDefs(defsRaws[i], { ns, worker });
-    for (const [name, def] of Object.entries(defs)) {
-      if (activeByName.has(name)) continue;
-      workflows.push({
-        namespace: ns,
-        worker,
-        activeVersion,
-        name,
-        binding: null,
-        className: def.className,
-        workflowKey: def.workflowKey,
-        retired: true,
-      });
-    }
+  const activeNames = new Set();
+  for (const workflow of workflowsFromMeta(meta)) {
+    activeNames.add(workflow.name);
+    workflows.push({
+      namespace: ns,
+      worker,
+      activeVersion,
+      name: workflow.name,
+      binding: workflow.binding,
+      className: workflow.className,
+      workflowKey: workflow.workflowKey,
+    });
   }
-  const sortedWorkflows = workflows.toSorted((a, b) =>
-    a.worker.localeCompare(b.worker) ||
-    a.name.localeCompare(b.name)
-  );
-  return { namespace: ns, workflows: sortedWorkflows };
-}
-
-/** @param {Record<string, unknown>} left @param {Record<string, unknown>} right */
-function sameRouteSnapshot(left, right) {
-  const keys = Object.keys(left);
-  return keys.length === Object.keys(right).length && keys.every((key) => right[key] === left[key]);
+  const defs = parseWorkflowDefs(defsRaw, { ns, worker });
+  for (const [name, def] of Object.entries(defs)) {
+    if (activeNames.has(name)) continue;
+    workflows.push({
+      namespace: ns,
+      worker,
+      activeVersion,
+      name,
+      binding: null,
+      className: def.className,
+      workflowKey: def.workflowKey,
+      retired: true,
+    });
+  }
+  return workflows.toSorted((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -422,7 +509,7 @@ function workflowBundleMeta(ns, worker, version, raw) {
   });
   const workflows = meta.workflows;
   if (workflows !== undefined) {
-    if (!Array.isArray(workflows)) {
+    if (!workflowDeclarationsFit(workflows) || !Array.isArray(workflows)) {
       throw corruptWorkflowEntries(ns, worker, version);
     }
     const names = new Set();
@@ -456,32 +543,18 @@ function corruptWorkflowEntries(ns, worker, version) {
   });
 }
 
-/**
- * @param {{ redis: RedisSession }} deps
- * @param {string} ns
- * @param {Array<[string, string]>} routeEntries
- * @returns {Promise<[Array<string | null | undefined>, Array<Record<string, string | null | undefined>>]>}
- */
-async function readWorkflowListRaws({ redis }, ns, routeEntries) {
+/** @param {RedisSession} redis @param {string} ns @param {string} worker @param {string} version @param {number} workerCount */
+async function readWorkflowListSnapshot(redis, ns, worker, version, workerCount) {
   try {
-    const snapshot = await redis.hGetManyAndHGetAllMany(
-      routeEntries.map(([worker, activeVersion]) => [
-        bundleKey(ns, worker, activeVersion),
-        "__meta__",
-      ]),
-      routeEntries.map(([worker]) => workflowDefsKey(ns, worker))
-    );
-    return [snapshot.fields, snapshot.hashes];
+    return await readWorkflowDefinitionSnapshot(redis, workflowDefsKey(ns, worker), bundleKey(ns, worker, version), {
+      key: routesKey(ns), worker, version,
+    });
   } catch (err) {
     requireControlLog()("error", "workflow_metadata_unavailable", {
-      namespace: ns,
-      worker_count: routeEntries.length,
-      error_message: errorMessage(err),
+      namespace: ns, worker_count: workerCount, error_message: errorMessage(err),
     });
     throw new ControlAbort(500, "workflow_metadata_unavailable", {
-      message: "Workflow metadata is unavailable",
-      namespace: ns,
-      worker_count: routeEntries.length,
+      message: "Workflow metadata is unavailable", namespace: ns, worker_count: workerCount,
     });
   }
 }
@@ -547,9 +620,11 @@ function isActiveWorkflowMeta(entry) {
 /**
  * @param {string} endpoint
  * @param {WorkflowRequest} body
- * @returns {Promise<Record<string, unknown>>}
+ * @returns {Promise<{ body: Record<string, unknown>, responseBytes: Uint8Array | null }>}
  */
 async function callWorkflowsRust(endpoint, body) {
+  /** @type {Uint8Array | null} */
+  let responseBytes = null;
   const { response, body: parsed } = await postWorkflowsInternal({
     endpoint: `workflows/${endpoint}`,
     body,
@@ -558,7 +633,12 @@ async function callWorkflowsRust(endpoint, body) {
     logFields: {
       endpoint,
     },
-    timeoutMs: null,
+    timeoutMs: endpoint === "instances" ? WORKFLOWS_INTERNAL_TIMEOUT_MS : null,
+    readBody: endpoint === "instances" ? async (response, signal) => {
+      const result = await readWorkflowInstancesResponse(response, signal);
+      responseBytes = result.bytes;
+      return result.body;
+    } : undefined,
   });
   if (!response.ok) {
     if (isUpstreamErrorBody(parsed)) {
@@ -587,7 +667,7 @@ async function callWorkflowsRust(endpoint, body) {
       message: "Workflow backend returned an invalid response",
     });
   }
-  return /** @type {Record<string, unknown>} */ (parsed);
+  return { body: /** @type {Record<string, unknown>} */ (parsed), responseBytes };
 }
 
 /**

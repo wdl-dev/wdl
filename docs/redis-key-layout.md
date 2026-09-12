@@ -268,7 +268,9 @@ Cross-cutting constraints:
   is no plaintext fallback on `/runtime/load` or authenticated `/ai/resolve`.
 - Workflows owns DB 2 instance state. `wf:ready:cursor` is the internal ready-shard
   fairness cursor. Control owns only DB 0 `wf:defs:*`; other tiers must not write DB 2
-  directly.
+  directly. Each `wf:defs:<ns>:<worker>` hash retains at most 1024 names and 1 MiB
+  of field/value bytes, including retired definitions. Control checks quota under
+  WATCH before deploy commits; whole-worker delete removes the hash.
 - `wf:pending-version:<ns>:<worker>:<version>` is a Workflows-owned, 30-second restart
   blocker. Version-delete checks it with `wf:by-version`, and the successful-restart
   DB 2 script atomically revalidates the initial marker before replacing it with the

@@ -5,14 +5,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { moduleDataUrl } from "../helpers/load-shared-module.js";
+import { moduleDataUrl, readRepositoryJson } from "../helpers/load-shared-module.js";
 import { compileControlSharedGraph } from "../helpers/load-control-shared.js";
 import {
   createFakeRedis,
   createFakeRedisState,
   sharedRedisStubUrl,
 } from "../helpers/mocks/fake-redis.js";
-import { installMockProperty } from "../helpers/mock-global.js";
+import { installMockProperty, withMockedProperty } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
 import { assertJsonResponse } from "../helpers/response-json.js";
 
@@ -35,7 +35,16 @@ const { controlSharedUrl, controlWorkflowsClientUrl } = compileControlSharedGrap
   sharedAuthRolesUrl,
   sharedQueueKeysUrl,
 });
-const { postWorkflowsInternalRequest } = await import(controlWorkflowsClientUrl);
+const {
+  WORKFLOWS_INTERNAL_TIMEOUT_MS,
+  MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES,
+  WORKFLOW_LIFECYCLE_MAX_PAGES,
+  WORKFLOW_LIFECYCLE_TIMEOUT_MS,
+  WORKFLOW_LIFECYCLE_RESPONSE_MAX_BYTES,
+  postWorkflowsInternalRequest,
+  readWorkflowInstancesResponse,
+  readWorkflowLifecycleResponse,
+} = await import(controlWorkflowsClientUrl);
 // Use the same stub constructor imported by control/shared.js so
 // runOptimistic's `instanceof WatchError` check observes the test error.
 const { WatchError: ControlSharedWatchError } = await import(sharedRedisUrl);
@@ -64,11 +73,13 @@ const {
  */
 function restoreControlSharedStateAfter(t) {
   const previous = {
+    redis: state.redis,
     env: state.env,
     log: state.log,
     workflows: state.workflows,
   };
   t.after(() => {
+    state.redis = previous.redis;
     state.env = previous.env;
     state.log = previous.log;
     state.workflows = previous.workflows;
@@ -639,7 +650,7 @@ test("assertWorkflowDeleteAllowed fails malformed successful workflow response a
       const abort = /** @type {InstanceType<typeof ControlAbort>} */ (err);
       assert.equal(abort.status, 503);
       assert.equal(abort.code, "workflow_internal_dispatch_failed");
-      assert.equal(abort.details.message, "Workflow lifecycle check returned an invalid response");
+      assert.equal(abort.details.message, "Workflow lifecycle check failed");
       return true;
     }
   );
@@ -752,7 +763,8 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
       const endpoint = String(url);
       if (endpoint.endsWith("/lifecycle/check-delete")) {
         assert.equal(new Headers(init?.headers).get("x-request-id"), "rid-lifecycle");
-        assert.equal(init?.signal, undefined);
+        assert.ok(init?.signal instanceof AbortSignal);
+        fetchSignals.push(init.signal);
         requestBodies.lifecycle = parseJsonObjectRequestBody(init, "workflow lifecycle request body");
         return Response.json({ allowed: true });
       }
@@ -781,13 +793,325 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
     restoreTimeout();
   }
 
-  assert.deepEqual(timeoutMs, [5_000]);
-  assert.equal(timeoutSignals.length, 1);
+  assert.deepEqual(timeoutMs, [5_000, 5_000]);
+  assert.equal(timeoutSignals.length, 2);
   assert.deepEqual(timeoutSignals, fetchSignals);
   assert.deepEqual(requestBodies, {
     lifecycle: { ns: "demo", worker: "api", version: "v2" },
     cleanup: { ns: "demo", worker: "api", doStorageId: "do_old" },
   });
+});
+
+const lifecycleContract = /** @type {{ limits: { responseBytesMax: number, controlPagesMax: number, controlTimeoutMs: number }, request: Record<string, unknown>, responses: { complete: Record<string, unknown>, blocked: Record<string, unknown>, continuation: Record<string, unknown>, rescanRequired: Record<string, unknown> } }} */ (
+  readRepositoryJson("tests/fixtures/workflow-lifecycle-check.json")
+);
+
+test("Workflow lifecycle reader limits match the cross-language fixture", async () => {
+  assert.equal(WORKFLOW_LIFECYCLE_MAX_PAGES, lifecycleContract.limits.controlPagesMax);
+  assert.equal(WORKFLOW_LIFECYCLE_TIMEOUT_MS, lifecycleContract.limits.controlTimeoutMs);
+  assert.equal(WORKFLOW_LIFECYCLE_RESPONSE_MAX_BYTES, lifecycleContract.limits.responseBytesMax);
+  for (const body of Object.values(lifecycleContract.responses)) {
+    assert.deepEqual(await readWorkflowLifecycleResponse(Response.json(body)), body);
+  }
+});
+
+test("Workflow lifecycle pages resume internally and renew the same delete lock", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  const redis = createFakeRedis();
+  state.redis = redis;
+  const token = await acquireDeleteLock(redis, "demo", "api", "whole");
+  assert.ok(token);
+  /** @type {Record<string, unknown>[]} */
+  const bodies = [];
+  state.workflows = {
+    async fetch(/** @type {string} */ _url, /** @type {RequestInit} */ init) {
+      bodies.push(parseJsonObjectRequestBody(init, "lifecycle page"));
+      return Response.json(bodies.length === 1 ? lifecycleContract.responses.continuation : lifecycleContract.responses.complete);
+    },
+  };
+  await assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", version: "v2", allowCleanup: true, lockToken: token });
+  assert.deepEqual(bodies, [
+    { ns: "demo", worker: "api", version: "v2", allowCleanup: true },
+    lifecycleContract.request,
+  ]);
+  assert.equal(redis.commands.filter((command) => command[0] === "set" && /** @type {{ifeq?: string}} */ (command[3] ?? {}).ifeq === token).length, 2);
+});
+
+test("Workflow lifecycle pagination stops when the delete lock is lost", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  const redis = createFakeRedis();
+  state.redis = redis;
+  const token = await acquireDeleteLock(redis, "demo", "api", "whole");
+  assert.ok(token);
+  let calls = 0;
+  state.workflows = {
+    async fetch() {
+      calls += 1;
+      await releaseDeleteLock(redis, "demo", "api", token);
+      return Response.json(lifecycleContract.responses.continuation);
+    },
+  };
+  await assert.rejects(
+    () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", allowCleanup: true, lockToken: token }),
+    (error) => error instanceof ControlAbort && /** @type {{code?: string}} */ (error).code === "deleting",
+  );
+  assert.equal(calls, 1);
+});
+
+test("Workflow lifecycle rescan responses require a new request instead of reporting active instances", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  for (const afterContinuation of [false, true]) {
+    let calls = 0;
+    state.workflows = {
+      async fetch() {
+        calls += 1;
+        return Response.json(afterContinuation && calls === 1
+          ? lifecycleContract.responses.continuation
+          : lifecycleContract.responses.rescanRequired);
+      },
+    };
+    await assert.rejects(
+      () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", allowCleanup: true }),
+      (error) => error instanceof ControlAbort &&
+        /** @type {{status?: number, code?: string}} */ (error).status === 503 &&
+        /** @type {{code?: string}} */ (error).code === "workflow_lifecycle_check_incomplete",
+    );
+    assert.equal(calls, afterContinuation ? 2 : 1);
+  }
+});
+
+for (const phase of ["fetch", "body", "materialization"]) {
+  test(`Workflow lifecycle total deadline during ${phase} returns incomplete`, async (t) => {
+    restoreControlSharedStateAfter(t);
+    state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+    let now = 1_000;
+    const deadline = now + WORKFLOW_LIFECYCLE_TIMEOUT_MS;
+    let calls = 0;
+    let cancelled = false;
+    /** @type {number[]} */
+    const timeouts = [];
+    /** @type {AbortController[]} */
+    const controllers = [];
+    /** @type {Array<{level: string, event: string}>} */
+    const logs = [];
+    state.log = (/** @type {string} */ level, /** @type {string} */ event) => logs.push({ level, event });
+    const expire = () => {
+      now = deadline;
+      const controller = controllers.at(-1);
+      assert.ok(controller);
+      controller.abort(new DOMException("deadline expired", "TimeoutError"));
+    };
+    state.workflows = {
+      async fetch(/** @type {string} */ _url, /** @type {RequestInit} */ init) {
+        calls += 1;
+        if (calls < 3) {
+          now += WORKFLOWS_INTERNAL_TIMEOUT_MS - 1;
+          return Response.json({ ...lifecycleContract.responses.continuation, cursor: String(calls) });
+        }
+        if (phase === "body") {
+          return new Response(new ReadableStream({
+            pull() { expire(); },
+            cancel() { cancelled = true; },
+          }, { highWaterMark: 0 }));
+        }
+        now = deadline;
+        if (phase === "fetch") {
+          expire();
+          throw init.signal?.reason;
+        }
+        return Response.json(lifecycleContract.responses.complete);
+      },
+    };
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", (ms) => {
+        timeouts.push(ms);
+        const controller = new AbortController();
+        controllers.push(controller);
+        return controller.signal;
+      }, async () => {
+        await assert.rejects(
+          () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", allowCleanup: true }),
+          (error) => error instanceof ControlAbort &&
+            /** @type {{status?: number, code?: string}} */ (error).status === 503 &&
+            /** @type {{code?: string}} */ (error).code === "workflow_lifecycle_check_incomplete",
+        );
+      });
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(timeouts, [WORKFLOWS_INTERNAL_TIMEOUT_MS, WORKFLOWS_INTERNAL_TIMEOUT_MS, 2]);
+    assert.equal(cancelled, phase === "body");
+    assert.deepEqual(logs, [{ level: "warn", event: "workflow_lifecycle_check_failed" }]);
+  });
+}
+
+test("Workflow lifecycle preserves per-call timeouts and backend errors", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  for (const scenario of ["per-call timeout", "late success", "late transport failure", "malformed reply"]) {
+    let now = 1_000;
+    const controller = new AbortController();
+    /** @type {string[]} */
+    const levels = [];
+    state.log = (/** @type {string} */ level) => levels.push(level);
+    state.workflows = { async fetch() {
+      if (scenario === "per-call timeout") {
+        now += WORKFLOWS_INTERNAL_TIMEOUT_MS;
+        controller.abort(new DOMException("per-call timeout", "TimeoutError"));
+        throw controller.signal.reason;
+      }
+      now += WORKFLOW_LIFECYCLE_TIMEOUT_MS;
+      if (scenario === "late success") return Response.json(lifecycleContract.responses.complete);
+      if (scenario === "malformed reply") return new Response("{broken");
+      throw new Error("backend connection failed");
+    } };
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", () => controller.signal, async () => {
+        await assert.rejects(
+          () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" }),
+          (error) => error instanceof ControlAbort &&
+            /** @type {{code?: string}} */ (error).code === "workflow_internal_dispatch_failed",
+        );
+      });
+    });
+    assert.deepEqual(levels, ["error"]);
+  }
+});
+
+for (const phase of ["fetch", "body"]) {
+  test(`Workflow lifecycle preserves a per-call timeout after delayed ${phase} rejection`, async (t) => {
+    restoreControlSharedStateAfter(t);
+    state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+    const controller = new AbortController();
+    const started = Promise.withResolvers();
+    let now = 1_000;
+    let calls = 0;
+    /** @type {string[]} */
+    const levels = [];
+    state.log = (/** @type {string} */ level) => levels.push(level);
+    state.workflows = { async fetch() {
+      calls += 1;
+      if (phase === "body") {
+        return new Response(new ReadableStream({
+          pull() { started.resolve(undefined); },
+        }, { highWaterMark: 0 }));
+      }
+      return await new Promise((_, reject) => {
+        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+        started.resolve(undefined);
+      });
+    } };
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", (ms) => {
+        assert.equal(ms, WORKFLOWS_INTERNAL_TIMEOUT_MS);
+        return controller.signal;
+      }, async () => {
+        const pending = assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" });
+        const rejected = assert.rejects(pending, (error) => error instanceof ControlAbort &&
+          /** @type {{code?: string}} */ (error).code === "workflow_internal_dispatch_failed");
+        await started.promise;
+        now = 1_000 + WORKFLOWS_INTERNAL_TIMEOUT_MS;
+        controller.abort(new DOMException("per-call timeout", "TimeoutError"));
+        // Deliver the rejection only after both deadlines have passed.
+        now = 1_000 + WORKFLOW_LIFECYCLE_TIMEOUT_MS + 1;
+        await rejected;
+      });
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(levels, ["error"]);
+  });
+}
+
+test("Workflow lifecycle bounds a hung renewal by the remaining check budget", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  const redis = createFakeRedis();
+  state.redis = redis;
+  const token = await acquireDeleteLock(redis, "demo", "api", "whole");
+  assert.ok(token);
+  const set = redis.set.bind(redis);
+  const renewalStarted = Promise.withResolvers();
+  const lateRenewal = Promise.withResolvers();
+  let now = 1_000;
+  let renewals = 0;
+  let backendCalls = 0;
+  /** @type {Array<{callback: () => void, delay: number, cleared: boolean}>} */
+  const timers = [];
+  const setTimeoutMock = /** @type {typeof setTimeout} */ ((
+    /** @type {() => void} */ callback, /** @type {number} */ delay
+  ) => {
+    const timer = { callback, delay, cleared: false };
+    timers.push(timer);
+    return /** @type {ReturnType<typeof setTimeout>} */ (/** @type {unknown} */ (timer));
+  });
+  const clearTimeoutMock = /** @type {typeof clearTimeout} */ ((timer) => {
+    /** @type {{cleared: boolean}} */ (/** @type {unknown} */ (timer)).cleared = true;
+  });
+  state.workflows = {
+    async fetch() {
+      backendCalls += 1;
+      now += 2_000;
+      return Response.json(lifecycleContract.responses.continuation);
+    },
+  };
+  await withMockedProperty(Date, "now", () => now, async () => {
+    await withMockedProperty(globalThis, "setTimeout", setTimeoutMock, async () => {
+      await withMockedProperty(globalThis, "clearTimeout", clearTimeoutMock, async () => {
+        await withMockedProperty(redis, "set", (/** @type {Parameters<typeof set>} */ ...args) => {
+          renewals += 1;
+          if (renewals === 1) return set(...args);
+          renewalStarted.resolve(undefined);
+          return lateRenewal.promise;
+        }, async () => {
+          const check = assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", lockToken: token });
+          const rejected = assert.rejects(check, (error) => error instanceof ControlAbort &&
+            /** @type {{code?: string}} */ (error).code === "workflow_lifecycle_check_incomplete");
+          await renewalStarted.promise;
+          assert.equal(timers[0].cleared, true);
+          assert.equal(timers[1].delay, lifecycleContract.limits.controlTimeoutMs - 2_000);
+          now = 1_000 + lifecycleContract.limits.controlTimeoutMs;
+          timers[1].callback();
+          await rejected;
+          assert.equal(timers[1].cleared, true);
+          assert.equal(backendCalls, 1);
+          lateRenewal.reject(new Error("late Redis rejection"));
+          await Promise.resolve();
+        });
+      });
+    });
+  });
+});
+
+test("Workflow lifecycle continuation cannot turn an incomplete or blocked scan into permission", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  for (const scenario of ["budget", "blocked", "stalled", "contradictory"]) {
+    let calls = 0;
+    state.workflows = {
+      async fetch() {
+        calls += 1;
+        if (scenario === "blocked" && calls === 2) return Response.json(lifecycleContract.responses.blocked);
+        if (scenario === "contradictory") return Response.json({ ...lifecycleContract.responses.complete, cursor: "128" });
+        return Response.json({ ...lifecycleContract.responses.continuation, cursor: scenario === "stalled" ? "128" : String(calls) });
+      },
+    };
+    const expected = scenario === "budget" ? "workflow_lifecycle_check_incomplete"
+      : scenario === "blocked" ? "workflow_instances_active" : "workflow_internal_dispatch_failed";
+    await assert.rejects(() => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" }),
+      (error) => error instanceof ControlAbort && /** @type {{code?: string}} */ (error).code === expected);
+    assert.equal(calls, scenario === "budget" ? WORKFLOW_LIFECYCLE_MAX_PAGES : scenario === "contradictory" ? 1 : 2);
+  }
+});
+
+test("Workflow lifecycle reader rejects oversized replies without draining the body", async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+    headers: { "content-length": String(WORKFLOW_LIFECYCLE_RESPONSE_MAX_BYTES + 1) },
+  });
+  await assert.rejects(() => readWorkflowLifecycleResponse(response), /exceeds/);
+  assert.equal(cancelled, true);
 });
 
 test("DO alarm cleanup rejects malformed or oversized success envelopes", async (t) => {
@@ -825,24 +1149,133 @@ test("DO alarm cleanup rejects malformed or oversized success envelopes", async 
 
 test("workflows transport requires an explicit timeout selection at runtime", async () => {
   let fetchCalls = 0;
-  await assert.rejects(
-    postWorkflowsInternalRequest({
-      workflows: {
-        async fetch() {
-          fetchCalls += 1;
-          return Response.json({ ok: true });
+  for (const deadlineMs of [undefined, Date.now() + 5_000, Date.now() - 1]) {
+    await assert.rejects(
+      postWorkflowsInternalRequest({
+        workflows: {
+          async fetch() {
+            fetchCalls += 1;
+            return Response.json({ ok: true });
+          },
         },
+        headers: () => ({ "content-type": "application/json" }),
+        endpoint: "workflows/test",
+        body: {},
+        logEvent: "workflow_test_failed",
+        timeoutMs: /** @type {any} */ (undefined),
+        deadlineMs,
+        makeError: (/** @type {import("../../control/workflows-client.js").WorkflowTransportFailure} */ failure) => new Error(failure),
+      }),
+      /request_failed/
+    );
+  }
+  assert.equal(fetchCalls, 0);
+});
+
+test("workflows transport handles explicit null and tied caps without trusting upstream timeouts", async () => {
+  for (const { timeoutMs, outcome } of [null, 1_000].flatMap((timeoutMs) =>
+    ["success", "upstream timeout", "clock expiry"].map((outcome) => ({ timeoutMs, outcome })))) {
+    let now = 1_000;
+    const controller = new AbortController();
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", (ms) => {
+        assert.equal(ms, 1_000);
+        return controller.signal;
+      }, async () => {
+        const pending = postWorkflowsInternalRequest({
+          workflows: { async fetch() {
+            if (outcome !== "success") now = 3_000;
+            if (outcome === "upstream timeout") {
+              throw new DOMException("upstream timeout", "TimeoutError");
+            }
+            return Response.json({ ok: true });
+          } },
+          headers: () => ({}),
+          endpoint: "workflows/test",
+          body: {},
+          logEvent: "workflow_test_failed",
+          timeoutMs,
+          deadlineMs: 2_000,
+          makeError: (/** @type {import("../../control/workflows-client.js").WorkflowTransportFailure} */ failure) => new Error(failure),
+        });
+        if (outcome === "upstream timeout") await assert.rejects(pending, /request_failed/);
+        else if (outcome === "clock expiry") await assert.rejects(pending, /deadline/);
+        else assert.deepEqual((await pending).body, { ok: true });
+      });
+    });
+  }
+});
+
+test("Workflow instances reader shares its byte ceiling with the Rust fixture", () => {
+  const contract = /** @type {{ instancesResponseBytesMax: number }} */ (
+    readRepositoryJson("tests/fixtures/workflow-limits.json")
+  );
+  assert.equal(MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES, contract.instancesResponseBytesMax);
+});
+
+for (const character of ["x", "\u4e2d"]) {
+  test(`Workflow instances reader accepts exact-limit UTF-8 (${character})`, async () => {
+    const empty = JSON.stringify({ instances: [{ output: "" }], cursor: null });
+    const available = MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES - Buffer.byteLength(empty);
+    const width = Buffer.byteLength(character);
+    const output = character.repeat(Math.floor(available / width)) + "x".repeat(available % width);
+    const body = JSON.stringify({ instances: [{ output }], cursor: null });
+    assert.equal(Buffer.byteLength(body), MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES);
+    const response = await readWorkflowInstancesResponse(new Response(body));
+    assert.equal(response.body.instances[0].output, output);
+    assert.equal(response.body.cursor, null);
+    assert.equal(response.bytes.byteLength, MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES);
+  });
+}
+
+test("Workflow instances reader cancels an oversized declared body without waiting for cancel", async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream({
+    cancel() { cancelled = true; return new Promise(() => {}); },
+  }), { headers: { "content-length": String(MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES + 1) } });
+  await assert.rejects(() => readWorkflowInstancesResponse(response), /exceeds/);
+  assert.equal(cancelled, true);
+});
+
+for (const headers of /** @type {HeadersInit[]} */ ([{}, { "content-encoding": "gzip", "content-length": "1" }])) {
+  test(`Workflow instances reader caps streamed bytes with ${JSON.stringify(headers)}`, async () => {
+    let cancelled = false;
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES));
+        controller.enqueue(new Uint8Array(1));
       },
-      headers: () => ({ "content-type": "application/json" }),
-      endpoint: "workflows/test",
+      cancel() { cancelled = true; },
+    }), { headers });
+    await assert.rejects(() => readWorkflowInstancesResponse(response), /exceeds/);
+    assert.equal(cancelled, true);
+  });
+}
+
+test("Workflow instances reader rejects malformed JSON and UTF-8", async () => {
+  for (const body of ["not-json", new Uint8Array([0xff])]) {
+    await assert.rejects(() => readWorkflowInstancesResponse(new Response(body)));
+  }
+});
+
+test("finite Workflow transport deadlines include synchronous response materialization", async () => {
+  let now = 1_000;
+  await withMockedProperty(Date, "now", () => now, async () => {
+    await assert.rejects(() => postWorkflowsInternalRequest({
+      workflows: { fetch: async () => Response.json({ instances: [], cursor: null }) },
+      headers: () => ({}),
+      endpoint: "workflows/instances",
       body: {},
       logEvent: "workflow_test_failed",
-      timeoutMs: /** @type {any} */ (undefined),
-      makeError: (/** @type {"unavailable" | "request_failed"} */ failure) => new Error(failure),
-    }),
-    /request_failed/
-  );
-  assert.equal(fetchCalls, 0);
+      timeoutMs: 5_000,
+      readBody: async (/** @type {Response} */ response) => {
+        const body = await response.json();
+        now += 5_000;
+        return body;
+      },
+      makeError: (/** @type {string} */ failure) => new Error(failure),
+    }), /request_failed/);
+  });
 });
 
 test("codedErrorResponse preserves semantic status/code with a fallback code", async () => {

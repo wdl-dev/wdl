@@ -289,7 +289,7 @@ Auth-specific contract:
   new delegated issue until the storage contract violation is repaired. Token list
   remains an operator repair surface and reports malformed `issue_templates` fields as
   invalid entries instead of failing the entire list.
-  Delegated namespace collision checks are best-effort in V1: unbound/full-plane
+  Delegated namespace collision checks are best-effort: unbound/full-plane
   tokens can still perform namespace-scoped writes that leave no auth-visible `ns`
   token record, while `namespaces` only reflects active workers. Routine delegated
   namespace workflows should use namespace-bound credentials for namespace-scoped
@@ -368,9 +368,19 @@ Auth-specific contract:
   scheduler dispatch open for minutes.
 - All Control-to-Workflows internal POSTs use the canonical transport in
   `control/workflows-client.js`. Callers retain endpoint-specific timeout, non-2xx, and
-  response-body interpretation. Workflow management calls and the lifecycle delete scan
-  have no client-side timeout because the scan is unbounded by namespace size. DO-alarm
-  cleanup uses a five-second timeout. Workflow lifecycle blockers fail closed on service
+  response-body interpretation. Callers must explicitly select `timeoutMs`, even
+  with an absolute deadline; only `null` disables the per-call cap.
+  Instance lists have an 8 MiB response cap and a
+  five-second backend deadline covering fetch, body read, and JSON parsing. Successful
+  list JSON bytes are forwarded without re-serialization. Instance status/lifecycle
+  calls retain their timeout policy. Deletion preflight follows bounded internal pages
+  for at most 16 pages / ten seconds, with five-second per-page timeouts, 64 KiB response
+  caps, and token-scoped lock renewal. An unfinished page cannot authorize deletion;
+  total-budget expiry during a page returns
+  `workflow_lifecycle_check_incomplete`, while earlier per-call timeouts and
+  backend failures retain the dispatch-failure code. DO-alarm cleanup uses a
+  five-second timeout.
+  Workflow lifecycle blockers fail closed on service
   errors.
 - AUTH JSRPC errors or Redis explosions are control-plane failures and map to 503
   fail-closed behavior, not tenant-visible authorization fallbacks.

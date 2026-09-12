@@ -121,7 +121,7 @@ The platform is split into seven app services plus shared state:
 | `d1-runtime` | D1 SQLite execution with owner leases and supervised workerd process. |
 | `do-runtime` | Durable Object native facets, SQLite storage, alarms, owner leases, and WebSockets. |
 | `scheduler` | Cron, queue, and workflow tick dispatch. |
-| `workflows` | Workflows V2 state machine, DB 2 owner, and DO alarm delivery backend. |
+| `workflows` | Workflow state machine, DB 2 owner, and DO alarm delivery backend. |
 
 Valkey/Redis uses a deliberate logical split:
 
@@ -172,7 +172,7 @@ compose bind-mounts `./dist` over the image's built configs.
 ```bash
 git clone https://github.com/wdl-dev/wdl.git
 cd wdl
-npm install -g @wdl-dev/cli@1.8.1
+npm install -g @wdl-dev/cli@1.9.0
 npm ci
 npm install --ignore-scripts --prefix examples/hello-jsonc
 npm run compile:workerd:local

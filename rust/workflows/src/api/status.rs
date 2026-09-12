@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
 use serde_json::{Value as JsonValue, json};
+use wdl_rust_common::text::truncate_chars;
 
 use crate::{AppState, WorkflowError, WorkflowResult, by_workflow_key, instance_state_key};
 
 use super::payload::{canonical_instance_payloads_key, parse_payload_ref};
 use super::{
-    InstanceResponse, ListInstancesResponse, WorkflowRequest, instance_id, public_state_or_empty,
+    InstanceResponse, ListInstancesResponse, MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES,
+    MAX_WORKFLOW_RESULT_BYTES, WorkflowRequest, instance_id, public_state_or_empty,
     read_payload_ref, read_step_history, validate_identity, verify_workflow_def,
     workflow_step_options,
 };
@@ -176,14 +178,21 @@ fn prepare_list_instance(
 }
 
 fn apply_list_payload_reply(
-    instances: &mut [InstanceResponse],
+    instance: &mut InstanceResponse,
     read: &InstancePayloadRead,
     raw: Option<String>,
 ) -> WorkflowResult<()> {
-    let value = parse_payload_ref(raw, &read.payload_ref)?;
-    let instance = instances.get_mut(read.instance_index).ok_or_else(|| {
-        WorkflowError::internal_error("workflow list payload response index mismatch")
-    })?;
+    let value = parse_payload_ref(raw, &read.payload_ref, MAX_WORKFLOW_RESULT_BYTES).map_err(
+        |mut error| {
+            error.message = format!(
+                "instance_id={:?} payload_ref={:?}: {}",
+                truncate_chars(&instance.id, 256),
+                truncate_chars(&read.payload_ref, 256),
+                truncate_chars(&error.message, 512),
+            );
+            error
+        },
+    )?;
     match read.field {
         InstancePayloadField::Output => instance.output = value,
         InstancePayloadField::Error => instance.error = value,
@@ -191,34 +200,62 @@ fn apply_list_payload_reply(
     Ok(())
 }
 
-async fn read_list_payloads(
+async fn read_list_payload_batch(
     state: &AppState,
-    instances: &mut [InstanceResponse],
     reads: &[InstancePayloadRead],
-) -> WorkflowResult<()> {
-    for batch in reads.chunks(LIST_PAYLOAD_READ_BATCH_SIZE) {
-        let raw_values: Vec<Option<String>> = state
-            .redis
-            .with_conn(async |mut conn| {
-                let mut pipe = redis::pipe();
-                for read in batch {
-                    pipe.cmd("HGET")
-                        .arg(&read.payloads_key)
-                        .arg(&read.payload_ref);
-                }
-                pipe.query_async(&mut conn).await
-            })
-            .await?;
-        if raw_values.len() != batch.len() {
-            return Err(WorkflowError::internal_error(
-                "workflow list payload reply count mismatch",
+) -> WorkflowResult<std::vec::IntoIter<Option<String>>> {
+    let raw_values: Vec<Option<String>> = state
+        .redis
+        .with_conn(async |mut conn| {
+            let mut pipe = redis::pipe();
+            for read in reads {
+                pipe.cmd("HGET")
+                    .arg(&read.payloads_key)
+                    .arg(&read.payload_ref);
+            }
+            pipe.query_async(&mut conn).await
+        })
+        .await?;
+    if raw_values.len() != reads.len() {
+        return Err(WorkflowError::internal_error(
+            "workflow list payload reply count mismatch",
+        ));
+    }
+    Ok(raw_values.into_iter())
+}
+
+fn list_response_overhead() -> WorkflowResult<usize> {
+    // Reserve the envelope and longest cursor before admitting any instance.
+    serde_json::to_vec(&ListInstancesResponse {
+        instances: Vec::new(),
+        cursor: Some(u64::MAX.to_string()),
+    })
+    .map(|body| body.len())
+    .map_err(|err| WorkflowError::internal_error(format!("workflow list envelope: {err}")))
+}
+
+fn append_list_instance(
+    page: &mut ListInstancesResponse,
+    response_bytes: &mut usize,
+    max_bytes: usize,
+    instance: &InstanceResponse,
+) -> WorkflowResult<bool> {
+    let raw = serde_json::value::to_raw_value(instance)
+        .map_err(|err| WorkflowError::internal_error(format!("workflow list instance: {err}")))?;
+    let next_bytes = response_bytes
+        .saturating_add(raw.get().len())
+        .saturating_add(usize::from(!page.instances.is_empty()));
+    if next_bytes > max_bytes {
+        if page.instances.is_empty() {
+            return Err(WorkflowError::invalid_state(
+                "Workflow instance exceeds the list response byte limit",
             ));
         }
-        for (read, raw) in batch.iter().zip(raw_values) {
-            apply_list_payload_reply(instances, read, raw)?;
-        }
+        return Ok(false);
     }
-    Ok(())
+    *response_bytes = next_bytes;
+    page.instances.push(raw);
+    Ok(true)
 }
 
 pub(super) async fn read_public_state(
@@ -319,30 +356,65 @@ pub(crate) async fn list_instances(
             })
             .await?
     };
+    if raw_states.len() != members.len() {
+        return Err(WorkflowError::internal_error(
+            "workflow list state reply count mismatch",
+        ));
+    }
     let mut instances = Vec::new();
     let mut payload_reads = Vec::new();
-    for (instance_id, raw_state) in members.iter().zip(raw_states) {
+    for (member_index, (instance_id, raw_state)) in members.iter().zip(raw_states).enumerate() {
         let existing = public_state_or_empty(state, raw_state).await?;
         if existing.is_empty() {
             continue;
         }
         let instance_index = instances.len();
-        instances.push(prepare_list_instance(
+        let instance = prepare_list_instance(
             &req.ns,
             &req.workflow_key,
             instance_id,
             &existing,
             instance_index,
             &mut payload_reads,
-        )?);
+        )?;
+        instances.push((member_index, instance));
     }
-    read_list_payloads(state, &mut instances, &payload_reads).await?;
     let next = cursor.saturating_add(u64::try_from(members.len()).unwrap_or(u64::MAX));
-
-    Ok(ListInstancesResponse {
-        instances,
+    let mut page = ListInstancesResponse {
+        instances: Vec::new(),
         cursor: has_more.then(|| next.to_string()),
-    })
+    };
+    let mut response_bytes = list_response_overhead()?;
+    let mut read_index = 0;
+    let mut raw_values = Vec::new().into_iter();
+    for (instance_index, (member_index, mut instance)) in instances.into_iter().enumerate() {
+        while let Some(read) = payload_reads
+            .get(read_index)
+            .filter(|read| read.instance_index == instance_index)
+        {
+            if raw_values.len() == 0 {
+                let end = (read_index + LIST_PAYLOAD_READ_BATCH_SIZE).min(payload_reads.len());
+                raw_values =
+                    read_list_payload_batch(state, &payload_reads[read_index..end]).await?;
+            }
+            let raw = raw_values.next().ok_or_else(|| {
+                WorkflowError::internal_error("workflow list payload reply count mismatch")
+            })?;
+            apply_list_payload_reply(&mut instance, read, raw)?;
+            read_index += 1;
+        }
+        // Retain serialized rows, not every payload's parsed JSON tree.
+        if !append_list_instance(
+            &mut page,
+            &mut response_bytes,
+            MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES,
+            &instance,
+        )? {
+            page.cursor = Some((cursor + member_index as u64).to_string());
+            break;
+        }
+    }
+    Ok(page)
 }
 
 #[cfg(test)]
@@ -351,11 +423,185 @@ mod tests {
     use crate::api::InstanceRouteKeys;
 
     #[test]
-    fn list_instances_uses_bounded_workflow_index_page() {
-        let source = include_str!("status.rs");
-        assert!(source.contains(r#"redis::cmd("ZRANGE")"#));
-        assert!(!source.contains(concat!("SM", "EMBERS")));
-        assert!(source.contains("members.truncate(limit)"));
+    fn list_options_bound_count_and_preserve_cursor() {
+        assert_eq!(
+            workflow_instances_options(&JsonValue::Null).unwrap(),
+            (100, 0)
+        );
+        assert_eq!(
+            workflow_instances_options(&json!({"limit": 1000, "cursor": "27"})).unwrap(),
+            (1000, 27)
+        );
+        for limit in [0, 1001] {
+            assert_eq!(
+                workflow_instances_options(&json!({"limit": limit}))
+                    .unwrap_err()
+                    .code,
+                "request_too_large"
+            );
+        }
+        assert_eq!(
+            workflow_instances_options(&json!({"cursor": "invalid"}))
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+    }
+
+    fn list_instance(output: JsonValue, error: Option<JsonValue>) -> InstanceResponse {
+        InstanceResponse {
+            id: "order-1".to_string(),
+            status: "completed".to_string(),
+            output: Some(output),
+            error,
+            steps: None,
+        }
+    }
+
+    #[test]
+    fn list_response_budget_counts_utf8_escaping_commas_and_cursor() {
+        let instance = list_instance(json!({"value": "\u{4e2d}\u{1f600}\n\"\\"}), None);
+        let row_bytes = serde_json::to_vec(&instance).unwrap().len();
+        let mut page = ListInstancesResponse {
+            instances: Vec::new(),
+            cursor: Some(u64::MAX.to_string()),
+        };
+        let mut bytes = list_response_overhead().unwrap();
+        let limit = bytes + 2 * row_bytes + 1;
+        assert!(append_list_instance(&mut page, &mut bytes, limit, &instance).unwrap());
+        assert!(append_list_instance(&mut page, &mut bytes, limit, &instance).unwrap());
+        assert!(!append_list_instance(&mut page, &mut bytes, limit, &instance).unwrap());
+        assert_eq!(bytes, limit);
+        let serialized = serde_json::to_vec(&page).unwrap();
+        assert_eq!(serialized.len(), limit);
+        let body: JsonValue = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(body["instances"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            body["instances"][0],
+            serde_json::to_value(&instance).unwrap()
+        );
+        assert!(body["instances"][0].get("steps").is_none());
+
+        let mut shorter = ListInstancesResponse {
+            instances: Vec::new(),
+            cursor: None,
+        };
+        let mut bytes = list_response_overhead().unwrap();
+        assert!(append_list_instance(&mut shorter, &mut bytes, limit - 1, &instance).unwrap());
+        assert!(!append_list_instance(&mut shorter, &mut bytes, limit - 1, &instance).unwrap());
+    }
+
+    #[test]
+    fn list_response_byte_limit_shortens_a_legal_large_payload_page() {
+        let instance = list_instance(
+            json!("x".repeat(MAX_WORKFLOW_RESULT_BYTES - 2)),
+            Some(JsonValue::Null),
+        );
+        let mut page = ListInstancesResponse {
+            instances: Vec::new(),
+            cursor: None,
+        };
+        let mut bytes = list_response_overhead().unwrap();
+        let mut admitted = 0;
+        for _ in 0..MAX_INSTANCES_LIMIT {
+            if !append_list_instance(
+                &mut page,
+                &mut bytes,
+                MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES,
+                &instance,
+            )
+            .unwrap()
+            {
+                break;
+            }
+            admitted += 1;
+        }
+        assert_eq!(admitted, 7);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES);
+        assert_eq!(page.instances.len(), admitted);
+    }
+
+    #[test]
+    fn list_response_rejects_an_unpageable_instance_instead_of_stalling_cursor() {
+        let instance = list_instance(JsonValue::Null, None);
+        let mut page = ListInstancesResponse {
+            instances: Vec::new(),
+            cursor: None,
+        };
+        let mut bytes = list_response_overhead().unwrap();
+        let limit = bytes + serde_json::to_vec(&instance).unwrap().len() - 1;
+        let error = append_list_instance(&mut page, &mut bytes, limit, &instance).unwrap_err();
+        assert_eq!(error.code, "workflow_invalid_state");
+        assert!(page.instances.is_empty());
+    }
+
+    #[test]
+    fn list_payload_rejects_oversized_persisted_json_before_parsing() {
+        let mut instance = list_instance(JsonValue::Null, None);
+        let read = InstancePayloadRead {
+            instance_index: 0,
+            field: InstancePayloadField::Output,
+            payloads_key: "payloads".to_string(),
+            payload_ref: "output".to_string(),
+        };
+        let error = apply_list_payload_reply(
+            &mut instance,
+            &read,
+            Some("x".repeat(MAX_WORKFLOW_RESULT_BYTES + 1)),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "workflow_invalid_state");
+        assert_eq!(
+            error.message,
+            format!(
+                "instance_id=\"order-1\" payload_ref=\"output\": Workflow payload exceeds the {MAX_WORKFLOW_RESULT_BYTES} byte limit"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn list_payload_diagnostics_are_bounded_and_stay_out_of_the_response() {
+        use axum::response::IntoResponse;
+
+        let mut instance = list_instance(JsonValue::Null, None);
+        instance.id = "\u{4e2d}".repeat(300);
+        let read = InstancePayloadRead {
+            instance_index: 0,
+            field: InstancePayloadField::Error,
+            payloads_key: "payloads".to_string(),
+            payload_ref: "r".repeat(300),
+        };
+        let error = apply_list_payload_reply(
+            &mut instance,
+            &read,
+            Some("{\"private-payload\":".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "workflow_invalid_state");
+        assert!(
+            error
+                .message
+                .contains(&format!("instance_id={:?}", "\u{4e2d}".repeat(256)))
+        );
+        assert!(
+            error
+                .message
+                .contains(&format!("payload_ref={:?}", "r".repeat(256)))
+        );
+        assert!(error.message.chars().count() < 1100);
+        assert!(!error.message.contains("private-payload"));
+        let response = error.into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&body).unwrap(),
+            json!({"error": "workflow_invalid_state", "message": "Workflow service request failed"})
+        );
     }
 
     #[test]
@@ -397,7 +643,7 @@ mod tests {
         let mut reads = Vec::new();
         let response = prepare_list_instance("demo", "wf_test", "inst-1", &state, 0, &mut reads)
             .expect("valid list instance");
-        let mut instances = vec![response];
+        let mut instances = [response];
 
         assert_eq!(reads.len(), 2);
         assert!(matches!(reads[0].field, InstancePayloadField::Output));
@@ -406,13 +652,13 @@ mod tests {
         assert_eq!(reads[1].payload_ref, "shared-ref");
 
         apply_list_payload_reply(
-            &mut instances,
+            &mut instances[0],
             &reads[0],
             Some(r#"{"kind":"output"}"#.to_string()),
         )
         .expect("output payload");
         apply_list_payload_reply(
-            &mut instances,
+            &mut instances[0],
             &reads[1],
             Some(r#"{"kind":"error"}"#.to_string()),
         )
@@ -437,10 +683,14 @@ mod tests {
         let mut reads = Vec::new();
         let response = prepare_list_instance("demo", "wf_test", "inst-1", &state, 0, &mut reads)
             .expect("valid list instance");
-        let mut instances = vec![response];
+        let mut instances = [response];
 
-        let err = apply_list_payload_reply(&mut instances, &reads[0], None)
+        let err = apply_list_payload_reply(&mut instances[0], &reads[0], None)
             .expect_err("missing list payload must fail closed");
         assert_eq!(err.code, "workflow_payload_missing");
+        assert!(
+            err.message
+                .contains("instance_id=\"inst-1\" payload_ref=\"missing-ref\"")
+        );
     }
 }
