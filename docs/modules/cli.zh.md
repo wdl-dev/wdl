@@ -176,4 +176,6 @@ Tail 是 live debug 路径，不是 audit storage。Tail protocol 细节见 [Log
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`
 
+CLI smoke tests 直接验证平台的 definition 与 instance 分页，包括 text/JSON 输出、短页或空页的续接，以及最终 cursor。
+
 CLI 仓库负责 `[ai]` parsing、extension stripping、provider command tests 和 `examples/ai-agent-demo` packaging path；平台侧 runtime/Control 合同由 `tests/integration/ai-binding.test.js` 保护。

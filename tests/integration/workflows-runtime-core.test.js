@@ -123,8 +123,23 @@ test("concurrent large Workflow replay stays admitted and releases detached stat
   };
   const saturated = (/** @type {string} */ body) => prometheusCounter(body, "wdl_workflow_replay_cache_total", { outcome: "saturated" });
   const before = saturated(metrics());
-  const container = sh(["docker", "compose", "ps", "-q", "user-runtime"]).trim();
-  const memory = () => sh(["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container]).trim();
+  // RSS sampling is optional; replay budget and release assertions are not.
+  const memory = (read = sh) => {
+    try {
+      const container = read(["docker", "compose", "ps", "-q", "user-runtime"]).trim();
+      if (!container) return "unavailable";
+      return read(["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container]).trim();
+    } catch {
+      return "unavailable";
+    }
+  };
+  for (const failedRead of [1, 2]) {
+    let reads = 0;
+    assert.equal(memory(() => {
+      if (++reads === failedRead) throw new Error("optional Docker diagnostic failed");
+      return "test-container";
+    }), "unavailable");
+  }
   t.diagnostic(`Runtime container memory before replay pressure: ${memory()}`);
   const entries = Array.from({ length: 20 }, (_, index) => ({ instanceId: `capacity-${index}`, params: { id: `capacity-${index}` } }));
   const created = serviceInternalPost("workflows", 9120, "/internal/workflows/create-batch", {

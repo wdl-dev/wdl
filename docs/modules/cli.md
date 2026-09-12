@@ -272,6 +272,9 @@ integration files marked `// @wdl-cli-integration`:
 - `tests/integration/route-demo.test.js`
 - `tests/integration/s3-cleanup.test.js`
 
+CLI smoke tests cover definition and instance pagination against the platform,
+including text/JSON output, short or empty continuation pages, and final cursors.
+
 The CLI repository owns `[ai]` parsing, extension stripping, provider command tests,
 and the `examples/ai-agent-demo` packaging path. The platform-side runtime and Control
 contract is covered by `tests/integration/ai-binding.test.js`.
