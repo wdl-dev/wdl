@@ -94,7 +94,7 @@ const NS_SCOPED_KINDS = new Set([
 ]);
 
 const PLATFORM_VERSION = platformVersionFromSource(WDL_VERSION_SOURCE);
-const MIN_CLI_VERSION = "1.8.0";
+const MIN_CLI_VERSION = "1.9.0";
 
 /**
  * @param {Request} request

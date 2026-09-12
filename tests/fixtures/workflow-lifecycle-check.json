@@ -22,6 +22,7 @@
       "count": 123,
       "blockers": [{ "workflowKey": "wf_11111111111111111111111111111111", "instanceId": "item" }]
     },
-    "continuation": { "allowed": false, "count": 123, "blockers": [], "cursor": "128" }
+    "continuation": { "allowed": false, "count": 123, "blockers": [], "cursor": "128" },
+    "rescanRequired": { "allowed": false, "count": 123, "blockers": [] }
   }
 }

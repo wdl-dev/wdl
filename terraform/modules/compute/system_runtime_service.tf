@@ -129,8 +129,8 @@ module "system_runtime_service" {
   name                = "${var.name}-system-runtime"
   cluster_id          = aws_ecs_cluster.this.id
   task_definition_arn = aws_ecs_task_definition.system_runtime.arn
-  # Day-one single replica. Control is stateless (Redis is the truth),
-  # so scaling out is purely a throughput choice, not correctness.
+  # Defaults to one replica; operators may adjust capacity or use zero for maintenance.
+  # Control is stateless (Redis is the truth), so scaling out is a throughput choice.
   desired_count          = var.system_runtime_desired_count
   enable_execute_command = true
   deployment             = local.start_before_stop_deployment

@@ -95,8 +95,9 @@ Key families：
 - Instance 冻结创建时的 worker version/class identity。
 - Control 会对当前操作实际读到的 malformed active workflow entry 和 malformed `wf:defs` record fail closed；管理路径返回 `corrupt_meta`，deploy 在复用损坏的历史 definition 时返回 `workflow_definition_corrupt`。损坏的权威 metadata 不会被暴露为正常的 missing 或 retired workflow。正常 deploy 和单个 workflow 路径不会扫描无关的历史 definition。
 - Workflows lifecycle check 会拒绝 malformed referrer member，而不是把它当成不存在。
-- Lifecycle preflight 每次 backend call 只处理一个有界 SSCAN page：COUNT 128 是 hint，超过 512 个 member 或 128 KiB member bytes 的原生 page 会在 transfer 前 fail closed。最多返回 20 个 blocker；dry-run 把 expired pending create 当作 blocker，不累计整个集合。Cleanup 应用现有 create-token fence，并用原子 absence check 清除 missing-state referrer；每个 20-member chunk 的 mutation 共用一个 pipeline，只对失败槽位再批量读取一次，state 仍存在就继续阻止删除。结果不明时不重放 pipeline。未完成扫描返回 `allowed:false` 与内部 cursor，不能授权删除。Control 从零开始，只跟随后端 cursor，每页前续租已有 delete lock；一次检查最多 16 页 / 十秒，每次 backend call 最多五秒、response 最多 64 KiB。预算耗尽返回 `workflow_lifecycle_check_incomplete`；再次删除会保留已完成的 cleanup 进度。公开请求中的 cursor 不作为删除授权。
+- Lifecycle preflight 每次 backend call 只处理一个有界 SSCAN page：COUNT 128 是 hint，超过 512 个 member 或 128 KiB member bytes 的原生 page 会在 transfer 前 fail closed。最多返回 20 个 blocker；dry-run 把 expired pending create 当作 blocker，不累计整个集合。Cleanup 应用现有 create-token fence，并用原子 absence check 清除 missing-state referrer；每个 20-member chunk 的 mutation 共用一个 pipeline，只对失败槽位再批量读取一次，state 仍存在就继续阻止删除。结果不明时不重放 pipeline。可续接的扫描页返回 `allowed:false` 与内部 cursor，不能授权删除。Control 从零开始，只跟随后端 cursor，每页前续租已有 delete lock；一次检查最多 16 页 / 十秒，每次 backend call 最多五秒、response 最多 64 KiB。预算耗尽返回 `workflow_lifecycle_check_incomplete`；再次删除会保留已完成的 cleanup 进度。公开请求中的 cursor 不作为删除授权。
 - Cleanup 授权删除前还要求 referrer set 为空，不能仅因 cursor 遍历结束就在 Redis failover 后跳过仍存活的 referrer。
+- 如果最终复核仍发现 member、但没有已识别的 blocker，response 会返回 `allowed:false`、空 blocker 列表且不带 cursor。Control 返回 `workflow_lifecycle_check_incomplete`，要求重新发起删除请求，而不是报告 active-instance conflict 或自动从头重扫。
 - 续租 delete lock 的等待也受同一个十秒预算的剩余时间约束；这不是整条公开 delete request 或其他 Redis 操作的统一 deadline。
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。Scheduler 会在 64 KiB 上限内读取 tick response，并要求合法 JSON object 根节点；单个缺失或未知字段仍保持 forward-compatible，并按未报告 progress 处理。
 - Scheduler 也通过同一个 `/internal/workflows/tick` endpoint 唤醒 Workflows-owned internal DO alarm jobs；scheduler 不直接读写 DO alarm state。
@@ -178,7 +179,7 @@ workflows 遵循 Rust service observability shape：JSON logs、`/_healthz`、`/
 
 ## 部署 / Rollout 注意事项
 
-- 部署分页 Control endpoint 前，先更新 definition-list client 使其沿 cursor 读取；companion CLI 的两个 list 命令都支持 `--limit` / `--cursor`。Control 与 Workflows 混版时，旧 Control 可能对尚未完成的 lifecycle page 保守拒绝删除；若不能接受短暂拒绝，应暂停删除，直到两端更新完成。
+- 部署分页 Control endpoint 前，先更新 definition-list client 使其沿 cursor 读取；使用 companion CLI 时，需要安装 `1.9.0` 或更高版本，升级 WDL service 不会升级已安装的 CLI client。Control 与 Workflows 混版时，旧 Control 可能对尚未完成的 lifecycle page 保守拒绝删除；若不能接受短暂拒绝，应暂停删除，直到两端更新完成。
 - Instance-list byte ceiling 是 writer-first 例外：先更新 Workflows，再更新 system-runtime 中的 Control worker。旧 reader 已接受较短 page 和不变的 cursor shape；有界 reader 不应早于保证 response ceiling 的 writer 上线。这项变更不需要 persisted-state migration。
 
 - 跨 tier Workflow protocol 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程；受影响的具体 service 写入该版本 CHANGELOG。

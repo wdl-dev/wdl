@@ -534,6 +534,16 @@ mod tests {
                 serde_json::to_value(lifecycle_page_response(123, blockers, cursor)).unwrap();
             assert_eq!(body, fixture["responses"][name]);
         }
+        let rescan = LifecycleCheckResponse {
+            allowed: false,
+            count: 123,
+            blockers: Vec::new(),
+            cursor: None,
+        };
+        assert_eq!(
+            serde_json::to_value(rescan).unwrap(),
+            fixture["responses"]["rescanRequired"]
+        );
     }
 
     #[test]

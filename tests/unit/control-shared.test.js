@@ -801,7 +801,7 @@ test("shared workflows calls preserve endpoint-specific timeout behavior", async
   });
 });
 
-const lifecycleContract = /** @type {{ limits: { responseBytesMax: number, controlPagesMax: number, controlTimeoutMs: number }, request: Record<string, unknown>, responses: { complete: Record<string, unknown>, blocked: Record<string, unknown>, continuation: Record<string, unknown> } }} */ (
+const lifecycleContract = /** @type {{ limits: { responseBytesMax: number, controlPagesMax: number, controlTimeoutMs: number }, request: Record<string, unknown>, responses: { complete: Record<string, unknown>, blocked: Record<string, unknown>, continuation: Record<string, unknown>, rescanRequired: Record<string, unknown> } }} */ (
   readRepositoryJson("tests/fixtures/workflow-lifecycle-check.json")
 );
 
@@ -857,6 +857,29 @@ test("Workflow lifecycle pagination stops when the delete lock is lost", async (
     (error) => error instanceof ControlAbort && /** @type {{code?: string}} */ (error).code === "deleting",
   );
   assert.equal(calls, 1);
+});
+
+test("Workflow lifecycle rescan responses require a new request instead of reporting active instances", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  for (const afterContinuation of [false, true]) {
+    let calls = 0;
+    state.workflows = {
+      async fetch() {
+        calls += 1;
+        return Response.json(afterContinuation && calls === 1
+          ? lifecycleContract.responses.continuation
+          : lifecycleContract.responses.rescanRequired);
+      },
+    };
+    await assert.rejects(
+      () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", allowCleanup: true }),
+      (error) => error instanceof ControlAbort &&
+        /** @type {{status?: number, code?: string}} */ (error).status === 503 &&
+        /** @type {{code?: string}} */ (error).code === "workflow_lifecycle_check_incomplete",
+    );
+    assert.equal(calls, afterContinuation ? 2 : 1);
+  }
 });
 
 test("Workflow lifecycle bounds a hung renewal by the remaining check budget", async (t) => {

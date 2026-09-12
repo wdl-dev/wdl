@@ -677,7 +677,8 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
       });
     }
     if (body.allowed) return;
-    if (Array.isArray(body.blockers) && body.blockers.length === 0 && body.cursor !== undefined) {
+    if (Array.isArray(body.blockers) && body.blockers.length === 0) {
+      if (body.cursor === undefined) break;
       if (typeof body.cursor !== "string" || !/^[1-9][0-9]*$/.test(body.cursor) || body.cursor === cursor) {
         throw new ControlAbort(503, "workflow_internal_dispatch_failed", {
           message: "Workflow lifecycle check returned an invalid cursor",
@@ -697,7 +698,7 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
     });
   }
   throw new ControlAbort(503, "workflow_lifecycle_check_incomplete", {
-    message: "Workflow lifecycle scan budget was exhausted; retry the deletion request",
+    message: "Workflow lifecycle check is incomplete; retry the deletion request",
     ...context,
   });
 }

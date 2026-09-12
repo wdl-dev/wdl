@@ -168,7 +168,7 @@ test("control whoami uses sanitized forwarded proto for public URL hints", async
   const body = await readJsonResponse(response, 200);
   assert.equal(body.ok, true);
   assert.equal(body.platformVersion, "wdl.20990101.2");
-  assert.equal(body.minCliVersion, "1.8.0");
+  assert.equal(body.minCliVersion, "1.9.0");
   assert.deepEqual(body.urls, {
     control: "https://control.example",
     namespace: "https://tenant-a.workers.example",

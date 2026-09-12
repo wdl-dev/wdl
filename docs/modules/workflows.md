@@ -201,7 +201,7 @@ Key families:
   absence check. Within each 20-member chunk, mutations share one pipeline; only
   failed mutation slots are reread in a second batch and remain blocking while state
   exists. Pipelines are not replayed after ambiguous failures.
-  An unfinished scan returns `allowed:false` with an internal cursor; it never
+  A continuation page returns `allowed:false` with an internal cursor; it never
   authorizes deletion. Control starts at zero, follows only backend cursors, renews
   the held delete lock before each page, and limits a check to 16 pages / ten seconds
   with five-second per-call and 64 KiB response bounds. Budget exhaustion returns
@@ -211,6 +211,10 @@ Key families:
   Public request cursors are not accepted as deletion authorization.
   Cleanup requires the referrer set to be empty before granting permission, so a
   cursor traversal interrupted by Redis failover cannot silently skip a live referrer.
+  If that final check still finds members without identified blockers, the response
+  has `allowed:false`, an empty blocker list, and no cursor. Control returns
+  `workflow_lifecycle_check_incomplete` and requires a fresh deletion request, rather
+  than reporting an active-instance conflict or restarting the scan automatically.
 - Scheduler only wakes workflows; workflows owns admission, fairness, shard ticks,
   ready/due movement, and runtime dispatch. Scheduler reads the tick response under a
   64 KiB cap and requires a valid JSON object root; individual missing or unknown fields
@@ -552,8 +556,9 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 ## Deployment / Rollout Notes
 
 - Update clients that consume Workflow definition lists to follow cursors before
-  deploying the paginated Control endpoint. The companion CLI supports `--limit`
-  and `--cursor` for both list commands. During a mixed Control/Workflows rollout,
+  deploying the paginated Control endpoint. Using the companion CLI requires `1.9.0`
+  or later; upgrading WDL services does not upgrade installed CLI clients.
+  During a mixed Control/Workflows rollout,
   an older Control may conservatively reject deletion on an unfinished lifecycle
   page; quiesce deletion until both are updated if uninterrupted deletion is needed.
 - The instance-list byte ceiling is a writer-first exception: update Workflows

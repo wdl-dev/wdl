@@ -898,11 +898,14 @@ test("Workflow payload and instance-list limits share a cross-language fixture",
 test("Workflow lifecycle continuation is shared by Rust and Control", () => {
   const fixture = "tests/fixtures/workflow-lifecycle-check.json";
   const contract = /** @type {{ request: Record<string, unknown>, responses: Record<string, {allowed: boolean, blockers: unknown[], cursor?: string}>, limits: Record<string, number> }} */ (readRepositoryJson(fixture));
-  assert.deepEqual(Object.keys(contract.responses).toSorted(), ["blocked", "complete", "continuation"]);
+  assert.deepEqual(Object.keys(contract.responses).toSorted(), ["blocked", "complete", "continuation", "rescanRequired"]);
   assert.equal(contract.responses.complete.allowed, true);
   assert.equal(contract.responses.blocked.allowed, false);
   assert.equal(contract.responses.continuation.allowed, false);
   assert.equal(typeof contract.responses.continuation.cursor, "string");
+  assert.equal(contract.responses.rescanRequired.allowed, false);
+  assert.deepEqual(contract.responses.rescanRequired.blockers, []);
+  assert.equal(Object.hasOwn(contract.responses.rescanRequired, "cursor"), false);
   for (const limit of Object.values(contract.limits)) assert.ok(Number.isSafeInteger(limit) && limit > 0);
   for (const reader of ["rust/workflows/src/api/lifecycle/cleanup.rs", "tests/unit/control-shared.test.js"]) {
     assert.match(readRepoFile(reader), /workflow-lifecycle-check\.json/, reader);
