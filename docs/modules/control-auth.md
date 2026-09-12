@@ -368,13 +368,18 @@ Auth-specific contract:
   scheduler dispatch open for minutes.
 - All Control-to-Workflows internal POSTs use the canonical transport in
   `control/workflows-client.js`. Callers retain endpoint-specific timeout, non-2xx, and
-  response-body interpretation. Instance lists have an 8 MiB response cap and a
+  response-body interpretation. Callers must explicitly select `timeoutMs`, even
+  with an absolute deadline; only `null` disables the per-call cap.
+  Instance lists have an 8 MiB response cap and a
   five-second backend deadline covering fetch, body read, and JSON parsing. Successful
   list JSON bytes are forwarded without re-serialization. Instance status/lifecycle
   calls retain their timeout policy. Deletion preflight follows bounded internal pages
   for at most 16 pages / ten seconds, with five-second per-page timeouts, 64 KiB response
   caps, and token-scoped lock renewal. An unfinished page cannot authorize deletion;
-  budget exhaustion is retryable. DO-alarm cleanup uses a five-second timeout.
+  total-budget expiry during a page returns
+  `workflow_lifecycle_check_incomplete`, while earlier per-call timeouts and
+  backend failures retain the dispatch-failure code. DO-alarm cleanup uses a
+  five-second timeout.
   Workflow lifecycle blockers fail closed on service
   errors.
 - AUTH JSRPC errors or Redis explosions are control-plane failures and map to 503

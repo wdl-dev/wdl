@@ -201,6 +201,10 @@ Stateful storage:
   `system_runtime_desired_count` with default `1`. Full-stop maintenance may set all
   counts to `0`; operators must still drain old tasks and converge selected revisions
   before restoring capacity in the release's required order.
+  Setting only system-runtime to zero also stops Control/Auth and `__system__`
+  Workers. Admin APIs, deployment, and system-targeted dispatch are unavailable.
+  Other pools may still serve existing tenant workloads; this is not a
+  full-platform stop.
 - In addition to the Fargate task memory limit, D1 and DO workerd containers set
   explicit container memory hard limits. DO also reserves memory for its local
   redis-proxy sidecar.

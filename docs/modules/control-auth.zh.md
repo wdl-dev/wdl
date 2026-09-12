@@ -161,8 +161,9 @@ Auth 子合同：
 - Control 同样会在 watched revision-CAS loop 前加密 AI credential，并且 provider read/list API 永不返回 plaintext。
 - Worker delete 先 commit Redis lifecycle state；异步 S3 cleanup enqueue 是 best-effort，失败时返回 warning。
 - `s3-cleanup` system worker 会把 cleanup task 持久化在 D1；row 存在后由 cron replay 负责重试。S3 失败使用分钟级 exponential backoff，最高 30 分钟；大前缀 cleanup 每完成一个 S3 List/Delete page 就 checkpoint continuation token，因此正常分页进度不会消耗 failure attempts，也不会在 scheduler timeout 后从头开始。每次 run 只处理一页，所以超大 prefix 会跨多个 cron 或 queue dispatch 排空，而不是让单次 scheduler dispatch 持续数分钟。
-- 所有 Control-to-Workflows internal POST 都使用 `control/workflows-client.js` 的 canonical transport。Caller 继续持有 endpoint-specific timeout、non-2xx 和 response-body interpretation。Instance list 使用 8 MiB response cap，五秒 backend deadline 覆盖 fetch、body read 和 JSON parse；成功的 list JSON bytes 不经重新序列化直接转发。Instance status/lifecycle 调用保留原有 timeout 策略。Deletion preflight 最多续接 16 页 / 十秒，每页最多五秒、response 最多 64 KiB，并续租相同 token 的 delete lock；未完成 page 不能授权删除，预算耗尽可以重试。DO-alarm cleanup 使用五秒 timeout。Workflow lifecycle blocker 在服务错误时 fail closed。
+- 所有 Control-to-Workflows internal POST 都使用 `control/workflows-client.js` 的 canonical transport。Caller 继续持有 endpoint-specific timeout、non-2xx 和 response-body interpretation。Instance list 使用 8 MiB response cap，五秒 backend deadline 覆盖 fetch、body read 和 JSON parse；成功的 list JSON bytes 不经重新序列化直接转发。Instance status/lifecycle 调用保留原有 timeout 策略。Deletion preflight 最多续接 16 页 / 十秒，每页最多五秒、response 最多 64 KiB，并续租相同 token 的 delete lock；未完成 page 不能授权删除，在途 page 耗尽总预算时返回 `workflow_lifecycle_check_incomplete`，更早的单次请求 timeout 和 backend failure 保留 dispatch-failure code。DO-alarm cleanup 使用五秒 timeout。Workflow lifecycle blocker 在服务错误时 fail closed。
 - AUTH JSRPC 错误或 Redis 爆炸属于控制面失败，映射为 503 fail closed，而不是 tenant-visible authorization fallback。
+- 即使传入 absolute deadline，Control-to-Workflows caller 也必须显式选择 `timeoutMs`；只有 `null` 表示禁用单次请求 cap。
 
 ## 安全边界
 

@@ -49,6 +49,12 @@ Control / CLI:
   after `workflow_metadata_contention`; pagination is not a durable snapshot.
   Concurrent namespace changes can repeat scan entries across pages; consumers
   collecting a complete view should deduplicate by worker/name or restart.
+  Cursor input is limited to 2048 ASCII bytes. Route discovery treats
+  `HSCAN COUNT 32` as a hint and rejects pages above 512 field/value pairs or
+  128 KiB of combined field/value bytes before transfer. Compact hash
+  encodings may return the whole hash regardless of COUNT. Increasing thresholds
+  such as `hash-max-listpack-entries` can therefore make listing fail closed;
+  WDL does not enforce a Valkey configuration value for those thresholds.
 - `GET /ns/<ns>/workflows/<worker>/<workflow>/instances` lists instances and uses
   `workflow.read`. `limit` defaults to 100 and accepts 1-1000; each page is also bounded
   to 8 MiB of serialized JSON, including output/error payloads and the cursor envelope.
@@ -140,6 +146,10 @@ Key concepts:
   invalid state, not caller input errors. Dispatch and restart params use the shared
   JSON parser with their own 1 MiB read cap. Restart validates before creating its
   pending marker or changing instance state and preserves the original JSON bytes.
+  Errors for missing, oversized, or malformed JSON instance-list payloads
+  include bounded instance-id and payload-ref context in the existing
+  server-side `request_complete.error_message`. Payload contents are not logged;
+  public 5xx responses keep the generic message.
 - Instance listing reads payload refs in batches of at most 32 and releases each parsed
   instance after serializing it into the bounded page. It does not retain all selected
   payload JSON trees or build a second response tree. Control reads the page under the
@@ -206,6 +216,15 @@ Key families:
   the held delete lock before each page, and limits a check to 16 pages / ten seconds
   with five-second per-call and 64 KiB response bounds. Budget exhaustion returns
   `workflow_lifecycle_check_incomplete`; retrying deletion preserves completed cleanup.
+  The absolute budget also bounds an in-flight page: its expiry returns the same
+  incomplete code and is a warning in the transport log. A per-call timeout
+  before the total budget expires, or a genuine backend/read failure, retains
+  `workflow_internal_dispatch_failed` and error-level transport diagnostics.
+  The limiting deadline is fixed at request setup; delayed rejection does not
+  turn an earlier per-call timeout into total-budget exhaustion. Equal deadlines
+  use the total-budget classification.
+  Dry-run does not prune referrers, so repeated dry-runs need not converge when
+  stale entries exceed the scan budget; actual deletion performs fenced cleanup.
   Lock-renewal waits use the same remaining ten-second budget; this is not a deadline
   for the entire public delete request or for unrelated Redis operations.
   Public request cursors are not accepted as deletion authorization.

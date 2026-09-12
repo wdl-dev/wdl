@@ -151,6 +151,45 @@ test("Workflow lifecycle continuation never skips a live blocker among stale mem
   });
 });
 
+test("Workflow lifecycle final membership check requires a fresh scan after skipped pages", async () => {
+  const ns = uniqueNs("wfliferescan");
+  const version = await deployAndPromote(ns, "shop", { code: WORKER_CODE,
+    workflows: [{ name: "orders", binding: "ORDERS", className: "OrderWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "shop", version).workflows[0].workflowKey;
+  seedWorkflowLifecycleMembers(ns, workflowKey, version, 0, 2000);
+  const key = workflowByWorkerKey(ns, "shop");
+  const contract = /** @type {{limits: {scanCount: number}, responses: {rescanRequired: Record<string, unknown>}}} */ (
+    readRepositoryJson("tests/fixtures/workflow-lifecycle-check.json")
+  );
+  // Resume at the last native scan page while retaining members from earlier pages.
+  const cursor = redisEval(`
+local cursor = '0'
+repeat
+  local page = redis.call('SSCAN', KEYS[1], cursor, 'COUNT', ARGV[1])
+  if page[1] == '0' then return cursor end
+  cursor = page[1]
+until false`, [key], [String(contract.limits.scanCount)], { db: 2 });
+  assert.notEqual(cursor, "0");
+  const response = serviceInternalPost("workflows", 9120, "/internal/workflows/lifecycle/check-delete", {
+    ns, worker: "shop", allowCleanup: true, cursor,
+  });
+  assert.equal(response.status, 200, response.body);
+  const remaining = redisSCard(key, { db: 2 });
+  assert.ok(remaining > 0);
+  assert.deepEqual(responseJson(response), { ...contract.responses.rescanRequired, count: remaining });
+  await waitUntil("fresh cleanup traverses the remaining referrers", async () => {
+    const deleted = await adminFetch(`/ns/${ns}/worker/shop/delete`, { method: "POST" });
+    if (deleted.status === 503) {
+      assert.equal((await readIntegrationJson(deleted, 503)).error, "workflow_lifecycle_check_incomplete");
+      return false;
+    }
+    await readIntegrationJson(deleted, 200);
+    return true;
+  });
+  assert.equal(redisSCard(key, { db: 2 }), 0);
+});
+
 test("stale workflow run cannot commit after restart generation changes", async () => {
   const ns = uniqueNs("wfstale");
   const version = await deployAndPromote(ns, "shop", {

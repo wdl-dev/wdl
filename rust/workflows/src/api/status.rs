@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde_json::{Value as JsonValue, json};
+use wdl_rust_common::text::truncate_chars;
 
 use crate::{AppState, WorkflowError, WorkflowResult, by_workflow_key, instance_state_key};
 
@@ -181,7 +182,17 @@ fn apply_list_payload_reply(
     read: &InstancePayloadRead,
     raw: Option<String>,
 ) -> WorkflowResult<()> {
-    let value = parse_payload_ref(raw, &read.payload_ref, MAX_WORKFLOW_RESULT_BYTES)?;
+    let value = parse_payload_ref(raw, &read.payload_ref, MAX_WORKFLOW_RESULT_BYTES).map_err(
+        |mut error| {
+            error.message = format!(
+                "instance_id={:?} payload_ref={:?}: {}",
+                truncate_chars(&instance.id, 256),
+                truncate_chars(&read.payload_ref, 256),
+                truncate_chars(&error.message, 512),
+            );
+            error
+        },
+    )?;
     match read.field {
         InstancePayloadField::Output => instance.output = value,
         InstancePayloadField::Error => instance.error = value,
@@ -542,7 +553,54 @@ mod tests {
         assert_eq!(error.code, "workflow_invalid_state");
         assert_eq!(
             error.message,
-            format!("Workflow payload exceeds the {MAX_WORKFLOW_RESULT_BYTES} byte limit")
+            format!(
+                "instance_id=\"order-1\" payload_ref=\"output\": Workflow payload exceeds the {MAX_WORKFLOW_RESULT_BYTES} byte limit"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn list_payload_diagnostics_are_bounded_and_stay_out_of_the_response() {
+        use axum::response::IntoResponse;
+
+        let mut instance = list_instance(JsonValue::Null, None);
+        instance.id = "\u{4e2d}".repeat(300);
+        let read = InstancePayloadRead {
+            instance_index: 0,
+            field: InstancePayloadField::Error,
+            payloads_key: "payloads".to_string(),
+            payload_ref: "r".repeat(300),
+        };
+        let error = apply_list_payload_reply(
+            &mut instance,
+            &read,
+            Some("{\"private-payload\":".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "workflow_invalid_state");
+        assert!(
+            error
+                .message
+                .contains(&format!("instance_id={:?}", "\u{4e2d}".repeat(256)))
+        );
+        assert!(
+            error
+                .message
+                .contains(&format!("payload_ref={:?}", "r".repeat(256)))
+        );
+        assert!(error.message.chars().count() < 1100);
+        assert!(!error.message.contains("private-payload"));
+        let response = error.into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&body).unwrap(),
+            json!({"error": "workflow_invalid_state", "message": "Workflow service request failed"})
         );
     }
 
@@ -630,5 +688,9 @@ mod tests {
         let err = apply_list_payload_reply(&mut instances[0], &reads[0], None)
             .expect_err("missing list payload must fail closed");
         assert_eq!(err.code, "workflow_payload_missing");
+        assert!(
+            err.message
+                .contains("instance_id=\"inst-1\" payload_ref=\"missing-ref\"")
+        );
     }
 }

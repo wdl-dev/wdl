@@ -106,6 +106,7 @@ Stateful storage：
 - 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。
 - 七个 Terraform service family 都提供 desired-count 输入，包括默认值为 `1` 的 `system_runtime_desired_count`。全停机维护可将所有 count 设为 `0`；operator 仍须清退旧 task、确认目标 revision 已收敛，再按 release 要求的顺序恢复容量。
+- 只将 system-runtime 设为零也会停止 Control/Auth 与 `__system__` Worker execution，因此 admin API、deploy 和发往系统 Worker 的 dispatch 不可用。其他 runtime pool 仍可能继续服务已有 tenant workload；这不等于全平台停机。
 - 除了 Fargate task memory limit，D1 和 DO 的 workerd container 还会设置显式 container memory hard limit。DO 还会给本地 redis-proxy sidecar 保留内存。
 - do-runtime 的 `DO_PREVENT_EVICTION` 默认是 `true`，会让 host actor resident，避免当前 workerd 的 actor eviction 中断在途 hibernatable WebSocket 操作。显式 `false` 会为已经验证的 workload 启用 eviction；它不能替代 container memory hard limit。
 - 所有 Terraform Fargate service 都使用 start-before-stop rolling replacement：`maximum_percent = 200`、`minimum_healthy_percent = 100`。Wire-compatible D1/DO release 可以安全重叠 router task，由 owner lease、generation fence 和 supervisor drain 控制状态交接；wire transition 无法安全重叠时，以 release Changelog 的额外 gate 覆盖该默认策略。scheduler 的重叠由各 dispatch path 的 Redis claim/fence 保护。

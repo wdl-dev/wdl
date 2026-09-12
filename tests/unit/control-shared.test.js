@@ -36,6 +36,7 @@ const { controlSharedUrl, controlWorkflowsClientUrl } = compileControlSharedGrap
   sharedQueueKeysUrl,
 });
 const {
+  WORKFLOWS_INTERNAL_TIMEOUT_MS,
   MAX_WORKFLOW_INSTANCES_RESPONSE_BYTES,
   WORKFLOW_LIFECYCLE_MAX_PAGES,
   WORKFLOW_LIFECYCLE_TIMEOUT_MS,
@@ -882,6 +883,147 @@ test("Workflow lifecycle rescan responses require a new request instead of repor
   }
 });
 
+for (const phase of ["fetch", "body", "materialization"]) {
+  test(`Workflow lifecycle total deadline during ${phase} returns incomplete`, async (t) => {
+    restoreControlSharedStateAfter(t);
+    state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+    let now = 1_000;
+    const deadline = now + WORKFLOW_LIFECYCLE_TIMEOUT_MS;
+    let calls = 0;
+    let cancelled = false;
+    /** @type {number[]} */
+    const timeouts = [];
+    /** @type {AbortController[]} */
+    const controllers = [];
+    /** @type {Array<{level: string, event: string}>} */
+    const logs = [];
+    state.log = (/** @type {string} */ level, /** @type {string} */ event) => logs.push({ level, event });
+    const expire = () => {
+      now = deadline;
+      const controller = controllers.at(-1);
+      assert.ok(controller);
+      controller.abort(new DOMException("deadline expired", "TimeoutError"));
+    };
+    state.workflows = {
+      async fetch(/** @type {string} */ _url, /** @type {RequestInit} */ init) {
+        calls += 1;
+        if (calls < 3) {
+          now += WORKFLOWS_INTERNAL_TIMEOUT_MS - 1;
+          return Response.json({ ...lifecycleContract.responses.continuation, cursor: String(calls) });
+        }
+        if (phase === "body") {
+          return new Response(new ReadableStream({
+            pull() { expire(); },
+            cancel() { cancelled = true; },
+          }, { highWaterMark: 0 }));
+        }
+        now = deadline;
+        if (phase === "fetch") {
+          expire();
+          throw init.signal?.reason;
+        }
+        return Response.json(lifecycleContract.responses.complete);
+      },
+    };
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", (ms) => {
+        timeouts.push(ms);
+        const controller = new AbortController();
+        controllers.push(controller);
+        return controller.signal;
+      }, async () => {
+        await assert.rejects(
+          () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api", allowCleanup: true }),
+          (error) => error instanceof ControlAbort &&
+            /** @type {{status?: number, code?: string}} */ (error).status === 503 &&
+            /** @type {{code?: string}} */ (error).code === "workflow_lifecycle_check_incomplete",
+        );
+      });
+    });
+    assert.equal(calls, 3);
+    assert.deepEqual(timeouts, [WORKFLOWS_INTERNAL_TIMEOUT_MS, WORKFLOWS_INTERNAL_TIMEOUT_MS, 2]);
+    assert.equal(cancelled, phase === "body");
+    assert.deepEqual(logs, [{ level: "warn", event: "workflow_lifecycle_check_failed" }]);
+  });
+}
+
+test("Workflow lifecycle preserves per-call timeouts and backend errors", async (t) => {
+  restoreControlSharedStateAfter(t);
+  state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+  for (const scenario of ["per-call timeout", "late success", "late transport failure", "malformed reply"]) {
+    let now = 1_000;
+    const controller = new AbortController();
+    /** @type {string[]} */
+    const levels = [];
+    state.log = (/** @type {string} */ level) => levels.push(level);
+    state.workflows = { async fetch() {
+      if (scenario === "per-call timeout") {
+        now += WORKFLOWS_INTERNAL_TIMEOUT_MS;
+        controller.abort(new DOMException("per-call timeout", "TimeoutError"));
+        throw controller.signal.reason;
+      }
+      now += WORKFLOW_LIFECYCLE_TIMEOUT_MS;
+      if (scenario === "late success") return Response.json(lifecycleContract.responses.complete);
+      if (scenario === "malformed reply") return new Response("{broken");
+      throw new Error("backend connection failed");
+    } };
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", () => controller.signal, async () => {
+        await assert.rejects(
+          () => assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" }),
+          (error) => error instanceof ControlAbort &&
+            /** @type {{code?: string}} */ (error).code === "workflow_internal_dispatch_failed",
+        );
+      });
+    });
+    assert.deepEqual(levels, ["error"]);
+  }
+});
+
+for (const phase of ["fetch", "body"]) {
+  test(`Workflow lifecycle preserves a per-call timeout after delayed ${phase} rejection`, async (t) => {
+    restoreControlSharedStateAfter(t);
+    state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
+    const controller = new AbortController();
+    const started = Promise.withResolvers();
+    let now = 1_000;
+    let calls = 0;
+    /** @type {string[]} */
+    const levels = [];
+    state.log = (/** @type {string} */ level) => levels.push(level);
+    state.workflows = { async fetch() {
+      calls += 1;
+      if (phase === "body") {
+        return new Response(new ReadableStream({
+          pull() { started.resolve(undefined); },
+        }, { highWaterMark: 0 }));
+      }
+      return await new Promise((_, reject) => {
+        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
+        started.resolve(undefined);
+      });
+    } };
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", (ms) => {
+        assert.equal(ms, WORKFLOWS_INTERNAL_TIMEOUT_MS);
+        return controller.signal;
+      }, async () => {
+        const pending = assertWorkflowDeleteAllowed({ ns: "demo", worker: "api" });
+        const rejected = assert.rejects(pending, (error) => error instanceof ControlAbort &&
+          /** @type {{code?: string}} */ (error).code === "workflow_internal_dispatch_failed");
+        await started.promise;
+        now = 1_000 + WORKFLOWS_INTERNAL_TIMEOUT_MS;
+        controller.abort(new DOMException("per-call timeout", "TimeoutError"));
+        // Deliver the rejection only after both deadlines have passed.
+        now = 1_000 + WORKFLOW_LIFECYCLE_TIMEOUT_MS + 1;
+        await rejected;
+      });
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(levels, ["error"]);
+  });
+}
+
 test("Workflow lifecycle bounds a hung renewal by the remaining check budget", async (t) => {
   restoreControlSharedStateAfter(t);
   state.env = { WDL_INTERNAL_AUTH_TOKEN: TEST_INTERNAL_AUTH_TOKEN };
@@ -1007,24 +1149,61 @@ test("DO alarm cleanup rejects malformed or oversized success envelopes", async 
 
 test("workflows transport requires an explicit timeout selection at runtime", async () => {
   let fetchCalls = 0;
-  await assert.rejects(
-    postWorkflowsInternalRequest({
-      workflows: {
-        async fetch() {
-          fetchCalls += 1;
-          return Response.json({ ok: true });
+  for (const deadlineMs of [undefined, Date.now() + 5_000, Date.now() - 1]) {
+    await assert.rejects(
+      postWorkflowsInternalRequest({
+        workflows: {
+          async fetch() {
+            fetchCalls += 1;
+            return Response.json({ ok: true });
+          },
         },
-      },
-      headers: () => ({ "content-type": "application/json" }),
-      endpoint: "workflows/test",
-      body: {},
-      logEvent: "workflow_test_failed",
-      timeoutMs: /** @type {any} */ (undefined),
-      makeError: (/** @type {"unavailable" | "request_failed"} */ failure) => new Error(failure),
-    }),
-    /request_failed/
-  );
+        headers: () => ({ "content-type": "application/json" }),
+        endpoint: "workflows/test",
+        body: {},
+        logEvent: "workflow_test_failed",
+        timeoutMs: /** @type {any} */ (undefined),
+        deadlineMs,
+        makeError: (/** @type {import("../../control/workflows-client.js").WorkflowTransportFailure} */ failure) => new Error(failure),
+      }),
+      /request_failed/
+    );
+  }
   assert.equal(fetchCalls, 0);
+});
+
+test("workflows transport handles explicit null and tied caps without trusting upstream timeouts", async () => {
+  for (const { timeoutMs, outcome } of [null, 1_000].flatMap((timeoutMs) =>
+    ["success", "upstream timeout", "clock expiry"].map((outcome) => ({ timeoutMs, outcome })))) {
+    let now = 1_000;
+    const controller = new AbortController();
+    await withMockedProperty(Date, "now", () => now, async () => {
+      await withMockedProperty(AbortSignal, "timeout", (ms) => {
+        assert.equal(ms, 1_000);
+        return controller.signal;
+      }, async () => {
+        const pending = postWorkflowsInternalRequest({
+          workflows: { async fetch() {
+            if (outcome !== "success") now = 3_000;
+            if (outcome === "upstream timeout") {
+              throw new DOMException("upstream timeout", "TimeoutError");
+            }
+            return Response.json({ ok: true });
+          } },
+          headers: () => ({}),
+          endpoint: "workflows/test",
+          body: {},
+          logEvent: "workflow_test_failed",
+          timeoutMs,
+          deadlineMs: 2_000,
+          makeError: (/** @type {import("../../control/workflows-client.js").WorkflowTransportFailure} */ failure) => new Error(failure),
+        });
+        if (outcome === "upstream timeout") await assert.rejects(pending, /request_failed/);
+        else if (outcome === "clock expiry") await assert.rejects(pending, /deadline/);
+        else assert.deepEqual((await pending).body, { ok: true });
+      });
+    });
+  }
 });
 
 test("Workflow instances reader shares its byte ceiling with the Rust fixture", () => {

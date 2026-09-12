@@ -232,6 +232,10 @@ for full-stop maintenance. Wait for old tasks to stop, apply and converge the
 selected image revisions at zero capacity, then restore capacity separately in
 the release's required startup order.
 
+Setting only `system_runtime_desired_count = 0` also stops Control/Auth and
+`__system__` Workers. Admin APIs, deployment, and system-targeted dispatch are
+then unavailable even if other pools continue serving existing tenant workloads.
+
 The ECS cluster enables both `FARGATE` and `FARGATE_SPOT` capacity providers:
 
 - gateway, user-runtime, and system-runtime keep `base = 1` on on-demand Fargate and

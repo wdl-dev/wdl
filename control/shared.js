@@ -642,8 +642,7 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
         if (renewalTimeout !== undefined) clearTimeout(renewalTimeout);
       }
     }
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) break;
+    if (Date.now() >= deadline) break;
     const { response, body } = await postWorkflowsInternal({
       endpoint: "workflows/lifecycle/check-delete",
       body: {
@@ -659,7 +658,9 @@ export async function assertWorkflowDeleteAllowed({ ns, worker, version = undefi
       errorDetails: context,
       unavailableMessage: "Workflow lifecycle check is unavailable",
       requestFailedMessage: "Workflow lifecycle check failed",
-      timeoutMs: Math.min(WORKFLOWS_INTERNAL_TIMEOUT_MS, remainingMs),
+      timeoutMs: WORKFLOWS_INTERNAL_TIMEOUT_MS,
+      deadlineMs: deadline,
+      deadlineErrorCode: "workflow_lifecycle_check_incomplete",
       readBody: readWorkflowLifecycleResponse,
     });
     if (!response.ok) {

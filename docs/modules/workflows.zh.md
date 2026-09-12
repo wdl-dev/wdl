@@ -26,6 +26,7 @@ Control / CLI：
 - `GET /ns/<ns>/workflows` 列 workflow definition，使用 `workflow.list`。
 - Definition list 接受 `limit`（默认 100，最多 1000）和不透明 `cursor`；每页最多处理 16 个 worker、16 MiB source snapshot 加一个有界 lookahead，并返回至多 8 MiB JSON。只保证页内排序，不保证整个 namespace 扫描的全局排序；空页或短页也必须沿 cursor 继续，直到它为 `null`。Route segment 或尚未返回完的 definition set 变化时返回 `workflow_metadata_contention`，应去掉 cursor 重新开始；这不是持久 snapshot。
 - 并发 namespace 变化可能使扫描 entry 在不同页重复；需要收集完整视图的 consumer 应按 worker/name 去重或重新扫描。
+- Cursor 输入最多 2048 个 ASCII 字节。Route discovery 使用 `HSCAN COUNT 32` 作为 hint；原生 page 超过 512 个 field/value pair 或 128 KiB field/value 总字节时，会在 transfer 前拒绝。Compact hash encoding 可能不论 COUNT 都返回整个 Hash；调高 `hash-max-listpack-entries` 等 compact-encoding threshold 因而可能让 listing fail closed。WDL 不强制这些 Valkey 配置项的取值。
 - `GET /ns/<ns>/workflows/<worker>/<workflow>/instances` 列 instance，使用 `workflow.read`。`limit` 默认 100，范围为 1-1000；每页 serialized JSON 还受 8 MiB 上限约束，包括 output/error payload 和 cursor envelope。字节预算可能使一页少于 `limit` 项；必须沿返回的 `cursor` 继续，直到它为 `null`，不能用短页判断结束。Rank cursor 计入已消费的 index entry（包括 missing/invisible instance），字节预算耗尽时从首个未返回的 instance 继续；它不提供针对并发 index 变化的 snapshot isolation。正在读取的 instance 若存在 payload-ref 错误会 fail closed，而不是静默跳过。
 - `GET /ns/<ns>/workflows/<worker>/<workflow>/instances/<id>` 返回 instance status，使用 `workflow.read`。可选查询参数只接受 camelCase：`includeSteps=true|false` 会返回 step 记录，`stepLimit=<n>` 限制返回的 step 数。
 - `POST /ns/<ns>/workflows/<worker>/<workflow>/instances/<id>/{pause,resume,restart,terminate}` 使用 `workflow.write`。
@@ -61,6 +62,7 @@ Definition-list snapshot 在同一个 Valkey Lua 中核验 worker 的预期 acti
 - Instance state、step records、payload refs、events、ready/due indexes、run leases、retention indexes 和 callbacks 存在 DB 2。
 - Workflow payload 是有显式 byte cap 的 JSON data。大型 application data 应放在 R2/S3/D1/KV，再在 workflow payload 中保存引用。
 - List、get 和 status 共用 persisted result ref reader，在 JSON parse 前检查 1 MiB result limit；超限存量 result 属于 invalid state，不是当前 caller 的输入错误。Dispatch 和 restart params 复用 JSON parser，并使用自身的 1 MiB read cap。Restart 在创建 pending marker 或改变 instance state 前校验，并保留原始 JSON 字节。
+- Instance list 的 payload 缺失、超限或 JSON 非法时，会在既有服务端 `request_complete.error_message` 中包含有界的 instance-id 和 payload-ref 诊断；不记录 payload 内容，公开 5xx response 仍使用通用 message。
 - Instance list 每批最多读取 32 个 payload ref，每个 instance 在序列化进有界 page 后就释放解析后的对象，不保留全部选中 payload 的 JSON tree，也不构造第二棵 response tree。Control 使用相同的 8 MiB cap 和五秒 backend deadline 读取 page，成功时直接转发 JSON bytes，不重新编码。超限、不可读或超时的 backend page 返回 `503 workflow_internal_dispatch_failed`；合法 backend error code 沿用现有脱敏映射。该 deadline 不改变 mutation retry 语义。
 - 同一个 instance 的 DB 2 key 共享 `{ns:workflowKey:instanceId}` hash tag，但 workflow state 也会使用 global ready/due/retention keys。因此当前部署要求单个非 cluster 的 Valkey 分片（`num_node_groups = 1`），而不是 Redis Cluster；为 HA 配一个 primary/replica 对是可以的，因为复制不会对 keyspace 分片，但多分片会把未加 hash tag 的 global key 拆到不同 slot 并触发 CROSSSLOT。
 - Internal Durable Object alarm jobs 也存在 DB 2 的 `wf:internal:do-alarm:*` 下。它们是 Workflows-owned backend jobs，不是 tenant workflow instances，只能通过 do-runtime/workflows internal endpoints 访问。
@@ -97,6 +99,8 @@ Key families：
 - Workflows lifecycle check 会拒绝 malformed referrer member，而不是把它当成不存在。
 - Lifecycle preflight 每次 backend call 只处理一个有界 SSCAN page：COUNT 128 是 hint，超过 512 个 member 或 128 KiB member bytes 的原生 page 会在 transfer 前 fail closed。最多返回 20 个 blocker；dry-run 把 expired pending create 当作 blocker，不累计整个集合。Cleanup 应用现有 create-token fence，并用原子 absence check 清除 missing-state referrer；每个 20-member chunk 的 mutation 共用一个 pipeline，只对失败槽位再批量读取一次，state 仍存在就继续阻止删除。结果不明时不重放 pipeline。可续接的扫描页返回 `allowed:false` 与内部 cursor，不能授权删除。Control 从零开始，只跟随后端 cursor，每页前续租已有 delete lock；一次检查最多 16 页 / 十秒，每次 backend call 最多五秒、response 最多 64 KiB。预算耗尽返回 `workflow_lifecycle_check_incomplete`；再次删除会保留已完成的 cleanup 进度。公开请求中的 cursor 不作为删除授权。
 - Cleanup 授权删除前还要求 referrer set 为空，不能仅因 cursor 遍历结束就在 Redis failover 后跳过仍存活的 referrer。
+- 绝对预算同样约束在途 page：预算到期返回相同的 incomplete code，并在 transport log 中记为 warning。总预算到期前的单次请求 timeout，以及真实 backend/read failure，仍返回 `workflow_internal_dispatch_failed` 并记录 error 级 transport 诊断。Dry-run 不 prune referrer；陈旧 entry 超出扫描预算时，重复 dry-run 不保证收敛，实际删除才执行 fenced cleanup。
+- 请求建立时固定生效的 deadline；rejection 延迟送达不会把先触发的单次请求 timeout 改成总预算耗尽。两个 deadline 相同时使用总预算分类。
 - 如果最终复核仍发现 member、但没有已识别的 blocker，response 会返回 `allowed:false`、空 blocker 列表且不带 cursor。Control 返回 `workflow_lifecycle_check_incomplete`，要求重新发起删除请求，而不是报告 active-instance conflict 或自动从头重扫。
 - 续租 delete lock 的等待也受同一个十秒预算的剩余时间约束；这不是整条公开 delete request 或其他 Redis 操作的统一 deadline。
 - Scheduler 只负责唤醒 workflows；admission、fairness、shard tick、ready/due movement 和 runtime dispatch 都由 workflows 负责。Scheduler 会在 64 KiB 上限内读取 tick response，并要求合法 JSON object 根节点；单个缺失或未知字段仍保持 forward-compatible，并按未报告 progress 处理。

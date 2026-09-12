@@ -35,7 +35,7 @@ export async function readWorkflowLifecycleResponse(response, signal) {
 /**
  * @typedef {{ fetch: typeof fetch }} WorkflowBackend
  * @typedef {(level: string, event: string, fields?: Record<string, unknown>) => void} WorkflowClientLogger
- * @typedef {"unavailable" | "request_failed"} WorkflowTransportFailure
+ * @typedef {"unavailable" | "request_failed" | "deadline"} WorkflowTransportFailure
  */
 
 /**
@@ -49,6 +49,7 @@ export async function readWorkflowLifecycleResponse(response, signal) {
  *   logEvent: string,
  *   logFields?: Record<string, unknown>,
  *   timeoutMs: number | null,
+ *   deadlineMs?: number,
  *   makeError: (failure: WorkflowTransportFailure) => Error,
  *   readBody?: (response: Response, signal?: AbortSignal) => Promise<unknown>,
  * }} args
@@ -64,6 +65,7 @@ export async function postWorkflowsInternalRequest({
   logEvent,
   logFields = {},
   timeoutMs,
+  deadlineMs,
   makeError,
   readBody = async (response) => await response.json().catch(() => null),
 }) {
@@ -71,13 +73,29 @@ export async function postWorkflowsInternalRequest({
     throw makeError("unavailable");
   }
 
+  /** @type {AbortSignal | undefined} */
+  let signal;
+  let deadlineOwnsTimeout = false;
+  let timeoutDetected = false;
   try {
+    if (timeoutMs === undefined) throw new TypeError("Workflow timeoutMs must be explicitly set");
     const requestHeaders = new Headers(headers());
     if (typeof requestId === "string" && requestId) {
       requestHeaders.set("x-request-id", requestId);
     }
-    const deadline = timeoutMs === null ? null : Date.now() + timeoutMs;
-    const signal = timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs);
+    const now = Date.now();
+    let requestTimeoutMs = timeoutMs;
+    // Delayed rejection must retain the deadline selected for this request.
+    if (deadlineMs !== undefined && (timeoutMs === null || deadlineMs - now <= timeoutMs)) {
+      deadlineOwnsTimeout = true;
+      requestTimeoutMs = Math.max(0, deadlineMs - now);
+    }
+    const deadline = requestTimeoutMs === null ? null : now + requestTimeoutMs;
+    if (deadlineMs !== undefined && now >= deadlineMs) {
+      timeoutDetected = true;
+      throw new DOMException("Workflow request deadline expired", "TimeoutError");
+    }
+    signal = requestTimeoutMs === null ? undefined : AbortSignal.timeout(requestTimeoutMs);
     const response = await workflows.fetch(`http://workflows/internal/${endpoint}`, {
       method: "POST",
       headers: requestHeaders,
@@ -87,6 +105,7 @@ export async function postWorkflowsInternalRequest({
     const responseBody = await readBody(response, signal);
     signal?.throwIfAborted();
     if (deadline !== null && Date.now() >= deadline) {
+      timeoutDetected = true;
       throw new DOMException("Workflow backend request timed out", "TimeoutError");
     }
     return {
@@ -94,12 +113,13 @@ export async function postWorkflowsInternalRequest({
       body: responseBody,
     };
   } catch (err) {
-    log?.("error", logEvent, {
+    const deadlineExpired = deadlineOwnsTimeout && (signal?.aborted || timeoutDetected);
+    log?.(deadlineExpired ? "warn" : "error", logEvent, {
       ...logFields,
       ...(typeof requestId === "string" && requestId ? { request_id: requestId } : {}),
       error_message: errorMessage(err),
     });
-    throw makeError("request_failed");
+    throw makeError(deadlineExpired ? "deadline" : "request_failed");
   }
 }
 
@@ -120,6 +140,8 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
    *   logFields?: Record<string, unknown>,
    *   errorDetails?: Record<string, unknown>,
    *   timeoutMs: number | null,
+   *   deadlineMs?: number,
+   *   deadlineErrorCode?: string,
    *   unavailableMessage?: string,
    *   requestFailedMessage?: string,
    *   readBody?: (response: Response, signal?: AbortSignal) => Promise<unknown>,
@@ -133,6 +155,8 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
     logFields = {},
     errorDetails = {},
     timeoutMs,
+    deadlineMs,
+    deadlineErrorCode = "workflow_internal_dispatch_failed",
     unavailableMessage = "Workflow backend is unavailable",
     requestFailedMessage = "Workflow backend request failed",
     readBody,
@@ -147,12 +171,13 @@ export function createPostWorkflowsInternal({ getWorkflows, headers, getLog = ()
       logEvent,
       logFields,
       timeoutMs,
+      deadlineMs,
       readBody,
-      makeError: (failure) => new ControlAbort(503, "workflow_internal_dispatch_failed", {
+      makeError: (failure) => new ControlAbort(503, failure === "deadline" ? deadlineErrorCode : "workflow_internal_dispatch_failed", {
         ...errorDetails,
         message: failure === "unavailable"
           ? unavailableMessage
-          : requestFailedMessage,
+          : failure === "deadline" ? "Workflow request deadline expired" : requestFailedMessage,
       }),
     });
   };
