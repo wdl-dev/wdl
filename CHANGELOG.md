@@ -2,12 +2,14 @@
 
 ## Unreleased
 
-- Updated workerd and Workers types to `1.20260911.1` and `5.20260911.1`, raising the maximum compatibility date to `2026-09-18` and accepting `auto_grpc_convert` as non-experimental. Inherited upstream AsyncResource isolation, DER private-key export validation, and Promise/stream lifetime fixes, plus native Iterator helpers and virtual `net.BoundSocket`. Static dates and autogates remain unchanged; the `2026-09-15` listener-exception default depends on each worker's selected date.
-- Added bounded Workflow definition pagination, with per-worker limits of 1024 retained names and 1 MiB of definition data. Large metadata snapshots fail before transfer instead of materializing an unbounded namespace view. Update CLI clients to `1.9.0` or later before rolling Control; CI and Quick Start now pin `1.9.0`.
-- Bounded Workflow deletion preflight and batched token-fenced cleanup with internal continuation and delete-lock renewal. Large cleanup requests may return `workflow_lifecycle_check_incomplete` and be retried without losing completed cleanup work.
-- Accounted retained, active/detached, and in-flight replay bytes under a 64 MiB Runtime budget; saturation is retryable and never becomes a fresh step claim. Persisted result limits apply consistently to list, get, and status; restart rejects invalid stored params before changing state.
-- Bounded Workflow instance-list pages to 8 MiB of JSON while preserving payloads, order, and cursor continuation; Control enforces the same response cap and a five-second read deadline without re-encoding successful pages. Update Workflows before system-runtime; no state migration is required.
-- Added `system_runtime_desired_count` to Terraform, preserving the default of one while allowing all service families to scale to zero for maintenance.
+## wdl.20260911.1 - 2026-09-13
+
+- Updated workerd and Workers types to `1.20260911.1` and `5.20260911.1`, raising the maximum compatibility date to `2026-09-18` and accepting non-experimental `auto_grpc_convert`. Includes upstream isolation, crypto-export, and Promise/stream fixes; `spec_compliant_dispatch_exceptions` defaults on for worker compatibility dates from `2026-09-15`.
+- Added Workflow definition pagination with per-worker limits of 1024 retained names and 1 MiB of definition data. Capped instance-list responses at 8 MiB with cursor continuation and a five-second Control read deadline.
+- Bounded Workflow deletion preflight with batched, token-fenced cleanup and lock renewal. Requests returning `workflow_lifecycle_check_incomplete` can be retried without losing completed cleanup work.
+- Capped retained, active/detached, and in-flight replay bytes at 64 MiB per Runtime isolate, with retryable saturation. Enforced persisted-result limits for list/get/status and validated restart params before mutation.
+- Added Terraform `system_runtime_desired_count` (default `1`), allowing system-runtime to scale to zero for maintenance.
+- **Deployment:** Upgrade CLI clients to `1.9.0` or later before Control, and Workflows before system-runtime. Upgrades from `wdl.20260906.1` require no state migration.
 
 ## wdl.20260906.1 - 2026-09-07
 

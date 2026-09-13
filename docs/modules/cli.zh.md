@@ -75,6 +75,7 @@ Workflow definition 分页要求 CLI `1.9.0` 或更高版本，以传递 opaque 
 | `wdl.20260801.2` - `wdl.20260804.1` | 无（基础命令为 `1.6.0`） | 既有 CLI 命令仍可用，但短暂存在的 `durableObjectRollout` opt-in 仅有 Control API，从未发布对应 CLI spelling。 |
 | `wdl.20260804.2` - `wdl.20260815.1` | `1.7.0` | `[wdl] session_policy` deploy 支持。 |
 | `wdl.20260817.1` - `wdl.20260906.1` | `1.8.0` | AI binding manifest 与 namespace AI provider management。 |
+| `wdl.20260911.1` | `1.9.0` | Workflow definition 与 instance 分页，包括短页或空页续接。 |
 
 CLI 应把其余 discovery 字段当作 diagnostics 和 user-facing guidance 的默认值，而不是替代用户显式配置。可选 URL hint 缺失时，应展示为 unavailable，不应自行猜测。
 

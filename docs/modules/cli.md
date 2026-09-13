@@ -125,6 +125,7 @@ published WDL releases; the source-line declaration above covers unreleased chan
 | `wdl.20260801.2` - `wdl.20260804.1` | None (`1.6.0` baseline) | Existing CLI commands remain usable, but the transient `durableObjectRollout` opt-in was Control-API-only and never had a published CLI spelling. |
 | `wdl.20260804.2` - `wdl.20260815.1` | `1.7.0` | `[wdl] session_policy` deploy support. |
 | `wdl.20260817.1` - `wdl.20260906.1` | `1.8.0` | AI binding manifests and namespace AI provider management. |
+| `wdl.20260911.1` | `1.9.0` | Workflow definition and instance pagination, including short or empty continuation pages. |
 
 The CLI must treat the remaining discovery fields as diagnostics and defaults for
 user-facing guidance, not as a replacement for explicit user configuration. Missing
