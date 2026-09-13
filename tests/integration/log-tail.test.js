@@ -21,7 +21,9 @@ import {
   runtimeDispatchPost,
   uniqueNs,
   waitForActivation,
+  waitUntil,
   setupIntegrationSuite,
+  readIntegrationJson,
   responseJson,
   parseJsonText,
 } from "./helpers/index.js";
@@ -42,6 +44,9 @@ const TAIL_WORKER_CODE = `
   export default {
     async fetch(request) {
       const url = new URL(request.url);
+      if (url.searchParams.get("clock") === "1") {
+        return Response.json({ now: performance.now() });
+      }
       const tag = url.searchParams.get("tag") || "default";
       console.log("hello tag=" + tag);
       if (url.searchParams.get("error") === "1") {
@@ -417,13 +422,21 @@ test("wdl tail: events after activation miss-cache expiry land in SSE", async ()
     ns, query: "worker=tail-target", durationMs: 8000,
   });
   await waitForActivation(ns, "tail-target");
-  await delay(2200);
+  // Cache expiry follows the Runtime clock, not the Node test runner's clock.
+  const startedAt = (await readIntegrationJson(
+    await gatewayFetch(ns, "/tail-target/?clock=1"), 200
+  )).now;
+  await waitUntil("Runtime activation miss cache expiry", async () => {
+    const { now } = await readIntegrationJson(await gatewayFetch(ns, "/tail-target/?clock=1"), 200);
+    return now - startedAt >= 2200;
+  }, { timeoutMs: 5000, intervalMs: 100 });
   for (const tag of ["live1", "live2"]) {
     const res = await gatewayFetch(ns, `/tail-target/?tag=${tag}`);
     assert.equal(res.status, 200);
   }
 
-  const { events } = await ssePromise;
+  const { status, events } = await ssePromise;
+  assert.equal(status, 200, "SSE handshake should succeed before collecting live events");
   const tags = parseEventJson(events)
     .filter((p) => p.event === "worker_console")
     .map((p) => {

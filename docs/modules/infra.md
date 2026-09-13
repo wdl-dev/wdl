@@ -259,8 +259,15 @@ service list:
 3. Roll writers or callers that emit the new shape, wait for old writers to drain, then
    resume the paused surface.
 
-The release changelog names the concrete services and any additional gate for each
-version. Services whose contracts are unchanged do not acquire an ordering requirement.
+The release changelog names concrete services when release-specific ordering or gates
+are required. Unchanged contracts do not impose a fixed service order.
+
+Routine workerd bumps may roll with temporary version skew. Until all affected
+runtimes converge, bundles using newer APIs, flags, or compatibility dates may fail
+on older instances. Convergence alone does not replay failed requests. Operators
+may sequence readers first, pause affected writes, or use a maintenance window to
+avoid this risk. Protocol or storage-format changes still follow the procedure
+above and any release-specific gates.
 
 Internal auth rotation is dual-read / single-write, but it is not rolling-safe:
 callers always send `WDL_INTERNAL_AUTH_TOKEN`, and receivers accept current plus

@@ -4,11 +4,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import http from "node:http";
+import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
 import {
   GATEWAY_HOST,
   GATEWAY_PORT,
   deployAndPromote,
   gatewayFetch,
+  readIntegrationJson,
   responseJson,
   setupIntegrationSuite,
   uniqueNs,
@@ -17,6 +19,7 @@ import {
 
 setupIntegrationSuite();
 
+const WORKERD_NODE_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node.js");
 const WORKERD_COMPAT_WORKER = readFileSync(
   new URL("../../test-workers/workerd-compat/src/index.js", import.meta.url),
   "utf8"
@@ -90,6 +93,7 @@ const BASE64_PROBE_WORKER = `
  *   },
  *   htmlRewriter: { uppercaseAttributeMatches: number },
  *   byob: { firstDone: boolean, firstBytes: number[], finalDone: boolean, finalBytes: number[] },
+ *   iteratorHelpers: { zip: Array<[number, string]>, zipKeyed: Array<{left: number, right: string}> },
  *   importMetaPathHelpers: { dirname: string, filename: string },
  *   nodeGlobals: Record<string, string>,
  *   urlParsing: { nonUts46XnLabel: string },
@@ -206,10 +210,52 @@ test("compatibilityDate and vars propagated", async () => {
   assert.equal(await res.text(), "hi-from-vars");
 });
 
+test("bundled workerd native Node boundaries preserve request isolation and key export safety", async () => {
+  const ns = uniqueNs("workerd-node");
+  await deployAndPromote(ns, "probe", {
+    code: WORKERD_NODE_WORKER,
+    compatibilityDate: "2026-04-24",
+    compatibilityFlags: ["nodejs_compat", "unhandled_rejection_after_microtask_checkpoint"],
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/capture"), 200), {
+    direct: "request-a", bound: "request-a",
+  });
+  const rejectedScope = { returned: false, isError: true, code: null };
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/check"), 200), {
+    direct: rejectedScope,
+    bound: rejectedScope,
+    rebound: rejectedScope,
+    callbacks: 0,
+    global: "root",
+    current: "request-b",
+  });
+  const rejectedExport = {
+    returned: false, isError: true, code: "ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS",
+  };
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/crypto"), 200), {
+    pkcs1: rejectedExport,
+    sec1: rejectedExport,
+    pkcs8Encrypted: true,
+    sec1Unencrypted: true,
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/rejection-reentry"), 200), {
+    handledEvents: 1,
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/bound-socket"), 200), {
+    address: "127.0.0.1",
+    family: "IPv4",
+    ephemeralPort: true,
+    fd: -1,
+    conflict: { returned: false, isError: true, code: "EADDRINUSE" },
+    reused: true,
+  });
+});
+
 test("bundled workerd tenant runtime defaults and execution context APIs", async () => {
   const ns = uniqueNs("workerd-compat");
   const variants = [
     { name: "before-node-default", compatibilityDate: "2026-04-24", compatibilityFlags: [] },
+    { name: "stable-grpc-flag", compatibilityDate: "2026-04-24", compatibilityFlags: ["auto_grpc_convert"] },
     {
       name: "spec-compliant-dispatch-exceptions",
       compatibilityDate: "2026-04-24",
@@ -283,6 +329,10 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       finalDone: true,
       finalBytes: [],
     });
+    assert.deepEqual(result.iteratorHelpers, {
+      zip: [[1, "a"], [2, "b"]],
+      zipKeyed: [{ left: 1, right: "a" }, { left: 2, right: "b" }],
+    });
     assert.deepEqual(result.importMetaPathHelpers, {
       dirname: "undefined",
       filename: "undefined",
@@ -320,6 +370,7 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
     setImmediate: "function",
   };
   assert.deepEqual(results["before-node-default"].nodeGlobals, disabledGlobals);
+  assert.deepEqual(results["stable-grpc-flag"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["spec-compliant-dispatch-exceptions"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["byob-pending-read"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["node-default"].nodeGlobals, enabledGlobals);

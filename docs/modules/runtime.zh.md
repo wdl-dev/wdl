@@ -131,7 +131,7 @@ Cold-load duration metric 使用 workerd request clock。`bundle_load_stage_dura
 - Bundled workerd 在 active request 外（包括 dynamic module evaluation）调用 `Date.now()`、无参数 `new Date()` 或 `performance.now()` 时都返回 `0`。Generated wrapper 原样传递 request-owned `ExecutionContext`，因此无需 WDL shim 即可使用 `ctx.abort(reason?)`、`ctx.tracing.startSpan()`、`ctx.tracing.getActiveSpan()`、`Span.recordException()` 和 span attribute setter。Tracing method 不需要额外 tracing flag，但方法可用不代表 span 会被导出。`ctx.abort()` 只终止当前 stateless invocation，与 host-only `abortIsolate()` eviction 无关。
 - compatibility date 不早于 `2026-08-04` 时，workerd 默认同时启用 `nodejs_compat` 和 `nodejs_compat_v2`。Tenant 如果不需要这两层 surface，必须同时指定 `no_nodejs_compat` 与 `no_nodejs_compat_v2`。
 - WDL 会保留显式 positive compatibility flag，即使所选日期已经启用它。Workerd 2026-08-25 会接受这种产生相同 compiled flag set 的冗余写法；WDL 不复制上游 date-to-flag 映射表。
-- `spec_compliant_dispatch_exceptions` 是受支持的 non-experimental 显式 opt-in，可用于较早的合法日期。它的 compatibility-date 默认值是 `2026-09-15`，超出 bundled workerd 的最大日期 `2026-09-12`，不会随日历日期自动启用。WDL static worker 使用 `2026-04-24`，未显式启用该 flag；native autogate 保持默认值。
+- `spec_compliant_dispatch_exceptions` 是受支持的 non-experimental 显式 opt-in，可用于较早的合法日期。所选 compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Control 仍拒绝未来 UTC 日期，bundled 最大日期见 [compatibility](../compatibility.zh.md)。WDL static worker 使用 `2026-04-24`，未显式启用该 flag；native autogate 保持默认值。
 - Control 会在 deploy 时拒绝上游 `$experimental` compatibility enable flags 和 WDL 显式禁止的 `allow_irrevocable_stub_storage`、`new_module_registry`、`no_rpc`、`streams_disable_constructors`，runtime 也会拒绝包含任一类 flag 的 retained metadata。New Module Registry 虽已从上游 experimental 毕业，但 WDL 的每个 dynamic Worker 都通过 `_wdl-wrapper.js` 执行，无法保持 tenant `import.meta.main`，因此继续明确禁用；generated binding facade 还要求 Fetcher RPC。Static host worker 同样不会启用不可撤销 stub flag。`no_*` 这类 disable-style flag 不属于 experimental mirror，除非 WDL 显式拒绝或上游把对应 enable flag 本身标为 experimental。
 - Python Workers modules 不受支持。上游 `python_workers_314` flag 是 non-experimental，在 compatibility date 不早于 `2026-09-08` 时由 `python_workers` 隐式启用；`auto_inject_python_workers` 是 experimental，`python_workers_20260817` 已移除。Control 会拒绝新的 `py` module manifest，runtime/do-runtime 也会拒绝 retained metadata 中的 `py` module，而不是让 workerd 在 cold load 时 bootstrap Pyodide。
 - 从 WDL 的 2026-07-01 workerd pin 开始，runtime 进程使用进程级 `--experimental`，因为上游用它 gate `workerLoader` binding。不要给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
@@ -155,6 +155,7 @@ Cold-load duration metric 使用 workerd request clock。`bundle_load_stage_dura
 - `tests/unit/runtime-r2-client.test.js`
 - `tests/unit/runtime-r2-host.test.js`
 - `tests/unit/runtime-workflows-client.test.js`
+- `tests/integration/worker-modules.test.js`
 - `tests/integration/service-bindings.test.js`
 - `tests/integration/service-bindings-rpc.test.js`
 - `tests/integration/platform-bindings.test.js`

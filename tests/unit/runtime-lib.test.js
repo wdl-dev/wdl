@@ -452,7 +452,7 @@ test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date p
       {
         mainModule: "w.js",
         compatibilityDate: "2026-04-20",
-        compatibilityFlags: ["nodejs_compat"],
+        compatibilityFlags: ["nodejs_compat", "auto_grpc_convert"],
         bindings: { KV: { type: "kv", id: "x" } },
         vars: { G: "hi" },
         modules: { "w.js": { type: "module" } },
@@ -460,7 +460,7 @@ test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date p
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["nodejs_compat", "enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, ["nodejs_compat", "auto_grpc_convert", "enhanced_error_serialization"]);
   assert.deepEqual(/** @type {any} */ (code.meta.bindings), { KV: { type: "kv", id: "x" } });
   assert.deepEqual(code.meta.vars, { G: "hi" });
   assert.ok(Object.isFrozen(code.meta), "meta must be frozen");

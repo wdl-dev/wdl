@@ -191,6 +191,7 @@ export default {
     }
 
     const tracing = await tracingProbe(ctx);
+    const iterator = Reflect.get(globalThis, "Iterator");
 
     return Response.json({
       moduleClock,
@@ -204,6 +205,10 @@ export default {
       listenerExceptions: listenerExceptionsProbe(),
       htmlRewriter: await htmlRewriterProbe(),
       byob: await byobProbe(),
+      iteratorHelpers: {
+        zip: Array.from(iterator.zip([[1, 2], ["a", "b"]])),
+        zipKeyed: Array.from(iterator.zipKeyed({ left: [1, 2], right: ["a", "b"] })),
+      },
       importMetaPathHelpers: {
         dirname: typeof Reflect.get(import.meta, "dirname"),
         filename: typeof Reflect.get(import.meta, "filename"),

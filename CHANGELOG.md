@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20260911.1` and `5.20260911.1`, raising the maximum compatibility date to `2026-09-18` and accepting `auto_grpc_convert` as non-experimental. Inherited upstream AsyncResource isolation, DER private-key export validation, and Promise/stream lifetime fixes, plus native Iterator helpers and virtual `net.BoundSocket`. Static dates and autogates remain unchanged; the `2026-09-15` listener-exception default depends on each worker's selected date.
 - Added bounded Workflow definition pagination, with per-worker limits of 1024 retained names and 1 MiB of definition data. Large metadata snapshots fail before transfer instead of materializing an unbounded namespace view. Update CLI clients to `1.9.0` or later before rolling Control; CI and Quick Start now pin `1.9.0`.
 - Bounded Workflow deletion preflight and batched token-fenced cleanup with internal continuation and delete-lock renewal. Large cleanup requests may return `workflow_lifecycle_check_incomplete` and be retried without losing completed cleanup work.
 - Accounted retained, active/detached, and in-flight replay bytes under a 64 MiB Runtime budget; saturation is retryable and never becomes a fresh step claim. Persisted result limits apply consistently to list, get, and status; restart rejects invalid stored params before changing state.

@@ -135,7 +135,9 @@ Stateful storage：
 2. 如果新旧 writer 混部可能提交不兼容状态，在 rolling writer tier 前暂停受影响 mutation surface。
 3. 再滚会发出新 shape 的 writer/caller，等待旧 writer 完全 drain 后恢复暂停的 surface。
 
-每个版本涉及的具体 service 与额外 gate 写在该版本 CHANGELOG 中；合同没有变化的 service 不会因此获得固定 rollout 顺序。
+需要版本专属顺序或 gate 时，才在该版本 CHANGELOG 中列出具体 service；合同没有变化的 service 不会因此获得固定 rollout 顺序。
+
+常规 workerd bump 允许滚动期间短暂混部。相关 runtime 全部收敛前，使用新版 API、flag 或 compatibility date 的 bundle 可能在旧实例上失败；版本收敛本身不会重放此前失败的请求。需要避免这一风险时，operator 可以选择 reader-first、暂停受影响写入或维护窗口。Protocol 或 storage format 变化仍遵循上述流程及版本专属 gate。
 
 Internal auth 轮换采用双读单写，但它不是 rolling-safe 协议：caller 始终只发送 `WDL_INTERNAL_AUTH_TOKEN`，receiver 接受当前值和可选 previous 值。应在维护窗口内轮换，或先暂停 scheduler/workflows traffic。把旧值配置为 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN`、新值配置为 `WDL_INTERNAL_AUTH_TOKEN`，一起重启/滚动所有 private service；确认全量收敛后，再清空 `WDL_INTERNAL_AUTH_PREVIOUS_TOKEN` 并第二次滚动。
 

@@ -451,10 +451,11 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
   enables them. Workerd 2026-08-25 accepts that redundant spelling because it produces the
   same compiled flag set; WDL does not duplicate upstream's date-to-flag table.
 - `spec_compliant_dispatch_exceptions` is a supported non-experimental explicit
-  opt-in at an earlier valid date. Its date default is `2026-09-15`, beyond the
-  bundled workerd maximum of `2026-09-12`; the calendar does not enable it.
-  WDL static workers use `2026-04-24` without this opt-in. Native autogates remain
-  at their defaults.
+  opt-in at an earlier valid date. It defaults on for a selected compatibility date
+  of `2026-09-15` or later unless explicitly disabled; the calendar does not enable
+  it. Control still rejects future UTC dates; the bundled maximum is recorded in
+  [compatibility](../compatibility.md). WDL static workers use `2026-04-24` without
+  this opt-in. Native autogates remain at their defaults.
 - Control rejects upstream `$experimental` compatibility enable flags and WDL's explicit
   `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and
   `streams_disable_constructors` deny policy at deploy; runtime rejects retained metadata
@@ -512,6 +513,7 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
 - `tests/unit/runtime-r2-client.test.js`
 - `tests/unit/runtime-r2-host.test.js`
 - `tests/unit/runtime-workflows-client.test.js`
+- `tests/integration/worker-modules.test.js`
 - `tests/integration/service-bindings.test.js`
 - `tests/integration/service-bindings-rpc.test.js`
 - `tests/integration/platform-bindings.test.js`

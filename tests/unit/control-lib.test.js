@@ -836,9 +836,9 @@ test("prepareBundle: compatibilityFlags preserved", () => {
   const { meta } = prepareBundle(
     "w.js",
     { "w.js": "x" },
-    { compatibilityFlags: ["nodejs_compat"] }
+    { compatibilityFlags: ["nodejs_compat", "auto_grpc_convert"] }
   );
-  assert.deepEqual(meta.compatibilityFlags, ["nodejs_compat"]);
+  assert.deepEqual(meta.compatibilityFlags, ["nodejs_compat", "auto_grpc_convert"]);
 });
 
 test("prepareBundle: experimental workerd compatibility flags are rejected", () => {
@@ -999,7 +999,8 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("auto_inject_python_workers"));
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_20260817"), false);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_314"), false);
-  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 38);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("auto_grpc_convert"), false);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 37);
   // The new module registry graduated upstream, but WDL's generated wrapper is
   // the actual loader main module and cannot preserve tenant import.meta.main.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("new_module_registry"), false);
