@@ -66,7 +66,7 @@ export function doPlatformErrorResponse(err) {
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_INVOKE_ENVELOPE_BYTES = 2 * 1024 * 1024;
 const MAX_REQUEST_HEADER_COUNT = 128;
-const MAX_REQUEST_HEADER_BYTES = 64 * 1024;
+const MAX_REQUEST_HEADER_BYTES = 128 * 1024;
 export const DO_INVOKE_CONTENT_TYPE = "application/vnd.wdl.do-invoke";
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
@@ -312,9 +312,6 @@ function normalizeHeaderPair(name, value) {
   if (typeof value !== "string") {
     throw new DoRuntimeError(400, "invalid_request", `request.headers.${headerName} must be a string`);
   }
-  if (byteLength(value) > 8192) {
-    throw new DoRuntimeError(400, "invalid_request", `request.headers.${headerName} is too large`);
-  }
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
     if (code < 0x20 || code === 0x7f) {
@@ -336,7 +333,7 @@ function normalizeRequestSpec(value) {
   }
   const url = input.url == null
     ? "https://do.internal/"
-    : requireString(input.url, "request.url", { maxBytes: 4096 });
+    : requireString(input.url, "request.url", { maxBytes: 16 * 1024 });
   try {
     new URL(url);
   } catch {

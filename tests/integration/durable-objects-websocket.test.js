@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -30,7 +31,9 @@ import {
   wsHandshake,
   setupIntegrationSuite,
   responseJson,
+  readIntegrationJson,
 } from "./helpers/index.js";
+import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
 import { prometheusCounter } from "./helpers/prometheus.js";
 import { doHostId, redisGetDoStorageId, redisSetDoOwner } from "./helpers/durable-objects.js";
 
@@ -48,6 +51,50 @@ const DO_WS_HIBERNATION_WORKER = readFileSync(
   new URL("../../test-workers/do-ws-hibernation/src/index.js", import.meta.url),
   "utf8"
 );
+
+test("internal Durable Object WebSockets accept large MCP headers with long URLs", async () => {
+  const ns = uniqueNs("do-ws-metadata");
+  await deployAndPromote(ns, "probe", {
+    code: readRepositoryModuleSource("test-workers/do-request-metadata/src/index.js"),
+    compatibilityFlags: ["nodejs_compat"],
+    bindings: { ECHO: { type: "do", className: "MetadataEcho" } },
+  });
+  const message = (/** @type {string} */ padding) => ({
+    jsonrpc: "2.0", id: "00000000-0000-4000-8000-000000000000", method: "tools/call",
+    params: { name: "get_current_user", arguments: { padding } },
+  });
+  const emptyBytes = Buffer.byteLength(JSON.stringify([message("")]));
+  const paddings = [
+    "a".repeat(6144 - emptyBytes),
+    "a".repeat(6145 - emptyBytes),
+    "\u4e2d".repeat(4000),
+  ];
+  for (const padding of paddings) {
+    const payload = message(padding);
+    const value = Buffer.from(JSON.stringify([payload])).toString("base64");
+    // The real HTTP upgrade must also fit the test mesh's wire-header budget.
+    const response = await gatewayFetch(ns, "/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: payload, urlBytes: 16 * 1024, websocket: true }),
+    });
+    assert.deepEqual(await readIntegrationJson(response, 200), {
+      headerBytes: value.length,
+      headerHash: createHash("sha256").update(value).digest("hex"),
+      urlBytes: 16 * 1024,
+      internalAuthVisible: false,
+      transport: "websocket",
+    });
+  }
+  const rejected = await gatewayFetch(ns, "/probe", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: message(""), urlBytes: 16 * 1024 + 1, websocket: true }),
+  });
+  const error = await readIntegrationJson(rejected, 400);
+  assert.equal(error.error, "invalid_request");
+  assert.equal(error.message, "request.url is too large");
+});
 
 function doRemoteOwnerResolutions() {
   const metrics = serviceInternalGet("do-runtime", 8788, "/_metrics").body;

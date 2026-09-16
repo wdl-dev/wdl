@@ -71,6 +71,17 @@ Tenant-originated DO fetch bodies are capped at 1 MiB in the runtime host adapte
 adapter rejects an oversized `Content-Length` before reading, and streamed bodies are
 read incrementally so the cap is enforced before buffering the full body.
 
+DO fetch and WebSocket-connect request metadata allow up to 128 header entries and
+128 KiB of UTF-8 header names and values combined, without a smaller per-value cap.
+Header names remain limited to 128 bytes and valid HTTP token syntax; values must
+be strings without control characters. The complete forwarded URL is limited to
+16 KiB of UTF-8 bytes. These are logical metadata budgets, not end-to-end wire
+guarantees: WebSocket forwarding adds internal routing/authentication headers, and
+workerd's HTTP parser also accounts for the request line. Intermediary proxies may
+impose smaller header or URL limits. Near-ceiling requests require deployment-level
+headroom; large messages encoded into headers, including MCP bridge payloads, share
+the same aggregate budget.
+
 DO RPC method names use the JavaScript identifier grammar. The do-runtime protocol
 reader caps them at 256 ASCII bytes. RPC arguments are structural JSON data capped at
 1 MiB: finite numbers, strings, booleans, null, dense arrays, and plain objects are

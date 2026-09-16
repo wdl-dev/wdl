@@ -867,7 +867,7 @@ test("rejects too many request headers", () => {
 
 test("rejects aggregate request header bytes over the protocol budget", () => {
   const headers = Object.fromEntries(
-    Array.from({ length: 128 }, (_, index) => [`x-test-${index}`, "x".repeat(600)])
+    Array.from({ length: 128 }, (_, index) => [`x-test-${index}`, "x".repeat(1024)])
   );
 
   assert.throws(
@@ -879,8 +879,76 @@ test("rejects aggregate request header bytes over the protocol budget", () => {
         headers,
       },
     }),
-    /request\.headers exceeds 65536 bytes/
+    /request\.headers exceeds 131072 bytes/
   );
+});
+
+test("request headers share one exact UTF-8 byte budget without a smaller value cap", () => {
+  const maxBytes = 128 * 1024;
+  const normalize = (/** @type {Record<string, string>} */ headers) => normalizeDoInvokeRequest({
+    ...BASE_BODY,
+    request: { ...BASE_BODY.request, headers },
+  });
+  for (const value of ["a".repeat(maxBytes - 1), `${"\u00e9".repeat((maxBytes - 2) / 2)}a`]) {
+    const invoke = normalize({ x: value });
+    assert.ok("request" in invoke);
+    assert.deepEqual(invoke.request.headers, [["x", value]]);
+    assert.throws(
+      () => normalize({ x: `${value}a` }),
+      (err) => err instanceof DoRuntimeError && err.status === 413 &&
+        err.code === "request_body_too_large" && err.message === "request.headers exceeds 131072 bytes"
+    );
+    assert.throws(() => normalize({ x: value, y: "" }), /request\.headers exceeds 131072 bytes/);
+  }
+  assert.doesNotThrow(() => normalize({ ["x".repeat(128)]: "ok" }));
+  assert.throws(() => normalize({ ["x".repeat(129)]: "ok" }), /request header name is too large/);
+  for (const value of ["line\nbreak", "line\rbreak", "tab\tvalue", "delete\u007f"]) {
+    assert.throws(() => normalize({ x: value }), /request\.headers\.x must not contain control characters/);
+  }
+});
+
+test("DO request URLs accept 16 KiB and reject the next UTF-8 byte", () => {
+  const prefix = "https://do.internal/?q=";
+  for (const character of ["a", "\u00e9"]) {
+    const unitBytes = Buffer.byteLength(character);
+    const remaining = 16 * 1024 - Buffer.byteLength(prefix);
+    const url = prefix + character.repeat(Math.floor(remaining / unitBytes)) + "a".repeat(remaining % unitBytes);
+    assert.equal(Buffer.byteLength(url), 16 * 1024);
+    const invoke = normalizeDoInvokeRequest({ ...BASE_BODY, request: { ...BASE_BODY.request, url } });
+    assert.ok("request" in invoke);
+    assert.equal(invoke.request.url, url);
+    assert.throws(
+      () => normalizeDoInvokeRequest({ ...BASE_BODY, request: { ...BASE_BODY.request, url: `${url}a` } }),
+      (err) => err instanceof DoRuntimeError && err.status === 400 &&
+        err.code === "invalid_request" && err.message === "request.url is too large"
+    );
+  }
+});
+
+test("DO WebSocket metadata preserves large MCP headers and the URL budget", () => {
+  const prefix = "https://do.internal/?q=";
+  const url = prefix + "a".repeat(16 * 1024 - prefix.length);
+  const connect = (/** @type {string} */ value, target = url) => new Request("http://do-runtime/internal/do/connect", {
+    headers: {
+      Upgrade: "websocket",
+      "x-wdl-do-ns": BASE_BODY.ns,
+      "x-wdl-do-worker": BASE_BODY.worker,
+      "x-wdl-do-version": BASE_BODY.version,
+      "x-wdl-do-storage-id": DO_STORAGE_ID,
+      "x-wdl-do-class-name": BASE_BODY.className,
+      "x-wdl-do-object-name": encodeDoObjectNameHeader(BASE_BODY.objectName),
+      "x-wdl-do-request-url": target,
+      "cf-mcp-message": value,
+    },
+  });
+  const maximum = 128 * 1024 - Buffer.byteLength("upgradewebsocketcf-mcp-message");
+  const value = "a".repeat(maximum);
+  const invoke = normalizeDoConnectRequest(connect(value));
+  assert.ok("request" in invoke);
+  assert.equal(invoke.request.url, url);
+  assert.deepEqual(Object.fromEntries(invoke.request.headers), { "cf-mcp-message": value, upgrade: "websocket" });
+  assert.throws(() => normalizeDoConnectRequest(connect(`${value}a`)), /request\.headers exceeds 131072 bytes/);
+  assert.throws(() => normalizeDoConnectRequest(connect(value, `${url}a`)), /request\.url is too large/);
 });
 
 test("allows empty header values", () => {

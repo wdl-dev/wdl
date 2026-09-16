@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -7,7 +8,9 @@ import {
   uniqueNs,
   setupIntegrationSuite,
   responseJson,
+  readIntegrationJson,
 } from "./helpers/index.js";
+import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
 import {
   DO_BINARY_BODY_WORKER,
   DO_BINDINGS_WORKER,
@@ -23,6 +26,29 @@ const DO_INTRINSIC_GUARD_WORKER = readFileSync(
   new URL("../fixtures/do-intrinsic-guard-worker.mjs.txt", import.meta.url),
   "utf8"
 );
+
+test("Durable Object fetch preserves headers above 64 KiB and 16 KiB URLs", async () => {
+  const ns = uniqueNs("do-metadata");
+  await deployAndPromote(ns, "probe", {
+    code: readRepositoryModuleSource("test-workers/do-request-metadata/src/index.js"),
+    compatibilityFlags: ["nodejs_compat"],
+    bindings: { ECHO: { type: "do", className: "MetadataEcho" } },
+  });
+  const message = { padding: "x".repeat(72 * 1024) };
+  const value = Buffer.from(JSON.stringify([message])).toString("base64");
+  assert.ok(value.length > 64 * 1024);
+  const response = await gatewayFetch(ns, "/probe", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message, urlBytes: 16 * 1024 }),
+  });
+  assert.deepEqual(await readIntegrationJson(response, 200), {
+    headerBytes: value.length,
+    headerHash: createHash("sha256").update(value).digest("hex"),
+    urlBytes: 16 * 1024,
+    internalAuthVisible: false,
+  });
+});
 
 test("worker Durable Object binding routes through do-runtime and preserves object state", async () => {
   const ns = uniqueNs("do");

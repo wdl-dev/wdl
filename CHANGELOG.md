@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Raised Durable Object fetch/WebSocket request metadata limits to 128 KiB of aggregate headers and 16 KiB URLs, removing the smaller per-header-value cap. Proxy and native HTTP parsing limits still apply, including internal forwarding overhead.
+
 ## wdl.20260911.1 - 2026-09-13
 
 - Updated workerd and Workers types to `1.20260911.1` and `5.20260911.1`, raising the maximum compatibility date to `2026-09-18` and accepting non-experimental `auto_grpc_convert`. Includes upstream isolation, crypto-export, and Promise/stream fixes; `spec_compliant_dispatch_exceptions` defaults on for worker compatibility dates from `2026-09-15`.

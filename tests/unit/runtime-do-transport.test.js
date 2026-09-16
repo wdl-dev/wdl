@@ -179,7 +179,7 @@ test("DO requestSpec header budget counts exact UTF-8 bytes", async () => {
   });
   await assert.rejects(
     () => requestSpec(oversized, null),
-    /fetch headers exceed 65536 bytes/
+    /fetch headers exceed 131072 bytes/
   );
 });
 
@@ -351,7 +351,7 @@ test("DO requestSpec header budget uses captured UTF-8 intrinsics", async () => 
       async () => {
         await assert.rejects(
           () => requestSpec(request, null),
-          /fetch headers exceed 65536 bytes/
+          /fetch headers exceed 131072 bytes/
         );
       }
     )
