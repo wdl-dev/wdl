@@ -20,6 +20,7 @@ import {
 setupIntegrationSuite();
 
 const WORKERD_NODE_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node.js");
+const WORKERD_NODE_IO_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node-io.js");
 const WORKERD_COMPAT_WORKER = readFileSync(
   new URL("../../test-workers/workerd-compat/src/index.js", import.meta.url),
   "utf8"
@@ -261,6 +262,7 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       compatibilityDate: "2026-04-24",
       compatibilityFlags: ["spec_compliant_dispatch_exceptions"],
     },
+    { name: "date-default-dispatch-exceptions", compatibilityDate: "2026-09-15", compatibilityFlags: [] },
     { name: "node-default", compatibilityDate: "2026-08-04", compatibilityFlags: [] },
     { name: "single-node-optout", compatibilityDate: "2026-08-04", compatibilityFlags: ["no_nodejs_compat"] },
     {
@@ -343,7 +345,8 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
   }
 
   for (const variant of variants) {
-    const reportsExceptions = variant.compatibilityFlags.includes("spec_compliant_dispatch_exceptions");
+    const reportsExceptions = variant.compatibilityFlags.includes("spec_compliant_dispatch_exceptions") ||
+      variant.compatibilityDate >= "2026-09-15";
     const expected = {
       listeners: reportsExceptions ? ["first", "second"] : ["first"],
       reports: reportsExceptions ? [true] : [],
@@ -374,6 +377,7 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
   assert.deepEqual(results["spec-compliant-dispatch-exceptions"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["byob-pending-read"].nodeGlobals, disabledGlobals);
   assert.deepEqual(results["node-default"].nodeGlobals, enabledGlobals);
+  assert.deepEqual(results["date-default-dispatch-exceptions"].nodeGlobals, enabledGlobals);
   assert.deepEqual(results["single-node-optout"].nodeGlobals, enabledGlobals);
   assert.deepEqual(results["full-node-optout"].nodeGlobals, disabledGlobals);
 
@@ -413,6 +417,53 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
 
   const healthy = await gatewayFetch(ns, "/node-default");
   assert.equal(healthy.status, 200);
+});
+
+test("bundled workerd Node filesystem respects sliced views and open truncation", async () => {
+  const ns = uniqueNs("workerd-fs");
+  await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
+  const result = await readIntegrationJson(await gatewayFetch(ns, "/probe/fs"), 200);
+  assert.deepEqual(result.views, ["sync", "callback", "promise"].map((mode) => ({
+    mode, input: "ABC", output: "...BC...", stored: "BC23456789",
+    readBounds: mode === "callback" ? "ERR_INVALID_ARG_VALUE" : "ERR_OUT_OF_RANGE",
+    writeBounds: "ERR_BUFFER_OUT_OF_BOUNDS",
+  })));
+  assert.equal(result.truncation.length, 9);
+  for (const entry of result.truncation) assert.equal(entry.size, 0, JSON.stringify(entry));
+});
+
+test("bundled workerd Node and Web streams settle through success, failure and cancellation", async () => {
+  const ns = uniqueNs("workerd-streams");
+  await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/streams"), 200), {
+    piped: "onetwo", batched: ["first", "second"], composed: "COMPOSE",
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/stream-failures"), 200), {
+    destinationError: "probe sink failed", cancelled: true,
+    abortName: "AbortError", abortedSource: true, sinkDestroyed: true,
+    lockedDestination: "TypeError", sourceError: "probe source failed", failedSinkDestroyed: true,
+  });
+});
+
+test("bundled workerd Node HTTP handler preserves bodies and terminates failed requests", async () => {
+  const ns = uniqueNs("workerd-http");
+  await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
+  const body = Buffer.alloc(128 * 1024, "node-http-pipe");
+  const echoed = await gatewayFetch(ns, "/probe/http/echo", { method: "POST", body });
+  assert.equal(echoed.status, 200);
+  assert.deepEqual(Buffer.from(await echoed.arrayBuffer()), body);
+  const buffered = await gatewayFetch(ns, "/probe/http/buffer");
+  assert.equal(buffered.status, 200);
+  assert.equal(await buffered.text(), "beforeafter");
+  const head = await gatewayFetch(ns, "/probe/http/head", { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "");
+  const rejected = await gatewayFetch(ns, "/probe/http/reject");
+  assert.equal(rejected.status, 502);
+  assert.equal((await responseJson(rejected)).error, "runtime_error");
+  const healthy = await gatewayFetch(ns, "/probe/http/healthy");
+  assert.equal(healthy.status, 200);
+  assert.equal(await healthy.text(), "node-http-ok");
 });
 
 test("shared base64 grammar agrees across workerd web and Node branches", async () => {

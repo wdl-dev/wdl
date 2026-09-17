@@ -854,8 +854,13 @@ function wrapWorkflowStep(step, requestContext, wrappedEnv) {
   __WdlHostRuntime__.defineDataProperty(
     facade,
     "do",
-    (name, configOrCallback, maybeCallback) => {
+    (name, configOrCallback, maybeCallback, rollbackOptions) => {
       const rawDo = method("do");
+      if (rollbackOptions !== undefined || (typeof configOrCallback === "function" && maybeCallback !== undefined)) {
+        // Only a flag crosses RPC so tenant serialization cannot bypass the
+        // host's terminal failure latch or create rollback capabilities.
+        return __WdlHostRuntime__.applyFunction(rawDo, step, [undefined, undefined, undefined, true]);
+      }
       if (typeof configOrCallback === "function") {
         return __WdlHostRuntime__.applyFunction(rawDo, step, [
           name,

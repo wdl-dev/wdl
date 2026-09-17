@@ -219,14 +219,8 @@ export const metrics = {
    *   value: number,
    * }> }} */ (await import(recordingMetricsUrl));
   kvCapacity.resetKvReadCapacityForTest();
-  /** @type {Promise<unknown>[]} */
-  const tasks = [];
   const binding = {
     env: { SERVICE_NAME: "unit" },
-    ctx: {
-      /** @param {Promise<unknown>} promise */
-      waitUntil(promise) { tasks.push(promise); },
-    },
   };
   /** @param {number} length */
   const response = (length) => new Response(null, {
@@ -258,17 +252,15 @@ export const metrics = {
   deadline.abort();
 
   assert.throws(
-    () => kvCapacity.acquireKvReadLease({
+    () => kvCapacity.withKvReadDeadline({
       env: binding.env,
       ctx: { waitUntil() { throw new Error("waitUntil failed"); } },
-    }, response(2), new AbortController().signal),
+    }, async () => undefined),
     /waitUntil failed/
   );
 
   kvCapacity.prepareKvReadCapacityMetrics(binding.env);
   kvCapacity.prepareKvReadCapacityMetrics(binding.env);
-  await Promise.all(tasks);
-
   const increments = recording.calls.filter((call) => call.kind === "increment");
   assert.deepEqual(increments.map((call) => [call.name, call.labels, call.value]), [
     ["kv_read_capacity_events", { service: "unit", outcome: "acquired" }, 1],
@@ -278,7 +270,6 @@ export const metrics = {
     ["kv_read_capacity_events", { service: "unit", outcome: "completed" }, 1],
     ["kv_read_capacity_events", { service: "unit", outcome: "acquired" }, 1],
     ["kv_read_capacity_events", { service: "unit", outcome: "deadline" }, 1],
-    ["kv_read_capacity_events", { service: "unit", outcome: "acquired" }, 1],
     ["kv_read_capacity_events", { service: "unit", outcome: "setup_error" }, 1],
   ]);
   const gauges = recording.calls.filter((call) => call.kind === "gauge");
@@ -346,6 +337,50 @@ test("KV read capacity rejects concurrent large materialization and releases lea
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
   assert.equal(await kv.get("third"), "x");
   assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+}));
+
+test("KV read keepalive owns pending headers and outlives earlier reads", withFetchStub(async (setFetch) => {
+  const { KV, kvCapacity } = await loadKvBinding();
+  const headers = [Promise.withResolvers(), Promise.withResolvers()];
+  /** @type {Promise<unknown>[]} */
+  const tasks = [];
+  let calls = 0;
+  setFetch(() => headers[calls++].promise);
+  const kv = makeKv(KV);
+  await withMockedProperty(kv.ctx, "waitUntil", (/** @type {Promise<unknown>} */ task) => { tasks.push(task); }, async () => {
+    const first = kv.get("first");
+    const second = kv.get("second");
+    const results = Promise.allSettled([first, second]);
+    const body = new TransformStream();
+    const writer = body.writable.getWriter();
+    try {
+      assert.equal(tasks.length, 2, "each read must be owned before response headers arrive");
+      assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+      let secondFinished = false;
+      void tasks[1].then(() => { secondFinished = true; });
+
+      headers[0].resolve(new Response("one", { headers: { "content-length": "3" } }));
+      assert.equal(await first, "one");
+      await tasks[0];
+      assert.equal(secondFinished, false, "the first completion must not end the second read");
+
+      headers[1].resolve(new Response(body.readable, { headers: { "content-length": "3" } }));
+      await waitUntil("late headers acquire their KV lease", () => (
+        kvCapacity.kvReadCapacityStateForTest().inUseBytes === 3
+      ));
+      assert.equal(secondFinished, false, "keepalive must also cover body materialization");
+      await writer.write(new TextEncoder().encode("two"));
+      await writer.close();
+      assert.equal(await second, "two");
+      await tasks[1];
+      assert.equal(kvCapacity.kvReadCapacityStateForTest().inUseBytes, 0);
+    } finally {
+      headers[0].resolve(new Response(null));
+      headers[1].resolve(new Response(null));
+      await writer.abort();
+      await results;
+    }
+  });
 }));
 
 test("KV canonical declared-length scalar reads use the native body consumer", withFetchStub(async (/** @type {(stub: any) => void} */ setFetch) => {

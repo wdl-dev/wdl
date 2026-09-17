@@ -292,6 +292,9 @@ Data-plane bindings use their own storage:
   share that deadline; an absolute check after construction rejects work that crosses the
   budget before returning it. The deadline rejects independently of best-effort fetch or
   stream cancellation and releases any reservation.
+  The complete bounded read is registered with `ctx.waitUntil()` before waiting for
+  headers, so caller return cannot strand a later response's lease or its deadline.
+  A lease does not own a separate keepalive task.
   Capacity rejection, read deadline/body failure, malformed host envelopes, host proxy
   URL/configuration failure, internal-auth `401`, fixed read-route `404`/`405`, and read
   proxy transport or 5xx failure carry one host-owned infrastructure code. Tenant-input

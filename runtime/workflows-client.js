@@ -6,7 +6,6 @@ const WORKFLOW_INSTANCE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const intrinsicJsonStringify = JSON.stringify;
 const intrinsicObjectAssign = Object.assign;
 const intrinsicObjectCreate = Object.create;
-const intrinsicObjectHasOwn = Object.hasOwn;
 const intrinsicReflectApply = Reflect.apply;
 
 /** @param {unknown} value */
@@ -31,17 +30,17 @@ function workflowRequestBody(fields) {
 
 /** @param {unknown} value @param {string} label @returns {Record<string, unknown>} */
 function ensureObject(value, label) {
-  if (value == null) return /** @type {Record<string, unknown>} */ ({});
+  if (value == null) return /** @type {Record<string, unknown>} */ (intrinsicObjectCreate(null));
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object`);
   }
   return /** @type {Record<string, unknown>} */ (value);
 }
 
-/** @param {Record<string, unknown>} options @param {string} label */
-function rejectUnsupportedCreateOptions(options, label) {
-  if (intrinsicReflectApply(intrinsicObjectHasOwn, undefined, [options, "locationHint"])) {
-    throw new TypeError(`${label} locationHint is not supported by WDL`);
+/** @param {Record<string, unknown>} options @param {string} label @param {string} field */
+function rejectUnsupportedOption(options, label, field) {
+  if (field in options) {
+    throw new TypeError(`${label} ${field} is not supported by WDL`);
   }
 }
 
@@ -124,12 +123,16 @@ export class WorkflowInstance {
     return this;
   }
 
-  async terminate() {
+  /** @param {unknown} [options] */
+  async terminate(options = undefined) {
+    rejectUnsupportedOption(ensureObject(options, "Workflow terminate options"), "Workflow terminate options", "rollback");
     await this.#call("terminate", { instanceId: this.id });
     return this;
   }
 
-  async restart() {
+  /** @param {unknown} [options] */
+  async restart(options = undefined) {
+    rejectUnsupportedOption(ensureObject(options, "Workflow restart options"), "Workflow restart options", "from");
     await this.#call("restart", { instanceId: this.id });
     return this;
   }
@@ -159,7 +162,7 @@ export class Workflow {
   /** @param {unknown} [options] */
   async create(options = undefined) {
     const opts = ensureObject(options, "Workflow create options");
-    rejectUnsupportedCreateOptions(opts, "Workflow create options");
+    rejectUnsupportedOption(opts, "Workflow create options", "locationHint");
     const id = ensureId(opts.id);
     const body = await this.#call("create", {
       instanceId: id,
@@ -181,7 +184,7 @@ export class Workflow {
     }
     const entries = options.map((entry) => {
       const opts = ensureObject(entry, "Workflow createBatch entry");
-      rejectUnsupportedCreateOptions(opts, "Workflow createBatch entry");
+      rejectUnsupportedOption(opts, "Workflow createBatch entry", "locationHint");
       return {
         instanceId: ensureId(opts.id),
         params: opts.params ?? null,

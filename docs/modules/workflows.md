@@ -334,8 +334,9 @@ Key families:
   may be overridden with
   `create({ retention: { successRetention, errorRetention } })`.
 - The bundled Workers types expose a best-effort `locationHint` create option. WDL has
-  no regional Workflow placement plane, so `create()` and `createBatch()` reject an own
-  `locationHint` field before backend I/O instead of silently discarding it.
+  no regional Workflow placement plane, so `create()` and `createBatch()` reject a
+  supplied `locationHint` field, including inherited fields, before backend I/O and
+  without evaluating getter values.
 - `Workflow.createBatch()` accepts at most 100 entries per call. Runtime prevalidation
   and Rust admission share this pinned limit. Rust reads the deduplicated instance-state
   snapshot in one bounded pipeline and shares the mutation preflight across entries;
@@ -706,6 +707,16 @@ pressure, and log workflow tick failures separately from queue/cron dispatch.
 - WDL's custom binding facade does not expose native workerd
   `WorkflowInstance.delete()` or `Workflow.deleteBatch()`; instance lifecycle remains
   owned by the documented WDL APIs and retention engine.
+- Instance event subscriptions (`subscribe()`), rollback APIs, and restart from a
+  selected step (`restart({ from: ... })`) are not supported. Own or inherited
+  `rollback` fields in terminate options and `from` fields in restart options are
+  rejected by presence before backend calls, without evaluating getters, even when
+  their values are `false` or `undefined`. Omitted lifecycle options or options
+  without those fields retain the ordinary operation. Both `step.do`
+  overloads reject supplied rollback options before replay reads, claims, or callback
+  execution. The wrapper sends only a presence marker to the host, not tenant rollback
+  objects or functions; serialization hooks cannot bypass the host's terminal
+  `workflow_invalid_step` rejection, even when tenant code catches the error.
 - No platform-managed large payload spill to object storage.
 - No tenant Durable Object storage as workflow backend.
 - Runtime replay does not skip directly to continuations; user JS replays through

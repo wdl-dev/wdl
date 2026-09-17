@@ -1763,6 +1763,33 @@ test("handleWorkflowRunDispatch does not replay a completed sleep as step.do", a
   ]);
 });
 
+test("step controller latches rollback rejection before step input or backend work", async () => {
+  let callbacks = 0;
+  const backend = makeWorkflowBackend(async () => {
+    throw new Error("unsupported options must not reach the backend");
+  });
+  const controller = createStepController({
+    ns: "demo", worker: "shop", frozenVersion: "v1", workflowName: "orders",
+    workflowKey: "wf_unsupported_rollback", className: "OrderWorkflow", instanceId: "rollback",
+    generation: 1, runToken: "run-1", createdAtMs: 1, dispatchDeadlineMs: Date.now() + 60_000,
+  }, backend);
+  const expected = {
+    name: "workflow_invalid_step",
+    message: "workflow step.do rollback options are not supported by WDL",
+  };
+  try {
+    await assert.rejects(controller.facade.do(undefined, undefined, undefined, true), expected);
+    assert.equal(controller.hasTerminalStepFailure(), true);
+    await assert.rejects(controller.facade.do("after-rejection", async () => {
+      callbacks += 1;
+    }), expected);
+    assert.deepEqual(backend.calls, []);
+    assert.equal(callbacks, 0);
+  } finally {
+    controller.closeForRunReturn();
+  }
+});
+
 test("step controller synchronously releases and cancels pending replay reads on closure", async () => {
   const reading = Promise.withResolvers();
   let cancelled = false;

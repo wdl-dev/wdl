@@ -43,7 +43,7 @@ function checkResource() {
 }
 
 function keyExportProbe() {
-  const rsa = generateKeyPairSync("rsa", { modulusLength: 1024 }).privateKey;
+  const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
   const ec = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey;
   const encrypted = { format: "der", cipher: "aes-256-cbc", passphrase: "fixture-passphrase" };
   return {

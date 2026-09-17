@@ -44,6 +44,59 @@ setupIntegrationSuite();
 
 const REPLAY_CAPACITY_WORKER = readRepositoryModuleSource("test-workers/workflow-replay-capacity/src/index.js");
 
+test("unsupported Workflow options fail before lifecycle mutation or step execution", async () => {
+  const ns = uniqueNs("wf-options");
+  const version = await deployAndPromote(ns, "probe", {
+    code: readRepositoryModuleSource("test-workers/workflows-demo/src/unsupported-options.js"),
+    workflows: [{ name: "options", binding: "FLOW", className: "OptionsWorkflow" }],
+  });
+  const workflowKey = workerMeta(ns, "probe", version).workflows[0].workflowKey;
+  for (const [id, mode, expected] of [
+    ["terminable", "wait", "waiting"],
+    ["restartable", "plain", "completed"],
+  ]) {
+    await readIntegrationJson(await gatewayFetch(ns, `/probe/create?id=${id}&mode=${mode}`), 200);
+    await waitUntil(`Workflow ${id} reaches ${expected}`, async () => (
+      await readIntegrationJson(await gatewayFetch(ns, `/probe/status?id=${id}`), 200)
+    ).status === expected);
+    const before = await readIntegrationJson(await gatewayFetch(ns, `/probe/status?id=${id}`), 200);
+    const generation = redisWorkflowStateHGet(ns, workflowKey, id, "generation");
+    const terminate = id === "terminable";
+    for (const shape of ["own", "inherited", "getter"]) {
+      const response = await gatewayFetch(ns, `/probe/${terminate ? "terminate-rollback" : "restart-from"}?id=${id}&shape=${shape}`);
+      assert.deepEqual(await readIntegrationJson(response, 400), {
+        name: "TypeError",
+        message: terminate
+          ? "Workflow terminate options rollback is not supported by WDL"
+          : "Workflow restart options from is not supported by WDL",
+      });
+    }
+    assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, `/probe/status?id=${id}`), 200), before);
+    assert.equal(redisWorkflowStateHGet(ns, workflowKey, id, "generation"), generation);
+  }
+  const modes = [
+    "rollback", "rollback-config", "rollback-getter", "rollback-getter-config",
+    "rollback-proxy", "rollback-proxy-config", "rollback-symbol", "rollback-symbol-config",
+  ];
+  for (const mode of modes) {
+    await readIntegrationJson(await gatewayFetch(ns, `/probe/create?id=${mode}&mode=${mode}`), 200);
+    await waitUntil(`Workflow ${mode} reaches a terminal outcome`, async () => {
+      const status = await readIntegrationJson(await gatewayFetch(ns, `/probe/status?id=${mode}`), 200);
+      return status.status === "failed" || status.status === "completed";
+    });
+    const failed = await readIntegrationJson(await gatewayFetch(ns, `/probe/status?id=${mode}`), 200);
+    assert.equal(failed.status, "failed", `Workflow ${mode} must not commit its caught fallback`);
+    assert.deepEqual(failed.error, {
+      name: "workflow_invalid_step",
+      message: "workflow step.do rollback options are not supported by WDL",
+    });
+    assert.deepEqual(failed.steps.entries, []);
+  }
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/calls"), 200), {
+    callbacks: 0, rollbacks: 0, optionReads: 0, lifecycleReads: 0, caught: modes.length,
+  });
+});
+
 test("closing a Workflow controller releases a pending replay lease across real JSRPC", async () => {
   const ns = uniqueNs("wfreplayclose");
   await deployAndPromote(ns, "root", {
@@ -1551,6 +1604,17 @@ test("tenant KV argument serialization errors cannot forge host provenance", asy
   }
 });
 
+/** @param {string} description */
+async function waitForKvReadCapacityRelease(description) {
+  await waitUntil(description, () => {
+    const response = serviceInternalGet("user-runtime", 8088, "/_metrics");
+    assert.equal(response.status, 200, response.body);
+    const bytes = parseCounters(response.body).get('wdl_kv_read_in_flight_bytes{service="user-runtime"}');
+    assert.equal(typeof bytes, "number", "missing KV read capacity gauge");
+    return bytes === 0;
+  }, { timeoutMs: 10_000, intervalMs: 100 });
+}
+
 test("real-workerd KV failures retry across run and durable callback boundaries", async () => {
   const ns = uniqueNs("wfrt-kv-boundaries");
   await deployAndPromote(ns, "shop", {
@@ -1586,6 +1650,7 @@ test("real-workerd KV failures retry across run and durable callback boundaries"
       assert.deepEqual(body.output, { retried: true, runs: 2 });
       return true;
     }, { timeoutMs: 60_000, intervalMs: 250 });
+    await waitForKvReadCapacityRelease(`workflow ${id} releases pending KV read capacity`);
   }
 });
 
@@ -1628,6 +1693,7 @@ test("caught real-workerd KV capacity failures may commit a step fallback", asyn
     );
     return true;
   }, { timeoutMs: 60_000, intervalMs: 250 });
+  await waitForKvReadCapacityRelease("caught KV capacity fallback releases all read leases");
 });
 
 test("uncaught real-workerd KV capacity failure retries before step error commit", async () => {
@@ -1665,4 +1731,5 @@ test("uncaught real-workerd KV capacity failure retries before step error commit
     });
     return true;
   }, { timeoutMs: 60_000, intervalMs: 250 });
+  await waitForKvReadCapacityRelease("uncaught KV capacity failure releases all read leases");
 });

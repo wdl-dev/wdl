@@ -820,6 +820,8 @@ test("DO live takeover aborts stale in-flight handler before post-await SQLite w
     const finalState = invoke("do-runtime-b", "/lease-state");
     assert.equal(finalState.status, 200, finalState.body);
     assert.deepEqual(responseJson(finalState), { started: 1, after: 0 });
+    const originalRuntime = serviceInternalGet("do-runtime-a", 8788, "/healthz");
+    assert.equal(originalRuntime.status, 200, originalRuntime.body);
   }, { ownerTtlSeconds: 3, renewStartDelayMs: 60000, renewIntervalMs: 60000 });
 });
 

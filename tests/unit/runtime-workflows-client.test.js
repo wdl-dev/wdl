@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { Workflow } from "../../runtime/workflows-client.js";
+import { Workflow, WorkflowInstance } from "../../runtime/workflows-client.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import { withMockedProperty, withMockedPropertyDescriptor } from "../helpers/mock-global.js";
 import { parseJsonObjectRequestBody } from "../helpers/request-body.js";
@@ -197,6 +197,7 @@ test("Workflow.create forwards explicit non-null retention", async () => {
 
 test("Workflow create APIs reject unsupported location hints before backend dispatch", async () => {
   let fetchCalls = 0;
+  let getters = 0;
   const workflow = createWorkflowForTest({
     backend: {
       async fetch() {
@@ -206,15 +207,91 @@ test("Workflow create APIs reject unsupported location hints before backend disp
     },
   });
 
-  await assert.rejects(
-    () => workflow.create({ id: "inst-1", locationHint: "weur" }),
-    /Workflow create options locationHint is not supported by WDL/
-  );
-  await assert.rejects(
-    () => workflow.createBatch([{ id: "inst-1", locationHint: "weur" }]),
-    /Workflow createBatch entry locationHint is not supported by WDL/
-  );
+  for (const options of [
+    { id: "inst-1", locationHint: "weur" },
+    Object.create({ locationHint: "weur" }),
+    new class {
+      get locationHint() { getters += 1; throw new Error("must not evaluate locationHint"); }
+    }(),
+  ]) {
+    await assert.rejects(
+      () => workflow.create(options),
+      /Workflow create options locationHint is not supported by WDL/
+    );
+    await assert.rejects(
+      () => workflow.createBatch([options]),
+      /Workflow createBatch entry locationHint is not supported by WDL/
+    );
+  }
   assert.equal(fetchCalls, 0);
+  assert.equal(getters, 0);
+});
+
+test("Workflow lifecycle rejects unsupported options without invoking getters or the backend", async () => {
+  let calls = 0;
+  let getters = 0;
+  const instance = new WorkflowInstance("inst-1", async () => {
+    calls += 1;
+    return {};
+  });
+  for (const [method, field] of /** @type {const} */ ([["terminate", "rollback"], ["restart", "from"]])) {
+    for (const value of [true, false, undefined, { name: "charge", count: 1, type: "do" }]) {
+      for (const options of [{ [field]: value }, Object.create({ [field]: value })]) {
+        await assert.rejects(() => instance[method](options), {
+          name: "TypeError",
+          message: `Workflow ${method} options ${field} is not supported by WDL`,
+        });
+      }
+    }
+    await assert.rejects(() => instance[method]({
+      get [field]() { getters += 1; throw new Error("must not evaluate an unsupported option"); },
+    }), /is not supported by WDL/);
+    await assert.rejects(() => instance[method](new class {
+      get [field]() { getters += 1; throw new Error("must not evaluate an inherited option"); }
+    }()), /is not supported by WDL/);
+    for (const options of [true, "invalid", []]) {
+      await assert.rejects(() => instance[method](options), /options must be an object/);
+    }
+  }
+  assert.equal(calls, 0);
+  assert.equal(getters, 0);
+});
+
+test("omitted Workflow lifecycle options do not inherit ambient option fields", async () => {
+  let calls = 0;
+  let getters = 0;
+  const instance = new WorkflowInstance("inst-1", async () => {
+    calls += 1;
+    return {};
+  });
+  for (const [method, field] of /** @type {const} */ ([["terminate", "rollback"], ["restart", "from"]])) {
+    await withMockedPropertyDescriptor(/** @type {any} */ (Object.prototype), field, {
+      get() { getters += 1; throw new Error("must not evaluate ambient options"); },
+    }, async () => {
+      assert.equal(await instance[method](), instance);
+      assert.equal(await instance[method](null), instance);
+      await assert.rejects(() => instance[method]({}), /is not supported by WDL/);
+    });
+  }
+  assert.equal(calls, 4);
+  assert.equal(getters, 0);
+});
+
+test("Workflow lifecycle preserves ordinary calls with absent or empty options", async () => {
+  /** @type {unknown[]} */
+  const calls = [];
+  const instance = new WorkflowInstance("inst-1", async (endpoint, fields) => {
+    calls.push({ endpoint, fields });
+    return {};
+  });
+  for (const method of /** @type {const} */ (["terminate", "restart"])) {
+    for (const options of [undefined, null, {}]) {
+      assert.equal(await instance[method](options), instance);
+    }
+  }
+  assert.deepEqual(calls, ["terminate", "terminate", "terminate", "restart", "restart", "restart"].map(
+    (endpoint) => ({ endpoint, fields: { instanceId: "inst-1" } })
+  ));
 });
 
 test("Workflow.createBatch rejects backend response entries without ids", async () => {

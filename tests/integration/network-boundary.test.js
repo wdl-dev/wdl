@@ -1,18 +1,48 @@
 // Loaded workers must not be able to reach the platform's internal
-// service mesh. Negative tests only — a positive "can reach public
-// internet" check would be a flaky proxy for workerd's own
-// allow=public classifier (upstream's job, not ours).
+// service mesh. System-pool controls prove the same Node clients can reach
+// the internal targets. Public Internet probes would be a flaky proxy for
+// workerd's own allow=public classifier (upstream's job, not ours).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
 import {
+  adminPost,
+  assertStatus,
   deployAndPromote,
   gatewayFetch,
+  hostFetch,
+  readIntegrationJson,
   responseJson,
   uniqueNs,
   setupIntegrationSuite,
 } from "./helpers/index.js";
 
 setupIntegrationSuite();
+
+test("Node HTTP and TCP clients retain the tenant outbound network boundary", async () => {
+  const ns = uniqueNs("node-netbnd");
+  const bundle = {
+    code: readRepositoryModuleSource("test-workers/workerd-compat/src/node-io.js"),
+    compatibilityDate: "2026-09-15",
+  };
+  await deployAndPromote(ns, "probe", bundle);
+  const host = `${ns}.test`;
+  assertStatus(await adminPost("/ns/__system__/hosts", { hosts: [host] }), 200);
+  await deployAndPromote("__system__", "node-probe", { ...bundle, routes: [`${host}/*`] });
+  for (const [mode, target] of [
+    ["http", "http://user-runtime:8088/_healthz"],
+    ["tcp", "tcp://redis:6379"],
+  ]) {
+    const path = `/network/${mode}?target=${encodeURIComponent(target)}`;
+    const allowed = await readIntegrationJson(await hostFetch(host, path), 200);
+    assert.deepEqual(allowed, mode === "http" ? { outcome: "ok", status: 200 } : { outcome: "ok" });
+    const result = await readIntegrationJson(
+      await gatewayFetch(ns, `/probe${path}`), 200
+    );
+    assert.equal(result.outcome, "threw", JSON.stringify(result));
+    assert.notEqual(result.message, "network probe timed out");
+  }
+});
 
 // Worker reflects the outcome of one fetch attempt as JSON. Lets the test
 // distinguish "worker code threw" (allowlist working) from "worker got a

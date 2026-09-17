@@ -734,6 +734,52 @@ test("workflow wrappers brand cached KV failures only when the same Error escape
   assert.deepEqual(relayReporter.codes, [KV_READ_INFRASTRUCTURE_ERROR_CODE]);
 });
 
+test("workflow step wrappers reject rollback through a data-only host marker", async () => {
+  const rawKv = completeKvBinding();
+  const { wrapped } = await loadWorkflowWrapper(`
+    export let touches = 0;
+    const touched = () => { touches += 1; throw new Error("rollback options must not be inspected"); };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const options = [
+      { rollback: touched },
+      { get rollback() { return touched(); } },
+      new Proxy({}, { get: touched, ownKeys: touched }),
+      revoked.proxy,
+      { rollback: touched, unsupported: Symbol("rollback") },
+      null,
+      false,
+    ];
+    export const optionCount = options.length;
+    export class Flow {
+      async run(event, step) {
+        const callback = async () => { throw new Error("callback must not run"); };
+        return event.withConfig
+          ? await step.do("charge", { timeout: "1s" }, callback, options[event.index])
+          : await step.do("charge", callback, options[event.index]);
+      }
+    }
+    export default {};
+  `, { moduleEnv: { CACHE: rawKv } });
+  let validations = 0;
+  const step = {
+    /** @param {...unknown} args */
+    async do(...args) {
+      assert.deepEqual(args, [undefined, undefined, undefined, true]);
+      validations += 1;
+      throw new Error("workflow step.do rollback options are not supported by WDL");
+    },
+  };
+  for (const withConfig of [false, true]) {
+    for (let index = 0; index < wrapped.optionCount; index += 1) {
+      const flow = new wrapped.Flow({ props: workflowReporter().props }, { CACHE: rawKv });
+      await assert.rejects(() => flow.run({ withConfig, index }, step), /rollback options are not supported by WDL/);
+    }
+  }
+  assert.equal(validations, wrapped.optionCount * 2);
+  assert.equal(wrapped.touches, 0);
+});
+
 test("workflow wrappers report only KV Errors escaping the durable callback boundary", async () => {
   const rawKv = completeKvBinding({
     get() { throw crossedKvInfrastructureError(); },

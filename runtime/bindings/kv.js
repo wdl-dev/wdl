@@ -75,7 +75,7 @@ function recordKvReadOperation(kv, operation, callback) {
     serviceName(kv),
     "kv",
     operation,
-    () => withKvReadDeadline(callback)
+    () => withKvReadDeadline(kv, callback)
   );
 }
 

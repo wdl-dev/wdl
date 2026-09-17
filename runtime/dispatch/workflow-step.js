@@ -834,14 +834,18 @@ export function createStepController(
 
   const facade = {
     /**
-     * @param {string} name
+     * @param {unknown} name
      * @param {unknown | (() => unknown | Promise<unknown>)} configOrCallback
-     * @param {undefined | (() => unknown | Promise<unknown>)} maybeCallback
+     * @param {unknown} [maybeCallback]
+     * @param {boolean} [hasRollbackOptions]
      */
-    do(name, configOrCallback, maybeCallback) {
+    do(name, configOrCallback, maybeCallback, hasRollbackOptions = false) {
       let callback;
       let identity;
       try {
+        if (hasRollbackOptions) {
+          throw workflowStepError("workflow_invalid_step", "workflow step.do rollback options are not supported by WDL");
+        }
         if (typeof name !== "string" || name === "") {
           throw workflowStepError("workflow_invalid_step", "workflow step name must be a non-empty string");
         }

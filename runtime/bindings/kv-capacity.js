@@ -27,7 +27,7 @@ function responseContentLength(response) {
 }
 
 /**
- * @param {{ env: Record<string, unknown>, ctx: { waitUntil(promise: Promise<unknown>): void } }} binding
+ * @param {{ env: Record<string, unknown> }} binding
  * @param {Response} response
  * @param {AbortSignal} deadlineSignal
  */
@@ -46,25 +46,17 @@ export function acquireKvReadLease(binding, response, deadlineSignal) {
   state.highWaterBytes = Math.max(state.highWaterBytes, state.inUseBytes);
   metrics.increment("kv_read_capacity_events", { service, outcome: "acquired" });
   let released = false;
-  const { promise: task, resolve: settle } = Promise.withResolvers();
   const release = (outcome = "completed") => {
     if (released) return false;
     released = true;
     deadlineSignal.removeEventListener("abort", onAbort);
     state.inUseBytes = Math.max(0, state.inUseBytes - bytes);
     metrics.increment("kv_read_capacity_events", { service, outcome });
-    settle(undefined);
     return true;
   };
   const onAbort = () => { release("deadline"); };
   deadlineSignal.addEventListener("abort", onAbort, { once: true });
   if (deadlineSignal.aborted) onAbort();
-  try {
-    binding.ctx.waitUntil(task);
-  } catch (error) {
-    release("setup_error");
-    throw error;
-  }
   return {
     bytes,
     contentLength,
@@ -74,10 +66,11 @@ export function acquireKvReadLease(binding, response, deadlineSignal) {
 
 /**
  * @template T
+ * @param {{ env: Record<string, unknown>, ctx: { waitUntil(promise: Promise<unknown>): void } }} binding
  * @param {(aborter: AbortController, assertWithinDeadline: () => void) => Promise<T>} callback
  * @returns {Promise<T>}
  */
-export async function withKvReadDeadline(callback) {
+export function withKvReadDeadline(binding, callback) {
   const aborter = new AbortController();
   const deadlineAtMs = Date.now() + KV_READ_DEADLINE_MS;
   /** @type {(reason?: unknown) => void} */
@@ -99,13 +92,28 @@ export async function withKvReadDeadline(callback) {
     rejectDeadline(error);
     aborter.abort(error);
   }, Math.max(0, deadlineAtMs - Date.now()));
+  const operation = (async () => {
+    try {
+      const result = await Promise.race([callback(aborter, assertWithinDeadline), deadline]);
+      assertWithinDeadline();
+      return result;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+  // Register before headers: a caller can finish while fetch is pending, and
+  // adding a lease-only task after the request has drained cannot revive it.
   try {
-    const result = await Promise.race([callback(aborter, assertWithinDeadline), deadline]);
-    assertWithinDeadline();
-    return result;
-  } finally {
-    clearTimeout(timer);
+    binding.ctx.waitUntil(operation.catch(() => {}));
+  } catch (error) {
+    metrics.increment("kv_read_capacity_events", {
+      service: serviceNameFromEnv(binding.env), outcome: "setup_error",
+    });
+    rejectDeadline(error);
+    aborter.abort(error);
+    throw error;
   }
+  return operation;
 }
 
 /** @param {Record<string, unknown>} env */
