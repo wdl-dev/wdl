@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- Updated workerd and Workers types to `1.20260916.1` and `5.20260916.1`, raising the maximum compatibility date to `2026-09-23`. Includes upstream facet-channel lifetime, Node streams, filesystem, and HTTP correctness fixes; this bump changes no WDL wire format or state schema.
-- Raised Durable Object fetch/WebSocket request metadata limits to 128 KiB of aggregate headers and 16 KiB URLs, removing the smaller per-header-value cap. Proxy and native HTTP parsing limits still apply, including internal forwarding overhead.
-- Workflow lifecycle and step APIs reject unsupported rollback and restart-from options before backend operations instead of silently ignoring them.
-- Keep bounded KV reads alive before response headers arrive, preventing caller return from stranding read admission capacity or its deadline.
+## wdl.20260916.1 - 2026-09-17
+
+- Updated workerd and Workers types to `1.20260916.1` and `5.20260916.1`, raising the maximum compatibility date to `2026-09-23`. Includes upstream facet lifetime and Node stream, filesystem, and HTTP fixes; upgrades from `wdl.20260911.1` require no state migration.
+- Raised Durable Object fetch/WebSocket limits to 128 KiB of aggregate request headers and 16 KiB URLs, removing the per-header-value cap. Proxy and native HTTP limits, including internal forwarding overhead, still apply.
+- Fixed KV read admission leaks when callers return before response headers arrive, retaining the single five-second total deadline.
+- Rejected unsupported Workflow rollback and restart-from options, including inherited fields, before backend operations. Step rollback rejection remains terminal even when caught.
 
 ## wdl.20260911.1 - 2026-09-13
 
