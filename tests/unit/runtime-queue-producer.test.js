@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   importRepositoryModule,
+  repositoryFileUrl,
   runtimeLibModuleDataUrl,
 } from "../helpers/load-shared-module.js";
 import { CLOUDFLARE_WORKERS_URL } from "../helpers/mocks/cloudflare-workers.js";
@@ -24,6 +25,7 @@ const mod = await importRepositoryModule("runtime/bindings/queue.js", [
     `from ${JSON.stringify(RUNTIME_LIB_URL)};`
   ],
   [/from "runtime-metrics";/, `from ${JSON.stringify(RUNTIME_METRICS_NOOP_URL)};`],
+  [/from "shared-bounded-body";/, `from ${JSON.stringify(repositoryFileUrl("shared/bounded-body.js"))};`],
   [
     /from "runtime-bindings-proxy";/,
     `from ${JSON.stringify(PROXY_BINDING_URL)};`
@@ -224,6 +226,84 @@ test("QueueProducer.send rejects non-serializable JSON bodies before fetch", asy
     );
     assert.equal(calls.length, 0);
   });
+});
+
+test("QueueProducer preserves exact byte limits for text, JSON and binary views", async () => {
+  /** @type {QueueFetchCall[]} */
+  const calls = [];
+  await withQueueFetch(calls, async () => {
+    const q = makeQueue();
+    const storage = new Uint8Array(128_002).fill(7);
+    await q.send("x".repeat(128_000), { contentType: "text" });
+    await q.send("\u4e2d".repeat(42_666) + "aa", { contentType: "text" });
+    await q.send("\u4e2d".repeat(42_666));
+    await q.send(new DataView(storage.buffer, 1, 128_000), { contentType: "bytes" });
+    assert.deepEqual(calls.map((call) => Buffer.from(call.body[0].entry.body_b64, "base64").byteLength),
+      [128_000, 128_000, 128_000, 128_000]);
+    assert.deepEqual(Buffer.from(calls[3].body[0].entry.body_b64, "base64"), Buffer.alloc(128_000, 7));
+
+    await assert.rejects(q.send("\u4e2d".repeat(42_667), { contentType: "text" }), /message body exceeds 128000/);
+    await assert.rejects(q.send("x".repeat(127_999)), /message body exceeds 128000/);
+    assert.equal(calls.length, 4);
+    await q.sendBatch([
+      { body: new Uint8Array(128_000), contentType: "bytes" },
+      { body: new Uint8Array(128_000), contentType: "bytes" },
+      { body: "", contentType: "text" },
+    ]);
+    assert.deepEqual(calls[4].body.map((action) => Buffer.from(action.entry.body_b64, "base64").byteLength),
+      [128_000, 128_000, 0]);
+  });
+});
+
+test("QueueProducer rejects oversized bodies before encoding or Base64 snapshots", async () => {
+  /** @type {QueueFetchCall[]} */
+  const calls = [];
+  const oversized = new Uint8Array(128_001);
+  const originalFrom = Buffer.from;
+  let snapshots = 0;
+  let encodes = 0;
+  await withQueueFetch(calls, () => withMockedProperty(TextEncoder.prototype, "encode", () => {
+    encodes += 1;
+    throw new Error("oversized body must not be UTF-8 encoded");
+  }, () => withMockedProperty(Buffer, "from", /** @type {typeof Buffer.from} */ ((/** @type {unknown[]} */ ...args) => {
+    if (args[0] === oversized) snapshots += 1;
+    return Reflect.apply(originalFrom, Buffer, args);
+  }), async () => {
+    const q = makeQueue();
+    await assert.rejects(q.send("x".repeat(128_001), { contentType: "text" }), /message body exceeds 128000/);
+    await assert.rejects(q.send("x".repeat(128_001)), /message body exceeds 128000/);
+    await assert.rejects(q.send(oversized, { contentType: "bytes" }), /message body exceeds 128000/);
+  })));
+  assert.equal(encodes, 0);
+  assert.equal(snapshots, 0);
+  assert.equal(calls.length, 0);
+});
+
+test("QueueProducer preflights remaining batch capacity without a partial write", async () => {
+  /** @type {QueueFetchCall[]} */
+  const calls = [];
+  const overflow = new Uint8Array(1);
+  const originalFrom = Buffer.from;
+  let snapshots = 0;
+  let encodes = 0;
+  await withQueueFetch(calls, () => withMockedProperty(TextEncoder.prototype, "encode", () => {
+    encodes += 1;
+    throw new Error("exhausted batch must not encode another body");
+  }, () => withMockedProperty(Buffer, "from", /** @type {typeof Buffer.from} */ ((/** @type {unknown[]} */ ...args) => {
+    if (args[0] === overflow) snapshots += 1;
+    return Reflect.apply(originalFrom, Buffer, args);
+  }), async () => {
+    for (const entry of [{ body: "x", contentType: "text" }, { body: overflow, contentType: "bytes" }]) {
+      await assert.rejects(makeQueue().sendBatch([
+        { body: new Uint8Array(128_000), contentType: "bytes" },
+        { body: new Uint8Array(128_000), contentType: "bytes" },
+        entry,
+      ]), /batch body exceeds 256000/);
+    }
+  })));
+  assert.equal(encodes, 0);
+  assert.equal(snapshots, 0);
+  assert.equal(calls.length, 0);
 });
 
 test("QueueProducer.sendBatch rejects non-serializable JSON bodies before fetch", async () => {

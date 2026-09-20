@@ -982,6 +982,31 @@ test("AI request admission bounds a stalled tenant upload before provider I/O", 
   assert.equal(Date.now() - startedAt < 10_000, true);
 });
 
+test("AI WebSocket rejects oversized text and binary frames and releases capacity", async () => {
+  const { ns } = await setupAiNamespace("ai-ws-frame");
+  const baseline = userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket");
+  const beforeLimit = userRuntimeAiMetric("wdl_ai_pool_events_total", "websocket", "frame_limit");
+  const frames = [
+    encodeClientTextFrame("x".repeat(1024 * 1024 + 1)),
+    encodeClientTextFrame("\u4e2d".repeat(349_526)),
+    encodeClientBinaryFrame(Buffer.alloc(1024 * 1024 + 1)),
+  ];
+  for (const frame of frames) {
+    const response = await wsHandshake(ns, "/ai/realtime-ws");
+    try {
+      assertStatus(response, 101, "AI frame-boundary upgrade");
+      const closed = readAiCloseFrame(response.socket, "oversized AI frame close");
+      response.socket.write(frame);
+      assert.deepEqual(await closed, { code: 1009, reason: "AI websocket frame too large" });
+    } finally {
+      response.socket.destroy();
+    }
+    await waitUntil("oversized AI frame releases its session", () =>
+      userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket") === baseline);
+  }
+  assert.equal(userRuntimeAiMetric("wdl_ai_pool_events_total", "websocket", "frame_limit"), beforeLimit + frames.length);
+});
+
 test("AI binding bridges agent and Realtime WebSockets with bounded lifecycle", async () => {
   const { ns } = await setupAiNamespace("ai-ws");
   const baseline = userRuntimeAiMetric("wdl_ai_pool_in_use", "websocket");

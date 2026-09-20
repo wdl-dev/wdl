@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject oversized Queue messages and AI WebSocket frames before avoidable encoding or copying; Queue batches apply their remaining byte budget before constructing each envelope.
+
 ## wdl.20260916.1 - 2026-09-17
 
 - Updated workerd and Workers types to `1.20260916.1` and `5.20260916.1`, raising the maximum compatibility date to `2026-09-23`. Includes upstream facet lifetime and Node stream, filesystem, and HTTP fixes; upgrades from `wdl.20260911.1` require no state migration.

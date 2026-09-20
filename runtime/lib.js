@@ -1,6 +1,7 @@
 // Pure helpers for the runtime worker.
 
 import { base64ToBytes, bytesToBase64 } from "shared-base64";
+import { BodyTooLargeError } from "shared-bounded-body";
 import { WORKER_NAME_RE, isValidRouteNs } from "shared-ns-pattern";
 import { parseVersion } from "shared-worker-contract";
 import {
@@ -55,37 +56,43 @@ export function normalizeQueueDelaySeconds(value, fallback = 0, field = "delaySe
   return n;
 }
 
-/** @param {unknown} body @param {string} contentType */
-function encodedQueueBody(body, contentType) {
-  let bytes;
+/** @param {unknown} body @param {string} contentType @param {number} maxBytes */
+function encodedQueueBody(body, contentType, maxBytes) {
+  let value = body;
   switch (contentType) {
     case QUEUE_CONTENT_TYPES.JSON:
       {
+        if (typeof body === "string" && body.length + 2 > maxBytes) {
+          throw new BodyTooLargeError(maxBytes);
+        }
         const json = JSON.stringify(body);
         if (json === undefined) {
           throw new TypeError("queue send: json contentType requires JSON-serializable body");
         }
-        bytes = utf8Encoder.encode(json);
+        value = json;
       }
       break;
     case QUEUE_CONTENT_TYPES.TEXT:
       if (typeof body !== "string") throw new Error("queue send: text contentType requires string body");
-      bytes = utf8Encoder.encode(body);
       break;
     case QUEUE_CONTENT_TYPES.BYTES:
-      bytes = toBytes(body);
       break;
     case QUEUE_CONTENT_TYPES.V8:
       throw new Error("queue send: v8 contentType not supported - use json, text, or bytes");
     default:
       throw new Error(`queue send: unsupported contentType "${contentType}"`);
   }
-  return { bodyB64: bytesToBase64(bytes), byteLength: bytes.length };
+  if (typeof value === "string" && value.length > maxBytes) {
+    throw new BodyTooLargeError(maxBytes);
+  }
+  const bytes = toBytes(value);
+  if (bytes.byteLength > maxBytes) throw new BodyTooLargeError(maxBytes);
+  return { bodyB64: bytesToBase64(bytes), byteLength: bytes.byteLength };
 }
 
-/** @param {unknown} body @param {string} contentType @param {number} now */
-export function buildQueueEnvelope(body, contentType, now) {
-  const encoded = encodedQueueBody(body, contentType);
+/** @param {unknown} body @param {string} contentType @param {number} now @param {number} maxBytes */
+export function buildQueueEnvelope(body, contentType, now, maxBytes) {
+  const encoded = encodedQueueBody(body, contentType, maxBytes);
   return {
     entry: {
       [QUEUE_ENVELOPE_FIELDS.ID]: crypto.randomUUID(),

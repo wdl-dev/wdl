@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   assertStatus,
+  deployAndPromote,
   delay,
   gatewayWorkerId,
   runtimeInternalPost,
@@ -9,7 +10,10 @@ import {
   waitUntil,
   responseJson,
   queueStreamKey,
+  withServiceStopped,
 } from "./helpers/index.js";
+import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
+import { redisXLen } from "./helpers/redis.js";
 import {
   BATCH_SIZE_RECORDER,
   BLOCKING_BATCH_RECORDER,
@@ -26,6 +30,39 @@ import {
 } from "./helpers/queue-scenarios.js";
 
 setupQueueIntegrationSuite();
+
+test("producer byte boundaries reject complete batches before Redis mutation", async () => {
+  const ns = uniqueNs("qbytes");
+  await withServiceStopped("scheduler", async () => {
+    const version = await deployAndPromote(ns, "producer", {
+      code: readRepositoryModuleSource("test-workers/queue-boundaries/src/index.js"),
+      bindings: { QUEUE: { type: "queue", id: "limits" } },
+    });
+    const headers = { "x-worker-id": gatewayWorkerId(ns, "producer", version) };
+    const stream = queueStreamKey(ns, "limits");
+    let entries = 0;
+    for (const type of ["text", "unicode", "json", "bytes", "view"]) {
+      const rejected = runtimeInternalPost(`/?type=${type}&size=128001`, headers, "");
+      assertStatus(rejected, 400, `${type} oversized queue message`);
+      assert.equal(responseJson(rejected).error, "queue_send_failed");
+      assert.match(responseJson(rejected).message, /message body exceeds 128000/);
+      assert.equal(redisXLen(stream, { db: 1 }), entries);
+      const accepted = runtimeInternalPost(`/?type=${type}&size=128000`, headers, "");
+      assertStatus(accepted, 200, `${type} exact queue message boundary`);
+      assert.equal(redisXLen(stream, { db: 1 }), ++entries);
+    }
+    for (const type of ["text", "bytes", "view"]) {
+      const rejected = runtimeInternalPost(`/batch?type=${type}&size=1`, headers, "");
+      assertStatus(rejected, 400, `${type} exhausted queue batch`);
+      assert.equal(responseJson(rejected).error, "queue_send_failed");
+      assert.match(responseJson(rejected).message, /batch body exceeds 256000/);
+      assert.equal(redisXLen(stream, { db: 1 }), entries, "rejected batch must not append its accepted prefix");
+    }
+    const accepted = runtimeInternalPost("/batch?type=bytes&size=0", headers, "");
+    assertStatus(accepted, 200, "exact batch budget plus an empty message");
+    assert.equal(redisXLen(stream, { db: 1 }), entries + 3);
+  });
+});
 
 test("maxBatchSize caps runtime dispatch size for multi-message producer sends", async () => {
   const ns = uniqueNs("qcap");

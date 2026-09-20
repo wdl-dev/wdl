@@ -337,7 +337,7 @@ test("normalizeQueueDelaySeconds preserves explicit zero over defaults", () => {
 });
 
 test("buildQueueEnvelope writes the internal Redis queue envelope", () => {
-  const built = buildQueueEnvelope({ ok: true }, "json", 123);
+  const built = buildQueueEnvelope({ ok: true }, "json", 123, 128_000);
   assert.equal(built.entry.content_type, "json");
   assert.equal(built.entry.attempts, "0");
   assert.equal(built.entry.first_seen_ms, "123");
@@ -781,9 +781,7 @@ test("buildAssetUrl: slashes separate segments, each encoded individually", () =
   );
 });
 
-// encodeBody in runtime/bindings/queue.js uses String.fromCharCode + btoa
-// over raw bytes — mirror that here so the round-trip is actually tested,
-// not just Buffer.from("utf8") which skips the binary-safe path.
+// Use an independent byte-preserving encoder for queue decoder fixtures.
 /** @param {Uint8Array} bytes */
 function b64FromBytes(bytes) {
   let bin = "";

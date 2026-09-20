@@ -14,13 +14,17 @@ function isRecord(value) {
 /** @param {unknown} data */
 function websocketFrame(data) {
   if (typeof data === "string") {
+    if (data.length > AI_WS_FRAME_MAX_BYTES) return null;
     const bytes = utf8ByteLength(data);
+    if (bytes > AI_WS_FRAME_MAX_BYTES) return null;
     return { kind: "text", data, bytes };
   }
   if (data instanceof ArrayBuffer) {
+    if (data.byteLength > AI_WS_FRAME_MAX_BYTES) return null;
     return { kind: "binary", data, bytes: data.byteLength };
   }
   if (ArrayBuffer.isView(data)) {
+    if (data.byteLength > AI_WS_FRAME_MAX_BYTES) return null;
     const view = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     return { kind: "binary", data: view.slice().buffer, bytes: view.byteLength };
   }
@@ -343,7 +347,7 @@ export function createAiWebSocketBridge(options) {
     if (closed || errorFallbackTimer !== null) return;
     try {
       const frame = websocketFrame(evt.data);
-      if (frame.bytes > AI_WS_FRAME_MAX_BYTES) {
+      if (frame === null) {
         finish(1009, "AI websocket frame too large", "frame_limit");
         return;
       }
@@ -356,7 +360,7 @@ export function createAiWebSocketBridge(options) {
           ? normalizeClientSocketText(model, publicModel, String(frame.data))
           : frame.data;
         const forwardedFrame = forwarded === frame.data ? frame : websocketFrame(forwarded);
-        if (forwardedFrame.bytes > AI_WS_FRAME_MAX_BYTES) {
+        if (forwardedFrame === null) {
           finish(1009, "AI websocket frame too large", "frame_limit");
           return;
         }
