@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Reject oversized Queue messages and AI WebSocket frames before avoidable encoding or copying; Queue batches apply their remaining byte budget before constructing each envelope.
+- Bound each Gateway WebSocket client send queue to 32 MiB in addition to its message-count limit, releasing queued payloads on close without changing reconnect ordering.
 
 ## wdl.20260916.1 - 2026-09-17
 

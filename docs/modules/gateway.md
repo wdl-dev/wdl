@@ -169,7 +169,15 @@ whether a route changed.
   forwarding remains independent of route Redis state.
 - Pattern branch leaves the request path unchanged; subdomain branch strips the leading
   worker segment.
-- WebSocket backend reconnect is bounded and owns a bounded client-frame buffer.
+- WebSocket backend reconnect retains client messages in the existing ordered send
+  queue, bounded by both the configured message count and a fixed 32 MiB payload-byte
+  budget per connection. Binary input uses its byte length; strings use a cheap
+  code-unit lower bound followed by exact UTF-8 accounting when they can fit.
+  Admission happens before enqueue, and send completion or terminal closure releases
+  the charge exactly once. Closure also drops queued payload references without waiting
+  for a pending reconnect. Either limit closes both peers with
+  `1013 websocket send buffer full`. This bounds Gateway's JavaScript queue, not native
+  socket buffers or aggregate process memory across sessions.
 - After route resolution, Gateway reads the route and session policy projection at
   one Redis linearization point. An initial route mismatch fails with
   `503 gateway_routing_unavailable` before the backend upgrade. This intentionally makes
@@ -209,8 +217,8 @@ whether a route changed.
   does not cross that response boundary automatically. Ordinary Worker and Durable Object
   WebSockets retain bounded transparent reconnect.
 - A `1012` close ends the application session; the client reconnects and repeats its
-  application handshake. Client messages queued under an older backend reconnect epoch
-  may be discarded without per-frame ack/nack when that epoch resets.
+  application handshake. Terminal closure discards queued client messages without
+  per-frame ack/nack.
 - Gateway-owned WebSocket peers use `arraybuffer` binary delivery so text and binary
   messages can be forwarded without changing their frame type. Tenant WebSocket code
   retains workerd's normal `binaryType` contract.
