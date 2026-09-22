@@ -58,6 +58,11 @@ User-facing queue interfaces:
 - Runtime producer API: `env.<BINDING>.sendBatch(messages, opts?)`
 - Producer limits are 128,000 bytes per message, 100 messages per batch, and 256,000
   bytes total per batch.
+- The envelope builder checks string lower bounds and binary byte lengths against
+  both the message limit and the remaining batch budget before Base64 allocation.
+  Obviously oversized strings are rejected before UTF-8 encoding; accepted strings
+  receive an exact encoded-byte check. JSON uses native serialization without an
+  object prewalk. A rejected batch writes none of its messages.
 - Runtime consumer handler: `export default { async queue(batch, env, ctx) {} }`
 - Producer `delivery_delay` is supported as the default delay for sends on that binding.
 - Consumer `retry_delay` is supported as the default delay for retries without an

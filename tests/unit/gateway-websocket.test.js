@@ -1193,6 +1193,145 @@ test("gateway websocket proxy honors configured reconnect buffer limit", async (
   assert.equal(sessions[0][1], "client_buffer_overflow");
 });
 
+test("gateway websocket proxy refunds its byte budget after ordered sends", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  let buffered = 0;
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => { throw new Error("not used"); },
+    null,
+    { adjustBufferedMessages: (/** @type {number} */ delta) => { buffered += delta; } }
+  );
+  const downstream = /** @type {any} */ (lastPair)[1];
+  const first = new ArrayBuffer(16 * 1024 * 1024);
+  const second = new ArrayBuffer(16 * 1024 * 1024);
+  downstream.dispatch("message", { data: first });
+  downstream.dispatch("message", { data: second });
+  assert.equal(buffered, 2);
+  assert.equal(responseWebSocket(response).closed, null);
+  await waitFor(() => buffered === 0);
+  assert.equal(upstream.sent[0], first);
+  assert.equal(upstream.sent[1], second);
+  upstream.sent.length = 0;
+
+  const full = new ArrayBuffer(32 * 1024 * 1024);
+  downstream.dispatch("message", { data: full });
+  await waitFor(() => buffered === 0);
+  assert.equal(upstream.sent[0], full);
+  assert.equal(responseWebSocket(response).closed, null);
+  downstream.dispatch("close", { code: 1000, reason: "done" });
+  assert.equal(buffered, 0);
+});
+
+test("gateway websocket proxy charges UTF-8 and in-flight bytes and drops them on overflow", async () => {
+  const upstream1 = new FakeWebSocket("upstream1");
+  const upstream2 = new FakeWebSocket("upstream2");
+  const reconnect = Promise.withResolvers();
+  let reconnectCalls = 0;
+  let buffered = 0;
+  /** @type {Array<{ event: string, fields: Record<string, unknown> }>} */
+  const events = [];
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream1),
+    async () => { reconnectCalls += 1; return await reconnect.promise; },
+    null,
+    {
+      adjustBufferedMessages: (/** @type {number} */ delta) => { buffered += delta; },
+      recordEvent: (/** @type {string} */ _level, /** @type {string} */ event, /** @type {Record<string, unknown>} */ fields) => {
+        events.push({ event, fields });
+      },
+    }
+  );
+  const downstream = /** @type {any} */ (lastPair)[1];
+  upstream1.dispatch("close", { code: 1011, reason: "reconnect" });
+  downstream.dispatch("message", { data: new ArrayBuffer(32 * 1024 * 1024 - 3) });
+  await waitFor(() => reconnectCalls === 1);
+  downstream.dispatch("message", { data: "\u4e2d" });
+  assert.equal(responseWebSocket(response).closed, null);
+  assert.equal(buffered, 2);
+  downstream.dispatch("message", { data: "x" });
+  assert.deepEqual(responseWebSocket(response).closed, { code: 1013, reason: "websocket send buffer full" });
+  assert.equal(buffered, 0);
+  assert.deepEqual(events.at(-1), {
+    event: "websocket_client_buffer_overflow",
+    fields: { buffered_messages: 2, buffered_bytes: 32 * 1024 * 1024 },
+  });
+  downstream.dispatch("message", { data: "after-close" });
+  reconnect.resolve(websocketResponse(upstream2));
+  await waitFor(() => upstream2.closed !== null);
+  assert.equal(buffered, 0);
+  assert.deepEqual(upstream2.sent, []);
+  assert.equal(events.filter(({ event }) => event === "websocket_client_buffer_overflow").length, 1);
+});
+
+test("gateway websocket proxy rejects string lower bounds before encoding", async () => {
+  const upstream = new FakeWebSocket("upstream");
+  const response = proxyGatewayWebSocket(
+    websocketResponse(upstream),
+    async () => { throw new Error("not used"); },
+    null
+  );
+  const downstream = /** @type {any} */ (lastPair)[1];
+  const oversized = "x".repeat(1024 * 1024);
+  const originalEncode = TextEncoder.prototype.encode;
+  let encodedOversized = false;
+  downstream.dispatch("message", { data: new ArrayBuffer(32 * 1024 * 1024 - 1) });
+  await withMockedProperty(TextEncoder.prototype, "encode", /** @this {TextEncoder} */ function (/** @type {string} */ value) {
+    if (value === oversized) encodedOversized = true;
+    return Reflect.apply(originalEncode, this, [value]);
+  }, () => {
+    downstream.dispatch("message", { data: oversized });
+  });
+  assert.equal(encodedOversized, false);
+  assert.equal(responseWebSocket(response).closed?.code, 1013);
+  assert.deepEqual(upstream.sent, []);
+});
+
+test("gateway websocket proxy releases pending bytes on close, error, lifecycle and reconnect failure", async () => {
+  for (const cause of ["close", "error", "lifecycle", "reconnect_failure"]) {
+    const upstream1 = new FakeWebSocket("upstream1");
+    const upstream2 = new FakeWebSocket("upstream2");
+    const reconnect = Promise.withResolvers();
+    let reconnectCalls = 0;
+    let buffered = 0;
+    /** @type {{ restart(): void, fail(): void } | undefined} */
+    let lifecycle;
+    proxyGatewayWebSocket(
+      websocketResponse(upstream1),
+      async () => { reconnectCalls += 1; return await reconnect.promise; },
+      null,
+      { adjustBufferedMessages: (/** @type {number} */ delta) => { buffered += delta; } },
+      {
+        reconnectDelaysMs: [0],
+        registerLifecycle(/** @type {{ restart(): void, fail(): void }} */ handlers) {
+          lifecycle = handlers;
+          return () => {};
+        },
+      }
+    );
+    const downstream = /** @type {any} */ (lastPair)[1];
+    upstream1.dispatch("close", { code: 1011, reason: "reconnect" });
+    downstream.dispatch("message", { data: new ArrayBuffer(32 * 1024 * 1024) });
+    await waitFor(() => reconnectCalls === 1);
+    assert.equal(buffered, 1);
+    if (cause === "lifecycle") {
+      assert.ok(lifecycle);
+      lifecycle.restart();
+    } else if (cause === "reconnect_failure") {
+      reconnect.resolve(new Response(null, { status: 503 }));
+    } else {
+      downstream.dispatch(cause, { code: 1000, reason: "done" });
+    }
+    if (cause !== "reconnect_failure") {
+      assert.equal(buffered, 0, "terminal close releases without awaiting reconnect");
+      reconnect.resolve(websocketResponse(upstream2));
+      await waitFor(() => upstream2.closed !== null);
+    }
+    await waitFor(() => buffered === 0);
+    assert.deepEqual(upstream2.sent, []);
+  }
+});
+
 test("gateway websocket proxy reports active, detached, and buffered gauges", async () => {
   const upstream1 = new FakeWebSocket("upstream1");
   const upstream2 = new FakeWebSocket("upstream2");
@@ -1312,7 +1451,7 @@ test("gateway websocket proxy closes when client messages exceed the reconnect b
     {
       level: "warn",
       event: "websocket_client_buffer_overflow",
-      fields: { buffered_messages: 64 },
+      fields: { buffered_messages: 64, buffered_bytes: 566 },
     },
   ]);
 });

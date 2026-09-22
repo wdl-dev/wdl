@@ -5,6 +5,7 @@ import {
   QUEUE_CONTENT_TYPES,
 } from "runtime-lib";
 import { recordBindingOperation } from "runtime-metrics";
+import { BodyTooLargeError } from "shared-bounded-body";
 import {
   proxyEndpoint as buildProxyEndpoint,
   proxyFetch,
@@ -46,18 +47,6 @@ function queueSendResponse() {
 }
 
 /**
- * @param {string} prefix
- * @param {number} byteLength
- */
-function checkMessageSize(prefix, byteLength) {
-  if (byteLength > MAX_QUEUE_MESSAGE_BYTES) {
-    throw new Error(
-      `${prefix}: message body exceeds ${MAX_QUEUE_MESSAGE_BYTES} byte limit`
-    );
-  }
-}
-
-/**
  * @param {QueueProducer} queue
  * @returns {string}
  */
@@ -70,11 +59,17 @@ function serviceName(queue) {
  * @param {string} contentType
  * @param {number} now
  * @param {string} [errorPrefix]
+ * @param {number} [remainingBatchBytes]
  */
-function buildEntry(body, contentType, now, errorPrefix = "queue send") {
-  const built = buildQueueEnvelope(body, contentType, now);
-  checkMessageSize(errorPrefix, built.byteLength);
-  return built;
+function buildEntry(body, contentType, now, errorPrefix = "queue send", remainingBatchBytes = MAX_QUEUE_BATCH_BYTES) {
+  try {
+    return buildQueueEnvelope(body, contentType, now, Math.min(MAX_QUEUE_MESSAGE_BYTES, remainingBatchBytes));
+  } catch (error) {
+    if (!(error instanceof BodyTooLargeError)) throw error;
+    throw new Error(remainingBatchBytes < MAX_QUEUE_MESSAGE_BYTES
+      ? `queue sendBatch: batch body exceeds ${MAX_QUEUE_BATCH_BYTES} byte limit`
+      : `${errorPrefix}: message body exceeds ${MAX_QUEUE_MESSAGE_BYTES} byte limit`, { cause: error });
+  }
 }
 
 /**
@@ -181,13 +176,8 @@ export class QueueProducer extends WorkerEntrypoint {
             "queue sendBatch: v8 contentType not supported - use json, text, or bytes"
           );
         }
-        const built = buildEntry(body, ct, now, "queue sendBatch");
+        const built = buildEntry(body, ct, now, "queue sendBatch", MAX_QUEUE_BATCH_BYTES - totalBytes);
         totalBytes += built.byteLength;
-        if (totalBytes > MAX_QUEUE_BATCH_BYTES) {
-          throw new Error(
-            `queue sendBatch: batch body exceeds ${MAX_QUEUE_BATCH_BYTES} byte limit`
-          );
-        }
         const delaySecs = normalizeQueueDelaySeconds(isWrapper ? batchMessage.delaySeconds : undefined, batchDelaySeconds);
         actions.push({
           entry: built.entry,

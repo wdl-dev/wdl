@@ -95,6 +95,7 @@ export function repositoryModuleDataUrl(relativePath, replacements = []) {
 export function runtimeLibModuleDataUrl() {
   return repositoryModuleDataUrl("runtime/lib.js", importSpecifierReplacements({
     "shared-base64": SHARED_BASE64_URL,
+    "shared-bounded-body": repositoryFileUrl("shared/bounded-body.js"),
     "shared-ns-pattern": SHARED_NS_PATTERN_URL,
     "shared-worker-contract": WORKER_CONTRACT_URL,
     "shared-workerd-compat-flags": SHARED_WORKERD_COMPAT_FLAGS_URL,

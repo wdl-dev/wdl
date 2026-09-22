@@ -419,7 +419,7 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
   assert.equal(healthy.status, 200);
 });
 
-test("bundled workerd Node filesystem respects sliced views and open truncation", async () => {
+test("bundled workerd Node filesystem respects views, creation flags and replacement", async () => {
   const ns = uniqueNs("workerd-fs");
   await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
   const result = await readIntegrationJson(await gatewayFetch(ns, "/probe/fs"), 200);
@@ -430,6 +430,20 @@ test("bundled workerd Node filesystem respects sliced views and open truncation"
   })));
   assert.equal(result.truncation.length, 9);
   for (const entry of result.truncation) assert.equal(entry.size, 0, JSON.stringify(entry));
+  assert.deepEqual(result.missing, ["sync", "callback", "promise"].map((mode) => ({
+    mode, code: "ENOENT", created: false,
+  })));
+  assert.equal(result.missingParent, "ENOENT");
+  assert.equal(result.parentCreated, false);
+  assert.deepEqual(result.writeStreams, [
+    { flags: "default", code: null, value: "next" },
+    { flags: "a", code: null, value: "previousnext" },
+    { flags: "wx", code: "EEXIST", value: "previous" },
+  ]);
+  assert.deepEqual(result.replacement, {
+    renameCode: null, renameValue: "renamed", sourceRemains: false,
+    copyCode: null, copyValue: "copied", exclusiveCode: "EEXIST", afterExclusive: "copied",
+  });
 });
 
 test("bundled workerd Node and Web streams settle through success, failure and cancellation", async () => {
@@ -442,6 +456,20 @@ test("bundled workerd Node and Web streams settle through success, failure and c
     destinationError: "probe sink failed", cancelled: true,
     abortName: "AbortError", abortedSource: true, sinkDestroyed: true,
     lockedDestination: "TypeError", sourceError: "probe source failed", failedSinkDestroyed: true,
+  });
+});
+
+test("bundled workerd compression preserves bytes and settles cancellation", async () => {
+  const ns = uniqueNs("workerd-compression");
+  await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/compression"), 200), {
+    inputBytes: 1024 * 1024 + 17,
+    webRoundtrip: true,
+    nodeToWebRoundtrip: true,
+    webToNodeRoundtrip: true,
+    invalid: "TypeError",
+    cancelledAfterRead: true,
+    utf16Slice: "AB\u20ac",
   });
 });
 

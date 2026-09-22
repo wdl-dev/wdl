@@ -27,8 +27,10 @@ import {
   uniqueNs,
   setupIntegrationSuite,
   waitUntil,
+  assertStatus,
 } from "./helpers/index.js";
 import { prometheusCounter } from "./helpers/prometheus.js";
+import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
 
 setupIntegrationSuite();
 
@@ -285,6 +287,11 @@ async function gatewayWebSocketProxyCount(outcome) {
 
 async function gatewayWebSocketProxyEstablished() {
   return await gatewayWebSocketProxyCount("established");
+}
+
+async function gatewayWebSocketBufferedMessages() {
+  const body = await (await fetch(gatewayUrl("/_metrics"))).text();
+  return prometheusCounter(body, "wdl_websocket_proxy_buffered_messages", { service: "gateway" });
 }
 
 /** @param {string} state */
@@ -869,6 +876,56 @@ test("gateway-proxied ws closes with 1011 when backend reconnect cannot produce 
     await assertNoGatewayHangSince(logSince);
   } finally {
     socket.destroy();
+  }
+});
+
+test("gateway-proxied ws bounds retained bytes while reconnect is pending", async () => {
+  const ns = uniqueNs("ws-byte-limit");
+  const name = "buffer";
+  await deployAndPromote(ns, name, {
+    code: readRepositoryModuleSource("test-workers/ws-reconnect-buffer/src/index.js"),
+  });
+  const beforeOverflow = await gatewayWebSocketProxyCount("client_buffer_overflow");
+  const { status, socket } = await wsHandshake(ns, `/${name}`);
+  try {
+    assert.equal(status, 101);
+    socket.write(encodeClientTextFrame("detach"));
+    await waitUntil("backend replacement is held open", async () => {
+      const state = await gatewayFetch(ns, `/${name}/state`);
+      assertStatus(state, 200, "reconnect fixture state");
+      const current = await responseJson(state);
+      assert.equal(current.reconnectWaiting, true, JSON.stringify(current));
+      return true;
+    }, { timeoutMs: 10_000, intervalMs: 100 });
+
+    const frame = encodeClientBinaryFrame(Buffer.alloc(4 * 1024 * 1024));
+    for (let i = 0; i < 8; i += 1) socket.write(frame);
+    await waitUntil("the exact 32 MiB queue budget is admitted", async () =>
+      await gatewayWebSocketBufferedMessages() === 8);
+    assert.equal(await gatewayWebSocketProxyCount("client_buffer_overflow"), beforeOverflow);
+
+    const closing = readOneServerCloseFrame(socket);
+    socket.write(encodeClientBinaryFrame(Buffer.from([1])));
+    const close = await closing;
+    assert.deepEqual(close, { code: 1013, reason: "websocket send buffer full" });
+    socket.write(encodeClientCloseFrame(close.code, close.reason));
+    await waitForSocketClose(socket);
+    assert.equal(await gatewayWebSocketBufferedMessages(), 0);
+    assert.equal(await gatewayWebSocketProxyCount("client_buffer_overflow"), beforeOverflow + 1);
+
+    assertStatus(await gatewayFetch(ns, `/${name}/release`), 200, "release backend replacement");
+    await waitUntil("late replacement closes without replaying buffered frames", async () => {
+      const state = await gatewayFetch(ns, `/${name}/state`);
+      assertStatus(state, 200, "reconnect fixture state");
+      const final = await responseJson(state);
+      assert.equal(final.received, 0);
+      return final.closed === 2;
+    }, { timeoutMs: 10_000, intervalMs: 100 });
+    assert.equal(await gatewayWebSocketBufferedMessages(), 0);
+    await waitForNoActiveGatewayWebSockets("byte-limit closure releases the session");
+  } finally {
+    socket.destroy();
+    await gatewayFetch(ns, `/${name}/release`);
   }
 });
 

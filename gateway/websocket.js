@@ -25,6 +25,7 @@ import { deleteGatewayInternalHeaders } from "gateway-lib";
  *   recordSessionLifetime?: (durationMs: number, outcome: string) => void,
  * }} GatewayWebSocketObservability
  * @typedef {{ fetch(request: Request): Promise<Response> }} GatewayWebSocketUpstream
+ * @typedef {{ data: string | ArrayBuffer | null, bytes: number }} QueuedClientMessage
  */
 
 const MAX_WEBSOCKET_CLOSE_REASON_BYTES = 123;
@@ -98,6 +99,7 @@ function websocketCloseShouldReconnect(evt) {
 const RECONNECT_DELAYS_MS = [0, 100, 250, 500, 1000, 2000, 5000];
 const MAX_BUFFERED_CLIENT_MESSAGES = 64;
 const MAX_BUFFERED_CLIENT_MESSAGES_CAP = 1024;
+const MAX_BUFFERED_CLIENT_BYTES = 32 * 1024 * 1024;
 const proxyOptionsByEnv = new WeakMap();
 
 /** @param {unknown} value */
@@ -222,8 +224,9 @@ export function proxyGatewayWebSocket(
   /** @type {Promise<WebSocket | null> | null} */
   let reconnectLoop = null;
   let sendQueue = Promise.resolve();
-  let queuedClientMessages = 0;
-  let queueEpoch = 0;
+  /** @type {Set<QueuedClientMessage>} */
+  const queuedClientMessages = new Set();
+  let queuedClientBytes = 0;
   let downstreamClosed = false;
   let activeRecorded = false;
   let detachedRecorded = false;
@@ -299,10 +302,29 @@ export function proxyGatewayWebSocket(
   }
 
   function clearQueuedClientMessages() {
-    if (queuedClientMessages === 0) return;
-    adjustBufferedMessages(-queuedClientMessages);
-    queuedClientMessages = 0;
-    queueEpoch += 1;
+    if (queuedClientMessages.size === 0) return;
+    adjustBufferedMessages(-queuedClientMessages.size);
+    // A pending reconnect may outlive closure. Drop payloads without waiting for it.
+    for (const message of queuedClientMessages) message.data = null;
+    queuedClientMessages.clear();
+    queuedClientBytes = 0;
+  }
+
+  /** @param {QueuedClientMessage} message */
+  function releaseClientMessage(message) {
+    if (!queuedClientMessages.delete(message)) return;
+    message.data = null;
+    queuedClientBytes -= message.bytes;
+    adjustBufferedMessages(-1);
+  }
+
+  function closeForClientBufferOverflow() {
+    record("client_buffer_overflow");
+    recordEvent("warn", "websocket_client_buffer_overflow", {
+      buffered_messages: queuedClientMessages.size,
+      buffered_bytes: queuedClientBytes,
+    });
+    closeDownstreamAndUpstream(1013, "websocket send buffer full", "client_buffer_overflow");
   }
 
   /** @param {WebSocket | null} [attachedUpstream] */
@@ -625,17 +647,18 @@ export function proxyGatewayWebSocket(
     });
   }
 
-  /** @param {string | ArrayBuffer} data */
-  async function sendClientMessage(data) {
+  /** @param {QueuedClientMessage} message */
+  async function sendClientMessage(message) {
     if (upstreamErrorGate !== null) await waitForUpstreamErrorDecision();
     if (downstreamClosed) throw new Error("WebSocket client is closed");
     await requireReconnectAllowed();
     if (upstreamErrorGate !== null) await waitForUpstreamErrorDecision();
     if (downstreamClosed) throw new Error("WebSocket client is closed");
     const current = upstream || await reconnectWithBudget();
+    if (message.data === null) return;
     if (!current) throw new Error("WebSocket upstream unavailable");
     try {
-      current.send(data);
+      current.send(message.data);
     } catch {
       if (reconnectDisabled) {
         closeWithoutReconnect(current);
@@ -647,11 +670,12 @@ export function proxyGatewayWebSocket(
       const gate = beginLifecycleCheck();
       await requireLifecycleContinuation(gate);
       const reconnected = await reconnectWithBudget();
+      if (message.data === null) return;
       if (!reconnected) throw new Error("WebSocket upstream unavailable");
       // A second send failure is terminal for this client frame; the caller
       // records reconnect_failed and closes the public socket rather than
       // retrying indefinitely and reordering later client frames.
-      reconnected.send(data);
+      reconnected.send(message.data);
     }
   }
 
@@ -672,21 +696,28 @@ export function proxyGatewayWebSocket(
   }
 
   downstream.addEventListener("message", (evt) => {
-    if (queuedClientMessages >= maxBufferedClientMessages) {
-      record("client_buffer_overflow");
-      recordEvent("warn", "websocket_client_buffer_overflow", {
-        buffered_messages: queuedClientMessages,
-      });
-      closeDownstreamAndUpstream(1013, "websocket send buffer full", "client_buffer_overflow");
+    if (downstreamClosed) return;
+    if (queuedClientMessages.size >= maxBufferedClientMessages) {
+      closeForClientBufferOverflow();
       return;
     }
-    queuedClientMessages += 1;
-    const messageQueueEpoch = queueEpoch;
+    const data = evt.data;
+    const remainingBytes = MAX_BUFFERED_CLIENT_BYTES - queuedClientBytes;
+    const bytes = typeof data === "string"
+      ? (data.length > remainingBytes ? data.length : utf8ByteLength(data))
+      : data.byteLength;
+    if (bytes > remainingBytes) {
+      closeForClientBufferOverflow();
+      return;
+    }
+    const message = { data, bytes };
+    queuedClientMessages.add(message);
+    queuedClientBytes += bytes;
     adjustBufferedMessages(1);
     sendQueue = sendQueue.then(async () => {
-      if (downstreamClosed || messageQueueEpoch !== queueEpoch) return;
+      if (downstreamClosed) return;
       try {
-        await sendClientMessage(evt.data);
+        await sendClientMessage(message);
       } catch {
         if (!downstreamClosed) {
           record("reconnect_failed");
@@ -697,10 +728,7 @@ export function proxyGatewayWebSocket(
         }
       }
     }).finally(() => {
-      if (messageQueueEpoch === queueEpoch) {
-        queuedClientMessages -= 1;
-        adjustBufferedMessages(-1);
-      }
+      releaseClientMessage(message);
     });
   });
   downstream.addEventListener("close", (evt) => {

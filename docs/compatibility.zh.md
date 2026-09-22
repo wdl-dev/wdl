@@ -31,7 +31,7 @@
 
 WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary 只能 cold-load 其支持的 `compatibility_date` 对应的 retained Dynamic Worker version；具体说明见 [infra rollout 注意事项](modules/infra.zh.md#部署--rollout-注意事项)。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-09-23`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-09-29`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
 `auto_grpc_convert` 是 non-experimental flag，可以作为 compatibility metadata 使用，但不会为 WDL 增加 Cloudflare edge gRPC conversion service。
 
@@ -85,10 +85,10 @@ D1 和 Durable Object SQL `DEFAULT` expression 遵循 workerd 既有的 function
 | Surface | Status | 当前 WDL 立场 |
 |---|---|---|
 | Cache API / Cloudflare edge cache 语义 | Not supported | `caches.default` 不是 WDL 暴露的 stock workerd surface，WDL 也没有实现 Cloudflare edge cache tier。Tenant code 不应依赖这个 binding，也不应把它当成持久化或 CDN 合同。 |
-| Vectorize、Analytics Engine、Browser Rendering、Hyperdrive、Email Workers | Not supported | WDL 没有对应 binding facade、control-plane metadata 或后端服务。 |
+| Vectorize、Analytics Engine / Analytics SQL、Browser Rendering、Hyperdrive、Email Workers | Not supported | WDL 没有对应 binding facade、control-plane metadata 或后端服务。 |
 | R2 multipart upload、customer-provided encryption keys 和 Cloudflare-specific checksum 行为 | Not supported | 当前 R2 facade 面向 WDL worker/assets 所需的 S3-compatible object 操作。高级 Cloudflare R2 行为需要先设计，才能写成兼容合同。 |
 | Queue `contentType = "v8"` 和 per-consumer `max_concurrency` | Not supported | Queue message 支持文档化的 `json`、`text` 和 `bytes` content type；只有 `v8` 会被拒绝。Dispatch concurrency 仍由 scheduler 拥有，`max_concurrency` 会被拒绝，而不是静默忽略。 |
-| Incoming TCP `connect()` handler 和 Socket RPC transfer | Not supported | Bundled workerd 已有 incoming `connect()` entrypoint 和 autogated Socket RPC transfer 路径，但 WDL 没有配置 tenant raw-TCP ingress，也没有启用该 autogate；这不影响已记录的 outbound `cloudflare:sockets` surface。 |
+| Incoming TCP/UDP `connect()` handler 和 Socket RPC transfer | Not supported | WDL 没有配置 tenant raw-TCP 或 raw-UDP ingress。UDP 还要求 worker 的 `experimental` flag，而 WDL 会拒绝 tenant 使用该 flag；Socket RPC transfer 仍受 autogate 控制且未启用。这不影响已记录的 outbound `cloudflare:sockets` surface。 |
 | 上游 experimental 和 WDL 显式拒绝的 compatibility flags | Not supported | Tenant `compatibility_flags` 中属于上游 workerd `$experimental` 的 enable flag，以及 WDL 显式拒绝的 `allow_irrevocable_stub_storage`、`new_module_registry`、`no_rpc` 和 `streams_disable_constructors`，会在 deploy 和 runtime decode 阶段被拒绝。New Module Registry 虽已在上游毕业，但 WDL generated wrapper 是实际 dynamic-loader main module，无法保持 tenant `import.meta.main`；WDL runtime facade 还要求 Fetcher RPC 和标准 stream constructor。 |
 | Python Workers | Not supported | WDL 拒绝 Python module manifest，而不是让 workerd 在 cold-load 时失败。 |
 | Durable Object cross-script binding 和 migration rename/delete 语义 | Not supported | WDL DO class 仅支持 same-worker。Storage identity、owner routing 和 delete cleanup 由 WDL 管理，不兼容 Cloudflare migration 模型。 |

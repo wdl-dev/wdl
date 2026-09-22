@@ -2086,6 +2086,52 @@ test("AI host bounds provider WebSocket frames", async () => {
   assert.equal(aiPoolStateForTest().websocket.inUse, 0);
 });
 
+test("AI WebSocket rejects oversized strings and views before proportional allocation", async () => {
+  const storage = new ArrayBuffer(AI_WS_FRAME_MAX_BYTES + 32);
+  const frames = [
+    "x".repeat(AI_WS_FRAME_MAX_BYTES + 1),
+    new Uint8Array(storage, 1, AI_WS_FRAME_MAX_BYTES + 1),
+    new DataView(storage, 2, AI_WS_FRAME_MAX_BYTES + 1),
+  ];
+  for (const direction of ["client", "provider"]) {
+    for (const data of frames) {
+      const { upstream, downstream } = await openFakeAiWebSocket();
+      assert.ok(downstream);
+      let encodes = 0;
+      let copies = 0;
+      await withMockedProperty(TextEncoder.prototype, "encode", () => {
+        encodes += 1;
+        throw new Error("oversized frame must not be encoded");
+      }, () => withMockedProperty(Uint8Array.prototype, "slice", () => {
+        copies += 1;
+        throw new Error("oversized frame must not be copied");
+      }, () => {
+        (direction === "client" ? downstream : upstream).dispatch("message", { data });
+      }));
+      assert.equal(encodes, 0);
+      assert.equal(copies, 0);
+      assert.deepEqual(upstream.closed, { code: 1009, reason: "AI websocket frame too large" });
+      assert.deepEqual(downstream.closed, { code: 1009, reason: "AI websocket frame too large" });
+      assert.equal(upstream.sent.length, 0);
+      assert.equal(downstream.sent.length, 0);
+      assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+    }
+  }
+});
+
+test("AI WebSocket frame admission counts UTF-8 bytes at the exact limit", async () => {
+  const { upstream, downstream } = await openFakeAiWebSocket();
+  assert.ok(downstream);
+  const exact = "\u4e2d".repeat(Math.floor(AI_WS_FRAME_MAX_BYTES / 3)) + "a";
+  assert.equal(new TextEncoder().encode(exact).byteLength, AI_WS_FRAME_MAX_BYTES);
+  upstream.dispatch("message", { data: exact });
+  assert.deepEqual(downstream.sent, [exact]);
+  upstream.dispatch("message", { data: exact + "a" });
+  assert.deepEqual(downstream.sent, [exact]);
+  assert.equal(downstream.closed?.code, 1009);
+  assert.equal(aiPoolStateForTest().websocket.inUse, 0);
+});
+
 test("AI host cancels an oversized WebSocket rejection response", async () => {
   let cancelled = false;
   const providerBody = new ReadableStream({

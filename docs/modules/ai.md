@@ -258,6 +258,10 @@ session count, `32 * 64 MiB` per direction is a theoretical cumulative acceptanc
 envelope before lifecycle closures, not reserved memory or a measured native queue
 size. Operators must size or override the session pool for their runtime memory and
 traffic distribution.
+WebSocket frame admission rejects obviously oversized strings before UTF-8 encoding
+and oversized binary views before copying. Accepted strings still use exact UTF-8
+byte accounting, and accepted views retain their owned snapshot. Frame overflow
+closes both peers with `1009` and releases the session permit.
 Default time bounds are 120 seconds for request/setup, 30 seconds SSE idle, five minutes
 SSE duration, 15 seconds WebSocket handshake, two minutes WebSocket idle, and 24 minutes
 operator WebSocket duration. The effective WebSocket duration is the lower of the

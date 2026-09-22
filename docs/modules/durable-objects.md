@@ -369,7 +369,8 @@ deletable.
   ingestion before owner dispatch. Structured DO RPC continues to cross the custom RPC
   boundary as bounded JSON data rather than a `Request`.
 - `WEBSOCKET_RECONNECT_DELAYS_MS` and `WEBSOCKET_MAX_BUFFERED_MESSAGES` tune gateway
-  backend reconnect budget and client-message buffering without a code rebuild.
+  backend reconnect budget and queued client-message count without a code rebuild.
+  The per-connection queued payload-byte cap is fixed at 32 MiB and is not configurable.
 - Alarm delivery is at-least-once. Scheduler wakes Workflows; Workflows promotes due
   internal alarm jobs to ready, claims one job under a DB 2 run token, and calls
   do-runtime `/internal/do/alarms/dispatch`. do-runtime constructs a native
@@ -672,9 +673,9 @@ logs do not measure the lifetime of backend WebSocket recovery after the initial
   hint has no incarnation fence with which to identify pre-delete sessions.
   Backend DO facets are not re-fenced per message after the initial `101`; owner handoff
   safety relies on reconnect/rebind behavior and the owner-side dispatch fences that run
-  before a backend facet is created. Client messages queued under an older backend
-  reconnect epoch may be discarded without per-frame ack/nack when the gateway resets
-  that epoch.
+  before a backend facet is created. Gateway retains queued client messages in order
+  across backend reconnects. Terminal closure discards pending messages without
+  per-frame ack/nack.
 - A cached WebSocket owner may trigger one router rediscovery only through a valid trusted
   same-shard owner hint or a narrow pre-dispatch ownership race. Broad ownership errors
   and unmarked transport failures do not fall back because the final 101 must come from

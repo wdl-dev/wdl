@@ -45,7 +45,7 @@ version's `compatibility_date`; see the
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-09-23`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-09-29`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 
@@ -144,10 +144,10 @@ docs:
 | Surface | Status | Current WDL position |
 |---|---|---|
 | Cache API / Cloudflare edge cache semantics | Not supported | `caches.default` is not part of the stock workerd surface WDL exposes, and WDL does not implement Cloudflare's edge cache tier. Tenant code should not depend on this binding or use it as a persistence/CDN contract. |
-| Vectorize, Analytics Engine, Browser Rendering, Hyperdrive, Email Workers | Not supported | No binding facade, control-plane metadata, or backing service exists in WDL. |
+| Vectorize, Analytics Engine / Analytics SQL, Browser Rendering, Hyperdrive, Email Workers | Not supported | No binding facade, control-plane metadata, or backing service exists in WDL. |
 | R2 multipart upload, customer-provided encryption keys, and Cloudflare-specific checksum behavior | Not supported | The current R2 facade targets S3-compatible object operations needed by WDL workers/assets. Advanced Cloudflare R2 behaviors need explicit design before being documented as compatible. |
 | Queue `contentType = "v8"` and per-consumer `max_concurrency` | Not supported | Queue messages support the documented `json`, `text`, and `bytes` content types; only `v8` is rejected. Dispatch concurrency remains scheduler-owned, and `max_concurrency` is rejected instead of silently ignored. |
-| Incoming TCP `connect()` handlers and Socket RPC transfer | Not supported | The bundled workerd has an incoming `connect()` entrypoint and an autogated Socket RPC transfer path, but WDL configures no tenant raw-TCP ingress and does not enable that autogate. This does not affect the documented outbound `cloudflare:sockets` surface. |
+| Incoming TCP/UDP `connect()` handlers and Socket RPC transfer | Not supported | WDL configures no tenant raw-TCP or raw-UDP ingress. UDP also requires the worker `experimental` flag, which WDL rejects for tenants; Socket RPC transfer remains autogated and disabled. This does not affect the documented outbound `cloudflare:sockets` surface. |
 | Upstream experimental and WDL-denied compatibility flags | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental`, plus WDL's explicit deny policies for `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and `streams_disable_constructors`, are rejected at deploy and runtime decode. New Module Registry has graduated upstream, but WDL's generated wrapper is the actual dynamic-loader main module and cannot preserve tenant `import.meta.main`; Fetcher RPC and standard stream constructors are required by WDL runtime facades. |
 | Python Workers | Not supported | WDL rejects Python module manifests instead of letting workerd fail at cold-load. |
 | Durable Object cross-script bindings and migration rename/delete semantics | Not supported | WDL DO classes are same-worker only. Storage identity, owner routing, and delete cleanup are WDL-managed rather than Cloudflare migration-compatible. |

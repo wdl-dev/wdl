@@ -35,6 +35,7 @@ Scheduler 负责实际投递：
 - Runtime producer API：`env.<BINDING>.send(body, opts?)`
 - Runtime producer API：`env.<BINDING>.sendBatch(messages, opts?)`
 - Producer 上限是单条消息 128,000 bytes、单个 batch 100 条消息、单个 batch 总计 256,000 bytes。
+- Envelope builder 在 Base64 分配前按 message limit 与 batch 剩余额度检查字符串大小下界和 binary byte length。明显超限的字符串在 UTF-8 encoding 前拒绝，其余字符串检查精确编码字节数。JSON 使用原生序列化，不预遍历对象；被拒绝的 batch 不写入任何消息。
 - Runtime consumer handler：`export default { async queue(batch, env, ctx) {} }`
 - Producer `delivery_delay` 已支持，作为该 binding 上 send 的默认 delay。
 - Consumer `retry_delay` 已支持，作为没有显式 `delaySeconds` 的 retry 默认 delay。
