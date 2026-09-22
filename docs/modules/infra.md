@@ -187,6 +187,10 @@ Stateful storage:
 - Gateway, user-runtime, and system-runtime can be horizontally replicated behind the
   environment's load balancing and service discovery layer. Local route caches, loaded
   isolates, and owner hints are optimizations, not authority.
+- Workerd's Unix I/O backend uses an additional file descriptor per socket monitored
+  for disconnects. Account for these descriptors when sizing the process open-file
+  limit, especially for long-lived WebSocket and SSE connections. They do not create
+  additional TCP connections.
 - D1/DO use owner leases, monotonic generation fences, and local drain/renew. Scaling
   them beyond one task requires stable per-replica storage identity and private local
   supervisor access so drain/renew never targets another replica by service alias.

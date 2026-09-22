@@ -102,6 +102,7 @@ Stateful storage：
 - Workflows 是独立 Rust service。
 - Scheduler 和 Workflows 默认最多 drain 25 秒 in-flight work；Compose、Kubernetes 和 Terraform ECS 均固定 30 秒 stop window，避免平台在默认应用 drain 结束前终止进程。部署如覆盖 `SCHEDULER_SHUTDOWN_DRAIN_MS` 或 `WORKFLOWS_SHUTDOWN_DRAIN_MS`，应同步评估对应的 stop window。
 - Gateway、user-runtime 和 system-runtime 可以放在环境的 load balancing / service discovery 层后面水平扩展。本地 route cache、已加载 isolate 和 owner hint 都是优化，不是 authority。
+- Workerd 的 Unix I/O backend 为每个被监视断连的 socket 额外使用一个文件描述符。规划进程 open-file limit 时应计入这些描述符，尤其是长时间保持的 WebSocket 和 SSE connection；它们不会创建额外的 TCP connection。
 - D1/DO 使用 owner lease、monotonic generation fence 和本地 drain/renew。超过 1 个 task 时需要稳定的 per-replica storage identity，并确保 supervisor drain/renew 只走私有本地入口，不能通过 service alias 打到其他 replica。
 - 普通 D1/DO task 丢失会退回到 lease expiry，再由其他 replica takeover；graceful rollout 应优先走 supervisor drain，在 child workerd process 退出前释放 ownership。
 - Terraform 在 ECS Fargate 上运行这套应用 stack 的服务。修改 capacity policy 时应记录哪些服务可以使用 `FARGATE_SPOT`；stateful runtime 和 singleton control loop 除非重新评估 interruption 语义，否则应保持 on-demand Fargate。

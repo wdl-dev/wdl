@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20260922.1` and `5.20260922.1`, raising the maximum compatibility date to `2026-09-29`. Includes V8 15.4, Tokio-backed I/O, and native compression buffering improvements. Node filesystem calls now return `ENOENT` for missing files without create flags, and `createWriteStream()` defaults to `w`. Allow an extra Unix descriptor per socket monitored for disconnects; upgrades from `wdl.20260916.1` require no WDL state migration.
 - Reject oversized Queue messages and AI WebSocket frames before avoidable encoding or copying; Queue batches apply their remaining byte budget before constructing each envelope.
 - Bound each Gateway WebSocket client send queue to 32 MiB in addition to its message-count limit, releasing queued payloads on close without changing reconnect ordering.
 

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { open } from "node:fs/promises";
 import { Buffer } from "node:buffer";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { promisify } from "node:util";
 import { Readable, Writable, PassThrough, compose } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
@@ -18,11 +19,27 @@ async function errorCode(callback) {
 }
 
 async function filesystemProbe() {
-  const path = `/tmp/wdl-node-io-${crypto.randomUUID()}`;
+  const directory = `/tmp/wdl-node-io-${crypto.randomUUID()}`;
+  fs.mkdirSync(directory);
+  const path = `${directory}/file`;
   const views = [];
   const truncation = [];
+  const missing = [];
   try {
     for (const mode of ["sync", "callback", "promise"]) {
+      const missingPath = `${directory}/missing-${mode}`;
+      const code = await errorCode(async () => {
+        if (mode === "promise") {
+          const file = await open(missingPath, "r");
+          await file.close();
+        } else {
+          const fd = mode === "sync"
+            ? fs.openSync(missingPath, "r")
+            : await promisify(fs.open)(missingPath, "r");
+          fs.closeSync(fd);
+        }
+      });
+      missing.push({ mode, code, created: fs.existsSync(missingPath) });
       fs.writeFileSync(path, "0123456789");
       const handle = await open(path, "r+");
       try {
@@ -70,9 +87,35 @@ async function filesystemProbe() {
         }
       }
     }
-    return { views, truncation };
+    const missingParent = await errorCode(() =>
+      fs.closeSync(fs.openSync(`${directory}/missing-parent/file`, "w")));
+    const parentCreated = fs.existsSync(`${directory}/missing-parent`);
+
+    const writeStreams = [];
+    for (const flags of [undefined, "a", "wx"]) {
+      fs.writeFileSync(path, "previous");
+      const stream = fs.createWriteStream(path, flags === undefined ? {} : { flags });
+      const completion = errorCode(() => finished(stream));
+      stream.end("next");
+      writeStreams.push({ flags: flags ?? "default", code: await completion,
+        value: fs.readFileSync(path, "utf8") });
+    }
+
+    const source = `${directory}/source`;
+    fs.writeFileSync(source, "renamed");
+    const renameCode = await errorCode(() => fs.renameSync(source, path));
+    const renameValue = fs.readFileSync(path, "utf8");
+    const sourceRemains = fs.existsSync(source);
+    fs.writeFileSync(source, "copied");
+    const copyCode = await errorCode(() => fs.copyFileSync(source, path));
+    const copyValue = fs.readFileSync(path, "utf8");
+    fs.writeFileSync(source, "must not replace");
+    const exclusiveCode = await errorCode(() => fs.copyFileSync(source, path, fs.constants.COPYFILE_EXCL));
+    return { views, truncation, missing, missingParent, parentCreated, writeStreams,
+      replacement: { renameCode, renameValue, sourceRemains, copyCode, copyValue,
+        exclusiveCode, afterExclusive: fs.readFileSync(path, "utf8") } };
   } finally {
-    fs.unlinkSync(path);
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -114,6 +157,44 @@ async function streamsProbe() {
   })();
   composed.end("compose");
   return { piped: piped.join(""), batched, composed: await collected };
+}
+
+async function compressionProbe() {
+  const input = Buffer.alloc(1024 * 1024 + 17);
+  for (let index = 0; index < input.length; index += 1) input[index] = index % 251;
+  const encoded = await new Response(
+    new Blob([input]).stream().pipeThrough(new CompressionStream("gzip"))
+  ).arrayBuffer();
+  const decoded = await new Response(
+    new Blob([encoded]).stream().pipeThrough(new DecompressionStream("gzip"))
+  ).arrayBuffer();
+  const nodeEncoded = gzipSync(input);
+  const nodeDecoded = await new Response(
+    new Blob([nodeEncoded]).stream().pipeThrough(new DecompressionStream("gzip"))
+  ).arrayBuffer();
+  const invalid = await errorCode(() => new Response(
+    new Blob([Uint8Array.of(0, 1, 2)]).stream().pipeThrough(new DecompressionStream("gzip"))
+  ).arrayBuffer());
+
+  const reader = new Blob([encoded]).stream()
+    .pipeThrough(new DecompressionStream("gzip")).getReader();
+  let firstBytes;
+  try {
+    firstBytes = (await reader.read()).value.byteLength;
+    await reader.cancel("probe complete");
+  } finally {
+    reader.releaseLock();
+  }
+  return {
+    inputBytes: input.length,
+    webRoundtrip: Buffer.from(decoded).equals(input),
+    nodeToWebRoundtrip: Buffer.from(nodeDecoded).equals(input),
+    webToNodeRoundtrip: gunzipSync(new Uint8Array(encoded)).equals(input),
+    invalid,
+    cancelledAfterRead: firstBytes > 0,
+    utf16Slice: Buffer.from([0xff, 0x41, 0, 0x42, 0, 0xac, 0x20, 0xee])
+      .subarray(1, 7).toString("utf16le"),
+  };
 }
 
 async function streamFailuresProbe() {
@@ -200,6 +281,7 @@ export default {
     if (path.startsWith("/network/")) return Response.json(await networkProbe(request));
     if (path === "/fs") return Response.json(await filesystemProbe());
     if (path === "/streams") return Response.json(await streamsProbe());
+    if (path === "/compression") return Response.json(await compressionProbe());
     if (path === "/stream-failures") return Response.json(await streamFailuresProbe());
     return new Response(null, { status: 404 });
   },
