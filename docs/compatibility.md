@@ -45,7 +45,7 @@ version's `compatibility_date`; see the
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-09-29`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-09-30`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 

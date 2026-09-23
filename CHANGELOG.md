@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20260923.1` and `5.20260923.1`, raising the maximum compatibility date to `2026-09-30`. Includes upstream native stream disconnect and BYOB fixes; new JSRPC stream cancellation remains behind disabled autogates. No WDL state migration is required.
+- Refreshed the pinned Distroless `base-debian13` image used by workerd-based services.
+
 ## wdl.20260922.1 - 2026-09-23
 
 - Updated workerd and Workers types to `1.20260922.1` and `5.20260922.1`, raising the maximum compatibility date to `2026-09-29`. Includes V8 15.4, Tokio-backed I/O, native compression buffering, and Node filesystem fixes: missing files without create flags return `ENOENT`, and `createWriteStream()` defaults to `w`. Upgrades from `wdl.20260916.1` require no WDL state migration.
