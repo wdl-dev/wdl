@@ -211,3 +211,64 @@ test("__system__ worker reaches redis:6379 via cloudflare:sockets connect()", as
   assert.match(body.reply, /^\+PONG/,
     `expected +PONG from redis, got ${JSON.stringify(body.reply)}`);
 });
+
+const SOCKET_TARGET_WORKER = `
+  import { WorkerEntrypoint } from "cloudflare:workers";
+  export default class extends WorkerEntrypoint {
+    async take() { return "taken"; }
+    async fetch() { return new Response("socket target"); }
+  }
+`;
+
+const SOCKET_CALLER_WORKER = `
+  import { connect } from "cloudflare:sockets";
+  export default {
+    async fetch(_request, env) {
+      const sock = connect("redis:6379");
+      await sock.opened;
+      try {
+        return Response.json({ taken: await env.TARGET.take(sock) });
+      } catch (err) {
+        return Response.json({ name: err.name, message: err.message });
+      } finally {
+        try { await sock.close(); } catch {}
+      }
+    },
+  };
+`;
+
+test("__system__ service binding RPC rejects cloudflare:sockets Socket transfer", async () => {
+  // Socket RPC transfer is autogated off in the bundled workerd; the
+  // compatibility matrix documents it as unsupported.
+  const host = `${uniqueNs("syssock").replaceAll("-", "")}.test`;
+  assertStatus(await adminPost("/ns/__system__/hosts", { hosts: [host] }), 200, "system host declare");
+  const suffix = host.split(".")[0];
+  const targetName = `socket-target-${suffix}`;
+  const callerName = `socket-caller-${suffix}`;
+  for (const [name, source, extra] of /** @type {Array<[string, string, Record<string, unknown>]>} */ ([
+    [targetName, SOCKET_TARGET_WORKER, {}],
+    [callerName, SOCKET_CALLER_WORKER, {
+      routes: [`${host}/probe`],
+      bindings: { TARGET: { type: "service", service: targetName } },
+    }],
+  ])) {
+    const dep = await adminPost(`/ns/__system__/worker/${name}/deploy`, {
+      mainModule: "worker.js",
+      modules: { "worker.js": source },
+      ...extra,
+    });
+    assertStatus(dep, 201, `${name} deploy`);
+    assertStatus(
+      await adminPost(`/ns/__system__/worker/${name}/promote`, { version: dep.json.version }),
+      200,
+      `${name} promote`
+    );
+  }
+
+  const res = await hostFetch(host, "/probe");
+  assert.equal(res.status, 200, res.body);
+  assert.deepEqual(res.json(), {
+    name: "DataCloneError",
+    message: 'Could not serialize object of type "Socket". This type does not support serialization.',
+  });
+});

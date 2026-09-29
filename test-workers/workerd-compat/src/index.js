@@ -10,7 +10,18 @@ async function tracingProbe(ctx) {
   const setAttributeChained = span.setAttribute("probe", "one") === span;
   const setAttributesChained = span.setAttributes({ second: 2, omitted: undefined }) === span;
   const startSpanPreservesActive = ctx.tracing.getActiveSpan() === previousSpan;
+  const updateNameChained = span.updateName("wdl-workerd-compat-renamed") === span;
+  const setStatusChained = span.setStatus({ code: "ok" }) === span &&
+    span.setStatus({ code: "error", message: "workerd compatibility status" }) === span;
+  let invalidStatusError = null;
+  try {
+    span.setStatus({ code: "invalid" });
+  } catch (error) {
+    invalidStatusError = error.name;
+  }
   span.end();
+  const endedSpanChained = span.updateName("wdl-workerd-compat-ended") === span &&
+    span.setStatus({ code: "unset" }) === span;
 
   const pending = ctx.tracing.startActiveSpan("wdl-workerd-compat-active", async (activeSpan) => {
     try {
@@ -46,6 +57,10 @@ async function tracingProbe(ctx) {
     setAttributeChained,
     setAttributesChained,
     startSpanPreservesActive,
+    updateNameChained,
+    setStatusChained,
+    invalidStatusError,
+    endedSpanChained,
     activeSpan: {
       ...activeSpanResult,
       callerPreservedWhilePending,

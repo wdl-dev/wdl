@@ -284,7 +284,7 @@ test("D1 binding wraps declared named entrypoints for service binding callers", 
   }, { timeoutMs: 10000, intervalMs: 500 });
 });
 
-test("D1 compat worker covers blob params raw edges SQL defaults and batch error shape", async () => {
+test("D1 compat worker covers blob params raw edges SQL defaults batch error shape and SQLite value limit", async () => {
   const ns = uniqueNs("d1compat");
   await adminPost(`/ns/${ns}/d1/databases`, {
     databaseName: "compat-main",
@@ -331,6 +331,21 @@ test("D1 compat worker covers blob params raw edges SQL defaults and batch error
     retryable: false,
   });
   assert.equal(defaults.blockedRows, 0);
+
+  // SQL-generated values bypass the 8 MiB query-body cap but not SQLite's own
+  // nominal 8 MiB length limit.
+  const tooBig = {
+    name: "D1_ERROR",
+    code: "sql-error",
+    category: "sql",
+    message: "D1_ERROR [sql-error]: SQL error: string or blob too big: SQLITE_TOOBIG",
+  };
+  assert.deepEqual(await call(ns, "compat", { op: "sqlite-value-limit" }), {
+    blobAtLimit: 8 * 1024 * 1024,
+    blobOverLimit: tooBig,
+    textAtLimit: 8 * 1024 * 1024,
+    textOverLimit: tooBig,
+  });
 });
 
 test("D1 batch is transactional", async () => {

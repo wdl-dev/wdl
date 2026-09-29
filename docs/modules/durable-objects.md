@@ -46,6 +46,10 @@ commit boundary.
 - Tenant binding: Durable Object namespace facade in loaded worker env.
 - Native `ctx.storage.sql` supports SQLite R*Tree virtual tables (`rtree`, `rtree_i32`)
   and `rtreecheck()` under the same facet storage and ownership boundaries.
+- Bundled workerd applies SQLite's native length limit to `ctx.storage.sql` at a
+  nominal `8 MiB`, with a small upstream serialization allowance, for each string,
+  BLOB, and encoded row. Exceeding it throws `string or blob too big: SQLITE_TOOBIG`.
+  The 1 MiB DO RPC argument cap does not bound values a facet builds itself.
 - Runtime -> do-runtime fetch/RPC: `/internal/do/invoke`
 - Runtime -> do-runtime WebSocket: `/internal/do/connect`
 - do-runtime -> workflows alarm writes: `/internal/workflows/do-alarms/set`,

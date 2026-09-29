@@ -76,6 +76,10 @@ const BASE64_PROBE_WORKER = `
  *     setAttributeChained: boolean,
  *     setAttributesChained: boolean,
  *     startSpanPreservesActive: boolean,
+ *     updateNameChained: boolean,
+ *     setStatusChained: boolean,
+ *     invalidStatusError: string | null,
+ *     endedSpanChained: boolean,
  *     activeSpan: {
  *       beforeAwait: boolean,
  *       afterAwait: boolean,
@@ -310,6 +314,10 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       setAttributeChained: true,
       setAttributesChained: true,
       startSpanPreservesActive: true,
+      updateNameChained: true,
+      setStatusChained: true,
+      invalidStatusError: "TypeError",
+      endedSpanChained: true,
       activeSpan: {
         beforeAwait: true,
         afterAwait: true,

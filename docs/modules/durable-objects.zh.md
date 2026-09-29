@@ -25,6 +25,7 @@ WDL 会 shim `ctx.storage.setAlarm()`、`getAlarm()` 和 `deleteAlarm()`，因�
 
 - Tenant binding：loaded worker env 中的 Durable Object namespace facade。
 - Native `ctx.storage.sql` 支持 SQLite R*Tree virtual table（`rtree`、`rtree_i32`）和 `rtreecheck()`，并沿用同一套 facet storage 与 ownership 边界。
+- Bundled workerd 对 `ctx.storage.sql` 沿用 SQLite 原生长度限制，对每个 string、BLOB 和编码后的整行施加标称 `8 MiB` 上限，上游保留少量序列化余量。超限会抛出 `string or blob too big: SQLITE_TOOBIG`。1 MiB DO RPC argument 上限不约束 facet 自行构造的 value。
 - Runtime -> do-runtime fetch/RPC：`/internal/do/invoke`
 - Runtime -> do-runtime WebSocket：`/internal/do/connect`
 - do-runtime -> workflows alarm 写入：`/internal/workflows/do-alarms/set`、`/internal/workflows/do-alarms/delete`

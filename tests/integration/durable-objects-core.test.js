@@ -268,6 +268,17 @@ test("Durable Object RPC dispatches class methods with structured args", async (
     code: "do_rpc_error",
   });
 
+  const tooBig = "string or blob too big: SQLITE_TOOBIG";
+  const valueLimit = await gatewayFetch(ns, "/rooms/sqlite-value-limit?name=sqlite-value-limit");
+  const valueLimitText = await valueLimit.text();
+  assert.equal(valueLimit.status, 200, valueLimitText);
+  assert.deepEqual(responseJson({ body: valueLimitText }), {
+    blobAtLimit: "ok",
+    blobOverLimit: tooBig,
+    textAtLimit: "ok",
+    textOverLimit: tooBig,
+  });
+
   const undefinedResult = await gatewayFetch(ns, "/rooms/undefined?name=alice");
   const undefinedResultText = await undefinedResult.text();
   assert.equal(undefinedResult.status, 200, undefinedResultText);

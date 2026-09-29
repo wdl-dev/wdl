@@ -220,8 +220,10 @@ test("restart session policy fences each evictable runtime's retained native fac
   const ownerKey = doHostId(ns, "probe", "Room", objectName);
 
   await withDoMultiRuntimes(async () => {
-    const invoke = (/** @type {string} */ service, /** @type {string} */ version) => (
-      doInternalInvoke(service, {
+    /** @type {unknown[]} */
+    const diagnostics = [];
+    const invoke = (/** @type {string} */ service, /** @type {string} */ version) => {
+      const response = doInternalInvoke(service, {
         ns,
         worker: "probe",
         version,
@@ -233,12 +235,14 @@ test("restart session policy fences each evictable runtime's retained native fac
           url: "https://do.internal/eviction-counter",
           headers: {},
         },
-      })
-    );
+      });
+      diagnostics.push({ service, version, at: Date.now(), status: response.status, body: response.body, headers: response.headers });
+      return response;
+    };
     const expireOwner = (/** @type {string} */ taskId) => {
       const owner = redisGetDoOwner(ownerKey);
       assert.equal(owner.taskId, taskId);
-      redisSetDoOwner(ownerKey, { ...owner, leaseExpiresAt: Date.now() - 1000 });
+      redisSetDoOwner(ownerKey, { ...owner, leaseExpiresAt: 0 });
     };
 
     const first = invoke("do-runtime-a", v1);
@@ -247,7 +251,7 @@ test("restart session policy fences each evictable runtime's retained native fac
       buildLabel: "v1",
       memoryHits: 1,
       storageHits: 1,
-    });
+    }, JSON.stringify(diagnostics));
     assert.equal(redisGetDoOwner(ownerKey).taskId, "do-runtime-a");
 
     await delay(15_000);
@@ -260,7 +264,7 @@ test("restart session policy fences each evictable runtime's retained native fac
       buildLabel: "v2",
       memoryHits: 1,
       storageHits: 2,
-    });
+    }, JSON.stringify(diagnostics));
     assert.equal(redisGetDoOwner(ownerKey).taskId, "do-runtime-b");
 
     expireOwner("do-runtime-b");
@@ -270,11 +274,51 @@ test("restart session policy fences each evictable runtime's retained native fac
       buildLabel: "v2",
       memoryHits: 1,
       storageHits: 3,
-    });
+    }, JSON.stringify(diagnostics));
     assert.equal(redisGetDoOwner(ownerKey).taskId, "do-runtime-a");
   }, {
     preventEviction: false,
     renewStartDelayMs: 600_000,
     renewIntervalMs: 600_000,
   });
+});
+
+test("host actor reconstruction neither drops nor replays concurrent dispatches", async () => {
+  const ns = uniqueNs("do-eviction-once");
+  // Multi-runtime tests restore the resident singleton; this gate needs eviction.
+  await recreateDoSingleRuntime({ preventEviction: false });
+  await waitForDoRuntimeReady(false);
+  await deployProbe(ns);
+  const path = "/probe/eviction-invocation?name=invocations";
+
+  /** @type {Array<{ id: string, instance: string }>} */
+  const dispatched = [];
+  let lastDispatchAt = Date.now();
+  // Idle windows around workerd's inactivity shutdown spread bursts across host
+  // actor reconstructions; the assertions cover loss and duplication across them.
+  for (const idleMs of [10_000, 12_000, 14_000, 16_000]) {
+    await waitForElapsed(lastDispatchAt, idleMs);
+    const burst = [];
+    for (let index = 0; index < 20; index += 1) {
+      const id = `${idleMs}-${String(index).padStart(2, "0")}`;
+      burst.push(gatewayFetch(ns, path, { method: "POST", body: id }).then(async (response) => (
+        /** @type {{ id: string, instance: string }} */ (await readIntegrationJson(response, 200, `invocation ${id}`))
+      )));
+      await delay(2);
+    }
+    dispatched.push(...await Promise.all(burst));
+    lastDispatchAt = Date.now();
+  }
+
+  const recorded = /** @type {Array<{ id: string, runs: number }>} */ (
+    await readIntegrationJson(await gatewayFetch(ns, path), 200, "recorded invocations")
+  );
+  assert.deepEqual(
+    recorded,
+    dispatched.map(({ id }) => ({ id, runs: 1 })).sort((a, b) => (a.id < b.id ? -1 : 1))
+  );
+  assert.ok(
+    new Set(dispatched.map(({ instance }) => instance)).size >= 2,
+    "expected at least one host actor reconstruction across idle windows"
+  );
 });
