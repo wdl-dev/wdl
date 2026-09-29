@@ -2,7 +2,10 @@
 
 ## Unreleased
 
+## wdl.20260928.1 - 2026-09-30
+
 - Updated workerd and Workers types to `1.20260928.1` and `5.20260928.1`, raising the maximum compatibility date to `2026-10-05`. The SQLite string, BLOB, and row length limit for D1 and Durable Objects rises from a nominal 4 MiB to 8 MiB; D1 query bodies remain capped at 8 MiB, which does not bound values generated inside SQL. `1.20260929.1` is skipped: one tenant `console.log()` whose formatting throws aborts the whole workerd process ([cloudflare/workerd#7576](https://github.com/cloudflare/workerd/issues/7576)). No WDL state migration is required.
+- CI and install docs now qualify `@wdl-dev/cli` `1.9.2`; the minimum supported CLI remains `1.9.0`.
 
 ## wdl.20260923.1 - 2026-09-23
 

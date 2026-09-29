@@ -58,7 +58,7 @@ CLI 可以展示：
 
 | WDL source line | 最低支持 CLI | CI-qualified CLI |
 | --- | --- | --- |
-| 当前 `main` / 下一次 release | `1.9.0` | `1.9.0` |
+| 当前 `main` / 下一次 release | `1.9.0` | `1.9.2` |
 
 Workflow definition 分页要求 CLI `1.9.0` 或更高版本，以传递 opaque cursor 并在短页或空页后显示 continuation。部署分页 Control endpoint 前应先升级已安装的 CLI client；升级 WDL service 不会升级 CLI。
 

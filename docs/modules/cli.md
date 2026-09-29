@@ -94,7 +94,7 @@ The maintained compatibility declaration for current `main` and its next release
 
 | WDL source line | Minimum supported CLI | CI-qualified CLI |
 | --- | --- | --- |
-| Current `main` / next release | `1.9.0` | `1.9.0` |
+| Current `main` / next release | `1.9.0` | `1.9.2` |
 
 Workflow definition pagination requires CLI `1.9.0` or later to pass opaque cursors
 and display continuation after short or empty pages. Upgrade installed CLI clients
