@@ -106,6 +106,29 @@ async function sqlDefaults(env) {
   return { allowed, error, blockedRows };
 }
 
+async function sqliteValueLimit(env) {
+  await resetTable(env.DB, "create table if not exists large_values (value blob)", "large_values");
+  // Values are generated inside SQLite, so the query body stays tiny and cannot
+  // bound them.
+  const limit = 8 * 1024 * 1024;
+  const insert = async (expression, size) => {
+    try {
+      await env.DB.prepare(`insert into large_values(value) values (${expression})`).bind(size).run();
+      return await env.DB.prepare("select length(value) as length from large_values").first("length");
+    } catch (err) {
+      return { name: err.name, code: err.code, category: err.category, message: err.message };
+    } finally {
+      await env.DB.prepare("delete from large_values").run();
+    }
+  };
+  return {
+    blobAtLimit: await insert("zeroblob(?)", limit),
+    blobOverLimit: await insert("zeroblob(?)", limit + 64),
+    textAtLimit: await insert("hex(zeroblob(?))", limit / 2),
+    textOverLimit: await insert("hex(zeroblob(?))", limit / 2 + 32),
+  };
+}
+
 const worker = {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -114,6 +137,7 @@ const worker = {
     if (op === "raw") return Response.json(await rawEdges(env));
     if (op === "batch-error") return Response.json(await batchError(env));
     if (op === "sql-defaults") return Response.json(await sqlDefaults(env));
+    if (op === "sqlite-value-limit") return Response.json(await sqliteValueLimit(env));
     return new Response("unknown D1 compat op", { status: 400 });
   },
   get test() {
