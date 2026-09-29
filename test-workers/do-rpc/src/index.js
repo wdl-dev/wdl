@@ -33,6 +33,28 @@ export class Room extends DurableObject {
     throw { custom: 1 };
   }
 
+  sqliteValueLimit() {
+    const sql = this.ctx.storage.sql;
+    sql.exec("CREATE TABLE IF NOT EXISTS large_values (id INTEGER PRIMARY KEY, value BLOB)");
+    const insert = (value) => {
+      try {
+        sql.exec("INSERT INTO large_values(value) VALUES (?)", value);
+        return "ok";
+      } catch (err) {
+        return err.message;
+      } finally {
+        sql.exec("DELETE FROM large_values");
+      }
+    };
+    const limit = 8 * 1024 * 1024;
+    return {
+      blobAtLimit: insert(new Uint8Array(limit)),
+      blobOverLimit: insert(new Uint8Array(limit + 64)),
+      textAtLimit: insert("x".repeat(limit)),
+      textOverLimit: insert("x".repeat(limit + 64)),
+    };
+  }
+
   returnUndefined() {
     return undefined;
   }
@@ -99,6 +121,9 @@ export default {
       } catch (err) {
         return Response.json({ name: err.name, message: err.message, code: err.code || null }, { status: 500 });
       }
+    }
+    if (url.pathname === "/sqlite-value-limit") {
+      return Response.json(await stub.sqliteValueLimit());
     }
     if (url.pathname === "/undefined") {
       const result = await stub.returnUndefined();

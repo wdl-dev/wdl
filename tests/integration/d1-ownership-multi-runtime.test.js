@@ -487,7 +487,7 @@ test("D1 expired owner takeover succeeds after probe failure", async () => {
     taskId: "missing-owner",
     endpoint: "d1-runtime-missing:8787",
     generation: 42,
-    leaseExpiresAt: Date.now() - 1_000,
+    leaseExpiresAt: 0,
   });
 
   const takeover = d1RuntimeQuery("d1-runtime-b", {

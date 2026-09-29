@@ -440,13 +440,13 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
   drain; workerd upgrades must reverify that behavior.
 - Bundled workerd returns `0` from `Date.now()`, zero-argument `new Date()`, and
   `performance.now()` outside an active request, including dynamic module evaluation.
-  Generated wrappers pass through the request-owned
-  `ExecutionContext`, so `ctx.abort(reason?)`, `ctx.tracing.startSpan()`,
-  `ctx.tracing.getActiveSpan()`, `Span.recordException()`, and span attribute setters
-  are available without a WDL shim. The tracing methods need no additional tracing
-  flag, but their availability does not imply span export. `ctx.abort()` terminates
-  only the current stateless invocation; it is unrelated to host-only `abortIsolate()`
-  eviction.
+  Generated wrappers pass through the request-owned `ExecutionContext`, so
+  `ctx.abort(reason?)`, `ctx.tracing.startSpan()`, `ctx.tracing.getActiveSpan()`,
+  `Span.recordException()`, span attribute setters, `Span.updateName()`, and
+  `Span.setStatus()` are available without a WDL shim. The tracing methods need no
+  additional tracing flag, but their availability does not imply span export.
+  `ctx.abort()` terminates only the current stateless invocation; it is unrelated to
+  host-only `abortIsolate()` eviction.
 - At compatibility date `2026-08-04` or later, workerd enables both `nodejs_compat` and
   `nodejs_compat_v2` by default. A tenant that needs neither surface must specify both
   `no_nodejs_compat` and `no_nodejs_compat_v2`.

@@ -6,6 +6,7 @@ export class Room extends DurableObject {
     this.evictionBuildLabel = env.EVICTION_BUILD_LABEL || "fixture";
     this.evictionHttpHits = 0;
     this.evictionWebSocketMessages = 0;
+    this.evictionInstance = crypto.randomUUID();
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
 
@@ -43,7 +44,21 @@ export class Room extends DurableObject {
         buildLabel: this.evictionBuildLabel,
         memoryHits: this.evictionHttpHits,
         storageHits: row.hits,
-      });
+      }, { headers: { "x-eviction-facet-instance": this.evictionInstance } });
+    }
+    if (url.pathname.endsWith("/eviction-invocation")) {
+      const sql = this.ctx.storage.sql;
+      sql.exec("CREATE TABLE IF NOT EXISTS eviction_invocations (id TEXT PRIMARY KEY, runs INTEGER NOT NULL)");
+      if (request.method === "GET") {
+        return Response.json([...sql.exec("SELECT id, runs FROM eviction_invocations ORDER BY id")]);
+      }
+      const id = await request.text();
+      sql.exec(
+        "INSERT INTO eviction_invocations (id, runs) VALUES (?, 1) " +
+          "ON CONFLICT(id) DO UPDATE SET runs = runs + 1",
+        id
+      );
+      return Response.json({ id, instance: this.evictionInstance });
     }
     if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket") {
       return new Response("need websocket", { status: 426 });

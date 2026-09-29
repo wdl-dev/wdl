@@ -157,7 +157,7 @@ test("Durable Object takeover preserves committed SQLite state after owner loss"
     composeStop("do-runtime-a");
     redisSetDoOwner(ownerKey, {
       ...owner,
-      leaseExpiresAt: Date.now() - 1000,
+      leaseExpiresAt: 0,
     });
 
     const afterTakeover = invoke("do-runtime-b", "alice");
@@ -302,7 +302,7 @@ test("Durable Object committed SQLite state survives hard owner SIGKILL and take
     });
     redisSetDoOwner(ownerKey, {
       ...owner,
-      leaseExpiresAt: Date.now() - 1000,
+      leaseExpiresAt: 0,
     });
 
     /** @type {string | null} */
@@ -448,7 +448,7 @@ test("do-runtime replicas forward a sharded object owner scope instead of splitt
       taskId: "missing-owner",
       endpoint: "do-runtime-missing:8788",
       generation: 42,
-      leaseExpiresAt: Date.now() - 1000,
+      leaseExpiresAt: 0,
     });
     redisSet(`${doOwnerRedisKey(takeoverOwnerKey)}:generation`, "40");
     const takeover = invoke("do-runtime-a", "takeover");

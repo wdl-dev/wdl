@@ -1232,7 +1232,7 @@ test("leased DO alarm redelivers after owner task crash before completion", asyn
         (members) => members === 2,
         10000
       );
-      redisSetDoOwner(ownerKey, { ...owner, leaseExpiresAt: Date.now() - 1000 });
+      redisSetDoOwner(ownerKey, { ...owner, leaseExpiresAt: 0 });
 
       const retryDue = Date.now() - 1000;
       redisSetDoAlarmJob(jobId, {
