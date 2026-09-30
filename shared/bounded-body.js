@@ -165,7 +165,7 @@ export async function readBoundedBytes(request, maxBytes, signal) {
 }
 
 /**
- * @param {Request} request
+ * @param {Request | Response} request
  * @param {number} maxBytes
  * @param {AbortSignal} [signal]
  */

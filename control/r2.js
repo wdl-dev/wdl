@@ -1,6 +1,8 @@
 import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { discardResponseBody } from "shared-respond";
 import { S3_TRANSIENT_RETRIES } from "shared-s3-retry";
+import { S3_ERROR_BODY_MAX_BYTES, streamS3Response, withS3Request } from "shared-s3-request";
+import { readBoundedText } from "shared-bounded-body";
 import {
   encodeS3KeyPath,
   encodeS3Query,
@@ -18,6 +20,7 @@ const DEFAULT_LIST_LIMIT = 1000;
 /**
  * @typedef {{ client: SigV4Client, endpoint: string, bucket: string }} R2Admin
  * @typedef {{ ns: string, bucketName: string }} R2ObjectScope
+ * @typedef {{ waitUntil(promise: Promise<unknown>): void }} R2RequestContext
  */
 
 /** @param {string} etag */
@@ -61,7 +64,7 @@ function requestHeaders(requestId) {
 }
 
 /**
- * @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string, method: "GET" | "HEAD" | "DELETE", notFound?: "error" | "null" | "ok" }} args
+ * @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string, ctx?: R2RequestContext | null, method: "GET" | "HEAD" | "DELETE", notFound?: "error" | "null" | "ok" }} args
  * @returns {Promise<Response | null>}
  */
 async function fetchR2AdminObject({
@@ -71,24 +74,33 @@ async function fetchR2AdminObject({
   key,
   requestId,
   method,
+  ctx,
   notFound = "error",
 }) {
-  const res = await r2.client.fetch(r2ObjectUrl(r2, { ns, bucketName }, key), {
-    method,
-    headers: requestHeaders(requestId),
-  });
-  if (res.status === 404 && notFound !== "error") {
-    if (notFound === "null") {
+  return withS3Request(async (aborter) => {
+    const res = await r2.client.fetch(r2ObjectUrl(r2, { ns, bucketName }, key), {
+      method,
+      headers: requestHeaders(requestId),
+      signal: aborter.signal,
+    });
+    if (res.status === 404 && notFound !== "error") {
       await discardResponseBody(res);
-      return null;
+      return notFound === "null" ? null : res;
     }
+    if (!res.ok) {
+      const detail = await readBoundedText(res, S3_ERROR_BODY_MAX_BYTES, aborter.signal).catch(async () => {
+        await discardResponseBody(res);
+        aborter.signal.throwIfAborted();
+        return "";
+      });
+      throw new Error(`R2 admin ${method} failed with ${res.status}: ${detail.slice(0, 200)}`);
+    }
+    if (method === "GET" && res.body) {
+      return new Response(streamS3Response(res, aborter, ctx), res);
+    }
+    await discardResponseBody(res);
     return res;
-  }
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`R2 admin ${method} failed with ${res.status}: ${detail.slice(0, 200)}`);
-  }
-  return res;
+  });
 }
 
 /** @param {unknown} value */
@@ -155,8 +167,8 @@ function parseBucketList(xml, ns) {
   };
 }
 
-/** @param {R2Admin} r2 @param {{ prefix: string, delimiter?: string, cursor?: string, limit?: unknown, requestId?: string }} options */
-async function listS3(r2, { prefix, delimiter, cursor, limit, requestId }) {
+/** @param {R2Admin} r2 @param {{ prefix: string, delimiter?: string, cursor?: string, limit?: unknown, requestId?: string, signal: AbortSignal }} options */
+async function listS3(r2, { prefix, delimiter, cursor, limit, requestId, signal }) {
   const query = encodeS3Query({
     "list-type": "2",
     prefix,
@@ -167,22 +179,32 @@ async function listS3(r2, { prefix, delimiter, cursor, limit, requestId }) {
   const res = await r2.client.fetch(`${r2.endpoint}/${r2.bucket}?${query}`, {
     method: "GET",
     headers: requestHeaders(requestId),
+    signal,
   });
-  const xml = await res.text();
-  if (!res.ok) throw new Error(`R2 admin LIST failed with ${res.status}: ${xml.slice(0, 200)}`);
-  return xml;
+  if (!res.ok) {
+    const detail = await readBoundedText(res, S3_ERROR_BODY_MAX_BYTES, signal).catch(async () => {
+      await discardResponseBody(res);
+      signal.throwIfAborted();
+      return "";
+    });
+    throw new Error(`R2 admin LIST failed with ${res.status}: ${detail.slice(0, 200)}`);
+  }
+  return readBoundedText(res, Infinity, signal);
 }
 
 /** @param {{ r2: R2Admin, ns: string, cursor?: string, limit?: unknown, requestId?: string }} args */
 export async function listR2Buckets({ r2, ns, cursor, limit, requestId }) {
-  const xml = await listS3(r2, {
-    prefix: `r2/${ns}/`,
-    delimiter: "/",
-    cursor,
-    limit,
-    requestId,
+  return withS3Request(async (aborter) => {
+    const xml = await listS3(r2, {
+      prefix: `r2/${ns}/`,
+      delimiter: "/",
+      cursor,
+      limit,
+      requestId,
+      signal: aborter.signal,
+    });
+    return { namespace: ns, ...parseBucketList(xml, ns) };
   });
-  return { namespace: ns, ...parseBucketList(xml, ns) };
 }
 
 /** @param {{ r2: R2Admin, ns: string, bucketName: string, prefix?: string, delimiter?: string, cursor?: string, limit?: unknown, requestId?: string }} args */
@@ -196,26 +218,29 @@ export async function listR2Objects({
   limit,
   requestId,
 }) {
-  validateR2BucketName(bucketName);
-  const normalizedPrefix = prefix ? normalizeR2ObjectKey(prefix) : "";
-  const props = { ns, bucketName };
-  const xml = await listS3(r2, {
-    prefix: `${r2PhysicalPrefix(props)}${normalizedPrefix}`,
-    delimiter,
-    cursor,
-    limit,
-    requestId,
+  return withS3Request(async (aborter) => {
+    validateR2BucketName(bucketName);
+    const normalizedPrefix = prefix ? normalizeR2ObjectKey(prefix) : "";
+    const props = { ns, bucketName };
+    const xml = await listS3(r2, {
+      prefix: `${r2PhysicalPrefix(props)}${normalizedPrefix}`,
+      delimiter,
+      cursor,
+      limit,
+      requestId,
+      signal: aborter.signal,
+    });
+    return {
+      namespace: ns,
+      bucket: bucketName,
+      prefix: normalizedPrefix,
+      ...parseObjectList(xml, props),
+    };
   });
-  return {
-    namespace: ns,
-    bucket: bucketName,
-    prefix: normalizedPrefix,
-    ...parseObjectList(xml, props),
-  };
 }
 
-/** @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string }} args */
-export async function getR2Object({ r2, ns, bucketName, key, requestId }) {
+/** @param {{ r2: R2Admin, ns: string, bucketName: string, key: string, requestId?: string, ctx?: R2RequestContext | null }} args */
+export async function getR2Object({ r2, ns, bucketName, key, requestId, ctx }) {
   return fetchR2AdminObject({
     r2,
     ns,
@@ -223,6 +248,7 @@ export async function getR2Object({ r2, ns, bucketName, key, requestId }) {
     key,
     requestId,
     method: "GET",
+    ctx,
     notFound: "null",
   });
 }
