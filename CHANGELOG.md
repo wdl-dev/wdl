@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Bound Runtime R2 and Control R2/ASSETS S3 operations to 60 seconds and each cleanup page to 30 seconds. GET streams have a 30-second pending-read timeout and five-minute no-progress cleanup, without cutting off active downloads by total duration. Cancel stalled reads and retry waits without reporting ambiguous mutations as successful or advancing cleanup checkpoints.
+- Refreshed Node 24 development tooling and the OpenAI SDK test dependency to `7.25.0`; updated the transitive `brace-expansion` dependency to fix denial-of-service advisories.
 
 ## wdl.20260928.1 - 2026-09-30
 
