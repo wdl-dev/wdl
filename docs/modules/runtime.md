@@ -174,6 +174,22 @@ Tenant-facing R2 errors expose operation/status plus virtual object keys where u
 but not raw S3 response bodies or physical `r2/<ns>/<bucket>/...` keys. Control-plane
 R2 admin errors may retain backend detail for operators.
 
+Host R2 operations have a 60-second total S3 deadline, including signing, retry
+waits, response reads, and result construction. A list operation shares that budget
+with its metadata HEADs; a batch delete shares it across all batches. The clock
+starts in the host adapter, after any tenant-side PUT buffering. A successful GET
+has no fixed total body duration while data continues to flow. Its body is reclaimed
+after five minutes without forwarding a non-empty chunk, starting when the body is
+handed off; empty chunks do not extend this idle deadline. A separate 30-second
+timeout applies only while a read waits on upstream data. Consumer backpressure
+does not count as an upstream read stall, but five minutes without consumption or
+data progress still causes idle cleanup. A pre-registered `waitUntil` task owns cleanup;
+EOF, cancellation, errors, and expiry release readers and timers, and failure aborts
+the upstream request. Expiry does not depend on delivery of a caller disconnect.
+These are WDL limits, not S3 platform limits. A timed-out PUT or DELETE may already
+have taken effect; WDL rejects the call without claiming rollback or adding a retry
+beyond the existing idempotent S3 retry policy.
+
 AI accepts at most one `{ type: "ai" }` binding. Generated wrapper code exposes
 `fetch()`, `run()`, and `models()` through positional handler/entrypoint env. When
 importable env is enabled, invocation-time reads from the imported env proxy see the

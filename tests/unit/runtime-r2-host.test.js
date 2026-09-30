@@ -10,6 +10,70 @@ import {
 import { withMockedProperty } from "../helpers/mock-global.js";
 import { requestBodyString } from "../helpers/request-body.js";
 import { delay } from "../helpers/timing.js";
+import { S3_REQUEST_TIMEOUT_MS } from "../../shared/s3-request.js";
+
+test("R2 host operations bound pending transport with one abortable deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  /** @type {((bucket: any) => Promise<unknown>)[]} */
+  const operations = [
+    (bucket) => bucket.head("key"),
+    (bucket) => bucket.get("key"),
+    (bucket) => bucket.put("key", new Uint8Array([1])),
+    (bucket) => bucket.delete("key"),
+    (bucket) => bucket.delete(["key"]),
+    (bucket) => bucket.list(),
+  ];
+  for (const operation of operations) {
+    const started = Promise.withResolvers();
+    /** @type {AbortSignal | null | undefined} */
+    let signal;
+    let calls = 0;
+    const restore = installR2FetchMock(async (/** @type {string} */ _url, /** @type {RequestInit} */ init) => {
+      calls += 1;
+      signal = init.signal;
+      started.resolve(undefined);
+      return new Promise(() => {});
+    });
+    try {
+      const rejected = assert.rejects(operation(makeR2Bucket()), { name: "TimeoutError" });
+      await started.promise;
+      assert.ok(signal);
+      assert.equal(signal.aborted, false);
+      t.mock.timers.tick(S3_REQUEST_TIMEOUT_MS);
+      await rejected;
+      assert.equal(signal.aborted, true);
+      assert.equal(calls, 1);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test("R2 host list body and follow-up HEADs share the original deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const started = Promise.withResolvers();
+  /** @type {(AbortSignal | null | undefined)[]} */
+  const signals = [];
+  const restore = installR2FetchMock(async (/** @type {string} */ _url, /** @type {RequestInit} */ init) => {
+    signals.push(init.signal);
+    if (init.method === "HEAD") {
+      started.resolve(undefined);
+      return new Promise(() => {});
+    }
+    t.mock.timers.setTime(S3_REQUEST_TIMEOUT_MS - 100);
+    return new Response('<ListBucketResult><Contents><Key>r2/demo/uploads/key</Key><Size>1</Size></Contents></ListBucketResult>');
+  });
+  try {
+    const rejected = assert.rejects(makeR2Bucket().list({ include: ["httpMetadata"] }), { name: "TimeoutError" });
+    await started.promise;
+    assert.equal(signals[0], signals[1]);
+    t.mock.timers.tick(100);
+    await rejected;
+    assert.equal(signals[1]?.aborted, true);
+  } finally {
+    restore();
+  }
+});
 
 test("R2 host RPC surface exposes only public bucket methods", () => {
   assert.deepEqual(Object.getOwnPropertyNames(R2Bucket.prototype).toSorted(), [
@@ -79,6 +143,7 @@ test("R2 host range get reports object size and range slice separately", async (
     const result = await makeR2Bucket().get("a.txt", { range: { offset: 5, length: 10 } });
     assert.equal(result.meta.size, 100);
     assert.deepEqual(result.meta.range, { offset: 5, length: 10 });
+    await result.body.cancel();
   } finally {
     restore();
   }

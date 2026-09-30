@@ -86,7 +86,8 @@
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire/forwarding/owner-hint/result-header 与 ownership-code contract，以及 SQL splitting utilities。 |
 | `shared/fnv1a32.js` | Runtime-side shard 和 slot hashing 共用的 JavaScript FNV-1a helpers。 |
 | `shared/s3-query.js` | s3-cleanup system worker 使用的 S3 query encoder；runtime R2 在 `runtime/r2-utils.js` 保留同一套 standalone helper，因为该文件会作为 worker source 注入。 |
-| `shared/s3-retry.js` | runtime R2 与 s3-cleanup worker 共用的 idempotent S3 POST 有界瞬态重试策略。 |
+| `shared/s3-retry.js` | runtime R2 与 s3-cleanup worker 共用的 idempotent S3 POST 可取消、有界瞬态重试策略。 |
+| `shared/s3-request.js` | Runtime R2、Control R2/ASSETS 与 cleanup 共用的 S3 总期限和 streaming GET body 生命周期。 |
 | `shared/s3-xml.js` | Control R2、runtime R2 和 system cleanup 路径共用的 S3 XML parsing helpers。 |
 | `shared/assets-token.js` | Control 与 cleanup validation 共用的 canonical ASSETS deploy token 和 object-prefix generation。 |
 | `shared/s3-cleanup-lifecycle.js` | Control 与 cleanup system worker 共用的 worker-delete S3 cleanup task id、queue fields、canonical ASSETS prefix、state 和 outcome。 |

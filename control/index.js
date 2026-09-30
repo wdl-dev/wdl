@@ -177,7 +177,7 @@ async function dispatchNamespaceRoute(routeInfo, context) {
       });
     case "r2":
       return await handleR2({
-        method, url, ns: nsName, subPath: routeInfo.subPath ?? [], requestId,
+        method, url, ns: nsName, subPath: routeInfo.subPath ?? [], requestId, ctx,
       });
     case "ai":
       return await handleAi({

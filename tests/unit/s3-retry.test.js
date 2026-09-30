@@ -34,3 +34,42 @@ test("fetchRetryableS3Post retries transport and transient response failures", a
   });
   assert.equal(calls, 3);
 });
+
+test("DeleteObjects cancellation interrupts backoff without another attempt", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const aborter = new AbortController();
+  let calls = 0;
+  let cancelled = false;
+  const backoff = Promise.withResolvers();
+  await withMockedProperty(Math, "random", () => {
+    backoff.resolve(undefined);
+    return 1;
+  }, async () => {
+    const request = fetchRetryableS3Post({
+      async fetch() {
+        calls += 1;
+        return new Response(new ReadableStream({ cancel() { cancelled = true; } }), { status: 503 });
+      },
+    }, "https://s3.test/bucket?delete", { method: "POST", signal: aborter.signal });
+    const rejected = assert.rejects(request, { name: "AbortError" });
+    await backoff.promise;
+    aborter.abort();
+    await rejected;
+    t.mock.timers.tick(60_000);
+    assert.equal(calls, 1);
+    assert.equal(cancelled, true);
+  });
+});
+
+test("DeleteObjects does not retry an aborted transport failure", async () => {
+  const aborter = new AbortController();
+  let calls = 0;
+  await assert.rejects(fetchRetryableS3Post({
+    async fetch() {
+      calls += 1;
+      aborter.abort();
+      throw new Error("transport failed after abort");
+    },
+  }, "https://s3.test/bucket?delete", { method: "POST", signal: aborter.signal }), { name: "AbortError" });
+  assert.equal(calls, 1);
+});

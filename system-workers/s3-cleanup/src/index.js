@@ -32,6 +32,9 @@ import {
   S3_TRANSIENT_RETRIES,
   fetchRetryableS3Post,
 } from "../../../shared/s3-retry.js";
+import { S3_ERROR_BODY_MAX_BYTES, withS3Request } from "../../../shared/s3-request.js";
+import { readBoundedText } from "../../../shared/bounded-body.js";
+import { discardResponseBody } from "../../../shared/respond.js";
 
 const MAX_ATTEMPTS = 10;
 const BACKOFF_MAX_MS = 30 * 60_000;
@@ -39,6 +42,7 @@ const BACKOFF_BASE_MS = 60_000;
 const CRON_BATCH = 100;
 const MAX_LIST_PAGES = 1000;
 const PROCESSING_LEASE_MS = 30 * 60_000;
+const S3_PAGE_TIMEOUT_MS = 30_000;
 const DB_BINDING = "S3_CLEANUP_DB";
 const SERVICE = "s3-cleanup";
 const utf8Encoder = new TextEncoder();
@@ -331,18 +335,36 @@ async function saveProgress(db, id, checkpoint, now = Date.now()) {
  * @param {string | null} [continuationToken]
  */
 export async function deletePrefixPage(s3, prefix, continuationToken = null) {
+  // Leave time within the scheduler request to persist failure/backoff in D1.
+  return withS3Request(
+    (aborter) => deletePage(s3, prefix, continuationToken, aborter.signal),
+    S3_PAGE_TIMEOUT_MS
+  );
+}
+
+/**
+ * @param {S3Client} s3
+ * @param {string} prefix
+ * @param {string | null} continuationToken
+ * @param {AbortSignal} signal
+ */
+async function deletePage(s3, prefix, continuationToken, signal) {
   let deleted = 0;
   const query = encodeS3Query({
     "list-type": "2",
     prefix,
     "continuation-token": continuationToken,
   });
-  const listRes = await s3.aws.fetch(`${s3.endpoint}/${s3.bucket}?${query}`, { method: "GET" });
+  const listRes = await s3.aws.fetch(`${s3.endpoint}/${s3.bucket}?${query}`, { method: "GET", signal });
   if (!listRes.ok) {
-    const body = await listRes.text().catch(() => "");
-    throw new Error(`s3 list ${prefix} → ${listRes.status}: ${body}`);
+    const body = await readBoundedText(listRes, S3_ERROR_BODY_MAX_BYTES, signal).catch(async () => {
+      await discardResponseBody(listRes);
+      signal.throwIfAborted();
+      return "";
+    });
+    throw new Error(`s3 list ${prefix} → ${listRes.status}: ${body.slice(0, 200)}`);
   }
-  const xml = await listRes.text();
+  const xml = await readBoundedText(listRes, Infinity, signal);
   // ListObjectsV2 returns <Key>a&amp;b.txt</Key> for key `a&b.txt` —
   // if we don't unescape before the subsequent xmlEscape() on send,
   // `a&amp;amp;b.txt` lands in the Delete body, S3 "successfully"
@@ -371,11 +393,17 @@ export async function deletePrefixPage(s3, prefix, continuationToken = null) {
         "x-amz-checksum-sha256": sha_b64,
       },
       body,
+      signal,
     });
-    const delXml = await delRes.text();
     if (!delRes.ok) {
-      throw new Error(`s3 delete ${prefix} → ${delRes.status}: ${delXml}`);
+      const detail = await readBoundedText(delRes, S3_ERROR_BODY_MAX_BYTES, signal).catch(async () => {
+        await discardResponseBody(delRes);
+        signal.throwIfAborted();
+        return "";
+      });
+      throw new Error(`s3 delete ${prefix} → ${delRes.status}: ${detail.slice(0, 200)}`);
     }
+    const delXml = await readBoundedText(delRes, Infinity, signal);
     // DeleteObjects reports partial failure in the body — the HTTP
     // status stays 200 even when every key failed (AccessDenied etc).
     const errorBlocks = [...delXml.matchAll(/<Error>([\s\S]*?)<\/Error>/g)];

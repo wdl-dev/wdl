@@ -359,13 +359,29 @@ Auth-specific contract:
   fallback.
 - Worker delete commits Redis lifecycle state first; async S3 cleanup enqueue is
   best-effort and returns warning if it fails.
+- Control R2 operations and each ASSETS object upload have a 60-second S3 deadline
+  covering signing, retries, response reads, and result construction. Streamed R2
+  downloads have no fixed total duration while data flows. They use the Runtime
+  binding's five-minute no-progress idle deadline and 30-second pending-read
+  timeout; request-context cleanup stays active after headers are returned.
+  Unused bodies are discarded. Non-2xx S3 diagnostic bodies are capped at 4 KiB,
+  with at most 200 characters included in errors. Oversized or unreadable detail
+  is omitted without replacing the backend status; request deadlines still apply.
+  Mutation timeout does not establish whether the object was written or deleted,
+  and is never reported as success. This is a per-operation limit, not a deadline
+  for the whole deploy.
 - The `s3-cleanup` system worker persists cleanup tasks in D1. Cron replay owns retries
   after the row exists, uses minute-scale exponential backoff capped at 30 minutes for
   S3 failures, and checkpoints large prefix cleanup after each S3 List/Delete page so
   normal pagination progress does not consume failure attempts or restart from the
   beginning after a scheduler timeout. Each run processes one page, so very large
   prefixes drain across multiple cron or queue dispatches instead of holding one
-  scheduler dispatch open for minutes.
+  scheduler dispatch open for minutes. Each page has one 30-second S3 deadline
+  across list, delete, response bodies, and retry waits, leaving time to persist
+  failure under the default scheduler budget. A timed-out page does not advance
+  its checkpoint; the existing D1 retry/backoff path handles an ambiguous delete
+  by safely repeating it. Non-2xx diagnostics use the same 4 KiB / 200-character
+  bounds. Queue durability and ack behavior are unchanged.
 - All Control-to-Workflows internal POSTs use the canonical transport in
   `control/workflows-client.js`. Callers retain endpoint-specific timeout, non-2xx, and
   response-body interpretation. Callers must explicitly select `timeoutMs`, even

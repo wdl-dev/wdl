@@ -25,7 +25,8 @@ if (includeLocalConfigs) {
     { name: "user-runtime-local", config: "runtime/config-user-local.capnp" },
     { name: "system-runtime-local", config: "runtime/config-system-local.capnp" },
     { name: "do-runtime-local", config: "do-runtime/config-local.capnp" },
-    { name: "do-runtime-local-evictable", config: "do-runtime/config-local-evictable.capnp" }
+    { name: "do-runtime-local-evictable", config: "do-runtime/config-local-evictable.capnp" },
+    { name: "r2-lifetime-test", config: "test-workers/r2-lifetime/config.capnp" }
   );
 }
 
