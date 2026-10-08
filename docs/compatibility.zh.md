@@ -31,11 +31,13 @@
 
 WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary 只能 cold-load 其支持的 `compatibility_date` 对应的 retained Dynamic Worker version；具体说明见 [infra rollout 注意事项](modules/infra.zh.md#部署--rollout-注意事项)。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-10-05`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-10-15`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
 `auto_grpc_convert` 是 non-experimental flag，可以作为 compatibility metadata 使用，但不会为 WDL 增加 Cloudflare edge gRPC conversion service。
 
-`durable_object_io_tasks_prevent_eviction` 是 non-experimental 显式 opt-in，可以作为 compatibility metadata 使用。Stock workerd 不读取该 flag，因此它不改变 WDL actor 驻留行为；`DO_PREVENT_EVICTION` 仍是唯一的驻留控制。
+`durable_object_io_tasks_prevent_eviction` 是 non-experimental flag，在 compatibility date 不早于 `2026-10-01` 时默认启用。Stock workerd 不读取该 flag，因此它不改变 WDL actor 驻留行为；`DO_PREVENT_EVICTION` 仍负责驻留控制。
+
+`webcrypto_modern_algorithms` 是允许使用的 non-experimental 显式 opt-in，暴露 workerd 原生的 ML-KEM、ML-DSA 和相关 WebCrypto helper。上游 API 遵循仍在演进的草案；WDL 不默认启用它，也不使用它处理平台 secret。
 
 Node.js TLS 行为跟随 bundled workerd binary。从 WDL 的 2026-07-01 workerd pin 开始，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此所有日期的证书 hostname 校验都跟随 bundled workerd 行为。
 
@@ -50,6 +52,8 @@ Compatibility flag 是架构工具，不是统一禁止的 surface。WDL 按代�
 - 必须按 flag 的完整 capability 和 trust-zone blast radius 判断，不能只看它是否让一个 call site 更容易。平台专用 flag 可以在对应 tenant flag 被拒绝时仍然合理；反过来，也不能为了狭窄 host plumbing 问题而暴露宽泛 tenant capability。
 
 Bundled workerd 允许 `Fetcher` 和 Durable Object class stub 在不启用 experimental flag 的情况下作为 opaque JSRPC 参数传递。WDL 把持有这种 stub 视为 capability delegation：接收方可以按 stub 内由 host 写入的 caller properties 调用目标，但不能改写这些 properties，也不能取出隐藏的平台 backend capability。该委托可以在内存中保留。当前设计下，WDL 会在 deploy 和 retained-state load 时拒绝 `allow_irrevocable_stub_storage`，static host worker 也不会启用它，因为 tenant-visible persistent-stub surface 宽于 WDL 当前 binding contract。这是上述策略下的 scoped capability decision，不是反对平台 worker 使用 compatibility flag 的 blanket rule。
+
+已经连接的 `cloudflare:sockets` socket 也可以通过 service-binding JSRPC 传递。这会委托现有连接及其 readable/writable stream，但不会授予接收方任意建立新连接的权限；创建连接时仍受创建方的 outbound 限制。特权 worker 不得向不可信代码委托私网连接。
 
 ## Bindings 和存储
 
@@ -86,14 +90,16 @@ D1 和 Durable Object SQL `DEFAULT` expression 遵循 workerd 既有的 function
 
 | Surface | Status | 当前 WDL 立场 |
 |---|---|---|
-| Cache API / Cloudflare edge cache 语义 | Not supported | `caches.default` 不是 WDL 暴露的 stock workerd surface，WDL 也没有实现 Cloudflare edge cache tier。Tenant code 不应依赖这个 binding，也不应把它当成持久化或 CDN 合同。 |
-| Vectorize、Analytics Engine / Analytics SQL、Browser Rendering、Hyperdrive、Email Workers | Not supported | WDL 没有对应 binding facade、control-plane metadata 或后端服务。 |
+| Cache API / Cloudflare edge cache 语义 | Not supported | `caches.default` 不是 WDL 暴露的 stock workerd surface，WDL 也没有实现 Cloudflare edge cache tier 或 `ctx.cache.purge()` / `invalidate()` 所需的 embedder service。Tenant code 不应把它们当成持久化或 CDN 合同。 |
+| Vectorize、Analytics Engine / Analytics SQL、Browser Rendering、Hyperdrive、Email Workers、Artifacts、Flagship | Not supported | WDL 没有对应 binding facade、control-plane metadata 或后端服务。 |
 | R2 multipart upload、customer-provided encryption keys 和 Cloudflare-specific checksum 行为 | Not supported | 当前 R2 facade 面向 WDL worker/assets 所需的 S3-compatible object 操作。高级 Cloudflare R2 行为需要先设计，才能写成兼容合同。 |
 | Queue `contentType = "v8"` 和 per-consumer `max_concurrency` | Not supported | Queue message 支持文档化的 `json`、`text` 和 `bytes` content type；只有 `v8` 会被拒绝。Dispatch concurrency 仍由 scheduler 拥有，`max_concurrency` 会被拒绝，而不是静默忽略。 |
-| Incoming TCP/UDP `connect()` handler 和 Socket RPC transfer | Not supported | WDL 没有配置 tenant raw-TCP 或 raw-UDP ingress。UDP 还要求 worker 的 `experimental` flag，而 WDL 会拒绝 tenant 使用该 flag；Socket RPC transfer 仍受 autogate 控制且未启用。这不影响已记录的 outbound `cloudflare:sockets` surface。 |
+| Incoming TCP/UDP `connect()` handler | Not supported | WDL 没有配置 tenant raw-TCP 或 raw-UDP ingress。UDP 还要求 worker 的 `experimental` flag，而 WDL 会拒绝 tenant 使用该 flag。这不影响 outbound `cloudflare:sockets`，或通过 JSRPC 委托现有 socket。 |
 | 上游 experimental 和 WDL 显式拒绝的 compatibility flags | Not supported | Tenant `compatibility_flags` 中属于上游 workerd `$experimental` 的 enable flag，以及 WDL 显式拒绝的 `allow_irrevocable_stub_storage`、`new_module_registry`、`no_rpc` 和 `streams_disable_constructors`，会在 deploy 和 runtime decode 阶段被拒绝。New Module Registry 虽已在上游毕业，但 WDL generated wrapper 是实际 dynamic-loader main module，无法保持 tenant `import.meta.main`；WDL runtime facade 还要求 Fetcher RPC 和标准 stream constructor。 |
 | Python Workers | Not supported | WDL 拒绝 Python module manifest，而不是让 workerd 在 cold-load 时失败。 |
 | Durable Object cross-script binding 和 migration rename/delete 语义 | Not supported | WDL DO class 仅支持 same-worker。Storage identity、owner routing 和 delete cleanup 由 WDL 管理，不兼容 Cloudflare migration 模型。 |
+| Durable Object snapshot 和用户配置的原生 retry | Not supported | 原生 `snapshot()` / `onNextSessionRestore()` 需要被拒绝的 experimental flag 和 embedder storage 实现。`cloudflare:durable-objects` 的 `retryable` decorator 不会启用 retry：对应 native userland gate 仍关闭，WDL 保留自己的 owner-fenced fetch/RPC 和 alarm 合同。 |
+| Workflow `createBatch({ count, ... })` / `createBatch({ instances })` | Not supported | WDL 只接受非空数组形式，在 backend I/O 前拒绝对象 overload。原生 partial-success 对象结果不是 WDL 合同。 |
 | Cloudflare account API parity | Not supported | WDL 暴露自己的 CLI/control API。Cloudflare API 兼容不是目标。 |
 
 ## 设计原则

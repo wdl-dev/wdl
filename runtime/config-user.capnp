@@ -116,6 +116,7 @@ const loaderWorker :Workerd.Worker = (
     (name = "shared-workerd-compat-flags", esModule = embed "../shared/workerd-compat-flags.js"),
     (name = "shared-respond", esModule = embed "../shared/respond.js"),
     (name = "shared-s3-retry", esModule = embed "../shared/s3-retry.js"),
+    (name = "shared-s3-request", esModule = embed "../shared/s3-request.js"),
     (name = "respond.js", esModule = embed "../shared/respond.js"),
     (name = "shared-bounded-body", esModule = embed "../shared/bounded-body.js"),
     (name = "shared-request-scope", esModule = embed "../shared/request-scope.js"),

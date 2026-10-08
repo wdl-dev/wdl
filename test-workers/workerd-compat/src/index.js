@@ -152,6 +152,28 @@ async function htmlRewriterProbe() {
   return { uppercaseAttributeMatches };
 }
 
+async function modernCryptoProbe() {
+  if (typeof crypto.subtle.encapsulateBits !== "function") return { enabled: false };
+  const kem = await crypto.subtle.generateKey("ML-KEM-768", false, [
+    "encapsulateBits", "decapsulateBits",
+  ]);
+  const encapsulated = await crypto.subtle.encapsulateBits("ML-KEM-768", kem.publicKey);
+  const decoded = await crypto.subtle.decapsulateBits(
+    "ML-KEM-768", kem.privateKey, encapsulated.ciphertext
+  );
+  const expected = new Uint8Array(encapsulated.sharedKey);
+  const actual = new Uint8Array(decoded);
+  const signing = await crypto.subtle.generateKey("ML-DSA-44", false, ["sign", "verify"]);
+  const message = new TextEncoder().encode("workerd compatibility");
+  const signature = await crypto.subtle.sign("ML-DSA-44", signing.privateKey, message);
+  return {
+    enabled: true,
+    sharedKeyMatches: expected.length > 0 && actual.length === expected.length &&
+      actual.every((byte, index) => byte === expected[index]),
+    signatureVerified: await crypto.subtle.verify("ML-DSA-44", signing.publicKey, signature, message),
+  };
+}
+
 function pendingInternalByobResponse(request, mode) {
   if (!request.body) throw new TypeError("request body is required");
   const reader = request.body.getReader({ mode: "byob" });
@@ -196,6 +218,7 @@ function pendingInternalByobResponse(request, mode) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (url.searchParams.has("modernCrypto")) return Response.json(await modernCryptoProbe());
     const pendingByobMode = url.searchParams.get("pendingByob");
     if (pendingByobMode) {
       return pendingInternalByobResponse(request, pendingByobMode);

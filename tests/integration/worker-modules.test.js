@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { readRepositoryModuleSource } from "../helpers/load-shared-module.js";
+import { composeExec } from "./helpers/compose.js";
 import {
   GATEWAY_HOST,
   GATEWAY_PORT,
@@ -18,6 +19,12 @@ import {
 } from "./helpers/index.js";
 
 setupIntegrationSuite();
+
+test("native workerd survives console formatting errors and reclaims short-lived wrappers", () => {
+  composeExec("user-runtime", [
+    "workerd", "test", "-b", "/app/dist/workerd-configs/workerd-lifecycle-test.bin",
+  ]);
+});
 
 const WORKERD_NODE_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node.js");
 const WORKERD_NODE_IO_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node-io.js");
@@ -243,6 +250,12 @@ test("bundled workerd native Node boundaries preserve request isolation and key 
     pkcs8Encrypted: true,
     sec1Unencrypted: true,
   });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/url"), 200), {
+    ascii: "xn--bcher-kva.example",
+    unicode: "b\u00fccher.example",
+    formatted: "https://b\u00fccher.example:8443/path",
+    ipv6: "http://[::1]:8080/path",
+  });
   assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/rejection-reentry"), 200), {
     handledEvents: 1,
   });
@@ -425,6 +438,28 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
 
   const healthy = await gatewayFetch(ns, "/node-default");
   assert.equal(healthy.status, 200);
+});
+
+test("bundled workerd modern WebCrypto algorithms remain opt-in", async () => {
+  const ns = uniqueNs("workerd-modern-crypto");
+  for (const { name, compatibilityFlags } of [
+    { name: "default", compatibilityFlags: [] },
+    { name: "modern", compatibilityFlags: ["webcrypto_modern_algorithms"] },
+  ]) {
+    await deployAndPromote(ns, name, {
+      code: WORKERD_COMPAT_WORKER,
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags,
+    });
+  }
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/default?modernCrypto"), 200), {
+    enabled: false,
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/modern?modernCrypto"), 200), {
+    enabled: true,
+    sharedKeyMatches: true,
+    signatureVerified: true,
+  });
 });
 
 test("bundled workerd Node filesystem respects views, creation flags and replacement", async () => {

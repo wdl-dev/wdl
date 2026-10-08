@@ -55,16 +55,19 @@ const mod = await importRepositoryModule("runtime/bindings/r2.js", [
   [/from "shared-respond";/, `from ${JSON.stringify(SHARED_RESPOND_URL)};`],
   [/from "shared-base64";/, `from ${JSON.stringify(SHARED_BASE64_URL)};`],
   [/from "shared-s3-retry";/, `from ${JSON.stringify(SHARED_S3_RETRY_URL)};`],
+  [/from "shared-s3-request";/, `from ${JSON.stringify(repositoryFileUrl("shared/s3-request.js"))};`],
+  [/from "shared-bounded-body";/, `from ${JSON.stringify(repositoryFileUrl("shared/bounded-body.js"))};`],
 ]);
 
 export const { R2Bucket } = mod;
 
 export function makeR2Bucket(
   envOverrides = {},
-  bindingProps = { ns: "demo", bucketName: "uploads" }
+  bindingProps = { ns: "demo", bucketName: "uploads" },
+  waitUntil = (/** @type {Promise<unknown>} */ _promise) => {}
 ) {
   return new R2Bucket(
-    { props: bindingProps },
+    { props: bindingProps, waitUntil },
     {
       SERVICE_NAME: "user-runtime",
       R2_S3_ACCESS_KEY_ID: "test",

@@ -138,6 +138,18 @@ node --test tests/integration/<file>.test.js
 The direct single-file path prepares local artifacts automatically unless
 `WDL_INTEGRATION_SKIP_PREPARE=1` is set.
 
+R2 integration also runs `test-workers/r2-lifetime/config.capnp` inside the workerd
+container. It uses the production R2 adapter and SigV4 client across native JSRPC,
+with a local service standing in for S3, to test real header/body deadlines,
+ambiguous PUT failure, cancellation, and slow consumers. Local config preparation
+compiles this fixture; production images do not include it.
+
+Worker-module integration also runs `test-workers/workerd-compat/config.capnp` in
+a separate workerd process inside the container. It checks console formatting
+exceptions and sustained short-lived native-wrapper allocation without forced GC.
+This local-only fixture protects process survival without adding test hooks to the
+production runtime or including the fixture in production images.
+
 CLI subset:
 
 ```bash

@@ -4,6 +4,9 @@
 import { SigV4Client } from "@wdl-dev/aws-sigv4";
 import { encodeS3KeyPath } from "runtime-r2-utils";
 import { S3_TRANSIENT_RETRIES } from "shared-s3-retry";
+import { S3_ERROR_BODY_MAX_BYTES, withS3Request } from "shared-s3-request";
+import { readBoundedText } from "shared-bounded-body";
+import { discardResponseBody } from "shared-respond";
 
 const TYPE_BY_EXT = {
   ".html": "text/html; charset=utf-8",
@@ -67,14 +70,22 @@ export function makeS3Client(env) {
 
 /** @param {S3Client} s3 @param {string} key @param {BodyInit | Uint8Array} body @param {string} contentType */
 export async function putAsset(s3, key, body, contentType) {
-  const url = `${s3.endpoint}/${s3.bucket}/${encodeS3KeyPath(key)}`;
-  const res = await s3.client.fetch(url, {
-    method: "PUT",
-    body: /** @type {BodyInit} */ (body),
-    headers: { "content-type": contentType },
+  return withS3Request(async (aborter) => {
+    const url = `${s3.endpoint}/${s3.bucket}/${encodeS3KeyPath(key)}`;
+    const res = await s3.client.fetch(url, {
+      method: "PUT",
+      body: /** @type {BodyInit} */ (body),
+      headers: { "content-type": contentType },
+      signal: aborter.signal,
+    });
+    if (!res.ok) {
+      const detail = await readBoundedText(res, S3_ERROR_BODY_MAX_BYTES, aborter.signal).catch(async () => {
+        await discardResponseBody(res);
+        aborter.signal.throwIfAborted();
+        return "";
+      });
+      throw new Error(`S3 PUT ${key} → ${res.status} ${detail.slice(0, 200)}`);
+    }
+    await discardResponseBody(res);
   });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`S3 PUT ${key} → ${res.status} ${detail.slice(0, 200)}`);
-  }
 }

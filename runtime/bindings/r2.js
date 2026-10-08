@@ -5,6 +5,8 @@ import { serviceNameFromEnv } from "runtime-bindings-proxy";
 import { discardResponseBody } from "shared-respond";
 import { bytesToBase64 } from "shared-base64";
 import { S3_TRANSIENT_RETRIES, fetchRetryableS3Post } from "shared-s3-retry";
+import { streamS3Response, withS3Request } from "shared-s3-request";
+import { readBoundedText } from "shared-bounded-body";
 import {
   assertR2BufferSize,
   encodeS3KeyPath,
@@ -37,7 +39,7 @@ const s3ByBucket = new WeakMap();
 /**
  * @typedef {{ ns: string, bucketName: string }} R2BindingProps
  * @typedef {Record<string, unknown>} R2BindingEnv
- * @typedef {{ ctx: { props: R2BindingProps }, env: R2BindingEnv }} R2BucketBinding
+ * @typedef {{ ctx: { props: R2BindingProps, waitUntil(promise: Promise<unknown>): void }, env: R2BindingEnv }} R2BucketBinding
  * @typedef {{ client: { fetch(url: string, init?: RequestInit): Promise<Response> }, endpoint: string, bucket: string }} S3Binding
  * @typedef {import("runtime-bindings-r2-metadata").R2Options} R2Options
  * @typedef {import("runtime-bindings-r2-metadata").R2RequestMeta} R2RequestMeta
@@ -179,14 +181,17 @@ function objectUrl(bucket, s3, userKey, physicalPrefix = r2PhysicalPrefix(bucket
  * @param {R2BucketBinding} bucket
  * @param {S3Binding} s3
  * @param {string} key
+ * @param {AbortSignal} signal
  * @param {R2RequestMeta} [requestMeta]
  * @param {string} [physicalPrefix]
  */
-async function headRaw(bucket, s3, key, requestMeta = {}, physicalPrefix) {
+async function headRaw(bucket, s3, key, signal, requestMeta = {}, physicalPrefix) {
   const res = await s3.client.fetch(objectUrl(bucket, s3, key, physicalPrefix), {
     method: "HEAD",
     headers: headersWithRequestId(requestMeta),
+    signal,
   });
+  await discardResponseBody(res);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`R2 HEAD failed with ${res.status}`);
   return metaFromHeaders(key, res.headers);
@@ -196,9 +201,10 @@ async function headRaw(bucket, s3, key, requestMeta = {}, physicalPrefix) {
  * @param {R2BucketBinding} bucket
  * @param {S3Binding} s3
  * @param {string[]} keys
+ * @param {AbortSignal} signal
  * @param {R2RequestMeta} [requestMeta]
  */
-async function deleteBatch(bucket, s3, keys, requestMeta = {}) {
+async function deleteBatch(bucket, s3, keys, signal, requestMeta = {}) {
   const prefix = r2PhysicalPrefix(bucket.ctx.props);
   const body = [
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
@@ -217,12 +223,13 @@ async function deleteBatch(bucket, s3, keys, requestMeta = {}) {
     method: "POST",
     headers,
     body,
+    signal,
   });
   if (!res.ok) {
     await discardResponseBody(res);
     throw new Error(`R2 DELETE failed with ${res.status}`);
   }
-  const xml = await res.text();
+  const xml = await readBoundedText(res, Infinity, signal);
   const errorBlocks = [...xml.matchAll(/<Error>([\s\S]*?)<\/Error>/g)];
   if (errorBlocks.length > 0) {
     const details = errorBlocks.slice(0, 5).map((m) => {
@@ -248,9 +255,9 @@ export class R2Bucket extends WorkerEntrypoint {
    */
   async head(key, requestMeta = {}) {
     const bucket = r2Binding(this);
-    return recordBindingOperation(serviceName(bucket), "r2", "head", async () => {
-      return headRaw(bucket, s3ForBucket(bucket), key, requestMeta);
-    });
+    return recordBindingOperation(serviceName(bucket), "r2", "head", () => withS3Request(async (aborter) => {
+      return headRaw(bucket, s3ForBucket(bucket), key, aborter.signal, requestMeta);
+    }));
   }
 
   /**
@@ -260,11 +267,11 @@ export class R2Bucket extends WorkerEntrypoint {
    */
   async get(key, options = {}, requestMeta = {}) {
     const bucket = r2Binding(this);
-    return recordBindingOperation(serviceName(bucket), "r2", "get", async () => {
+    return recordBindingOperation(serviceName(bucket), "r2", "get", () => withS3Request(async (aborter) => {
       const s3 = s3ForBucket(bucket);
       const headers = headersWithRequestId(requestMeta);
       applyGetOptions(headers, options);
-      const res = await s3.client.fetch(objectUrl(bucket, s3, key), { method: "GET", headers });
+      const res = await s3.client.fetch(objectUrl(bucket, s3, key), { method: "GET", headers, signal: aborter.signal });
       if (res.status === 404) {
         await discardResponseBody(res);
         return null;
@@ -275,13 +282,13 @@ export class R2Bucket extends WorkerEntrypoint {
       }
       if (res.status === 304 || res.status === 412) {
         await discardResponseBody(res);
-        return { meta: await headRaw(bucket, s3, key, requestMeta) || metaFromHeaders(key, res.headers) };
+        return { meta: await headRaw(bucket, s3, key, aborter.signal, requestMeta) || metaFromHeaders(key, res.headers) };
       }
       return {
         meta: metaFromHeaders(key, res.headers),
-        body: res.body || new ReadableStream({ start(controller) { controller.close(); } }),
+        body: streamS3Response(res, aborter, bucket.ctx),
       };
-    });
+    }));
   }
 
   /**
@@ -292,7 +299,7 @@ export class R2Bucket extends WorkerEntrypoint {
    */
   async put(key, value, options = {}, requestMeta = {}) {
     const bucket = r2Binding(this);
-    return recordBindingOperation(serviceName(bucket), "r2", "put", async () => {
+    return recordBindingOperation(serviceName(bucket), "r2", "put", () => withS3Request(async (aborter) => {
       const body = putBodyFromUnknown(value);
       const bodySize = r2Uint8ArrayByteLength(body);
       assertR2BufferSize(bodySize, "put");
@@ -306,17 +313,17 @@ export class R2Bucket extends WorkerEntrypoint {
         method: "PUT",
         headers,
         body,
+        signal: aborter.signal,
       });
+      await discardResponseBody(res);
       if (res.status === 412) {
-        await discardResponseBody(res);
         return null;
       }
       if (!res.ok) {
-        await discardResponseBody(res);
         throw new Error(`R2 PUT failed with ${res.status}`);
       }
       return metaFromPutResponse(key, res.headers, bodySize, options);
-    });
+    }));
   }
 
   /**
@@ -325,14 +332,14 @@ export class R2Bucket extends WorkerEntrypoint {
    */
   async delete(keys, requestMeta = {}) {
     const bucket = r2Binding(this);
-    return recordBindingOperation(serviceName(bucket), "r2", "delete", async () => {
+    return recordBindingOperation(serviceName(bucket), "r2", "delete", () => withS3Request(async (aborter) => {
       const list = Array.isArray(keys) ? keys : [keys];
       const s3 = s3ForBucket(bucket);
       if (Array.isArray(keys)) {
         // CF accepts empty batch delete as a no-op; keep it explicit.
         if (list.length === 0) return;
         for (let i = 0; i < list.length; i += DELETE_OBJECTS_BATCH_SIZE) {
-          await deleteBatch(bucket, s3, list.slice(i, i + DELETE_OBJECTS_BATCH_SIZE), requestMeta);
+          await deleteBatch(bucket, s3, list.slice(i, i + DELETE_OBJECTS_BATCH_SIZE), aborter.signal, requestMeta);
         }
         return;
       }
@@ -340,13 +347,14 @@ export class R2Bucket extends WorkerEntrypoint {
         const res = await s3.client.fetch(objectUrl(bucket, s3, key), {
           method: "DELETE",
           headers: headersWithRequestId(requestMeta),
+          signal: aborter.signal,
         });
+        await discardResponseBody(res);
         if (!res.ok && res.status !== 404) {
-          await discardResponseBody(res);
           throw new Error(`R2 DELETE failed with ${res.status}`);
         }
       }
-    });
+    }));
   }
 
   /**
@@ -355,7 +363,7 @@ export class R2Bucket extends WorkerEntrypoint {
    */
   async list(options = {}, requestMeta = {}) {
     const bucket = r2Binding(this);
-    return recordBindingOperation(serviceName(bucket), "r2", "list", async () => {
+    return recordBindingOperation(serviceName(bucket), "r2", "list", () => withS3Request(async (aborter) => {
       const s3 = s3ForBucket(bucket);
       const prefix = r2PhysicalPrefix(bucket.ctx.props);
       const listPrefix = options.prefix ? normalizeR2ObjectKey(options.prefix) : "";
@@ -371,12 +379,13 @@ export class R2Bucket extends WorkerEntrypoint {
       const res = await s3.client.fetch(`${s3.endpoint}/${s3.bucket}?${query}`, {
         method: "GET",
         headers: headersWithRequestId(requestMeta),
+        signal: aborter.signal,
       });
       if (!res.ok) {
         await discardResponseBody(res);
         throw new Error(`R2 LIST failed with ${res.status}`);
       }
-      const xml = await res.text();
+      const xml = await readBoundedText(res, Infinity, aborter.signal);
       const listed = parseListObjects(xml, prefix);
       const include = new Set(Array.isArray(options.include) ? options.include : []);
       if (include.has("httpMetadata") || include.has("customMetadata")) {
@@ -384,7 +393,7 @@ export class R2Bucket extends WorkerEntrypoint {
           listed.objects,
           LIST_INCLUDE_HEAD_CONCURRENCY,
           async (meta) => {
-            const head = await headRaw(bucket, s3, meta.key, requestMeta, prefix);
+            const head = await headRaw(bucket, s3, meta.key, aborter.signal, requestMeta, prefix);
             if (!head) return meta;
             return {
               ...meta,
@@ -395,6 +404,6 @@ export class R2Bucket extends WorkerEntrypoint {
         );
       }
       return listed;
-    });
+    }));
   }
 }

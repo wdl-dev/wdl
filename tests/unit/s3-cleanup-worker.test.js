@@ -12,6 +12,7 @@ import {
   S3_CLEANUP_TASK_STATUS,
 } from "../../shared/s3-cleanup-lifecycle.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
+import { S3_ERROR_BODY_MAX_BYTES } from "../../shared/s3-request.js";
 
 const TASK_PREFIX = "assets/demo/worker/019dd83e7d1c345302f9b0f3b4f6/";
 
@@ -114,6 +115,83 @@ test("s3-cleanup retry horizon reaches the 30 minute cap before final failure", 
   assert.equal(nextBackoffMs(1), 60_000);
   assert.equal(nextBackoffMs(6), 30 * 60_000);
   assert.equal(nextBackoffMs(10), 30 * 60_000);
+});
+
+test("cleanup keeps a timed-out delete pending without advancing the checkpoint", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const db = cleanupDb(taskRow());
+  const started = Promise.withResolvers();
+  /** @type {AbortSignal | null | undefined} */
+  let signal;
+  const s3 = /** @type {any} */ ({
+    endpoint: "http://s3.test", bucket: "assets",
+    aws: { async fetch(/** @type {string} */ _url, /** @type {RequestInit} */ init) {
+      if (init.method === "GET") {
+        return new Response(`<ListBucketResult><Contents><Key>${TASK_PREFIX}key</Key></Contents></ListBucketResult>`);
+      }
+      signal = init.signal;
+      started.resolve(undefined);
+      return new Response(new ReadableStream({
+        pull() { return new Promise(() => {}); },
+      }));
+    } },
+  });
+  const pending = processTask(db, s3, "s3cleanup:unit");
+  await started.promise;
+  t.mock.timers.tick(30_000);
+  assert.equal(await pending, S3_CLEANUP_OUTCOME.RETRY);
+  assert.ok(signal);
+  assert.equal(signal.aborted, true);
+  assert.equal(db.state.deleted, false);
+  assert.equal(db.state.row[S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON], null);
+  assert.equal(db.state.row[S3_CLEANUP_TASK_FIELDS.ATTEMPTS], 1);
+});
+
+test("cleanup list keeps the backend status when its error body is unreadable", async () => {
+  const { s3 } = s3Mock([new Response(new ReadableStream({
+    start(controller) { controller.error(new TypeError("body disconnected")); },
+  }), { status: 503 })]);
+  await assert.rejects(deletePrefixPage(s3, TASK_PREFIX), /s3 list .*503/);
+});
+
+test("cleanup omits oversized list/delete errors without advancing its checkpoint", async () => {
+  for (const phase of ["list", "delete"]) {
+    const db = cleanupDb(taskRow());
+    let cancelled = false;
+    let reads = 0;
+    const errorResponse = new Response(new ReadableStream({
+      pull(controller) { reads += 1; controller.close(); },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 }), {
+      status: 400,
+      headers: { "content-length": String(S3_ERROR_BODY_MAX_BYTES + 1) },
+    });
+    const listResponse = new Response(`<ListBucketResult><Contents><Key>${TASK_PREFIX}key</Key></Contents></ListBucketResult>`);
+    const { s3 } = s3Mock(phase === "list" ? [errorResponse] : [listResponse, errorResponse]);
+    await withMockedProperty(console, "log", () => {}, async () => {
+      assert.equal(await processTask(db, s3, "s3cleanup:unit"), S3_CLEANUP_OUTCOME.RETRY);
+    });
+    assert.equal(cancelled, true);
+    assert.equal(reads, 0);
+    assert.equal(db.state.deleted, false);
+    assert.equal(db.state.row[S3_CLEANUP_TASK_FIELDS.CHECKPOINT_JSON], null);
+    assert.equal(db.state.row[S3_CLEANUP_TASK_FIELDS.ATTEMPTS], 1);
+    assert.match(String(db.state.row[S3_CLEANUP_TASK_FIELDS.LAST_ERROR]), new RegExp(`^s3 ${phase} .*400: $`));
+  }
+});
+
+test("cleanup includes only a short detail from an exact-limit list/delete error", async () => {
+  for (const phase of ["list", "delete"]) {
+    const errorResponse = new Response("x".repeat(S3_ERROR_BODY_MAX_BYTES), { status: 400 });
+    const listResponse = new Response(`<ListBucketResult><Contents><Key>${TASK_PREFIX}key</Key></Contents></ListBucketResult>`);
+    const { s3 } = s3Mock(phase === "list" ? [errorResponse] : [listResponse, errorResponse]);
+    await assert.rejects(deletePrefixPage(s3, TASK_PREFIX), (error) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, new RegExp(`^s3 ${phase} .*400: `));
+      assert.equal(error.message.split("400: ")[1], "x".repeat(200));
+      return true;
+    });
+  }
 });
 
 test("deletePrefixPage returns continuation tokens without deleting empty pages", async () => {

@@ -375,6 +375,25 @@ test("Workflow.createBatch accepts valid instances array", async () => {
   assert.deepEqual(instances.map((instance) => instance.id), ["inst-1", "inst-2"]);
 });
 
+test("Workflow.createBatch rejects unsupported object overloads before backend I/O", async () => {
+  let calls = 0;
+  const workflow = createWorkflowForTest({
+    backend: {
+      async fetch() {
+        calls += 1;
+        return Response.json({ instances: [] });
+      },
+    },
+  });
+  for (const options of [{ count: 2, params: {} }, { instances: [{ id: "inst-1" }] }]) {
+    await assert.rejects(
+      () => workflow.createBatch(options),
+      /Workflow createBatch options must be a non-empty array/
+    );
+  }
+  assert.equal(calls, 0);
+});
+
 test("Workflow.create rejects non-object success responses", async () => {
   const workflow = createWorkflowForTest({
     backend: {

@@ -45,16 +45,20 @@ version's `compatibility_date`; see the
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-10-05`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-10-15`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 
 `auto_grpc_convert` is non-experimental and accepted as compatibility metadata. It
 does not add Cloudflare's edge gRPC conversion service to WDL.
 
-`durable_object_io_tasks_prevent_eviction` is a non-experimental explicit opt-in
-accepted as compatibility metadata. Stock workerd does not consume it, so it does not
-change WDL actor residency; `DO_PREVENT_EVICTION` remains the only residency control.
+`durable_object_io_tasks_prevent_eviction` is non-experimental and defaults on for
+compatibility dates from `2026-10-01`. Stock workerd does not consume it, so it does
+not change WDL actor residency; `DO_PREVENT_EVICTION` remains the residency control.
+
+`webcrypto_modern_algorithms` is an accepted, non-experimental opt-in. It exposes
+workerd's native ML-KEM, ML-DSA, and related WebCrypto helpers. The upstream API follows
+an evolving draft; WDL does not enable it by default or use it for platform secrets.
 
 Node.js TLS behavior follows the bundled workerd binary. Starting with WDL's
 2026-07-01 workerd pin, workers whose compatibility date is at least 2026-06-16 get
@@ -107,6 +111,12 @@ tenant-visible persistent-stub surface is broader than WDL's current binding con
 This is a scoped capability decision under the policy above, not a blanket rule against
 using compatibility flags in platform workers.
 
+Connected `cloudflare:sockets` sockets can also be transferred through service-binding
+JSRPC. This delegates the existing connection, including its readable and writable
+streams; it does not grant the receiver authority to open arbitrary new connections.
+The creator's outbound restrictions still apply when establishing the connection.
+Privileged workers must not delegate private connections to untrusted code.
+
 ## Bindings And Storage
 
 | Surface | Status | What workerd provides | Stronger / added in WDL | Different from Cloudflare | Not implemented / gaps |
@@ -147,14 +157,16 @@ docs:
 
 | Surface | Status | Current WDL position |
 |---|---|---|
-| Cache API / Cloudflare edge cache semantics | Not supported | `caches.default` is not part of the stock workerd surface WDL exposes, and WDL does not implement Cloudflare's edge cache tier. Tenant code should not depend on this binding or use it as a persistence/CDN contract. |
-| Vectorize, Analytics Engine / Analytics SQL, Browser Rendering, Hyperdrive, Email Workers | Not supported | No binding facade, control-plane metadata, or backing service exists in WDL. |
+| Cache API / Cloudflare edge cache semantics | Not supported | `caches.default` is not part of the stock workerd surface WDL exposes, and WDL does not implement Cloudflare's edge cache tier or the embedder service behind `ctx.cache.purge()` / `invalidate()`. Tenant code should not depend on these as a persistence/CDN contract. |
+| Vectorize, Analytics Engine / Analytics SQL, Browser Rendering, Hyperdrive, Email Workers, Artifacts, Flagship | Not supported | No binding facade, control-plane metadata, or backing service exists in WDL. |
 | R2 multipart upload, customer-provided encryption keys, and Cloudflare-specific checksum behavior | Not supported | The current R2 facade targets S3-compatible object operations needed by WDL workers/assets. Advanced Cloudflare R2 behaviors need explicit design before being documented as compatible. |
 | Queue `contentType = "v8"` and per-consumer `max_concurrency` | Not supported | Queue messages support the documented `json`, `text`, and `bytes` content types; only `v8` is rejected. Dispatch concurrency remains scheduler-owned, and `max_concurrency` is rejected instead of silently ignored. |
-| Incoming TCP/UDP `connect()` handlers and Socket RPC transfer | Not supported | WDL configures no tenant raw-TCP or raw-UDP ingress. UDP also requires the worker `experimental` flag, which WDL rejects for tenants; Socket RPC transfer remains autogated and disabled. This does not affect the documented outbound `cloudflare:sockets` surface. |
+| Incoming TCP/UDP `connect()` handlers | Not supported | WDL configures no tenant raw-TCP or raw-UDP ingress. UDP also requires the worker `experimental` flag, which WDL rejects for tenants. This does not affect outbound `cloudflare:sockets` or delegation of an existing socket over JSRPC. |
 | Upstream experimental and WDL-denied compatibility flags | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental`, plus WDL's explicit deny policies for `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and `streams_disable_constructors`, are rejected at deploy and runtime decode. New Module Registry has graduated upstream, but WDL's generated wrapper is the actual dynamic-loader main module and cannot preserve tenant `import.meta.main`; Fetcher RPC and standard stream constructors are required by WDL runtime facades. |
 | Python Workers | Not supported | WDL rejects Python module manifests instead of letting workerd fail at cold-load. |
 | Durable Object cross-script bindings and migration rename/delete semantics | Not supported | WDL DO classes are same-worker only. Storage identity, owner routing, and delete cleanup are WDL-managed rather than Cloudflare migration-compatible. |
+| Durable Object snapshots and user-configured native retries | Not supported | Native `snapshot()` / `onNextSessionRestore()` require the rejected experimental flag and an embedder storage implementation. The `cloudflare:durable-objects` `retryable` decorator does not enable retries: its native userland gate is off, and WDL retains its own owner-fenced fetch/RPC and alarm contracts. |
+| Workflow `createBatch({ count, ... })` / `createBatch({ instances })` | Not supported | WDL accepts the non-empty array form only and rejects object overloads before backend I/O. The native partial-success object result is not a WDL contract. |
 | Cloudflare account API parity | Not supported | WDL exposes its own CLI/control API. Cloudflare API compatibility is not a stated goal. |
 
 ## Design Rule

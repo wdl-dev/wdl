@@ -15,6 +15,7 @@ import {
   uniqueNs,
   setupIntegrationSuite,
 } from "./helpers/index.js";
+import { composeExec } from "./helpers/compose.js";
 
 const R2_DEMO_SRC = readFileSync(
   path.join(ROOT, "test-workers/r2-demo/src/index.js"),
@@ -22,6 +23,12 @@ const R2_DEMO_SRC = readFileSync(
 );
 
 setupIntegrationSuite();
+
+test("R2 native JSRPC bounds header/body stalls and preserves slow consumers", () => {
+  composeExec("user-runtime", [
+    "workerd", "test", "-b", "/app/dist/workerd-configs/r2-lifetime-test.bin",
+  ]);
+});
 
 /**
  * @param {string} ns @param {string} worker @param {string} method @param {string} pathSuffix

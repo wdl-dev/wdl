@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { S3_ERROR_BODY_MAX_BYTES, S3_REQUEST_TIMEOUT_MS } from "../../shared/s3-request.js";
 
 import {
   importRepositoryModule,
@@ -26,6 +27,8 @@ const {
   "runtime-r2-utils": repositoryFileUrl("runtime/r2-utils.js"),
   "shared-s3-xml": repositoryFileUrl("shared/s3-xml.js"),
   "shared-s3-retry": repositoryFileUrl("shared/s3-retry.js"),
+  "shared-s3-request": repositoryFileUrl("shared/s3-request.js"),
+  "shared-bounded-body": repositoryFileUrl("shared/bounded-body.js"),
   "shared-respond": repositoryFileUrl("shared/respond.js"),
 }));
 
@@ -155,4 +158,81 @@ test("control R2 object methods share request, error, and not-found handling", a
     status: "ok",
   });
   assert.equal(deleteMock.calls[0].init?.method, "DELETE");
+});
+
+test("control R2 list cancels a stalled XML response at the request deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const started = Promise.withResolvers();
+  let cancelled = false;
+  const { r2, calls } = r2AdminMock(new Response(new ReadableStream({
+    pull() { started.resolve(undefined); return new Promise(() => {}); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 })));
+  const rejected = assert.rejects(listR2Objects({ r2, ns: "demo", bucketName: "uploads" }), { name: "TimeoutError" });
+  await started.promise;
+  t.mock.timers.tick(S3_REQUEST_TIMEOUT_MS);
+  await rejected;
+  assert.equal(cancelled, true);
+  assert.equal(calls[0].init?.signal?.aborted, true);
+});
+
+test("control R2 GET transfers body lifetime to the request context", async () => {
+  const { r2, calls } = r2AdminMock(new Response("value"));
+  /** @type {Promise<unknown>[]} */
+  const tasks = [];
+  const ctx = { waitUntil(/** @type {Promise<unknown>} */ task) { tasks.push(task); } };
+  const response = await getR2Object({ r2, ns: "demo", bucketName: "uploads", key: "key", ctx });
+  assert.equal(tasks.length, 1);
+  assert.equal(await response.text(), "value");
+  await Promise.all(tasks);
+  assert.equal(calls[0].init?.signal?.aborted, false);
+});
+
+test("control R2 keeps the backend status when its error body is unreadable", async () => {
+  const { r2 } = r2AdminMock(new Response(new ReadableStream({
+    start(controller) { controller.error(new TypeError("body disconnected")); },
+  }), { status: 503 }));
+  await assert.rejects(getR2Object({ r2, ns: "demo", bucketName: "uploads", key: "key" }), {
+    name: "Error", message: "R2 admin GET failed with 503: ",
+  });
+});
+
+test("control R2 omits and cancels oversized error bodies without replacing status", async () => {
+  for (const operation of [getR2Object, headR2Object, deleteR2Object, listR2Objects]) {
+    for (const declared of [true, false]) {
+      let reads = 0;
+      let cancelled = false;
+      const { r2 } = r2AdminMock(new Response(new ReadableStream({
+        pull(controller) {
+          reads += 1;
+          if (reads > 2) controller.close();
+          else controller.enqueue(new Uint8Array(reads === 1 ? S3_ERROR_BODY_MAX_BYTES : 1));
+        },
+        cancel() { cancelled = true; },
+      }, { highWaterMark: 0 }), {
+        status: 503,
+        headers: declared ? { "content-length": String(S3_ERROR_BODY_MAX_BYTES + 1) } : {},
+      }));
+      await assert.rejects(operation({ r2, ns: "demo", bucketName: "uploads", key: "key" }),
+        /R2 admin \w+ failed with 503: $/);
+      assert.equal(cancelled, true);
+      assert.equal(reads, declared ? 0 : 2);
+    }
+  }
+});
+
+test("control R2 accepts an exact-limit error body but includes only a short detail", async () => {
+  const { r2 } = r2AdminMock(new Response("x".repeat(S3_ERROR_BODY_MAX_BYTES), { status: 400 }));
+  await assert.rejects(getR2Object({ r2, ns: "demo", bucketName: "uploads", key: "key" }), {
+    message: `R2 admin GET failed with 400: ${"x".repeat(200)}`,
+  });
+});
+
+test("control R2 does not apply the diagnostic cap to successful list XML", async () => {
+  const { r2 } = r2AdminMock(new Response(
+    `<ListBucketResult>${" ".repeat(S3_ERROR_BODY_MAX_BYTES)}<Contents><Key>r2/demo/uploads/key</Key><Size>1</Size></Contents></ListBucketResult>`
+  ));
+  const result = await listR2Objects({ r2, ns: "demo", bucketName: "uploads" });
+  assert.equal(result.objects.length, 1);
+  assert.equal(result.objects[0].key, "key");
 });

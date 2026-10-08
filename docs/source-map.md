@@ -89,7 +89,8 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/d1-*.js`, `shared/sql-splitter.js` | D1 parameter, data-field, transport, timeout, query-wire/forwarding/owner-hint/result-header and ownership-code contracts, and SQL splitting utilities shared by runtime, d1-runtime, control, and tests. |
 | `shared/fnv1a32.js` | Shared JavaScript FNV-1a helpers for runtime-side shard and slot hashing. |
 | `shared/s3-query.js` | S3 query encoder used by the s3-cleanup system worker; runtime R2 keeps the same standalone helper in `runtime/r2-utils.js` because that file is injected as worker source. |
-| `shared/s3-retry.js` | Bounded transient retry policy for idempotent S3 POST operations, shared by runtime R2 and the s3-cleanup worker. |
+| `shared/s3-retry.js` | Abortable, bounded transient retry policy for idempotent S3 POST operations, shared by runtime R2 and the s3-cleanup worker. |
+| `shared/s3-request.js` | S3 total request deadlines and streamed GET body lifetimes shared by Runtime R2, Control R2/ASSETS, and cleanup. |
 | `shared/s3-xml.js` | Shared S3 XML parsing helpers used by control R2, runtime R2, and system cleanup paths. |
 | `shared/assets-token.js` | Canonical ASSETS deploy token and object-prefix generation shared by Control and cleanup validation. |
 | `shared/s3-cleanup-lifecycle.js` | Worker-delete S3 cleanup task ids, queue fields, canonical ASSETS prefixes, states, and outcomes shared by Control and the cleanup system worker. |

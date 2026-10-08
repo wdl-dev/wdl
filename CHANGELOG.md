@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20261008.1` and `5.20261008.1`, raising the maximum compatibility date to `2026-10-15`. Includes GC allocation and exception-handling fixes, console crash fixes, and native stream and WebSocket memory-safety fixes; enables Socket transfer over JSRPC and accepts opt-in `webcrypto_modern_algorithms`. No WDL state migration is required.
+- Bound Runtime R2 and Control R2/ASSETS S3 operations to 60 seconds and each cleanup page to 30 seconds. GET streams have a 30-second pending-read timeout and five-minute no-progress cleanup, without cutting off active downloads by total duration. Cancel stalled reads and retry waits without reporting ambiguous mutations as successful or advancing cleanup checkpoints.
+- Refreshed Node 24 development tooling and the OpenAI SDK test dependency to `7.30.0`; updated the transitive `brace-expansion` and `smol-toml` dependencies to fix denial-of-service advisories.
+
 ## wdl.20260928.1 - 2026-09-30
 
 - Updated workerd and Workers types to `1.20260928.1` and `5.20260928.1`, raising the maximum compatibility date to `2026-10-05`. The SQLite string, BLOB, and row length limit for D1 and Durable Objects rises from a nominal 4 MiB to 8 MiB; D1 query bodies remain capped at 8 MiB, which does not bound values generated inside SQL. `1.20260929.1` is skipped: one tenant `console.log()` whose formatting throws aborts the whole workerd process ([cloudflare/workerd#7576](https://github.com/cloudflare/workerd/issues/7576)). No WDL state migration is required.

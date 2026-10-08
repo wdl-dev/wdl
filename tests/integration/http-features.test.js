@@ -215,7 +215,26 @@ test("__system__ worker reaches redis:6379 via cloudflare:sockets connect()", as
 const SOCKET_TARGET_WORKER = `
   import { WorkerEntrypoint } from "cloudflare:workers";
   export default class extends WorkerEntrypoint {
-    async take() { return "taken"; }
+    async take(socket) {
+      const writer = socket.writable.getWriter();
+      const reader = socket.readable.getReader();
+      try {
+        await socket.opened;
+        await writer.write(new TextEncoder().encode("*1\\r\\n$4\\r\\nPING\\r\\n"));
+        const decoder = new TextDecoder();
+        let reply = "";
+        while (!reply.endsWith("\\r\\n") && reply.length < 64) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          reply += decoder.decode(value, { stream: true });
+        }
+        return reply;
+      } finally {
+        writer.releaseLock();
+        reader.releaseLock();
+        await socket.close();
+      }
+    }
     async fetch() { return new Response("socket target"); }
   }
 `;
@@ -237,9 +256,7 @@ const SOCKET_CALLER_WORKER = `
   };
 `;
 
-test("__system__ service binding RPC rejects cloudflare:sockets Socket transfer", async () => {
-  // Socket RPC transfer is autogated off in the bundled workerd; the
-  // compatibility matrix documents it as unsupported.
+test("__system__ service binding RPC transfers a connected Socket with working streams", async () => {
   const host = `${uniqueNs("syssock").replaceAll("-", "")}.test`;
   assertStatus(await adminPost("/ns/__system__/hosts", { hosts: [host] }), 200, "system host declare");
   const suffix = host.split(".")[0];
@@ -267,8 +284,5 @@ test("__system__ service binding RPC rejects cloudflare:sockets Socket transfer"
 
   const res = await hostFetch(host, "/probe");
   assert.equal(res.status, 200, res.body);
-  assert.deepEqual(res.json(), {
-    name: "DataCloneError",
-    message: 'Could not serialize object of type "Socket". This type does not support serialization.',
-  });
+  assert.deepEqual(res.json(), { taken: "+PONG\r\n" });
 });

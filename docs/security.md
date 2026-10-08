@@ -73,6 +73,9 @@ workerd isolate boundaries and continues with WDL-specific wrapper and network r
   `cloudflare:sockets` must not reach platform-private addresses.
 - system-runtime `__system__` workers intentionally have private+public outbound because
   they are platform code, not tenant code.
+- Transferring a connected socket over JSRPC delegates that existing connection; it
+  does not bypass outbound checks when opening new connections. Privileged workers
+  must not hand private connections to untrusted code.
 - Privileged runtime events use the private `:8088` internal socket. Gateway must not
   reserve tenant-visible paths like `/_scheduled`; the socket boundary is the security
   boundary.

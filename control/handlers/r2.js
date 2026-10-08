@@ -48,10 +48,10 @@ function copyObjectHeaders(headers) {
   return out;
 }
 
-/** @param {{ method: string, url: URL, ns: string, subPath: string[], requestId: string }} args */
-export async function handle({ method, url, ns, subPath, requestId }) {
+/** @param {{ method: string, url: URL, ns: string, subPath: string[], requestId: string, ctx?: import("control-r2").R2RequestContext | null }} args */
+export async function handle({ method, url, ns, subPath, requestId, ctx }) {
   try {
-    return await handleInner({ method, url, ns, subPath, requestId });
+    return await handleInner({ method, url, ns, subPath, requestId, ctx });
   } catch (err) {
     const message = errorMessage(err);
     if (err instanceof TypeError ||
@@ -63,8 +63,8 @@ export async function handle({ method, url, ns, subPath, requestId }) {
   }
 }
 
-/** @param {{ method: string, url: URL, ns: string, subPath: string[], requestId: string }} args */
-async function handleInner({ method, url, ns, subPath, requestId }) {
+/** @param {{ method: string, url: URL, ns: string, subPath: string[], requestId: string, ctx?: import("control-r2").R2RequestContext | null }} args */
+async function handleInner({ method, url, ns, subPath, requestId, ctx }) {
   const r2 = getControlR2();
   const log = requireControlLog();
   if (!r2) {
@@ -133,7 +133,7 @@ async function handleInner({ method, url, ns, subPath, requestId }) {
 
     if (method === "GET") {
       const key = objectKeyFromRequest({ subPath: subPath.slice(3) });
-      const res = await getR2Object({ r2, ns, bucketName, key, requestId });
+      const res = await getR2Object({ r2, ns, bucketName, key, requestId, ctx });
       if (!res) return jsonError(404, "r2_object_not_found", "R2 object not found");
       log("info", "r2_object_read", {
         request_id: requestId,
