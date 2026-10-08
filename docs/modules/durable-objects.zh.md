@@ -90,6 +90,8 @@ Alarm mutation 横跨 object SQLite 与 Workflows DB 2，明确不提供分布�
 
 Bundled workerd 为其 native alarm scheduler 暴露 `ctx.abort(reason, { retryAlarm: false })`。WDL 通过 authenticated、owner-fenced fetch 调用 tenant `alarm()`，并由 Workflows DB 2 持有 retry state，因此 workerd 不会把该 dispatch 识别为 native alarm event。该 option 仍会 abort facet，但不会禁止 WDL alarm retry；WDL 不会静默声称支持这项新的 native retry-control contract。
 
+Stock workerd 可以在断线未被标记为已投递时重试可重放的 native host-actor fetch；facet fetch 不支持这条原生 retry 路径。Native JSRPC retry 和 userland `retryable` dispatch 仍未启用，不替代 WDL owner fence、uncertain-result 处理或 Workflows alarm retry。
+
 Pending delete row 会保存 internal fence token 并固定 `in_flight=1`。该 bit 是 same-service rolling reader fence：旧 do-runtime 虽不识别 token prefix，但会跳过 `getAlarm()` repair，并因原 backend token 与 fence token 不匹配而忽略 delivery，因此不会把 tombstone 当作 tenant alarm 执行。混部期间旧 mutator 仍可能把 fence token 作为一次无效 backend CAS 发出；当前 reader 会在删除前统一解开该 token。
 创建 fence 时只在 current token 约束下更新 `token` 和 `in_flight`，不重新校验无关的 scheduled-time/retry 字段，因此损坏或 legacy row 仍可删除。
 

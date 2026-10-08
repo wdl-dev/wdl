@@ -123,6 +123,8 @@ Workflow replay 输出 retained、active、detached、在途 read bytes，以及
 
 Runtime 为 loading、binding operation、AI pool state、`redis-proxy` call、workflow replay cache、loader eviction 和 dispatch envelope 输出日志/metrics。Tail worker 总是为 console/exception capture 输出结构化 stdout；只有匹配的 active tail session 存在时才转发到 `wdl tail`。该 buffered tail pipeline 不导出 tracing span；WDL 没有 streaming-tail span sink。`tail_worker_user_spans` 已废弃，启用它也不会提供该 sink。
 
+Bundled workerd 实现中原生 per-call JSRPC tracing 已启用，但这不会把 buffered tail pipeline 变成 span exporter。
+
 KV response admission 暴露 `wdl_kv_read_capacity_events_total{service,outcome}`，固定 outcome 为 `acquired`、`saturated`、`completed`、`deadline` 和 `setup_error`，并暴露当前值 `wdl_kv_read_in_flight_bytes{service}` 及进程生命周期 high-water `wdl_kv_read_in_flight_high_water_bytes{service}` gauge。Scrape 不会重置 high-water；只有 Runtime task 重启才会清零。`completed` 表示 lease 在 deadline 前释放，不表示 value parse 或 binding operation 成功；后者由 binding-operation metrics 拥有。
 
 Cold-load duration metric 使用 workerd request clock。`bundle_load_stage_duration_ms` 只覆盖发生 await 的 `redis_proxy_load` 阶段；`bundle_load_duration_ms` 则覆盖 request 可观察的端到端 load latency，在 stock workerd 会计入同步 bundle decode、env construction 和 wrapper generation，但它仍是一个 aggregate，不是 per-stage CPU profile。

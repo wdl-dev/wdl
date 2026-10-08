@@ -429,6 +429,9 @@ when a matching active tail session exists. This buffered tail pipeline does not
 tracing spans; WDL has no streaming-tail span sink. `tail_worker_user_spans` is obsolete
 and would not supply that sink.
 
+Native per-call JSRPC tracing is active in the bundled workerd implementation; it
+does not turn the buffered tail pipeline into a span exporter.
+
 KV response admission exposes
 `wdl_kv_read_capacity_events_total{service,outcome}` with fixed outcomes `acquired`,
 `saturated`, `completed`, `deadline`, and `setup_error`, plus the current

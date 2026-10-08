@@ -1,6 +1,7 @@
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { generateKeyPairSync } from "node:crypto";
 import { BoundSocket } from "node:net";
+import { domainToASCII, domainToUnicode, format } from "node:url";
 
 const storage = new AsyncLocalStorage();
 const globalResource = new AsyncResource("wdl-global-probe");
@@ -51,6 +52,19 @@ function keyExportProbe() {
     sec1: attempt(() => ec.export({ ...encrypted, type: "sec1" }).byteLength),
     pkcs8Encrypted: rsa.export({ ...encrypted, type: "pkcs8" }).byteLength > 0,
     sec1Unencrypted: ec.export({ format: "der", type: "sec1" }).byteLength > 0,
+  };
+}
+
+function urlProbe() {
+  return {
+    ascii: domainToASCII("b\u00fccher.example"),
+    unicode: domainToUnicode("xn--bcher-kva.example"),
+    formatted: format(new URL("https://user:pass@xn--bcher-kva.example:8443/path?q=1#part"), {
+      auth: false, fragment: false, search: false, unicode: true,
+    }),
+    ipv6: format(new URL("http://user:pass@[::1]:8080/path?q=1#part"), {
+      auth: false, fragment: false, search: false, unicode: true,
+    }),
   };
 }
 
@@ -122,6 +136,7 @@ export default {
       case "/capture": return Response.json(captureResource());
       case "/check": return Response.json(checkResource());
       case "/crypto": return Response.json(keyExportProbe());
+      case "/url": return Response.json(urlProbe());
       case "/rejection-reentry": return Response.json(await rejectionReentryProbe());
       case "/bound-socket": return Response.json(boundSocketProbe());
       default: return new Response(null, { status: 404 });

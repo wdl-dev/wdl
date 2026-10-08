@@ -38,6 +38,7 @@ WDL 使用 stock workerd，不 patch workerd。因此 runtime 隔离从 workerd 
 - Runtime wrapper generation 构造 tenant-visible `env`。通用 authenticated backend Fetcher 留在 runtime 内，永远不进入 loaded-worker env；module evaluation 最多只能观察由不可变 props 限定到对应 binding 声明的 scoped host adapter。DO host adapter 通过 runtime internal network 自行完成 owner direct forwarding；AI host adapter 在 wrapper invocation 前只暴露 binding-scoped `fetch()` 表面。
 - user-runtime loaded worker 只拿 public-only outbound。Tenant `fetch()` 和 `cloudflare:sockets` 不应访问 platform-private address。
 - system-runtime 的 `__system__` worker 刻意拥有 private+public outbound，因为它们是平台代码，不是 tenant code。
+- 通过 JSRPC 传递已经连接的 socket 会委托该现有连接，但不会绕过建立新连接时的 outbound 检查。特权 worker 不得把私网连接交给不可信代码。
 - 特权 runtime event 使用私有 `:8088` internal socket。Gateway 不应保留 `/_scheduled` 这样的 tenant-visible path；socket 边界才是安全边界。
 
 ## Tenant Realm Provenance 边界

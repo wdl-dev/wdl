@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20261008.1` and `5.20261008.1`, raising the maximum compatibility date to `2026-10-15`. Includes GC allocation and exception-handling fixes, console crash fixes, and native stream and WebSocket memory-safety fixes; enables Socket transfer over JSRPC and accepts opt-in `webcrypto_modern_algorithms`. No WDL state migration is required.
 - Bound Runtime R2 and Control R2/ASSETS S3 operations to 60 seconds and each cleanup page to 30 seconds. GET streams have a 30-second pending-read timeout and five-minute no-progress cleanup, without cutting off active downloads by total duration. Cancel stalled reads and retry waits without reporting ambiguous mutations as successful or advancing cleanup checkpoints.
 - Refreshed Node 24 development tooling and the OpenAI SDK test dependency to `7.30.0`; updated the transitive `brace-expansion` and `smol-toml` dependencies to fix denial-of-service advisories.
 
