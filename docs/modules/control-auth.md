@@ -428,6 +428,19 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 - Control and gateway must keep route invalidation channel names aligned.
 - Auth role changes should be reviewed as security boundary changes and tested against
   reserved namespace behavior.
+- `__system__/s3-cleanup` is an independently deployed, immutable Worker bundle;
+  replacing platform images does not update its code. When its source or bundled
+  helpers change, redeploy it from the matching release checkout using an `ops`
+  token and the intended `CONTROL_URL`:
+
+  ```bash
+  wdl deploy system-workers/s3-cleanup --ns __system__ --control-url "$CONTROL_URL"
+  ```
+
+  The CLI deploys and promotes the new version, updating its queue consumer and
+  cron projection. Preserve the existing `s3-cleanup-state` D1 database, task rows,
+  `S3_CLEANUP_DB` binding, and worker secrets. Apply any pending bundled D1
+  migrations before redeploying; do not repeat bootstrap or recreate state.
 
 ## Tests That Protect This Module
 

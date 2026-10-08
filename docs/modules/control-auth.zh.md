@@ -185,6 +185,13 @@ Verify outcome 记录为 success、reject 或 error；5xx outcome 是 error log�
 - 跨 tier Control shape 变化遵循 [infra rollout 注意事项](infra.zh.md#部署--rollout-注意事项)中的 reader-before-writer 流程。
 - Control 和 gateway 必须保持 route invalidation channel 名称一致。
 - Auth role 改动属于安全边界变更，应重点测试 reserved namespace 行为。
+- `__system__/s3-cleanup` 是独立部署的 immutable Worker bundle，替换平台镜像不会更新其代码。源码或 bundled helper 变化时，应从对应 release checkout 使用 `ops` token 和正确的 `CONTROL_URL` 重新部署：
+
+  ```bash
+  wdl deploy system-workers/s3-cleanup --ns __system__ --control-url "$CONTROL_URL"
+  ```
+
+  CLI 会 deploy 并 promote 新版本，同时更新 queue consumer 和 cron projection。保留既有 `s3-cleanup-state` D1 数据库、task row、`S3_CLEANUP_DB` binding 和 worker secrets。如有尚未应用的 bundled D1 migration，应在重新部署前应用；不要重复 bootstrap 或重建状态。
 
 ## 保护该模块的测试
 

@@ -102,6 +102,10 @@ node --test tests/integration/<file>.test.js
 
 直接手跑单文件路径会自动准备本地 artifact，除非设置了 `WDL_INTEGRATION_SKIP_PREPARE=1`。
 
+R2 integration 还会在 workerd 容器内运行 `test-workers/r2-lifetime/config.capnp`。它通过原生 JSRPC 使用生产 R2 adapter 和 SigV4 client，以本地 service 模拟 S3，验证真实 header/body deadline、结果不确定的 PUT 失败、取消和慢消费者。本地 config preparation 会编译该 fixture；生产镜像不包含它。
+
+Worker-module integration 还会在容器内的独立 workerd 进程中运行 `test-workers/workerd-compat/config.capnp`，验证 console formatting exception，以及不强制 GC 时持续分配短命 native wrapper 的回收行为。这个仅供本地测试的 fixture 保护进程存活，不向生产 runtime 增加测试 hook，也不进入生产镜像。
+
 CLI 子集：
 
 ```bash
