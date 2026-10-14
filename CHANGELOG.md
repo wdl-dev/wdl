@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20261013.1` and `5.20261013.1`, raising the maximum compatibility date to `2026-10-20`. Includes V8 15.6 and the JSRPC fix that releases a rejected call's pipeline so callees complete; accepts opt-in `wasm_esm_integration_builtins`, and `Span.spanContext()` returns per-invocation ids that WDL never exports. `1.20261014.1` is skipped: its Rust server opens a new outbound connection per subrequest instead of reusing them (cloudflare/workerd#7714). Refreshed the pinned Distroless `base-debian13` image. No WDL state migration is required.
+- **Deployment:** workerd replaced the `@retryable` decorator from `cloudflare:durable-objects` with a `retryable()` function, so bundles built with the decorator fail at cold load with `TypeError: retryable() accepts only functions.` The marker has no effect in WDL; before rollout, check retained `worker:*:v:*` bundles for `cloudflare:durable-objects` imports and have affected tenants remove the decorator or switch to `retryable()` and redeploy.
+
 ## wdl.20261008.1 - 2026-10-09
 
 - Updated workerd and Workers types to `1.20261008.1` and `5.20261008.1`, raising the maximum compatibility date to `2026-10-15`. Includes GC allocation and exception-handling fixes, console crash fixes, and native stream and WebSocket memory-safety fixes; enables Socket transfer over JSRPC and accepts opt-in `webcrypto_modern_algorithms`. No WDL state migration is required.

@@ -87,6 +87,7 @@ const BASE64_PROBE_WORKER = `
  *     setStatusChained: boolean,
  *     invalidStatusError: string | null,
  *     endedSpanChained: boolean,
+ *     spanContext: unknown,
  *     activeSpan: {
  *       beforeAwait: boolean,
  *       afterAwait: boolean,
@@ -306,7 +307,9 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
   /** @type {Record<string, WorkerdCompatResult>} */
   const results = {};
   for (const variant of variants) {
-    const response = await gatewayFetch(ns, `/${variant.name}`);
+    const response = await gatewayFetch(ns, `/${variant.name}`, {
+      headers: { traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" },
+    });
     assert.equal(response.status, 200);
     results[variant.name] = /** @type {WorkerdCompatResult} */ (await responseJson(response));
   }
@@ -331,6 +334,14 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
       setStatusChained: true,
       invalidStatusError: "TypeError",
       endedSpanChained: true,
+      spanContext: {
+        validIds: true,
+        sharedTrace: true,
+        distinctSpans: true,
+        stableAfterEnd: true,
+        traceFlags: [0, 0],
+        inboundTraceIgnored: true,
+      },
       activeSpan: {
         beforeAwait: true,
         afterAwait: true,
@@ -459,6 +470,47 @@ test("bundled workerd modern WebCrypto algorithms remain opt-in", async () => {
     enabled: true,
     sharedKeyMatches: true,
     signatureVerified: true,
+  });
+});
+
+// (module (import "wasm:js/string-constants" "hello" (global externref)) (export "s" (global 0)))
+const WASM_STRING_CONSTANT_B64 = "AGFzbQEAAAACIwEYd2FzbTpqcy9zdHJpbmctY29uc3RhbnRzBWhlbGxvA28ABwUBAXMDAA==";
+
+const WASM_STRING_CONSTANT_WORKER = `
+import mod from "./constant.wasm";
+export default {
+  fetch() {
+    try {
+      return Response.json({ value: new WebAssembly.Instance(mod, {}).exports.s.value });
+    } catch (error) {
+      return Response.json({ error: error.name });
+    }
+  },
+};
+`;
+
+test("bundled workerd Wasm string-constant builtins remain opt-in", async () => {
+  const ns = uniqueNs("workerd-wasm-builtins");
+  for (const { name, compatibilityFlags } of [
+    { name: "default", compatibilityFlags: [] },
+    { name: "builtins", compatibilityFlags: ["wasm_esm_integration_builtins"] },
+  ]) {
+    await deployAndPromote(ns, name, {
+      mainModule: "worker.js",
+      modules: {
+        "worker.js": WASM_STRING_CONSTANT_WORKER,
+        "constant.wasm": { wasm_b64: WASM_STRING_CONSTANT_B64 },
+      },
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags,
+    });
+  }
+  // Without the flag the wasm:js/string-constants import stays unresolved.
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/default/"), 200), {
+    error: "TypeError",
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/builtins/"), 200), {
+    value: "hello",
   });
 });
 

@@ -4,12 +4,15 @@ const moduleClock = {
   performanceNow: performance.now(),
 };
 
-async function tracingProbe(ctx) {
+async function tracingProbe(ctx, request) {
   const previousSpan = ctx.tracing.getActiveSpan();
   const span = ctx.tracing.startSpan("wdl-workerd-compat-probe");
   const setAttributeChained = span.setAttribute("probe", "one") === span;
   const setAttributesChained = span.setAttributes({ second: 2, omitted: undefined }) === span;
   const startSpanPreservesActive = ctx.tracing.getActiveSpan() === previousSpan;
+  // The attached buffered tail enables per-invocation ids; WDL never exports spans.
+  const startedContext = span.spanContext();
+  const invocationContext = previousSpan ? previousSpan.spanContext() : null;
   const updateNameChained = span.updateName("wdl-workerd-compat-renamed") === span;
   const setStatusChained = span.setStatus({ code: "ok" }) === span &&
     span.setStatus({ code: "error", message: "workerd compatibility status" }) === span;
@@ -22,6 +25,19 @@ async function tracingProbe(ctx) {
   span.end();
   const endedSpanChained = span.updateName("wdl-workerd-compat-ended") === span &&
     span.setStatus({ code: "unset" }) === span;
+  const endedContext = span.spanContext();
+  const validId = (value, length) => typeof value === "string" &&
+    new RegExp(`^[0-9a-f]{${length}}$`).test(value) && !/^0+$/.test(value);
+  const spanContext = {
+    validIds: [startedContext, invocationContext].every((context) => context !== null &&
+      validId(context.traceId, 32) && validId(context.spanId, 16)),
+    sharedTrace: startedContext.traceId === invocationContext?.traceId,
+    distinctSpans: startedContext.spanId !== invocationContext?.spanId,
+    stableAfterEnd: JSON.stringify(endedContext) === JSON.stringify(startedContext),
+    traceFlags: [startedContext.traceFlags, invocationContext?.traceFlags],
+    // An inbound W3C traceparent must not choose the invocation's trace id.
+    inboundTraceIgnored: !request.headers.get("traceparent")?.includes(startedContext.traceId),
+  };
 
   const pending = ctx.tracing.startActiveSpan("wdl-workerd-compat-active", async (activeSpan) => {
     try {
@@ -61,6 +77,7 @@ async function tracingProbe(ctx) {
     setStatusChained,
     invalidStatusError,
     endedSpanChained,
+    spanContext,
     activeSpan: {
       ...activeSpanResult,
       callerPreservedWhilePending,
@@ -228,7 +245,7 @@ export default {
       return new Response("unreachable");
     }
 
-    const tracing = await tracingProbe(ctx);
+    const tracing = await tracingProbe(ctx, request);
     const iterator = Reflect.get(globalThis, "Iterator");
 
     return Response.json({
