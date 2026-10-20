@@ -1,7 +1,7 @@
 // SSE handler for `wdl tail`. Pull-based ReadableStream + pre-registered
 // ctx.waitUntil(cancelPromise) keeps cleanup outside the cancel callback.
-// workerd >= 2026-06-19 no longer reliably calls cancel() on client
-// disconnect, so max-session and idle-pull cleanup use independent watchdogs.
+// Native response-pump cancellation handles observed disconnects best-effort.
+// Session reauthorization and idle-pull limits still need independent watchdogs.
 
 import { RedisSession, redisDbFromEnv } from "shared-redis";
 import { envValueOr } from "shared-env";
@@ -448,9 +448,8 @@ export async function handle({ request, env, ctx, ns, requestId }) {
   }
   scheduleIdleWatchdog();
 
-  // Pre-register cleanup. Per CLAUDE.md gotcha: scheduling waitUntil from
-  // inside cancel races IoContext teardown — cancel only resolves the
-  // promise, the actual close happens here.
+  // Register cleanup before handing off the stream. The cancel callback only
+  // signals this task, rather than scheduling new work during context teardown.
   ctx.waitUntil(cancelPromise.then(async () => {
     clearTimeout(expiryTimer);
     if (idleTimer) clearTimeout(idleTimer);
@@ -572,9 +571,7 @@ export async function handle({ request, env, ctx, ns, requestId }) {
       }
     },
     cancel() {
-      // CLAUDE.md gotcha: do real cleanup in the pre-registered waitUntil
-      // promise, not here — IoContext teardown can race anything scheduled
-      // from inside the cancel callback itself.
+      // The pre-registered waitUntil task owns asynchronous resource cleanup.
       cancelled = true;
       resolveCancel();
     },

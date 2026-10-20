@@ -156,6 +156,49 @@ async function byobProbe() {
   };
 }
 
+async function pipeBackwardPropagationProbe() {
+  const failure = new Error("workerd compatibility destination failure");
+  let destinationController;
+  let canceledWithFailure = false;
+  const destination = new WritableStream({
+    start(controller) {
+      destinationController = controller;
+    },
+  });
+  const source = new ReadableStream({
+    pull() {
+      destinationController.error(failure);
+    },
+    cancel(reason) {
+      canceledWithFailure = reason === failure;
+    },
+  }, { highWaterMark: 0 });
+  const outcome = await source.pipeTo(destination).then(
+    () => "fulfilled",
+    (error) => error === failure ? "destination-error" : "unexpected-error"
+  );
+  return {
+    outcome,
+    canceledWithFailure,
+    sourceUnlocked: !source.locked,
+    destinationUnlocked: !destination.locked,
+  };
+}
+
+async function cacheOptionProbe(env) {
+  const result = {};
+  for (const [name, options] of [
+    ["noCache", { cache: "no-cache" }],
+    ["noStore", { cache: "no-store" }],
+    ["ttl", { cf: { cacheTtl: 300 } }],
+  ]) {
+    const request = new Request("https://cache-option.test/?cacheOptionEcho", options);
+    const response = await env.CACHE_TARGET.fetch(request);
+    result[name] = await response.json();
+  }
+  return result;
+}
+
 async function htmlRewriterProbe() {
   let uppercaseAttributeMatches = 0;
   const response = new HTMLRewriter()
@@ -236,6 +279,19 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.searchParams.has("modernCrypto")) return Response.json(await modernCryptoProbe());
+    if (url.searchParams.has("pipeBackwardPropagation")) {
+      return Response.json(await pipeBackwardPropagationProbe());
+    }
+    if (url.searchParams.has("cacheOption")) return Response.json(await cacheOptionProbe(env));
+    if (url.searchParams.has("cacheOptionEcho")) {
+      const cf = request.cf ?? {};
+      return Response.json({
+        cacheControl: cf.cacheControl ?? null,
+        cacheForceRevalidate: cf.cacheForceRevalidate ?? null,
+        cacheTtl: cf.cacheTtl ?? null,
+        cacheLevel: cf.cacheLevel ?? null,
+      });
+    }
     const pendingByobMode = url.searchParams.get("pendingByob");
     if (pendingByobMode) {
       return pendingInternalByobResponse(request, pendingByobMode);

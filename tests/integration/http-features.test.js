@@ -24,7 +24,7 @@ const ABORT_WORKER = readFileSync(
   "utf8"
 );
 
-test("client disconnect response stream behavior is bounded on current workerd", async () => {
+test("client disconnect cancels an async response stream through gateway and runtime", async () => {
   const ns = uniqueNs("abort");
   await deployAndPromote(ns, "w", {
     mainModule: "worker.js",
@@ -56,17 +56,11 @@ test("client disconnect response stream behavior is bounded on current workerd",
 
   await waitUntil("disconnect marker written", async () => {
     const r = await gatewayFetch(ns, `/w/poll?key=${encodeURIComponent(key)}`);
+    assert.equal(r.status, 200);
     const text = await r.text();
-    // workerd #6832 means 2026-06-19+ no longer calls ReadableStream.cancel()
-    // for this async response-body pattern on client disconnect. If "cancel"
-    // appears again, upstream likely fixed the bug and WDL should restore the
-    // strict cancel assertion and re-evaluate log-tail watchdog/documentation.
-    if (text === "cancel") {
-      throw new Error("upstream workerd #6832 appears fixed; restore strict cancel assertion and re-evaluate WDL stream watchdogs");
-    }
-    if (text === "enqueue-threw" || text === "ended-normally") return true;
     if (text === "__null__") return false;
-    throw new Error(`unexpected marker value ${JSON.stringify(text)}`);
+    assert.equal(text, "cancel", "disconnect must cancel the async response source");
+    return true;
   }, { timeoutMs: 30000, intervalMs: 250 });
 });
 

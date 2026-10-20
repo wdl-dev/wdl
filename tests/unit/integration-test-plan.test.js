@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
+import path from "node:path";
 
 import {
   CLI_INTEGRATION_MARKER,
+  SLOW_FIRST_FILES,
   durationPriorityNames,
   hasCliIntegrationMarker,
   prioritizeDefaultFiles,
@@ -11,7 +13,18 @@ import {
   readIntegrationDurationReport,
 } from "../../scripts/integration-test-plan.js";
 import { installStreamWriteCapture } from "../helpers/output-capture.js";
+import { jsFiles } from "../helpers/source-scan.js";
 import { withTempDir } from "../helpers/temp-dir.js";
+
+test("fallback slow-first list covers every integration file exactly once", () => {
+  const directory = path.join("tests", "integration");
+  const files = jsFiles(directory)
+    .filter((file) => path.dirname(file) === directory && file.endsWith(".test.js"))
+    .map((file) => path.basename(file));
+
+  assert.equal(new Set(SLOW_FIRST_FILES).size, SLOW_FIRST_FILES.length);
+  assert.deepEqual(SLOW_FIRST_FILES.toSorted(), files.toSorted());
+});
 
 test("prioritizeDefaultFiles runs configured slow files first and preserves the rest", () => {
   assert.deepEqual(
@@ -44,8 +57,8 @@ test("prioritizeDefaultFiles runs configured slow files first and preserves the 
       "workflows-runtime-scheduler.test.js",
       "queues-retry-and-delay.test.js",
       "workflows-runtime-core.test.js",
-      "queues-delivery.test.js",
       "queues-orphan-and-control.test.js",
+      "queues-delivery.test.js",
       "workflows-runtime-retention.test.js",
       "queues-batch-and-isolation.test.js",
       "z.test.js",

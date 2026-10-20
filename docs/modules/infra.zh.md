@@ -37,7 +37,7 @@ Local compose 是开发便利环境，不是 production delivery contract。它�
 
 - 公开入口通过 ALB/gateway。Terraform-managed ALB ingress 可以在同一个 gateway service 上承载 admin host、platform wildcard、canonical site host 和额外 exact public host。
 - Admin-host ingress 通过 gateway 的 `ADMIN_HOST` 分支进入 system-runtime control。
-- Local Compose private service hop 使用 `envoy/envoy.yaml` 和编译进 `dist/workerd-configs` 的 `*-local.capnp` workerd config。
+- Local Compose private service hop 使用 `envoy/envoy.yaml` 和编译进 `dist/workerd-configs` 的 `*-local.capnp` workerd config。HTTP route 显式禁用 Envoy 的总响应超时（`timeout: 0s`），与 ECS Service Connect 的 per-request 设置一致。Connection 和 stream-idle timeout 仍启用，operation/session 时限继续由应用 deadline 和 SSE watchdog 持有。
 - ECS Service Connect 覆盖 runtime、D1、DO 和 workflows service target。
 - 承载 WebSocket 的 Service Connect target 必须保留会传递 HTTP/1.1 Upgrade 的 HTTP 语义。不要在未重新验证 101 upgrade path 的情况下，把 gateway/runtime/DO traffic 悄悄降级成普通 L4 path。
 - `redis-proxy` 是 runtime/DO task 旁边的本地 sidecar。

@@ -2629,6 +2629,31 @@ test("local Compose routes private HTTP hops through Envoy", () => {
   }
 });
 
+test("local Envoy preserves service-owned response lifetimes", () => {
+  const [document] = yamlDocuments("envoy/envoy.yaml");
+  const config = /** @type {any} */ (document.toJS());
+  let checkedRoutes = 0;
+  // Envoy's implicit 15-second deadline truncates otherwise healthy SSE bodies.
+  for (const listener of config.static_resources.listeners) {
+    for (const chain of listener.filter_chains) {
+      for (const filter of chain.filters) {
+        for (const host of filter.typed_config?.route_config?.virtual_hosts ?? []) {
+          for (const entry of host.routes) {
+            if (!entry.route) continue;
+            assert.equal(
+              entry.route.timeout,
+              "0s",
+              `${listener.name}/${entry.route.cluster} must disable the mesh response deadline`,
+            );
+            checkedRoutes++;
+          }
+        }
+      }
+    }
+  }
+  assert.ok(checkedRoutes > 0, "Envoy HTTP routes must be checked");
+});
+
 test("workerd experimental process access stays limited to workerLoader tiers", () => {
   const compose = withoutLineComments(readRepoFile("docker-compose.yml"));
   const kubeGateway = withoutLineComments(readRepoFile("deploy/kubernetes/base/gateway.yaml"));

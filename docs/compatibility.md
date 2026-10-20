@@ -45,7 +45,7 @@ version's `compatibility_date`; see the
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-10-20`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-10-26`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 
@@ -65,6 +65,17 @@ worker's Wasm modules with the js-string builtins and `wasm:js/string-constants`
 enabled; modules that do not import the `wasm:*` namespaces are unaffected. WDL
 delivers Wasm modules to `workerLoader` as bytes, so each version compiles them under
 its own flags.
+
+`pipe_to_backward_propagation` is an accepted, non-experimental opt-in. It makes
+`pipeTo()` and `pipeThrough()` propagate a JavaScript-backed destination's errors
+and closure back to the source, including failures while canceling the source.
+`cache_option_preserves_cache_control` is also accepted; it stops the caller's
+`fetch()` cache option from synthesizing `cf.cacheControl`, while `no-cache` still
+sets `cacheForceRevalidate`. Synthesis from `cf.cacheTtl` is unchanged: forwarding a
+`no-store` request through another service-binding fetch can re-synthesize
+`cacheControl: "no-store"` from its `cacheTtl: -1`. This does not add a CDN cache to
+WDL. Both default on from compatibility date `2026-11-17`, beyond the bundled
+maximum; neither is enabled on WDL's static workers.
 
 Node.js TLS behavior follows the bundled workerd binary. Starting with WDL's
 2026-07-01 workerd pin, workers whose compatibility date is at least 2026-06-16 get

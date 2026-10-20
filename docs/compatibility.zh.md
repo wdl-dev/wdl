@@ -31,7 +31,7 @@
 
 WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary 只能 cold-load 其支持的 `compatibility_date` 对应的 retained Dynamic Worker version；具体说明见 [infra rollout 注意事项](modules/infra.zh.md#部署--rollout-注意事项)。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-10-20`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-10-26`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
 `auto_grpc_convert` 是 non-experimental flag，可以作为 compatibility metadata 使用，但不会为 WDL 增加 Cloudflare edge gRPC conversion service。
 
@@ -40,6 +40,8 @@ WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary �
 `webcrypto_modern_algorithms` 是允许使用的 non-experimental 显式 opt-in，暴露 workerd 原生的 ML-KEM、ML-DSA 和相关 WebCrypto helper。上游 API 遵循仍在演进的草案；WDL 不默认启用它，也不使用它处理平台 secret。
 
 `wasm_esm_integration_builtins` 是允许使用的 non-experimental 显式 opt-in。它在编译 worker 的 Wasm module 时启用 js-string builtin 和 `wasm:js/string-constants` import；未 import `wasm:*` namespace 的 module 不受影响。WDL 以字节形式把 Wasm module 交给 `workerLoader`，因此每个 version 都按自己的 flag 编译。
+
+`pipe_to_backward_propagation` 是允许使用的 non-experimental 显式 opt-in，使 `pipeTo()` 和 `pipeThrough()` 将 JavaScript-backed destination 的错误和关闭反向传播给 source，并处理取消 source 时的失败。`cache_option_preserves_cache_control` 同样允许使用，它阻止调用方 `fetch()` 的 cache option 自动生成 `cf.cacheControl`，而 `no-cache` 仍设置 `cacheForceRevalidate`。从 `cf.cacheTtl` 合成的行为不变：`no-store` 请求再经过一次 service-binding fetch 时，其 `cacheTtl: -1` 仍可能重新生成 `cacheControl: "no-store"`。这不会为 WDL 增加 CDN cache。两者都从 compatibility date `2026-11-17` 开始默认启用，超出当前 bundled maximum；WDL static worker 均未启用它们。
 
 Node.js TLS 行为跟随 bundled workerd binary。从 WDL 的 2026-07-01 workerd pin 开始，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此所有日期的证书 hostname 校验都跟随 bundled workerd 行为。
 

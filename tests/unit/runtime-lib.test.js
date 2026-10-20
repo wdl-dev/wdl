@@ -447,12 +447,18 @@ test("bundleToWorkerCode: rejects compatibilityDate below the WDL dynamic-worker
 });
 
 test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date platform floor, meta is frozen", () => {
+  const compatibilityFlags = [
+    "nodejs_compat",
+    "auto_grpc_convert",
+    "pipe_to_backward_propagation",
+    "cache_option_preserves_cache_control",
+  ];
   const code = bundleToWorkerCode(
     mkBundle(
       {
         mainModule: "w.js",
         compatibilityDate: "2026-04-20",
-        compatibilityFlags: ["nodejs_compat", "auto_grpc_convert"],
+        compatibilityFlags,
         bindings: { KV: { type: "kv", id: "x" } },
         vars: { G: "hi" },
         modules: { "w.js": { type: "module" } },
@@ -460,7 +466,7 @@ test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date p
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["nodejs_compat", "auto_grpc_convert", "enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, [...compatibilityFlags, "enhanced_error_serialization"]);
   assert.deepEqual(/** @type {any} */ (code.meta.bindings), { KV: { type: "kv", id: "x" } });
   assert.deepEqual(code.meta.vars, { G: "hi" });
   assert.ok(Object.isFrozen(code.meta), "meta must be frozen");

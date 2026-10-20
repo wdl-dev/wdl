@@ -164,7 +164,7 @@ should install the published CLI version pinned by the top-level
 `WDL_CLI_PACKAGE` value in `.github/workflows/ci.yml`:
 
 ```bash
-npm install -g @wdl-dev/cli@1.9.2
+npm install -g @wdl-dev/cli@1.9.3
 ```
 
 For unpublished CLI changes, link or wrap the checkout so `wdl` is on `PATH`.

@@ -24,6 +24,8 @@ Worker 通过不可变 id `<ns>:<worker>:<version>` 加载。Promote 会生成�
 
 这条 privilege asymmetry 存在于 capnp，而不是 Terraform 或 Kubernetes egress policy。`env.SERVICE_NAME` 是 capnp literal（`user-runtime` 或 `system-runtime`），用于日志/metrics，避免两个 pool 的观测流混在一起。
 
+Bundled workerd 使用 Rust server 和 Hyper transport。External HTTP 与 network service 在各自的 service lifetime 内保留 outbound connection pool；public-only 与 internal network service 继续使用独立的地址过滤规则。这不改变 WDL 的 immutable loader identity 或 host-binding ownership。
+
 workerd config wiring 有几条不明显的约束：`workerd serve` 的 config 和 service binding 参数必须是分开的 argv token，不要压成 colon-separated string；Cap'n Proto 的 `external = ... http` 用于 HTTP/TLS-capable peer，Redis 这种 plain TCP peer 应放在 `network` service 后面并用 `connect()`；通过 `network` service 做 HTTPS fetch 需要 `tlsOptions = (trustBrowserCas = true)`，runtime image 必须带 `ca-certificates`；workerd embedded module name 不能包含 `..`，因此共享嵌入模块使用 `shared-redis` 这类扁平名称；部分 support source 会以两个名字使用：普通 workerd module 用 capnp 扁平名，generated loaded-worker module 用 `.js` module 名；例如 D1 会把同一个 `shared/d1-data-field.js` 源码作为 `shared-d1-data-field` 提供给 workerd module，同时作为 `_wdl-d1-data-field.js` 注入 tenant WorkerCode；user-runtime 同时保留 platform plumbing 用的 `internal-network` 和 tenant outbound 用的 `public-network`，loaded user worker 只能拿到 `public-network`，platform wrapper 保留自己需要的 private reach。
 
 ## 接口
@@ -141,7 +143,7 @@ Cold-load duration metric 使用 workerd request clock。`bundle_load_stage_dura
 - Python Workers modules 不受支持。上游 `python_workers_314` flag 是 non-experimental，在 compatibility date 不早于 `2026-09-08` 时由 `python_workers` 隐式启用；`auto_inject_python_workers` 是 experimental，`python_workers_20260817` 已移除。Control 会拒绝新的 `py` module manifest，runtime/do-runtime 也会拒绝 retained metadata 中的 `py` module，而不是让 workerd 在 cold load 时 bootstrap Pyodide。
 - 从 WDL 的 2026-07-01 workerd pin 开始，runtime 进程使用进程级 `--experimental`，因为上游用它 gate `workerLoader` binding。不要给 loaded WorkerCode 加 `experimental` compatibility flag 或 `allowExperimental`，除非新的上游 API 明确需要。
 - 从 WDL 的 2026-07-01 workerd pin 开始，Control 执行上游的 64 MiB dynamic worker code 上限和 1 MiB serialized dynamic env 上限。Control 在分配 version 前估算一次最终 WorkerCode，包含 runtime/do-runtime 注入的 wrapper/client modules 和 workflow import rewrite。Materialized D1 id、DO storage id、Workflow key 与 version identity 位于 host props，不进入 generated source，因此 WATCH retry 不重复该代码估算。Vars、namespace/worker secrets、runtime 注入的 binding env value 会在 Redis WATCH commit 和 secret mutation 路径里按 headroomed `workerLoader` env budget 做权威检查；Workflow identity 同样由该 env budget 覆盖。Commit 与 secret mutation 路径按各自实际要加载的 version 检查；deploy 和 namespace-secret mutation 使用其实际可加载 version，worker-secret mutation 还会在 WATCH/COPY bump 事务内重新检查 forced bump，确保 routing flip 前覆盖已分配的 bump version。估算以 JSON bytes 为基底，并对非 Latin-1 字符串补上 V8 two-byte string overhead，因此 ASCII 混 CJK 或 emoji 的 secret 不会绕过 control 后在 cold-load 才失败。
-- 当前 stock workerd 中，客户端在 async `ReadableStream` response body 中途断开时，不一定调用 stream source 的 `cancel()`。Tenant streaming/SSE worker 应使用自己的 heartbeat、timeout 或应用层 close path，不要把 disconnect-driven `cancel()` 当成唯一资源清理信号。
+- Bundled workerd 已恢复异步 response stream 的 `cancel()` callback：观测到客户端断开并丢弃 native response pump 时会调用它。清理仍是 best-effort，context teardown 或已没有 incoming request 时可能无法执行。Incoming `request.signal` 需要显式启用 `enable_request_signal`，也不保证断线信号贯穿所有中间层。Streaming/SSE worker 应保留独立 deadline、idle limit 或应用层 close path。
 - workerd 升级仍可能改变默认或 compatibility-flagged runtime surface；升级时要审 exposed surface，而不只审 loader/abort path。
 
 ## 保护该模块的测试

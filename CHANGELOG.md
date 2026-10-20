@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- Updated workerd and Workers types to `1.20261013.1` and `5.20261013.1`, raising the maximum compatibility date to `2026-10-20`. Includes V8 15.6 and the JSRPC fix that releases a rejected call's pipeline so callees complete; accepts opt-in `wasm_esm_integration_builtins`, and `Span.spanContext()` returns per-invocation ids that WDL never exports. `1.20261014.1` is skipped: its Rust server opens a new outbound connection per subrequest instead of reusing them (cloudflare/workerd#7714). Refreshed the pinned Distroless `base-debian13` image. No WDL state migration is required.
+- Updated workerd and Workers types to `1.20261019.1` and `5.20261019.1`, raising the maximum compatibility date to `2026-10-26`. Includes V8 15.7, the Rust server with pooled outbound connections, and JSRPC completion and actor exception-attribution fixes. Restores async response-body cancellation on observed client disconnects and `new Function("")` rejection when dynamic code generation is disabled. No WDL state migration is required.
+- Accepts opt-in `wasm_esm_integration_builtins`, `pipe_to_backward_propagation`, and `cache_option_preserves_cache_control`; static worker flags are unchanged. `Span.spanContext()` returns per-invocation ids that WDL never exports.
+- Refreshed the pinned Distroless `base-debian13` image, Node 24 development tooling, and OpenAI SDK test dependency; pinned Rust to `1.99.1` and refreshed Rust dependencies. CI and install docs qualify CLI `1.9.3`; the minimum supported CLI remains `1.9.0`.
+- Aligned local Envoy response timeouts with Service Connect so active SSE and streaming responses are not cut off at 15 seconds; connection, idle, and application deadlines remain in force.
 - **Deployment:** workerd replaced the `@retryable` decorator from `cloudflare:durable-objects` with a `retryable()` function, so bundles built with the decorator fail at cold load with `TypeError: retryable() accepts only functions.` The marker has no effect in WDL; before rollout, check retained `worker:*:v:*` bundles for `cloudflare:durable-objects` imports and have affected tenants remove the decorator or switch to `retryable()` and redeploy.
 
 ## wdl.20261008.1 - 2026-10-09

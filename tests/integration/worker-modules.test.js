@@ -473,6 +473,76 @@ test("bundled workerd modern WebCrypto algorithms remain opt-in", async () => {
   });
 });
 
+test("bundled workerd pipe destination-error propagation remains opt-in", async () => {
+  const ns = uniqueNs("workerd-pipe-backward");
+  for (const { name, compatibilityFlags, outcome } of [
+    { name: "default", compatibilityFlags: [], outcome: "fulfilled" },
+    {
+      name: "backward",
+      compatibilityFlags: ["pipe_to_backward_propagation"],
+      outcome: "destination-error",
+    },
+  ]) {
+    await deployAndPromote(ns, name, {
+      code: WORKERD_COMPAT_WORKER,
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags,
+    });
+    assert.deepEqual(
+      await readIntegrationJson(await gatewayFetch(ns, `/${name}?pipeBackwardPropagation`), 200),
+      { outcome, canceledWithFailure: true, sourceUnlocked: true, destinationUnlocked: true }
+    );
+  }
+});
+
+test("bundled workerd cache option serialization remains opt-in through service bindings", async () => {
+  const ns = uniqueNs("workerd-cache-option");
+  await deployAndPromote(ns, "target", {
+    code: WORKERD_COMPAT_WORKER,
+    compatibilityDate: "2026-04-24",
+  });
+  for (const { name, compatibilityFlags, preserves } of [
+    { name: "default", compatibilityFlags: [], preserves: false },
+    {
+      name: "preserve",
+      compatibilityFlags: ["cache_option_preserves_cache_control"],
+      preserves: true,
+    },
+  ]) {
+    await deployAndPromote(ns, name, {
+      code: WORKERD_COMPAT_WORKER,
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags,
+      bindings: { CACHE_TARGET: { type: "service", service: "target" } },
+    });
+    assert.deepEqual(
+      await readIntegrationJson(await gatewayFetch(ns, `/${name}?cacheOption`), 200),
+      {
+        noCache: {
+          cacheControl: preserves ? null : "no-cache",
+          cacheForceRevalidate: true,
+          cacheTtl: null,
+          cacheLevel: null,
+        },
+        noStore: {
+          // The forwarding fetch re-synthesizes this from cf.cacheTtl=-1.
+          cacheControl: "no-store",
+          cacheForceRevalidate: null,
+          cacheTtl: -1,
+          cacheLevel: "bypass",
+        },
+        ttl: {
+          cacheControl: "max-age=300",
+          cacheForceRevalidate: null,
+          cacheTtl: 300,
+          cacheLevel: null,
+        },
+      },
+      name
+    );
+  }
+});
+
 // (module (import "wasm:js/string-constants" "hello" (global externref)) (export "s" (global 0)))
 const WASM_STRING_CONSTANT_B64 = "AGFzbQEAAAACIwEYd2FzbTpqcy9zdHJpbmctY29uc3RhbnRzBWhlbGxvA28ABwUBAXMDAA==";
 

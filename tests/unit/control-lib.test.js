@@ -833,12 +833,18 @@ test("prepareBundle: binding names with __WDL_ prefix are runtime-internal", () 
 });
 
 test("prepareBundle: compatibilityFlags preserved", () => {
+  const compatibilityFlags = [
+    "nodejs_compat",
+    "auto_grpc_convert",
+    "pipe_to_backward_propagation",
+    "cache_option_preserves_cache_control",
+  ];
   const { meta } = prepareBundle(
     "w.js",
     { "w.js": "x" },
-    { compatibilityFlags: ["nodejs_compat", "auto_grpc_convert"] }
+    { compatibilityFlags }
   );
-  assert.deepEqual(meta.compatibilityFlags, ["nodejs_compat", "auto_grpc_convert"]);
+  assert.deepEqual(meta.compatibilityFlags, compatibilityFlags);
 });
 
 test("prepareBundle: experimental workerd compatibility flags are rejected", () => {

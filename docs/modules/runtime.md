@@ -36,6 +36,11 @@ That privilege asymmetry lives in capnp, not in Terraform or Kubernetes egress p
 `env.SERVICE_NAME` is a capnp literal (`user-runtime` or `system-runtime`) and is used
 for logs/metrics so the two pools do not collapse into one observability stream.
 
+The bundled workerd uses its Rust server and Hyper transport. External HTTP and
+network services retain outbound connection pools for their service lifetime;
+public-only and internal network services retain their distinct address filters.
+This does not change WDL's immutable loader identity or host-binding ownership.
+
 workerd config wiring has a few non-obvious constraints:
 
 - `workerd serve` takes config and service binding arguments as separate argv tokens;
@@ -513,10 +518,12 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
   version is covered before routing flips. The estimate starts from JSON bytes and adds
   V8 two-byte string overhead for non-Latin-1 strings, so mixed ASCII plus CJK or emoji
   secrets do not slip past control and fail later at cold-load.
-- In current stock workerd, a client disconnect during an async `ReadableStream`
-  response body may not call the stream source's `cancel()` callback. Tenant streaming
-  and SSE workers should use their own heartbeat, timeout, or application close path
-  instead of relying on disconnect-driven `cancel()` as the only resource cleanup hook.
+- Bundled workerd restores an async response stream's `cancel()` callback when an
+  observed client disconnect drops the native response pump. Cleanup is still
+  best-effort: context teardown or the absence of an incoming request can prevent it.
+  Incoming `request.signal` requires the `enable_request_signal` opt-in and is not a
+  guarantee of disconnect propagation through every intermediary. Streaming and SSE
+  workers should retain independent deadlines, idle limits, or application close paths.
 - workerd upgrades can still change default or compatibility-flagged runtime
   surfaces; review the exposed surface, not only the loader/abort path.
 

@@ -248,10 +248,12 @@ uses Workflows DB 2 for retry state, so workerd does not classify that dispatch 
 native alarm event. The option still aborts the facet but does not suppress WDL alarm
 retries; WDL does not silently claim the new native retry-control contract.
 
-Stock workerd can retry replayable native host-actor fetches after disconnects that
-are not marked as delivered. Facet fetches do not support that native retry path.
-Native JSRPC retries and userland `retryable` dispatch remain disabled; they do not
-replace WDL owner fences, uncertain-result handling, or Workflows alarm retries.
+Stock workerd can retry replayable native host-actor fetches after retryable failures
+that are not marked as delivered, including internally marked transient failures
+as well as disconnects. Facet fetches do not support that native retry path.
+Native JSRPC retries and userland `retryable` dispatch remain disabled. Experimental
+per-stub `retry` options are not a WDL tenant API; none of these mechanisms replace
+WDL owner fences, uncertain-result handling, or Workflows alarm retries.
 
 A pending delete row stores an internal fence token with `in_flight=1`. The in-flight bit
 is a same-service rolling reader fence: an older do-runtime does not understand the token

@@ -3,6 +3,8 @@ admin:
     socket_address: { address: 0.0.0.0, port_value: 9901 }
 
 static_resources:
+  # Match Service Connect: services own total request deadlines, not the mesh.
+  # Keep connection and stream-idle timeouts; active streams have no total cap.
   listeners:
     - name: user_runtime
       address:
@@ -23,7 +25,7 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { prefix: "/" }
-                          route: { cluster: user_runtime }
+                          route: { cluster: user_runtime, timeout: 0s }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -48,7 +50,7 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { prefix: "/" }
-                          route: { cluster: system_runtime_loader }
+                          route: { cluster: system_runtime_loader, timeout: 0s }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -71,7 +73,7 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { prefix: "/" }
-                          route: { cluster: user_runtime_internal }
+                          route: { cluster: user_runtime_internal, timeout: 0s }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -94,7 +96,7 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { prefix: "/" }
-                          route: { cluster: system_runtime_internal }
+                          route: { cluster: system_runtime_internal, timeout: 0s }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -117,7 +119,7 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { prefix: "/" }
-                          route: { cluster: system_runtime_control }
+                          route: { cluster: system_runtime_control, timeout: 0s }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -140,7 +142,7 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { prefix: "/" }
-                          route: { cluster: d1_router }
+                          route: { cluster: d1_router, timeout: 0s }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -165,7 +167,7 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match: { prefix: "/" }
-                          route: { cluster: do_router }
+                          route: { cluster: do_router, timeout: 0s }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:

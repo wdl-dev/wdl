@@ -65,7 +65,7 @@ Tail streams 使用有界 `MAXLEN ~ 500`，并在写入时刷新 TTL。它们是
 - 结构化 stdout 是持久平台日志的事实来源。
 - 没有 active tailer 时，runtime 仍输出 stdout，但在本地 active-set miss cache 后跳过精确 tail-envelope serialization 和 stream-append work。
 - Active tail session 是有时限的授权租约，必须通过正常 auth reconnect。`LOG_TAIL_MAX_SESSION_MS` 设置 control-side 最大时长；非法值或空值会回退到 15 分钟。
-- 当前 stock workerd 的行为（上游 issue [#6832](https://github.com/cloudflare/workerd/issues/6832) 跟踪）不会可靠地在 client disconnect 时触发 async response-body `ReadableStream.cancel()`。WDL 把它当作永久兼容边界处理：Control 的独立 watchdog 不是等待上游修复的临时 workaround。max-session watchdog 负责 reauthorization 上界，idle-pull watchdog 在 SSE body 连续三个 keepalive 周期没有被 pull 时关闭 session。活跃客户端会因为每次 heartbeat 腾出 queue 空间而自然按 keepalive 粒度继续 pull；遗弃客户端会停止 pull，因此不需要等完整 session lifetime 才清理。TCP 连接还在但应用层长时间不读的客户端可能被关闭，应自行 reconnect。
+- Bundled workerd 已包含 [#6832 修复](https://github.com/cloudflare/workerd/pull/7600)：观测到 client disconnect 并丢弃 native response pump 时，会调用异步 response body 的 `ReadableStream.cancel()`。清理仍是 best-effort，context teardown 或已没有 incoming request 时可能跳过。Control 保留预先注册的 cleanup task 和两个独立 watchdog：max-session watchdog 负责 reauthorization 上界，idle-pull watchdog 在 SSE body 连续三个 keepalive 周期没有被 pull 时关闭 session。活跃客户端会因为每次 heartbeat 腾出 queue 空间而自然按 keepalive 粒度继续 pull。TCP 连接保持但应用层停止读取不等于断线；idle watchdog 仍负责这类 session 的时限，客户端应自行 reconnect。
 - 与 activation race 的 tail event 可以丢失。
 - 高 QPS 或慢 SSE reader 可能因为 stream cap 丢中间事件。
 

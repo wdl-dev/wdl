@@ -62,7 +62,10 @@ except for co-located sidecars:
   hosts on the same gateway service.
 - Admin-host ingress through gateway's `ADMIN_HOST` branch to system-runtime control.
 - Local Compose private service hops use `envoy/envoy.yaml` and the `*-local.capnp`
-  workerd configs compiled into `dist/workerd-configs`.
+  workerd configs compiled into `dist/workerd-configs`. HTTP routes explicitly disable
+  Envoy's total response timeout (`timeout: 0s`), matching ECS Service Connect's
+  per-request setting. Connection and stream-idle timeouts remain enabled; application
+  deadlines and SSE watchdogs still own operation/session bounds.
 - ECS Service Connect covers runtime, D1, DO, and workflows service targets.
 - Service Connect targets that carry WebSockets must keep HTTP semantics that preserve
   HTTP/1.1 Upgrade. Do not silently downgrade gateway/runtime/DO traffic to a plain L4

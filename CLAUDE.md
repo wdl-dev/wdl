@@ -162,7 +162,7 @@ shared crate `wdl-rust-common`.
   pinned by `tests/fixtures/*.json` read on both sides plus
   `tests/unit/style-contracts.test.js`; change both sides and the fixture together.
 - Use the explicit language baselines by default: JavaScript targets ES2025 on Node 24,
-  and Rust targets Edition 2024 on Rust 1.98. Do not reintroduce older spellings when
+  and Rust targets Edition 2024 on Rust 1.99.1. Do not reintroduce older spellings when
   the repository standard already uses a modern API or syntax. Cross-language rules
   live in `docs/project-standards.md`; language-specific rules live in
   `docs/workerd-js-standards.md` and `docs/rust-sidecar-standards.md`.
@@ -210,10 +210,11 @@ output capture, or fixture loading.
   host-only helpers in module functions or WeakMaps.
 - `workerd serve` emits raw console stdout in addition to structured tail events. The
   structured JSON log is the platform source of truth.
-- On current workerd, mid-response disconnects do not reliably trip `request.signal`
-  or async response-body `ReadableStream.cancel`; do not use either as the only
-  cleanup signal. Bound streaming responses with an independent timeout or an
-  explicit app-level heartbeat/close path.
+- Bundled workerd restores async response-body `ReadableStream.cancel()` when an
+  observed disconnect drops the native response pump. Cleanup is best-effort and can
+  be skipped during context teardown. `request.signal` requires `enable_request_signal`;
+  do not assume disconnect propagation through every proxy or wrapper. Keep independent
+  stream deadlines and idle cleanup.
 - Forwarding WebSocket `101` responses requires preserving `response.webSocket`; use the
   shared response helper instead of wrapping with `new Response(body, init)`.
 - workerd/capnp wiring traps apply to every tier's `*.capnp`, not just runtime: `workerd
