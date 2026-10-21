@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-- Updated workerd and Workers types to `1.20261021.1` and `5.20261021.1`, raising the maximum compatibility date to `2026-10-28`. Includes V8 15.7, native stream/GC and compression safety fixes, reduced microtask/tracing retention and allocations, and compact WebAssembly imports. Retains pooled Rust-server connections, restores async response-body cancellation on observed disconnects, and rejects `new Function("")` when dynamic code generation is disabled. No WDL state migration is required.
-- Accepts opt-in `wasm_esm_integration_builtins`, `pipe_to_backward_propagation`, and `cache_option_preserves_cache_control`; static worker flags are unchanged. `Span.spanContext()` returns per-invocation ids that WDL never exports.
-- Refreshed the pinned Distroless `base-debian13` image, Node 24 development tooling, and OpenAI SDK test dependency; pinned Rust to `1.99.1` and refreshed Rust dependencies. CI and install docs qualify CLI `1.9.3`; the minimum supported CLI remains `1.9.0`.
-- Aligned local Envoy response timeouts with Service Connect so active SSE and streaming responses are not cut off at 15 seconds; connection, idle, and application deadlines remain in force.
-- **Deployment:** workerd replaced the `@retryable` decorator from `cloudflare:durable-objects` with a `retryable()` function, so bundles built with the decorator fail at cold load with `TypeError: retryable() accepts only functions.` The marker has no effect in WDL; before rollout, check retained `worker:*:v:*` bundles for `cloudflare:durable-objects` imports and have affected tenants remove the decorator or switch to `retryable()` and redeploy.
+## wdl.20261021.1 - 2026-10-21
+
+- Updated workerd and Workers types to `1.20261021.1` and `5.20261021.1`, raising the maximum compatibility date to `2026-10-28`. Includes V8 15.7, pooled Rust-server connections, native stream/GC and compression safety fixes, and reduced microtask/tracing allocations. No WDL state migration is required.
+- Added compact WebAssembly imports and opt-in `wasm_esm_integration_builtins`, `pipe_to_backward_propagation`, and `cache_option_preserves_cache_control`; static worker flags are unchanged. Exposed `Span.spanContext()` without span export; restored best-effort disconnect cancellation and `new Function("")` rejection when dynamic code generation is disabled.
+- Updated Rust to `1.99.1`, refreshed Rust/Node dependencies and the pinned Distroless image, and qualified CLI `1.9.3` with minimum `1.9.0`.
+- Disabled local Envoy's 15-second total response timeout to preserve active streams, matching Service Connect; connection, idle, and application deadlines remain.
+- **Deployment:** Audit retained bundles for `cloudflare:durable-objects` `@retryable`. Before rollout, remove the decorator or switch to `retryable()`, redeploy affected workers, and retire references to old decorator-based versions. The marker still does not enable retries in WDL.
 
 ## wdl.20261008.1 - 2026-10-09
 
