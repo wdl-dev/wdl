@@ -45,7 +45,7 @@ version's `compatibility_date`; see the
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-10-26`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-10-28`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 
@@ -65,6 +65,9 @@ worker's Wasm modules with the js-string builtins and `wasm:js/string-constants`
 enabled; modules that do not import the `wasm:*` namespaces are unaffected. WDL
 delivers Wasm modules to `workerLoader` as bytes, so each version compiles them under
 its own flags.
+
+Compact WebAssembly import-section encoding is also accepted by the bundled
+workerd without an opt-in. WDL forwards Wasm module bytes without rewriting them.
 
 `pipe_to_backward_propagation` is an accepted, non-experimental opt-in. It makes
 `pipeTo()` and `pipeThrough()` propagate a JavaScript-backed destination's errors
@@ -182,7 +185,7 @@ docs:
 | Upstream experimental and WDL-denied compatibility flags | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental`, plus WDL's explicit deny policies for `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and `streams_disable_constructors`, are rejected at deploy and runtime decode. New Module Registry has graduated upstream, but WDL's generated wrapper is the actual dynamic-loader main module and cannot preserve tenant `import.meta.main`; Fetcher RPC and standard stream constructors are required by WDL runtime facades. |
 | Python Workers | Not supported | WDL rejects Python module manifests instead of letting workerd fail at cold-load. |
 | Durable Object cross-script bindings and migration rename/delete semantics | Not supported | WDL DO classes are same-worker only. Storage identity, owner routing, and delete cleanup are WDL-managed rather than Cloudflare migration-compatible. |
-| Durable Object snapshots and user-configured native retries | Not supported | Native `snapshot()` / `onNextSessionRestore()` require the rejected experimental flag and an embedder storage implementation. The `cloudflare:durable-objects` `retryable()` marker does not enable retries: its native userland gate is off, and WDL retains its own owner-fenced fetch/RPC and alarm contracts. |
+| Durable Object snapshots and user-configured native retries | Not supported | Native `snapshot()` / `onNextSessionRestore()` require the rejected `durable_object_snapshots` or catch-all `experimental` flag and an embedder storage implementation. The `cloudflare:durable-objects` `retryable()` marker does not enable retries: its native userland gate is off, and WDL retains its own owner-fenced fetch/RPC and alarm contracts. |
 | Workflow `createBatch({ count, ... })` / `createBatch({ instances })` | Not supported | WDL accepts the non-empty array form only and rejects object overloads before backend I/O. The native partial-success object result is not a WDL contract. |
 | Cloudflare account API parity | Not supported | WDL exposes its own CLI/control API. Cloudflare API compatibility is not a stated goal. |
 

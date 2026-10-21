@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import { open } from "node:fs/promises";
 import { Buffer } from "node:buffer";
-import { gzipSync, gunzipSync } from "node:zlib";
+import { constants, createBrotliCompress, gzipSync, gunzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
+import { throws } from "node:assert";
 import { promisify } from "node:util";
 import { Readable, Writable, PassThrough, compose } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
@@ -185,6 +186,20 @@ async function compressionProbe() {
   } finally {
     reader.releaseLock();
   }
+  const brotli = createBrotliCompress({ params: { [constants.BROTLI_PARAM_QUALITY]: 1 } });
+  try {
+    const bytes = new Uint8Array(256);
+    throws(() => brotli._handle.writeSync(
+      constants.BROTLI_OPERATION_FINISH, bytes, 0, 128, bytes, 64, 128
+    ), { message: "Input and output buffers must not overlap" });
+  } finally {
+    brotli.close();
+  }
+  // Zstd's stable input/output buffer modes cannot be honored by this adapter.
+  for (const parameter of [1006, 1007]) {
+    throws(() => zstdCompressSync(input, { params: { [parameter]: 1 } }),
+      /Unsupported Zstd compression parameter/);
+  }
   return {
     inputBytes: input.length,
     webRoundtrip: Buffer.from(decoded).equals(input),
@@ -192,6 +207,9 @@ async function compressionProbe() {
     webToNodeRoundtrip: gunzipSync(new Uint8Array(encoded)).equals(input),
     invalid,
     cancelledAfterRead: firstBytes > 0,
+    overlappingBuffersRejected: true,
+    stableBufferModesRejected: true,
+    zstdRoundtrip: zstdDecompressSync(zstdCompressSync(input)).equals(input),
     utf16Slice: Buffer.from([0xff, 0x41, 0, 0x42, 0, 0xac, 0x20, 0xee])
       .subarray(1, 7).toString("utf16le"),
   };

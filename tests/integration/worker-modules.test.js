@@ -20,7 +20,7 @@ import {
 
 setupIntegrationSuite();
 
-test("native workerd survives console formatting errors and reclaims short-lived wrappers", () => {
+test("native workerd preserves isolate and stream lifetimes", () => {
   composeExec("user-runtime", [
     "workerd", "test", "-b", "/app/dist/workerd-configs/workerd-lifecycle-test.bin",
   ]);
@@ -584,6 +584,48 @@ test("bundled workerd Wasm string-constant builtins remain opt-in", async () => 
   });
 });
 
+// Generated with wasm-tools from the compact import groups in:
+// (module
+//   (type (func (param i32) (result i32)))
+//   (import "a" (item "f" (func (type 0))) (item "g" (global i32)))
+//   (import "b" (item "x") (item "y") (func (type 0)))
+//   (func (export "run") (param i32) (result i32)
+//     (i32.add (i32.add (i32.add (call 0 (local.get 0)) (call 1 (local.get 0)))
+//       (call 2 (local.get 0))) (global.get 0))))
+const WASM_COMPACT_IMPORTS_B64 = "AGFzbQEAAAABBgFgAX8BfwIaAgFhAH8CAWYAAAFnA38AAWIAfgAAAgF4AXkDAgEABwcBA3J1bgADChUBEwAgABAAIAAQAWogABACaiMAags=";
+
+test("bundled workerd loads compact Wasm import groups without an opt-in", async () => {
+  const ns = uniqueNs("workerd-wasm-compact");
+  await deployAndPromote(ns, "probe", {
+    mainModule: "worker.js",
+    compatibilityDate: "2026-04-24",
+    modules: {
+      "worker.js": `
+        import module from "./compact.wasm";
+        export default {
+          fetch() {
+            const instance = new WebAssembly.Instance(module, {
+              a: { f: (value) => value + 1, g: 1000 },
+              b: { x: (value) => value * 2, y: (value) => value * 3 },
+            });
+            return Response.json({ imports: WebAssembly.Module.imports(module), value: instance.exports.run(1) });
+          },
+        };
+      `,
+      "compact.wasm": { wasm_b64: WASM_COMPACT_IMPORTS_B64 },
+    },
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/"), 200), {
+    imports: [
+      { module: "a", name: "f", kind: "function" },
+      { module: "a", name: "g", kind: "global" },
+      { module: "b", name: "x", kind: "function" },
+      { module: "b", name: "y", kind: "function" },
+    ],
+    value: 1007,
+  });
+});
+
 test("bundled workerd Node filesystem respects views, creation flags and replacement", async () => {
   const ns = uniqueNs("workerd-fs");
   await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
@@ -624,7 +666,7 @@ test("bundled workerd Node and Web streams settle through success, failure and c
   });
 });
 
-test("bundled workerd compression preserves bytes and settles cancellation", async () => {
+test("bundled workerd compression preserves bytes and rejects unsafe buffers", async () => {
   const ns = uniqueNs("workerd-compression");
   await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
   assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/compression"), 200), {
@@ -634,6 +676,9 @@ test("bundled workerd compression preserves bytes and settles cancellation", asy
     webToNodeRoundtrip: true,
     invalid: "TypeError",
     cancelledAfterRead: true,
+    overlappingBuffersRejected: true,
+    stableBufferModesRejected: true,
+    zstdRoundtrip: true,
     utf16Slice: "AB\u20ac",
   });
 });

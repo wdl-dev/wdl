@@ -147,6 +147,8 @@ compiles this fixture; production images do not include it.
 Worker-module integration also runs `test-workers/workerd-compat/config.capnp` in
 a separate workerd process inside the container. It checks console formatting
 exceptions and sustained short-lived native-wrapper allocation without forced GC.
+It also verifies byte-stream terminal-state reentry across completed request
+contexts without enabling experimental stream implementations.
 This local-only fixture protects process survival without adding test hooks to the
 production runtime or including the fixture in production images.
 

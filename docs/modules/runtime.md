@@ -41,6 +41,10 @@ network services retain outbound connection pools for their service lifetime;
 public-only and internal network services retain their distinct address filters.
 This does not change WDL's immutable loader identity or host-binding ownership.
 
+The upstream native `CodeCacheStore` is not connected by the standalone server;
+WDL does not gain a process-wide bundle compilation cache from it. Existing live
+Worker reuse and builtin module caches remain separate mechanisms.
+
 workerd config wiring has a few non-obvious constraints:
 
 - `workerd serve` takes config and service binding arguments as separate argv tokens;

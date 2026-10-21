@@ -26,6 +26,8 @@ Worker 通过不可变 id `<ns>:<worker>:<version>` 加载。Promote 会生成�
 
 Bundled workerd 使用 Rust server 和 Hyper transport。External HTTP 与 network service 在各自的 service lifetime 内保留 outbound connection pool；public-only 与 internal network service 继续使用独立的地址过滤规则。这不改变 WDL 的 immutable loader identity 或 host-binding ownership。
 
+Standalone server 尚未接入上游原生 `CodeCacheStore`，WDL 不会因此自动获得进程级 bundle 编译缓存。现有 live Worker 复用和 builtin module cache 是独立机制。
+
 workerd config wiring 有几条不明显的约束：`workerd serve` 的 config 和 service binding 参数必须是分开的 argv token，不要压成 colon-separated string；Cap'n Proto 的 `external = ... http` 用于 HTTP/TLS-capable peer，Redis 这种 plain TCP peer 应放在 `network` service 后面并用 `connect()`；通过 `network` service 做 HTTPS fetch 需要 `tlsOptions = (trustBrowserCas = true)`，runtime image 必须带 `ca-certificates`；workerd embedded module name 不能包含 `..`，因此共享嵌入模块使用 `shared-redis` 这类扁平名称；部分 support source 会以两个名字使用：普通 workerd module 用 capnp 扁平名，generated loaded-worker module 用 `.js` module 名；例如 D1 会把同一个 `shared/d1-data-field.js` 源码作为 `shared-d1-data-field` 提供给 workerd module，同时作为 `_wdl-d1-data-field.js` 注入 tenant WorkerCode；user-runtime 同时保留 platform plumbing 用的 `internal-network` 和 tenant outbound 用的 `public-network`，loaded user worker 只能拿到 `public-network`，platform wrapper 保留自己需要的 private reach。
 
 ## 接口

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Updated workerd and Workers types to `1.20261019.1` and `5.20261019.1`, raising the maximum compatibility date to `2026-10-26`. Includes V8 15.7, the Rust server with pooled outbound connections, and JSRPC completion and actor exception-attribution fixes. Restores async response-body cancellation on observed client disconnects and `new Function("")` rejection when dynamic code generation is disabled. No WDL state migration is required.
+- Updated workerd and Workers types to `1.20261021.1` and `5.20261021.1`, raising the maximum compatibility date to `2026-10-28`. Includes V8 15.7, native stream/GC and compression safety fixes, reduced microtask/tracing retention and allocations, and compact WebAssembly imports. Retains pooled Rust-server connections, restores async response-body cancellation on observed disconnects, and rejects `new Function("")` when dynamic code generation is disabled. No WDL state migration is required.
 - Accepts opt-in `wasm_esm_integration_builtins`, `pipe_to_backward_propagation`, and `cache_option_preserves_cache_control`; static worker flags are unchanged. `Span.spanContext()` returns per-invocation ids that WDL never exports.
 - Refreshed the pinned Distroless `base-debian13` image, Node 24 development tooling, and OpenAI SDK test dependency; pinned Rust to `1.99.1` and refreshed Rust dependencies. CI and install docs qualify CLI `1.9.3`; the minimum supported CLI remains `1.9.0`.
 - Aligned local Envoy response timeouts with Service Connect so active SSE and streaming responses are not cut off at 15 seconds; connection, idle, and application deadlines remain in force.
