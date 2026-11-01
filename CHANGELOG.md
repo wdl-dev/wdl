@@ -2,11 +2,13 @@
 
 ## Unreleased
 
+## wdl.20261101.1 - 2026-11-01
+
 - Updated workerd and Workers types to `1.20261101.1` and `5.20261101.1`, raising the maximum compatibility date to `2026-11-08`. Includes native GC/RPC lifetime and cached-EXPLAIN safety fixes; SQLite's compiled-opcode allocation limit rises from 25,000 to 250,000. No WDL state migration is required.
 - Documented native WebAssembly support and accepted opt-in `wasm_source_url_support` and `temporal`; static worker flags remain unchanged.
 - Reduced eager byte-array copies for R2 Blob PUTs by preserving immutable bodies through RPC and signing, retaining the 25 MiB cap and transient retries. Arbitrary stream PUTs still validate the complete body before writing.
 - Enabled negotiated gzip for live log-tail SSE while preserving incremental event delivery, identity clients, and independent session/idle cleanup.
-- Refreshed the pinned Distroless `base-debian13` image and Node/Rust dependencies, including Redis `1.8.1` and Tokio `1.54.1`; use patched Minimatch for the ESLint toolchain.
+- Refreshed the pinned Distroless `base-debian13` image and Node/Rust dependencies, including Redis `1.8.1` and Tokio `1.54.1`, with patched Minimatch for the ESLint toolchain.
 - Updated Croner to JavaScript `11.0.0` and Rust `4.0.2`, aligning Control and Scheduler DST calculations: fixed times in a spring-forward gap run at the first valid post-gap time, while interval schedules cover both occurrences of a repeated hour.
 
 ## wdl.20261021.1 - 2026-10-21
