@@ -121,12 +121,15 @@ function serviceName(bucket) {
 
 /**
  * @param {unknown} value
- * @returns {Uint8Array}
+ * @returns {Uint8Array | Blob}
  */
 function putBodyFromUnknown(value) {
   const bytes = r2BufferSourceBytes(value);
   if (bytes) return bytes;
-  throw new TypeError("R2 put: value must be ArrayBuffer or ArrayBufferView");
+  // Blob is immutable and replayable by the signer without materializing bytes.
+  // Content type remains owned by httpMetadata, not the input Blob's MIME type.
+  if (value instanceof Blob) return Blob.prototype.slice.call(value, 0, undefined, "");
+  throw new TypeError("R2 put: value must be ArrayBuffer, ArrayBufferView or Blob");
 }
 
 /** @param {R2BucketBinding} bucket */
@@ -301,7 +304,7 @@ export class R2Bucket extends WorkerEntrypoint {
     const bucket = r2Binding(this);
     return recordBindingOperation(serviceName(bucket), "r2", "put", () => withS3Request(async (aborter) => {
       const body = putBodyFromUnknown(value);
-      const bodySize = r2Uint8ArrayByteLength(body);
+      const bodySize = body instanceof Blob ? body.size : r2Uint8ArrayByteLength(body);
       assertR2BufferSize(bodySize, "put");
       const s3 = s3ForBucket(bucket);
       const headers = headersWithRequestId(requestMeta);

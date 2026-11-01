@@ -655,13 +655,13 @@ test("AI host model list strips resolver-only identity and credential fields", a
   });
 });
 
-test("AI host allows advertised DeepSeek vision inputs and rejects unsupported capabilities before provider I/O", async () => {
+test("AI host allows DeepSeek Flash image inputs and rejects unsupported capabilities before provider I/O", async () => {
   let providerCalls = 0;
   const resolution = openAiResolution({
     provider: "deepseek",
-    alias: "vision",
+    alias: "flash",
     kind: "deepseek",
-    upstreamModel: "deepseek-v4-flash-vision-exp",
+    upstreamModel: "deepseek-flash",
     destination: "https://api.deepseek.com/responses",
     credential: "fake-deepseek-key",
     inputModalities: ["image", "text"],
@@ -696,7 +696,7 @@ test("AI host allows advertised DeepSeek vision inputs and rejects unsupported c
       },
     ];
     for (const body of allowedBodies) {
-      const allowed = await binding.fetch(request({ model: "deepseek/vision", ...body }));
+      const allowed = await binding.fetch(request({ model: "deepseek/flash", ...body }));
       assert.equal(allowed.status, 200);
     }
 
@@ -711,21 +711,21 @@ test("AI host allows advertised DeepSeek vision inputs and rejects unsupported c
       [{ input: "hello", background: true }, "ai_background_unsupported"],
     ];
     for (const [body, error] of cases) {
-      const response = await binding.fetch(request({ model: "deepseek/vision", ...body }));
+      const response = await binding.fetch(request({ model: "deepseek/flash", ...body }));
       assert.equal((await readJsonResponse(response, 400, error)).error, error);
     }
   });
   assert.equal(providerCalls, 3);
 });
 
-test("AI host leaves DeepSeek model-owned output and continuation fields to the provider", async () => {
+test("AI host leaves synthetic DeepSeek model-owned output and continuation fields to the provider", async () => {
   let providerCalls = 0;
   let providerBody;
   const resolution = openAiResolution({
     provider: "deepseek",
-    alias: "flash",
+    alias: "probe",
     kind: "deepseek",
-    upstreamModel: "deepseek-v4-flash",
+    upstreamModel: "fixture-deepseek-native-fields",
     destination: "https://api.deepseek.com/responses",
     credential: "fake-deepseek-key",
     inputModalities: ["text"],
@@ -745,7 +745,7 @@ test("AI host leaves DeepSeek model-owned output and continuation fields to the 
   });
   await withMockedProperty(globalThis, "fetch", resolver(resolution), async () => {
     const allowed = await binding.fetch(request({
-      model: "deepseek/flash",
+      model: "deepseek/probe",
       messages: [{ role: "user", content: "hello" }],
       modalities: ["audio"],
       previous_response_id: "resp_old",
@@ -754,7 +754,7 @@ test("AI host leaves DeepSeek model-owned output and continuation fields to the 
   });
   assert.equal(providerCalls, 1);
   assert.deepEqual(providerBody, {
-    model: "deepseek-v4-flash",
+    model: "fixture-deepseek-native-fields",
     messages: [{ role: "user", content: "hello" }],
     modalities: ["audio"],
     previous_response_id: "resp_old",

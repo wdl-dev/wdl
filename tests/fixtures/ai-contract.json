@@ -236,17 +236,17 @@
       }
     },
     {
-      "name": "deepseek-vision-input",
+      "name": "deepseek-flash-image-input",
       "valid": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
         "models": {
-          "vision": {
-            "upstreamModel": "deepseek-v4-flash-vision-exp",
+          "flash": {
+            "upstreamModel": "deepseek-flash",
             "protocol": "chat_completions",
             "transports": ["http", "sse"],
-            "inputModalities": ["file", "image", "text"],
+            "inputModalities": ["image", "text"],
             "outputModalities": ["text"],
             "capabilities": {
               "functionTools": true,
@@ -261,14 +261,14 @@
       }
     },
     {
-      "name": "deepseek-model-owned-audio-input",
+      "name": "deepseek-synthetic-model-owned-audio-input",
       "valid": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
         "models": {
           "voice": {
-            "upstreamModel": "deepseek-v4-flash-vision-exp",
+            "upstreamModel": "fixture-deepseek-audio-input",
             "protocol": "responses",
             "transports": ["http", "sse"],
             "inputModalities": ["audio", "text"],
@@ -286,14 +286,14 @@
       }
     },
     {
-      "name": "deepseek-model-owned-continuation",
+      "name": "deepseek-synthetic-model-owned-continuation",
       "valid": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
         "models": {
           "flash": {
-            "upstreamModel": "deepseek-v4-flash",
+            "upstreamModel": "fixture-deepseek-continuation",
             "protocol": "responses",
             "transports": ["http", "sse"],
             "inputModalities": ["text"],
@@ -311,14 +311,14 @@
       }
     },
     {
-      "name": "deepseek-model-owned-audio-output",
+      "name": "deepseek-synthetic-model-owned-audio-output",
       "valid": true,
       "value": {
         "revision": "0123456789abcdef0123456789abcdef",
         "kind": "deepseek",
         "models": {
           "voice": {
-            "upstreamModel": "deepseek-v4-flash",
+            "upstreamModel": "fixture-deepseek-audio-output",
             "protocol": "responses",
             "transports": ["http", "sse"],
             "inputModalities": ["text"],
@@ -413,9 +413,9 @@
       "valid": true,
       "value": {
         "provider": "deepseek",
-        "alias": "vision",
+        "alias": "flash",
         "kind": "deepseek",
-        "upstreamModel": "deepseek-v4-flash-vision-exp",
+        "upstreamModel": "deepseek-flash",
         "protocol": "responses",
         "transport": "http",
         "destination": "https://api.deepseek.com/responses",
@@ -435,9 +435,9 @@
       "valid": true,
       "value": {
         "provider": "deepseek",
-        "alias": "vision",
+        "alias": "voice",
         "kind": "deepseek",
-        "upstreamModel": "deepseek-v4-flash-vision-exp",
+        "upstreamModel": "fixture-deepseek-audio-input",
         "protocol": "responses",
         "transport": "http",
         "destination": "https://api.deepseek.com/responses",

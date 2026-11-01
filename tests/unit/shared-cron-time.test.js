@@ -14,18 +14,7 @@ test("cron parity fixture is valid", () => {
     assert.equal(typeof entry.cron, "string", `${entry.id}: entry.cron must be a string`);
     assert.equal(typeof entry.timezone, "string", `${entry.id}: entry.timezone must be a string`);
     assert.equal(typeof entry.afterMs, "number", `${entry.id}: entry.afterMs must be a number`);
-    assert.ok(
-      typeof entry.nextMs === "number" || typeof entry.jsNextMs === "number",
-      `${entry.id}: entry must provide nextMs or jsNextMs`
-    );
-    if (entry.knownDivergence !== undefined) {
-      assert.equal(typeof entry.knownDivergence, "string", `${entry.id}: knownDivergence must be a string`);
-      assert.equal(typeof entry.jsNextMs, "number", `${entry.id}: known divergence must include jsNextMs`);
-      assert.equal(typeof entry.rustNextMs, "number", `${entry.id}: known divergence must include rustNextMs`);
-      assert.notEqual(entry.jsNextMs, entry.rustNextMs, `${entry.id}: known divergence must actually differ`);
-    } else {
-      assert.equal(typeof entry.nextMs, "number", `${entry.id}: non-divergent entry must include nextMs`);
-    }
+    assert.equal(typeof entry.nextMs, "number", `${entry.id}: entry.nextMs must be a number`);
   }
 });
 
@@ -66,10 +55,9 @@ test("nextFireMs: rejects date-like fields before croner one-shot parsing", () =
 
 test("nextFireMs: matches shared JS/Rust parity fixture", () => {
   for (const entry of cronParityCases) {
-    const expected = entry.knownDivergence ? entry.jsNextMs : entry.nextMs;
     assert.equal(
       nextFireMs(entry.cron, entry.timezone, entry.afterMs),
-      expected,
+      entry.nextMs,
       entry.id
     );
   }

@@ -1,48 +1,77 @@
 // node_modules/croner/dist/croner.js
-function T(s2) {
-  return Date.UTC(s2.y, s2.m - 1, s2.d, s2.h, s2.i, s2.s);
+function w(i3) {
+  return Date.UTC(i3.y, i3.m - 1, i3.d, i3.h, i3.i, i3.s);
 }
-function D(s2, e) {
-  return s2.y === e.y && s2.m === e.m && s2.d === e.d && s2.h === e.h && s2.i === e.i && s2.s === e.s;
+function C(i3, e) {
+  return i3.y === e.y && i3.m === e.m && i3.d === e.d && i3.h === e.h && i3.i === e.i && i3.s === e.s;
 }
-function A(s2, e) {
-  let t = new Date(Date.parse(s2));
+function O(i3) {
+  let e = i3.substring(9);
+  return e.includes("Z") || e.includes("+") || e.includes("-");
+}
+function j(i3, e) {
+  let t = new Date(Date.parse(i3));
   if (isNaN(t)) throw new Error("Invalid ISO8601 passed to timezone parser.");
-  let r = s2.substring(9);
-  return r.includes("Z") || r.includes("+") || r.includes("-") ? b(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate(), t.getUTCHours(), t.getUTCMinutes(), t.getUTCSeconds(), "Etc/UTC") : b(t.getFullYear(), t.getMonth() + 1, t.getDate(), t.getHours(), t.getMinutes(), t.getSeconds(), e);
+  return O(i3) ? { tp: y(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate(), t.getUTCHours(), t.getUTCMinutes(), t.getUTCSeconds(), "Etc/UTC"), ms: t.getUTCMilliseconds() } : { tp: y(t.getFullYear(), t.getMonth() + 1, t.getDate(), t.getHours(), t.getMinutes(), t.getSeconds(), e), ms: t.getMilliseconds() };
 }
-function v(s2, e, t) {
-  return k(A(s2, e), t);
+function D(i3, e, t) {
+  let { tp: n, ms: s } = j(i3, e);
+  return new Date(P(n, t).getTime() + s);
 }
-function k(s2, e) {
-  let t = new Date(T(s2)), r = g(t, s2.tz), n = T(s2), i = T(r), a = n - i, o = new Date(t.getTime() + a), h = g(o, s2.tz);
-  if (D(h, s2)) {
-    let u = new Date(o.getTime() - 36e5), d = g(u, s2.tz);
-    return D(d, s2) ? u : o;
-  }
-  let l = new Date(o.getTime() + T(s2) - T(h)), y = g(l, s2.tz);
-  if (D(y, s2)) return l;
+function P(i3, e) {
+  let t = v(i3);
+  if (t.kind === "single") return t.date;
+  if (t.kind === "ambiguous") return t.earlier;
   if (e) throw new Error("Invalid date passed to fromTZ()");
-  return o.getTime() > l.getTime() ? o : l;
+  return t.after;
 }
-function g(s2, e) {
-  let t, r;
+function v(i3) {
+  let e = w(i3), t = (a) => M(new Date(a), i3.tz), n = e - t(e), s = g(new Date(n), i3.tz);
+  if (C(s, i3)) {
+    let a = w(s) - n, o = n - (t(n - x) - a);
+    if (o < n && C(g(new Date(o), i3.tz), i3)) return { kind: "ambiguous", earlier: new Date(o), later: new Date(n) };
+    let u = n + (a - t(n + x));
+    return u > n && C(g(new Date(u), i3.tz), i3) ? { kind: "ambiguous", earlier: new Date(n), later: new Date(u) } : { kind: "single", date: new Date(n) };
+  }
+  let r = e - (w(s) - n);
+  return C(g(new Date(r), i3.tz), i3) ? { kind: "single", date: new Date(r) } : { kind: "gap", before: new Date(Math.min(n, r)), after: new Date(Math.max(n, r)) };
+}
+var x = 3 * 36e5;
+function M(i3, e) {
+  return w(g(i3, e)) - (i3.getTime() - i3.getUTCMilliseconds());
+}
+function _(i3, e, t) {
+  let n = M(new Date(i3), t);
+  for (; e - i3 > 1e3; ) {
+    let s = i3 + Math.floor((e - i3) / 2e3) * 1e3;
+    M(new Date(s), t) === n ? i3 = s : e = s;
+  }
+  return e;
+}
+function U(i3, e) {
+  let t = v(g(new Date(i3), e));
+  if (t.kind === "ambiguous") return i3 < t.later.getTime() ? "earlier" : "later";
+}
+var E = /* @__PURE__ */ new Map();
+function g(i3, e) {
+  if (e === void 0) return y(i3.getFullYear(), i3.getMonth() + 1, i3.getDate(), i3.getHours(), i3.getMinutes(), i3.getSeconds());
+  let t = E.get(e), n;
   try {
-    t = new Intl.DateTimeFormat("en-US", { timeZone: e, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hour12: false }), r = t.formatToParts(s2);
-  } catch (i) {
-    let a = i instanceof Error ? i.message : String(i);
+    t || (t = new Intl.DateTimeFormat("en-US", { timeZone: e, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hour12: false }), E.set(e, t)), n = t.formatToParts(i3);
+  } catch (r) {
+    let a = r instanceof Error ? r.message : String(r);
     throw new RangeError(`toTZ: Invalid timezone '${e}' or date. Please provide a valid IANA timezone (e.g., 'America/New_York', 'Europe/Stockholm'). Original error: ${a}`);
   }
-  let n = { year: 0, month: 0, day: 0, hour: 0, minute: 0, second: 0 };
-  for (let i of r) (i.type === "year" || i.type === "month" || i.type === "day" || i.type === "hour" || i.type === "minute" || i.type === "second") && (n[i.type] = parseInt(i.value, 10));
-  if (isNaN(n.year) || isNaN(n.month) || isNaN(n.day) || isNaN(n.hour) || isNaN(n.minute) || isNaN(n.second)) throw new Error(`toTZ: Failed to parse all date components from timezone '${e}'. This may indicate an invalid date or timezone configuration. Parsed components: ${JSON.stringify(n)}`);
-  return n.hour === 24 && (n.hour = 0), { y: n.year, m: n.month, d: n.day, h: n.hour, i: n.minute, s: n.second, tz: e };
+  let s = { year: 0, month: 0, day: 0, hour: 0, minute: 0, second: 0 };
+  for (let r of n) (r.type === "year" || r.type === "month" || r.type === "day" || r.type === "hour" || r.type === "minute" || r.type === "second") && (s[r.type] = parseInt(r.value, 10));
+  if (isNaN(s.year) || isNaN(s.month) || isNaN(s.day) || isNaN(s.hour) || isNaN(s.minute) || isNaN(s.second)) throw new Error(`toTZ: Failed to parse all date components from timezone '${e}'. This may indicate an invalid date or timezone configuration. Parsed components: ${JSON.stringify(s)}`);
+  return s.hour === 24 && (s.hour = 0), { y: s.year, m: s.month, d: s.day, h: s.hour, i: s.minute, s: s.second, tz: e };
 }
-function b(s2, e, t, r, n, i, a) {
-  return { y: s2, m: e, d: t, h: r, i: n, s: i, tz: a };
+function y(i3, e, t, n, s, r, a) {
+  return { y: i3, m: e, d: t, h: n, i: s, s: r, tz: a };
 }
-var O = [1, 2, 4, 8, 16];
-var C = class {
+var R = [1, 2, 4, 8, 16];
+var b = class i {
   pattern;
   timezone;
   mode;
@@ -62,8 +91,9 @@ var C = class {
   starDOW;
   starYear;
   useAndLogic;
-  constructor(e, t, r) {
-    this.pattern = e, this.timezone = t, this.mode = r?.mode ?? "auto", this.alternativeWeekdays = r?.alternativeWeekdays ?? false, this.sloppyRanges = r?.sloppyRanges ?? false, this.second = Array(60).fill(0), this.minute = Array(60).fill(0), this.hour = Array(24).fill(0), this.day = Array(31).fill(0), this.month = Array(12).fill(0), this.dayOfWeek = Array(7).fill(0), this.year = Array(1e4).fill(0), this.lastDayOfMonth = false, this.lastWeekday = false, this.nearestWeekdays = Array(31).fill(0), this.starDOM = false, this.starDOW = false, this.starYear = false, this.useAndLogic = false, this.parse();
+  isFixedTime;
+  constructor(e, t, n) {
+    this.pattern = e, this.timezone = t, this.mode = n?.mode ?? "auto", this.alternativeWeekdays = n?.alternativeWeekdays ?? false, this.sloppyRanges = n?.sloppyRanges ?? false, this.second = Array(60).fill(0), this.minute = Array(60).fill(0), this.hour = Array(24).fill(0), this.day = Array(31).fill(0), this.month = Array(12).fill(0), this.dayOfWeek = Array(7).fill(0), this.year = Array(1e4).fill(0), this.lastDayOfMonth = false, this.lastWeekday = false, this.nearestWeekdays = Array(31).fill(0), this.starDOM = false, this.starDOW = false, this.starYear = false, this.useAndLogic = false, this.isFixedTime = false, this.parse();
   }
   parse() {
     if (!(typeof this.pattern == "string" || this.pattern instanceof String)) throw new TypeError("CronPattern: Pattern has to be of type string.");
@@ -71,33 +101,34 @@ var C = class {
     let e = this.pattern.match(/\S+/g) || [""], t = e.length;
     if (e.length < 5 || e.length > 7) throw new TypeError("CronPattern: invalid configuration format ('" + this.pattern + "'), exactly five, six, or seven space separated parts are required.");
     if (this.mode !== "auto") {
-      let n;
+      let r;
       switch (this.mode) {
         case "5-part":
-          n = 5;
+          r = 5;
           break;
         case "6-part":
-          n = 6;
+          r = 6;
           break;
         case "7-part":
-          n = 7;
+          r = 7;
           break;
         case "5-or-6-parts":
-          n = [5, 6];
+          r = [5, 6];
           break;
         case "6-or-7-parts":
-          n = [6, 7];
+          r = [6, 7];
           break;
         default:
-          n = 0;
+          r = 0;
       }
-      if (!(Array.isArray(n) ? n.includes(t) : t === n)) {
-        let a = Array.isArray(n) ? n.join(" or ") : n.toString();
-        throw new TypeError(`CronPattern: mode '${this.mode}' requires exactly ${a} parts, but pattern '${this.pattern}' has ${t} parts.`);
+      if (!(Array.isArray(r) ? r.includes(t) : t === r)) {
+        let o = Array.isArray(r) ? r.join(" or ") : r.toString();
+        throw new TypeError(`CronPattern: mode '${this.mode}' requires exactly ${o} parts, but pattern '${this.pattern}' has ${t} parts.`);
       }
     }
-    if (e.length === 5 && e.unshift("0"), e.length === 6 && e.push("*"), e[3].toUpperCase() === "LW" ? (this.lastWeekday = true, e[3] = "") : e[3].toUpperCase().indexOf("L") >= 0 && (e[3] = e[3].replace(/L/gi, ""), this.lastDayOfMonth = true), e[3] == "*" && (this.starDOM = true), e[6] == "*" && (this.starYear = true), e[4].length >= 3 && (e[4] = this.replaceAlphaMonths(e[4])), e[5].length >= 3 && (e[5] = this.alternativeWeekdays ? this.replaceAlphaDaysQuartz(e[5]) : this.replaceAlphaDays(e[5])), e[5].startsWith("+") && (this.useAndLogic = true, e[5] = e[5].substring(1), e[5] === "")) throw new TypeError("CronPattern: Day-of-week field cannot be empty after '+' modifier.");
-    switch (e[5] == "*" && (this.starDOW = true), this.pattern.indexOf("?") >= 0 && (e[0] = e[0].replace(/\?/g, "*"), e[1] = e[1].replace(/\?/g, "*"), e[2] = e[2].replace(/\?/g, "*"), e[3] = e[3].replace(/\?/g, "*"), e[4] = e[4].replace(/\?/g, "*"), e[5] = e[5].replace(/\?/g, "*"), e[6] && (e[6] = e[6].replace(/\?/g, "*"))), this.mode) {
+    if (e.length === 5 && e.unshift("0"), e.length === 6 && e.push("*"), this.pattern.indexOf("?") >= 0) for (let r = 0; r < e.length; r++) e[r] = e[r].replace(/\?/g, "*");
+    if (e[3].toUpperCase() === "LW" ? (this.lastWeekday = true, e[3] = "") : e[3].toUpperCase().indexOf("L") >= 0 && (e[3] = e[3].replace(/L/gi, ""), this.lastDayOfMonth = true), e[3] == "*" && (this.starDOM = true), e[6] == "*" && (this.starYear = true), e[4].length >= 3 && (e[4] = this.replaceAlpha(e[4], i.MONTH_NAMES)), e[5].length >= 3 && (e[5] = this.alternativeWeekdays ? this.replaceAlpha(e[5], i.DAY_NAMES_QUARTZ) : this.replaceAlpha(e[5], i.DAY_NAMES)), e[5].startsWith("+") && (this.useAndLogic = true, e[5] = e[5].substring(1), e[5] === "")) throw new TypeError("CronPattern: Day-of-week field cannot be empty after '+' modifier.");
+    switch (e[5] == "*" && (this.starDOW = true), this.mode) {
       case "5-part":
         e[0] = "0", e[6] = "*";
         break;
@@ -114,33 +145,35 @@ var C = class {
         break;
     }
     this.throwAtIllegalCharacters(e), this.partToArray("second", e[0], 0, 1), this.partToArray("minute", e[1], 0, 1), this.partToArray("hour", e[2], 0, 1), this.partToArray("day", e[3], -1, 1), this.partToArray("month", e[4], -1, 1);
-    let r = this.alternativeWeekdays ? -1 : 0;
-    this.partToArray("dayOfWeek", e[5], r, 63), this.partToArray("year", e[6], 0, 1), !this.alternativeWeekdays && this.dayOfWeek[7] && (this.dayOfWeek[0] = this.dayOfWeek[7]);
+    let n = this.alternativeWeekdays ? -1 : 0;
+    this.partToArray("dayOfWeek", e[5], n, 63), this.partToArray("year", e[6], 0, 1), !this.alternativeWeekdays && this.dayOfWeek[7] && (this.dayOfWeek[0] = this.dayOfWeek[7]);
+    let s = (r, a) => !r.includes("*") && !r.includes("/") && a.filter((o) => o).length === 1;
+    this.isFixedTime = s(e[0], this.second) && s(e[1], this.minute) && s(e[2], this.hour);
   }
-  partToArray(e, t, r, n) {
-    let i = this[e], a = e === "day" && this.lastDayOfMonth, o = e === "day" && this.lastWeekday;
-    if (t === "" && !a && !o) throw new TypeError("CronPattern: configuration entry " + e + " (" + t + ") is empty, check for trailing spaces.");
-    if (t === "*") return i.fill(n);
-    let h = t.split(",");
-    if (h.length > 1) for (let l = 0; l < h.length; l++) this.partToArray(e, h[l], r, n);
-    else t.indexOf("-") !== -1 && t.indexOf("/") !== -1 ? this.handleRangeWithStepping(t, e, r, n) : t.indexOf("-") !== -1 ? this.handleRange(t, e, r, n) : t.indexOf("/") !== -1 ? this.handleStepping(t, e, r, n) : t !== "" && this.handleNumber(t, e, r, n);
+  partToArray(e, t, n, s) {
+    let r = this[e];
+    if (t === "" && !(e === "day" && (this.lastDayOfMonth || this.lastWeekday))) throw new TypeError("CronPattern: configuration entry " + e + " (" + t + ") is empty, check for trailing spaces.");
+    if (t === "*") return r.fill(s);
+    let a = t.split(",");
+    if (a.length > 1) for (let o of a) this.partToArray(e, o, n, s);
+    else t.includes("-") && t.includes("/") ? this.handleRangeWithStepping(t, e, n, s) : t.includes("-") ? this.handleRange(t, e, n, s) : t.includes("/") ? this.handleStepping(t, e, n, s) : t !== "" && this.handleNumber(t, e, n, s);
   }
   throwAtIllegalCharacters(e) {
     for (let t = 0; t < e.length; t++) if ((t === 3 ? /[^/*0-9,\-WwLl]+/ : t === 5 ? /[^/*0-9,\-#Ll]+/ : /[^/*0-9,\-]+/).test(e[t])) throw new TypeError("CronPattern: configuration entry " + t + " (" + e[t] + ") contains illegal characters.");
   }
-  handleNumber(e, t, r, n) {
-    let i = this.extractNth(e, t), a = e.toUpperCase().includes("W");
+  handleNumber(e, t, n, s) {
+    let r = this.extractNth(e, t), a = e.toUpperCase().includes("W");
     if (t !== "day" && a) throw new TypeError("CronPattern: Nearest weekday modifier (W) only allowed in day-of-month.");
     a && (t = "nearestWeekdays");
-    let o = parseInt(i[0], 10) + r;
+    let o = parseInt(r[0], 10) + n;
     if (isNaN(o)) throw new TypeError("CronPattern: " + t + " is not a number: '" + e + "'");
-    this.setPart(t, o, i[1] || n);
+    this.setPart(t, o, r[1] || s);
   }
-  setPart(e, t, r) {
+  setPart(e, t, n) {
     if (!Object.prototype.hasOwnProperty.call(this, e)) throw new TypeError("CronPattern: Invalid part specified: " + e);
     if (e === "dayOfWeek") {
       if (t === 7 && (t = 0), t < 0 || t > 6) throw new RangeError("CronPattern: Invalid value for dayOfWeek: " + t);
-      this.setNthWeekdayOfMonth(t, r);
+      this.setNthWeekdayOfMonth(t, n);
       return;
     }
     if (e === "second" || e === "minute") {
@@ -152,48 +185,48 @@ var C = class {
     } else if (e === "month") {
       if (t < 0 || t >= 12) throw new RangeError("CronPattern: Invalid value for " + e + ": " + t);
     } else if (e === "year" && (t < 1 || t >= 1e4)) throw new RangeError("CronPattern: Invalid value for " + e + ": " + t + " (supported range: 1-9999)");
-    this[e][t] = r;
+    this[e][t] = n;
   }
   validateNotNaN(e, t) {
     if (isNaN(e)) throw new TypeError(t);
   }
-  validateRange(e, t, r, n, i) {
-    if (e > t) throw new TypeError("CronPattern: From value is larger than to value: '" + i + "'");
-    if (r !== void 0) {
-      if (r === 0) throw new TypeError("CronPattern: Syntax error, illegal stepping: 0");
-      if (r > this[n].length) throw new TypeError("CronPattern: Syntax error, steps cannot be greater than maximum value of part (" + this[n].length + ")");
+  validateRange(e, t, n, s, r) {
+    if (e > t) throw new TypeError("CronPattern: From value is larger than to value: '" + r + "'");
+    if (n !== void 0) {
+      if (n === 0) throw new TypeError("CronPattern: Syntax error, illegal stepping: 0");
+      if (n > this[s].length) throw new TypeError("CronPattern: Syntax error, steps cannot be greater than maximum value of part (" + this[s].length + ")");
     }
   }
-  handleRangeWithStepping(e, t, r, n) {
+  handleRangeWithStepping(e, t, n, s) {
     if (e.toUpperCase().includes("W")) throw new TypeError("CronPattern: Syntax error, W is not allowed in ranges with stepping.");
-    let i = this.extractNth(e, t), a = i[0].match(/^(\d+)-(\d+)\/(\d+)$/);
+    let r = this.extractNth(e, t), a = r[0].match(/^(\d+)-(\d+)\/(\d+)$/);
     if (a === null) throw new TypeError("CronPattern: Syntax error, illegal range with stepping: '" + e + "'");
-    let [, o, h, l] = a, y = parseInt(o, 10) + r, u = parseInt(h, 10) + r, d = parseInt(l, 10);
-    this.validateNotNaN(y, "CronPattern: Syntax error, illegal lower range (NaN)"), this.validateNotNaN(u, "CronPattern: Syntax error, illegal upper range (NaN)"), this.validateNotNaN(d, "CronPattern: Syntax error, illegal stepping: (NaN)"), this.validateRange(y, u, d, t, e);
-    for (let c = y; c <= u; c += d) this.setPart(t, c, i[1] || n);
+    let [, o, u, h] = a, c = parseInt(o, 10) + n, d = parseInt(u, 10) + n, m = parseInt(h, 10);
+    this.validateNotNaN(c, "CronPattern: Syntax error, illegal lower range (NaN)"), this.validateNotNaN(d, "CronPattern: Syntax error, illegal upper range (NaN)"), this.validateNotNaN(m, "CronPattern: Syntax error, illegal stepping: (NaN)"), this.validateRange(c, d, m, t, e);
+    for (let p = c; p <= d; p += m) this.setPart(t, p, r[1] || s);
   }
   extractNth(e, t) {
-    let r = e, n;
-    if (r.includes("#")) {
+    let n = e, s;
+    if (n.includes("#")) {
       if (t !== "dayOfWeek") throw new Error("CronPattern: nth (#) only allowed in day-of-week field");
-      n = r.split("#")[1], r = r.split("#")[0];
-    } else if (r.toUpperCase().endsWith("L")) {
+      s = n.split("#")[1], n = n.split("#")[0];
+    } else if (n.toUpperCase().endsWith("L")) {
       if (t !== "dayOfWeek") throw new Error("CronPattern: L modifier only allowed in day-of-week field (use L alone for day-of-month)");
-      n = "L", r = r.slice(0, -1);
+      s = "L", n = n.slice(0, -1);
     }
-    return [r, n];
+    return [n, s];
   }
-  handleRange(e, t, r, n) {
+  handleRange(e, t, n, s) {
     if (e.toUpperCase().includes("W")) throw new TypeError("CronPattern: Syntax error, W is not allowed in a range.");
-    let i = this.extractNth(e, t), a = i[0].split("-");
+    let r = this.extractNth(e, t), a = r[0].split("-");
     if (a.length !== 2) throw new TypeError("CronPattern: Syntax error, illegal range: '" + e + "'");
-    let o = parseInt(a[0], 10) + r, h = parseInt(a[1], 10) + r;
-    this.validateNotNaN(o, "CronPattern: Syntax error, illegal lower range (NaN)"), this.validateNotNaN(h, "CronPattern: Syntax error, illegal upper range (NaN)"), this.validateRange(o, h, void 0, t, e);
-    for (let l = o; l <= h; l++) this.setPart(t, l, i[1] || n);
+    let o = parseInt(a[0], 10) + n, u = parseInt(a[1], 10) + n;
+    this.validateNotNaN(o, "CronPattern: Syntax error, illegal lower range (NaN)"), this.validateNotNaN(u, "CronPattern: Syntax error, illegal upper range (NaN)"), this.validateRange(o, u, void 0, t, e);
+    for (let h = o; h <= u; h++) this.setPart(t, h, r[1] || s);
   }
-  handleStepping(e, t, r, n) {
+  handleStepping(e, t, n, s) {
     if (e.toUpperCase().includes("W")) throw new TypeError("CronPattern: Syntax error, W is not allowed in parts with stepping.");
-    let i = this.extractNth(e, t), a = i[0].split("/");
+    let r = this.extractNth(e, t), a = r[0].split("/");
     if (a.length !== 2) throw new TypeError("CronPattern: Syntax error, illegal stepping: '" + e + "'");
     if (this.sloppyRanges) a[0] === "" && (a[0] = "*");
     else {
@@ -201,41 +234,38 @@ var C = class {
       if (a[0] !== "*") throw new TypeError("CronPattern: Syntax error, stepping with numeric prefix ('" + e + "') is not allowed. Use wildcard (*/step) or range (min-max/step) instead.");
     }
     let o = 0;
-    a[0] !== "*" && (o = parseInt(a[0], 10) + r);
-    let h = parseInt(a[1], 10);
-    this.validateNotNaN(h, "CronPattern: Syntax error, illegal stepping: (NaN)"), this.validateRange(0, this[t].length - 1, h, t, e);
-    for (let l = o; l < this[t].length; l += h) this.setPart(t, l, i[1] || n);
+    a[0] !== "*" && (o = parseInt(a[0], 10) + n);
+    let u = parseInt(a[1], 10);
+    this.validateNotNaN(u, "CronPattern: Syntax error, illegal stepping: (NaN)"), this.validateRange(0, this[t].length - 1, u, t, e);
+    for (let h = o; h < this[t].length; h += u) t === "year" && h === 0 || this.setPart(t, h, r[1] || s);
   }
-  replaceAlphaDays(e) {
-    return e.replace(/-sun/gi, "-7").replace(/sun/gi, "0").replace(/mon/gi, "1").replace(/tue/gi, "2").replace(/wed/gi, "3").replace(/thu/gi, "4").replace(/fri/gi, "5").replace(/sat/gi, "6");
+  replaceAlpha(e, t) {
+    let n = e;
+    for (let [s, r] of Object.entries(t)) n = n.replace(new RegExp(s, "gi"), r);
+    return n;
   }
-  replaceAlphaDaysQuartz(e) {
-    return e.replace(/sun/gi, "1").replace(/mon/gi, "2").replace(/tue/gi, "3").replace(/wed/gi, "4").replace(/thu/gi, "5").replace(/fri/gi, "6").replace(/sat/gi, "7");
-  }
-  replaceAlphaMonths(e) {
-    return e.replace(/jan/gi, "1").replace(/feb/gi, "2").replace(/mar/gi, "3").replace(/apr/gi, "4").replace(/may/gi, "5").replace(/jun/gi, "6").replace(/jul/gi, "7").replace(/aug/gi, "8").replace(/sep/gi, "9").replace(/oct/gi, "10").replace(/nov/gi, "11").replace(/dec/gi, "12");
-  }
+  static DAY_NAMES = { "-sun": "-7", sun: "0", mon: "1", tue: "2", wed: "3", thu: "4", fri: "5", sat: "6" };
+  static DAY_NAMES_QUARTZ = { sun: "1", mon: "2", tue: "3", wed: "4", thu: "5", fri: "6", sat: "7" };
+  static MONTH_NAMES = { jan: "1", feb: "2", mar: "3", apr: "4", may: "5", jun: "6", jul: "7", aug: "8", sep: "9", oct: "10", nov: "11", dec: "12" };
+  static NICKNAME_MAP = { "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *", "@weekly": "0 0 * * 0", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *" };
   handleNicknames(e) {
     let t = e.trim().toLowerCase();
-    if (t === "@yearly" || t === "@annually") return "0 0 1 1 *";
-    if (t === "@monthly") return "0 0 1 * *";
-    if (t === "@weekly") return "0 0 * * 0";
-    if (t === "@daily" || t === "@midnight") return "0 0 * * *";
-    if (t === "@hourly") return "0 * * * *";
     if (t === "@reboot") throw new TypeError("CronPattern: @reboot is not supported in this environment. This is an event-based trigger that requires system startup detection.");
-    return e;
+    return i.NICKNAME_MAP[t] || e;
   }
   setNthWeekdayOfMonth(e, t) {
     if (typeof t != "number" && t.toUpperCase() === "L") this.dayOfWeek[e] = this.dayOfWeek[e] | 32;
     else if (t === 63) this.dayOfWeek[e] = 63;
-    else if (t < 6 && t > 0) this.dayOfWeek[e] = this.dayOfWeek[e] | O[t - 1];
+    else if (t < 6 && t > 0) this.dayOfWeek[e] = this.dayOfWeek[e] | R[t - 1];
     else throw new TypeError(`CronPattern: nth weekday out of range, should be 1-5 or L. Value: ${t}, Type: ${typeof t}`);
   }
 };
-var P = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-var f = [["month", "year", 0], ["day", "month", -1], ["hour", "day", 0], ["minute", "hour", 0], ["second", "minute", 0]];
-var m = class s {
+var $ = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+var l = [["month", "year", 0], ["day", "month", -1], ["hour", "day", 0], ["minute", "hour", 0], ["second", "minute", 0]];
+var f = class i2 {
   tz;
+  instantMs;
+  instantFields;
   ms;
   second;
   minute;
@@ -248,29 +278,29 @@ var m = class s {
     else throw new TypeError("CronDate: Invalid date passed to CronDate constructor");
     else if (e == null) this.fromDate(/* @__PURE__ */ new Date());
     else if (e && typeof e == "string") this.fromString(e);
-    else if (e instanceof s) this.fromCronDate(e);
+    else if (e instanceof i2) this.fromCronDate(e);
     else throw new TypeError("CronDate: Invalid type (" + typeof e + ") passed to CronDate constructor");
   }
   getLastDayOfMonth(e, t) {
-    return t !== 1 ? P[t] : new Date(Date.UTC(e, t + 1, 0)).getUTCDate();
+    return t !== 1 ? $[t] : new Date(Date.UTC(e, t + 1, 0)).getUTCDate();
   }
   getLastWeekday(e, t) {
-    let r = this.getLastDayOfMonth(e, t), i = new Date(Date.UTC(e, t, r)).getUTCDay();
-    return i === 0 ? r - 2 : i === 6 ? r - 1 : r;
+    let n = this.getLastDayOfMonth(e, t), r = new Date(Date.UTC(e, t, n)).getUTCDay();
+    return r === 0 ? n - 2 : r === 6 ? n - 1 : n;
   }
-  getNearestWeekday(e, t, r) {
-    let n = this.getLastDayOfMonth(e, t);
-    if (r > n) return -1;
-    let a = new Date(Date.UTC(e, t, r)).getUTCDay();
-    return a === 0 ? r === n ? r - 2 : r + 1 : a === 6 ? r === 1 ? r + 2 : r - 1 : r;
+  getNearestWeekday(e, t, n) {
+    let s = this.getLastDayOfMonth(e, t);
+    if (n > s) return -1;
+    let a = new Date(Date.UTC(e, t, n)).getUTCDay();
+    return a === 0 ? n === s ? n - 2 : n + 1 : a === 6 ? n === 1 ? n + 2 : n - 1 : n;
   }
-  isNthWeekdayOfMonth(e, t, r, n) {
-    let a = new Date(Date.UTC(e, t, r)).getUTCDay(), o = 0;
-    for (let h = 1; h <= r; h++) new Date(Date.UTC(e, t, h)).getUTCDay() === a && o++;
-    if (n & 63 && O[o - 1] & n) return true;
-    if (n & 32) {
-      let h = this.getLastDayOfMonth(e, t);
-      for (let l = r + 1; l <= h; l++) if (new Date(Date.UTC(e, t, l)).getUTCDay() === a) return false;
+  isNthWeekdayOfMonth(e, t, n, s) {
+    let a = new Date(Date.UTC(e, t, n)).getUTCDay(), o = 0;
+    for (let u = 1; u <= n; u++) new Date(Date.UTC(e, t, u)).getUTCDay() === a && o++;
+    if (s & 63 && R[o - 1] & s) return true;
+    if (s & 32) {
+      let u = this.getLastDayOfMonth(e, t);
+      for (let h = n + 1; h <= u; h++) if (new Date(Date.UTC(e, t, h)).getUTCDay() === a) return false;
       return true;
     }
     return false;
@@ -279,281 +309,321 @@ var m = class s {
     if (this.tz !== void 0) if (typeof this.tz == "number") this.ms = e.getUTCMilliseconds(), this.second = e.getUTCSeconds(), this.minute = e.getUTCMinutes() + this.tz, this.hour = e.getUTCHours(), this.day = e.getUTCDate(), this.month = e.getUTCMonth(), this.year = e.getUTCFullYear(), this.apply();
     else try {
       let t = g(e, this.tz);
-      this.ms = e.getMilliseconds(), this.second = t.s, this.minute = t.i, this.hour = t.h, this.day = t.d, this.month = t.m - 1, this.year = t.y;
+      this.ms = e.getMilliseconds(), this.second = t.s, this.minute = t.i, this.hour = t.h, this.day = t.d, this.month = t.m - 1, this.year = t.y, this.cacheInstant(e.getTime() - this.ms);
     } catch (t) {
-      let r = t instanceof Error ? t.message : String(t);
-      throw new TypeError(`CronDate: Failed to convert date to timezone '${this.tz}'. This may happen with invalid timezone names or dates. Original error: ${r}`);
+      let n = t instanceof Error ? t.message : String(t);
+      throw new TypeError(`CronDate: Failed to convert date to timezone '${this.tz}'. This may happen with invalid timezone names or dates. Original error: ${n}`);
     }
-    else this.ms = e.getMilliseconds(), this.second = e.getSeconds(), this.minute = e.getMinutes(), this.hour = e.getHours(), this.day = e.getDate(), this.month = e.getMonth(), this.year = e.getFullYear();
+    else this.ms = e.getMilliseconds(), this.second = e.getSeconds(), this.minute = e.getMinutes(), this.hour = e.getHours(), this.day = e.getDate(), this.month = e.getMonth(), this.year = e.getFullYear(), this.cacheInstant(e.getTime() - this.ms);
+  }
+  cacheInstant(e) {
+    this.instantMs = e;
+    let { year: t, month: n, day: s, hour: r, minute: a, second: o } = this;
+    this.instantFields = [t, n, s, r, a, o, this.tz];
+  }
+  cachedInstant() {
+    let e = this.instantFields;
+    if (!(e === void 0 || e[6] !== this.tz) && !(e[5] !== this.second || e[4] !== this.minute || e[3] !== this.hour) && !(e[2] !== this.day || e[1] !== this.month || e[0] !== this.year)) return this.instantMs;
   }
   fromCronDate(e) {
-    this.tz = e.tz, this.year = e.year, this.month = e.month, this.day = e.day, this.hour = e.hour, this.minute = e.minute, this.second = e.second, this.ms = e.ms;
+    this.tz = e.tz, this.year = e.year, this.month = e.month, this.day = e.day, this.hour = e.hour, this.minute = e.minute, this.second = e.second, this.ms = e.ms, this.instantMs = e.instantMs, this.instantFields = e.instantFields;
   }
   apply() {
-    if (this.month > 11 || this.month < 0 || this.day > P[this.month] || this.day < 1 || this.hour > 59 || this.minute > 59 || this.second > 59 || this.hour < 0 || this.minute < 0 || this.second < 0) {
-      let e = new Date(Date.UTC(this.year, this.month, this.day, this.hour, this.minute, this.second, this.ms));
-      return this.ms = e.getUTCMilliseconds(), this.second = e.getUTCSeconds(), this.minute = e.getUTCMinutes(), this.hour = e.getUTCHours(), this.day = e.getUTCDate(), this.month = e.getUTCMonth(), this.year = e.getUTCFullYear(), true;
+    if (this.month > 11 || this.month < 0 || this.day > this.getLastDayOfMonth(this.year, this.month) || this.day < 1 || this.hour > 23 || this.minute > 59 || this.second > 59 || this.hour < 0 || this.minute < 0 || this.second < 0) {
+      let e = /* @__PURE__ */ new Date(0);
+      return e.setUTCFullYear(this.year, this.month, this.day), e.setUTCHours(this.hour, this.minute, this.second, this.ms), this.ms = e.getUTCMilliseconds(), this.second = e.getUTCSeconds(), this.minute = e.getUTCMinutes(), this.hour = e.getUTCHours(), this.day = e.getUTCDate(), this.month = e.getUTCMonth(), this.year = e.getUTCFullYear(), true;
     } else return false;
   }
   fromString(e) {
     if (typeof this.tz == "number") {
-      let t = v(e);
+      if (O(e)) return this.fromDate(D(e));
+      let t = D(e, "Etc/UTC");
       this.ms = t.getUTCMilliseconds(), this.second = t.getUTCSeconds(), this.minute = t.getUTCMinutes(), this.hour = t.getUTCHours(), this.day = t.getUTCDate(), this.month = t.getUTCMonth(), this.year = t.getUTCFullYear(), this.apply();
-    } else return this.fromDate(v(e, this.tz));
+    } else return this.fromDate(D(e, this.tz));
   }
-  findNext(e, t, r, n) {
-    return this._findMatch(e, t, r, n, 1);
+  findNext(e, t, n, s) {
+    return this._findMatch(e, t, n, s, 1);
   }
-  _findMatch(e, t, r, n, i) {
-    let a = this[t], o;
-    r.lastDayOfMonth && (o = this.getLastDayOfMonth(this.year, this.month));
-    let h = !r.starDOW && t == "day" ? new Date(Date.UTC(this.year, this.month, 1, 0, 0, 0, 0)).getUTCDay() : void 0, l = this[t] + n, y = i === 1 ? (u) => u < r[t].length : (u) => u >= 0;
-    for (let u = l; y(u); u += i) {
-      let d = r[t][u];
-      if (t === "day" && !d) {
-        for (let c = 0; c < r.nearestWeekdays.length; c++) if (r.nearestWeekdays[c]) {
-          let M = this.getNearestWeekday(this.year, this.month, c - n);
-          if (M === -1) continue;
-          if (M === u - n) {
-            d = 1;
-            break;
-          }
+  _matchDayValue(e, t, n, s) {
+    let r = e;
+    if (!r) {
+      for (let a = 0; a < n.nearestWeekdays.length; a++) if (n.nearestWeekdays[a]) {
+        let o = this.getNearestWeekday(this.year, this.month, a + 1);
+        if (o !== -1 && o === t) {
+          r = 1;
+          break;
         }
       }
-      if (t === "day" && r.lastWeekday) {
-        let c = this.getLastWeekday(this.year, this.month);
-        u - n === c && (d = 1);
-      }
-      if (t === "day" && r.lastDayOfMonth && u - n == o && (d = 1), t === "day" && !r.starDOW) {
-        let c = r.dayOfWeek[(h + (u - n - 1)) % 7];
-        if (c && c & 63) c = this.isNthWeekdayOfMonth(this.year, this.month, u - n, c) ? 1 : 0;
-        else if (c) throw new Error(`CronDate: Invalid value for dayOfWeek encountered. ${c}`);
-        r.useAndLogic ? d = d && c : !e.domAndDow && !r.starDOM ? d = d || c : d = d && c;
-      }
-      if (d) return this[t] = u - n, a !== this[t] ? 2 : 1;
+    }
+    if (n.lastWeekday) {
+      let a = this.getLastWeekday(this.year, this.month);
+      t === a && (r = 1);
+    }
+    if (n.lastDayOfMonth) {
+      let a = this.getLastDayOfMonth(this.year, this.month);
+      t === a && (r = 1);
+    }
+    if (!n.starDOW) {
+      let a = new Date(Date.UTC(this.year, this.month, 1, 0, 0, 0, 0)).getUTCDay(), o = n.dayOfWeek[(a + (t - 1)) % 7];
+      o && o & 63 && (o = this.isNthWeekdayOfMonth(this.year, this.month, t, o) ? 1 : 0), n.useAndLogic ? r = r && o : !s.domAndDow && !n.starDOM ? r = r || o : r = r && o;
+    }
+    return r;
+  }
+  _findMatch(e, t, n, s, r) {
+    let a = this[t], o = this[t] + s, u = r === 1 ? (h) => h < n[t].length : (h) => h >= 0;
+    for (let h = o; u(h); h += r) {
+      let c = n[t][h];
+      if (t === "day" && (c = this._matchDayValue(c, h - s, n, e)), c) return this[t] = h - s, a !== this[t] ? 2 : 1;
     }
     return 3;
   }
-  recurse(e, t, r) {
-    if (r === 0 && !e.starYear) {
+  recurse(e, t, n) {
+    let s = this.year, r = n;
+    for (; typeof r == "number"; ) {
+      if (e.starYear && Math.abs(this.year - s) > 400) return null;
+      r = this.recurseStep(e, t, r);
+    }
+    return r;
+  }
+  recurseStep(e, t, n) {
+    if (n === 0 && !e.starYear) {
       if (this.year >= 0 && this.year < e.year.length && e.year[this.year] === 0) {
-        let i = -1;
+        let r = -1;
         for (let a = this.year + 1; a < e.year.length && a < 1e4; a++) if (e.year[a] === 1) {
-          i = a;
+          r = a;
           break;
         }
-        if (i === -1) return null;
-        this.year = i, this.month = 0, this.day = 1, this.hour = 0, this.minute = 0, this.second = 0, this.ms = 0;
+        if (r === -1) return null;
+        this.year = r, this.month = 0, this.day = 1, this.hour = 0, this.minute = 0, this.second = 0, this.ms = 0;
       }
       if (this.year >= 1e4) return null;
     }
-    let n = this.findNext(t, f[r][0], e, f[r][2]);
-    if (n > 1) {
-      let i = r + 1;
-      for (; i < f.length; ) this[f[i][0]] = -f[i][2], i++;
-      if (n === 3) {
-        if (this[f[r][1]]++, this[f[r][0]] = -f[r][2], this.apply(), r === 0 && !e.starYear) {
+    let s = this.findNext(t, l[n][0], e, l[n][2]);
+    if (s > 1) {
+      let r = n + 1;
+      for (; r < l.length; ) this[l[r][0]] = -l[r][2], r++;
+      if (s === 3) {
+        if (this[l[n][1]]++, this[l[n][0]] = -l[n][2], this.apply(), n === 0 && !e.starYear) {
           for (; this.year >= 0 && this.year < e.year.length && e.year[this.year] === 0 && this.year < 1e4; ) this.year++;
           if (this.year >= 1e4 || this.year >= e.year.length) return null;
         }
-        return this.recurse(e, t, 0);
-      } else if (this.apply()) return this.recurse(e, t, r - 1);
+        return 0;
+      } else if (this.apply()) return n - 1;
     }
-    return r += 1, r >= f.length ? this : (e.starYear ? this.year >= 3e3 : this.year >= 1e4) ? null : this.recurse(e, t, r);
+    return n += 1, n >= l.length ? this : (e.starYear ? this.year >= 3e3 : this.year >= 1e4) ? null : n;
   }
-  increment(e, t, r) {
-    return this.second += t.interval !== void 0 && t.interval > 1 && r ? t.interval : 1, this.ms = 0, this.apply(), this.recurse(e, t, 0);
+  increment(e, t, n) {
+    return this.instantMs = void 0, this.instantFields = void 0, this.second += t.interval !== void 0 && t.interval > 1 && n ? t.interval : 1, this.ms = 0, this.apply(), this.recurse(e, t, 0);
   }
   decrement(e, t) {
-    return this.second -= t.interval !== void 0 && t.interval > 1 ? t.interval : 1, this.ms = 0, this.apply(), this.recurseBackward(e, t, 0, 0);
+    return this.instantMs = void 0, this.instantFields = void 0, this.second -= t.interval !== void 0 && t.interval > 1 ? t.interval : 1, this.ms = 0, this.apply(), this.recurseBackward(e, t, 0);
   }
-  recurseBackward(e, t, r, n = 0) {
-    if (n > 1e4) return null;
-    if (r === 0 && !e.starYear) {
+  recurseBackward(e, t, n) {
+    let s = this.year, r = n;
+    for (; typeof r == "number"; ) {
+      if (e.starYear && Math.abs(this.year - s) > 400) return null;
+      r = this.recurseBackwardStep(e, t, r);
+    }
+    return r;
+  }
+  recurseBackwardStep(e, t, n) {
+    if (n === 0 && !e.starYear) {
       if (this.year >= 0 && this.year < e.year.length && e.year[this.year] === 0) {
-        let a = -1;
-        for (let o = this.year - 1; o >= 0; o--) if (e.year[o] === 1) {
-          a = o;
+        let r = -1;
+        for (let a = this.year - 1; a >= 0; a--) if (e.year[a] === 1) {
+          r = a;
           break;
         }
-        if (a === -1) return null;
-        this.year = a, this.month = 11, this.day = 31, this.hour = 23, this.minute = 59, this.second = 59, this.ms = 0;
+        if (r === -1) return null;
+        this.year = r, this.month = 11, this.day = 31, this.hour = 23, this.minute = 59, this.second = 59, this.ms = 0;
       }
       if (this.year < 0) return null;
     }
-    let i = this.findPrevious(t, f[r][0], e, f[r][2]);
-    if (i > 1) {
-      let a = r + 1;
-      for (; a < f.length; ) {
-        let o = f[a][0], h = f[a][2], l = this.getMaxPatternValue(o, e, h);
-        this[o] = l, a++;
+    let s = this.findPrevious(t, l[n][0], e, l[n][2]);
+    if (s > 1) {
+      let r = n + 1;
+      for (; r < l.length; ) {
+        let a = l[r][0], o = l[r][2], u = this.getMaxPatternValue(a, e, o);
+        this[a] = u, r++;
       }
-      if (i === 3) {
-        if (this[f[r][1]]--, r === 0) {
-          let y = this.getLastDayOfMonth(this.year, this.month);
-          this.day > y && (this.day = y);
+      if (s === 3) {
+        if (this[l[n][1]]--, n === 0) {
+          let u = this.getLastDayOfMonth(this.year, this.month);
+          this.day > u && (this.day = u);
         }
-        if (r === 1) if (this.day <= 0) this.day = 1;
+        if (n === 1) if (this.day <= 0) this.day = 1;
         else {
-          let y = this.year, u = this.month;
-          for (; u < 0; ) u += 12, y--;
-          for (; u > 11; ) u -= 12, y++;
-          let d = u !== 1 ? P[u] : new Date(Date.UTC(y, u + 1, 0)).getUTCDate();
-          this.day > d && (this.day = d);
+          let u = this.year, h = this.month;
+          for (; h < 0; ) h += 12, u--;
+          for (; h > 11; ) h -= 12, u++;
+          let c = this.getLastDayOfMonth(u, h);
+          this.day > c && (this.day = c);
         }
         this.apply();
-        let o = f[r][0], h = f[r][2], l = this.getMaxPatternValue(o, e, h);
-        if (o === "day") {
-          let y = this.getLastDayOfMonth(this.year, this.month);
-          this[o] = Math.min(l, y);
-        } else this[o] = l;
-        if (this.apply(), r === 0) {
-          let y = f[1][2], u = this.getMaxPatternValue("day", e, y), d = this.getLastDayOfMonth(this.year, this.month), c = Math.min(u, d);
-          c !== this.day && (this.day = c, this.hour = this.getMaxPatternValue("hour", e, f[2][2]), this.minute = this.getMaxPatternValue("minute", e, f[3][2]), this.second = this.getMaxPatternValue("second", e, f[4][2]));
+        let a = l[n][0], o = l[n][2];
+        if (this[a] = this.getMaxPatternValue(a, e, o), this.apply(), n === 0) {
+          let u = l[1][2], h = this.getMaxPatternValue("day", e, u);
+          h !== this.day && (this.day = h, this.hour = this.getMaxPatternValue("hour", e, l[2][2]), this.minute = this.getMaxPatternValue("minute", e, l[3][2]), this.second = this.getMaxPatternValue("second", e, l[4][2]));
         }
-        if (r === 0 && !e.starYear) {
+        if (n === 0 && !e.starYear) {
           for (; this.year >= 0 && this.year < e.year.length && e.year[this.year] === 0; ) this.year--;
           if (this.year < 0) return null;
         }
-        return this.recurseBackward(e, t, 0, n + 1);
-      } else if (this.apply()) return this.recurseBackward(e, t, r - 1, n + 1);
+        return 0;
+      } else if (this.apply()) return n - 1;
     }
-    return r += 1, r >= f.length ? this : this.year < 0 ? null : this.recurseBackward(e, t, r, n + 1);
+    return n += 1, n >= l.length ? this : this.year < 0 ? null : n;
   }
-  getMaxPatternValue(e, t, r) {
-    if (e === "day" && t.lastDayOfMonth) return this.getLastDayOfMonth(this.year, this.month);
-    if (e === "day" && !t.starDOW) return this.getLastDayOfMonth(this.year, this.month);
-    for (let n = t[e].length - 1; n >= 0; n--) if (t[e][n]) return n - r;
-    return t[e].length - 1 - r;
+  getMaxPatternValue(e, t, n) {
+    let s = t[e].length - 1 - n;
+    for (let r = t[e].length - 1; r >= 0; r--) if (t[e][r]) {
+      s = r - n;
+      break;
+    }
+    if (e === "day") {
+      let r = this.getLastDayOfMonth(this.year, this.month);
+      return t.lastDayOfMonth || !t.starDOW ? r : Math.min(s, r);
+    }
+    return s;
   }
-  findPrevious(e, t, r, n) {
-    return this._findMatch(e, t, r, n, -1);
+  findPrevious(e, t, n, s) {
+    return this._findMatch(e, t, n, s, -1);
   }
   getDate(e) {
-    return e || this.tz === void 0 ? new Date(this.year, this.month, this.day, this.hour, this.minute, this.second, this.ms) : typeof this.tz == "number" ? new Date(Date.UTC(this.year, this.month, this.day, this.hour, this.minute - this.tz, this.second, this.ms)) : k(b(this.year, this.month + 1, this.day, this.hour, this.minute, this.second, this.tz), false);
+    if (!e && typeof this.tz != "number") {
+      let t = this.cachedInstant();
+      if (t !== void 0) return new Date(t + (this.tz === void 0 ? this.ms : 0));
+    }
+    return e || this.tz === void 0 ? new Date(this.year, this.month, this.day, this.hour, this.minute, this.second, this.ms) : typeof this.tz == "number" ? new Date(Date.UTC(this.year, this.month, this.day, this.hour, this.minute - this.tz, this.second, this.ms)) : P(y(this.year, this.month + 1, this.day, this.hour, this.minute, this.second, this.tz), false);
   }
   getTime() {
     return this.getDate(false).getTime();
   }
   match(e, t) {
     if (!e.starYear && (this.year < 0 || this.year >= e.year.length || e.year[this.year] === 0)) return false;
-    for (let r = 0; r < f.length; r++) {
-      let n = f[r][0], i = f[r][2], a = this[n];
-      if (a + i < 0 || a + i >= e[n].length) return false;
-      let o = e[n][a + i];
-      if (n === "day") {
-        if (!o) {
-          for (let h = 0; h < e.nearestWeekdays.length; h++) if (e.nearestWeekdays[h]) {
-            let l = this.getNearestWeekday(this.year, this.month, h - i);
-            if (l !== -1 && l === a) {
-              o = 1;
-              break;
-            }
-          }
-        }
-        if (e.lastWeekday) {
-          let h = this.getLastWeekday(this.year, this.month);
-          a === h && (o = 1);
-        }
-        if (e.lastDayOfMonth) {
-          let h = this.getLastDayOfMonth(this.year, this.month);
-          a === h && (o = 1);
-        }
-        if (!e.starDOW) {
-          let h = new Date(Date.UTC(this.year, this.month, 1, 0, 0, 0, 0)).getUTCDay(), l = e.dayOfWeek[(h + (a - 1)) % 7];
-          l && l & 63 && (l = this.isNthWeekdayOfMonth(this.year, this.month, a, l) ? 1 : 0), e.useAndLogic ? o = o && l : !t.domAndDow && !e.starDOM ? o = o || l : o = o && l;
-        }
-      }
-      if (!o) return false;
+    for (let n = 0; n < l.length; n++) {
+      let s = l[n][0], r = l[n][2], a = this[s];
+      if (a + r < 0 || a + r >= e[s].length) return false;
+      let o = e[s][a + r];
+      if (s === "day" && (o = this._matchDayValue(o, a, e, t)), !o) return false;
     }
     return true;
   }
 };
-function R(s2) {
-  if (s2 === void 0 && (s2 = {}), delete s2.name, s2.legacyMode !== void 0 && s2.domAndDow === void 0 ? s2.domAndDow = !s2.legacyMode : s2.domAndDow === void 0 && (s2.domAndDow = false), s2.legacyMode = !s2.domAndDow, s2.paused = s2.paused === void 0 ? false : s2.paused, s2.maxRuns = s2.maxRuns === void 0 ? 1 / 0 : s2.maxRuns, s2.catch = s2.catch === void 0 ? false : s2.catch, s2.interval = s2.interval === void 0 ? 0 : parseInt(s2.interval.toString(), 10), s2.utcOffset = s2.utcOffset === void 0 ? void 0 : parseInt(s2.utcOffset.toString(), 10), s2.dayOffset = s2.dayOffset === void 0 ? 0 : parseInt(s2.dayOffset.toString(), 10), s2.unref = s2.unref === void 0 ? false : s2.unref, s2.mode = s2.mode === void 0 ? "auto" : s2.mode, s2.alternativeWeekdays = s2.alternativeWeekdays === void 0 ? false : s2.alternativeWeekdays, s2.sloppyRanges = s2.sloppyRanges === void 0 ? false : s2.sloppyRanges, !["auto", "5-part", "6-part", "7-part", "5-or-6-parts", "6-or-7-parts"].includes(s2.mode)) throw new Error("CronOptions: mode must be one of 'auto', '5-part', '6-part', '7-part', '5-or-6-parts', or '6-or-7-parts'.");
-  if (s2.startAt && (s2.startAt = new m(s2.startAt, s2.timezone)), s2.stopAt && (s2.stopAt = new m(s2.stopAt, s2.timezone)), s2.interval !== null) {
-    if (isNaN(s2.interval)) throw new Error("CronOptions: Supplied value for interval is not a number");
-    if (s2.interval < 0) throw new Error("CronOptions: Supplied value for interval can not be negative");
+function I(i3) {
+  i3 === void 0 && (i3 = {}), delete i3.name, i3.legacyMode !== void 0 && i3.domAndDow === void 0 ? i3.domAndDow = !i3.legacyMode : i3.domAndDow === void 0 && (i3.domAndDow = false), i3.legacyMode = !i3.domAndDow;
+  let e = (n, s) => n === void 0 ? s : n;
+  if (i3.paused = e(i3.paused, false), i3.maxRuns = e(i3.maxRuns, 1 / 0), i3.catch = e(i3.catch, false), i3.unref = e(i3.unref, false), i3.mode = e(i3.mode, "auto"), i3.alternativeWeekdays = e(i3.alternativeWeekdays, false), i3.sloppyRanges = e(i3.sloppyRanges, false), i3.allowPast = e(i3.allowPast, false), i3.interval = i3.interval === void 0 ? 0 : parseInt(i3.interval.toString(), 10), i3.utcOffset = i3.utcOffset === void 0 ? void 0 : parseInt(i3.utcOffset.toString(), 10), i3.dayOffset = i3.dayOffset === void 0 ? 0 : parseInt(i3.dayOffset.toString(), 10), !["auto", "5-part", "6-part", "7-part", "5-or-6-parts", "6-or-7-parts"].includes(i3.mode)) throw new Error("CronOptions: mode must be one of 'auto', '5-part', '6-part', '7-part', '5-or-6-parts', or '6-or-7-parts'.");
+  i3.timezone === "" && (i3.timezone = void 0);
+  let t = i3.timezone ?? i3.utcOffset;
+  if (i3.startAt && (i3.startAt = W(new f(i3.startAt, t))), i3.stopAt && (i3.stopAt = W(new f(i3.stopAt, t))), i3.interval !== null) {
+    if (isNaN(i3.interval)) throw new Error("CronOptions: Supplied value for interval is not a number");
+    if (i3.interval < 0) throw new Error("CronOptions: Supplied value for interval can not be negative");
   }
-  if (s2.utcOffset !== void 0) {
-    if (isNaN(s2.utcOffset)) throw new Error("CronOptions: Invalid value passed for utcOffset, should be number representing minutes offset from UTC.");
-    if (s2.utcOffset < -870 || s2.utcOffset > 870) throw new Error("CronOptions: utcOffset out of bounds.");
-    if (s2.utcOffset !== void 0 && s2.timezone) throw new Error("CronOptions: Combining 'utcOffset' with 'timezone' is not allowed.");
+  if (i3.utcOffset !== void 0) {
+    if (isNaN(i3.utcOffset)) throw new Error("CronOptions: Invalid value passed for utcOffset, should be number representing minutes offset from UTC.");
+    if (i3.utcOffset < -870 || i3.utcOffset > 870) throw new Error("CronOptions: utcOffset out of bounds.");
+    if (i3.utcOffset !== void 0 && i3.timezone) throw new Error("CronOptions: Combining 'utcOffset' with 'timezone' is not allowed.");
   }
-  if (s2.unref !== true && s2.unref !== false) throw new Error("CronOptions: Unref should be either true, false or undefined(false).");
-  if (s2.dayOffset !== void 0 && s2.dayOffset !== 0 && isNaN(s2.dayOffset)) throw new Error("CronOptions: Invalid value passed for dayOffset, should be a number representing days to offset.");
-  return s2;
+  if (i3.unref !== true && i3.unref !== false) throw new Error("CronOptions: Unref should be either true, false or undefined(false).");
+  if (i3.dayOffset !== void 0 && i3.dayOffset !== 0 && isNaN(i3.dayOffset)) throw new Error("CronOptions: Invalid value passed for dayOffset, should be a number representing days to offset.");
+  return i3;
 }
-function p(s2) {
-  return Object.prototype.toString.call(s2) === "[object Function]" || typeof s2 == "function" || s2 instanceof Function;
+function W(i3) {
+  return i3.ms ? (i3.ms = 0, new f(new Date(i3.getTime() + 1e3), i3.tz)) : i3;
 }
-function _(s2) {
-  return p(s2);
+function T(i3) {
+  return typeof i3 == "function";
 }
-function x(s2) {
-  typeof Deno < "u" && typeof Deno.unrefTimer < "u" ? Deno.unrefTimer(s2) : s2 && typeof s2.unref < "u" && s2.unref();
+function z(i3) {
+  return T(i3);
 }
-var W = 30 * 1e3;
-var w = [];
-var E = class {
+function F(i3) {
+  typeof Deno < "u" && typeof Deno.unrefTimer < "u" ? Deno.unrefTimer(i3) : i3 && typeof i3.unref < "u" && i3.unref();
+}
+var N = 1440 * 60 * 1e3;
+var L = 30 * 1e3;
+var k = [];
+var Y = class {
   name;
   options;
   _states;
   fn;
+  _startAtRoundingMs = 0;
   getTz() {
-    return this.options.timezone || this.options.utcOffset;
+    return this.options.timezone ?? this.options.utcOffset;
   }
   applyDayOffset(e) {
-    if (this.options.dayOffset !== void 0 && this.options.dayOffset !== 0) {
-      let t = this.options.dayOffset * 24 * 60 * 60 * 1e3;
-      return new Date(e.getTime() + t);
-    }
-    return e;
+    let t = this._offsetMs();
+    return t ? new Date(e.getTime() + t) : e;
   }
-  constructor(e, t, r) {
-    let n, i;
-    if (p(t)) i = t;
-    else if (typeof t == "object") n = t;
+  _offsetMs() {
+    return (this.options.dayOffset ?? 0) * N;
+  }
+  get _startAt() {
+    return this.options.startAt;
+  }
+  get _stopAt() {
+    return this.options.stopAt;
+  }
+  _nextTarget(e, t) {
+    let n = this._offsetMs(), s = this._next(this._shift(e), new Date(t.getTime() - n), { startAt: this._shift(this._startAt), stopAt: this._shift(this._stopAt) });
+    return s ? this.applyDayOffset(s.getDate(false)) : null;
+  }
+  _previousTarget(e, t) {
+    let n = this._previous(this._shift(e ?? t), { startAt: this._shift(this._startAt), stopAt: this._shift(this._stopAt) });
+    return n ? this.applyDayOffset(n.getDate(false)) : null;
+  }
+  _shift(e) {
+    if (e != null) return new f(new Date(this._toMs(e) - this._offsetMs()), this.getTz());
+  }
+  constructor(e, t, n) {
+    let s, r;
+    if (T(t)) r = t;
+    else if (typeof t == "object") s = t;
     else if (t !== void 0) throw new Error("Cron: Invalid argument passed for optionsIn. Should be one of function, or object (options).");
-    if (p(r)) i = r;
-    else if (typeof r == "object") n = r;
-    else if (r !== void 0) throw new Error("Cron: Invalid argument passed for funcIn. Should be one of function, or object (options).");
-    if (this.name = n?.name, this.options = R(n), this._states = { kill: false, blocking: false, previousRun: void 0, currentRun: void 0, once: void 0, currentTimeout: void 0, maxRuns: n ? n.maxRuns : void 0, paused: n ? n.paused : false, pattern: new C("* * * * *", void 0, { mode: "auto" }) }, e && (e instanceof Date || typeof e == "string" && e.indexOf(":") > 0) ? this._states.once = new m(e, this.getTz()) : this._states.pattern = new C(e, this.options.timezone, { mode: this.options.mode, alternativeWeekdays: this.options.alternativeWeekdays, sloppyRanges: this.options.sloppyRanges }), this.name) {
-      if (w.find((o) => o.name === this.name)) throw new Error("Cron: Tried to initialize new named job '" + this.name + "', but name already taken.");
-      w.push(this);
+    if (T(n)) r = n;
+    else if (typeof n == "object") s = n;
+    else if (n !== void 0) throw new Error("Cron: Invalid argument passed for funcIn. Should be one of function, or object (options).");
+    this.name = s?.name;
+    let a = s?.startAt;
+    if (this.options = I(s), a && this._startAt && (this._startAtRoundingMs = this._startAt.getTime() - new f(a, this.getTz()).getTime()), this._states = { kill: false, blocking: false, previousRun: void 0, currentRun: void 0, once: void 0, currentTimeout: void 0, maxRuns: s ? s.maxRuns : void 0, paused: s ? s.paused : false, pattern: new b("* * * * *", void 0, { mode: "auto" }) }, e && (e instanceof Date || typeof e == "string" && e.indexOf(":") > 0) ? this._states.once = new f(e, this.getTz()) : this._states.pattern = new b(e, this.options.timezone, { mode: this.options.mode, alternativeWeekdays: this.options.alternativeWeekdays, sloppyRanges: this.options.sloppyRanges }), this.name) {
+      if (k.find((u) => u.name === this.name)) throw new Error("Cron: Tried to initialize new named job '" + this.name + "', but name already taken.");
+      k.push(this);
     }
-    return i !== void 0 && _(i) && (this.fn = i, this.schedule()), this;
+    return r !== void 0 && z(r) && (this.fn = r, this.schedule()), this;
   }
   nextRun(e) {
-    let t = this._next(e);
-    return t ? this.applyDayOffset(t.getDate(false)) : null;
+    return this._nextTarget(e, /* @__PURE__ */ new Date());
   }
   nextRuns(e, t) {
     this._states.maxRuns !== void 0 && e > this._states.maxRuns && (e = this._states.maxRuns);
-    let r = t || this._states.currentRun || void 0;
-    return this._enumerateRuns(e, r, "next");
+    let n = t || this._states.currentRun || void 0;
+    return this._enumerateRuns(e, n, "next");
   }
   previousRuns(e, t) {
     return this._enumerateRuns(e, t || void 0, "previous");
   }
-  _enumerateRuns(e, t, r) {
-    let n = [], i = t ? new m(t, this.getTz()) : null, a = r === "next" ? this._next : this._previous;
-    for (; e--; ) {
-      let o = a.call(this, i);
+  enumerate(e) {
+    return new A(this, e);
+  }
+  _enumerateRuns(e, t, n) {
+    let s = [], r = /* @__PURE__ */ new Date(), a = t;
+    for (; e-- > 0; ) {
+      let o = n === "next" ? this._nextTarget(a, r) : this._previousTarget(a, r);
       if (!o) break;
-      let h = o.getDate(false);
-      n.push(this.applyDayOffset(h)), i = o;
+      s.push(o), a = o;
     }
-    return n;
+    return s;
   }
   match(e) {
     if (this._states.once) {
-      let r = new m(e, this.getTz());
-      r.ms = 0;
-      let n = new m(this._states.once, this.getTz());
-      return n.ms = 0, r.getTime() === n.getTime();
+      let n = new f(e, this.getTz());
+      n.ms = 0;
+      let s = new f(this._states.once, this.getTz());
+      return s.ms = 0, n.getTime() === s.getTime();
     }
-    let t = new m(e, this.getTz());
+    let t = new f(e, this.getTz());
     return t.ms = 0, t.match(this._states.pattern, this.options);
   }
   getPattern() {
@@ -563,8 +633,7 @@ var E = class {
     return this._states.once ? this._states.once.getDate() : null;
   }
   isRunning() {
-    let e = this.nextRun(this._states.currentRun), t = !this._states.paused, r = this.fn !== void 0, n = !this._states.kill;
-    return t && r && n && e !== null;
+    return !this._states.paused && !this._states.kill && this.fn !== void 0 && this._nextTarget(this._states.currentRun, /* @__PURE__ */ new Date()) !== null;
   }
   isStopped() {
     return this._states.kill;
@@ -579,13 +648,13 @@ var E = class {
     return this._states.previousRun ? this._states.previousRun.getDate() : null;
   }
   msToNext(e) {
-    let t = this._next(e);
-    return t ? e instanceof m || e instanceof Date ? t.getTime() - e.getTime() : t.getTime() - new m(e).getTime() : null;
+    let t = /* @__PURE__ */ new Date(), n = this._nextTarget(e, t);
+    return n ? n.getTime() - this._toMs(e ?? t) : null;
   }
   stop() {
     this._states.kill = true, this._states.currentTimeout && clearTimeout(this._states.currentTimeout);
-    let e = w.indexOf(this);
-    e >= 0 && w.splice(e, 1);
+    let e = k.indexOf(this);
+    e >= 0 && k.splice(e, 1);
   }
   pause() {
     return this._states.paused = true, !this._states.kill;
@@ -594,25 +663,30 @@ var E = class {
     return this._states.paused = false, !this._states.kill;
   }
   schedule(e) {
+    return this._schedule(e);
+  }
+  _schedule(e, t) {
     if (e && this.fn) throw new Error("Cron: It is not allowed to schedule two functions using the same Croner instance.");
     e && (this.fn = e);
-    let t = this.msToNext(), r = this.nextRun(this._states.currentRun);
-    return t == null || isNaN(t) || r === null ? this : (t > W && (t = W), this._states.currentTimeout = setTimeout(() => this._checkTrigger(r), t), this._states.currentTimeout && this.options.unref && x(this._states.currentTimeout), this);
+    let n = t ?? /* @__PURE__ */ new Date(), s = this._nextTarget(void 0, n), r = s ? s.getTime() - n.getTime() : null, a = this._states.currentRun;
+    a && a.getTime() > n.getTime() && (a = void 0);
+    let o = this._nextTarget(a, n);
+    return r === null || isNaN(r) || o === null ? this : (r > L && (r = L), r < 0 && (r = this._states.paused ? 1e3 : 0), this._states.currentTimeout = setTimeout(() => this._checkTrigger(o), r), this._states.currentTimeout && this.options.unref && F(this._states.currentTimeout), this);
   }
-  async _trigger(e) {
-    this._states.blocking = true, this._states.currentRun = new m(void 0, this.getTz());
+  async _trigger(e = /* @__PURE__ */ new Date()) {
+    this._states.blocking = true, this._states.currentRun = new f(e, this.getTz());
     try {
       if (this.options.catch) try {
         this.fn !== void 0 && await this.fn(this, this.options.context);
       } catch (t) {
-        if (p(this.options.catch)) try {
+        if (T(this.options.catch)) try {
           this.options.catch(t, this);
         } catch {
         }
       }
       else this.fn !== void 0 && await this.fn(this, this.options.context);
     } finally {
-      this._states.previousRun = new m(e, this.getTz()), this._states.blocking = false;
+      this._states.previousRun = new f(e, this.getTz()), this._states.blocking = false;
     }
   }
   async trigger() {
@@ -622,32 +696,100 @@ var E = class {
     return this._states.maxRuns;
   }
   _checkTrigger(e) {
-    let t = /* @__PURE__ */ new Date(), r = !this._states.paused && t.getTime() >= e.getTime(), n = this._states.blocking && this.options.protect;
-    r && !n ? (this._states.maxRuns !== void 0 && this._states.maxRuns--, this._trigger()) : r && n && p(this.options.protect) && setTimeout(() => this.options.protect(this), 0), this.schedule();
+    let t = /* @__PURE__ */ new Date(), n = !this._states.paused && t.getTime() >= e.getTime(), s = this._states.blocking && this.options.protect;
+    n && !s ? (this._states.maxRuns !== void 0 && this._states.maxRuns--, this._trigger(t)) : n && s && T(this.options.protect) && setTimeout(() => this.options.protect(this), 0), this._schedule(void 0, n ? void 0 : t);
   }
-  _next(e) {
-    let t = !!(e || this._states.currentRun), r = false;
-    !e && this.options.startAt && this.options.interval && ([e, t] = this._calculatePreviousRun(e, t), r = !e), e = new m(e, this.getTz()), this.options.startAt && e && e.getTime() < this.options.startAt.getTime() && (e = this.options.startAt);
-    let n = this._states.once || new m(e, this.getTz());
-    return !r && n !== this._states.once && (n = n.increment(this._states.pattern, this.options, t)), this._states.once && this._states.once.getTime() <= e.getTime() || n === null || this._states.maxRuns !== void 0 && this._states.maxRuns <= 0 || this._states.kill || this.options.stopAt && n.getTime() >= this.options.stopAt.getTime() ? null : n;
+  _next(e, t, n) {
+    let s = n ? n.startAt : this._startAt, r = n ? n.stopAt : this._stopAt, a = !!e, o = !!(e || this._states.currentRun), u = false;
+    !e && s && this.options.interval && (e = this._calculatePreviousRun(s, t), e && (o = true), u = !e);
+    let h = e ?? t ?? /* @__PURE__ */ new Date(), c = this._toMs(h);
+    e = new f(h, this.getTz()), s && c < s.getTime() && (e = u ? s : new f(new Date(s.getTime() - 1e3), this.getTz()), c = e.getTime());
+    let d = this._states.once || new f(e, this.getTz());
+    if (!u && d !== this._states.once && (d = this._findOccurrence(e, c, 1, o)), this._states.once) {
+      let m = this._states.once.getTime(), p = c - m;
+      if (s && m < s.getTime() - this._startAtRoundingMs || this._states.currentRun && this.applyDayOffset(this._states.once.getDate()).getTime() <= this._states.currentRun.getTime() || (a ? p >= 0 : p > 1e3 && !this.options.allowPast)) return null;
+    }
+    return d === null || this._states.maxRuns !== void 0 && this._states.maxRuns <= 0 || this._states.kill || r && d.getTime() >= r.getTime() ? null : d;
   }
-  _previous(e) {
-    let t = new m(e, this.getTz());
-    this.options.stopAt && t.getTime() > this.options.stopAt.getTime() && (t = this.options.stopAt);
-    let r = new m(t, this.getTz());
-    return this._states.once ? this._states.once.getTime() < t.getTime() ? this._states.once : null : (r = r.decrement(this._states.pattern, this.options), r === null || this.options.startAt && r.getTime() < this.options.startAt.getTime() ? null : r);
+  _previous(e, t) {
+    let n = this._toMs(e ?? /* @__PURE__ */ new Date());
+    if (t.stopAt && n > t.stopAt.getTime() && (n = t.stopAt.getTime()), this._states.once) return this._states.once.getTime() < n ? this._states.once : null;
+    let s = this._findOccurrence(new f(new Date(n), this.getTz()), n, -1);
+    return s === null || t.startAt && s.getTime() < t.startAt.getTime() ? null : s;
+  }
+  _toMs(e) {
+    return e instanceof Date ? e.getTime() : new f(e, this.getTz()).getTime();
+  }
+  _findOccurrence(e, t, n, s = false) {
+    let r = this._walk(e, t, n, s), a = this.getTz();
+    if (this._states.pattern.isFixedTime && n === 1 || typeof a == "number" || U(t, a) !== (n === 1 ? "earlier" : "later")) return r;
+    let o = Math.floor(t / 1e3) * 1e3, u = n === 1 ? _(o, o + N, a) : _(o - N, o, a) - 1e3;
+    if (r && (u - r.getTime()) * n > 0) return r;
+    let h = this._walk(new f(new Date(u), a), u - n, n, false, true);
+    return !r || !h ? r ?? h : (r.getTime() - h.getTime()) * n > 0 ? h : r;
+  }
+  _walk(e, t, n, s, r = false) {
+    let a = this._states.pattern, o = (h, c) => n === 1 ? h.increment(a, this.options, c) : h.decrement(a, this.options), u = new f(e, this.getTz());
+    for ((!r || !u.match(a, this.options)) && (u = o(u, s)); u; ) {
+      let h = this._runAt(u, t, n);
+      if (h) return new f(h, this.getTz());
+      u = o(u, false);
+    }
+    return null;
+  }
+  _runAt(e, t, n) {
+    let s = (m) => (m.getTime() - t) * n > 0, r = e.tz;
+    if (typeof r == "number") {
+      let m = e.getDate();
+      return s(m) ? m : null;
+    }
+    let a = y(e.year, e.month + 1, e.day, e.hour, e.minute, e.second, r), o = v(a), u = this._states.pattern.isFixedTime;
+    if (o.kind === "single") return s(o.date) ? o.date : null;
+    if (o.kind === "ambiguous") {
+      let { earlier: m, later: p } = o;
+      return (u ? [m] : n === 1 ? [m, p] : [p, m]).find(s) ?? null;
+    }
+    if (!u) return null;
+    let h = new Date(_(o.before.getTime(), o.after.getTime(), r)), c = g(h, r);
+    return c.y === a.y && c.m === a.m && c.d === a.d && s(h) ? h : null;
   }
   _calculatePreviousRun(e, t) {
-    let r = new m(void 0, this.getTz()), n = e;
-    if (this.options.startAt.getTime() <= r.getTime()) {
-      n = this.options.startAt;
-      let i = n.getTime() + this.options.interval * 1e3;
-      for (; i <= r.getTime(); ) n = new m(n, this.getTz()).increment(this._states.pattern, this.options, true), i = n.getTime() + this.options.interval * 1e3;
-      t = true;
+    let n = new f(t, this.getTz()).getTime();
+    if (e.getTime() > n) return;
+    let s = this.options.interval * 1e3, r = e;
+    for (; r.getTime() + s <= n; ) {
+      let a = new f(r, this.getTz()).increment(this._states.pattern, this.options, true);
+      if (a === null) break;
+      r = a;
     }
-    return n === null && (n = void 0), [n, t];
+    return r;
+  }
+};
+var A = class {
+  cron;
+  cursor;
+  now;
+  done;
+  initialMaxRuns;
+  remainingRuns;
+  constructor(e, t) {
+    this.cron = e, this.initialMaxRuns = e.runsLeft() ?? 1 / 0, this.reset(t);
+  }
+  next() {
+    if (this.done || this.remainingRuns <= 0) return this.done = true, { value: void 0, done: true };
+    let e = this.cron._nextTarget(this.cursor, this.now);
+    return e === null ? (this.done = true, { value: void 0, done: true }) : (this.cursor = e, this.remainingRuns--, { value: e, done: false });
+  }
+  peek() {
+    return this.done || this.remainingRuns <= 0 ? null : this.cron._nextTarget(this.cursor, this.now);
+  }
+  reset(e) {
+    this.cursor = e instanceof Date ? new Date(e.getTime()) : e ?? void 0, this.now = /* @__PURE__ */ new Date(), this.done = false, this.remainingRuns = this.initialMaxRuns;
+  }
+  [Symbol.iterator]() {
+    return this;
   }
 };
 export {
-  E as Cron
+  Y as Cron
 };

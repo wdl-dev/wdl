@@ -25,9 +25,7 @@
     "cron": "30 2 * * *",
     "timezone": "America/New_York",
     "afterMs": 1772949600000,
-    "jsNextMs": 1772955000000,
-    "rustNextMs": 1772953200000,
-    "knownDivergence": "JavaScript croner schedules nonexistent fixed-time DST gap at 03:30 local; Rust croner follows Vixie/OCPS and fires at first valid post-gap minute."
+    "nextMs": 1772953200000
   },
   {
     "id": "new-york-fall-back",
@@ -35,5 +33,47 @@
     "timezone": "America/New_York",
     "afterMs": 1793505600000,
     "nextMs": 1793511000000
+  },
+  {
+    "id": "new-york-spring-forward-after-gap",
+    "cron": "30 2 * * *",
+    "timezone": "America/New_York",
+    "afterMs": 1772953200000,
+    "nextMs": 1773037800000
+  },
+  {
+    "id": "new-york-fall-back-fixed-once",
+    "cron": "30 1 * * *",
+    "timezone": "America/New_York",
+    "afterMs": 1793511000000,
+    "nextMs": 1793601000000
+  },
+  {
+    "id": "new-york-fall-back-interval-enters-repeated-hour",
+    "cron": "*/30 * * * *",
+    "timezone": "America/New_York",
+    "afterMs": 1793511000000,
+    "nextMs": 1793512800000
+  },
+  {
+    "id": "new-york-fall-back-interval-repeats-minute",
+    "cron": "*/30 * * * *",
+    "timezone": "America/New_York",
+    "afterMs": 1793512800000,
+    "nextMs": 1793514600000
+  },
+  {
+    "id": "explicit-step-range",
+    "cron": "5-59/5 * * * *",
+    "timezone": "UTC",
+    "afterMs": 1793491200000,
+    "nextMs": 1793491500000
+  },
+  {
+    "id": "last-weekday",
+    "cron": "0 0 LW * *",
+    "timezone": "UTC",
+    "afterMs": 1793491200000,
+    "nextMs": 1795996800000
   }
 ]

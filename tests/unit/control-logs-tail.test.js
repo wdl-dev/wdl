@@ -204,6 +204,97 @@ test("RedisTailCursor skips array payloads instead of adding object fields to th
   }]);
 });
 
+for (const { acceptEncoding, gzip } of [
+  { acceptEncoding: null, gzip: false },
+  { acceptEncoding: "", gzip: false },
+  { acceptEncoding: "identity", gzip: false },
+  { acceptEncoding: "br, deflate", gzip: false },
+  { acceptEncoding: "gzip", gzip: true },
+  { acceptEncoding: "br, gzip, deflate", gzip: true },
+  { acceptEncoding: " GZip ; Q = 0.5 ", gzip: true },
+  { acceptEncoding: "gzip;q=1.000", gzip: true },
+  { acceptEncoding: "gzip;q=0.001", gzip: true },
+  { acceptEncoding: "gzip;q=1.", gzip: true },
+  { acceptEncoding: "gzip;q=0", gzip: false },
+  { acceptEncoding: "gzip;q=0.", gzip: false },
+  { acceptEncoding: "gzip;q=0.000", gzip: false },
+  { acceptEncoding: "*", gzip: true },
+  { acceptEncoding: "br, *;q=0.5", gzip: true },
+  { acceptEncoding: "*;q=0", gzip: false },
+  { acceptEncoding: "gzip;q=0, *;q=1", gzip: false },
+  { acceptEncoding: "*;q=1, gzip;q=0", gzip: false },
+  { acceptEncoding: "*;q=0, gzip;q=0.5", gzip: true },
+  { acceptEncoding: "gzip;q=0.5, *;q=0", gzip: true },
+  { acceptEncoding: "x-gzip, gzip-extra", gzip: false },
+  { acceptEncoding: "gzip;q=", gzip: false },
+  { acceptEncoding: "gzip;q=wat, *", gzip: false },
+  { acceptEncoding: "gzip;q=-1", gzip: false },
+  { acceptEncoding: "gzip;q=1.001", gzip: false },
+  { acceptEncoding: "gzip;q=0.0001", gzip: false },
+  { acceptEncoding: "gzip;q=1e0", gzip: false },
+  { acceptEncoding: "gzip;q=1;q=0", gzip: false },
+  { acceptEncoding: "gzip;q=0, gzip;q=1", gzip: false },
+  { acceptEncoding: "gzip;q=1, gzip;q=0", gzip: false },
+  { acceptEncoding: "*;q=wat", gzip: false },
+  { acceptEncoding: "*;q=1, *;q=0", gzip: false },
+]) {
+  test(`logs tail negotiates ${JSON.stringify(acceptEncoding)} as ${gzip ? "gzip" : "identity"}`, async () => {
+    resetTailState();
+    const { handle } = await loadLogsTailHandler();
+    /** @type {Promise<unknown>[]} */
+    const waitUntilPromises = [];
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/logs/tail?worker=foo", {
+        headers: acceptEncoding === null ? {} : { "accept-encoding": acceptEncoding },
+      }),
+      env: { REDIS_ADDR: "redis://unit" },
+      ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+      ns: "demo",
+      requestId: "rid-tail-encoding",
+    });
+    const reader = response.body.getReader();
+    try {
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-encoding"), gzip ? "gzip" : null);
+      assert.equal(response.headers.get("vary"), "Accept-Encoding");
+      assert.equal(response.headers.get("content-type"), "text/event-stream; charset=utf-8");
+      assert.equal(response.headers.get("cache-control"), "no-cache, no-transform");
+      assert.equal(response.headers.get("x-accel-buffering"), "no");
+      // Node does not implement workerd's native response encoding. The source
+      // stream must still supply the same uncompressed frames to that pump.
+      assert.equal((await readText(reader)).text, ": tail-open\n\n");
+      assert.match((await readText(reader)).text, /^: hb /);
+      const session = /** @type {any} */ (globalThis).__tailSessions[0];
+      assert.equal(session.xReadCalls[0][1], "5000");
+      assert.equal(session.closed, false);
+    } finally {
+      await reader.cancel();
+      await Promise.all(waitUntilPromises);
+    }
+    assert.equal(/** @type {any} */ (globalThis).__tailSessions[0].closed, true);
+  });
+}
+
+test("logs tail does not opt validation errors into SSE gzip encoding", async () => {
+  resetTailState();
+  const { handle } = await loadLogsTailHandler();
+  const response = await handle({
+    request: new Request("http://control.test/ns/demo/logs/tail", {
+      headers: { "accept-encoding": "gzip" },
+    }),
+    env: { REDIS_ADDR: "redis://unit" },
+    ctx: null,
+    ns: "demo",
+    requestId: "rid-tail-invalid",
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(response.headers.get("content-encoding"), null);
+  assert.equal(response.headers.get("vary"), null);
+  assert.match(response.headers.get("content-type") ?? "", /^application\/json\b/);
+  assert.equal(/** @type {any} */ (globalThis).__tailSessions.length, 0);
+});
+
 test("logs tail closes after the max session lifetime so reconnect reauthorizes", async () => {
   resetTailState();
   const { handle } = await loadLogsTailHandler();
@@ -236,13 +327,15 @@ test("logs tail closes after the max session lifetime so reconnect reauthorizes"
   assert.ok(/** @type {any} */ (globalThis).__tailState.logs.some((/** @type {any} */ entry) => entry.event === "tail_session_expired"));
 });
 
-test("logs tail max-session watchdog closes even without stream cancel", async () => {
+test("logs tail max-session watchdog closes even without stream cancel when gzip is negotiated", async () => {
   resetTailState();
   const { handle } = await loadLogsTailHandler();
   /** @type {Promise<unknown>[]} */
   const waitUntilPromises = [];
   const response = await handle({
-    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo", {
+      headers: { "accept-encoding": "gzip" },
+    }),
     env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "50" },
     ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
     ns: "demo",
@@ -250,6 +343,7 @@ test("logs tail max-session watchdog closes even without stream cancel", async (
   });
 
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-encoding"), "gzip");
   const reader = response.body.getReader();
   assert.match((await readText(reader)).text, /tail-open/);
   await delay(80);
@@ -261,13 +355,15 @@ test("logs tail max-session watchdog closes even without stream cancel", async (
   await reader.cancel().catch(() => {});
 });
 
-test("logs tail idle-pull watchdog closes abandoned streams before max-session", async () => {
+test("logs tail idle-pull watchdog closes abandoned streams before max-session when gzip is negotiated", async () => {
   resetTailState();
   const { handle } = await loadLogsTailHandler({ keepaliveMs: 5 });
   /** @type {Promise<unknown>[]} */
   const waitUntilPromises = [];
   const response = await handle({
-    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo"),
+    request: new Request("http://control.test/ns/demo/logs/tail?worker=foo", {
+      headers: { "accept-encoding": "gzip" },
+    }),
     env: { REDIS_ADDR: "redis://unit", LOG_TAIL_MAX_SESSION_MS: "1000" },
     ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
     ns: "demo",
@@ -275,6 +371,7 @@ test("logs tail idle-pull watchdog closes abandoned streams before max-session",
   });
 
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-encoding"), "gzip");
   const reader = response.body.getReader();
   assert.match((await readText(reader)).text, /tail-open/);
   await waitUntil("tail idle watchdog to close session", () =>

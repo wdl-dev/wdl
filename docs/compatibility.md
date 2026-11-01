@@ -29,6 +29,7 @@ Each row separates four compatibility claims:
 
 | Surface | Status | What workerd provides | Stronger / added in WDL | Different from Cloudflare | Not implemented / gaps |
 |---|---|---|---|---|---|
+| WebAssembly modules | Supported | Native Wasm compilation and execution, including compact imports and opt-in js-string builtins and source URLs. | CLI/Control preserve Wasm module bytes through immutable bundle storage and `workerLoader`. | Modules compile under each worker version's compatibility flags. | No WDL-provided WASI runtime; dynamic code-generation restrictions still apply. |
 | ES module Workers and `fetch()` | Supported | Module evaluation, request dispatch, `Response`/`Request`, service binding JSRPC machinery. | Dynamic `workerLoader`, immutable version ids, wrapper-generated `env`, gateway routing, request logs, and public/private outbound separation. | Root module names beginning `_wdl-` are platform-reserved; new deploys are rejected and retained versions fail closed on cold load. An uncaught tenant `fetch()` exception maps to platform `502 runtime_error`; exception detail goes to structured logs/live tail, not the client body. | WDL does not emulate every compatibility-date behavior change; workerd is configured with the platform's enabled flags. |
 | WebSocket upgrade | Supported | WebSocket API and 101 response handling inside workerd. | Gateway terminates a local public WebSocket pair and directly forwards to runtime/do-runtime with bounded backend reconnect and client-frame buffering. | Cloudflare disconnects every WebSocket when new code is deployed. Unless a worker opts into `sessionPolicy: "restart"` (which closes its sessions at promotion), WDL keeps gateway-proxied sockets across a promotion while the pinned version's backend stays healthy; only after that backend is lost does Gateway revalidate the active route and, if the pinned version is no longer active, close with `1012` so the client upgrades to the active version. | Gateway rolling still drops physical client sockets; application-level resume is not implemented. Reconnect is application-owned: neither the WebSocket protocol nor the bare API defines a close code that triggers reconnection. |
 | `compatibility_date` / `compatibility_flags` | Partial | workerd feature flags and compatibility behavior where configured in capnp. | CLI/control stores bundle metadata. Dynamic Workers reject explicit `compatibility_date` values earlier than `2026-04-01`; Control also validates that the value is a real `YYYY-MM-DD` date that is not later than the current UTC date or the maximum date supported by the bundled workerd, rejects upstream `$experimental` enable flags such as `experimental` / `unsafe_module`, and rejects `legacy_error_serialization`, `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and `streams_disable_constructors`. Redundant positive flags already enabled by date are preserved and accepted when they compile to the same flag set; workerd owns other incompatible combinations at cold load. | WDL treats compatibility metadata as deploy-time platform metadata rather than a complete per-worker historical emulation layer. | No per-worker emulation of every Cloudflare historical behavior; tenant workers cannot opt into upstream experimental-only flags, disable WDL-required enhanced error serialization, Fetcher RPC, or standard stream constructors, persist irrevocable capability stubs, or enable a module registry whose `import.meta.main` identity conflicts with WDL's generated main wrapper. |
@@ -41,11 +42,16 @@ binary can cold-load a retained Dynamic Worker version only when it supports tha
 version's `compatibility_date`; see the
 [infra rollout notes](modules/infra.md#deployment--rollout-notes).
 
+`ctx.mapVirtualHost(fetcher, port)` is available without experimental flags. It
+maps an already-held native Fetcher to a virtual host and port for socket clients;
+it neither grants new network reachability nor turns a JavaScript binding facade
+into a TCP backend.
+
 `spec_compliant_dispatch_exceptions` is non-experimental and accepted as an explicit
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-10-28`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-11-08`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 
@@ -57,8 +63,10 @@ compatibility dates from `2026-10-01`. Stock workerd does not consume it, so it 
 not change WDL actor residency; `DO_PREVENT_EVICTION` remains the residency control.
 
 `webcrypto_modern_algorithms` is an accepted, non-experimental opt-in. It exposes
-workerd's native ML-KEM, ML-DSA, and related WebCrypto helpers. The upstream API follows
-an evolving draft; WDL does not enable it by default or use it for platform secrets.
+workerd's native ML-KEM, ML-DSA, `ChaCha20-Poly1305`, `MLKEM768-X25519`,
+`SHA3-256`, `SHA3-384`, `SHA3-512`, and related WebCrypto helpers. The upstream API
+follows an evolving draft; WDL does not enable it by default or use it for platform
+secrets.
 
 `wasm_esm_integration_builtins` is an accepted, non-experimental opt-in. It compiles a
 worker's Wasm modules with the js-string builtins and `wasm:js/string-constants` imports
@@ -68,6 +76,16 @@ its own flags.
 
 Compact WebAssembly import-section encoding is also accepted by the bundled
 workerd without an opt-in. WDL forwards Wasm module bytes without rewriting them.
+
+`wasm_source_url_support` preserves the module's path in native Wasm stack frames,
+including errors passed to structured live tail; without it, frames use an anonymous
+`wasm://wasm/` URL. `temporal` exposes the native `Temporal` API. Both are accepted,
+non-experimental opt-ins and default on from compatibility date `2026-12-01`, beyond
+the bundled maximum. Neither is enabled on WDL's static workers.
+
+The native `Response` constructor defaults `statusText` to an empty string and rejects
+a locked body stream immediately. Explicit status text is preserved; HTTP status codes
+remain the wire contract.
 
 `pipe_to_backward_propagation` is an accepted, non-experimental opt-in. It makes
 `pipeTo()` and `pipeThrough()` propagate a JavaScript-backed destination's errors

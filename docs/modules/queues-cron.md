@@ -134,6 +134,13 @@ Cron therefore follows Cloudflare-style best-effort scheduled events: minute ali
 catch-up replay, overlap allowed, and user-handler failure reported as an outcome rather
 than retried by scheduler.
 
+Control and scheduler use the same DST expectations, pinned by
+`tests/fixtures/cron-parity.json`. A fixed local time inside a spring-forward gap
+runs at the first valid time after the gap on that day. A repeated fixed local
+time during fall-back runs once, at its first occurrence; interval patterns can
+run in both occurrences of the repeated hour. These timezone rules do not change
+the scheduler's no-catch-up policy for missed slots during an outage.
+
 Scheduler streams both cron and queue Runtime responses through a fixed 256 KiB body
 limit before JSON parsing. A response over that limit is a cron dispatch error or a
 Queue retry-all transport failure, except that an already received HTTP 413 remains

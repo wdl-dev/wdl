@@ -1,5 +1,5 @@
 /*
- * The experimental flags mirror workerd v1.20261021.1
+ * The experimental flags mirror workerd v1.20261101.1
  * src/workerd/io/compatibility-date.capnp. Refresh them on every workerd pin
  * bump from an upstream source checkout:
  *
@@ -11,7 +11,7 @@
  * mirror data.
  */
 
-export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20261021.1";
+export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20261101.1";
 
 // WDL supports one forward-only dynamic-worker compatibility surface. Static
 // platform workers keep their independently pinned workerd service dates.
@@ -36,6 +36,7 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "allow_insecure_inefficient_logged_eval",
   "auto_inject_python_workers",
   "cache_reload_enabled",
+  "connect_handler_starttls",
   "connect_pass_through",
   "d1_binding_jsrpc",
   "durable_object_get_existing",
@@ -53,9 +54,11 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "js_rpc",
   "kv_direct_binding",
   "memory_cache_delete",
+  "offpeak_location_hint",
   "precise_timers",
   "python_workers_development",
   "python_workers_durable_objects",
+  "python_zstd_snapshot",
   "replica_routing",
   "rtti_api",
   "service_binding_extra_handlers",

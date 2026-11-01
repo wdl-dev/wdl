@@ -110,7 +110,7 @@ function providerBody(kind = "openai") {
     kind,
     models: {
       primary: {
-        upstreamModel: kind === "deepseek" ? "deepseek-v4-flash" : "gpt-5.6-luna",
+        upstreamModel: kind === "deepseek" ? "deepseek-flash" : "gpt-5.6-luna",
         protocol: "responses",
         transports: ["http", "sse"],
         capabilities: { functionTools: true, structuredOutput: true },

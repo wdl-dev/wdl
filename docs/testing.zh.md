@@ -102,9 +102,17 @@ node --test tests/integration/<file>.test.js
 
 直接手跑单文件路径会自动准备本地 artifact，除非设置了 `WDL_INTEGRATION_SKIP_PREPARE=1`。
 
-R2 integration 还会在 workerd 容器内运行 `test-workers/r2-lifetime/config.capnp`。它通过原生 JSRPC 使用生产 R2 adapter 和 SigV4 client，以本地 service 模拟 S3，验证真实 header/body deadline、结果不确定的 PUT 失败、取消和慢消费者。本地 config preparation 会编译该 fixture；生产镜像不包含它。
+R2 integration 还会在 workerd 容器内运行 `test-workers/r2-lifetime/config.capnp`。它通过原生 JSRPC 使用生产 R2 adapter 和 SigV4 client，以本地 service 模拟 S3，验证真实 header/body deadline、结果不确定的 PUT 失败、取消和慢消费者，也覆盖 Blob replay、25 MiB 边界，以及带有误导性原生 `expectedLength` 的 stream 必须在任何 backend write 前完成完整校验。本地 config preparation 会编译该 fixture；生产镜像不包含它。
 
 Worker-module integration 还会在容器内的独立 workerd 进程中运行 `test-workers/workerd-compat/config.capnp`，验证 console formatting exception，以及不强制 GC 时持续分配短命 native wrapper 的回收行为。它还会在不启用实验性流实现的情况下，验证跨已完成 request context 的 byte-stream 终态重入。这个仅供本地测试的 fixture 保护进程存活，不向生产 runtime 增加测试 hook，也不进入生产镜像。
+
+独立的 `gc` service 验证三类 native cycle 的回收：AsyncLocalStorage store 与 Response、背压状态下 TransformStream 的排队 chunk 与 stream，以及 ReadableStream.values iterator 与 reader。每个 case 创建 40 个小对象环，最多进行 12 轮强制 GC，每轮之间通过 scheduler 让出一个执行轮次，并断言所有注册对象均已完成 finalization。只有这个本地测试 config 启用 V8 的 `--expose-gc`：hook 对整个进程可见，但只有 `gc.js` 调用它。lifecycle 和 stream-reentry 测试不强制 GC，以保留依赖分配压力触发回收的验证。fixture 和 GC hook 均不进入生产 config 或镜像。
+
+无需 Docker，仅运行 native GC gate：
+
+```bash
+node_modules/.bin/workerd test test-workers/workerd-compat/config.capnp gc
+```
 
 CLI 子集：
 

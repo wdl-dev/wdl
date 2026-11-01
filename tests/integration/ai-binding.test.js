@@ -125,26 +125,26 @@ const PROVIDERS = Object.freeze({
       kind: "deepseek",
       models: {
         chat: {
-          upstreamModel: "deepseek-v4-flash",
+          upstreamModel: "deepseek-flash",
           protocol: "chat_completions",
           transports: ["http", "sse"],
-          inputModalities: ["text"],
-          outputModalities: ["audio", "text"],
-          capabilities: { functionTools: true, reasoning: true },
-        },
-        flash: {
-          upstreamModel: "deepseek-v4-flash",
-          protocol: "responses",
-          transports: ["http", "sse"],
-          inputModalities: ["text"],
+          inputModalities: ["image", "text"],
           outputModalities: ["text"],
           capabilities: { functionTools: true, reasoning: true },
         },
-        vision: {
-          upstreamModel: "deepseek-v4-flash-vision-exp",
+        flash: {
+          upstreamModel: "deepseek-flash",
           protocol: "responses",
           transports: ["http", "sse"],
           inputModalities: ["image", "text"],
+          outputModalities: ["text"],
+          capabilities: { functionTools: true, reasoning: true },
+        },
+        pro: {
+          upstreamModel: "deepseek-v4-pro",
+          protocol: "responses",
+          transports: ["http", "sse"],
+          inputModalities: ["text"],
           outputModalities: ["text"],
           capabilities: { functionTools: true, reasoning: true },
         },
@@ -547,7 +547,7 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   assert.deepEqual(imported.models, [
     "deepseek/chat",
     "deepseek/flash",
-    "deepseek/vision",
+    "deepseek/pro",
     "openai/embedding",
     "openai/primary",
     "xai/agent",
@@ -562,7 +562,7 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   assert.deepEqual(modelList.models.map((/** @type {{ id: string }} */ model) => model.id), [
     "deepseek/chat",
     "deepseek/flash",
-    "deepseek/vision",
+    "deepseek/pro",
     "openai/embedding",
     "openai/primary",
     "xai/agent",
@@ -572,20 +572,25 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
     "upstreamModel" in model), false);
   assert.deepEqual(
     modelList.models.find((/** @type {{ id: string }} */ model) =>
-      model.id === "deepseek/vision")?.inputModalities,
+      model.id === "deepseek/flash")?.inputModalities,
     ["image", "text"]
   );
   assert.deepEqual(
     modelList.models.find((/** @type {{ id: string }} */ model) =>
       model.id === "deepseek/chat")?.outputModalities,
-    ["audio", "text"]
+    ["text"]
+  );
+  assert.deepEqual(
+    modelList.models.find((/** @type {{ id: string }} */ model) =>
+      model.id === "deepseek/pro")?.inputModalities,
+    ["text"]
   );
 
   for (const [model, upstreamModel] of [
     ["openai/primary", "gpt-test"],
     ["xai/agent", "grok-test"],
-    ["deepseek/flash", "deepseek-v4-flash"],
-    ["deepseek/vision", "deepseek-v4-flash-vision-exp"],
+    ["deepseek/flash", "deepseek-flash"],
+    ["deepseek/pro", "deepseek-v4-pro"],
   ]) {
     const response = await readIntegrationJson(
       await gatewayFetch(ns, `/ai/json?model=${encodeURIComponent(model)}`),
@@ -632,20 +637,20 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
     "DeepSeek vision input"
   );
   assert.deepEqual(deepSeekVision, {
-    model: "deepseek-v4-flash-vision-exp",
+    model: "deepseek-flash",
     type: "input_image",
     imageUrl: "https://images.example/vision.png",
     detail: "low",
   });
 
-  const deepSeekAudio = await readIntegrationJson(
-    await gatewayFetch(ns, "/ai/deepseek-audio"),
+  const deepSeekProVision = await readIntegrationJson(
+    await gatewayFetch(ns, "/ai/deepseek-vision?model=deepseek%2Fpro"),
     200,
-    "DeepSeek model-owned output modality"
+    "DeepSeek Pro image input rejection"
   );
-  assert.deepEqual(deepSeekAudio, {
-    status: 200,
-    code: null,
+  assert.deepEqual(deepSeekProVision, {
+    status: 400,
+    code: "ai_input_modality_unsupported",
   });
 
   const malformedModel = await readIntegrationJson(
@@ -682,7 +687,7 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
     "DeepSeek Chat Completions response"
   );
   assert.equal(chat.object, "chat.completion");
-  assert.equal(chat.model, "deepseek-v4-flash");
+  assert.equal(chat.model, "deepseek-flash");
 
   const embedding = await readIntegrationJson(
     await gatewayFetch(ns, "/ai/embedding"),
@@ -727,6 +732,33 @@ test("AI binding exposes agent-capable HTTP and SSE without exposing provider cr
   const missing = await adminFetch(`/ns/${ns}/ai/providers/deepseek`);
   assertStatus(missing, 404, "deleted DeepSeek provider");
   assert.doesNotMatch(await missing.text(), /fake-deepseek-key/);
+});
+
+test("synthetic DeepSeek output capabilities remain model-owned", async () => {
+  const ns = uniqueNs("ai-synthetic-output");
+  await configureProviders(ns);
+  const updated = await adminPut(`/ns/${ns}/ai/providers/deepseek`, {
+    kind: "deepseek",
+    models: {
+      chat: {
+        ...PROVIDERS.deepseek.record.models.chat,
+        upstreamModel: "fixture-deepseek-audio-output",
+        outputModalities: ["audio", "text"],
+      },
+    },
+  });
+  assertStatus(updated, 200, "synthetic output model");
+  await deployAiWorker(ns);
+  const modelList = await readIntegrationJson(await gatewayFetch(ns, "/ai/models"), 200);
+  assert.deepEqual(
+    modelList.models.find((/** @type {{ id: string }} */ model) =>
+      model.id === "deepseek/chat")?.outputModalities,
+    ["audio", "text"]
+  );
+  assert.deepEqual(
+    await readIntegrationJson(await gatewayFetch(ns, "/ai/deepseek-audio"), 200),
+    { status: 200, code: null, model: "fixture-deepseek-audio-output" }
+  );
 });
 
 test("AI positional facades remain usable when importable env is disabled", async () => {

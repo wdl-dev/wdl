@@ -19,7 +19,7 @@ path = "src/main.rs"
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
 chrono = { workspace = true, features = ["clock"] }
 chrono-tz = "0.10"
-croner = "3.0"
+croner = "4.0"
 futures-util = { workspace = true, features = ["std"] }
 redis = { workspace = true, features = ["tokio-comp", "streams", "connection-manager"] }
 reqwest = { workspace = true, features = ["json"] }

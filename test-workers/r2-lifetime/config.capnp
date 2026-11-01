@@ -6,6 +6,9 @@ const config :Workerd.Config = (
       modules = [
         (name = "worker", esModule = embed "probe.js"),
         (name = "shared-s3-request", esModule = embed "../../shared/s3-request.js"),
+        (name = "r2-client", esModule = embed "../../runtime/r2-client.js"),
+        (name = "_wdl-r2-utils.js", esModule = embed "../../runtime/r2-utils.js"),
+        (name = "_wdl-request-id.js", esModule = embed "../../runtime/_wdl-request-id.js"),
       ],
       compatibilityDate = "2026-04-24",
       compatibilityFlags = ["nodejs_compat"],

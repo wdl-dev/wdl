@@ -58,9 +58,7 @@ mod tests {
         cron: String,
         timezone: String,
         after_ms: i64,
-        next_ms: Option<i64>,
-        rust_next_ms: Option<i64>,
-        known_divergence: Option<String>,
+        next_ms: i64,
     }
 
     #[test]
@@ -102,24 +100,12 @@ mod tests {
             serde_json::from_str(include_str!("../../../../tests/fixtures/cron-parity.json"))
                 .expect("cron parity fixture must parse");
         for case in cases {
-            let expected = case
-                .rust_next_ms
-                .or(case.next_ms)
-                .expect("case must set an expected time");
             assert_eq!(
                 next_fire_ms(&case.cron, &case.timezone, case.after_ms).unwrap(),
-                expected,
+                case.next_ms,
                 "{}",
                 case.id
             );
-            if case.known_divergence.is_none() {
-                assert_eq!(
-                    case.next_ms,
-                    Some(expected),
-                    "{} should use shared expected time",
-                    case.id
-                );
-            }
         }
     }
 }

@@ -1007,7 +1007,10 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_20260817"), false);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_workers_314"), false);
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("auto_grpc_convert"), false);
-  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 38);
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("connect_handler_starttls"));
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("offpeak_location_hint"));
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_zstd_snapshot"));
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 41);
   // The new module registry graduated upstream, but WDL's generated wrapper is
   // the actual loader main module and cannot preserve tenant import.meta.main.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("new_module_registry"), false);

@@ -171,10 +171,16 @@ extra HEAD requests for metadata fields and applies a concurrency cap. Tenant-su
 `Headers` metadata must carry a canonical IMF-fixdate `Expires` value when that header
 is present; malformed write metadata is rejected before the host binding call.
 R2 validates BufferSource internal slots before writing. Blob PUT bodies are checked
-against the object limit before their bytes are materialized. Buffered stream readers
-snapshot each delivered chunk before retaining it across the next read. Raw GET streams
-retain zero-copy normalization for chunks backed by fixed `ArrayBuffer`s and snapshot
-resizable or shared backing before exposure.
+against the object limit and passed as immutable Blobs through JSRPC to the signer,
+without first materializing a tenant-side byte array. Native RPC still copies the
+Blob data; this is not end-to-end zero-copy. The signer reuses the immutable Blob for
+transient retries without buffering a stream, retaining the existing retry budget.
+Only `httpMetadata` sets the uploaded content type, not the input Blob's MIME type.
+Arbitrary streams are still buffered and checked before RPC and before any S3 write:
+their native `expectedLength` is caller-controlled and cannot establish completeness.
+Buffered stream readers snapshot each delivered chunk before retaining it across
+the next read. Raw GET streams retain zero-copy normalization for chunks backed by
+fixed `ArrayBuffer`s and snapshot resizable or shared backing before exposure.
 `ReadableStreamDefaultController.enqueue()` queues object references, so producer
 mutations after enqueue can change bytes before WDL receives them. Direct `Uint8Array`
 PUT bodies backed by a fixed `ArrayBuffer` retain zero-copy normalization. Detached or

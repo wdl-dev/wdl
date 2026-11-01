@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { createGunzip } from "node:zlib";
 import {
   ADMIN_HOST_HEADER,
   ADMIN_TOKEN,
@@ -115,19 +116,23 @@ async function deployTailWorker(ns, name = "tail-target", code = TAIL_WORKER_COD
 }
 
 // Spec-style SSE collector. Opens `GET /ns/<ns>/logs/tail?<query>`,
-// drains for `durationMs`, returns { status, events[] }. Treats abort
-// errors after our own req.destroy() as clean shutdown — the SSE body
-// is a long-lived stream, server doesn't end-of-stream on its own.
+// drains until `durationMs` or signal abort, returns { status, events[] }.
+// Decode gzip before the same incremental parser; live callbacks let tests
+// observe delivery without waiting for the long-lived stream to close.
 /**
  * @typedef {{ event: string, id: string | null, data: string }} SseEvent
  * @typedef {{ status: number, headers: import("node:http").IncomingHttpHeaders, body?: string, events: SseEvent[] }} SseResult
  */
 
 /**
- * @param {{ ns: string, query: string, headers?: Record<string, string>, durationMs?: number }} args
+ * @param {{
+ *   ns: string, query: string, headers?: Record<string, string>, durationMs?: number,
+ *   signal?: AbortSignal, onEvent?: (event: SseEvent) => void,
+ *   onComment?: (comment: string) => void,
+ * }} args
  * @returns {Promise<SseResult>}
  */
-function openSseAndCollect({ ns, query, headers = {}, durationMs = 4000 }) {
+function openSseAndCollect({ ns, query, headers = {}, durationMs = 4000, signal, onEvent, onComment }) {
   return new Promise((resolve, reject) => {
     const reqHeaders = {
       Host: ADMIN_HOST_HEADER,
@@ -137,8 +142,30 @@ function openSseAndCollect({ ns, query, headers = {}, durationMs = 4000 }) {
     };
     /** @type {Array<{ event: string, id: string | null, data: string }>} */
     const events = [];
-    let aborted = false;
-    const { promise: connectedPromise, resolve: onConnected } = Promise.withResolvers();
+    let settled = false;
+    let status = 0;
+    /** @type {import("node:http").IncomingHttpHeaders} */
+    let responseHeaders = {};
+    let errorBody = "";
+    /** @type {ReturnType<typeof createGunzip> | undefined} */
+    let gunzip;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timer;
+    /** @param {unknown} [error] */
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      gunzip?.destroy();
+      req.destroy();
+      if (error) reject(error);
+      else resolve({
+        status, headers: responseHeaders, events,
+        ...(status < 200 || status >= 300 ? { body: errorBody } : {}),
+      });
+    };
+    const abort = () => finish();
     /** @type {{ event: string, id: string | null, data: string[] }} */
     let current = { event: "message", id: null, data: [] };
     let buf = "";
@@ -147,8 +174,10 @@ function openSseAndCollect({ ns, query, headers = {}, durationMs = 4000 }) {
         current = { event: "message", id: current.id, data: [] };
         return;
       }
-      events.push({ event: current.event, id: current.id, data: current.data.join("\n") });
+      const event = { event: current.event, id: current.id, data: current.data.join("\n") };
+      events.push(event);
       current = { event: "message", id: current.id, data: [] };
+      onEvent?.(event);
     };
     const req = http.request({
       host: GATEWAY_HOST,
@@ -158,51 +187,47 @@ function openSseAndCollect({ ns, query, headers = {}, durationMs = 4000 }) {
       headers: reqHeaders,
       agent: false,
     }, (res) => {
-      const status = res.statusCode || 0;
-      onConnected({ status, headers: res.headers });
-      if (status < 200 || status >= 300) {
-        /** @type {Buffer[]} */
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          resolve({ status, headers: res.headers, body: text, events });
-        });
-        return;
-      }
-      res.setEncoding("utf8");
-      res.on("data", (chunk) => {
-        buf += chunk;
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          let line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          if (line.endsWith("\r")) line = line.slice(0, -1);
-          if (line === "") { dispatch(); continue; }
-          if (line.startsWith(":")) continue;
-          const colon = line.indexOf(":");
-          const field = colon < 0 ? line : line.slice(0, colon);
-          let value = colon < 0 ? "" : line.slice(colon + 1);
-          if (value.startsWith(" ")) value = value.slice(1);
-          if (field === "event") current.event = value;
-          else if (field === "id") current.id = value;
-          else if (field === "data") current.data.push(value);
+      status = res.statusCode || 0;
+      responseHeaders = res.headers;
+      gunzip = res.headers["content-encoding"] === "gzip" ? createGunzip() : undefined;
+      const body = gunzip ? res.pipe(gunzip) : res;
+      res.on("error", finish);
+      body.on("error", finish);
+      body.setEncoding("utf8");
+      body.on("data", (chunk) => {
+        if (settled) return;
+        if (status < 200 || status >= 300) {
+          errorBody += chunk;
+          return;
+        }
+        try {
+          buf += chunk;
+          let nl;
+          while (!settled && (nl = buf.indexOf("\n")) >= 0) {
+            let line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (line.endsWith("\r")) line = line.slice(0, -1);
+            if (line === "") { dispatch(); continue; }
+            if (line.startsWith(":")) { onComment?.(line.slice(1).trimStart()); continue; }
+            const colon = line.indexOf(":");
+            const field = colon < 0 ? line : line.slice(0, colon);
+            let value = colon < 0 ? "" : line.slice(colon + 1);
+            if (value.startsWith(" ")) value = value.slice(1);
+            if (field === "event") current.event = value;
+            else if (field === "id") current.id = value;
+            else if (field === "data") current.data.push(value);
+          }
+        } catch (error) {
+          finish(error);
         }
       });
-      res.on("end", () => resolve({ status, headers: res.headers, events }));
-      res.on("error", (err) => {
-        if (aborted) return resolve({ status, headers: res.headers, events });
-        reject(err);
-      });
-      setTimeout(() => { aborted = true; req.destroy(); }, durationMs);
+      body.on("end", () => finish());
+      timer = setTimeout(abort, durationMs);
     });
-    req.on("error", (err) => {
-      if (aborted) return;
-      reject(err);
-    });
+    req.on("error", finish);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) { abort(); return; }
     req.end();
-    // Surface connect errors via the rejection above.
-    connectedPromise.catch(() => {});
   });
 }
 
@@ -225,6 +250,119 @@ function parseEventJson(events) {
 function logTailEventJson(event) {
   return parseJsonText(event.data, `log-tail ${event.event} event`);
 }
+
+test("wdl tail: negotiated gzip and identity deliver successive events before stream close", async () => {
+  const ns = uniqueNs("wdl-tail-encoding");
+  await deployTailWorker(ns);
+
+  for (const [index, { acceptEncoding, gzip }] of [
+    { acceptEncoding: null, gzip: false },
+    { acceptEncoding: "identity", gzip: false },
+    { acceptEncoding: "gzip", gzip: true },
+    { acceptEncoding: "gzip;q=0.5", gzip: true },
+    { acceptEncoding: "gzip;q=0", gzip: false },
+    { acceptEncoding: "*;q=0.5", gzip: true },
+    { acceptEncoding: "gzip;q=0, *;q=1", gzip: false },
+    { acceptEncoding: "*;q=0, gzip;q=0.5", gzip: true },
+    { acceptEncoding: "*;q=0", gzip: false },
+  ].entries()) {
+    const label = `Accept-Encoding: ${acceptEncoding ?? "(absent)"}`;
+    const controller = new AbortController();
+    /** @type {SseEvent[]} */
+    const liveEvents = [];
+    let opened = false;
+    let closed = false;
+    const sse = openSseAndCollect({
+      ns, query: "worker=tail-target", durationMs: 20_000,
+      headers: acceptEncoding === null ? {} : { "accept-encoding": acceptEncoding },
+      signal: controller.signal,
+      onComment(comment) { if (comment === "tail-open") opened = true; },
+      onEvent(event) { liveEvents.push(event); },
+    });
+    void sse.then(() => { closed = true; }, () => { closed = true; });
+    /** @type {SseResult | undefined} */
+    let result;
+    try {
+      await waitUntil(`${label} live tail-open`, () => opened, { timeoutMs: 5000, intervalMs: 25 });
+      assert.equal(closed, false, `${label}: tail-open must arrive on an open stream`);
+      // Only produce the second event after the first was decoded. A compressor
+      // that waits for EOF (or for another event to flush) cannot pass this test.
+      for (const suffix of ["first", "second"]) {
+        const tag = `encoding-${index}-${suffix}`;
+        const res = await gatewayFetch(ns, `/tail-target/?tag=${tag}`);
+        assert.equal(res.status, 200);
+        await waitUntil(`${label} live ${tag}`, () => liveEvents.some((event) => {
+          if (event.event !== "worker_console") return false;
+          const payload = logTailEventJson(event);
+          return payload.worker === "tail-target" && payload.message?.[0] === `hello tag=${tag}`;
+        }), { timeoutMs: 4000, intervalMs: 25 });
+        assert.equal(closed, false, `${label}: event must arrive before stream close`);
+      }
+    } finally {
+      controller.abort();
+      result = await sse;
+    }
+    assert.equal(result.status, 200, label);
+    assert.equal(result.headers["content-encoding"], gzip ? "gzip" : undefined, label);
+    assert.match(String(result.headers.vary), /(?:^|,)\s*accept-encoding\s*(?:,|$)/i, label);
+    assert.equal(result.headers["cache-control"], "no-cache, no-transform", label);
+    assert.equal(result.headers["x-accel-buffering"], "no", label);
+    assert.match(String(result.headers["content-type"]), /^text\/event-stream\b/, label);
+    for (const event of liveEvents) {
+      if (event.event !== "tail_warning") assert.match(event.id ?? "", /^\d+-\d+$/, label);
+    }
+  }
+});
+
+test("wdl tail: Wasm source URL opt-in preserves named frames in live error metadata", async () => {
+  const ns = uniqueNs("wdl-tail-wasm");
+  const worker = "wasm-trap";
+  // (module (func (export "trap") unreachable))
+  const wasm = Buffer.from(
+    "0061736d0100000001040160000003020100070801047472617000000a05010300000b",
+    "hex"
+  ).toString("base64");
+  const version = await deployAndPromote(ns, worker, {
+    mainModule: "worker.js",
+    compatibilityDate: "2026-04-24",
+    compatibilityFlags: ["wasm_source_url_support"],
+    modules: {
+      "worker.js": `
+        import module from "./lib/tail-trap.wasm";
+        export default {
+          fetch() {
+            const instance = new WebAssembly.Instance(module);
+            try { instance.exports.trap(); }
+            catch (error) {
+              console.error("wasm-tail-trap", error);
+              throw error;
+            }
+            return new Response("missing trap", { status: 500 });
+          },
+        };
+      `,
+      "lib/tail-trap.wasm": { wasm_b64: wasm },
+    },
+  });
+
+  const sse = openSseAndCollect({ ns, query: `worker=${worker}`, durationMs: 5000 });
+  await waitForActivation(ns, worker);
+  const failed = await gatewayFetch(ns, `/${worker}/`);
+  assert.equal(failed.status, 502);
+
+  const collected = await sse;
+  assert.equal(collected.status, 200);
+  const consoleEvent = parseEventJson(collected.events).find((event) =>
+    event.event === "worker_console" && event.console_level === "error" &&
+    event.message?.[0] === "wasm-tail-trap");
+  assert.ok(consoleEvent, "expected the Wasm trap in live-tail console events");
+  assert.equal(consoleEvent.worker_id, gatewayWorkerId(ns, worker, version));
+  const error = consoleEvent.error_info?.[1];
+  assert.ok(error, "expected structured Wasm error metadata in live tail");
+  assert.equal(error.name, "RuntimeError");
+  assert.match(error.message, /unreachable/);
+  assert.match(error.stack, /lib\/tail-trap\.wasm:wasm-function\[0\]/);
+});
 
 test("wdl tail: console.* + uncaught exception flow end-to-end", async () => {
   const ns = uniqueNs("wdl-tail-flow");

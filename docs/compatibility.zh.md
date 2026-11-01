@@ -22,6 +22,7 @@
 
 | Surface | 状态 | workerd 提供什么 | WDL 增强 / 新增什么 | 与 Cloudflare 的模型差异 | 未实现 / 缺口 |
 |---|---|---|---|---|---|
+| WebAssembly modules | Supported | 原生 Wasm 编译与执行，包括 compact imports、显式 opt-in 的 js-string builtins 和 source URL。 | CLI/Control 在 immutable bundle 存储和 `workerLoader` 之间保留 Wasm module 字节。 | 每个 Worker version 按自己的 compatibility flags 编译。 | WDL 不提供 WASI runtime；动态代码生成限制仍然适用。 |
 | ES module Workers 和 `fetch()` | Supported | Module evaluation、request dispatch、`Response`/`Request`、service binding JSRPC 机制。 | Dynamic `workerLoader`、immutable version id、wrapper 生成 `env`、gateway routing、request logs、public/private outbound 隔离。 | 以 `_wdl-` 开头的 root module name 由平台保留；新 deploy 会被拒绝，retained version 在 cold load 时 fail closed。Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error`；异常细节进入结构化日志/live tail，不进客户端 body。 | WDL 不模拟每个 compatibility date 的历史行为；workerd 按平台启用的 flags 运行。 |
 | WebSocket upgrade | Supported | workerd 内的 WebSocket API 和 101 response 处理。 | Gateway 在本地终结公开 WebSocket pair，并通过有界 backend reconnect 和 client-frame buffer 直接转发到 runtime/do-runtime。 | Cloudflare 在部署新代码时会断开全部 WebSocket。除非 worker 选择了 `sessionPolicy: "restart"`（其 session 在 promote 时即关闭），WDL 在 promote 后只要 pinned version 的 backend 仍健康就保留 gateway-proxied 连接；仅当该 backend 丢失后，Gateway 才复核 active route，若 pinned version 已不活跃则以 `1012` 关闭，让 client 升级到 active version。 | Gateway rolling 仍会断开物理 client socket；应用级 resume 未实现。重连由应用负责：WebSocket 协议和裸 API 都没有定义会触发重连的 close code。 |
 | `compatibility_date` / `compatibility_flags` | Partial | capnp 中启用的 workerd feature flags 和兼容行为。 | Dynamic Worker 会拒绝早于 `2026-04-01` 的显式 `compatibility_date`；Control 还会校验该值是真实的 `YYYY-MM-DD` 日期，且不晚于当前 UTC 日期和当前 bundled workerd 支持的最大日期，并拒绝上游 `$experimental` enable flags（例如 `experimental` / `unsafe_module`）、`legacy_error_serialization`、`allow_irrevocable_stub_storage`、`new_module_registry`、`no_rpc` 和 `streams_disable_constructors`。已由日期启用且生成相同 compiled flag set 的冗余 positive flag 会被保留并接受；其它不兼容组合仍由 workerd 在 cold load 时校验。 | WDL 把 compatibility metadata 当成部署期平台 metadata，不承诺完整 per-worker 历史行为模拟层。 | 没有 per-worker 模拟所有 Cloudflare 历史行为；tenant worker 不能 opt into 上游 experimental-only flags、禁用 WDL 要求的 enhanced error serialization、Fetcher RPC 或标准 stream constructors、持久化不可撤销的 capability stub，或启用与 WDL generated main wrapper 冲突的 module registry identity。 |
@@ -31,15 +32,21 @@
 
 WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary 只能 cold-load 其支持的 `compatibility_date` 对应的 retained Dynamic Worker version；具体说明见 [infra rollout 注意事项](modules/infra.zh.md#部署--rollout-注意事项)。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-10-28`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`ctx.mapVirtualHost(fetcher, port)` 无需 experimental flag 即可使用。它将已持有的 native Fetcher 映射为供 socket client 使用的虚拟 host 和 port，不会授予新的网络可达性，也不会把 JavaScript binding facade 变成 TCP backend。
+
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-08`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
 `auto_grpc_convert` 是 non-experimental flag，可以作为 compatibility metadata 使用，但不会为 WDL 增加 Cloudflare edge gRPC conversion service。
 
 `durable_object_io_tasks_prevent_eviction` 是 non-experimental flag，在 compatibility date 不早于 `2026-10-01` 时默认启用。Stock workerd 不读取该 flag，因此它不改变 WDL actor 驻留行为；`DO_PREVENT_EVICTION` 仍负责驻留控制。
 
-`webcrypto_modern_algorithms` 是允许使用的 non-experimental 显式 opt-in，暴露 workerd 原生的 ML-KEM、ML-DSA 和相关 WebCrypto helper。上游 API 遵循仍在演进的草案；WDL 不默认启用它，也不使用它处理平台 secret。
+`webcrypto_modern_algorithms` 是允许使用的 non-experimental 显式 opt-in，暴露 workerd 原生的 ML-KEM、ML-DSA、`ChaCha20-Poly1305`、`MLKEM768-X25519`、`SHA3-256`、`SHA3-384`、`SHA3-512` 和相关 WebCrypto helper。上游 API 遵循仍在演进的草案；WDL 不默认启用它，也不使用它处理平台 secret。
 
 `wasm_esm_integration_builtins` 是允许使用的 non-experimental 显式 opt-in。它在编译 worker 的 Wasm module 时启用 js-string builtin 和 `wasm:js/string-constants` import；未 import `wasm:*` namespace 的 module 不受影响。WDL 以字节形式把 Wasm module 交给 `workerLoader`，因此每个 version 都按自己的 flag 编译。
+
+`wasm_source_url_support` 在原生 Wasm stack frame 中保留 module path，包括传入结构化 live tail 的错误；未启用时 frame 使用匿名 `wasm://wasm/` URL。`temporal` 暴露原生 `Temporal` API。两者都是允许使用的 non-experimental 显式 opt-in，从 compatibility date `2026-12-01` 起默认启用，晚于当前 bundled maximum；WDL static workers 均未启用。
+
+原生 `Response` constructor 的默认 `statusText` 是空字符串，并会立即拒绝 locked body stream。显式 status text 保持不变；HTTP status code 仍是 wire contract。
 
 Bundled workerd 同时接受 compact WebAssembly import-section 编码，无需 opt-in。WDL 不改写 Wasm module 字节，直接转发给 workerd。
 

@@ -93,11 +93,13 @@ Provider 和 model alias grammar 由 `shared/ns-pattern.js` 拥有；model alias
 |---|---|
 | `openai` | Responses、Chat Completions、Embeddings、Responses WebSocket、Realtime WebSocket |
 | `xai` | Responses、Chat Completions、Embeddings、Responses WebSocket、Realtime WebSocket |
-| `deepseek` | HTTP/SSE 的 Responses compatibility 与 Chat Completions |
+| `deepseek` | HTTP/SSE 的 Responses 与 Chat Completions |
 
 Adapter table 在代码中固定官方 destination，provider metadata 不能提供 endpoint。Model descriptor 仍必须只声明 upstream model 实际支持的能力；WDL 不解释的 native field 由 provider error 作为权威结果。
 
 DeepSeek 与其他 provider 使用同一套由 model 拥有的 input/output modality 和 capability 声明。这覆盖 WDL request 上限内的 Chat Completions `image_url` / image `file` block 与 Responses `input_image` part，不再把 capability 硬编码到某个 DeepSeek model family；WDL 仍不提供 provider file upload 或 file lifecycle API。
+
+当前 DeepSeek 配置示例使用 `deepseek-flash`（文本和图像输入、文本输出）或 `deepseek-v4-pro`（文本输入和输出）。Flash 已包含视觉能力，不需要单独的实验性视觉模型；两者均使用上面的 HTTP/SSE adapter。这些是 upstream model id，不是 WDL 保留 alias，也不是平台托管目录。配置 descriptor 时应核对 DeepSeek 的[模型列表](https://api-docs.deepseek.com/api/list-models/)与[视觉指南](https://api-docs.deepseek.com/guides/vision/)；WDL 不会自动同步 provider metadata。
 
 ## Redis 与持久状态
 

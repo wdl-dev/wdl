@@ -55,7 +55,28 @@ Live tail is an activation-gated pipe, not a durable logging system:
   readers can be dropped. This is acceptable because stdout/log aggregation remains the
   durable observability path.
 
-Service probes:
+### SSE Transport Encoding
+
+Only successful Control `GET /ns/<ns>/logs/tail` SSE responses opt into gzip. Control
+negotiates `Accept-Encoding` explicitly: `gzip` with no weight or a valid positive
+`q` enables gzip; a positive `*` applies only when no explicit `gzip` entry exists.
+An explicit `gzip;q=0` overrides a wildcard, regardless of order. Coding and parameter
+names are case-insensitive. Invalid weights or parameters are treated as zero, and
+conflicting duplicate entries use the lowest weight. Absent or empty headers,
+identity-only clients, unsupported encodings, and gzip refusals keep the existing
+uncompressed response. This optional encoding does not introduce a new 406 response.
+
+Both variants send `Vary: Accept-Encoding`, retain
+`Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`, and use the same
+SSE frames and resume cursors. For accepted gzip, Control sets
+`Content-Encoding: gzip` on the original stream. Bundled workerd 2026-11-01 performs
+native automatic encoding and incrementally flushes compressed SSE; there is no
+JavaScript compression stream or whole-body buffering. The activation-gated
+`tail-open` comment, five-second idle keepalives, event delivery, cancellation cleanup,
+and both session watchdogs are unchanged. Other Control responses and existing
+identity clients do not opt into compression through this handler.
+
+### Service Probes
 
 | Service | Health | Metrics |
 |---|---|---|
@@ -255,6 +276,8 @@ Tail identity rules:
   conversion is bounded to roughly one full event. Other strings still undergo bounded
   UTF-8 byte measurement. The final clone budget limits emitted bytes but does not make
   generic JavaScript own-key discovery independent of object width.
+- For Wasm bundles opting into `wasm_source_url_support`, forwarded console
+  `error_info[].stack` retains named `.wasm` module frames.
 - `scheduled()` and `queue()` console events are JSRPC events without a request shape, so
   their console tail events omit `worker_id` and `request_id` instead of inventing
   `"unknown"` sentinels.

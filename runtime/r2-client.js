@@ -17,19 +17,18 @@ import { requestIdFromOptions } from "./_wdl-request-id.js";
  * @typedef {{
  *   head?(key: string, requestMeta: object): Promise<AnyRecord | null>,
  *   get?(key: string, options: AnyRecord, requestMeta: object): Promise<null | { meta: AnyRecord, body?: ReadableStream<Uint8Array> | null }>,
- *   put?(key: string, body: Uint8Array, options: AnyRecord, requestMeta: object): Promise<AnyRecord | null>,
+ *   put?(key: string, body: Uint8Array | Blob, options: AnyRecord, requestMeta: object): Promise<AnyRecord | null>,
  *   delete?(keys: string | string[], requestMeta: object): Promise<unknown>,
  *   list?(options: AnyRecord, requestMeta: object): Promise<AnyRecord & { objects?: AnyRecord[], truncated?: unknown, cursor?: unknown, delimitedPrefixes?: unknown }>,
  * }} R2Stub
  * @typedef {{ stub: R2Stub, requestIdOptions: object }} R2BucketState
- * @typedef {{ bytes: Uint8Array, pendingBytes: null } | { bytes: null, pendingBytes: Promise<Uint8Array> }} PreparedPutBytes
+ * @typedef {{ body: Uint8Array | Blob, pendingBody: null } | { body: null, pendingBody: Promise<Uint8Array> }} PreparedPutBody
  */
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();
 const IntrinsicBlob = Blob;
 const IntrinsicResponse = Response;
 const IntrinsicUint8Array = Uint8Array;
-const intrinsicBlobBytes = IntrinsicBlob.prototype.bytes;
 const intrinsicBlobSlice = IntrinsicBlob.prototype.slice;
 const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
@@ -506,27 +505,24 @@ export class R2ObjectBody extends R2Object {
   }
 }
 
-/** @param {unknown} value @returns {PreparedPutBytes} */
-function preparePutBytes(value) {
-  if (value == null) return { bytes: new IntrinsicUint8Array(0), pendingBytes: null };
-  if (typeof value === "string") {
-    return {
-      bytes: utf8Encoder.encode(value),
-      pendingBytes: null,
-    };
+/** @param {unknown} value @returns {PreparedPutBody} */
+function preparePutBody(value) {
+  if (value == null) return { body: new IntrinsicUint8Array(0), pendingBody: null };
+  const bytes = typeof value === "string" ? utf8Encoder.encode(value) : r2BufferSourceBytes(value);
+  if (bytes) {
+    assertR2BufferSize(r2Uint8ArrayByteLength(bytes), "put");
+    return { body: bytes, pendingBody: null };
   }
-  const bufferSourceBytes = r2BufferSourceBytes(value);
-  if (bufferSourceBytes) return { bytes: bufferSourceBytes, pendingBytes: null };
   const blobLength = maybeBlobByteLength(value);
   if (blobLength !== null) {
     assertR2BufferSize(blobLength, "put");
-    const pendingBytes = intrinsicReflectApply(intrinsicBlobBytes, value, []);
-    return { bytes: null, pendingBytes };
+    const body = intrinsicReflectApply(intrinsicBlobSlice, value, [0, blobLength, ""]);
+    return { body, pendingBody: null };
   }
   if (value instanceof ReadableStream) {
-    // WDL R2 does not implement multipart yet: stream PUT is buffered locally,
-    // capped at 25 MiB, then sent as one S3 PUT.
-    return { bytes: null, pendingBytes: readStreamWithLimit(value, "put") };
+    // Native expectedLength is caller-controlled, not proof of completeness.
+    // Validate arbitrary streams before crossing RPC or writing the S3 object.
+    return { body: null, pendingBody: readStreamWithLimit(value, "put") };
   }
   throw new TypeError(
     "R2 put: value must be string | ArrayBuffer | typed array | Blob | ReadableStream"
@@ -573,14 +569,17 @@ export class R2Bucket {
     const { stub } = /** @type {R2BucketState} */ (weakMapGet(bucketState, this));
     if (typeof stub.put !== "function") throw new TypeError("R2 stub put is not configured");
     const requestMeta = bucketRequestMeta(this);
-    const prepared = preparePutBytes(value);
-    const bytes = prepared.bytes === null
-      ? await prepared.pendingBytes
-      : prepared.bytes;
-    assertR2BufferSize(r2Uint8ArrayByteLength(bytes), "put");
+    const prepared = preparePutBody(value);
+    let body;
+    if (prepared.body === null) {
+      body = await prepared.pendingBody;
+      assertR2BufferSize(r2Uint8ArrayByteLength(body), "put");
+    } else {
+      body = prepared.body;
+    }
     const meta = await stub.put(
       normalizedKey,
-      bytes,
+      body,
       normalizedOptions,
       requestMeta
     );

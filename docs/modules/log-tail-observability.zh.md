@@ -34,7 +34,13 @@ Live tail 是 activation-gated pipe，不是持久日志系统：
 - 单 worker `wdl tail` 可以用 `Last-Event-ID` 在 stream 窗口内 resume。多 worker tail 是 fan-in session；reconnect 从新会话开始，因为单个 SSE cursor 无法表达每个 worker 一个 cursor。
 - 与 session activation race 的 event、runtime rolling、redis-proxy failure 或慢 SSE reader 都可能导致丢 event。这是可接受的，因为 stdout/log aggregation 才是持久 observability 路径。
 
-服务探针：
+### SSE 传输编码
+
+只有成功的 Control `GET /ns/<ns>/logs/tail` SSE response 会按需启用 gzip。Control 显式协商 `Accept-Encoding`：无 weight 或有效正数 `q` 的 `gzip` 允许 gzip；只有不存在显式 `gzip` entry 时，正数 `*` 才生效。显式 `gzip;q=0` 无论顺序如何都会覆盖 wildcard。Coding 和 parameter 名称不区分大小写。非法 weight 或 parameter 按零处理，冲突的重复 entry 取最低 weight。缺失或空 header、仅接受 identity 的客户端、不支持的 encoding 和拒绝 gzip 的请求都保持现有未压缩 response。可选编码不会引入新的 406 response。
+
+两种 response 都发送 `Vary: Accept-Encoding`，保留 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no`，并使用相同的 SSE frame 与 resume cursor。接受 gzip 时，Control 在原 stream 上设置 `Content-Encoding: gzip`。Bundled workerd 2026-11-01 负责 native automatic encoding，并增量 flush 压缩后的 SSE；不使用 JavaScript compression stream，也不缓冲整个 body。受 activation gate 约束的 `tail-open` comment、五秒 idle keepalive、event delivery、取消清理和两个 session watchdog 均保持不变。其它 Control response 和现有 identity 客户端不会通过这个 handler 启用压缩。
+
+### 服务探针
 
 | 服务 | Health | Metrics |
 |---|---|---|
@@ -122,6 +128,7 @@ Tail identity 规则：
 
 - fetch 请求的 `worker_console` identity 来自转发请求头，因为 workerd 对 `workerLoader` loaded worker 报告的 `scriptName=none`。
 - `worker_console.message` 保留 console argument 的位置。workerd 提供位置对应的 `Error` metadata 时，Runtime 会输出平行且有界的 `error_info` array，字段为 `name`、`message` 和可选 `stack`。结构化 stdout 在 metadata 超过 clone budget 时输出 `error_info_omitted: true`；live-tail 的精确序列化依次尝试 metadata、omitted marker 和不变的基础 message，只有基础 event 本身超限时才输出 `tail_warning`。UTF-16 code-unit length 已超过剩余 clone budget 的 string、超过固定 full-event decimal-magnitude guard 的 BigInt，以及 intrinsic length 超过预算的 indexed binary view，会在按输入规模执行 conversion、UTF-8 encoding 或 indexed-key enumeration 前被拒绝。通过固定 guard 的 BigInt 仍可能先转换，再因剩余预算不足被拒绝，但转换成本最多约为一个完整 event。其它 string 仍执行有界的 UTF-8 byte measurement。最终 clone budget 会限制输出字节，但不能让通用 JavaScript own-key discovery 的成本与 object width 无关。
+- 启用 `wasm_source_url_support` 的 Wasm bundle，其转发的 console `error_info[].stack` 会保留具名 `.wasm` module frame。
 - `scheduled()` 和 `queue()` 的 console event 是没有 request shape 的 JSRPC event，因此 console tail event 会省略 `worker_id` 和 `request_id`，而不是伪造 `"unknown"`。
 - Runtime 会在 invocation 边界输出显式的 `worker_fetch`、`worker_scheduled` 和 `worker_queue` start/finish event。`worker_fetch` 包含 method、worker-visible pathname、status/outcome 和 duration，不包含 host/query。
 - Control 生成的 `tail_warning` SSE event 没有 Redis stream id，因此不会污染单 worker resume cursor。

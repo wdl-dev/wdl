@@ -28,6 +28,7 @@ test("native workerd preserves isolate and stream lifetimes", () => {
 
 const WORKERD_NODE_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node.js");
 const WORKERD_NODE_IO_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node-io.js");
+const WORKERD_NATIVE_API_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/native-apis.js");
 const WORKERD_COMPAT_WORKER = readFileSync(
   new URL("../../test-workers/workerd-compat/src/index.js", import.meta.url),
   "utf8"
@@ -267,6 +268,55 @@ test("bundled workerd native Node boundaries preserve request isolation and key 
     fd: -1,
     conflict: { returned: false, isError: true, code: "EADDRINUSE" },
     reused: true,
+  });
+});
+
+test("bundled workerd Temporal is opt-in at an older compatibility date", async () => {
+  const ns = uniqueNs("workerd-temporal");
+  for (const enabled of [false, true]) {
+    const name = enabled ? "enabled" : "default";
+    await deployAndPromote(ns, name, {
+      code: WORKERD_NATIVE_API_WORKER,
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags: enabled ? ["temporal"] : [],
+    });
+    assert.deepEqual(
+      await readIntegrationJson(await gatewayFetch(ns, `/${name}/temporal`), 200),
+      enabled ? {
+        type: "object",
+        nextDate: "2024-03-01",
+        utc: "2024-03-01T00:30:00+00:00[UTC]",
+      } : { type: "undefined" },
+      name
+    );
+  }
+});
+
+test("bundled workerd response constructors enforce native defaults without flags", async () => {
+  const ns = uniqueNs("workerd-response-defaults");
+  await deployAndPromote(ns, "probe", {
+    code: WORKERD_NATIVE_API_WORKER,
+    compatibilityDate: "2026-04-24",
+    compatibilityFlags: [],
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/response"), 200), {
+    statusText: { default: "", notFound: "", custom: "Fixture" },
+    lockedBody: { response: "TypeError", request: "TypeError" },
+  });
+});
+
+test("bundled workerd Node keys report bytes and createRequire preserves process identity", async () => {
+  const ns = uniqueNs("workerd-node-native-apis");
+  await deployAndPromote(ns, "probe", {
+    code: WORKERD_NATIVE_API_WORKER,
+    compatibilityDate: "2026-04-24",
+    compatibilityFlags: ["nodejs_compat"],
+  });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/node"), 200), {
+    rawKeyBytes: 5,
+    aesKeyBytes: 16,
+    processMatchesImport: true,
+    bareProcessMatchesPrefixed: true,
   });
 });
 
@@ -593,6 +643,38 @@ test("bundled workerd Wasm string-constant builtins remain opt-in", async () => 
 //     (i32.add (i32.add (i32.add (call 0 (local.get 0)) (call 1 (local.get 0)))
 //       (call 2 (local.get 0))) (global.get 0))))
 const WASM_COMPACT_IMPORTS_B64 = "AGFzbQEAAAABBgFgAX8BfwIaAgFhAH8CAWYAAAFnA38AAWIAfgAAAgF4AXkDAgEABwcBA3J1bgADChUBEwAgABAAIAAQAWogABACaiMAags=";
+
+test("Wasm source URLs preserve named modules only with the opt-in", async () => {
+  const ns = uniqueNs("workerd-wasm-url");
+  for (const enabled of [false, true]) {
+    const name = enabled ? "named" : "default";
+    await deployAndPromote(ns, name, {
+      mainModule: "worker.js",
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags: enabled ? ["wasm_source_url_support"] : [],
+      modules: {
+        "worker.js": `
+          import module from "./lib/compact.wasm";
+          export default {
+            fetch() {
+              const instance = new WebAssembly.Instance(module, {
+                a: { f() { throw new Error("wasm-source-url"); }, g: 1000 },
+                b: { x: value => value * 2, y: value => value * 3 },
+              });
+              try { instance.exports.run(1); }
+              catch (error) { return Response.json({ stack: error.stack }); }
+              return new Response("missing trap", { status: 500 });
+            },
+          };
+        `,
+        "lib/compact.wasm": { wasm_b64: WASM_COMPACT_IMPORTS_B64 },
+      },
+    });
+    const { stack } = await readIntegrationJson(await gatewayFetch(ns, `/${name}/`), 200);
+    assert.match(stack, /wasm-source-url/);
+    assert.match(stack, enabled ? /lib\/compact\.wasm:wasm-function/ : /wasm:\/\/wasm\//);
+  }
+});
 
 test("bundled workerd loads compact Wasm import groups without an opt-in", async () => {
   const ns = uniqueNs("workerd-wasm-compact");

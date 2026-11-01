@@ -141,7 +141,9 @@ The direct single-file path prepares local artifacts automatically unless
 R2 integration also runs `test-workers/r2-lifetime/config.capnp` inside the workerd
 container. It uses the production R2 adapter and SigV4 client across native JSRPC,
 with a local service standing in for S3, to test real header/body deadlines,
-ambiguous PUT failure, cancellation, and slow consumers. Local config preparation
+ambiguous PUT failure, cancellation, and slow consumers. It also covers Blob replay,
+the 25 MiB boundary, and complete validation of streams with misleading native
+`expectedLength` values before any backend write. Local config preparation
 compiles this fixture; production images do not include it.
 
 Worker-module integration also runs `test-workers/workerd-compat/config.capnp` in
@@ -149,8 +151,21 @@ a separate workerd process inside the container. It checks console formatting
 exceptions and sustained short-lived native-wrapper allocation without forced GC.
 It also verifies byte-stream terminal-state reentry across completed request
 contexts without enabling experimental stream implementations.
-This local-only fixture protects process survival without adding test hooks to the
-production runtime or including the fixture in production images.
+The separate `gc` service checks collection of native cycles involving an
+AsyncLocalStorage store and Response, a backpressured TransformStream's queued
+chunk and stream, and a ReadableStream.values iterator and reader. Each case uses
+40 small cycles and at most 12 forced-GC rounds with a scheduler turn between
+rounds, asserting that all registered objects are finalized. Only this local test
+config enables V8's `--expose-gc`: the hook is process-wide, but only `gc.js` calls
+it. The lifecycle and stream-reentry tests do not force GC, preserving the
+allocation-driven reclamation check. The fixture and GC hook are absent from
+production configs and images.
+
+Run just the native GC gates without Docker:
+
+```bash
+node_modules/.bin/workerd test test-workers/workerd-compat/config.capnp gc
+```
 
 CLI subset:
 

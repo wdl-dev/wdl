@@ -52,10 +52,33 @@ const TAIL_STREAM_KEY = (ns, name) => `logs:${ns}:${name}:s`;
 const SSE_HEADERS = {
   "content-type": "text/event-stream; charset=utf-8",
   "cache-control": "no-cache, no-transform",
+  "vary": "Accept-Encoding",
   // Hint to nginx / Envoy / similar proxies: do not buffer the response.
   // Without this some intermediaries hold the entire body until close.
   "x-accel-buffering": "no",
 };
+
+/** @param {string | null} acceptEncoding */
+function acceptsGzip(acceptEncoding) {
+  /** @type {number | null} */
+  let gzip = null;
+  /** @type {number | null} */
+  let wildcard = null;
+  for (const entry of (acceptEncoding ?? "").split(",")) {
+    const [name, ...parameters] = entry.toLowerCase().split(";");
+    const coding = name.trim();
+    if (coding !== "gzip" && coding !== "*") continue;
+    const weight = parameters.length === 1
+      ? /^q\s*=\s*(0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.exec(parameters[0].trim())
+      : null;
+    const quality = parameters.length === 0 ? 1 : weight ? Number(weight[1]) : 0;
+    // An explicit gzip entry overrides '*'; malformed or conflicting entries
+    // conservatively opt out rather than overriding a client's q=0 refusal.
+    if (coding === "gzip") gzip = Math.min(gzip ?? 1, quality);
+    else wildcard = Math.min(wildcard ?? 1, quality);
+  }
+  return (gzip ?? wildcard ?? 0) > 0;
+}
 
 /**
  * @typedef {{
@@ -577,5 +600,11 @@ export async function handle({ request, env, ctx, ns, requestId }) {
     },
   });
 
-  return new Response(stream, { status: 200, headers: SSE_HEADERS });
+  const headers = new Headers(SSE_HEADERS);
+  if (acceptsGzip(request.headers.get("accept-encoding"))) {
+    // workerd's automatic response encoding flushes SSE incrementally. Keep the
+    // original pull/cancel lifecycle and let the native response pump gzip it.
+    headers.set("content-encoding", "gzip");
+  }
+  return new Response(stream, { status: 200, headers });
 }

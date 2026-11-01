@@ -175,7 +175,7 @@ does not use alias grammar.
 |---|---|
 | `openai` | Responses, Chat Completions, Embeddings, Responses WebSocket, Realtime WebSocket |
 | `xai` | Responses, Chat Completions, Embeddings, Responses WebSocket, Realtime WebSocket |
-| `deepseek` | Responses compatibility and Chat Completions over HTTP/SSE |
+| `deepseek` | Responses and Chat Completions over HTTP/SSE |
 
 The adapter table fixes official destinations in code. Provider metadata cannot supply
 an endpoint. Model descriptors must still advertise only capabilities actually
@@ -187,6 +187,15 @@ the other providers. This covers Chat Completions `image_url` / image `file` blo
 Responses `input_image` parts within WDL's request limit without hard-coding capabilities
 to a DeepSeek model family. WDL still does not expose provider file-upload or
 file-lifecycle APIs.
+
+Current DeepSeek configuration examples use `deepseek-flash` for text and image
+input with text output, or `deepseek-v4-pro` for text input and output. Flash
+includes vision; it does not require a separate experimental vision model.
+Both use the HTTP/SSE adapters above. These are upstream model ids, not reserved
+WDL aliases or a platform-managed catalog. Check DeepSeek's
+[model list](https://api-docs.deepseek.com/api/list-models/) and
+[vision guide](https://api-docs.deepseek.com/guides/vision/) when configuring
+descriptors; WDL does not automatically synchronize provider metadata.
 
 ## Redis And Persisted State
 

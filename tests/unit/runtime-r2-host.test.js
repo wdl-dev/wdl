@@ -11,6 +11,7 @@ import { withMockedProperty } from "../helpers/mock-global.js";
 import { requestBodyString } from "../helpers/request-body.js";
 import { delay } from "../helpers/timing.js";
 import { S3_REQUEST_TIMEOUT_MS } from "../../shared/s3-request.js";
+import { R2_OBJECT_MAX_BUFFER_BYTES } from "../../runtime/r2-utils.js";
 
 test("R2 host operations bound pending transport with one abortable deadline", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
@@ -237,8 +238,43 @@ test("R2 host put rejects non byte-like values instead of writing an empty body"
   try {
     await assert.rejects(
       () => makeR2Bucket().put("a.txt", "hello"),
-      /R2 put: value must be ArrayBuffer or ArrayBufferView/
+      /R2 put: value must be ArrayBuffer, ArrayBufferView or Blob/
     );
+  } finally {
+    restore();
+  }
+});
+
+test("R2 host preserves immutable Blob bodies for replay without byte materialization", async () => {
+  /** @type {Array<{ url: string, init: any }>} */
+  const calls = [];
+  const restore = installRecordingR2FetchMock(calls, {
+    response: new Response(null, { headers: { etag: '"blob"' } }),
+  });
+  class MisleadingBlob extends Blob {
+    get size() { return 0; }
+    /** @returns {never} */
+    slice() { throw new Error("own slice must not run"); }
+    /** @returns {Promise<never>} */
+    async arrayBuffer() { throw new Error("no materialization"); }
+    /** @returns {Promise<never>} */
+    async bytes() { throw new Error("no materialization"); }
+  }
+  try {
+    const result = await makeR2Bucket().put("blob", new MisleadingBlob(["hello"], { type: "text/html" }));
+    assert.equal(result.size, 5);
+    assert.equal(calls.length, 1);
+    const body = calls[0].init.body;
+    assert.ok(body instanceof Blob);
+    assert.equal(body.size, 5);
+    assert.equal(body.type, "");
+    assert.equal(calls[0].init.headers.has("content-type"), false);
+    assert.equal(await body.text(), "hello");
+    await assert.rejects(
+      makeR2Bucket().put("oversized", new MisleadingBlob([new Uint8Array(R2_OBJECT_MAX_BUFFER_BYTES + 1)])),
+      /exceeds the 25 MiB WDL R2 limit/
+    );
+    assert.equal(calls.length, 1);
   } finally {
     restore();
   }
