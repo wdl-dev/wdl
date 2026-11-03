@@ -34,7 +34,7 @@ WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary �
 
 `ctx.mapVirtualHost(fetcher, port)` 无需 experimental flag 即可使用。它将已持有的 native Fetcher 映射为供 socket client 使用的虚拟 host 和 port，不会授予新的网络可达性，也不会把 JavaScript binding facade 变成 TCP backend。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-08`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-10`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
 `auto_grpc_convert` 是 non-experimental flag，可以作为 compatibility metadata 使用，但不会为 WDL 增加 Cloudflare edge gRPC conversion service。
 

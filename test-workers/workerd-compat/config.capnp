@@ -20,5 +20,20 @@ const config :Workerd.Config = (
       compatibilityFlags = ["nodejs_compat"],
       modules = [(name = "gc.js", esModule = embed "gc.js")],
     )),
+    (name = "rpc-streams", worker = (
+      compatibilityDate = "2026-04-24",
+      compatibilityFlags = ["nodejs_compat"],
+      modules = [(name = "rpc-streams.js", esModule = embed "rpc-streams.js")],
+      bindings = [
+        (name = "SOURCE", service = "http-source"),
+        (name = "SINK", service = "rpc-sink"),
+      ],
+    )),
+    (name = "rpc-sink", worker = (
+      compatibilityDate = "2026-04-24",
+      compatibilityFlags = ["nodejs_compat"],
+      modules = [(name = "rpc-stream-sink.js", esModule = embed "rpc-stream-sink.js")],
+    )),
+    (name = "http-source", external = (address = "127.0.0.1:8088", http = ())),
   ],
 );

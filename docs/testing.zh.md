@@ -106,6 +106,8 @@ R2 integration 还会在 workerd 容器内运行 `test-workers/r2-lifetime/confi
 
 Worker-module integration 还会在容器内的独立 workerd 进程中运行 `test-workers/workerd-compat/config.capnp`，验证 console formatting exception，以及不强制 GC 时持续分配短命 native wrapper 的回收行为。它还会在不启用实验性流实现的情况下，验证跨已完成 request context 的 byte-stream 终态重入。这个仅供本地测试的 fixture 保护进程存活，不向生产 runtime 增加测试 hook，也不进入生产镜像。
 
+HTTP-to-RPC pipe probe 通过 TCP 读取运行中 user-runtime 的 `/_healthz`，检查完整传输与单次 close，包括 `preventClose` 路径。Integration runner 同时检查捕获的 native diagnostics：重复 stream `end()` 可能只记录内部错误，即使断言与进程退出状态都成功。
+
 独立的 `gc` service 验证三类 native cycle 的回收：AsyncLocalStorage store 与 Response、背压状态下 TransformStream 的排队 chunk 与 stream，以及 ReadableStream.values iterator 与 reader。每个 case 创建 40 个小对象环，最多进行 12 轮强制 GC，每轮之间通过 scheduler 让出一个执行轮次，并断言所有注册对象均已完成 finalization。只有这个本地测试 config 启用 V8 的 `--expose-gc`：hook 对整个进程可见，但只有 `gc.js` 调用它。lifecycle 和 stream-reentry 测试不强制 GC，以保留依赖分配压力触发回收的验证。fixture 和 GC hook 均不进入生产 config 或镜像。
 
 无需 Docker，仅运行 native GC gate：
@@ -125,7 +127,7 @@ CLI 子集已经包含在 `npm run test:integration` 中；只在聚焦 CLI 路�
 CLI integration 默认使用 `PATH` 上的 `wdl` executable。本地运行应安装 `.github/workflows/ci.yml` 顶层 `WDL_CLI_PACKAGE` pin 住的已发布 CLI 版本：
 
 ```bash
-npm install -g @wdl-dev/cli@1.9.3
+npm install -g @wdl-dev/cli@1.9.4
 ```
 
 验证未发布 CLI 变更时，优先 link 或包装 checkout，让 `wdl` 出现在 `PATH` 上。`WDL_CLI_BIN` 只保留给少数需要绕过 `PATH` 解析的聚焦 run。

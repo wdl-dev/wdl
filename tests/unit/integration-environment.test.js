@@ -45,6 +45,15 @@ test("one-off compose commands do not restart stopped services or publish ports"
   });
 });
 
+test("compose exec can retain successful native process diagnostics", () => {
+  assert.deepEqual(composeHelper.composeExec("user-runtime", ["workerd", "test"], {
+    includeStderr: true,
+  }), {
+    argv: ["docker", "compose", "exec", "-T", "user-runtime", "workerd", "test"],
+    opts: { includeStderr: true },
+  });
+});
+
 test("compose helpers consume the shared preflight no-build flag", async () => {
   await withMockedProperty(process.env, "WDL_INTEGRATION_NO_BUILD", "1", () => {
     assert.deepEqual(

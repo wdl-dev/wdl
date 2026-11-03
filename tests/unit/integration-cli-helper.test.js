@@ -27,3 +27,13 @@ test("integration sh forwards argv and env without shell parsing", () => {
   );
   assert.equal(output, 'inline:["hello world","","left && right"]');
 });
+
+test("integration sh captures successful stderr only when requested", () => {
+  const command = [
+    process.execPath,
+    "-e",
+    'process.stdout.write("output"); process.stderr.write("diagnostic");',
+  ];
+  assert.equal(sh(command), "output");
+  assert.equal(sh(command, { includeStderr: true }), "outputdiagnostic");
+});

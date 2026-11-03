@@ -21,9 +21,12 @@ import {
 setupIntegrationSuite();
 
 test("native workerd preserves isolate and stream lifetimes", () => {
-  composeExec("user-runtime", [
+  const output = composeExec("user-runtime", [
     "workerd", "test", "-b", "/app/dist/workerd-configs/workerd-lifecycle-test.bin",
-  ]);
+  ], { includeStderr: true });
+  // The duplicate native end() used to log an internal error while both the
+  // body assertion and the workerd test command still succeeded.
+  assert.doesNotMatch(output, /already called end\(\)/);
 });
 
 const WORKERD_NODE_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node.js");

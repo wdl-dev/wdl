@@ -69,7 +69,7 @@ uncompressed response. This optional encoding does not introduce a new 406 respo
 Both variants send `Vary: Accept-Encoding`, retain
 `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`, and use the same
 SSE frames and resume cursors. For accepted gzip, Control sets
-`Content-Encoding: gzip` on the original stream. Bundled workerd 2026-11-01 performs
+`Content-Encoding: gzip` on the original stream. Bundled workerd performs
 native automatic encoding and incrementally flushes compressed SSE; there is no
 JavaScript compression stream or whole-body buffering. The activation-gated
 `tail-open` comment, five-second idle keepalives, event delivery, cancellation cleanup,

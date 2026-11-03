@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20261103.1` and `5.20261103.1`, raising the maximum compatibility date to `2026-11-10`. Includes V8 15.8 and native stream/RPC finalization fixes. Static worker flags and enabled autogates are unchanged; no WDL state migration is required.
+- Updated the CI CLI pin and installation guidance to `@wdl-dev/cli` `1.9.4`; the minimum supported CLI remains `1.9.0`.
+
 ## wdl.20261101.1 - 2026-11-01
 
 - Updated workerd and Workers types to `1.20261101.1` and `5.20261101.1`, raising the maximum compatibility date to `2026-11-08`. Includes native GC/RPC lifetime and cached-EXPLAIN safety fixes; SQLite's compiled-opcode allocation limit rises from 25,000 to 250,000. No WDL state migration is required.

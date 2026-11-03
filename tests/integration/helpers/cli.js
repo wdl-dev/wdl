@@ -49,7 +49,7 @@ function spawnIntegrationCommand(program, args, opts) {
 
 /**
  * @param {string[]} argv
- * @param {{ cwd?: string, input?: string | Buffer, stdio?: any, env?: NodeJS.ProcessEnv }} [opts]
+ * @param {{ cwd?: string, input?: string | Buffer, stdio?: any, env?: NodeJS.ProcessEnv, includeStderr?: boolean }} [opts]
  */
 export function sh(argv, opts = {}) {
   const [program, ...args] = argv;
@@ -62,7 +62,7 @@ export function sh(argv, opts = {}) {
       `integration command failed (${res.status}): ${(res.stderr || res.stdout || command).trim()}`
     );
   }
-  return res.stdout || "";
+  return (res.stdout || "") + (opts.includeStderr ? res.stderr || "" : "");
 }
 
 /**

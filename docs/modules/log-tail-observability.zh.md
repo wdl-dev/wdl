@@ -38,7 +38,7 @@ Live tail 是 activation-gated pipe，不是持久日志系统：
 
 只有成功的 Control `GET /ns/<ns>/logs/tail` SSE response 会按需启用 gzip。Control 显式协商 `Accept-Encoding`：无 weight 或有效正数 `q` 的 `gzip` 允许 gzip；只有不存在显式 `gzip` entry 时，正数 `*` 才生效。显式 `gzip;q=0` 无论顺序如何都会覆盖 wildcard。Coding 和 parameter 名称不区分大小写。非法 weight 或 parameter 按零处理，冲突的重复 entry 取最低 weight。缺失或空 header、仅接受 identity 的客户端、不支持的 encoding 和拒绝 gzip 的请求都保持现有未压缩 response。可选编码不会引入新的 406 response。
 
-两种 response 都发送 `Vary: Accept-Encoding`，保留 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no`，并使用相同的 SSE frame 与 resume cursor。接受 gzip 时，Control 在原 stream 上设置 `Content-Encoding: gzip`。Bundled workerd 2026-11-01 负责 native automatic encoding，并增量 flush 压缩后的 SSE；不使用 JavaScript compression stream，也不缓冲整个 body。受 activation gate 约束的 `tail-open` comment、五秒 idle keepalive、event delivery、取消清理和两个 session watchdog 均保持不变。其它 Control response 和现有 identity 客户端不会通过这个 handler 启用压缩。
+两种 response 都发送 `Vary: Accept-Encoding`，保留 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no`，并使用相同的 SSE frame 与 resume cursor。接受 gzip 时，Control 在原 stream 上设置 `Content-Encoding: gzip`。Bundled workerd 负责 native automatic encoding，并增量 flush 压缩后的 SSE；不使用 JavaScript compression stream，也不缓冲整个 body。受 activation gate 约束的 `tail-open` comment、五秒 idle keepalive、event delivery、取消清理和两个 session watchdog 均保持不变。其它 Control response 和现有 identity 客户端不会通过这个 handler 启用压缩。
 
 ### 服务探针
 

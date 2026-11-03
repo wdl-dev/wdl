@@ -151,6 +151,10 @@ a separate workerd process inside the container. It checks console formatting
 exceptions and sustained short-lived native-wrapper allocation without forced GC.
 It also verifies byte-stream terminal-state reentry across completed request
 contexts without enabling experimental stream implementations.
+Its HTTP-to-RPC pipe probe reads the running user-runtime's `/_healthz` through
+TCP and checks complete delivery and one close, including `preventClose`. The
+integration runner also checks captured native diagnostics: a duplicate stream
+`end()` can log an internal error despite successful assertions and exit status.
 The separate `gc` service checks collection of native cycles involving an
 AsyncLocalStorage store and Response, a backpressured TransformStream's queued
 chunk and stream, and a ReadableStream.values iterator and reader. Each case uses
@@ -181,7 +185,7 @@ should install the published CLI version pinned by the top-level
 `WDL_CLI_PACKAGE` value in `.github/workflows/ci.yml`:
 
 ```bash
-npm install -g @wdl-dev/cli@1.9.3
+npm install -g @wdl-dev/cli@1.9.4
 ```
 
 For unpublished CLI changes, link or wrap the checkout so `wdl` is on `PATH`.

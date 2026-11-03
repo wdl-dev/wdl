@@ -72,9 +72,9 @@ export function runProbeNodeAsync(script, { env = {}, input = "", evalScript = f
   });
 }
 
-/** @param {string} service @param {string[]} args */
-export function composeExec(service, args) {
-  return sh(["docker", "compose", "exec", "-T", service, ...args]);
+/** @param {string} service @param {string[]} args @param {{ includeStderr?: boolean }} [opts] */
+export function composeExec(service, args, opts = {}) {
+  return sh(["docker", "compose", "exec", "-T", service, ...args], opts);
 }
 
 /** @param {string} service @param {string[]} args */
