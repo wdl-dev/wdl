@@ -55,7 +55,7 @@ function html(prefix) {
       <dt>Binary module</dt>
       <dd><code>icon.png</code> (<code>import</code>-ed as <code>ArrayBuffer</code>)</dd>
       <dt>Storage</dt>
-      <dd>Redis Hash <code>worker:pages:v1</code> — one field per module, PNG bytes stored raw (binary-safe RESP, no base64)</dd>
+      <dd>Redis Hash <code>worker:demo:pages:v:1</code> — one field per module, PNG bytes stored raw (binary-safe RESP, no base64)</dd>
     </dl>
   </div>
 </body>

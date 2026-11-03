@@ -5,14 +5,13 @@ import {
   parseDispatchWorkerId,
   parseRuntimeLoadWorkerId,
   parseWorkerId,
-  parseWorkerIdObject,
 } from "../../shared/worker-id.js";
 
 test("worker id helpers round-trip exact three-part ids", () => {
   const workerId = formatWorkerId({ namespace: "demo", worker: "hello", version: "v1" });
   assert.equal(workerId, "demo:hello:v1");
   assert.deepEqual(parseWorkerId(workerId), ["demo", "hello", "v1"]);
-  assert.deepEqual(parseWorkerIdObject(workerId), {
+  assert.deepEqual(parseDispatchWorkerId(workerId), {
     namespace: "demo",
     worker: "hello",
     version: "v1",
@@ -84,10 +83,7 @@ test("worker id helpers reject null, empty, and malformed ids", () => {
     "a:b:c:d",
   ]) {
     assert.equal(parseWorkerId(value), null);
-    assert.deepEqual(parseWorkerIdObject(value), {
-      namespace: "",
-      worker: "",
-      version: "",
-    });
+    assert.equal(parseDispatchWorkerId(value), null);
+    assert.equal(parseRuntimeLoadWorkerId(value), null);
   }
 });

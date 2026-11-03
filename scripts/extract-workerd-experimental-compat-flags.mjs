@@ -33,7 +33,7 @@ export function extractExperimentalCompatFlags(source) {
 }
 
 /** @param {string[]} [argv] */
-export function runCli(argv = process.argv.slice(2)) {
+function runCli(argv = process.argv.slice(2)) {
   const input = argv[0] || DEFAULT_COMPATIBILITY_DATE_CAPNP;
   const source = readFileSync(input, "utf8");
   for (const flag of extractExperimentalCompatFlags(source)) {

@@ -1262,10 +1262,10 @@ test("parseControlRoute: dispatch shape carries handler params", () => {
 });
 
 test("parseControlRoute: known dispatch prefixes may omit auth action", () => {
-  assert.deepEqual(parseControlRoute("/auth/tokens/abc/extra", "DELETE"), {
+  assert.deepEqual(parseControlRoute("/auth/tokens/abc", "POST"), {
     kind: "authTokens",
     scopeRoute: "auth_tokens",
-    tokenId: undefined,
+    tokenId: "abc",
   });
   assert.deepEqual(parseControlRoute("/auth/delegated-tokens", "GET"), {
     kind: "authDelegatedTokens",
@@ -1303,11 +1303,16 @@ test("parseControlRoute: unknown shape has no action (red line 3 in evaluateAcce
 });
 
 test("parseControlRoute: trailing junk on known prefix has no action", () => {
-  // CRITICAL invariant: `DELETE /auth/tokens/<id>/extra` must NOT match
-  // auth.token.revoke (segs.length=4, not 3) — otherwise the dispatcher
-  // would 404 a request that already passed auth, giving low-priv tokens
-  // a 200/404 oracle on path existence.
-  assertNoAuthAction("/auth/tokens/abc/extra", "DELETE");
+  for (const method of ["GET", "POST", "DELETE", "PUT"]) {
+    for (const suffix of ["extra", "extra/more"]) {
+      assert.deepEqual(parseControlRoute(`/auth/tokens/abc/${suffix}`, method), {});
+    }
+  }
+  for (const action of ["deploy", "promote", "delete"]) {
+    const route = parseControlRoute(`/ns/foo/worker/bar/${action}/extra`, "POST");
+    assert.equal(route.action, undefined);
+    assert.deepEqual(route.subPath, ["extra"]);
+  }
   assert.deepEqual(parseControlRoute("/auth/delegated-tokens/extra", "POST"), {});
   assertNoAuthAction("/ns/foo/worker/bar/versions/v1/extra", "DELETE");
   assertNoAuthAction("/ns/foo/d1/databases/main/query/extra", "POST");

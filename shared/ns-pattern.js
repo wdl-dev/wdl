@@ -3,8 +3,8 @@
 // Control validates deploy and host inputs while gateway matches subdomains.
 // Keeping their shared grammar here prevents acceptance and routing drift.
 export const NS_PATTERN = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
-export const DEFAULT_PLATFORM_DOMAIN = "workers.local";
-export const MAX_PLATFORM_DOMAIN_BYTES = 126;
+const DEFAULT_PLATFORM_DOMAIN = "workers.local";
+const MAX_PLATFORM_DOMAIN_BYTES = 126;
 const MAX_DNS_HOSTNAME_BYTES = 253;
 const DNS_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const DNS_FINAL_LABEL_RE = /^[A-Za-z]+$/;
@@ -89,7 +89,7 @@ export const ROUTES_ALLOWED_RESERVED_NS = new Set(["__system__"]);
 // whose target worker lives in the exporting platform namespace.
 export const PLATFORM_TIER_RESERVED_NS = new Set(["__platform__"]);
 
-export const RUNTIME_LOAD_ALLOWED_RESERVED_NS =
+const RUNTIME_LOAD_ALLOWED_RESERVED_NS =
   ROUTES_ALLOWED_RESERVED_NS.union(PLATFORM_TIER_RESERVED_NS);
 
 // Tenant ns names that NS_RE accepts but the platform reserves for
@@ -147,8 +147,8 @@ export const WORKFLOW_KEY_RE = /^wf_[0-9a-f]{32}$/;
 // allow dots and underscores used by model catalogs without admitting `/`.
 // Digit-only aliases would serialize in different orders as JS object keys and
 // Rust map keys, so the shared grammar excludes them.
-export const AI_PROVIDER_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
-export const AI_MODEL_ALIAS_RE = /^(?![0-9]+$)[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+const AI_PROVIDER_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+const AI_MODEL_ALIAS_RE = /^(?![0-9]+$)[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 
 /** @param {unknown} name */
 export function isValidAiProviderName(name) {
@@ -192,7 +192,7 @@ export function isValidJsIdentifier(value) {
   return typeof value === "string" && JS_IDENTIFIER_RE.test(value);
 }
 
-export const JS_CLASS_DECLARATION_RESERVED_WORDS = new Set([
+const JS_CLASS_DECLARATION_RESERVED_WORDS = new Set([
   "arguments",
   "await",
   "break",
@@ -281,7 +281,7 @@ export const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 // POSIX-style paths for workerd's workerLoader module map. Regex is
 // shape-only — see validateModulePath for segment rules.
-export const MODULE_PATH_RE = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/;
+const MODULE_PATH_RE = /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/;
 
 // Segments that either take the `__proto__` setter path or shadow
 // inherited Object methods. Checked per-segment so `src/__proto__` is

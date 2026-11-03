@@ -87,7 +87,7 @@ export default {
 };
 `;
 
-export const QUEUE_PRODUCER = `
+const QUEUE_PRODUCER = `
 export default {
   async fetch(req, env) {
     const body = await req.json();

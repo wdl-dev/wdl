@@ -31,6 +31,7 @@ import {
 import {
   redisCommand,
   redisDel,
+  redisHGet,
   redisScriptFlush,
   redisXLen,
   redisXRangeRaw,
@@ -115,7 +116,7 @@ async function deployTailWorker(ns, name = "tail-target", code = TAIL_WORKER_COD
   return version;
 }
 
-// Spec-style SSE collector. Opens `GET /ns/<ns>/logs/tail?<query>`,
+// Spec-style SSE collector. Defaults to `GET /ns/<ns>/logs/tail?<query>`,
 // drains until `durationMs` or signal abort, returns { status, events[] }.
 // Decode gzip before the same incremental parser; live callbacks let tests
 // observe delivery without waiting for the long-lived stream to close.
@@ -126,13 +127,13 @@ async function deployTailWorker(ns, name = "tail-target", code = TAIL_WORKER_COD
 
 /**
  * @param {{
- *   ns: string, query: string, headers?: Record<string, string>, durationMs?: number,
+ *   ns: string, query: string, method?: string, headers?: Record<string, string>, durationMs?: number,
  *   signal?: AbortSignal, onEvent?: (event: SseEvent) => void,
  *   onComment?: (comment: string) => void,
  * }} args
  * @returns {Promise<SseResult>}
  */
-function openSseAndCollect({ ns, query, headers = {}, durationMs = 4000, signal, onEvent, onComment }) {
+function openSseAndCollect({ ns, query, method = "GET", headers = {}, durationMs = 4000, signal, onEvent, onComment }) {
   return new Promise((resolve, reject) => {
     const reqHeaders = {
       Host: ADMIN_HOST_HEADER,
@@ -182,7 +183,7 @@ function openSseAndCollect({ ns, query, headers = {}, durationMs = 4000, signal,
     const req = http.request({
       host: GATEWAY_HOST,
       port: GATEWAY_PORT,
-      method: "GET",
+      method,
       path: `/ns/${ns}/logs/tail?${query}`,
       headers: reqHeaders,
       agent: false,
@@ -250,6 +251,51 @@ function parseEventJson(events) {
 function logTailEventJson(event) {
   return parseJsonText(event.data, `log-tail ${event.event} event`);
 }
+
+test("wdl tail: ops and scoped non-GET methods reject without activation", { timeout: 10_000 }, async (t) => {
+  const ns = uniqueNs("wdl-tail-method");
+  const issued = await adminFetch("/auth/tokens", {
+    method: "POST",
+    body: JSON.stringify({ kind: "ns", ns, label: "tail-method" }),
+  });
+  const { token: scopedToken } = await readIntegrationJson(issued, 201);
+  for (const { role, token, status, error } of [
+    { role: "ops", token: ADMIN_TOKEN, status: 405, error: "method_not_allowed" },
+    { role: "ns", token: scopedToken, status: 403, error: "unknown_action_requires_ops" },
+  ]) {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]) {
+      const label = `${role} ${method}`;
+      const worker = `tail-${role}-${method.toLowerCase()}`;
+      const controller = new AbortController();
+      try {
+        const result = await openSseAndCollect({
+          ns,
+          query: `worker=${worker}`,
+          method,
+          headers: { "accept-encoding": "gzip", "x-admin-token": token },
+          durationMs: 1000,
+          // Bound even a missing response header; an old SSE handler is canceled
+          // on its first comment instead of waiting for the stream to finish.
+          signal: AbortSignal.any([t.signal, controller.signal, AbortSignal.timeout(3000)]),
+          onComment() { controller.abort(); },
+        });
+        assert.equal(result.status, status, label);
+        assert.equal(result.headers.allow, role === "ops" ? "GET" : undefined, label);
+        assert.equal(result.headers["content-encoding"], undefined, label);
+        assert.deepEqual(result.events, [], label);
+        if (method === "HEAD") {
+          assert.equal(result.body, "", label);
+        } else {
+          const body = await readIntegrationJson(result, status, `${label} log tail`);
+          assert.equal(body.error, error, label);
+        }
+        assert.equal(redisHGet("logs:tail:active", `${ns}:${worker}`, { db: 1 }), null, label);
+      } finally {
+        controller.abort();
+      }
+    }
+  }
+});
 
 test("wdl tail: negotiated gzip and identity deliver successive events before stream close", async () => {
   const ns = uniqueNs("wdl-tail-encoding");

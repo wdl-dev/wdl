@@ -70,22 +70,22 @@ export function doAlarmStateKey(jobId) {
 }
 
 /** @param {string} jobId */
-export function doAlarmShard(jobId) {
+function doAlarmShard(jobId) {
   return fnv1a32Utf8(jobId) % DO_ALARM_READY_SHARDS;
 }
 
 /** @param {string} jobId */
-export function doAlarmDueKey(jobId) {
+function doAlarmDueKey(jobId) {
   return `wf:internal:do-alarm:due:${doAlarmShard(jobId)}`;
 }
 
 /** @param {string} jobId */
-export function doAlarmReadyKey(jobId) {
+function doAlarmReadyKey(jobId) {
   return `wf:internal:do-alarm:ready:${doAlarmShard(jobId)}`;
 }
 
 /** @param {string} ns @param {string} worker */
-export function doAlarmByWorkerKey(ns, worker) {
+function doAlarmByWorkerKey(ns, worker) {
   return `wf:internal:do-alarm:by-worker:${ns}:${worker}`;
 }
 

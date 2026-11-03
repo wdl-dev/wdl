@@ -112,11 +112,6 @@ export function slotOf(namespace, databaseId, slotCount = SLOT_COUNT) {
   return fnv1a32CodeUnits(key) % slotCount;
 }
 
-/** @param {unknown[]} params */
-export function sqliteBindParams(params) {
-  return params;
-}
-
 /**
  * @param {unknown} statement
  * @returns {NormalizedStatement}

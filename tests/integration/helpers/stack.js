@@ -152,7 +152,7 @@ export async function waitForGatewaySubscriber() {
   });
 }
 
-export async function readGatewayHealth() {
+async function readGatewayHealth() {
   const res = await fetch(`http://${GATEWAY_HOST}:${GATEWAY_PORT}/healthz`);
   if (!res.ok) {
     throw new Error(`gateway healthz failed: ${res.status} ${await res.text()}`);
@@ -218,7 +218,7 @@ export async function waitForScheduler() {
 // shared external-binding resolution layer — per-external config
 // correctness (system-runtime aliases etc.) is *fail-fast*, by the
 // first test that hits it, not readiness's job.
-export async function waitForGatewayToRuntime() {
+async function waitForGatewayToRuntime() {
   const ns = "stack-probe";
   const name = "ready";
   const code = `export default { fetch() { return new Response("ready"); } };`;

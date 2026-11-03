@@ -373,9 +373,4 @@ export class RedisCommandSurface {
   async xRead(...args) {
     return this._exec("XREAD", ...args);
   }
-
-  /** @param {...RedisArg} args */
-  async xRange(...args) {
-    return /** @type {[Uint8Array, Uint8Array[]][]} */ (await this._exec("XRANGE", ...args));
-  }
 }

@@ -14,16 +14,8 @@ output "assets_bucket_name" {
   value = aws_s3_bucket.assets.bucket
 }
 
-output "assets_bucket_arn" {
-  value = aws_s3_bucket.assets.arn
-}
-
 output "r2_bucket_name" {
   value = aws_s3_bucket.r2.bucket
-}
-
-output "r2_bucket_arn" {
-  value = aws_s3_bucket.r2.arn
 }
 
 output "control_s3_secret_arn" {

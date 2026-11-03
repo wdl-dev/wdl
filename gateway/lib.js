@@ -1,6 +1,6 @@
 // Pure request-routing helpers for the gateway worker. No bare specifier
 // imports — this file is loaded both as a workerd embedded module (via the
-// capnp "lib" name) and directly by node --test.
+// capnp "gateway-lib" name) and directly by node --test.
 
 /**
  * @typedef {import("shared-route-projection").PatternProjection & { slot: string }} PatternEntry

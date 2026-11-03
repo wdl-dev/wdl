@@ -1,6 +1,6 @@
 import { utf8ByteLength } from "./utf8.js";
 
-export const D1_MAX_VALUE_BYTES = 2_000_000;
+const D1_MAX_VALUE_BYTES = 2_000_000;
 
 /**
  * @param {number} bytes

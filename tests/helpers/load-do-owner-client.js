@@ -5,7 +5,7 @@ import {
 } from "./load-owner-harness.js";
 import { repositoryFileUrl } from "./load-shared-module.js";
 
-export const protocolUrl = doProtocolDataUrl();
+const protocolUrl = doProtocolDataUrl();
 const { DO_INVOKE_CONTENT_TYPE: invokeContentType } = await loadDoProtocol();
 export const DO_INVOKE_CONTENT_TYPE = invokeContentType;
 const { DO_FORWARD_HEADERS: forwardHeaders } = await import(

@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  parseConsumerKey,
-  parseDelayedKey,
-  parseStreamKey,
   QUEUE_DELAYED_WAKE_STREAM,
   queueConsumerKey,
   queueDelayedKey,
@@ -20,15 +17,19 @@ test("queue key builders compose canonical Redis shapes", () => {
   assert.equal(QUEUE_DELAYED_WAKE_STREAM, "queue-delayed-wake");
 });
 
-test("queue key parsers match the cross-language fixture", () => {
-  const parsers = {
-    stream: parseStreamKey,
-    delayed: parseDelayedKey,
-    consumer: parseConsumerKey,
+test("queue key builders match the keys accepted by the Rust parser fixture", () => {
+  const builders = {
+    stream: queueStreamKey,
+    delayed: queueDelayedKey,
+    consumer: queueConsumerKey,
   };
-  for (const [kind, parser] of Object.entries(parsers)) {
-    for (const { key, parsed } of QUEUE_KEY_PARSE_CASES[kind]) {
-      assert.deepEqual(parser(key), parsed, `${kind}:${JSON.stringify(key)}`);
+  for (const [kind, build] of Object.entries(builders)) {
+    const validCases = QUEUE_KEY_PARSE_CASES[kind].filter(
+      (/** @type {{ parsed: unknown }} */ entry) => entry.parsed !== null
+    );
+    assert.ok(validCases.length > 0, `${kind} needs accepted key cases`);
+    for (const { key, parsed } of validCases) {
+      assert.equal(build(parsed.ns, parsed.queue), key, `${kind}:${JSON.stringify(key)}`);
     }
   }
 });

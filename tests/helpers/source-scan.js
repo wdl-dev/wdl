@@ -76,7 +76,7 @@ export function sourceFiles(dir, options) {
  * @param {{ ignoreDirs?: Set<string> }} [options]
  * @returns {string[]}
  */
-export function jsFilesIn(dir, options = {}) {
+function jsFilesIn(dir, options = {}) {
   return sourceFilesIn(dir, { ...options, extensions: [".js"] });
 }
 
@@ -85,7 +85,7 @@ export function jsFilesIn(dir, options = {}) {
  * @param {{ extensions: string[], ignoreDirs?: Set<string> }} options
  * @returns {string[]}
  */
-export function sourceFilesIn(dir, options) {
+function sourceFilesIn(dir, options) {
   const ignoreDirs = new Set([...DEFAULT_JS_IGNORE_DIRS, ...(options.ignoreDirs || [])]);
   const extensions = new Set(options.extensions);
   /** @type {string[]} */

@@ -6,7 +6,7 @@ const config :Workerd.Config = (
 
     # Loader pools — one external per runtime container. gateway picks
     # RUNTIME_USER vs RUNTIME_SYSTEM by namespace (`__system__` → system,
-    # others → user) in index.js. Names match the SC DNS aliases set in
+    # others → user) in dispatch.js. Names match the SC DNS aliases set in
     # terraform / compose.
     (name = "runtime-user",   external = (address = "user-runtime:8081",   http = ())),
     (name = "runtime-system", external = (address = "system-runtime:8081", http = ())),

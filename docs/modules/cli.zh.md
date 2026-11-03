@@ -81,7 +81,16 @@ CLI 应把其余 discovery 字段当作 diagnostics 和 user-facing guidance 的
 
 ## Deploy Pipeline
 
-`wdl deploy <project>` 是受支持的 worker bundling 路径。它会调用项目本地 `wrangler`，或在设置 `WDL_WRANGLER_BIN` 时调用该显式 binary，并把 Wrangler dry-run 输出作为 bundle 来源。CLI 会为 dry-run bundling 设置 dummy `CLOUDFLARE_API_TOKEN`，因此普通项目本地构建不需要真实 Cloudflare 凭据。
+`wdl deploy <project>` 是受支持的 worker bundling 路径。它把 Wrangler dry-run 输出作为 bundle 来源，并按以下优先级解析 Wrangler：
+
+1. 显式设置的 `WDL_WRANGLER_BIN`。
+2. Worker 项目本地安装的 Wrangler。
+3. CLI package 自带的 Wrangler。
+4. `PATH` 中找到的 Wrangler。
+
+如果以上来源均未找到，只有显式设置 `WDL_ALLOW_NPX_WRANGLER=1` 时，CLI 才会使用 `npx --yes wrangler@^4`。该 fallback 可能访问 npm registry，默认禁用。使用 CLI 自带版本时，不要求项目本地安装 Wrangler。
+
+CLI 会为 dry-run bundling 设置 dummy `CLOUDFLARE_API_TOKEN`，因此普通项目本地构建不需要真实 Cloudflare 凭据。
 
 WDL worker name 遵循平台语法，而不是 Wrangler 更窄的 deployment-name 语法：`[A-Za-z0-9][A-Za-z0-9_-]{0,254}`。大写字母、数字、下划线和连字符都是合法的。如果 Wrangler dry-run validation 会拒绝真实的平台 worker name，下游 CLI 可以在 bundling 时传入 dummy Wrangler name，但发给 control 的 payload 和最终部署的 WDL worker name 必须仍是用户请求的平台 worker name。
 

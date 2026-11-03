@@ -38,7 +38,7 @@ export const QUEUE_CONTENT_TYPES = Object.freeze({
   BYTES: "bytes",
   V8: "v8",
 });
-export const QUEUE_ENVELOPE_FIELDS = Object.freeze({
+const QUEUE_ENVELOPE_FIELDS = Object.freeze({
   ID: "id",
   BODY_B64: "body_b64",
   CONTENT_TYPE: "content_type",
@@ -106,7 +106,7 @@ export function buildQueueEnvelope(body, contentType, now, maxBytes) {
 }
 
 /** @param {unknown} internalAttempts */
-export function workerQueueAttempts(internalAttempts) {
+function workerQueueAttempts(internalAttempts) {
   const n = Number(internalAttempts);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) + 1 : 1;
 }

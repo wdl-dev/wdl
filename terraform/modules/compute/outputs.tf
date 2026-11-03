@@ -6,28 +6,12 @@ output "gateway_target_group_arn" {
   value = aws_lb_target_group.gateway.arn
 }
 
-output "gateway_service_name" {
-  value = module.gateway_service.name
-}
-
-output "user_runtime_service_name" {
-  value = module.user_runtime_service.name
-}
-
-output "system_runtime_service_name" {
-  value = module.system_runtime_service.name
-}
-
 output "d1_runtime_service_name" {
   value = module.d1_runtime_service.name
 }
 
 output "do_runtime_service_name" {
   value = module.do_runtime_service.name
-}
-
-output "scheduler_service_name" {
-  value = module.scheduler_service.name
 }
 
 output "workflows_service_name" {

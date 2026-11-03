@@ -210,7 +210,7 @@ function findJsonField(fields) {
  * @param {TailActivationRedis} redis
  * @param {string[]} keys
  */
-export async function activateTailWorkers(redis, keys) {
+async function activateTailWorkers(redis, keys) {
   if (keys.length === 0) return;
   await redis.eval(
     ACTIVATE_TAIL_WORKERS_SCRIPT,
@@ -318,6 +318,13 @@ function sseEvent(opts) {
  * @param {{ request: Request, env: Record<string, unknown>, ctx: { waitUntil(promise: Promise<unknown>): void } | null, ns: string, requestId: string }} args
  */
 export async function handle({ request, env, ctx, ns, requestId }) {
+  if (request.method !== "GET") {
+    const headers = { allow: "GET" };
+    return request.method === "HEAD"
+      ? new Response(null, { status: 405, headers })
+      : jsonError(405, "method_not_allowed", "Method not allowed", {}, headers);
+  }
+
   const log = requireControlLog();
   const redis = controlTailRedis();
   const maxSessionMs = tailMaxSessionMs(env);

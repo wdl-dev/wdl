@@ -22,7 +22,7 @@ const PROTOCOL_TRANSPORTS = new Map([
   ["embeddings", new Set(["http"])],
   ["realtime", new Set(["realtime_websocket"])],
 ]);
-export const AI_TRANSPORTS = Object.freeze([
+const AI_TRANSPORTS = Object.freeze([
   ...new Set([...PROTOCOL_TRANSPORTS.values()].flatMap((transports) => [...transports])),
 ]);
 

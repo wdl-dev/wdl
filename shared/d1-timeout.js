@@ -1,13 +1,13 @@
 import { envValueOr } from "shared-env";
 import { errorMessage } from "./errors.js";
 
-export const DEFAULT_D1_QUERY_TIMEOUT_MS = 30000;
+const DEFAULT_D1_QUERY_TIMEOUT_MS = 30000;
 
 /**
  * @param {{ D1_QUERY_TIMEOUT_MS?: unknown } | null | undefined} env
  * @returns {number}
  */
-export function d1QueryTimeoutMs(env) {
+function d1QueryTimeoutMs(env) {
   const raw = Number(envValueOr(env?.D1_QUERY_TIMEOUT_MS, DEFAULT_D1_QUERY_TIMEOUT_MS));
   if (!Number.isInteger(raw) || raw <= 0) return DEFAULT_D1_QUERY_TIMEOUT_MS;
   return raw;

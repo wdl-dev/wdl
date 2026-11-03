@@ -10,7 +10,7 @@ where
         .unwrap_or(fallback)
 }
 
-pub fn env_positive<T>(name: &str, fallback: T) -> T
+fn env_positive<T>(name: &str, fallback: T) -> T
 where
     T: Copy + From<u8> + FromStr + PartialOrd,
 {

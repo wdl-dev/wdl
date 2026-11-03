@@ -71,7 +71,7 @@ export function workflowByWorkerKey(ns, worker) {
 }
 
 /** @param {string} ns @param {string} worker @param {string} version */
-export function workflowByVersionKey(ns, worker, version) {
+function workflowByVersionKey(ns, worker, version) {
   return `wf:by-version:${ns}:${worker}:${version}`;
 }
 

@@ -32,7 +32,7 @@ export function normalizeAlarmScheduledTime(value) {
 }
 
 /** @param {unknown} value */
-export function alarmRetryCount(value) {
+function alarmRetryCount(value) {
   if (value === undefined || value === null) return 0;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     throw new TypeError("DO alarm retryCount must be a non-negative integer");

@@ -4,6 +4,7 @@
 
 - Updated workerd and Workers types to `1.20261103.1` and `5.20261103.1`, raising the maximum compatibility date to `2026-11-10`. Includes V8 15.8 and native stream/RPC finalization fixes. Static worker flags and enabled autogates are unchanged; no WDL state migration is required.
 - Updated the CI CLI pin and installation guidance to `@wdl-dev/cli` `1.9.4`; the minimum supported CLI remains `1.9.0`.
+- Reject extra path segments on Control worker-write and auth-token routes, and reject non-GET log-tail requests before opening sessions or writing activation state.
 
 ## wdl.20261101.1 - 2026-11-01
 

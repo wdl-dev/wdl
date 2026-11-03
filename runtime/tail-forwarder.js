@@ -181,11 +181,6 @@ async function postEvent(env, ns, worker, payload) {
   }
 }
 
-/** @param {string} json */
-export function tailEventByteLength(json) {
-  return utf8ByteLength(json);
-}
-
 /** @param {unknown} payload */
 function stringifyTailPayload(payload) {
   try {
@@ -198,7 +193,7 @@ function stringifyTailPayload(payload) {
 
 /** @param {string | null} json */
 function tailPayloadFits(json) {
-  return json !== null && tailEventByteLength(json) <= TAIL_EVENT_MAX_BYTES;
+  return json !== null && utf8ByteLength(json) <= TAIL_EVENT_MAX_BYTES;
 }
 
 /** @param {unknown} payload */
@@ -222,7 +217,7 @@ export function tailEventTooLargePayload(payload) {
 }
 
 /** @param {unknown} payload */
-export function serializeTailPayload(payload) {
+function serializeTailPayload(payload) {
   let json = stringifyTailPayload(payload);
   if (tailPayloadFits(json)) return /** @type {string} */ (json);
 
@@ -246,7 +241,7 @@ export function serializeTailPayload(payload) {
   }
 
   const warning = JSON.stringify(tailEventTooLargePayload(payload));
-  if (tailEventByteLength(warning) <= TAIL_EVENT_MAX_BYTES) return warning;
+  if (utf8ByteLength(warning) <= TAIL_EVENT_MAX_BYTES) return warning;
   return JSON.stringify({
     event: "tail_warning",
     code: "event_too_large",
@@ -281,7 +276,7 @@ async function isTailActive(env, ns, worker) {
  * @param {RuntimeTailEnv} env
  * @param {{ ns?: string, worker?: string, payload?: unknown }} entry
  */
-export async function forwardTailEntry(env, entry) {
+async function forwardTailEntry(env, entry) {
   if (!entry?.ns || !entry?.worker || !entry?.payload) return;
   if (await isTailActive(env, entry.ns, entry.worker)) {
     await postEvent(env, entry.ns, entry.worker, entry.payload);

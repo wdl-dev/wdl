@@ -32,7 +32,7 @@ Main files:
 
 - Admin-host HTTP APIs use `x-admin-token`.
 - Control calls `env.AUTH.verify({ token, action, ns, requestId })`.
-- Auth exposes JSRPC methods: verify, issue, list, revoke.
+- Auth exposes JSRPC methods: verify, issue, delegatedIssue, list, revoke.
 - CLI uses the control URL; it does not talk directly to Redis or AWS for
   ordinary deploys.
 
@@ -161,9 +161,11 @@ Control lifecycle operations are split so each critical transition has one autho
   `POST /auth/delegated-tokens` uses action `auth.delegated_token.issue`, so
   `/auth/tokens` issue/list/revoke remain strict ops-only while `token-issuer`
   credentials can only ask Auth to materialize one configured template.
-- `/whoami` is the only namespace-less non-ops action. It is allowed for any valid token
-  because it reports only the current token's own principal, token id, request id, and
-  public diagnostics. `platformVersion` is the exact project release from the root
+- `/whoami` is a namespace-less self-introspection action allowed for every valid role,
+  including `token-issuer`. It reports only the current token's own principal, token
+  id, request id, and public diagnostics. Delegated issue is also namespace-less, but
+  requires a `token-issuer` credential and its template allowlist.
+  `platformVersion` is the exact project release from the root
   `VERSION` file, including the final counter that distinguishes WDL-only patches on
   the same workerd date. The raw workerd version and image revision are not returned.
   `minCliVersion` declares the oldest downstream CLI supported for the complete
@@ -183,7 +185,12 @@ Control lifecycle operations are split so each critical transition has one autho
   authorized shape. Missing action is deliberate: non-ops hit the auth unknown-action
   red line, while ops can still reach dispatcher/handler path and method validation
   instead of being rejected by auth. Known top-level route wrong-method cases such as
-  `/reload` return `405 method_not_allowed` after ops auth succeeds.
+  `/reload` return `405 method_not_allowed` after ops auth succeeds. Worker deploy,
+  promote, and whole-worker delete require an empty subpath; extra path segments return
+  `404 not_found` for ops without invoking the write handler. Auth token routes accept
+  only `/auth/tokens` or `/auth/tokens/<id>`; longer paths return `400 invalid_path` for
+  ops without calling Auth lifecycle methods. Wrong methods on those accepted auth path
+  shapes still return `405 method_not_allowed`.
 
 ## Redis / Storage Contracts
 
@@ -470,6 +477,9 @@ Verify outcomes are logged as success, reject, or error; 5xx outcomes are error 
 - Control is not topology-aware for gateway.
 - Auth tokens are bearer tokens; storage and revocation are Redis-backed.
 - Control APIs are admin/operator APIs, not tenant data-plane APIs.
-- Control/runtime/auth/CLI ship as one release. Do not add fake dual-shape fallbacks for
-  in-tree protocol response migrations unless a real external rollout requirement
-  exists.
+- Control/runtime/auth ship as one platform release. Do not add fake dual-shape
+  fallbacks for in-tree protocol response migrations unless a real external rollout
+  requirement exists. The downstream CLI is independently versioned and installed;
+  upgrading platform services does not upgrade CLI clients. Preserve the external
+  compatibility contract and minimum supported versions documented in
+  [CLI diagnostic discovery](cli.md#diagnostic-discovery).

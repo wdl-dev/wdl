@@ -5,7 +5,6 @@ import {
   d1ErrorResponse,
   readD1ActorControlRequest,
   readD1ActorQueryRequest,
-  sqliteBindParams,
 } from "d1-runtime-protocol";
 import { assertCurrentOwnerWithLeaseBudget } from "d1-runtime-owner-registry";
 import { d1QuerySuccessResponse, json, jsonError } from "d1-runtime-http";
@@ -368,7 +367,7 @@ export class D1DatabaseActor extends DurableObject {
     for (const statement of statements) {
       const ddl = parseIdempotentSchemaDdl(statement.sql);
       const existedBefore = ddl ? this.schemaObjectExists(ddl, leaseGuard) : null;
-      this.checkedSqlExec(statement.sql, sqliteBindParams(statement.params), leaseGuard);
+      this.checkedSqlExec(statement.sql, statement.params, leaseGuard);
       const statementChanged = this.statementChangedDb(statement.sql, 0, ddl, existedBefore);
       changedDb ||= statementChanged;
     }
@@ -463,7 +462,7 @@ export class D1DatabaseActor extends DurableObject {
     const ddl = parseIdempotentSchemaDdl(statement.sql);
     const existedBefore = ddl ? this.schemaObjectExists(ddl, leaseGuard) : null;
 
-    const cursor = this.checkedSqlExec(statement.sql, sqliteBindParams(statement.params), leaseGuard);
+    const cursor = this.checkedSqlExec(statement.sql, statement.params, leaseGuard);
     const results = resultFromCursor(
       cursor,
       resultsFormat,

@@ -439,7 +439,7 @@ export function authMockState() {
 }
 
 /** @param {string} event */
-export function authLogs(event) {
+function authLogs(event) {
   return authMockState().logs.filter((/** @type {any} */ entry) => entry.event === event);
 }
 

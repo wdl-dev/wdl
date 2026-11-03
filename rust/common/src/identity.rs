@@ -7,7 +7,7 @@
 
 use crate::worker_contract::parse_version_tag;
 
-pub fn is_valid_tenant_ns(ns: &str) -> bool {
+fn is_valid_tenant_ns(ns: &str) -> bool {
     let bytes = ns.as_bytes();
     if bytes.is_empty()
         || bytes.len() > 63

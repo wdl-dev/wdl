@@ -198,9 +198,9 @@ when intentionally keeping a mutable tag.
 Schema or cross-tier protocol changes require the owning module's maintenance
 procedure. In particular, the
 [Workflow schema-3 runbook](../docs/modules/workflows.md#deployment--rollout-notes)
-requires affected-surface quiescence, old-participant drain, and a coordinated
-state reset and startup sequence. Updating image references or forcing a rolling
-deployment does not perform those steps.
+requires affected-surface quiescence, old-participant drain, preservation-based
+offline migration, and a coordinated startup sequence. Updating image references
+or forcing a rolling deployment does not perform those steps.
 
 ## Services
 
@@ -330,7 +330,6 @@ wdl d1 create --ns __system__ s3-cleanup-state --control-url "$CONTROL_URL"
 (
   cd system-workers/s3-cleanup
   wdl d1 migrations apply --ns __system__ s3-cleanup-state --control-url "$CONTROL_URL"
-  npm install --ignore-scripts
 )
 
 printf '%s' "$S3_ENDPOINT" \

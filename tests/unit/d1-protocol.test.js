@@ -29,7 +29,6 @@ const {
   readD1ActorControlRequest,
   readD1ActorQueryRequest,
   readD1QueryRequest,
-  sqliteBindParams,
   slotOf,
 } = await loadD1Protocol();
 
@@ -223,11 +222,41 @@ test("D1 query wire bytes remain stable across representative and varint-boundar
   }
 });
 
-test("D1 protocol: restores wire byte arrays for SQLite binding", () => {
-  const blob = new Uint8Array([0, 127, 255]);
-  const params = sqliteBindParams(["x", 7, null, blob]);
-  assert.deepEqual(params.slice(0, 3), ["x", 7, null]);
-  assert.equal(params[3], blob);
+test("D1 protocol: normalizes and round-trips parameters with native BLOB bytes", async () => {
+  const blob = new Uint8Array([9, 0, 127, 255, 9]).subarray(1, 4);
+  const emptyBlob = new Uint8Array();
+  const query = normalizeQueryRequest({
+    namespace: "tenant-a",
+    databaseId: "main",
+    binding: "DB",
+    mode: "all",
+    statements: [{
+      sql: "select ?, ?, ?, ?, ?, ?, ?, ?, ?",
+      params: ["x", 7, null, true, false, 7n, -0, blob, emptyBlob],
+    }],
+  });
+  const expectedParams = ["x", 7, null, 1, 0, 7, 0, new Uint8Array([0, 127, 255]), emptyBlob];
+  assert.deepEqual(query.statements[0].params, expectedParams);
+  assert.equal(query.statements[0].params[7], blob);
+  assert.equal(query.statements[0].params[8], emptyBlob);
+
+  const decoded = await readD1QueryRequest(new Request("http://d1/internal/d1/query", {
+    method: "POST",
+    headers: { "content-type": D1_QUERY_CONTENT_TYPE },
+    body: encodeD1QueryRequest(query),
+  }));
+  const normalized = normalizeQueryRequest(decoded);
+  assert.deepEqual(normalized, query);
+  assert.equal(normalized.statements[0].params[7], decoded.statements[0].params[7]);
+  assert.equal(normalized.statements[0].params[8], decoded.statements[0].params[8]);
+
+  const owner = { dbKey: query.dbKey, taskId: "task-a", generation: 7 };
+  const actorQuery = await readD1ActorQueryRequest(new Request("http://d1-actor/query", {
+    method: "POST",
+    headers: { "content-type": D1_ACTOR_QUERY_CONTENT_TYPE },
+    body: encodeD1ActorQueryRequest(normalized, owner),
+  }));
+  assert.deepEqual(actorQuery, { ...query, owner });
 });
 
 test("D1 protocol: rejects unsupported bind parameter types", () => {

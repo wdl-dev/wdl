@@ -23,7 +23,7 @@ Control 跑在 system-runtime 的 `:8082`，通过 gateway admin-host 分支进�
 
 - Admin-host HTTP API 使用 `x-admin-token`。
 - Control 调用 `env.AUTH.verify({ token, action, ns, requestId })`。
-- Auth 暴露 JSRPC 方法：verify、issue、list、revoke。
+- Auth 暴露 JSRPC 方法：verify、issue、delegatedIssue、list、revoke。
 - CLI 使用 control URL；普通 deploy 不直接访问 Redis 或 AWS。
 
 ## Admin API Surface
@@ -80,8 +80,8 @@ Control lifecycle 操作会拆开处理，确保每个关键 transition 只有�
 - Worker delete lock value 由 `whole:` 或 `version:` 操作类型加服务端生成的随机 token 组成；`s3cleanup:<id>` task id 也由服务端生成。`x-request-id` 只用于诊断，客户端或重试可能复用它；不能把它用作 lock token 或 cleanup-task id。Delete、D1 migration 和 delegated issue lock 使用 `shared/redis-lock.js` 的 token-fenced primitive；release 按 token 限定且是 best-effort，因为 TTL expiry 会限制 advisory lock 泄漏时间，release error 不能覆盖操作的真实结果。Version delete 和 whole-worker delete 会在最终 lifecycle mutation 前续租一次，并在最终 WATCH snapshot 内验证 token，因此过期请求不能借替代 holder 的 lock 提交。
 - Auth 不是一层约定俗成的 middleware。`parseControlRoute()` 分配 action，control 把 action 和 namespace 发给 auth，auth 用存储的 token record 对照 `shared/auth-roles.js` 评估权限。Dispatcher 代码不应自己从 URL prefix 推断权限。
 - Delegated token issue 刻意不放进 direct `auth.token.*` lifecycle。`POST /auth/delegated-tokens` 使用 action `auth.delegated_token.issue`，因此 `/auth/tokens` issue/list/revoke 仍保持 strict ops-only；`token-issuer` credential 只能请求 Auth 按一个已配置 template materialize token。
-- `/whoami` 是唯一 namespace-less non-ops action。它对任何有效 token 开放，因为只报告当前 token 自己的 principal、token id、request id 和 public diagnostics。`platformVersion` 是根 `VERSION` 文件中的精确 project release，包含用于区分同一 workerd date 上 WDL-only patch 的末尾 counter；raw workerd version 和 image revision 不返回。`minCliVersion` 声明完整文档化 management surface 所支持的最老下游 CLI，它是 diagnostics metadata，不是 Control-side request enforcement。`urls.control` 是到达 control 的 public origin；当 ingress 提供单个 `x-forwarded-proto` 且值为 `http` 或 `https` 时，`/whoami` 会用该协议生成 `urls.control` 和 `urls.namespace`，否则回退到 control 看到的 request URL 协议。`urls.namespace` 只在 caller 是 tenant namespace token 且显式配置了 `PLATFORM_DOMAIN` 时返回；该门槛只校验 DNS 语法，任何语法合法的 hostname 都会通过，是否公网可达由运维负责。Control 绝不把未配置时的 `workers.local` fallback 伪装成 public URL。`urls.assets` 只在 `ASSETS_CDN_BASE` 是安全的绝对 `http`/`https` URL 时返回，并且会去掉 query 和 fragment。它不能扩展成 token list、token lookup 或携带 secret 的 diagnostics。
-- 只有 method、path length 和 verb 精确匹配 authorized shape 时，route shape 才带 `action`。缺 action 是有意行为：非 ops 会触发 auth unknown-action red line，ops 仍可到 dispatcher/handler 的 path 和 method validation，而不是被 auth 拦下。`/reload` 这类已知 top-level route 的 wrong-method case 会在 ops auth 通过后返回 `405 method_not_allowed`。
+- `/whoami` 是 namespace-less self-introspection action，对所有有效 role 开放，包括 `token-issuer`；它只报告当前 token 自己的 principal、token id、request id 和 public diagnostics。Delegated issue 同样不带 namespace，但要求 `token-issuer` credential 及其 template allowlist。`platformVersion` 是根 `VERSION` 文件中的精确 project release，包含用于区分同一 workerd date 上 WDL-only patch 的末尾 counter；raw workerd version 和 image revision 不返回。`minCliVersion` 声明完整文档化 management surface 所支持的最老下游 CLI，它是 diagnostics metadata，不是 Control-side request enforcement。`urls.control` 是到达 control 的 public origin；当 ingress 提供单个 `x-forwarded-proto` 且值为 `http` 或 `https` 时，`/whoami` 会用该协议生成 `urls.control` 和 `urls.namespace`，否则回退到 control 看到的 request URL 协议。`urls.namespace` 只在 caller 是 tenant namespace token 且显式配置了 `PLATFORM_DOMAIN` 时返回；该门槛只校验 DNS 语法，任何语法合法的 hostname 都会通过，是否公网可达由运维负责。Control 绝不把未配置时的 `workers.local` fallback 伪装成 public URL。`urls.assets` 只在 `ASSETS_CDN_BASE` 是安全的绝对 `http`/`https` URL 时返回，并且会去掉 query 和 fragment。它不能扩展成 token list、token lookup 或携带 secret 的 diagnostics。
+- 只有 method、path length 和 verb 精确匹配 authorized shape 时，route shape 才带 `action`。缺 action 是有意行为：非 ops 会触发 auth unknown-action red line，ops 仍可到 dispatcher/handler 的 path 和 method validation，而不是被 auth 拦下。`/reload` 这类已知 top-level route 的 wrong-method case 会在 ops auth 通过后返回 `405 method_not_allowed`。Worker deploy、promote 和 whole-worker delete 要求空 subpath；额外 path segment 对 ops 返回 `404 not_found`，不调用 write handler。Auth token route 只接受 `/auth/tokens` 或 `/auth/tokens/<id>`；更长的 path 对 ops 返回 `400 invalid_path`，不调用 Auth lifecycle method。上述合法 auth path shape 的错误 method 仍返回 `405 method_not_allowed`。
 
 ## Redis / Storage 合同
 
@@ -219,4 +219,4 @@ Verify outcome 记录为 success、reject 或 error；5xx outcome 是 error log�
 - Control 不感知 gateway 拓扑。
 - Auth token 是 bearer token；存储和 revoke 基于 Redis。
 - Control API 是 admin/operator API，不是 tenant data-plane API。
-- Control/runtime/auth/CLI 作为一个 release 交付。除非存在真实外部 rollout 要求，不要为 in-tree protocol response migration 增加假的双 shape fallback。
+- Control/runtime/auth 作为一个 platform release 交付。除非存在真实外部 rollout 要求，不要为 in-tree protocol response migration 增加假的双 shape fallback。下游 CLI 独立版本化和安装；升级平台服务不会升级 CLI client。保留 [CLI diagnostic discovery](cli.zh.md#diagnostic-discovery) 中声明的外部兼容合同与最低支持版本。

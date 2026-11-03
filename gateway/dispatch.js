@@ -53,7 +53,7 @@ import { parseVersion } from "shared-worker-contract";
  * @param {{ namespace?: string | null, worker?: string | null, version?: string | null }} [context]
  * @returns {GatewayNotFoundDispatch}
  */
-export function notFoundDispatch(route, context = {}) {
+function notFoundDispatch(route, context = {}) {
   return {
     kind: "not_found",
     route,

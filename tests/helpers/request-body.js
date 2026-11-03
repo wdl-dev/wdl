@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
  * @param {RequestInit} [init]
  * @returns {RequestInit}
  */
-export function jsonRequestInit(body, init = {}) {
+function jsonRequestInit(body, init = {}) {
   return { ...init, body: JSON.stringify(body) };
 }
 
@@ -32,7 +32,7 @@ export function requestBodyString(init, label = "request body") {
  * @param {{ body?: unknown } | RequestInit | undefined} init
  * @param {string} [label]
  */
-export function parseJsonRequestBody(init, label = "request body") {
+function parseJsonRequestBody(init, label = "request body") {
   const body = requestBodyString(init, label);
   return JSON.parse(body);
 }

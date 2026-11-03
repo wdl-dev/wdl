@@ -193,7 +193,7 @@ export function encodeReferrerMember({ callerNs, callerWorker, callerVersion, bi
  * @param {unknown} raw
  * @returns {ReferrerMember | null}
  */
-export function decodeReferrerMember(raw) {
+function decodeReferrerMember(raw) {
   if (typeof raw !== "string") return null;
   let obj;
   try { obj = JSON.parse(raw); } catch { return null; }
@@ -396,7 +396,7 @@ export function parseControlRoute(pathname, method) {
   }
 
   // /auth/tokens, /auth/tokens/<id>
-  if (segs[0] === "auth" && segs[1] === "tokens") {
+  if (segs[0] === "auth" && segs[1] === "tokens" && segs.length <= 3) {
     const route = {
       kind: "authTokens",
       scopeRoute: "auth_tokens",

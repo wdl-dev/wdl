@@ -171,7 +171,7 @@ function forceNativeDeleteAllPreservesAlarm(workerCode) {
  * @param {DoRuntimeContext} ctx
  * @param {DoInvoke} invoke
  */
-export function buildDoEnv(meta, nsSecrets, workerSecrets, env, ctx, invoke) {
+function buildDoEnv(meta, nsSecrets, workerSecrets, env, ctx, invoke) {
   const out = buildWorkerEnv(
     meta,
     nsSecrets,

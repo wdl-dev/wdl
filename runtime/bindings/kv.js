@@ -43,7 +43,7 @@ import {
 export const KV_VALUE_MAX_BYTES = 25 * 1024 * 1024;
 export const KV_METADATA_MAX_BYTES = 1024;
 export const KV_READ_RESPONSE_MAX_BYTES = 36 * 1024 * 1024;
-export const KV_LIST_LIMIT_MAX = 1000;
+const KV_LIST_LIMIT_MAX = 1000;
 const KV_LIST_LIMIT_DEFAULT = 1000;
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder();

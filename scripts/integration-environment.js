@@ -4,7 +4,7 @@ import path from "node:path";
 export const ROOT = path.resolve(import.meta.dirname, "..");
 export const COMPILE_WORKERD_LOCAL_ARGS = ["scripts/compile-workerd-configs.js", "--local"];
 export const DOCKER_COMPOSE_BUILD_ARGS = ["compose", "build", "gateway", "workflows"];
-export const DEFAULT_WDL_CLI_COMMAND = "wdl";
+const DEFAULT_WDL_CLI_COMMAND = "wdl";
 export const LOCAL_ADMIN_TOKEN = "local-dev-token";
 export const ADMIN_HOST_HEADER = "admin.test";
 export const LOCAL_CONNECT_HOST = "localhost";

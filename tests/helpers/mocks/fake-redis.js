@@ -1064,7 +1064,7 @@ export function createFakeRedisSession(state, options = {}) {
  * @param {{ nowMs?: () => number, onExecFailure?: (ops: unknown[][], remainingFailures: number) => void }} [options]
  * @param {{ assertUnchanged: () => void, clear: () => void }} [watchContext]
  */
-export function createFakeRedisMulti(state, options = {}, watchContext = undefined) {
+function createFakeRedisMulti(state, options = {}, watchContext = undefined) {
   /** @type {unknown[][]} */
   const ops = [];
   const chain = {

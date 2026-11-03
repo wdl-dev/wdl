@@ -5,11 +5,12 @@ use axum::{
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
+#[cfg(any(test, feature = "axum"))]
 use subtle::ConstantTimeEq;
 
 pub const INTERNAL_AUTH_HEADER: &str = "x-wdl-internal-auth";
-pub const INTERNAL_AUTH_ENV: &str = "WDL_INTERNAL_AUTH_TOKEN";
-pub const INTERNAL_AUTH_PREVIOUS_ENV: &str = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN";
+const INTERNAL_AUTH_ENV: &str = "WDL_INTERNAL_AUTH_TOKEN";
+const INTERNAL_AUTH_PREVIOUS_ENV: &str = "WDL_INTERNAL_AUTH_PREVIOUS_TOKEN";
 pub const INTERNAL_AUTH_FAILURE_CODE: &str = "internal_auth_failed";
 pub const INTERNAL_AUTH_FAILURE_MESSAGE: &str = "Internal authentication failed";
 
@@ -51,7 +52,8 @@ pub fn internal_auth_tokens_from_env() -> Result<InternalAuthTokens, String> {
     Ok(InternalAuthTokens { current, previous })
 }
 
-pub fn internal_auth_matches(actual: Option<&str>, expected: &str) -> bool {
+#[cfg(any(test, feature = "axum"))]
+fn internal_auth_matches(actual: Option<&str>, expected: &str) -> bool {
     let Some(actual) = actual else {
         return false;
     };
@@ -70,7 +72,8 @@ pub fn internal_auth_matches(actual: Option<&str>, expected: &str) -> bool {
     bool::from(equal)
 }
 
-pub fn internal_auth_matches_any(actual: Option<&str>, expected: &InternalAuthTokens) -> bool {
+#[cfg(any(test, feature = "axum"))]
+fn internal_auth_matches_any(actual: Option<&str>, expected: &InternalAuthTokens) -> bool {
     internal_auth_matches(actual, expected.current.as_str())
         || expected
             .previous
@@ -79,7 +82,7 @@ pub fn internal_auth_matches_any(actual: Option<&str>, expected: &InternalAuthTo
 }
 
 #[cfg(feature = "axum")]
-pub fn internal_auth_header_value(headers: &HeaderMap) -> Option<&str> {
+fn internal_auth_header_value(headers: &HeaderMap) -> Option<&str> {
     let mut values = headers.get_all(INTERNAL_AUTH_HEADER).iter();
     let value = values.next()?.to_str().ok()?;
     if values.next().is_some() {

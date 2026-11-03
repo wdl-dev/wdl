@@ -224,17 +224,17 @@ async function dispatchWorkerRoute(routeInfo, context) {
     });
   }
 
-  // `ops` can reach actionless worker routes too; these POST checks are
-  // the method gate for deploy/promote/delete.
-  if (method === "POST" && action === "deploy") {
+  // `ops` can reach actionless worker routes too; writes still require
+  // the exact method and path shape.
+  if (method === "POST" && action === "deploy" && subPath.length === 0) {
     return await handleDeploy({ request, env, ns, name, requestId });
   }
 
-  if (method === "POST" && action === "promote") {
+  if (method === "POST" && action === "promote" && subPath.length === 0) {
     return await handlePromote({ request, env, ns, name, requestId });
   }
 
-  if (method === "POST" && action === "delete") {
+  if (method === "POST" && action === "delete" && subPath.length === 0) {
     return await handleDelete({
       request, env, url, ns, name,
       principal: auth.principal,
@@ -285,7 +285,7 @@ export default {
 
       // Authorize before reading body / touching Redis.
       // Dispatch params may exist for 404/405 handler continuity, but auth
-      // sees the old classifier shape: no exact action match means no ns.
+      // receives no ns unless the exact route shape has an action.
       const authRouteInfo = typeof routeInfo.action === "string"
         ? { action: routeInfo.action, ns: routeInfo.ns }
         : {};
@@ -348,7 +348,7 @@ export default {
 
       if (routeInfo.kind !== "worker") {
         scope.setRoute("invalid_path");
-        return finalize(jsonError(400, "invalid_path", "Invalid path. Use /ns/<ns>/worker/<name>/<action>"));
+        return finalize(jsonError(400, "invalid_path", "Invalid control API path"));
       }
       return finalize(await dispatchWorkerRoute(routeInfo, {
         request, env, url, method, auth, requestId,

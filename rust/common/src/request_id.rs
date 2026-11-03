@@ -4,7 +4,8 @@ use axum::http::HeaderMap;
 #[cfg(feature = "axum")]
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
-pub fn sanitize_request_id(raw: &str) -> Option<String> {
+#[cfg(any(test, feature = "axum"))]
+fn sanitize_request_id(raw: &str) -> Option<String> {
     let first = raw
         .split(',')
         .next()?

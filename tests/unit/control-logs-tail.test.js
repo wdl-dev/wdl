@@ -6,6 +6,7 @@ import {
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { compileSharedAuthRoles } from "../helpers/load-auth-roles.js";
+import { assertJsonResponse } from "../helpers/response-json.js";
 import { delay, waitUntil } from "../helpers/timing.js";
 
 const { sharedAuthRolesUrl } = await compileSharedAuthRoles();
@@ -72,11 +73,13 @@ function loadLogsTailHandler(options = {}) {
     [
       /import \{ controlTailRedis, errorMessage, jsonError, requireControlLog \} from "control-shared";/,
       `import { errorMessage } from ${JSON.stringify(repositoryFileUrl("shared/errors.js"))};
-       const jsonError = (status, error, message) =>
-         Response.json({ error, message }, { status });
+       import { jsonError } from ${JSON.stringify(repositoryFileUrl("shared/respond.js"))};
        const state = /** @type {any} */ (globalThis).__tailState;
        const requireControlLog = () => state.log;
-       const controlTailRedis = () => state.dataRedis || state.redis;`,
+       const controlTailRedis = () => {
+         state.redisAccesses += 1;
+         return state.dataRedis || state.redis;
+       };`,
     ],
   );
   return importRepositoryModuleFresh("control/handlers/logs-tail.js", replacements);
@@ -86,6 +89,7 @@ function resetTailState() {
   /** @type {any} */ (globalThis).__tailSessions = [];
   /** @type {any} */ (globalThis).__tailState = {
     redis: {},
+    redisAccesses: 0,
     dataRedis: {
       /** @type {Array<[string, string[], string[]]>} */
       evalCalls: [],
@@ -133,6 +137,51 @@ async function readText(reader) {
 /** @param {string} value */
 function utf8(value) {
   return new TextEncoder().encode(value);
+}
+
+for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]) {
+  test(`logs tail rejects ${method} before Redis access or session activation`, { timeout: 1000 }, async () => {
+    resetTailState();
+    const { handle } = await loadLogsTailHandler();
+    /** @type {Promise<unknown>[]} */
+    const waitUntilPromises = [];
+    const response = await handle({
+      request: new Request("http://control.test/ns/demo/logs/tail?worker=foo", {
+        method,
+        headers: { "accept-encoding": "gzip" },
+      }),
+      env: { REDIS_ADDR: "redis://unit" },
+      ctx: { waitUntil(/** @type {Promise<unknown>} */ promise) { waitUntilPromises.push(promise); } },
+      ns: "demo",
+      requestId: "rid-tail-method",
+    });
+    try {
+      assert.equal(response.status, 405);
+      assert.equal(response.headers.get("allow"), "GET");
+      assert.equal(response.headers.get("content-encoding"), null);
+      assert.equal(response.headers.get("vary"), null);
+      const state = /** @type {any} */ (globalThis).__tailState;
+      assert.equal(state.redisAccesses, 0);
+      assert.equal(state.dataRedis.sessionCalls, 0);
+      assert.deepEqual(state.dataRedis.evalCalls, []);
+      assert.equal(state.dataRedis.activeFields.size, 0);
+      assert.deepEqual(/** @type {any} */ (globalThis).__tailSessions, []);
+      assert.deepEqual(waitUntilPromises, []);
+      if (method === "HEAD") {
+        assert.equal(response.body, null);
+        assert.equal(await response.text(), "");
+      } else {
+        await assertJsonResponse(response, 405, {
+          error: "method_not_allowed",
+          message: "Method not allowed",
+        });
+      }
+    } finally {
+      // A missing gate returns an SSE stream; cancel it even on assertion failure.
+      await response.body?.cancel().catch(() => {});
+      await Promise.all(waitUntilPromises);
+    }
+  });
 }
 
 test("RedisTailCursor uses the cross-language stream key contract", async () => {

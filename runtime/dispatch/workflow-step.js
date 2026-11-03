@@ -205,7 +205,7 @@ class WorkflowSuspended extends Error {
 }
 
 /** @param {unknown} err */
-export function isWorkflowSuspended(err) {
+function isWorkflowSuspended(err) {
   try {
     return err instanceof WorkflowSuspended;
   } catch {

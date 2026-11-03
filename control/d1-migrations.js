@@ -149,7 +149,7 @@ async function ensureMigrationsTable(env, ns, databaseId, requestId) {
  * @param {string} [requestId]
  * @returns {Promise<{ ok: true, migrations: AppliedMigration[] } | { ok: false, status: number, body: unknown }>}
  */
-export async function readAppliedMigrations(env, ns, databaseId, requestId = undefined) {
+async function readAppliedMigrations(env, ns, databaseId, requestId = undefined) {
   const created = await ensureMigrationsTable(env, ns, databaseId, requestId);
   if (!created.ok) return { ok: false, status: created.status, body: created.body };
   return await readAppliedMigrationsWithoutCreate(env, ns, databaseId, requestId);

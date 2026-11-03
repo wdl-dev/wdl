@@ -23,6 +23,8 @@ Rust 服务（`scheduler`、`redis-proxy`、`workflows`、`supervisor`）使用�
 - Control SSE endpoint 服务 `wdl tail`。
 - `redis-proxy` active-set 和 append APIs。
 
+Control tail endpoint 只接受 `GET`。正常授权之后，其它到达 handler 的方法会返回 `405 method_not_allowed` 和 `Allow: GET`，且不会获取 tail Redis client、创建 session 或写 activation state。`HEAD` 返回相同 status 和 Allow header，但 body 为空。没有已授权 route action 的 non-ops 请求仍由 Auth 在 handler dispatch 前拒绝。
+
 ## Tail 投递模型
 
 Live tail 是 activation-gated pipe，不是持久日志系统：

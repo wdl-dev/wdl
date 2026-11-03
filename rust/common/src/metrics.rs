@@ -248,7 +248,7 @@ pub fn prometheus_response(metrics: &MetricStore) -> Response {
     response
 }
 
-pub fn labels_map(labels: &[(&str, &str)]) -> BTreeMap<String, String> {
+fn labels_map(labels: &[(&str, &str)]) -> BTreeMap<String, String> {
     labels
         .iter()
         .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
@@ -310,7 +310,7 @@ fn write_metric_key(out: &mut String, name: &str, labels: &[(&str, &str)]) {
     }
 }
 
-pub fn format_labels(labels: &BTreeMap<String, String>) -> String {
+fn format_labels(labels: &BTreeMap<String, String>) -> String {
     if labels.is_empty() {
         return String::new();
     }
@@ -322,7 +322,7 @@ pub fn format_labels(labels: &BTreeMap<String, String>) -> String {
     format!("{{{body}}}")
 }
 
-pub fn escape_label(value: &str) -> String {
+fn escape_label(value: &str) -> String {
     value
         .replace('\\', r"\\")
         .replace('\n', r"\n")

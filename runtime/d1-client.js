@@ -74,11 +74,6 @@ function d1ParameterError(message) {
   return null;
 }
 
-/** @param {string} sql */
-export function splitExecStatements(sql) {
-  return splitSqlStatements(sql);
-}
-
 export class D1Error extends Error {
   /**
    * @param {string} message
@@ -390,7 +385,7 @@ export class D1Database {
         category: "invalid-request",
       });
     }
-    const statements = splitExecStatements(sql).map((statement) => ({
+    const statements = splitSqlStatements(sql).map((statement) => ({
       sql: statement.sql,
       params: statement.params.map(normalizeD1Param),
     }));

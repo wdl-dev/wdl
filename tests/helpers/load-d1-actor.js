@@ -94,9 +94,8 @@ const source = applyModuleReplacements(readRepositoryFile("d1-runtime/actor.js")
     "class DurableObject {}"
   ],
   [
-    /import \{\n {2}classifyD1Error,\n {2}D1ProtocolError,\n {2}d1ErrorResponse,\n {2}readD1ActorControlRequest,\n {2}readD1ActorQueryRequest,\n {2}sqliteBindParams,\n\} from "d1-runtime-protocol";/,
-    `import { classifyD1Error, D1ProtocolError, d1ErrorResponse, readD1ActorControlRequest, readD1ActorQueryRequest } from ${JSON.stringify(protocolUrl)};
-     import { sqliteBindParams } from ${JSON.stringify(d1ProtocolUrl)};`
+    /import \{\n {2}classifyD1Error,\n {2}D1ProtocolError,\n {2}d1ErrorResponse,\n {2}readD1ActorControlRequest,\n {2}readD1ActorQueryRequest,\n\} from "d1-runtime-protocol";/,
+    `import { classifyD1Error, D1ProtocolError, d1ErrorResponse, readD1ActorControlRequest, readD1ActorQueryRequest } from ${JSON.stringify(protocolUrl)};`
   ],
   [
     /import \{ assertCurrentOwnerWithLeaseBudget \} from "d1-runtime-owner-registry";/,

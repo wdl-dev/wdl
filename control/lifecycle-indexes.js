@@ -7,7 +7,7 @@ import {
 import { QUEUE_CONSUMER_INDEX_KEY, queueConsumerKey } from "shared-queue-keys";
 import { cronSequenceKey, workerVersionsKey } from "shared-worker-contract";
 
-export const CRON_WORKER_INDEX_KEY = "cron:index:workers";
+const CRON_WORKER_INDEX_KEY = "cron:index:workers";
 
 /**
  * @typedef {import("shared-redis").RedisMulti} RedisMulti

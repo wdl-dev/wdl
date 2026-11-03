@@ -9,7 +9,7 @@ import { installMockProperty } from "./mock-global.js";
  *
  * @returns {CapturedConsole & { restore: () => void }}
  */
-export function installCapturedConsole() {
+function installCapturedConsole() {
   /** @type {string[]} */
   const stdout = [];
   /** @type {string[]} */

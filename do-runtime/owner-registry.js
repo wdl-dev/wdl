@@ -88,7 +88,7 @@ return 1
  */
 
 /** @param {DoEnv} env */
-export function redisClient(env) {
+function redisClient(env) {
   return createRedisClient(env, "registry_unavailable", "DO owner registry is not configured");
 }
 
@@ -104,7 +104,7 @@ export function ownerLeaseGuardMs(env) {
 }
 
 /** @param {DoEnv} env */
-export function renewConcurrency(env) {
+function renewConcurrency(env) {
   return boundedPositiveIntEnv(env, "DO_RENEW_CONCURRENCY", DEFAULT_RENEW_CONCURRENCY, MAX_RENEW_CONCURRENCY);
 }
 
@@ -629,7 +629,7 @@ export async function assertCurrentOwnerWithLeaseBudget(env, owner, options) {
  * @param {DoEnv} env
  * @param {DoOwner} owner
  */
-export async function renewOwner(env, owner) {
+async function renewOwner(env, owner) {
   const localTask = await resolveTaskIdentity(env);
   const client = redisClient(env);
   const key = ownerKeyOf(owner.ownerKey);

@@ -29,7 +29,7 @@ import {
  */
 
 /** @param {unknown} value @param {QueueMessageContentType} contentType */
-export function encodeQueueMessageBody(value, contentType) {
+function encodeQueueMessageBody(value, contentType) {
   if (contentType === "text") return Buffer.from(String(value), "utf8").toString("base64");
   if (contentType === "json") return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
   if (contentType === "bytes") {

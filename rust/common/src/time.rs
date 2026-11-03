@@ -8,7 +8,7 @@ pub fn now_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
-pub fn duration_ms_for_log(duration: Duration) -> u64 {
+pub(crate) fn duration_ms_for_log(duration: Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
 

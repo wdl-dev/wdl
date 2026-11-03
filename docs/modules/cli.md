@@ -133,11 +133,21 @@ optional URL hints should be displayed as unavailable rather than guessed.
 
 ## Deploy Pipeline
 
-`wdl deploy <project>` is the supported worker bundling path. It shells out to the
-project-local `wrangler` binary, or to `WDL_WRANGLER_BIN` when that env var is set, and
-uses Wrangler's dry-run output as the bundle source. The CLI sets a dummy
-`CLOUDFLARE_API_TOKEN` for dry-run bundling so ordinary projects do not need real
-Cloudflare credentials to build locally.
+`wdl deploy <project>` is the supported worker bundling path. It uses Wrangler's
+dry-run output as the bundle source and resolves Wrangler in this order:
+
+1. `WDL_WRANGLER_BIN`, when explicitly set.
+2. The Worker project's local Wrangler installation.
+3. Wrangler bundled with the CLI package.
+4. Wrangler found on `PATH`.
+
+If none is found, the CLI uses `npx --yes wrangler@^4` only when
+`WDL_ALLOW_NPX_WRANGLER=1` is explicitly set. This fallback may access the npm
+registry and is disabled by default. A project-local Wrangler installation is not
+required when using the CLI's bundled version.
+
+The CLI sets a dummy `CLOUDFLARE_API_TOKEN` for dry-run bundling so ordinary
+projects do not need real Cloudflare credentials to build locally.
 
 WDL worker names follow the platform grammar, not Wrangler's narrower deployment-name
 grammar: `[A-Za-z0-9][A-Za-z0-9_-]{0,254}`. Uppercase letters, digits, underscores, and

@@ -85,7 +85,7 @@ export function validateS3CleanupTaskInput({ taskId, prefixes, source }, caller 
  * @param {string} [caller]
  * @returns {S3CleanupIntent}
  */
-export function s3CleanupIntent(
+function s3CleanupIntent(
   { taskId, prefixes, source, nowMs = Date.now() },
   caller = "s3CleanupTask"
 ) {

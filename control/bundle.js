@@ -24,7 +24,7 @@ import { WORKFLOW_DEFINITIONS_MAX_COUNT, workflowDeclarationsFit } from "control
 import { assertCanonicalBase64 } from "base64.js";
 import PACKAGE_JSON_SOURCE from "wdl-package-json-source";
 
-export class BundleConfigError extends Error {
+class BundleConfigError extends Error {
   /** @param {number} status @param {string} code @param {string} message */
   constructor(status, code, message) {
     super(message);
@@ -267,7 +267,7 @@ export function normalizeWorkflows(workflows) {
 }
 
 /** @param {unknown} vars */
-export function normalizeVars(vars) {
+function normalizeVars(vars) {
   if (vars === undefined || vars === null) return undefined;
   if (typeof vars !== "object" || Array.isArray(vars)) {
     throw new Error("[vars] must be an object");

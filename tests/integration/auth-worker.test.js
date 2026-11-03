@@ -129,6 +129,82 @@ test("issue → verify → revoke round-trip on a tenant ns", async () => {
   assert.equal(whoami.status, 401);
 });
 
+test("ops auth token suffixes do not issue or revoke tokens", async () => {
+  const ns = uniqueNs("auth-suffix");
+  const issued = await adminPost("/auth/tokens", { ns });
+  assert.equal(issued.status, 201);
+  const before = await adminGet("/auth/tokens");
+  assert.equal(before.status, 200);
+
+  for (const method of ["POST", "GET", "DELETE"]) {
+    const rejected = await fetchWithToken(ADMIN_TOKEN, `/auth/tokens/${issued.json.tokenId}/extra`, {
+      method,
+      body: method === "POST" ? { ns, label: "must-not-be-issued" } : undefined,
+    });
+    assert.equal(rejected.status, 400, rejected.text);
+    assert.equal(rejected.json.error, "invalid_path");
+  }
+
+  for (const [method, path] of [
+    ["DELETE", "/auth/tokens"],
+    ["POST", `/auth/tokens/${issued.json.tokenId}`],
+  ]) {
+    const rejected = await fetchWithToken(ADMIN_TOKEN, path, { method });
+    assert.equal(rejected.status, 405, rejected.text);
+    assert.equal(rejected.json.error, "method_not_allowed");
+  }
+
+  const after = await adminGet("/auth/tokens");
+  assert.equal(after.status, 200);
+  assert.deepEqual(after.json.tokens, before.json.tokens);
+  const stillValid = await fetchWithToken(issued.json.token, "/whoami");
+  assert.equal(stillValid.status, 200, stillValid.text);
+
+  const revoked = await fetchWithToken(ADMIN_TOKEN, `/auth/tokens/${issued.json.tokenId}`, { method: "DELETE" });
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.json.revoked, true);
+});
+
+test("non-ops suffix requests remain rejected before worker or token mutation", async () => {
+  const ns = uniqueNs("auth-suffix-ns");
+  const issued = await adminPost("/auth/tokens", { ns });
+  assert.equal(issued.status, 201);
+  const base = `/ns/${ns}/worker/hello`;
+  const bundle = { code: "export default { fetch() { return new Response('ok'); } };" };
+  const deployed = await fetchWithToken(issued.json.token, `${base}/deploy`, {
+    method: "POST",
+    body: bundle,
+  });
+  assert.equal(deployed.status, 201, deployed.text);
+
+  for (const action of ["deploy", "promote", "delete"]) {
+    const rejected = await fetchWithToken(issued.json.token, `${base}/${action}/extra`, {
+      method: "POST",
+      body: { ...bundle, version: deployed.json.version },
+    });
+    assert.equal(rejected.status, 403, rejected.text);
+    assert.equal(rejected.json.error, "unknown_action_requires_ops");
+  }
+  for (const method of ["POST", "GET", "DELETE"]) {
+    const rejected = await fetchWithToken(issued.json.token, `/auth/tokens/${issued.json.tokenId}/extra`, {
+      method,
+      body: method === "POST" ? { ns } : undefined,
+    });
+    assert.equal(rejected.status, 403, rejected.text);
+    assert.equal(rejected.json.error, "unknown_action_requires_ops");
+  }
+
+  const versions = await adminGet(`${base}/versions`);
+  assert.equal(versions.status, 200);
+  assert.deepEqual(versions.json.versions, [{ version: deployed.json.version, active: false }]);
+  const tokens = await adminGet(`/auth/tokens?ns=${ns}`);
+  assert.equal(tokens.status, 200);
+  assert.equal(tokens.json.tokens.length, 1);
+  assert.equal(tokens.json.tokens[0].tokenId, issued.json.tokenId);
+  const stillValid = await fetchWithToken(issued.json.token, "/whoami");
+  assert.equal(stillValid.status, 200, stillValid.text);
+});
+
 test("token-issuer creates a delegated tenant ns token from server template", async () => {
   const bootstrapDelegated = await adminPost("/auth/delegated-tokens", {
     template: "wdl-chat-ns-pool",

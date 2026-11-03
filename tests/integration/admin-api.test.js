@@ -31,6 +31,46 @@ test("deploy + versions round-trip", async () => {
   assert.deepEqual(v.json.versions, [{ version: "v1", active: false }]);
 });
 
+test("worker write suffixes do not deploy, promote, or delete", async () => {
+  const base = "/ns/exact-worker-path/worker/hello";
+  const bundle = { code: "export default { fetch() { return new Response('ok'); } };" };
+
+  const invalidDeploy = await adminPost(`${base}/deploy/extra`, bundle);
+  assert.equal(invalidDeploy.status, 404);
+  assert.equal(invalidDeploy.json.error, "not_found");
+  const empty = await adminGet(`${base}/versions`);
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.json.versions, []);
+
+  const deployed = await adminPost(`${base}/deploy`, bundle);
+  assert.equal(deployed.status, 201);
+  assert.equal(deployed.json.version, "v1");
+
+  const invalidPromote = await adminPost(`${base}/promote/extra`, { version: "v1" });
+  assert.equal(invalidPromote.status, 404);
+  assert.equal(invalidPromote.json.error, "not_found");
+  const inactive = await adminGet(`${base}/versions`);
+  assert.equal(inactive.status, 200);
+  assert.deepEqual(inactive.json.versions, [{ version: "v1", active: false }]);
+
+  const promoted = await adminPost(`${base}/promote`, { version: "v1" });
+  assert.equal(promoted.status, 200);
+
+  const invalidDelete = await adminPost(`${base}/delete/preview`, {});
+  assert.equal(invalidDelete.status, 404);
+  assert.equal(invalidDelete.json.error, "not_found");
+  const active = await adminGet(`${base}/versions`);
+  assert.equal(active.status, 200);
+  assert.deepEqual(active.json.versions, [{ version: "v1", active: true }]);
+
+  const deleted = await adminPost(`${base}/delete`, {});
+  assert.equal(deleted.status, 200);
+  assert.equal(deleted.json.deleted, true);
+  const removed = await adminGet(`${base}/versions`);
+  assert.equal(removed.status, 200);
+  assert.deepEqual(removed.json.versions, []);
+});
+
 test("deploy increments version", async () => {
   await adminPost("/ns/test2/worker/x/deploy", { code: "export default { fetch(){return new Response('a')} };" });
   const d2 = await adminPost("/ns/test2/worker/x/deploy", { code: "export default { fetch(){return new Response('b')} };" });

@@ -30,7 +30,7 @@ import {
 
 // Narrower than SECRET_KEY_RE (no lowercase) so platform slot names read
 // as registered identifiers rather than local vars.
-export const PLATFORM_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
+const PLATFORM_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
 
 /**
  * @typedef {Record<string, unknown> & { type?: string, id?: unknown, service?: unknown, ns?: unknown, entrypoint?: unknown, deliveryDelaySeconds?: unknown, databaseId?: unknown, databaseName?: unknown, bucketName?: unknown, className?: unknown, version?: string, requiredCallerSecrets?: unknown, doStorageId?: string }} BindingSpec

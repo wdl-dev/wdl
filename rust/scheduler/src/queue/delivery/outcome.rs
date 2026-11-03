@@ -154,8 +154,9 @@ pub(crate) fn decide_outcome(res: &RuntimeResponse, messages: Vec<QueueMessage>)
         }
     }
     // Runtime always wraps the handler return in `{outcome, result, ...}`
-    // (runtime/index.js#/_queued). Anything outside that envelope is a
-    // protocol violation — fall through to retry-all rather than guess.
+    // (runtime/dispatch.js#handleQueuedDispatch, via runtime/internal.js#/_queued).
+    // Anything outside that envelope is a protocol violation; fall through to
+    // retry-all rather than guess.
     let Some(result_value) = json.get("result") else {
         return OutcomePlan::RetryAll {
             kind: "handler_error",

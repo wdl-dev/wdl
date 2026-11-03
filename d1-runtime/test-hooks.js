@@ -1,7 +1,6 @@
 import {
   D1ProtocolError,
   normalizeQueryRequest,
-  sqliteBindParams,
 } from "d1-runtime-protocol";
 import { redisClient } from "d1-runtime-owner-registry";
 
@@ -90,7 +89,7 @@ async function holdTransactionForTest(actor, owner, statements, holdMs) {
   );
   actor.state.storage.transactionSync(() => {
     for (const statement of statements) {
-      actor.sql.exec(statement.sql, ...sqliteBindParams(statement.params));
+      actor.sql.exec(statement.sql, ...statement.params);
     }
     const deadline = Date.now() + ms;
     while (Date.now() < deadline) {

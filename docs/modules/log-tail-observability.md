@@ -27,6 +27,12 @@ JSON logs and service-specific Prometheus metrics.
 - Control SSE endpoint for `wdl tail`.
 - `redis-proxy` active-set and append APIs.
 
+The Control tail endpoint accepts only `GET`. After normal authorization, other
+methods reaching the handler return `405 method_not_allowed` with `Allow: GET`
+before acquiring a tail Redis client, opening a session, or writing activation state.
+`HEAD` returns the same status and Allow header with an empty body. Non-ops requests
+without an authorized route action remain rejected by Auth before handler dispatch.
+
 ## Tail Delivery Model
 
 Live tail is an activation-gated pipe, not a durable logging system:

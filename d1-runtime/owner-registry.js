@@ -465,7 +465,7 @@ async function waitForOwnedActorsToDrain(env, entries) {
 }
 
 /** @param {D1Env} env @param {D1Owner} owner */
-export async function renewOwner(env, owner) {
+async function renewOwner(env, owner) {
   const client = redisClient(env);
   const key = ownerKeyOf(owner.dbKey);
   const localTask = await resolveTaskIdentity(env);

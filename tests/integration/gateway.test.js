@@ -260,7 +260,7 @@ test("admin host does not route runtime internal endpoint names to runtime", asy
   });
   await assertIntegrationJson(res, 400, {
     error: "invalid_path",
-    message: "Invalid path. Use /ns/<ns>/worker/<name>/<action>",
+    message: "Invalid control API path",
   });
 });
 

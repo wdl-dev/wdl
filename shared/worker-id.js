@@ -14,15 +14,6 @@ export function parseWorkerId(workerId) {
   return parts;
 }
 
-/** @param {unknown} workerId */
-export function parseWorkerIdObject(workerId) {
-  const parts = parseWorkerId(typeof workerId === "string" ? workerId : null);
-  if (!parts) {
-    return { namespace: "", worker: "", version: "" };
-  }
-  return { namespace: parts[0], worker: parts[1], version: parts[2] };
-}
-
 /**
  * @param {string | null | undefined} workerId
  * @param {(ns: unknown) => boolean} nsValidator

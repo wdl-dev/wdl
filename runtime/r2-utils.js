@@ -1,5 +1,5 @@
 export const R2_OBJECT_MAX_BUFFER_BYTES = 25 * 1024 * 1024;
-export const R2_LIST_LIMIT_MAX = 1000;
+const R2_LIST_LIMIT_MAX = 1000;
 // Keep in sync with shared/ns-pattern.js. This file is embedded into loaded
 // workers as _wdl-r2-utils.js, so it must stay standalone.
 export const R2_BUCKET_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;

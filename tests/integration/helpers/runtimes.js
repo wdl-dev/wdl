@@ -13,7 +13,7 @@ async function waitForDoRouter() {
   }, { timeoutMs: 10_000, intervalMs: 100 });
 }
 
-export function stopD1MultiRuntimes() {
+function stopD1MultiRuntimes() {
   sh(["docker", "compose", "rm", "-sf", "d1-runtime-a", "d1-runtime-b", "d1-runtime-c"], {
     stdio: "pipe",
     env: { COMPOSE_PROFILES: "d1-multi" },
@@ -53,7 +53,7 @@ export function recreateD1MultiRuntimes({ ownerLeaseGuardMs } = {}) {
   return composeProfileUp("d1-multi", ["--force-recreate", "--wait", "d1-runtime-c"], opts);
 }
 
-export function stopDoMultiRuntimes() {
+function stopDoMultiRuntimes() {
   sh(["docker", "compose", "rm", "-sf", "do-runtime-a", "do-runtime-b", "do-runtime-c"], {
     stdio: "pipe",
     env: { COMPOSE_PROFILES: "do-multi" },
@@ -102,7 +102,7 @@ export async function recreateDoSingleRuntime({ preventEviction } = {}) {
  *   preventEviction?: boolean,
  * }} [options]
  */
-export async function recreateDoMultiRuntimes({ ownerTtlSeconds, ownerLeaseGuardMs, renewStartDelayMs, renewIntervalMs, preventEviction } = {}) {
+async function recreateDoMultiRuntimes({ ownerTtlSeconds, ownerLeaseGuardMs, renewStartDelayMs, renewIntervalMs, preventEviction } = {}) {
   sh(["docker", "compose", "stop", "do-runtime"], { stdio: "pipe" });
   const opts = {
     stdio: "pipe",
@@ -140,7 +140,7 @@ export async function withDoMultiRuntimes(fn, options = {}) {
   }
 }
 
-export function startDoOwnerTask() {
+function startDoOwnerTask() {
   composeProfileUp("do-multi", ["--force-recreate", "--wait", "do-runtime-a"], {
     stdio: "pipe",
   });
@@ -167,7 +167,7 @@ export function startDoOwnerTask() {
   });
 }
 
-export function stopDoOwnerTask() {
+function stopDoOwnerTask() {
   return sh(["docker", "compose", "rm", "-sf", "do-runtime-a"], {
     stdio: "pipe",
     env: { COMPOSE_PROFILES: "do-multi" },

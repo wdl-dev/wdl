@@ -84,7 +84,7 @@ are outside this map unless they own runtime or deployable service behavior.
 | `shared/ai-runtime-config.js` | Canonical defaults, hard maxima, and normalization for process-local AI runtime pools and deadlines. |
 | `shared/worker-contract.js` | Worker version grammar plus worker, route-plane, lifecycle, DO owner/session-policy keys and projection, route/session-policy notification channels, and the internal WebSocket backend-reconnect policy. |
 | `shared/workerd-compat-flags.js` | Pinned upstream mirror of experimental enable flags plus WDL-owned dynamic-worker date, unsupported-flag, and error-serialization policy. |
-| `shared/queue-keys.js` | JavaScript queue key helpers used by tests and cross-tier key-shape checks. |
+| `shared/queue-keys.js` | Queue key builders used by Control, integration helpers, and cross-tier key-shape checks; persisted-key parsing belongs to `rust/common/src/queue_keys.rs`. |
 | `shared/route-projection.js` | Compact pattern-route projection encoding shared by control writers, delete checks, and gateway readers. |
 | `shared/d1-*.js`, `shared/sql-splitter.js` | D1 parameter, data-field, transport, timeout, query-wire/forwarding/owner-hint/result-header and ownership-code contracts, and SQL splitting utilities shared by runtime, d1-runtime, control, and tests. |
 | `shared/fnv1a32.js` | Shared JavaScript FNV-1a helpers for runtime-side shard and slot hashing. |

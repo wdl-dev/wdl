@@ -81,7 +81,7 @@
 | `shared/ai-runtime-config.js` | Process-local AI runtime pool 与 deadline 的 canonical 默认值、hard maximum 和 normalization。 |
 | `shared/worker-contract.js` | Worker version grammar，以及 worker、route-plane、lifecycle、DO owner/session-policy keys 和 projection、route/session-policy notification channels 与内部 WebSocket backend-reconnect policy。 |
 | `shared/workerd-compat-flags.js` | 上游 workerd experimental enable flags 的 pinned mirror，以及 WDL-owned dynamic-worker 日期、unsupported-flag 和 error-serialization policy。 |
-| `shared/queue-keys.js` | JavaScript queue key helpers，供 tests 和 cross-tier key-shape checks 使用。 |
+| `shared/queue-keys.js` | Control、integration helper 和 cross-tier key-shape check 使用的 Queue key builder；persisted-key parsing 由 `rust/common/src/queue_keys.rs` 拥有。 |
 | `shared/route-projection.js` | Control writer、delete check 和 gateway reader 共用的紧凑 pattern-route projection encoding。 |
 | `shared/d1-*.js`、`shared/sql-splitter.js` | Runtime、d1-runtime、control 和 tests 共用的 D1 parameter、data-field、transport、timeout、query-wire/forwarding/owner-hint/result-header 与 ownership-code contract，以及 SQL splitting utilities。 |
 | `shared/fnv1a32.js` | Runtime-side shard 和 slot hashing 共用的 JavaScript FNV-1a helpers。 |

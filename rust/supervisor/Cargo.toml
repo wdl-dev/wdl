@@ -26,7 +26,7 @@ path = "src/bin/http-hc.rs"
 [dependencies]
 libc = "0.2"
 # Drain/renew only call 127.0.0.1 over plain HTTP; keep reqwest TLS stacks off.
-reqwest = { workspace = true, features = ["json"] }
+reqwest.workspace = true
 serde_json.workspace = true
 # Supervisor bins use #[tokio::main(flavor = "current_thread")].
 tokio = { workspace = true, features = ["macros", "process", "rt", "signal", "sync", "time"] }
