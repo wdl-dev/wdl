@@ -589,7 +589,7 @@ test("definition query rejects invalid limits and cursors before Redis reads", a
   }
 });
 
-test("workflows handler preserves metadata-unavailable error shape for batched reads", async () => {
+test("workflows handler sanitizes definition snapshot failures and logs their cause", async () => {
   const state = resetWorkflowsHandlerState();
   const redis = /** @type {any} */ (state.redis);
   redis.hashes.set("routes:demo", { api: "v2", billing: "v5" });
@@ -630,56 +630,6 @@ test("workflows handler preserves metadata-unavailable error shape for batched r
       event: "workflow_request_rejected",
       fields: {
         request_id: "rid-meta-fail",
-        namespace: "demo",
-        status: 500,
-        reason: "workflow_metadata_unavailable",
-        error_message: "Workflow metadata is unavailable",
-      },
-    },
-  ]);
-});
-
-test("workflows handler wraps combined metadata batch read failures", async () => {
-  const state = resetWorkflowsHandlerState();
-  const redis = /** @type {any} */ (state.redis);
-  redis.hashes.set("routes:demo", { api: "v2", billing: "v5" });
-  configureWorkflowListSession(state, (session) => {
-    const originalRead = session.eval.bind(session);
-    session.eval = async (/** @type {string} */ script, /** @type {string[]} */ keys, /** @type {unknown[]} */ args) => {
-      if (script === WORKFLOW_DEFINITION_SNAPSHOT_SCRIPT) throw new Error("defs unavailable");
-      return originalRead(script, keys, args);
-    };
-  });
-
-  const response = await handle({
-    method: "GET",
-    url: new URL("http://control/ns/demo/workflows"),
-    ns: "demo",
-    subPath: [],
-    requestId: "rid-defs-fail",
-  });
-
-  await assertJsonResponse(response, 500, {
-    error: "workflow_metadata_unavailable",
-    message: "Internal error",
-    namespace: "demo",
-    worker_count: 2,
-  });
-  assert.deepEqual(state.logs, [
-    {
-      level: "error",
-      event: "workflow_metadata_unavailable",
-      fields: {
-        namespace: "demo",
-        worker_count: 2,
-        error_message: "defs unavailable",
-      },
-    },
-    {
-      level: "error",
-      event: "workflow_request_rejected",
-      fields: {
-        request_id: "rid-defs-fail",
         namespace: "demo",
         status: 500,
         reason: "workflow_metadata_unavailable",

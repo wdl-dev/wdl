@@ -411,8 +411,10 @@ Auth-specific contract:
   principal kind and matching platform-tier namespace.
 - Control sanitizes `x-admin-token` before calling Auth; Auth receives the bounded token
   value through JSRPC and does not parse request headers.
-- Control carries no token-shaped environment variable. The only server-side token env
-  is auth's `BOOTSTRAP_TOKEN`; control reaches auth through the `AUTH` binding.
+- Control does not receive an admin or bootstrap token in its environment; incoming
+  admin tokens are verified through the `AUTH` binding. Auth alone receives
+  `BOOTSTRAP_TOKEN`. Control uses `WDL_INTERNAL_AUTH_TOKEN` for private mesh calls,
+  not for client-facing admin authorization.
 
 ## Observability
 

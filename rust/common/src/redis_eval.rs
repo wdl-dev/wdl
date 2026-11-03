@@ -118,12 +118,8 @@ mod tests {
     fn static_script_reuses_the_cached_redis_script() {
         static SCRIPT: StaticRedisScript = StaticRedisScript::new("return KEYS[1]");
 
-        let first = SCRIPT
-            .script
-            .get_or_init(|| redis::Script::new(SCRIPT.body));
-        let second = SCRIPT
-            .script
-            .get_or_init(|| redis::Script::new(SCRIPT.body));
+        let first = SCRIPT.cached_script();
+        let second = SCRIPT.cached_script();
         assert!(std::ptr::eq(first, second));
     }
 

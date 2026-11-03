@@ -576,6 +576,73 @@ test("fake redis supports lock-style set and delIfEq with TTL expiry", async () 
   assert.equal(await redis.exists("lock"), 0);
 });
 
+for (const mode of ["client", "multi"]) {
+  test(`fake redis ${mode} incr clears expired counters and preserves live TTLs`, async () => {
+    let nowMs = 1_000;
+    const redis = createFakeRedis(undefined, { nowMs: () => nowMs });
+    await redis.set("expired", "10", { ttl: 1 });
+    await redis.set("live", "20", { ttl: 2 });
+
+    nowMs = 2_000;
+    const replies = mode === "client"
+      ? [await redis.incr("expired"), await redis.incr("live")]
+      : await redis.session((session) => session.multi().incr("expired").incr("live").exec());
+
+    assert.deepEqual(replies, [1, 21]);
+    assert.equal(redis.expirations.has("expired"), false);
+    assert.equal(redis.expirations.get("live"), 3_000);
+    assert.equal(await redis.get("expired"), "1");
+    assert.equal(await redis.get("live"), "21");
+
+    nowMs = 3_000;
+    assert.equal(await redis.get("expired"), "1");
+    assert.equal(await redis.get("live"), null);
+  });
+
+  test(`fake redis ${mode} hDel clears key TTL when deleting the last field`, async () => {
+    let nowMs = 1_000;
+    const redis = createFakeRedis(undefined, { nowMs: () => nowMs });
+    await redis.hSet("hash", { first: "1", last: "2" });
+    await redis.session((session) => session.multi().expireAt("hash", 2).exec());
+    /** @param {string} field */
+    const removeField = async (field) => mode === "client"
+      ? [await redis.hDel("hash", field)]
+      : await redis.session((session) => session.multi().hDel("hash", field).exec());
+
+    assert.deepEqual(await removeField("first"), [1]);
+    assert.equal(redis.expirations.get("hash"), 2_000);
+    assert.deepEqual(await removeField("last"), [1]);
+    assert.equal(redis.hashes.has("hash"), false);
+    assert.equal(redis.expirations.has("hash"), false);
+
+    if (mode === "client") await redis.hSet("hash", { recreated: "3" });
+    else await redis.session((session) => session.multi().hSet("hash", { recreated: "3" }).exec());
+
+    nowMs = 2_000;
+    assert.deepEqual(await redis.hGetAll("hash"), { recreated: "3" });
+  });
+}
+
+test("fake redis multi zRem clears key TTL when deleting the last member", async () => {
+  let nowMs = 1_000;
+  const redis = createFakeRedis(undefined, { nowMs: () => nowMs });
+  await redis.session((session) => session.multi()
+    .zAdd("scores", 1, "first")
+    .zAdd("scores", 2, "last")
+    .expireAt("scores", 2)
+    .exec());
+
+  assert.deepEqual(await redis.session((session) => session.multi().zRem("scores", "first").exec()), [1]);
+  assert.equal(redis.expirations.get("scores"), 2_000);
+  assert.deepEqual(await redis.session((session) => session.multi().zRem("scores", "last").exec()), [1]);
+  assert.equal(redis.zsets.has("scores"), false);
+  assert.equal(redis.expirations.has("scores"), false);
+  await redis.session((session) => session.multi().zAdd("scores", 3, "recreated").exec());
+
+  nowMs = 2_000;
+  assert.deepEqual(await redis.zRange("scores", 0, -1), ["recreated"]);
+});
+
 test("fake redis client compares raw bytes for batched owner CAS", async () => {
   const redis = createFakeRedis(undefined, { encodeGet: true });
   redis.strings.set("owner:a", "owner-a");

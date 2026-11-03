@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   extractAssignedConstant,
@@ -12,10 +13,12 @@ import {
   objectJsonPayloads,
   scannedTestFiles,
   serviceAnchorRegex,
+  testSourceFiles,
   withoutStringAndTemplateLiterals,
   yamlDocuments,
 } from "../helpers/style-contract-scanner.js";
 import {
+  ROOT,
   executableModuleSpecifiers,
   jsFiles,
   readRepoFile,
@@ -24,6 +27,7 @@ import {
   withoutCapnpLineComments,
   withoutLineComments,
 } from "../helpers/source-scan.js";
+import { withTempDir } from "../helpers/temp-dir.js";
 import { AI_RUNTIME_SETTINGS } from "../../shared/ai-runtime-config.js";
 import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
@@ -217,7 +221,26 @@ test("control handlers parse JSON request bodies through readJsonBody", () => {
   assert.deepEqual(offenders, []);
 });
 
-test("source scanners ignore generated dependency directories", () => {
+test("source scanners ignore generated dependency directories", async () => {
+  await withTempDir("wdl-source-scan-", (dir) => {
+    const authored = ["helper.js", "nested/manual.mjs", "nested/runner.cjs"];
+    const generated = ["node_modules", ".deploy-dist", ".wrangler"]
+      .flatMap((name) => [`${name}/generated.js`, `nested/${name}/generated.mjs`]);
+    for (const file of [...authored, ...generated, "nested/readme.txt"]) {
+      const target = path.join(dir, file);
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, "// fixture\n");
+    }
+    const relativeDir = path.relative(ROOT, dir);
+    const expected = authored.map((file) => path.join(relativeDir, file)).toSorted();
+    assert.deepEqual(testSourceFiles(relativeDir).toSorted(), expected);
+    assert.deepEqual(
+      sourceFiles(relativeDir, { extensions: [".js", ".cjs", ".mjs"] }).toSorted(),
+      expected,
+    );
+    assert.deepEqual(jsFiles(relativeDir), [path.join(relativeDir, "helper.js")]);
+  });
+
   const scanned = [
     ...jsFiles("system-workers"),
     ...jsFiles("test-workers"),

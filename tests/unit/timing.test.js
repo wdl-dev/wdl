@@ -2,10 +2,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { delay, settlementWithin, waitUntil } from "../helpers/timing.js";
 
-test("delay resolves after the requested timeout", async () => {
-  const start = Date.now();
-  await delay(5);
-  assert.ok(Date.now() - start >= 0);
+test("delay resolves after the requested timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let settled = false;
+  const pending = delay(5).then(() => { settled = true; });
+
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(4);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  await Promise.resolve();
+  assert.equal(settled, true);
+  await pending;
 });
 
 test("settlementWithin reports fulfillment and rejection", async () => {

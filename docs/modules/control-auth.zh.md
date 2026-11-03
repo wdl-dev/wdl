@@ -173,7 +173,7 @@ Auth 子合同：
 - `ops` 是全平面权限。`ops-observer`、`ns`、`platform`、`platform-observer` 和 `token-issuer` 范围更窄。
 - Platform double-pin 规则：platform role 要读跨 namespace 细节，必须同时满足 platform principal kind 和匹配的 platform-tier namespace。
 - Control 在调用 Auth 前清理 `x-admin-token`；Auth 通过 JSRPC 接收有界 token value，不解析 request header。
-- Control 不携带 token-shaped 环境变量。唯一 server-side token env 是 auth 的 `BOOTSTRAP_TOKEN`；control 只通过 `AUTH` binding 调 auth。
+- Control 的环境中不注入 admin 或 bootstrap token；传入的 admin token 通过 `AUTH` binding 校验。只有 Auth 接收 `BOOTSTRAP_TOKEN`。Control 使用 `WDL_INTERNAL_AUTH_TOKEN` 认证 private mesh 调用，不把它用于客户端 admin 授权。
 
 ## 可观测性
 

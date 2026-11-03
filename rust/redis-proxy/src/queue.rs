@@ -429,12 +429,21 @@ mod tests {
     fn delayed_queue_wake_pipeline_is_bounded_and_names_the_delayed_key() {
         let mut pipe = redis::pipe();
         pipe_delayed_wake(&mut pipe, "queue-delayed:demo:jobs", 1_234_567.0);
-        let packed = String::from_utf8(pipe.get_packed_pipeline()).unwrap();
-        assert!(packed.contains(QUEUE_DELAYED_WAKE_STREAM));
-        assert!(packed.contains("MAXLEN"));
-        assert!(packed.contains(QUEUE_DELAYED_WAKE_KEY_FIELD));
-        assert!(packed.contains("queue-delayed:demo:jobs"));
-        assert!(packed.contains(QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD));
+        assert_eq!(
+            parse_packed_commands(&pipe.get_packed_pipeline()),
+            vec![vec![
+                "XADD".to_string(),
+                QUEUE_DELAYED_WAKE_STREAM.to_string(),
+                "MAXLEN".to_string(),
+                "~".to_string(),
+                QUEUE_DELAYED_WAKE_MAX_LEN.to_string(),
+                "*".to_string(),
+                QUEUE_DELAYED_WAKE_KEY_FIELD.to_string(),
+                "queue-delayed:demo:jobs".to_string(),
+                QUEUE_DELAYED_WAKE_VISIBLE_AT_FIELD.to_string(),
+                "1234567".to_string(),
+            ]]
+        );
     }
 
     #[test]

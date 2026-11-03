@@ -40,9 +40,10 @@ export function uniqueNs(prefix) {
  * @param {string} url
  * @returns {Promise<RawHttpResponse>}
  */
-export function rawHttpGet(url) {
+export async function rawHttpGet(url) {
   const u = new URL(url);
-  return new Promise((resolve, reject) => {
+  /** @type {import("node:http").IncomingMessage} */
+  const res = await new Promise((resolve, reject) => {
     const req = http.request(
       {
         host: u.hostname,
@@ -51,25 +52,21 @@ export function rawHttpGet(url) {
         path: u.pathname + u.search,
         agent: false,
       },
-      (res) => {
-        /** @type {Buffer[]} */
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const buf = Buffer.concat(chunks);
-          const body = bufferedResponseBody(buf);
-          resolve({
-            status: res.statusCode,
-            headers: { get: (/** @type {string} */ name) => res.headers[name.toLowerCase()] ?? null },
-            text: body.text,
-            arrayBuffer: body.arrayBuffer,
-          });
-        });
-      }
+      resolve
     );
     req.on("error", reject);
     req.end();
   });
+  /** @type {Buffer[]} */
+  const chunks = [];
+  for await (const chunk of res) chunks.push(Buffer.from(chunk));
+  const body = bufferedResponseBody(Buffer.concat(chunks));
+  return {
+    status: res.statusCode,
+    headers: { get: (/** @type {string} */ name) => res.headers[name.toLowerCase()] ?? null },
+    text: body.text,
+    arrayBuffer: body.arrayBuffer,
+  };
 }
 
 // undici fetch() rewrites Host; use plain http so gateway sees what we set.
@@ -178,8 +175,9 @@ export function hostFetch(host, p = "/") {
  * @param {Record<string, string>} [headers]
  * @returns {Promise<LocalHttpResponse>}
  */
-function localHttpGet(host, port, path, headers = {}) {
-  return new Promise((resolve, reject) => {
+async function localHttpGet(host, port, path, headers = {}) {
+  /** @type {import("node:http").IncomingMessage} */
+  const res = await new Promise((resolve, reject) => {
     const req = http.request(
       {
         host,
@@ -189,22 +187,19 @@ function localHttpGet(host, port, path, headers = {}) {
         headers,
         agent: false,
       },
-      (res) => {
-        /** @type {Buffer[]} */
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const body = bufferedResponseBody(Buffer.concat(chunks));
-          resolve({
-            status: res.statusCode,
-            text: body.text,
-            json: async () => responseJson(body, "local HTTP response body"),
-            headers: res.headers,
-          });
-        });
-      }
+      resolve
     );
     req.on("error", reject);
     req.end();
   });
+  /** @type {Buffer[]} */
+  const chunks = [];
+  for await (const chunk of res) chunks.push(Buffer.from(chunk));
+  const body = bufferedResponseBody(Buffer.concat(chunks));
+  return {
+    status: res.statusCode,
+    text: body.text,
+    json: async () => responseJson(body, "local HTTP response body"),
+    headers: res.headers,
+  };
 }

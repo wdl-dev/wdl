@@ -119,7 +119,7 @@ Valkey logical DB 按 authority 切分：
 - Control endpoint 的 DB 0：control-plane metadata、route state、lifecycle index、secrets、referrer index、D1/DO metadata、AI provider/credential record、cron config 和 queue consumer projection。
 - Workflows endpoint 的 DB 0：只保存 Workflows-owned operator schema-migration state。Control 与 Workflows 共用 endpoint 时，它们指向同一个逻辑数据库；`WORKFLOWS_REDIS_URL` 选择专用 endpoint 时，则位于不同服务器。
 - DB 1：data-plane KV、queue streams、delayed queues、log-tail streams、cleanup queues。
-- DB 2：workflows workflow instance state。
+- DB 2：Workflow instance state。
 - DB 15：inactive schema-2 Workflow archive，保留到用户显式删除；正常 service 不会选择该数据库。
 
 Index 通常是可重建 projection。Authority 在每个模块文档列出的 owning hash、stream 或 lifecycle record 中。新增 fallback SCAN 或 secondary writer 前，必须说明 index 是权威还是可修复。

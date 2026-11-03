@@ -22,7 +22,7 @@ import { bufferedResponseBody, responseJson, responseJsonOrNull } from "./http-r
  * @param {{ method?: string, headers?: Record<string, string>, body?: string | Buffer | Record<string, unknown> }} [init]
  * @returns {Promise<AdminResponse>}
  */
-export function adminFetch(pathSuffix, init = {}) {
+export async function adminFetch(pathSuffix, init = {}) {
   const method = init.method || "GET";
   /** @type {Record<string, string>} */
   const headers = {
@@ -35,7 +35,8 @@ export function adminFetch(pathSuffix, init = {}) {
     headers["content-type"] = "application/json";
   }
 
-  return new Promise((resolve, reject) => {
+  /** @type {import("node:http").IncomingMessage} */
+  const res = await new Promise((resolve, reject) => {
     const req = http.request(
       {
         host: GATEWAY_HOST,
@@ -45,30 +46,26 @@ export function adminFetch(pathSuffix, init = {}) {
         headers,
         agent: false,
       },
-      (res) => {
-        /** @type {Buffer[]} */
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const buf = Buffer.concat(chunks);
-          const body = bufferedResponseBody(buf);
-          const status = res.statusCode ?? 0;
-          resolve({
-            status,
-            ok: status >= 200 && status < 300,
-            headers: res.headers,
-            text: body.text,
-            json: async () => responseJson(body, "admin response body"),
-            jsonOrNull: async () => responseJsonOrNull(body, "admin response body"),
-            arrayBuffer: body.arrayBuffer,
-          });
-        });
-      }
+      resolve
     );
     req.on("error", reject);
     if (body) req.write(typeof body === "string" ? body : JSON.stringify(body));
     req.end();
   });
+  /** @type {Buffer[]} */
+  const chunks = [];
+  for await (const chunk of res) chunks.push(Buffer.from(chunk));
+  const responseBody = bufferedResponseBody(Buffer.concat(chunks));
+  const status = res.statusCode ?? 0;
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: res.headers,
+    text: responseBody.text,
+    json: async () => responseJson(responseBody, "admin response body"),
+    jsonOrNull: async () => responseJsonOrNull(responseBody, "admin response body"),
+    arrayBuffer: responseBody.arrayBuffer,
+  };
 }
 
 /** @param {string} pathSuffix @param {unknown} body */
@@ -118,7 +115,7 @@ export async function deployAndPromote(ns, name, body) {
  * @param {{ method?: string, headers?: Record<string, string>, body?: string | Buffer | Record<string, unknown> }} [init]
  * @returns {Promise<{ status: number | undefined, text: string, json: any }>}
  */
-export function fetchWithToken(token, pathSuffix, init = {}) {
+export async function fetchWithToken(token, pathSuffix, init = {}) {
   const method = init.method || "GET";
   /** @type {Record<string, string>} */
   const headers = {
@@ -131,7 +128,8 @@ export function fetchWithToken(token, pathSuffix, init = {}) {
     headers["content-type"] = "application/json";
   }
 
-  return new Promise((resolve, reject) => {
+  /** @type {import("node:http").IncomingMessage} */
+  const res = await new Promise((resolve, reject) => {
     const req = http.request(
       {
         host: GATEWAY_HOST,
@@ -141,20 +139,17 @@ export function fetchWithToken(token, pathSuffix, init = {}) {
         headers,
         agent: false,
       },
-      (res) => {
-        /** @type {Buffer[]} */
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          let json = null;
-          try { json = responseJsonOrNull({ body: text }, "token-auth admin response body"); } catch { /* leave null */ }
-          resolve({ status: res.statusCode, text, json });
-        });
-      }
+      resolve
     );
     req.on("error", reject);
     if (body) req.write(typeof body === "string" ? body : JSON.stringify(body));
     req.end();
   });
+  /** @type {Buffer[]} */
+  const chunks = [];
+  for await (const chunk of res) chunks.push(Buffer.from(chunk));
+  const text = Buffer.concat(chunks).toString("utf8");
+  let json = null;
+  try { json = responseJsonOrNull({ body: text }, "token-auth admin response body"); } catch { /* leave null */ }
+  return { status: res.statusCode, text, json };
 }

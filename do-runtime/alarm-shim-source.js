@@ -750,8 +750,8 @@ export function wrapDurableObjectClass(Base, className) {
       const alarmBinding = env?.[ALARMS_BINDING];
       const constructorStorageProxy = installStorageProxy(ctx, alarmBinding, className);
       // The inner host-binding wrapper owns env facade materialization. Strip
-      // only the alarm binding here so __WDL_HOST_BINDINGS_WRAPPED can survive
-      // through the two-layer wrapper contract.
+      // only the alarm binding here and preserve the host wrapper's private
+      // Symbol marker through the two-layer wrapper contract.
       super(ctx, withoutInternalEnv(env));
       // Resolve once through the host wrapper after construction so prototype
       // methods, class fields, and accessors retain the real instance receiver.

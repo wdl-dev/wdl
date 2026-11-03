@@ -3,7 +3,7 @@ import { readdirSync } from "node:fs";
 import path from "node:path";
 import { parseAllDocuments } from "yaml";
 
-import { readRepoFile, repoPath } from "./source-scan.js";
+import { readRepoFile, repoPath, sourceFiles } from "./source-scan.js";
 
 /**
  * @param {string} dir
@@ -33,24 +33,14 @@ export function fixtureSourceFile(file) {
     !file.includes("/node_modules/");
 }
 
-const TEST_SOURCE_EXTENSIONS = new Set([".js", ".cjs", ".mjs"]);
+const TEST_SOURCE_EXTENSIONS = [".js", ".cjs", ".mjs"];
 
 /**
  * @param {string} dir
  * @returns {string[]}
  */
 export function testSourceFiles(dir) {
-  /** @type {string[]} */
-  const out = [];
-  for (const entry of readdirSync(repoPath(dir), { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...testSourceFiles(full));
-    } else if (entry.isFile() && TEST_SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
-      out.push(full);
-    }
-  }
-  return out;
+  return sourceFiles(dir, { extensions: TEST_SOURCE_EXTENSIONS });
 }
 
 /** @param {string} file */

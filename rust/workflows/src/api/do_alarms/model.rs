@@ -552,11 +552,20 @@ mod tests {
             .as_array()
             .expect("DO owner shard fixture cases is an array")
         {
+            let do_storage_id = case["doStorageId"]
+                .as_str()
+                .expect("doStorageId is a string");
+            let class_name = case["className"].as_str().expect("className is a string");
             let object_name = case["objectName"].as_str().expect("objectName is a string");
             let expected = case["shard"].as_u64().expect("shard is an integer") as u32;
             assert_eq!(
                 fnv1a32(object_name.as_bytes()) % DO_HOST_SHARD_COUNT,
                 expected
+            );
+            assert_eq!(
+                alarm_host_id_len(do_storage_id, class_name, object_name),
+                format!("{do_storage_id}:{class_name}:shard{expected}").len(),
+                "{object_name:?}"
             );
         }
     }

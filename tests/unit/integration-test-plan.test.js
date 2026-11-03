@@ -28,42 +28,17 @@ test("fallback slow-first list covers every integration file exactly once", () =
 
 test("prioritizeDefaultFiles runs configured slow files first and preserves the rest", () => {
   assert.deepEqual(
-    prioritizeDefaultFiles([
-      "z.test.js",
-      "log-tail.test.js",
-      "d1-ownership-multi-runtime.test.js",
-      "d1-storage-shared-localdisk.test.js",
-      "workflows-runtime-retention.test.js",
-      "workflows-runtime-scheduler.test.js",
-      "workflows-runtime-core.test.js",
-      "durable-objects-ownership.test.js",
-      "durable-objects-websocket.test.js",
-      "durable-objects-alarms.test.js",
-      "queues-orphan-and-control.test.js",
-      "queues-retry-and-delay.test.js",
-      "queues-delivery.test.js",
-      "queues-batch-and-isolation.test.js",
-      "cron-triggers.test.js",
-      "a.test.js",
-    ]),
-    [
-      "durable-objects-ownership.test.js",
-      "d1-storage-shared-localdisk.test.js",
-      "d1-ownership-multi-runtime.test.js",
-      "durable-objects-alarms.test.js",
-      "cron-triggers.test.js",
-      "log-tail.test.js",
-      "durable-objects-websocket.test.js",
-      "workflows-runtime-scheduler.test.js",
-      "queues-retry-and-delay.test.js",
-      "workflows-runtime-core.test.js",
-      "queues-orphan-and-control.test.js",
-      "queues-delivery.test.js",
-      "workflows-runtime-retention.test.js",
-      "queues-batch-and-isolation.test.js",
-      "z.test.js",
-      "a.test.js",
-    ]
+    prioritizeDefaultFiles(
+      ["z.test.js", "slower.test.js", "slowest.test.js", "a.test.js"],
+      { priority: ["slowest.test.js", "slower.test.js"] },
+    ),
+    ["slowest.test.js", "slower.test.js", "z.test.js", "a.test.js"],
+  );
+
+  const [first, second] = SLOW_FIRST_FILES;
+  assert.deepEqual(
+    prioritizeDefaultFiles(["unranked.test.js", second, first]),
+    [first, second, "unranked.test.js"],
   );
 });
 

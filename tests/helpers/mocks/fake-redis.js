@@ -226,6 +226,7 @@ export function createFakeRedisClient(state, options = {}) {
     },
     /** @param {string} key */
     async incr(key) {
+      expireIfNeeded(state, key, options);
       state.commands.push(["incr", key]);
       const next = Number(state.strings.get(key) || 0) + 1;
       state.strings.set(key, String(next));
@@ -463,7 +464,7 @@ export function createFakeRedisClient(state, options = {}) {
           removed += 1;
         }
       }
-      if (Object.keys(hash).length === 0) state.hashes.delete(key);
+      if (Object.keys(hash).length === 0) clearKeyData(state, key);
       if (removed > 0) markKeyModified(state, key);
       return removed;
     },
@@ -1200,7 +1201,7 @@ export function applyFakeRedisOp(state, op, options = {}) {
         removed += 1;
       }
     }
-    if (Object.keys(hash).length === 0) state.hashes.delete(key);
+    if (Object.keys(hash).length === 0) clearKeyData(state, key);
     if (removed > 0) markKeyModified(state, key);
     return removed;
   }
@@ -1234,7 +1235,7 @@ export function applyFakeRedisOp(state, op, options = {}) {
     for (const member of /** @type {string[]} */ (op.slice(2))) {
       if (zset?.delete(member)) removed += 1;
     }
-    if (zset?.size === 0) state.zsets.delete(key);
+    if (zset?.size === 0) clearKeyData(state, key);
     if (removed > 0) markKeyModified(state, key);
     return removed;
   }

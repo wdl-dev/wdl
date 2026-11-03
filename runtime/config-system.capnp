@@ -294,8 +294,8 @@ const controlWorker :Workerd.Worker = (
     (name = "WDL_INTERNAL_AUTH_TOKEN", fromEnvironment = "WDL_INTERNAL_AUTH_TOKEN"),
     (name = "DATA_REDIS_ADDR",        fromEnvironment = "DATA_REDIS_ADDR"),
     (name = "DATA_REDIS_DB",          fromEnvironment = "DATA_REDIS_DB"),
-    # control verifies tokens via this binding only — no token-shaped
-    # env may live on controlWorker (see auth/index.js).
+    # Control verifies admin tokens through Auth; the mesh token above
+    # authenticates only private service calls (see auth/index.js).
     (name = "AUTH",                   service = "auth"),
     (name = "S3_ENDPOINT",            fromEnvironment = "S3_ENDPOINT"),
     (name = "S3_BUCKET",              fromEnvironment = "S3_BUCKET"),

@@ -823,27 +823,68 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_event_rechecks_after_waiting_commit() {
+    fn source_contract_wait_for_event_rechecks_after_waiting_commit() {
         let source = include_str!("events.rs");
-        let helper = source
-            .find("async fn write_waiting_record_and_recheck_event")
-            .expect("wait-for-event helper should be present");
-        let body = &source[helper..];
-        assert!(body.contains("Some(event_type_index_prefix(event_type))"));
-        assert!(body.contains("find_buffered_event(state, req, event_type).await?"));
-        assert!(body.contains("complete_wait_with_payload("));
+        let implementation = source
+            .split_once("\n#[cfg(test)]")
+            .expect("event implementation should precede tests")
+            .0;
+        let helper = implementation
+            .split_once("async fn write_waiting_record_and_recheck_event(")
+            .expect("wait-for-event helper must exist")
+            .1
+            .split_once("\n}")
+            .expect("wait-for-event helper must have a closing brace")
+            .0;
+        let write = helper
+            .find("write_waiting_record(")
+            .expect("wait-for-event helper must write the waiting record");
+        let commit = helper
+            .find(".await?;")
+            .expect("waiting write must be awaited");
+        let recheck = helper
+            .find("find_buffered_event(state, req, event_type).await?")
+            .expect("waiting commit must be followed by an event recheck");
+        let complete = helper
+            .find("complete_wait_with_payload(")
+            .expect("a buffered event must complete the wait");
+        assert!(write < commit && commit < recheck && recheck < complete);
+        assert!(helper[..commit].contains("Some(event_type_index_prefix(event_type))"));
+
+        let register = implementation
+            .split_once("async fn register_wait(")
+            .expect("wait registration must exist")
+            .1
+            .split_once("\n}")
+            .expect("wait registration must have a closing brace")
+            .0;
+        let (existing, new) = register
+            .split_once("let waiting = StepRecord {")
+            .expect("wait registration must construct new waiting records");
         assert!(
-            source.contains(
+            new.contains(
                 "write_waiting_record_and_recheck_event(state, &req, config, waiting, due_at_ms, &event_type)"
             ),
             "new waits must close the sendEvent/register-wait lost-wakeup window"
         );
-        assert!(
-            source
-                .matches("write_waiting_record_and_recheck_event(")
-                .count()
-                >= 4,
-            "new and existing waiting records must both recheck buffered events"
-        );
+        let waiting = existing
+            .split_once("\"waiting\" => {")
+            .expect("existing waiting records must have their own branch")
+            .1
+            .split_once("\n            _ => {")
+            .expect("waiting branch must precede the invalid-state branch")
+            .0;
+        let (timed, untimed) = waiting
+            .split_once("if let Some(stored_due) = record.due_at_ms {")
+            .expect("existing waits must preserve their deadline")
+            .1
+            .split_once("\n                }\n")
+            .expect("timed wait branch must end before untimed waits");
+        for (name, branch) in [("timed", timed), ("untimed", untimed)] {
+            assert!(
+                branch.contains("return write_waiting_record_and_recheck_event("),
+                "existing {name} waits must recheck buffered events"
+            );
+        }
     }
 }

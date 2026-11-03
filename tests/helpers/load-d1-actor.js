@@ -7,27 +7,15 @@ import {
 } from "./load-shared-module.js";
 import { d1ProtocolDataUrl, d1QueryWireDataUrl } from "./load-d1-protocol.js";
 
+const d1ProtocolUrl = d1ProtocolDataUrl();
+// SQL-focused tests keep JSON request fixtures and the read gate, but share
+// production error identity, classification, and response encoding.
 const protocolUrl = moduleDataUrl(`
-export function classifyD1Error(err) {
-  if (err?.code === "limit-exceeded") {
-    return { status: err.status, code: err.code, category: "limit", retryable: false, message: err.message };
-  }
-  return { status: 500, code: "internal", category: "internal", retryable: false, message: err.message };
-}
-export class D1ProtocolError extends Error {
-  constructor(status, code, message) {
-    super(message);
-    this.name = "D1ProtocolError";
-    this.status = status;
-    this.code = code;
-  }
-}
-export function d1ErrorResponse(err) {
-  return Response.json(
-    { success: false, error: err.code || err.message, message: err.message },
-    { status: err.status || 500 }
-  );
-}
+export {
+  classifyD1Error,
+  D1ProtocolError,
+  d1ErrorResponse,
+} from ${JSON.stringify(d1ProtocolUrl)};
 export async function readD1ActorQueryRequest(request) {
   const gate = globalThis.__d1ActorQueryReadGate;
   if (gate) {
@@ -40,7 +28,6 @@ export async function readD1ActorControlRequest(request) {
   return await request.json();
 }
 `);
-const d1ProtocolUrl = d1ProtocolDataUrl();
 const d1QueryWireUrl = d1QueryWireDataUrl();
 
 const ownerRegistryUrl = moduleDataUrl(`

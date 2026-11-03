@@ -1,11 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadD1Actor } from "../helpers/load-d1-actor.js";
+import { loadD1Protocol } from "../helpers/load-d1-protocol.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 import { settlementWithin } from "../helpers/timing.js";
 
 const { D1DatabaseActor, resultFromCursor } = await loadD1Actor();
+const { readD1QueryResponseWithBytes } = await loadD1Protocol();
+
+/**
+ * @param {Response} response
+ * @param {number} status
+ * @param {Record<string, unknown>} expected
+ */
+async function assertD1ErrorResponse(response, status, expected) {
+  assert.equal(response.status, status);
+  const { payload } = await readD1QueryResponseWithBytes(response);
+  assert.deepEqual(payload, expected);
+}
 
 /**
  * @param {{ leaseRemainingMs?: number, guardMs?: number }} assertion
@@ -173,10 +186,12 @@ test("D1 actor: fetch maps aggregate result byte-cap overflow to limit-exceeded 
     }),
   }));
 
-  await assertJsonResponse(response, 413, {
+  await assertD1ErrorResponse(response, 413, {
     success: false,
     error: "limit-exceeded",
     message: "D1 limit exceeded: maximum result bytes per request is 57",
+    category: "limit",
+    retryable: false,
   });
   assert.equal(calls, 2);
 });
@@ -292,10 +307,12 @@ test("D1 actor: wait-until-idle uses actor-specific timeout env", async () => {
           body: JSON.stringify({ __control: "wait-until-idle" }),
         }));
 
-        await assertJsonResponse(idleResponse, 503, {
+        await assertD1ErrorResponse(idleResponse, 503, {
           success: false,
           error: "drain-timeout",
           message: "D1 actor timed out waiting for 1 in-flight query(s)",
+          category: "invalid-request",
+          retryable: false,
         });
       } finally {
         queryReadRelease.resolve(undefined);
@@ -341,10 +358,12 @@ test("D1 actor: batch preserves result byte-cap overflow as limit-exceeded", asy
     }),
   }));
 
-  await assertJsonResponse(response, 413, {
+  await assertD1ErrorResponse(response, 413, {
     success: false,
     error: "limit-exceeded",
     message: "D1 limit exceeded: maximum result bytes per request is 57",
+    category: "limit",
+    retryable: false,
   });
   assert.equal(calls, 2);
 });
@@ -377,10 +396,12 @@ test("D1 actor: fetch maps result row-cap overflow to limit-exceeded response", 
     }),
   }));
 
-  await assertJsonResponse(response, 413, {
+  await assertD1ErrorResponse(response, 413, {
     success: false,
     error: "limit-exceeded",
     message: "D1 limit exceeded: maximum result rows per statement is 1",
+    category: "limit",
+    retryable: false,
   });
 });
 
@@ -782,59 +803,70 @@ test("D1 actor: exec reports changed_db from idempotent schema DDL object existe
   assert.equal(typeof result.payload.duration, "number");
 });
 
-test("D1 actor: exec multi-statement failure rolls back earlier writes", async () => {
-  /** @type {Array<{ id: string, body: string }>} */
-  let rows = [];
-  let transactions = 0;
-  const actor = new D1DatabaseActor({
-    storage: {
-      transactionSync(/** @type {() => unknown} */ callback) {
-        transactions += 1;
-        const snapshot = rows.map((row) => ({ ...row }));
-        try {
-          return callback();
-        } catch (err) {
-          rows = snapshot;
-          throw err;
-        }
-      },
-      sql: {
-        get databaseSize() {
-          return 4096 + rows.length;
+for (const mode of ["exec", "batch"]) {
+  test(`D1 actor: ${mode} multi-statement failure rolls back earlier writes`, async () => {
+    /** @type {Array<{ id: string, body: string }>} */
+    let rows = [];
+    let transactions = 0;
+    const actor = new D1DatabaseActor({
+      storage: {
+        transactionSync(/** @type {() => unknown} */ callback) {
+          transactions += 1;
+          const snapshot = rows.map((row) => ({ ...row }));
+          try {
+            return callback();
+          } catch (err) {
+            rows = snapshot;
+            throw err;
+          }
         },
-        exec(/** @type {string} */ sql, /** @type {unknown[]} */ ...params) {
-          if (/^insert into messages\b/i.test(sql)) {
-            rows.push({ id: String(params[0]), body: String(params[1]) });
-            return { columnNames: [], raw: () => [], rowsRead: 0, rowsWritten: 1 };
-          }
-          if (/^insert into missing_table\b/i.test(sql)) {
-            throw new Error("no such table: missing_table");
-          }
-          if (/^SELECT last_insert_rowid/i.test(sql)) {
-            return { toArray: () => [{ last_row_id: rows.length }] };
-          }
-          return { columnNames: [], raw: () => [], rowsRead: 0, rowsWritten: 0 };
+        sql: {
+          get databaseSize() {
+            return 4096 + rows.length;
+          },
+          exec(/** @type {string} */ sql, /** @type {unknown[]} */ ...params) {
+            if (/^insert into messages\b/i.test(sql)) {
+              rows.push({ id: String(params[0]), body: String(params[1]) });
+              return { columnNames: [], raw: () => [], rowsRead: 0, rowsWritten: 1 };
+            }
+            if (/^insert into missing_table\b/i.test(sql)) {
+              throw new Error("no such table: missing_table");
+            }
+            if (/^SELECT last_insert_rowid/i.test(sql)) {
+              return { toArray: () => [{ last_row_id: rows.length }] };
+            }
+            return { columnNames: [], raw: () => [], rowsRead: 0, rowsWritten: 0 };
+          },
         },
       },
-    },
-  }, {});
+    }, {});
 
-  const response = await actor.fetch(new Request("http://d1-actor/query", {
-    method: "POST",
-    body: JSON.stringify({
-      mode: "exec",
-      owner: { taskId: "task-a" },
-      statements: [
-        { sql: "insert into messages (id, body) values (?, ?)", params: ["m1", "before-failure"] },
-        { sql: "insert into missing_table (id) values (?)", params: ["boom"] },
-      ],
-    }),
-  }));
+    const response = await actor.fetch(new Request("http://d1-actor/query", {
+      method: "POST",
+      body: JSON.stringify({
+        mode,
+        owner: { taskId: "task-a" },
+        statements: [
+          { sql: "insert into messages (id, body) values (?, ?)", params: ["m1", "before-failure"] },
+          { sql: "insert into missing_table (id) values (?)", params: ["boom"] },
+        ],
+      }),
+    }));
 
-  assert.equal(response.status, 500);
-  assert.equal(transactions, 1);
-  assert.deepEqual(rows, []);
-});
+    await assertD1ErrorResponse(response, 400, {
+      success: false,
+      error: mode === "batch" ? "batch-statement-error" : "sql-error",
+      message: mode === "batch"
+        ? "D1 batch statement 1 failed: SQL error: no such table: missing_table"
+        : "SQL error: no such table: missing_table",
+      category: "sql",
+      retryable: false,
+      ...(mode === "batch" ? { statementIndex: 1, causeCode: "sql-error" } : {}),
+    });
+    assert.equal(transactions, 1);
+    assert.deepEqual(rows, []);
+  });
+}
 
 test("D1 actor: lease budget guard stops the next exec statement and rolls back", async () => {
   /** @type {Array<{ id: string, body: string }>} */
@@ -884,10 +916,12 @@ test("D1 actor: lease budget guard stops the next exec statement and rolls back"
       }),
     }));
 
-    await assertJsonResponse(response, 503, {
+    await assertD1ErrorResponse(response, 503, {
       success: false,
       error: "lease-budget-exhausted",
-      message: "D1 database owner lease budget was exhausted during local SQL dispatch",
+      message: "D1 database is temporarily unavailable while ownership is changing; retry the request (lease-budget-exhausted).",
+      category: "ownership",
+      retryable: true,
     });
   });
 
@@ -1004,10 +1038,12 @@ test("D1 actor: lease budget guard prevents a single statement past the local de
       }),
     }));
 
-    await assertJsonResponse(response, 503, {
+    await assertD1ErrorResponse(response, 503, {
       success: false,
       error: "lease-budget-exhausted",
-      message: "D1 database owner lease budget was exhausted during local SQL dispatch",
+      message: "D1 database is temporarily unavailable while ownership is changing; retry the request (lease-budget-exhausted).",
+      category: "ownership",
+      retryable: true,
     });
   });
 
@@ -1173,7 +1209,13 @@ test("D1 actor: failed transaction clears its advisory schema object memo", asyn
     }),
   }));
 
-  assert.equal(response.status, 500);
+  await assertD1ErrorResponse(response, 400, {
+    success: false,
+    error: "sql-error",
+    message: "SQL error: no such table: missing_table",
+    category: "sql",
+    retryable: false,
+  });
   assert.equal(exists, false);
   assert.equal(actor.schemaObjectExistsMemo.has("table\0stable"), false);
   assert.equal(actor.schemaObjectExistsMemo.has("table\0inspections"), false);

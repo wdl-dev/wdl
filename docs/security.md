@@ -136,11 +136,10 @@ property name, symbol, or storage key is unavailable to ordinary tenant code:
 
 Many internal endpoints are private platform protocols, not public APIs:
 
-- runtime `:8088` scheduled, queue, and workflow dispatch
+- runtime `:8088` scheduled, queue, and Workflow run/notify dispatch
 - d1-runtime owner, SQL, drain, and renew paths
 - do-runtime invoke/connect/alarm/storage cleanup/drain/renew paths
 - do-runtime diagnostic probe path
-- runtime `:8088` workflow run/notify dispatch paths called by workflows
 - workflows internal lifecycle, step, tick, and DO alarm mutation/cleanup paths
 - redis-proxy sidecar APIs for cold-load, KV, queue, logs, and runtime support
 

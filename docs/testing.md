@@ -114,8 +114,8 @@ Each slot gets its own:
 - s3mock host port: `29500 + slot`
 - Valkey container and data volume
 
-Passing slots are torn down immediately. Failed slots stay up for debugging unless
-cleanup-on-failure is explicitly enabled.
+After all selected files finish, passing slot stacks are torn down. Failed slots stay
+up for debugging unless cleanup-on-failure is explicitly enabled.
 
 The first file in a slot pays the dependency-ordered stack startup/restart cost. Later
 files in the same slot use the `WDL_INTEGRATION_SLOT_PREPPED=1` fast path; the caller
@@ -349,6 +349,8 @@ Prefer the narrow helper that matches the response or fixture source:
   owns standard Docker-backed lifecycle setup: use `setupIntegrationSuite()` at
   module scope, with `afterStackUp`, `beforeEachReset`, or `reset: false` when
   a file needs one-time setup, extra per-test cleanup, or no default reset.
+  Buffered HTTP transport helpers reject response-stream failures as well as
+  request failures; receiving headers alone does not complete a buffered request.
   `http-response.js` owns cached integration response JSON accessors:
   `readIntegrationJson(...)` and
   `assertIntegrationJson(...)` combine status assertion with labelled JSON

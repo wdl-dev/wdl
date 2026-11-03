@@ -4,29 +4,13 @@ import {
   importRepositoryModule,
   importSpecifierReplacements,
   moduleDataUrl,
-  repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
+import { compileControlGraph } from "../helpers/load-control-lib.js";
 import { assertJsonResponse, readJsonResponse } from "../helpers/response-json.js";
 
 /** @type {any} */ (globalThis).__controlIndexState = null;
 
-const sharedNsPatternUrl = repositoryFileUrl("shared/ns-pattern.js");
-const controlLibUrl = moduleDataUrl(`
-export const NS_RE = /^[a-z0-9-]+$/;
-export function configuredPublicUrl() { return null; }
-export function platformVersionFromSource(source) { return source.trim(); }
-export function projectAccessPrincipal(principal) { return principal || null; }
-export function isAdminAcceptableNs(ns) { return typeof ns === "string" && !ns.includes("_"); }
-function withAction(route, action) { return action ? { ...route, action } : route; }
-export function parseControlRoute(pathname, method) {
-  if (pathname === "/reload") return withAction({ kind: "reload", scopeRoute: "reload" }, method === "POST" ? "system.reload" : null);
-  if (pathname === "/whoami") return withAction({ kind: "whoami", scopeRoute: "whoami" }, method === "GET" ? "diagnostic.whoami" : null);
-  if (pathname === "/auth/delegated-tokens") return withAction({ kind: "authDelegatedTokens", scopeRoute: "auth_delegated_tokens" }, method === "POST" ? "auth.delegated_token.issue" : null);
-  const nsMatch = /^\\/ns\\/([^/]+)\\/workers$/.exec(pathname);
-  if (nsMatch) return withAction({ kind: "workers", ns: nsMatch[1], scopeRoute: "ns_workers" }, method === "GET" ? "worker.list" : null);
-  return {};
-}
-`);
+const { libUrl: controlLibUrl, sharedNsUrl: sharedNsPatternUrl } = await compileControlGraph();
 
 const controlSharedUrl = moduleDataUrl(`
 export const state = { service: "control-test" };
@@ -208,15 +192,36 @@ test("control whoami ignores malformed forwarded proto values", async () => {
 });
 
 test("control namespace routes include grammar details for invalid namespaces", async () => {
-  resetControlIndexState();
+  for (const ns of ["Bad_NS", "BadName", "-invalid", "admin"]) {
+    const state = resetControlIndexState();
+
+    const response = await controlIndex.fetch(
+      new Request(`https://ctl.example/ns/${ns}/workers`),
+      {},
+      /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
+    );
+
+    const body = await readJsonResponse(response, 400);
+    assert.equal(body.error, "invalid_namespace");
+    assert.match(body.message, /Must match/);
+    assert.deepEqual(state.handlerCalls, []);
+  }
+});
+
+test("control dispatcher preserves reserved namespaces for authorized ops requests", async () => {
+  const state = resetControlIndexState();
 
   const response = await controlIndex.fetch(
-    new Request("https://ctl.example/ns/Bad_NS/workers"),
+    new Request("https://ctl.example/ns/__system__/workers"),
     {},
     /** @type {import("@cloudflare/workers-types").ExecutionContext} */ ({})
   );
 
-  const body = await readJsonResponse(response, 400);
-  assert.equal(body.error, "invalid_namespace");
-  assert.match(body.message, /Must match/);
+  await assertJsonResponse(response, 200, { ok: true });
+  assert.equal(state.handlerCalls.length, 1);
+  assert.equal(state.handlerCalls[0].nsName, "__system__");
+  assert.deepEqual(state.authCalls, [{
+    routeInfo: { action: "worker.list", ns: "__system__" },
+    requestId: "rid-control-index",
+  }]);
 });

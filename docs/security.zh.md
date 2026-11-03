@@ -56,12 +56,11 @@ Tenant execution context 不是 host authenticity boundary；即使普通 tenant
 
 很多 internal endpoint 是私有平台协议，不是公开 API：
 
-- runtime `:8088` scheduled、queue 和 workflow dispatch
+- runtime `:8088` scheduled、queue 和 Workflow run/notify dispatch
 - d1-runtime owner、SQL、drain 和 renew path
 - do-runtime invoke/connect/alarm/storage cleanup/drain/renew path
 - do-runtime diagnostic probe path
-- runtime `:8088` workflow run/notify dispatch path，由 workflows 调用
-- workflows internal lifecycle、step 和 tick path
+- workflows internal lifecycle、step、tick 和 DO alarm mutation/cleanup path
 - redis-proxy sidecar 的 cold-load、KV、queue、logs 和 runtime support API
 
 这些 endpoint 要求 `x-wdl-internal-auth` header，取值来自注入到每个平台注册服务 task 的共享 `WDL_INTERNAL_AUTH_TOKEN` secret。Tenant-originated forwarding path 会剥离这个 header；token 保留在 host-owned Durable Object proxy 和 host-side backend capability 中，不嵌入 generated tenant facade code，也不进入 tenant-visible `env`。

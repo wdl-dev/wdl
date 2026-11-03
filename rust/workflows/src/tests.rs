@@ -787,20 +787,55 @@ fn workflow_admission_isolates_per_instance_dispatch_errors() {
 }
 
 #[test]
-fn workflow_runtime_dispatch_timeout_releases_run_claim() {
+fn source_contract_workflow_runtime_dispatch_timeout_releases_run_claim() {
     let tick_source = include_str!("api/tick.rs");
-    let runtime_dispatch_source = RUNTIME_DISPATCH_SOURCE;
+    let tick_implementation = tick_source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .expect("tick implementation should precede tests")
+        .0;
+    let finish = tick_implementation
+        .split_once("async fn finish_claimed_workflow(")
+        .expect("claimed workflow completion must exist")
+        .1
+        .split_once("\n}")
+        .expect("claimed workflow completion must have a closing brace")
+        .0;
+    let dispatch_error = finish
+        .split_once("match dispatch_runtime(")
+        .expect("claimed workflow must dispatch to runtime")
+        .1
+        .split_once("\n        };")
+        .expect("runtime dispatch match must end before terminal commit")
+        .0
+        .split_once("Err(err) => {")
+        .expect("runtime dispatch must handle errors")
+        .1
+        .split_once("\n            }")
+        .expect("runtime dispatch error branch must have a closing brace")
+        .0;
+    let release = dispatch_error
+        .find("release_run_claim(app, &identity, &claim, &previous_status).await?;")
+        .expect("runtime dispatch errors must release the run claim");
+    let result = dispatch_error
+        .find("return Ok(ReadyTokenResult::DispatchError);")
+        .expect("runtime dispatch errors must return a per-token result");
+    assert!(release < result);
 
+    let runtime_implementation = RUNTIME_DISPATCH_SOURCE
+        .split_once("\n#[cfg(test)]")
+        .expect("runtime dispatch implementation should precede tests")
+        .0;
+    let runtime_dispatch = runtime_implementation
+        .split_once("async fn dispatch_runtime(")
+        .expect("runtime dispatch must exist")
+        .1
+        .split_once("\n}")
+        .expect("runtime dispatch must have a closing brace")
+        .0;
     assert!(
-        runtime_dispatch_source
+        runtime_dispatch
             .contains(".timeout(Duration::from_millis(app.config.dispatch_timeout_ms))"),
         "ordinary workflow runtime dispatch must keep using the explicit dispatch timeout boundary"
-    );
-    assert!(
-        tick_source.contains("Err(err) => {\n            app.metrics")
-            && tick_source
-                .contains("release_run_claim(app, &identity, &claim, &previous_status).await?;"),
-        "ordinary workflow dispatch errors, including reqwest timeouts, currently release the run claim for retry"
     );
 }
 

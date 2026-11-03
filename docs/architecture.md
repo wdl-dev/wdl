@@ -180,7 +180,7 @@ Valkey logical DBs are split by authority:
   different server when `WORKFLOWS_REDIS_URL` selects a dedicated endpoint.
 - DB 1: data-plane KV, queue streams, delayed queues, log-tail streams, and cleanup
   queues.
-- DB 2: workflows workflow instance state.
+- DB 2: Workflow instance state.
 - DB 15: inactive schema-2 Workflow archive retained until explicitly deleted; no
   normal service selects it.
 

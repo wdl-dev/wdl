@@ -40,6 +40,8 @@ test("token lock owner acquires and renews with the canonical Redis options", as
 test("token lock release is token-scoped and never masks the primary outcome", async () => {
   /** @type {unknown[][]} */
   const seen = [];
+  /** @type {unknown[]} */
+  const reportedErrors = [];
   const releaseError = new Error("redis unavailable");
   const client = {
     async set() { return "OK"; },
@@ -55,10 +57,12 @@ test("token lock release is token-scoped and never masks the primary outcome", a
     { key: "lock:demo", token: "token" },
     {
       onError(/** @type {unknown} */ err) {
-        assert.equal(err, releaseError);
+        reportedErrors.push(err);
         throw new Error("logger unavailable");
       },
     }
   ));
   assert.deepEqual(seen, [["lock:demo", "token"]]);
+  assert.equal(reportedErrors.length, 1);
+  assert.equal(reportedErrors[0], releaseError);
 });

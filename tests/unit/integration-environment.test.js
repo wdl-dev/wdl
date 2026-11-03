@@ -16,7 +16,7 @@ import {
   repositoryFileUrl,
 } from "../helpers/load-shared-module.js";
 import { withMockedProperty } from "../helpers/mock-global.js";
-import { makeTempDir, removeTempDir } from "../helpers/temp-dir.js";
+import { withTempDir } from "../helpers/temp-dir.js";
 
 const composeHelper = await importRepositoryModule(
   "tests/integration/helpers/compose.js",
@@ -87,28 +87,22 @@ test("resolveWdlCliBin uses the supplied PATH environment", () => {
   assert.equal(resolveWdlCliBin({ PATH: "" }), "wdl");
 });
 
-test("resolveWdlCliBin resolves executable wdl commands on PATH", () => {
-  const dir = makeTempDir("wdl-cli-path-");
-  try {
+test("resolveWdlCliBin resolves executable wdl commands on PATH", async () => {
+  await withTempDir("wdl-cli-path-", (dir) => {
     const bin = path.join(dir, "wdl");
     writeFileSync(bin, "#!/usr/bin/env node\n");
     chmodSync(bin, 0o755);
     assert.equal(resolveWdlCliBin({ PATH: dir }), bin);
-  } finally {
-    removeTempDir(dir);
-  }
+  });
 });
 
-test("resolveWdlCliBin ignores non-executable wdl commands on PATH", () => {
-  const dir = makeTempDir("wdl-cli-path-");
-  try {
+test("resolveWdlCliBin ignores non-executable wdl commands on PATH", async () => {
+  await withTempDir("wdl-cli-path-", (dir) => {
     const bin = path.join(dir, "wdl");
     writeFileSync(bin, "#!/usr/bin/env node\n");
     chmodSync(bin, 0o644);
     assert.equal(resolveWdlCliBin({ PATH: dir }), "wdl");
-  } finally {
-    removeTempDir(dir);
-  }
+  });
 });
 
 test("resolveWdlCliBin resolves repository-relative overrides", () => {

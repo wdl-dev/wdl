@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   adminFetch,
   adminGet,
-  delay,
+  assertStatus,
   deployAndPromote,
   gatewayFetch,
   gatewayUrl,
@@ -12,8 +12,11 @@ import {
   runtimeInternalGet,
   runtimeInternalPost,
   setupIntegrationSuite,
+  structuredServiceLogEvents,
+  uniqueNs,
+  waitUntil,
 } from "./helpers/index.js";
-import { parseCounters } from "./helpers/prometheus.js";
+import { parseCounters, prometheusCounter } from "./helpers/prometheus.js";
 
 setupIntegrationSuite();
 
@@ -54,20 +57,32 @@ test("gateway exposes metrics on the data plane (/_metrics on :8080)", async () 
 });
 
 test("gateway exposes PUBLISH invalidation counters after a promote", async () => {
-  await deployAndPromote("obs-inv", "hello", {
+  const ns = uniqueNs("obs-inv");
+  const invalidations = async () => {
+    const res = await fetch(gatewayUrl("/_metrics"));
+    assertStatus(res, 200, "gateway invalidation metrics");
+    return prometheusCounter(await res.text(), "wdl_subscriber_invalidations_total", {
+      scope: "namespace",
+      service: "gateway",
+    });
+  };
+  await deployAndPromote(ns, "hello", {
     code: "export default { fetch() { return new Response('v1'); } };",
   });
-  await gatewayFetch("obs-inv", "/hello");
-  await deployAndPromote("obs-inv", "hello", {
+  // The per-namespace event follows the counter increment, so the first
+  // promote cannot arrive late and satisfy the second promote's delta.
+  await waitUntil("gateway consumes the initial promote invalidation", () => (
+    structuredServiceLogEvents("gateway", "routes_invalidated")
+      .some((event) => event.namespace === ns)
+  ), { timeoutMs: 10_000, intervalMs: 100 });
+  assertStatus(await gatewayFetch(ns, "/hello"), 200, "initial promoted worker");
+  const before = await invalidations();
+  await deployAndPromote(ns, "hello", {
     code: "export default { fetch() { return new Response('v2'); } };",
   });
-  await delay(100);
-
-  const body = await (await fetch(gatewayUrl("/_metrics"))).text();
-  assert.match(
-    body,
-    /wdl_subscriber_invalidations_total\{[^}]*scope="namespace"[^}]*\}\s+[1-9]/
-  );
+  await waitUntil("gateway counts the next promote invalidation", async () => (
+    await invalidations() > before
+  ), { timeoutMs: 10_000, intervalMs: 100 });
 });
 
 test("user-runtime exposes loader and bundle timing metrics", async () => {

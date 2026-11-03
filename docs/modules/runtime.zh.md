@@ -14,7 +14,7 @@ Runtime 从 Redis 加载不可变 worker version，构建 tenant-facing `env` bi
 - `runtime/runtime.js`：workerLoader cache bookkeeping 和 sibling eviction。
 - `runtime/dispatch.js` 和 `runtime/dispatch/*`：fetch/scheduled/queue/workflow dispatch helper。
 
-Worker 通过不可变 id `<ns>:<worker>:<version>` 加载。Promote 会生成新的 id，因此 active-version 变化自然触发 fresh isolate cold-load。
+Worker 通过不可变 id `<ns>:<worker>:<version>` 加载。Promote 选择已有版本；只有该 id 不在本地 loader cache 中时，dispatch 才会 cold-load。重复 promote 或回滚到已缓存版本不保证创建 fresh isolate。
 `runtime/load.js` 也统一持有 `workerLoader.get()` wrapper：每次 cache miss 都会登记供后续 eviction 使用，只有 active-version dispatch path 会请求 sibling eviction；service binding 加载 pinned version 时不会驱逐 sibling。
 
 两个 runtime pool 使用同一个 image 和源码，但 capnp config 不同：
@@ -95,7 +95,7 @@ Runtime 通过 `redis-proxy` 从 DB 0 读取不可变 bundle 和 metadata。Data
 - D1 和 DO binding 调用专门 runtime service。
 - R2/ASSETS 使用 S3-compatible object storage。
 
-Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。旧 metadata 如果包含早于 `2026-04-01` 的 `compatibilityDate`、Python module entry、上游 experimental compatibility flag、禁用 WDL 要求的 enhanced error serialization，或违反其他由 WDL 拥有的 metadata contract，也会 fail closed。日期下限与 enhanced serialization 要求是 WDL 的 forward-only policy；冗余或其他不兼容的上游 flag 仍由 workerd 在 cold load 时拒绝。
+Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materialize 旧 metadata 时仍会重新校验 reserved runtime entrypoint 和 binding name。旧 metadata 如果包含早于 `2026-04-01` 的 `compatibilityDate`、Python module entry、上游 experimental compatibility flag、禁用 WDL 要求的 enhanced error serialization，或违反其他由 WDL 拥有的 metadata contract，也会 fail closed。日期下限与 enhanced serialization 要求是 WDL 的 forward-only policy；已由日期启用的 positive flag 可以显式保留，不兼容的上游 flag 组合仍由 workerd 在 cold load 时拒绝。
 
 ## Ownership / 并发 / 失败语义
 
@@ -107,7 +107,7 @@ Runtime 可以把 Redis bundle metadata 视为 control-authored，但 materializ
 - Request context wrapper 会把 facade object 换进 env，并在事件类型允许时传播 request id。do-runtime alarm 和 RPC 通过携带外层 request id 的私有 fetch dispatch 进入，不会把平台 metadata 加入 tenant method argument。
 - Tenant `fetch()` 未捕获异常会映射为平台 `502 runtime_error` response，并带 request id。异常细节输出到结构化日志/live tail，不复制进客户端 body；throwable 自身无法转成字符串时，tail formatting 也不能反向覆盖原始异常。
 - Internal scheduled、queue 和 workflow dispatch route 使用 result envelope 表达 handler outcome。Tenant handler error 是 scheduler/workflow 协议中的 outcome state，不是 generic platform transport error。
-- Runtime 没有 route-cache invalidation protocol。`workerLoader` cache key 是不可变 worker id，因此 promote 后的新 version 是新 key，会自然 cold-load。
+- Runtime 没有 route-cache invalidation protocol。`workerLoader` cache key 是不可变 worker id；Gateway 传入选中的版本，不会修改已有 cache entry 的内容。
 - `runtime/tail-worker.js` 通过 `workerCode.tails` 附加到每次 dynamic load。它总是输出结构化 stdout；只有 shared tail forwarder 看到 active subscription 后，才转发到 `wdl tail`。
 
 ## 安全边界
@@ -187,4 +187,4 @@ Cold-load duration metric 使用 workerd request clock。`bundle_load_stage_dura
 - Promote 的短暂 stale-route window 内，普通请求仍可能被 admission 到前一个 immutable version 并在那里完成。Gateway WebSocket lifecycle snapshot 会拒绝 stale initial upgrade，并在 backend loss 后避免重新加载已非 active 的 pinned version；它不会给普通 Runtime call 增加 active-version lookup。
 - Workflow replay cache 只是 advisory。
 - Runtime 不是 control-plane 授权边界。
-- 指向 pinned historical version 的 service-binding cold load 在 promote 后可能再次发生，因为这类版本有意不被 evict。非 route-churn 的 isolate leak 仍以 container recycle 作为 backstop。
+- Service-binding cold load 不会驱逐 sibling，但它固定的 historical version 自身仍可能被 active-version cold load 驱逐。后续调用在 cache miss 时重新加载同一个 pinned version。Sibling eviction 未覆盖的 isolate 保留和 process memory 增长仍以 container recycle 作为 backstop。

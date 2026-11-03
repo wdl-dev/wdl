@@ -306,8 +306,6 @@ test("verify: verify_threw when Redis throws mid-flight", async () => {
   assert.equal(logged.category, "worker");
   assert.ok(typeof logged.error_message === "string" && logged.error_message.length > 0,
     "verify_threw log must carry error_message");
-
-  assert.equal(logged.category, "worker");
 });
 
 // --- verify: outcome split ↔ log level mapping ------------------------------

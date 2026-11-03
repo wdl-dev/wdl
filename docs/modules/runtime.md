@@ -19,8 +19,10 @@ are:
 - `runtime/dispatch.js` and `runtime/dispatch/*`: fetch/scheduled/queue/workflow
   dispatch helpers.
 
-Workers are loaded by immutable id `<ns>:<worker>:<version>`. Promotion creates a new
-id, so active-version changes naturally cold-load a fresh isolate.
+Workers are loaded by immutable id `<ns>:<worker>:<version>`. Promotion selects an
+existing version; a dispatch cold-loads it only when that id is absent from the local
+loader cache. Re-promoting or rolling back to a cached version need not create a fresh
+isolate.
 `runtime/load.js` also owns the shared `workerLoader.get()` wrapper: every cache miss is
 recorded for later eviction, while only active-version dispatch paths request sibling
 eviction. Service bindings load their pinned version without evicting siblings.
@@ -369,8 +371,8 @@ It also fails closed if older metadata has a `compatibilityDate` before `2026-04
 contains Python module entries or upstream experimental compatibility flags, disables
 WDL's required enhanced error serialization, or violates another WDL-owned metadata
 contract. The date floor and enhanced-serialization requirement are WDL forward-only
-policy. Workerd remains responsible for rejecting redundant or otherwise incompatible
-upstream flags during cold load.
+policy. Positive flags already enabled by date are accepted; workerd remains responsible
+for rejecting incompatible upstream flag combinations during cold load.
 
 ## Ownership / Concurrency / Failure Semantics
 
@@ -403,7 +405,8 @@ upstream flags during cold load.
   handler outcomes. A tenant handler error is represented as outcome state for the
   scheduler/workflow protocol, not as a generic platform transport error.
 - No route-cache invalidation protocol exists at runtime. `workerLoader` cache keys are
-  immutable worker ids, so a promoted version is a new key and naturally cold-loads.
+  immutable worker ids; Gateway supplies the selected version without changing the
+  contents of an existing cache entry.
 - `runtime/tail-worker.js` is attached to every dynamic load through `workerCode.tails`.
   It always emits structured stdout; forwarding into `wdl tail` only happens after the
   shared tail forwarder sees an active subscription.
@@ -584,6 +587,7 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
   after backend loss; they do not add an active-version lookup to ordinary Runtime calls.
 - Workflow replay cache is advisory only.
 - Runtime is not the control-plane authorization boundary.
-- Service-binding cold loads for pinned historical versions may recur after promote
-  because those versions are deliberately not evicted. Container recycle remains the
-  backstop for non-route-churn isolate leaks.
+- Service-binding cold loads do not evict siblings, but their pinned historical versions
+  can themselves be evicted by an active-version cold load. A later call reloads the
+  same pinned version on a cache miss. Container recycle remains the backstop for
+  retained isolates and process memory growth outside sibling eviction.

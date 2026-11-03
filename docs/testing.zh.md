@@ -82,7 +82,7 @@ push PR 前仍建议先跑定向 local integration：
 - s3mock host port：`29500 + slot`
 - Valkey 容器和数据卷
 
-通过的 slot 会立即清理。失败的 slot 默认保留供调试，除非显式开启失败清理。
+所有选中的测试文件运行结束后，统一清理通过的 slot stack。失败的 slot 默认保留供调试，除非显式开启失败清理。
 
 slot 的第一个文件会支付依赖序 stack startup/restart 成本。该 slot 的后续文件走 `WDL_INTEGRATION_SLOT_PREPPED=1` 快路径；调用方承诺这个 slot 已经拾取最新编译 config 和预构建镜像。
 
@@ -208,6 +208,7 @@ npm install -g @wdl-dev/cli@1.9.4
   - `mock-global.js` 负责临时替换 global 和 global property；单个 lexical async scope 用 `withMockedGlobal(...)` / `withMockedProperty(...)`，只有文件需要 before/after hook 所有权时才用 install-style helper。`mock-fetch.js` 是这套 helper 的 typed fetch wrapper。style-contract 套件会扫描仓库作者维护的 `.js` 测试，并拒绝这些 helper 之外新增的直接非 `__` `globalThis.<name> = ...` 赋值、直接 `console.log/warn/error/info = ...` 赋值，以及测试常用 built-in/global property hook（`process.stderr.*`、`AbortSignal.*`、`Object.*`、`JSON.*`、`Headers.prototype.*`、`Array.prototype.*`、`Function.prototype.*`）的直接赋值。Built-in prototype descriptor mock 使用 `withMockedPropertyDescriptor(...)`，不手写 `Object.defineProperty(...)` save/restore。
   - unit tests 不起 Docker，通过这些 loader 导入。
 - `tests/integration/helpers/` 是 integration helper 的归属：
+  - Buffered HTTP transport helper 必须在 response stream 或 request 失败时 reject；仅收到 headers 不代表 buffered request 已完成。
   - 每个关注点独占子模块：`admin-http.js`、`cli.js`、`compose.js`、`env.js`、`gateway-http.js`、`internal-http.js`、`http-response.js`、`websocket.js`、`stack.js`、`runtimes.js`、`redis.js`、`prometheus.js`、`misc.js`、`worker-source.js`，再加 tier 专用的 `d1-runtime.js` 和 `durable-objects.js`。`index.js` 是供 consumer 用的 barrel re-export。
   - helper 自己内部 import 走具体子模块，不绕 barrel。barrel 有意只收通用 helper。
   - tier 专用 fixture 模块（`d1-runtime.js`、`durable-objects.js`）保持 deep import，因为它们在 import 期跑 top-level `await` 编译 protocol graph，只有 D1/DO 测试该付这个成本。

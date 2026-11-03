@@ -418,9 +418,12 @@ The task does not need explicit task ID or endpoint environment variables.
 ### Runtime Recycle
 
 `workerLoader` caches by immutable `<ns>:<name>:<version>`, so new deploys are
-natural cache misses. Old isolates remain resident until user-runtime or
-system-runtime tasks recycle. Use `aws ecs update-service --force-new-deployment`
-periodically if memory growth matters.
+natural cache misses. Active-version cold loads from gateway, scheduled, and queue
+dispatch asynchronously evict cached sibling versions of the same Worker. This is
+best-effort cache removal, not an immediate termination or memory-release guarantee.
+Service-binding and frozen Workflow cold loads do not trigger sibling eviction.
+Task recycling remains an operational fallback for retained isolates and process
+memory growth; see the [Runtime lifecycle contract](../docs/modules/runtime.md).
 
 ### Durable Object Actor Residency
 

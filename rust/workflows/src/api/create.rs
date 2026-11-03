@@ -385,21 +385,41 @@ mod tests {
     }
 
     #[test]
-    fn create_revalidates_active_export_before_finalize() {
+    fn source_contract_create_revalidates_active_export_before_finalize() {
         let active_export_source = include_str!("active_export.rs");
+        let active_export_implementation = active_export_source
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("active export implementation should precede tests");
+        let verify = active_export_implementation
+            .split_once("async fn verify_active_workflow_current(")
+            .expect("active-export verifier must exist")
+            .1
+            .split_once("\n}")
+            .expect("active-export verifier must have a closing brace")
+            .0;
+        assert!(verify.contains("active.version != req.frozen_version"));
+        assert!(verify.contains("active.class_name != req.class_name"));
+
         let create_source = include_str!("create.rs");
-        assert!(active_export_source.contains("async fn verify_active_workflow_current"));
-        assert!(active_export_source.contains("active.version != req.frozen_version"));
-        assert!(active_export_source.contains("active.class_name != req.class_name"));
-        assert!(
-            create_source
-                .contains("if let Err(err) = verify_active_workflow_current(state, &req).await")
-        );
-        assert!(
-            create_source.contains(
-                "finalize_created_instance(state, &req, &id, &pending_create_token).await?"
-            )
-        );
+        let create_implementation = create_source
+            .split_once("\n#[cfg(test)]")
+            .expect("create implementation should precede tests")
+            .0;
+        let create = create_implementation
+            .split_once("async fn create_instance_after_delete_preflight(")
+            .expect("create mutation must exist")
+            .1
+            .split_once("\n}")
+            .expect("create mutation must have a closing brace")
+            .0;
+        let revalidate = create
+            .find("if let Err(err) = verify_active_workflow_current(state, &req).await")
+            .expect("create must revalidate the active export");
+        let finalize = create
+            .find("finalize_created_instance(state, &req, &id, &pending_create_token).await?")
+            .expect("create must finalize the pending instance");
+        assert!(revalidate < finalize);
     }
 
     #[test]

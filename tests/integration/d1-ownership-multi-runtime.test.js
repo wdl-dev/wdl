@@ -31,6 +31,7 @@ import {
   waitUntil,
   setupIntegrationSuite,
 } from "./helpers/index.js";
+import { redisGet } from "./helpers/redis.js";
 
 process.env.D1_TEST_HOOKS = "1";
 
@@ -358,12 +359,14 @@ test("D1 draining task releases owned databases for immediate takeover", async (
   }
 });
 
-test("D1 drain does not release an owner before an in-flight write finishes", async () => {
+test("D1 drain completes after a held transaction and allows ownership takeover", async () => {
   useD1MultiRuntime();
 
   const ns = uniqueNs("d1drainwait");
   const databaseId = "main";
   const dbKey = dbKeyOf(ns, databaseId);
+  /** @type {Promise<unknown>[]} */
+  const pending = [];
 
   try {
     const initA = d1RuntimeQuery("d1-runtime-a", {
@@ -377,42 +380,52 @@ test("D1 drain does not release an owner before an in-flight write finishes", as
     assertStatus(initA, 200, "initA");
     assert.equal(d1RuntimeProbe("d1-runtime-b", dbKey).owner.taskId, "d1-runtime-a");
 
-    let delayedQueryDone = false;
     let drainDone = false;
+    /** @type {unknown} */
+    let invariantError;
     const delayedQueryPromise = d1RuntimeTestHookQueryAsync("d1-runtime-a", {
       namespace: ns,
       databaseId,
       mode: "all",
       __control: "hold-transaction",
-      __holdMs: 250,
+      __holdMs: 2000,
       statements: [{
         sql: "insert into messages (id, body) values ('delayed', 'before-drain')",
       }],
-    }).finally(() => {
-      delayedQueryDone = true;
     });
+    pending.push(delayedQueryPromise.catch(() => {}));
 
-    await delay(25);
-
+    await waitUntil("D1 test hook transaction starts before drain", () => (
+      redisGet(`d1:test-hook:hold-started:${encodeURIComponent(dbKey)}`) === "d1-runtime-a"
+    ), { timeoutMs: 10_000, intervalMs: 50 });
     const drainPromise = d1RuntimeDrainAsync("d1-runtime-a").finally(() => {
       drainDone = true;
     });
+    pending.push(drainPromise.catch(() => {}));
 
-    await waitUntil("drain waits for in-flight write", async () => {
-      if (drainDone && !delayedQueryDone) {
-        throw new Error("drain completed before delayed query finished");
+    await waitUntil("D1 drain completes after the held transaction", async () => {
+      try {
+        if (drainDone) return true;
+
+        const ownerProbe = d1RuntimeProbe("d1-runtime-b", dbKey);
+        // A released owner is valid even while the query's independent HTTP
+        // client is still waiting for its response. Do not infer server order.
+        if (ownerProbe.owner !== null) {
+          assert.equal(ownerProbe.owner.taskId, "d1-runtime-a");
+        }
+
+        const drainingProbe = d1RuntimeProbeRaw("d1-runtime-a", dbKey);
+        if (drainingProbe.status === 503) {
+          assert.equal(drainingProbe.body.status, "draining");
+        }
+        return false;
+      } catch (error) {
+        // waitUntil retries thrown assertions; keep invariant failures terminal.
+        invariantError ??= error;
+        return true;
       }
-      if (delayedQueryDone) return true;
-
-      const ownerProbe = d1RuntimeProbe("d1-runtime-b", dbKey);
-      assert.equal(ownerProbe.owner.taskId, "d1-runtime-a");
-
-      const drainingProbe = d1RuntimeProbeRaw("d1-runtime-a", dbKey);
-      if (drainingProbe.status === 503) {
-        assert.equal(drainingProbe.body.status, "draining");
-      }
-      return false;
     }, { timeoutMs: 10_000, intervalMs: 50 });
+    assert.ifError(invariantError);
 
     const delayedQuery = await delayedQueryPromise;
     assertStatus(delayedQuery, 500, "delayedQuery");
@@ -420,6 +433,8 @@ test("D1 drain does not release an owner before an in-flight write finishes", as
 
     const drain = await drainPromise;
     assertStatus(drain, 200, "drain");
+    assert.equal(drain.body.pending, 0, "drain must finish with no server-side pending queries");
+    assert.deepEqual(drain.body.errors, []);
     assert.equal(drain.body.released, 1);
 
     const readAfterDrain = d1RuntimeQuery("d1-runtime-b", {
@@ -430,7 +445,9 @@ test("D1 drain does not release an owner before an in-flight write finishes", as
     });
     assertStatus(readAfterDrain, 200, "readAfterDrain");
     assert.deepEqual(readAfterDrain.body.results, []);
+    assert.equal(d1RuntimeProbe("d1-runtime-b", dbKey).owner.taskId, "d1-runtime-b");
   } finally {
+    await Promise.all(pending);
     restoreD1MultiTasks();
   }
 });

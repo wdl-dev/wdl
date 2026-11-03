@@ -234,14 +234,40 @@ mod tests {
     }
 
     #[test]
-    fn due_sweep_overfetches_but_keeps_move_batch_bounded() {
+    fn source_contract_due_sweep_overfetches_but_keeps_move_batch_bounded() {
         let source = include_str!("ready.rs");
+        let implementation = source
+            .split_once("\n#[cfg(test)]")
+            .expect("ready implementation should precede tests")
+            .0;
+        let sweep = implementation
+            .split_once("async fn move_due_tokens(")
+            .expect("due-token sweep must exist")
+            .1
+            .split_once("\n}")
+            .expect("due-token sweep must have a closing brace")
+            .0;
+        let (scan, move_batch) = sweep
+            .split_once("let mut offset = 0;")
+            .expect("due-token sweep must scan before moving batches");
+        assert!(scan.contains("let remaining = WORKFLOW_READY_BATCH_SIZE - moved"));
+        assert!(scan.contains("remaining.saturating_mul(DUE_SCAN_OVERFETCH_FACTOR)"));
+        assert!(scan.contains(".arg(scan_count)"));
+        assert!(move_batch.contains("while moved < WORKFLOW_READY_BATCH_SIZE"));
+        assert!(move_batch.contains("let remaining = WORKFLOW_READY_BATCH_SIZE - moved"));
+
         let shared_source = include_str!("../sharded_dispatch.rs");
-        assert!(source.contains("DUE_SCAN_OVERFETCH_FACTOR"));
-        assert!(source.contains("let remaining = WORKFLOW_READY_BATCH_SIZE - moved"));
-        assert!(source.contains("remaining.saturating_mul(DUE_SCAN_OVERFETCH_FACTOR)"));
-        assert!(source.contains("while moved < WORKFLOW_READY_BATCH_SIZE"));
-        assert!(shared_source.contains("fn due_shards_with_due_members"));
-        assert!(shared_source.contains(r#".cmd("ZRANGEBYSCORE")"#));
+        let shared_implementation = shared_source
+            .split_once("\n#[cfg(test)]")
+            .expect("shared dispatch implementation should precede tests")
+            .0;
+        let due_shards = shared_implementation
+            .split_once("async fn due_shards_with_due_members(")
+            .expect("due-shard lookup must exist")
+            .1
+            .split_once("\n}")
+            .expect("due-shard lookup must have a closing brace")
+            .0;
+        assert!(due_shards.contains(r#".cmd("ZRANGEBYSCORE")"#));
     }
 }

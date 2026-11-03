@@ -105,17 +105,25 @@ export const redisConformanceCases = [
   },
   {
     id: "hash-delete",
-    name: "hash delete removes the key after the last field",
+    name: "hash delete removes the key and expiration after the last field",
     /** @param {RedisConformanceAdapter} redis */
     async run(redis) {
       const hash = redis.key("hash-delete");
+      const futureUnixSeconds = 4_102_444_800;
       await redis.del(hash);
 
-      await redis.hSet(hash, { value: "1" });
+      await redis.hSet(hash, { first: "1", last: "2" });
+      await redis.expireAt(hash, futureUnixSeconds);
       assert.equal(await redis.exists(hash), true);
-      assert.equal(await redis.hDel(hash, "value"), 1);
+      assert.equal(await redis.hDel(hash, "first"), 1);
+      assert.equal(await redis.expireTime(hash), futureUnixSeconds);
+      assert.equal(await redis.hDel(hash, "last"), 1);
       assert.equal(await redis.exists(hash), false);
       assert.deepEqual(await redis.hGetAll(hash), {});
+
+      await redis.hSet(hash, { recreated: "3" });
+      assert.equal(await redis.expireTime(hash), -1);
+      assert.deepEqual(await redis.hGetAll(hash), { recreated: "3" });
     },
   },
   {

@@ -277,8 +277,8 @@ export function createLoaderCallback({ requestId, env, ctx, ns, worker, version,
       }
     );
 
-    // Loaded workers must not inherit runtime's private-reaching
-    // outbound; pin them to PUBLIC_NETWORK.
+    // Use the pool's configured outbound: public-only for tenant workers,
+    // private+public for privileged system workers.
     const workerCode = {
       ...codeBase,
       env: workerEnv,
