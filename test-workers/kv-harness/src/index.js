@@ -7,6 +7,38 @@ export default {
     const meta = url.searchParams.get("meta");
     const kv = env.KV;
     try {
+      if (op === "putOversizedStream") {
+        let cancellations = 0;
+        let remaining = Number(url.searchParams.get("bytes"));
+        if (!Number.isSafeInteger(remaining) || remaining < 1) throw new Error("invalid probe byte count");
+        let controller;
+        const chunk = new Uint8Array(1024 * 1024);
+        const source = new ReadableStream({
+          start(value) { controller = value; },
+          pull(value) {
+            if (remaining > 0) {
+              const size = Math.min(remaining, chunk.byteLength);
+              value.enqueue(chunk.subarray(0, size));
+              remaining -= size;
+            }
+          },
+          cancel() { cancellations++; },
+        });
+        const timer = setTimeout(() => controller.error(new Error("KV source probe timed out")), 10_000);
+        let error = null;
+        try {
+          await kv.put(key, source);
+        } catch (caught) {
+          error = caught.message;
+        } finally {
+          clearTimeout(timer);
+        }
+        const deadline = Date.now() + 5_000;
+        while (cancellations === 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        return Response.json({ error, cancellations, stored: await kv.get(key) });
+      }
       if (op === "put") {
         const opts = {};
         if (meta) opts.metadata = JSON.parse(meta);

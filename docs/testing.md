@@ -20,6 +20,10 @@ they exercise, and which runner flags are supported.
 `npm run test` is the fast pre-push gate: lint, both workerd typechecks, the Node-only
 typecheck, and unit tests. It intentionally does not run Docker integration tests.
 
+The three typecheck commands use the native TypeScript 7 compiler. Source-discovery
+tests use OXC to parse executable imports and re-exports independently of compiler
+APIs; comments and source strings are not dependency edges.
+
 The workerd typechecks cover runtime/control JavaScript tiers with Workers ambient
 declarations only. The Node-only typecheck covers JavaScript-like test sources under
 `tests/` (`.js`, `.cjs`, and `.mjs`) and maintenance scripts under `scripts/` (`.js`
@@ -146,11 +150,19 @@ the 25 MiB boundary, and complete validation of streams with misleading native
 `expectedLength` values before any backend write. Local config preparation
 compiles this fixture; production images do not include it.
 
+Its cancellation probe keeps an upstream GET idle, cancels through the tenant R2
+facade, and checks the backend cancellation count. A tee retains the source until
+both branches cancel. Service-binding integration covers idle readable arguments
+and results plus native writable abort and clean close; KV integration checks that
+an oversized stream PUT cancels its source without storing a value.
+
 Worker-module integration also runs `test-workers/workerd-compat/config.capnp` in
 a separate workerd process inside the container. It checks console formatting
 exceptions and sustained short-lived native-wrapper allocation without forced GC.
 It also verifies byte-stream terminal-state reentry across completed request
 contexts without enabling experimental stream implementations.
+An abort after a response body starts being pulled must reject that read while a
+subsequent request remains healthy.
 Its HTTP-to-RPC pipe probe reads the running user-runtime's `/_healthz` through
 TCP and checks complete delivery and one close, including `preventClose`. The
 integration runner also checks captured native diagnostics: a duplicate stream

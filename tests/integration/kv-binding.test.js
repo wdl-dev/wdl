@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readRepositoryJson } from "../helpers/load-shared-module.js";
 import {
   delay,
   deployAndPromote,
@@ -98,6 +99,22 @@ test("get unknown key → null", async () => {
   await setup("kvns2");
   const r = await call("kvns2", { op: "get", key: "missing" });
   assert.equal(await r.text(), "__null__");
+});
+
+test("oversized stream put cancels its RPC source without persisting a value", async () => {
+  const ns = "kv-stream-cancel";
+  const { maxValueBytes } = /** @type {{ maxValueBytes: number }} */ (
+    readRepositoryJson("tests/fixtures/kv-host-response.json")
+  );
+  await setup(ns);
+  const response = await call(ns, {
+    op: "putOversizedStream", key: "too-large", bytes: String(maxValueBytes + 1),
+  });
+  assert.equal(response.status, 200);
+  const result = await responseJson(response);
+  assert.equal(result.error, `KV put: value exceeds ${maxValueBytes} byte limit`);
+  assert.equal(result.cancellations, 1);
+  assert.equal(result.stored, null);
 });
 
 test("delete removes key", async () => {

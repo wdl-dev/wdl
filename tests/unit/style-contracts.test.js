@@ -1766,9 +1766,39 @@ test("executable module scanning includes bounded dynamic imports", () => {
     `, "fixture.js"),
     ["./static.js", "./exported.js", "./dynamic.js"],
   );
+  for (const source of [
+    "import(moduleName)",
+    'import("./" + name)',
+    "import(`./${name}.js`)",
+    'import(("./parenthesized.js"))',
+  ]) {
+    assert.throws(
+      () => executableModuleSpecifiers(source, "non-literal.js"),
+      /non-literal\.js: dynamic import specifier must be a string literal/,
+    );
+  }
+});
+
+test("executable module scanning decodes literals without scanning comments or strings", () => {
+  const source = [
+    'import "./st\\u0061tic.js";',
+    'import data from "./data.json" with { type: "json" };',
+    'export * from "./all.js";',
+    'export * as ns from "./namespace.js";',
+    'const load = () => import(`./template.js`);',
+    '// import("./comment.js")',
+    '/** @type {import("./types.js").Type} */',
+    'const text = \'import("./source-text.js")\';',
+  ].join("\n");
+  assert.deepEqual(executableModuleSpecifiers(source), [
+    "./static.js", "./data.json", "./all.js", "./namespace.js", "./template.js",
+  ]);
+});
+
+test("executable module scanning rejects malformed source instead of a partial graph", () => {
   assert.throws(
-    () => executableModuleSpecifiers("import(moduleName)", "non-literal.js"),
-    /non-literal\.js: dynamic import specifier must be a string literal/,
+    () => executableModuleSpecifiers('import "./first.js"; const =', "invalid.js"),
+    /invalid\.js:/,
   );
 });
 

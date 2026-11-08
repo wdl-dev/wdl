@@ -40,7 +40,7 @@ export class BundleMetaError extends Error {
  * @returns {Record<string, unknown>}
  */
 export function parseBundleMeta(raw, { ns, worker, version, makeError }) {
-  /** @param {unknown} cause @returns {never} */
+  /** @type {(cause: unknown) => never} */
   const fail = (cause) => {
     const failure = {
       namespace: ns,

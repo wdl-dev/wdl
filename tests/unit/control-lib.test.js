@@ -838,6 +838,7 @@ test("prepareBundle: compatibilityFlags preserved", () => {
     "auto_grpc_convert",
     "pipe_to_backward_propagation",
     "cache_option_preserves_cache_control",
+    "nodejs_process_version_24",
   ];
   const { meta } = prepareBundle(
     "w.js",
@@ -848,7 +849,7 @@ test("prepareBundle: compatibilityFlags preserved", () => {
 });
 
 test("prepareBundle: experimental workerd compatibility flags are rejected", () => {
-  for (const flag of ["unsafe_module", "wasm_memory_discard", "auto_inject_python_workers"]) {
+  for (const flag of ["unsafe_module", "wasm_memory_discard", "auto_inject_python_workers", "r2_binding_jsrpc"]) {
     assert.throws(
       () => prepareBundle(
         "w.js",
@@ -1010,7 +1011,9 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("connect_handler_starttls"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("offpeak_location_hint"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_zstd_snapshot"));
-  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 41);
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("r2_binding_jsrpc"));
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("nodejs_process_version_24"), false);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 42);
   // The new module registry graduated upstream, but WDL's generated wrapper is
   // the actual loader main module and cannot preserve tenant import.meta.main.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("new_module_registry"), false);

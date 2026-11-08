@@ -22,7 +22,29 @@ async function tracingProbe(ctx, request) {
   } catch (error) {
     invalidStatusError = error.name;
   }
+  let callbackPromise;
+  const activated = ctx.tracing.withActiveSpan(span, (first, second) => {
+    callbackPromise = (async () => {
+      const beforeAwait = ctx.tracing.getActiveSpan() === span;
+      await Promise.resolve();
+      return { arguments: [first, second], beforeAwait, afterAwait: ctx.tracing.getActiveSpan() === span };
+    })();
+    return callbackPromise;
+  }, "first", 2);
+  const promiseIdentityPreserved = activated === callbackPromise;
+  const callerRestoredWhilePending = ctx.tracing.getActiveSpan() === previousSpan;
+  const activation = await activated;
+  const callerRestoredAfterAwait = ctx.tracing.getActiveSpan() === previousSpan;
+  const failure = new Error("workerd compatibility span activation");
+  let thrownErrorPreserved = false;
+  try {
+    ctx.tracing.withActiveSpan(span, () => { throw failure; });
+  } catch (error) {
+    thrownErrorPreserved = error === failure;
+  }
+  const callerRestoredAfterThrow = ctx.tracing.getActiveSpan() === previousSpan;
   span.end();
+  const endedSpanActive = ctx.tracing.withActiveSpan(span, () => ctx.tracing.getActiveSpan() === span);
   const endedSpanChained = span.updateName("wdl-workerd-compat-ended") === span &&
     span.setStatus({ code: "unset" }) === span;
   const endedContext = span.spanContext();
@@ -78,6 +100,15 @@ async function tracingProbe(ctx, request) {
     invalidStatusError,
     endedSpanChained,
     spanContext,
+    withActiveSpan: {
+      ...activation,
+      promiseIdentityPreserved,
+      callerRestoredWhilePending,
+      callerRestoredAfterAwait,
+      thrownErrorPreserved,
+      callerRestoredAfterThrow,
+      endedSpanActive,
+    },
     activeSpan: {
       ...activeSpanResult,
       callerPreservedWhilePending,

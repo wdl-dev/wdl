@@ -42,6 +42,13 @@
     "nextMs": 1773037800000
   },
   {
+    "id": "new-york-before-spring-forward-not-repeated",
+    "cron": "30 1 * * *",
+    "timezone": "America/New_York",
+    "afterMs": 1772951400000,
+    "nextMs": 1773034200000
+  },
+  {
     "id": "new-york-fall-back-fixed-once",
     "cron": "30 1 * * *",
     "timezone": "America/New_York",
@@ -75,5 +82,19 @@
     "timezone": "UTC",
     "afterMs": 1793491200000,
     "nextMs": 1795996800000
+  },
+  {
+    "id": "last-sunday-zero",
+    "cron": "0 0 * * 0L",
+    "timezone": "UTC",
+    "afterMs": 1793491200000,
+    "nextMs": 1795910400000
+  },
+  {
+    "id": "last-sunday-seven",
+    "cron": "0 0 * * 7L",
+    "timezone": "UTC",
+    "afterMs": 1793491200000,
+    "nextMs": 1795910400000
   }
 ]

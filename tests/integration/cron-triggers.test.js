@@ -2,6 +2,7 @@
 // runtime /_scheduled → scheduler sidecar fire.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { nextFireMs } from "../../shared/cron-time.js";
 import {
   adminFetch,
   adminPost,
@@ -393,25 +394,26 @@ test("runtime POST /_scheduled rejects malformed body with 400", async () => {
   assert.equal(res.status, 400);
 });
 
-test("scheduler: ref in current bucket is fired, pre-advanced, and reaches worker.scheduled()", async () => {
+test("scheduler: last-Sunday ref is fired, pre-advanced, and reaches worker.scheduled()", async () => {
   const ns = uniqueNs("schsidecar");
-  // Cron whose natural next-fire is distant so promote doesn't put the
-  // ref in the current slot; the test seeds it there explicitly.
+  const month = ((new Date().getUTCMonth() + 6) % 12) + 1;
+  const cron = `0 0 * ${month} 7L`;
+  // A distant month keeps natural firing from racing the seeded slot.
   await deployAndPromoteWithCrons(ns, "w", [
-    { cron: "0 0 1 1 *", timezone: "UTC" },
+    { cron, timezone: "UTC" },
   ]);
 
   // Swap the NOP for SCHEDULED_RECORDER; same cron, gen is preserved.
   const d = await adminPost(`/ns/${ns}/worker/w/deploy`, {
     code: SCHEDULED_RECORDER,
-    crons: [{ cron: "0 0 1 1 *", timezone: "UTC" }],
+    crons: [{ cron, timezone: "UTC" }],
   });
   assert.ok(d.ok);
   const p = await adminPost(`/ns/${ns}/worker/w/promote`, { version: d.json.version });
   assert.ok(p.ok);
   const activeVersion = d.json.version;
 
-  const id = cronId("0 0 1 1 *", "UTC");
+  const id = cronId(cron, "UTC");
   const hash = redisHGetAll(`crons:${ns}:w`);
   const entry = redisHashJsonField(hash, id, `crons:${ns}:w ${id}`);
   const ref = `${ns}:w:${id}:${entry.gen}`;
@@ -441,6 +443,7 @@ test("scheduler: ref in current bucket is fired, pre-advanced, and reaches worke
   const nextSlotKey = redisKeys("cron-slot:*").find((k) => redisSMembers(k).includes(ref));
   assert.ok(nextSlotKey, "ref must have been advanced into some future slot");
   const nextSlotMs = Number(nextSlotKey.split(":")[1]);
+  assert.equal(nextSlotMs, nextFireMs(cron, "UTC", currentSlot));
   assert.equal(redisExpireTime(nextSlotKey), Math.floor(nextSlotMs / 1000) + 600,
     "advance_ref must EXPIREAT the new slot");
   assert.ok(redisCommandCalls("evalsha") > evalshaBefore);

@@ -137,6 +137,9 @@ expiration, delete removes both value and metadata fields, list scans bucket fie
 an opaque cursor, and batch/list metadata paths enforce aggregate raw value/metadata byte
 budgets before base64 response encoding.
 
+WDL does not configure workerd's bundled native KV service; its KV storage remains
+owned by redis-proxy, not native Durable Object SQLite or blob storage.
+
 ## Binding Surface Contracts
 
 KV supports the common `KVNamespace` calls: `get`, batch `get`, `getWithMetadata`, batch
@@ -539,6 +542,14 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
   workers should retain independent deadlines, idle limits, or application close paths.
 - workerd upgrades can still change default or compatibility-flagged runtime
   surfaces; review the exposed surface, not only the loader/abort path.
+
+RPC readable cancellation also propagates to an idle origin, and an unended
+native writable dropped by its receiver aborts its sink. R2 GET cancellation can
+therefore release the host S3 reader before its independent deadline. KV stream
+PUT size rejection can cancel the producer before any Redis write. KV GET already
+consumes the backend value before returning its stream, so cancellation does not
+undo or interrupt that completed read. These signals do not replace the existing
+admission release paths, timers, or request-context cleanup.
 
 ## Tests That Protect This Module
 

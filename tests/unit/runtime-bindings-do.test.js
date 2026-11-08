@@ -45,6 +45,8 @@ const {
   scopedDoRequest,
 } = await import(scopedRequestUrl);
 
+/** @typedef {InstanceType<typeof DurableObjectNamespace>} DurableObjectNamespaceInstance */
+
 beforeEach(() => clearDoOwnerHintsForTest());
 
 const BINDING_PROPS = Object.freeze({
@@ -70,7 +72,7 @@ function bindingWithBackend(backend) {
   });
 }
 
-/** @param {DurableObjectNamespace} binding @param {string} objectName @param {Request} request */
+/** @param {DurableObjectNamespaceInstance} binding @param {string} objectName @param {Request} request */
 function bindingFetch(binding, objectName, request) {
   return binding.fetch(scopedDoRequest(objectName, request, null));
 }
@@ -293,19 +295,19 @@ test("DO binding replays broad ownership errors only for GET and HEAD", async (t
   const cases = [
     {
       name: "GET",
-      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+      invoke: (/** @type {DurableObjectNamespaceInstance} */ binding, /** @type {string} */ objectName) =>
         bindingFetch(binding, objectName, new Request("https://demo.workers.example/read")),
       replay: true,
     },
     {
       name: "HEAD",
-      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+      invoke: (/** @type {DurableObjectNamespaceInstance} */ binding, /** @type {string} */ objectName) =>
         bindingFetch(binding, objectName, new Request("https://demo.workers.example/read", { method: "HEAD" })),
       replay: true,
     },
     {
       name: "POST",
-      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+      invoke: (/** @type {DurableObjectNamespaceInstance} */ binding, /** @type {string} */ objectName) =>
         bindingFetch(binding, objectName, new Request("https://demo.workers.example/write", {
           method: "POST",
           body: "write",
@@ -314,14 +316,14 @@ test("DO binding replays broad ownership errors only for GET and HEAD", async (t
     },
     {
       name: "RPC",
-      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+      invoke: (/** @type {DurableObjectNamespaceInstance} */ binding, /** @type {string} */ objectName) =>
         binding.rpcObject(objectName, "addMessage", ["write"]),
       replay: false,
       rpc: true,
     },
     {
       name: "WebSocket",
-      invoke: (/** @type {DurableObjectNamespace} */ binding, /** @type {string} */ objectName) =>
+      invoke: (/** @type {DurableObjectNamespaceInstance} */ binding, /** @type {string} */ objectName) =>
         bindingFetch(binding, objectName, new Request("https://demo.workers.example/ws", {
           headers: {
             Connection: "Upgrade",

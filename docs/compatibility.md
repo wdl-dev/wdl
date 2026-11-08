@@ -47,13 +47,33 @@ maps an already-held native Fetcher to a virtual host and port for socket client
 it neither grants new network reachability nor turns a JavaScript binding facade
 into a TCP backend.
 
+With the full Node process surface enabled, `process.version` and
+`process.versions.node` report Node `22.23.4` by default. The non-experimental
+`nodejs_process_version_24` opt-in reports `24.22.2`; its negative flag is
+`no_nodejs_process_version_24`. Its date default is `2026-11-24`, beyond the
+bundled maximum. These are compatibility identifiers, not a separate Node runtime
+or a guarantee of complete Node 24 APIs. WDL's static workers keep their flags.
+Recognized `node:net` read/write failures expose Node-style `code`, `errno`, and
+`syscall` fields; unrecognized failures retain the platform error. The public
+`cloudflare:sockets` error surface is unchanged.
+
+`ctx.tracing.withActiveSpan(span, callback, ...args)` invokes the callback with
+that active span and preserves its result, including Promise identity. It restores
+the caller's active span after return or throw, while asynchronous continuations
+retain the selected span. It does not end the span or add span export to WDL.
+
 `spec_compliant_dispatch_exceptions` is non-experimental and accepted as an explicit
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-11-10`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-11-15`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
+
+`enable_request_signal` and `new_module_registry` default on from compatibility
+date `2026-11-17`, beyond the bundled maximum. Earlier dates still need an explicit
+request-signal opt-in. WDL continues to reject explicit `new_module_registry`;
+this does not change its legacy-registry wrapper identity contract.
 
 `auto_grpc_convert` is non-experimental and accepted as compatibility metadata. It
 does not add Cloudflare's edge gRPC conversion service to WDL.
@@ -155,6 +175,14 @@ streams; it does not grant the receiver authority to open arbitrary new connecti
 The creator's outbound restrictions still apply when establishing the connection.
 Privileged workers must not delegate private connections to untrusted code.
 
+Canceling an RPC-transferred readable stream before EOF notifies its source,
+including an idle source. Abandoning an unended native writable stream aborts its
+sink; clean close does not. Releasing a reader lock alone is not cancellation.
+These lifetime signals neither roll back completed operations nor guarantee
+cleanup during context teardown; WDL retains independent deadlines and budgets.
+Forwarding native pumps may replace a cancellation reason with a generic
+disconnection error.
+
 ## Bindings And Storage
 
 | Surface | Status | What workerd provides | Stronger / added in WDL | Different from Cloudflare | Not implemented / gaps |
@@ -203,7 +231,7 @@ docs:
 | Upstream experimental and WDL-denied compatibility flags | Not supported | Tenant `compatibility_flags` entries whose upstream workerd flag is marked `$experimental`, plus WDL's explicit deny policies for `allow_irrevocable_stub_storage`, `new_module_registry`, `no_rpc`, and `streams_disable_constructors`, are rejected at deploy and runtime decode. New Module Registry has graduated upstream, but WDL's generated wrapper is the actual dynamic-loader main module and cannot preserve tenant `import.meta.main`; Fetcher RPC and standard stream constructors are required by WDL runtime facades. |
 | Python Workers | Not supported | WDL rejects Python module manifests instead of letting workerd fail at cold-load. |
 | Durable Object cross-script bindings and migration rename/delete semantics | Not supported | WDL DO classes are same-worker only. Storage identity, owner routing, and delete cleanup are WDL-managed rather than Cloudflare migration-compatible. |
-| Durable Object snapshots and user-configured native retries | Not supported | Native `snapshot()` / `onNextSessionRestore()` require the rejected `durable_object_snapshots` or catch-all `experimental` flag and an embedder storage implementation. The `cloudflare:durable-objects` `retryable()` marker does not enable retries: its native userland gate is off, and WDL retains its own owner-fenced fetch/RPC and alarm contracts. |
+| Durable Object snapshots and user-configured native retries | Not supported | Native `snapshot()` / `onNextSessionRestore()` require the rejected `durable_object_snapshots` or catch-all `experimental` flag and an embedder storage implementation. Native workerd recognizes per-stub retry policies and `retryable()` markers, but WDL's namespace facade does not forward retry options and its custom facet fetch/RPC dispatch does not use those markers. WDL retains its own owner-fenced fetch/RPC and alarm contracts. |
 | Workflow `createBatch({ count, ... })` / `createBatch({ instances })` | Not supported | WDL accepts the non-empty array form only and rejects object overloads before backend I/O. The native partial-success object result is not a WDL contract. |
 | Cloudflare account API parity | Not supported | WDL exposes its own CLI/control API. Cloudflare API compatibility is not a stated goal. |
 

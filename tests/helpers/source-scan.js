@@ -1,10 +1,10 @@
 // Repository source-discovery helpers. Executable module specifiers use the
-// TypeScript AST; the remaining scanners stay intentionally narrow.
+// OXC AST; the remaining scanners stay intentionally narrow.
 
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import { parseSync, Visitor } from "oxc-parser";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -27,33 +27,31 @@ export function readRepoFile(rel) {
  * @param {string} [fileName]
  */
 export function executableModuleSpecifiers(source, fileName = "module.js") {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
+  const parsed = parseSync(fileName, source, { lang: "js", sourceType: "module" });
+  if (parsed.errors.length > 0) {
+    throw new Error(`${fileName}: ${parsed.errors[0].message}`);
+  }
   /** @type {string[]} */
   const specifiers = [];
-  /** @param {ts.Node} node */
-  const visit = (node) => {
-    if (
-      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-      node.moduleSpecifier &&
-      ts.isStringLiteralLike(node.moduleSpecifier)
-    ) {
-      specifiers.push(node.moduleSpecifier.text);
-    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      const [specifier] = node.arguments;
-      if (!specifier || !ts.isStringLiteralLike(specifier)) {
+  new Visitor({
+    ImportDeclaration(node) { specifiers.push(node.source.value); },
+    ExportNamedDeclaration(node) {
+      if (node.source) specifiers.push(node.source.value);
+    },
+    ExportAllDeclaration(node) { specifiers.push(node.source.value); },
+    ImportExpression({ source: specifier }) {
+      if (specifier.type === "Literal" && typeof specifier.value === "string") {
+        specifiers.push(specifier.value);
+      } else if (
+        specifier.type === "TemplateLiteral" && specifier.expressions.length === 0 &&
+        typeof specifier.quasis[0].value.cooked === "string"
+      ) {
+        specifiers.push(specifier.quasis[0].value.cooked);
+      } else {
         throw new Error(`${fileName}: dynamic import specifier must be a string literal`);
       }
-      specifiers.push(specifier.text);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+    },
+  }).visit(parsed.program);
   return specifiers;
 }
 

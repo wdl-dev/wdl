@@ -92,6 +92,17 @@ const BASE64_PROBE_WORKER = `
  *     invalidStatusError: string | null,
  *     endedSpanChained: boolean,
  *     spanContext: unknown,
+ *     withActiveSpan: {
+ *       arguments: [string, number],
+ *       beforeAwait: boolean,
+ *       afterAwait: boolean,
+ *       promiseIdentityPreserved: boolean,
+ *       callerRestoredWhilePending: boolean,
+ *       callerRestoredAfterAwait: boolean,
+ *       thrownErrorPreserved: boolean,
+ *       callerRestoredAfterThrow: boolean,
+ *       endedSpanActive: boolean,
+ *     },
  *     activeSpan: {
  *       beforeAwait: boolean,
  *       afterAwait: boolean,
@@ -295,6 +306,24 @@ test("bundled workerd Temporal is opt-in at an older compatibility date", async 
   }
 });
 
+test("bundled workerd Node version reporting follows its explicit compatibility flag", async () => {
+  const ns = uniqueNs("workerd-node-version");
+  for (const { name, flags, version } of [
+    { name: "default", flags: [], version: "22.23.4" },
+    { name: "node24", flags: ["nodejs_process_version_24"], version: "24.22.2" },
+    { name: "node22", flags: ["no_nodejs_process_version_24"], version: "22.23.4" },
+  ]) {
+    await deployAndPromote(ns, name, {
+      code: WORKERD_NODE_WORKER,
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags: ["nodejs_compat", ...flags],
+    });
+    assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, `/${name}/version`), 200), {
+      version: `v${version}`, node: version,
+    }, name);
+  }
+});
+
 test("bundled workerd response constructors enforce native defaults without flags", async () => {
   const ns = uniqueNs("workerd-response-defaults");
   await deployAndPromote(ns, "probe", {
@@ -394,6 +423,17 @@ test("bundled workerd tenant runtime defaults and execution context APIs", async
         stableAfterEnd: true,
         traceFlags: [0, 0],
         inboundTraceIgnored: true,
+      },
+      withActiveSpan: {
+        arguments: ["first", 2],
+        beforeAwait: true,
+        afterAwait: true,
+        promiseIdentityPreserved: true,
+        callerRestoredWhilePending: true,
+        callerRestoredAfterAwait: true,
+        thrownErrorPreserved: true,
+        callerRestoredAfterThrow: true,
+        endedSpanActive: true,
       },
       activeSpan: {
         beforeAwait: true,
@@ -765,6 +805,19 @@ test("bundled workerd compression preserves bytes and rejects unsafe buffers", a
     stableBufferModesRejected: true,
     zstdRoundtrip: true,
     utf16Slice: "AB\u20ac",
+  });
+});
+
+test("bundled workerd buffer transcoding preserves views and validates encodings", async () => {
+  const ns = uniqueNs("workerd-transcode");
+  await deployAndPromote(ns, "probe", { code: WORKERD_NODE_IO_WORKER, compatibilityDate: "2026-09-15" });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/transcode"), 200), {
+    utf16: "4100e9004c753dd800de",
+    roundtrip: "A\u00e9\u754c\ud83d\ude00",
+    latin1: "41c3a9",
+    source: "A\u00e9\u754c\ud83d\ude00",
+    invalidEncoding: "Error",
+    oddUtf16: "Error",
   });
 });
 

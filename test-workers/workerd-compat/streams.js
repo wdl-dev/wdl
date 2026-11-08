@@ -3,9 +3,21 @@
 // https://opensource.org/licenses/Apache-2.0
 // Narrowed from workerd's streams-terminal-state regression.
 
-import { deepStrictEqual, strictEqual } from "node:assert";
+import { deepStrictEqual, rejects, strictEqual } from "node:assert";
 
 let session;
+let abortedResponses = 0;
+
+export const abortDuringResponse = {
+  async test(_controller, env) {
+    await rejects(async () => {
+      const response = await env.SELF.fetch("https://streams.test/abort-response");
+      await response.arrayBuffer();
+    });
+    const healthy = await env.SELF.fetch("https://streams.test/abort-health");
+    deepStrictEqual(await healthy.json(), { abortedResponses: 1 });
+  },
+};
 
 export const terminalReentry = {
   async test(_controller, env) {
@@ -26,8 +38,21 @@ export const terminalReentry = {
 };
 
 export default {
-  async fetch(request) {
-    if (new URL(request.url).pathname === "/origin") {
+  async fetch(request, _env, ctx) {
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/abort-response") {
+      return new Response(new ReadableStream({
+        pull(controller) {
+          abortedResponses++;
+          controller.enqueue(Uint8Array.of(1));
+          ctx.abort("expected response-pump abort");
+          // A missed abort must complete the body and fail the rejection assertion.
+          controller.close();
+        },
+      }, { highWaterMark: 0 }));
+    }
+    if (pathname === "/abort-health") return Response.json({ abortedResponses });
+    if (pathname === "/origin") {
       let controller;
       const source = new ReadableStream({
         type: "bytes",

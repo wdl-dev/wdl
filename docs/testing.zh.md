@@ -17,6 +17,8 @@
 
 `npm run test` 是快速 pre-push gate：lint、两层 workerd typecheck、Node-only typecheck 和 unit tests。它不跑 Docker integration tests。
 
+三套 typecheck 命令使用原生 TypeScript 7 编译器。Source-discovery 测试使用 OXC 解析可执行的 import 和 re-export，不依赖编译器 API；注释和源码字符串不构成依赖边。
+
 两层 workerd typecheck 只使用 Workers ambient declarations 覆盖 runtime/control JavaScript tier。Node-only typecheck 覆盖 `tests/` 下的 JavaScript-like 测试源码（`.js`、`.cjs` 和 `.mjs`）以及 `scripts/` 下的维护脚本（`.js` 和 `.mjs`），并通过正常 module resolution 继续检查它们实际 import 的生产源码。JSON payload、Markdown、Cap'n Proto fixture 文件等非 JS fixture 不进入 TypeScript。
 
 ## 无用代码分析边界
@@ -104,7 +106,9 @@ node --test tests/integration/<file>.test.js
 
 R2 integration 还会在 workerd 容器内运行 `test-workers/r2-lifetime/config.capnp`。它通过原生 JSRPC 使用生产 R2 adapter 和 SigV4 client，以本地 service 模拟 S3，验证真实 header/body deadline、结果不确定的 PUT 失败、取消和慢消费者，也覆盖 Blob replay、25 MiB 边界，以及带有误导性原生 `expectedLength` 的 stream 必须在任何 backend write 前完成完整校验。本地 config preparation 会编译该 fixture；生产镜像不包含它。
 
-Worker-module integration 还会在容器内的独立 workerd 进程中运行 `test-workers/workerd-compat/config.capnp`，验证 console formatting exception，以及不强制 GC 时持续分配短命 native wrapper 的回收行为。它还会在不启用实验性流实现的情况下，验证跨已完成 request context 的 byte-stream 终态重入。这个仅供本地测试的 fixture 保护进程存活，不向生产 runtime 增加测试 hook，也不进入生产镜像。
+取消探针让 upstream GET 保持 idle，通过 tenant R2 facade 取消并检查 backend cancellation count；tee 只有在两个分支都取消后才释放 source。Service-binding integration 覆盖 idle readable 参数和返回值，以及 native writable 的 abort 和正常 close；KV integration 验证超限 stream PUT 会取消 source，且不会存入 value。
+
+Worker-module integration 还会在容器内的独立 workerd 进程中运行 `test-workers/workerd-compat/config.capnp`，验证 console formatting exception，以及不强制 GC 时持续分配短命 native wrapper 的回收行为。它还会在不启用实验性流实现的情况下，验证跨已完成 request context 的 byte-stream 终态重入；响应 body 开始被拉取后 abort 必须拒绝该读取，但后续请求仍应正常。这个仅供本地测试的 fixture 保护进程存活，不向生产 runtime 增加测试 hook，也不进入生产镜像。
 
 HTTP-to-RPC pipe probe 通过 TCP 读取运行中 user-runtime 的 `/_healthz`，检查完整传输与单次 close，包括 `preventClose` 路径。Integration runner 同时检查捕获的 native diagnostics：重复 stream `end()` 可能只记录内部错误，即使断言与进程退出状态都成功。
 

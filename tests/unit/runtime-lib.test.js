@@ -585,7 +585,7 @@ test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibil
 });
 
 test("bundleToWorkerCode: experimental workerd compatibility flags fail closed", () => {
-  for (const flag of ["unsafe_module", "auto_inject_python_workers"]) {
+  for (const flag of ["unsafe_module", "auto_inject_python_workers", "r2_binding_jsrpc"]) {
     assert.throws(
       () => bundleToWorkerCode(
         mkBundle(

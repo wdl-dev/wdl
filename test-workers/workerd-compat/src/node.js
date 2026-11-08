@@ -133,6 +133,7 @@ function boundSocketProbe() {
 export default {
   async fetch(request) {
     switch (new URL(request.url).pathname) {
+      case "/version": return Response.json({ version: process.version, node: process.versions.node });
       case "/capture": return Response.json(captureResource());
       case "/check": return Response.json(checkResource());
       case "/crypto": return Response.json(keyExportProbe());

@@ -56,6 +56,8 @@ workerd 提供 isolate、module evaluation、named entrypoint 和 JSRPC 机制�
 
 KV 是最直接的例子。Runtime 把 `KV` 导出成 named entrypoint，并用 `{ ns, id }` props 为每个 binding 实例化一个对象。`get`、`put`、`delete`、`list`、batch `get` 和 metadata 调用都进入 redis-proxy DB 1。redis-proxy 把每个 namespace/id 拆成 32 个 hash bucket，key 形如 `kvh:<ns>:<id>:b:<bucket>`；value field 是 `v:<key>`，metadata field 是 `m:<key>`。Put 使用 `HSET`/`HSETEX` 和 hash-field expiration，delete 同时删除 value 和 metadata field，list 用 opaque cursor 扫 bucket field，batch/list metadata 路径会在 base64 response encoding 前检查 aggregate raw value/metadata byte budget。
 
+WDL 不配置 workerd 自带的 native KV service；KV 存储仍由 redis-proxy 拥有，不使用 native Durable Object SQLite 或 blob storage。
+
 ## Binding Surface 合同
 
 KV 支持常用 `KVNamespace` 调用：`get`、batch `get`、`getWithMetadata`、batch `getWithMetadata`、`put`、`delete` 和 `list`。`get` 支持 text、JSON、arrayBuffer 和 stream 形状；batch read 支持 text 和 JSON。Runtime shim 在 proxy 前把 value 限制到 25 MiB，stream value 也用同一个 cap 读取。所有 KV 操作的 key 都在 redis-proxy 边界限制为 512 个 UTF-8 字节，包括 list prefix 和 batch read。`put()` 的 expiration 与 expiration-TTL 必须是正的 JavaScript safe integer；proxy 会原子执行带过期时间的 value-only 写入与 stale metadata 删除。redis-proxy 会在持久化 metadata 前使用 metadata reader 同一个 Rust JSON parser 校验其 bytes，不支持的 JSON 不会把后续 metadata read 变成永久 host failure。Serialized metadata JSON 在 Runtime Base64/header allocation 前以及 redis-proxy persistence 前都会限制为 1024 个 UTF-8 bytes；persisted read 会独立执行同一上限，并对超限的 legacy 或 repair-written metadata fail closed。`list()` 基于 Redis `HSCAN`，不是 Cloudflare 有序 B-tree：key 不排序，cursor 是 opaque WDL cursor，并发写可能乱序出现或被再次看到。`list_complete: false` 的页面可能少于 `limit` 个 key，甚至为空；调用方必须使用返回的 cursor 继续分页，直到 `list_complete` 为 true。`limit` 上限是 1000。`cacheTtl` 只是 API shape；没有 Cloudflare edge read cache 或 global eventual-consistency window。
@@ -147,6 +149,8 @@ Cold-load duration metric 使用 workerd request clock。`bundle_load_stage_dura
 - 从 WDL 的 2026-07-01 workerd pin 开始，Control 执行上游的 64 MiB dynamic worker code 上限和 1 MiB serialized dynamic env 上限。Control 在分配 version 前估算一次最终 WorkerCode，包含 runtime/do-runtime 注入的 wrapper/client modules 和 workflow import rewrite。Materialized D1 id、DO storage id、Workflow key 与 version identity 位于 host props，不进入 generated source，因此 WATCH retry 不重复该代码估算。Vars、namespace/worker secrets、runtime 注入的 binding env value 会在 Redis WATCH commit 和 secret mutation 路径里按 headroomed `workerLoader` env budget 做权威检查；Workflow identity 同样由该 env budget 覆盖。Commit 与 secret mutation 路径按各自实际要加载的 version 检查；deploy 和 namespace-secret mutation 使用其实际可加载 version，worker-secret mutation 还会在 WATCH/COPY bump 事务内重新检查 forced bump，确保 routing flip 前覆盖已分配的 bump version。估算以 JSON bytes 为基底，并对非 Latin-1 字符串补上 V8 two-byte string overhead，因此 ASCII 混 CJK 或 emoji 的 secret 不会绕过 control 后在 cold-load 才失败。
 - Bundled workerd 已恢复异步 response stream 的 `cancel()` callback：观测到客户端断开并丢弃 native response pump 时会调用它。清理仍是 best-effort，context teardown 或已没有 incoming request 时可能无法执行。Incoming `request.signal` 需要显式启用 `enable_request_signal`，也不保证断线信号贯穿所有中间层。Streaming/SSE worker 应保留独立 deadline、idle limit 或应用层 close path。
 - workerd 升级仍可能改变默认或 compatibility-flagged runtime surface；升级时要审 exposed surface，而不只审 loader/abort path。
+
+RPC readable cancellation 也会传播到 idle origin；receiver 丢弃未正常结束的 native writable 时会 abort 其 sink。因此 R2 GET 取消可在独立 deadline 到期前释放 host S3 reader，KV stream PUT 的大小拒绝可在任何 Redis write 前取消 producer。KV GET 在返回 stream 前已消费 backend value，因此取消不会撤销或中断已完成的读取。这些信号不替代既有 admission release、timer 或 request-context cleanup。
 
 ## 保护该模块的测试
 

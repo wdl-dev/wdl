@@ -34,7 +34,13 @@ WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary �
 
 `ctx.mapVirtualHost(fetcher, port)` 无需 experimental flag 即可使用。它将已持有的 native Fetcher 映射为供 socket client 使用的虚拟 host 和 port，不会授予新的网络可达性，也不会把 JavaScript binding facade 变成 TCP backend。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-10`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+启用完整 Node process surface 后，`process.version` 和 `process.versions.node` 默认报告 Node `22.23.4`。Non-experimental 的 `nodejs_process_version_24` opt-in 改为报告 `24.22.2`，对应 negative flag 为 `no_nodejs_process_version_24`。它的默认启用日期是 `2026-11-24`，超过 bundled maximum。这些只是 compatibility identifier，不代表单独的 Node runtime，也不保证完整 Node 24 API。WDL static worker 保持原有 flags。被识别的 `node:net` read/write failure 提供 Node 风格的 `code`、`errno` 和 `syscall` 字段；未被识别的 failure 保留原平台错误。公开的 `cloudflare:sockets` error surface 不变。
+
+`ctx.tracing.withActiveSpan(span, callback, ...args)` 在指定 active span 下调用 callback，并原样返回结果，包括保持 Promise identity。Callback 返回或抛错后恢复 caller 的 active span，异步 continuation 则保留所选 span。它不会结束该 span，也不会为 WDL 增加 span export。
+
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-15`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+
+`enable_request_signal` 与 `new_module_registry` 从 compatibility date `2026-11-17` 起默认启用，超过 bundled maximum。更早日期仍需显式 opt-in 才有 incoming request signal。WDL 继续拒绝显式 `new_module_registry`，legacy-registry wrapper identity 合同不变。
 
 `auto_grpc_convert` 是 non-experimental flag，可以作为 compatibility metadata 使用，但不会为 WDL 增加 Cloudflare edge gRPC conversion service。
 
@@ -67,6 +73,8 @@ Compatibility flag 是架构工具，不是统一禁止的 surface。WDL 按代�
 Bundled workerd 允许 `Fetcher` 和 Durable Object class stub 在不启用 experimental flag 的情况下作为 opaque JSRPC 参数传递。WDL 把持有这种 stub 视为 capability delegation：接收方可以按 stub 内由 host 写入的 caller properties 调用目标，但不能改写这些 properties，也不能取出隐藏的平台 backend capability。该委托可以在内存中保留。当前设计下，WDL 会在 deploy 和 retained-state load 时拒绝 `allow_irrevocable_stub_storage`，static host worker 也不会启用它，因为 tenant-visible persistent-stub surface 宽于 WDL 当前 binding contract。这是上述策略下的 scoped capability decision，不是反对平台 worker 使用 compatibility flag 的 blanket rule。
 
 已经连接的 `cloudflare:sockets` socket 也可以通过 service-binding JSRPC 传递。这会委托现有连接及其 readable/writable stream，但不会授予接收方任意建立新连接的权限；创建连接时仍受创建方的 outbound 限制。特权 worker 不得向不可信代码委托私网连接。
+
+在 EOF 前取消经 RPC 传递的 readable stream 会通知其 source，包括尚无数据的 idle source。丢弃未正常结束的 native writable stream 会 abort 其 sink，正常 close 不会；仅释放 reader lock 不等于取消。这些生命周期信号不会回滚已完成的操作，也不保证 context teardown 时仍能清理，WDL 保留独立 deadline 和预算。经过 native pump 转发时，取消原因可能被替换为通用的断线错误。
 
 ## Bindings 和存储
 
@@ -111,7 +119,7 @@ D1 和 Durable Object SQL `DEFAULT` expression 遵循 workerd 既有的 function
 | 上游 experimental 和 WDL 显式拒绝的 compatibility flags | Not supported | Tenant `compatibility_flags` 中属于上游 workerd `$experimental` 的 enable flag，以及 WDL 显式拒绝的 `allow_irrevocable_stub_storage`、`new_module_registry`、`no_rpc` 和 `streams_disable_constructors`，会在 deploy 和 runtime decode 阶段被拒绝。New Module Registry 虽已在上游毕业，但 WDL generated wrapper 是实际 dynamic-loader main module，无法保持 tenant `import.meta.main`；WDL runtime facade 还要求 Fetcher RPC 和标准 stream constructor。 |
 | Python Workers | Not supported | WDL 拒绝 Python module manifest，而不是让 workerd 在 cold-load 时失败。 |
 | Durable Object cross-script binding 和 migration rename/delete 语义 | Not supported | WDL DO class 仅支持 same-worker。Storage identity、owner routing 和 delete cleanup 由 WDL 管理，不兼容 Cloudflare migration 模型。 |
-| Durable Object snapshot 和用户配置的原生 retry | Not supported | 原生 `snapshot()` / `onNextSessionRestore()` 需要被拒绝的 `durable_object_snapshots` 或总开关 `experimental` flag，以及 embedder storage 实现。`cloudflare:durable-objects` 的 `retryable()` 标记不会启用 retry：对应 native userland gate 仍关闭，WDL 保留自己的 owner-fenced fetch/RPC 和 alarm 合同。 |
+| Durable Object snapshot 和用户配置的原生 retry | Not supported | 原生 `snapshot()` / `onNextSessionRestore()` 需要被拒绝的 `durable_object_snapshots` 或总开关 `experimental` flag，以及 embedder storage 实现。Native workerd 会识别 per-stub retry policy 和 `retryable()` 标记，但 WDL namespace facade 不转发 retry option，自定义 facet fetch/RPC dispatch 也不使用这些标记。WDL 保留自己的 owner-fenced fetch/RPC 和 alarm 合同。 |
 | Workflow `createBatch({ count, ... })` / `createBatch({ instances })` | Not supported | WDL 只接受非空数组形式，在 backend I/O 前拒绝对象 overload。原生 partial-success 对象结果不是 WDL 合同。 |
 | Cloudflare account API parity | Not supported | WDL 暴露自己的 CLI/control API。Cloudflare API 兼容不是目标。 |
 

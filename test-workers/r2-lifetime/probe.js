@@ -5,6 +5,41 @@ import { R2_OBJECT_MAX_BUFFER_BYTES } from "./_wdl-r2-utils.js";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function cancellationCount(env, key) {
+  const counts = await (await env.BACKEND.fetch("http://s3.test/cancellations")).json();
+  return counts[key] ?? 0;
+}
+
+async function waitForCancellation(env, key) {
+  const deadline = Date.now() + 5_000;
+  while (await cancellationCount(env, key) === 0 && Date.now() < deadline) await delay(10);
+  assert.equal(await cancellationCount(env, key), 1, key);
+}
+
+export const cancellation = {
+  async test(_controller, env) {
+    const bucket = new R2Bucket(env.BUCKET);
+    const result = await bucket.get("cancelled-single");
+    const reader = result.body.getReader();
+    assert.deepEqual(Array.from((await reader.read()).value), [7]);
+    await reader.cancel("reader finished");
+    reader.releaseLock();
+    await waitForCancellation(env, "cancelled-single");
+
+    const teed = await bucket.get("cancelled-tee");
+    const [left, right] = teed.body.tee();
+    const leftCancelled = left.cancel("left finished");
+    const rightReader = right.getReader();
+    assert.deepEqual(Array.from((await rightReader.read()).value), [7]);
+    assert.equal(await cancellationCount(env, "cancelled-tee"), 0);
+    await Promise.all([leftCancelled, rightReader.cancel("right finished")]);
+    rightReader.releaseLock();
+    await waitForCancellation(env, "cancelled-tee");
+    const next = await bucket.get("after-cancel");
+    assert.equal(await next.text(), "ok");
+  },
+};
+
 export const blobUpload = {
   async test(_controller, env) {
     const bucket = new R2Bucket(env.BUCKET);
@@ -83,10 +118,6 @@ export default {
         const bytes = new Uint8Array(await new Response(result.body).arrayBuffer());
         assert.equal(bytes.byteLength, 2 * 1024 * 1024);
         assert.ok(bytes.every((byte) => byte === 7));
-        const cancelled = await env.BUCKET.get("cancelled");
-        await cancelled.body.cancel();
-        const next = await env.BUCKET.get("after-cancel");
-        assert.equal(await new Response(next.body).text(), "ok");
       })(),
     ]);
   },

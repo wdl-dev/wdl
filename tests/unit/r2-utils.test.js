@@ -149,6 +149,7 @@ test("r2BufferSourceBytes uses intrinsic bounds for every BufferSource kind", ()
     get byteOffset() { return 0; }
     get byteLength() { return 0; }
   }
+  /** @extends {DataView<ArrayBuffer>} */
   class MisleadingView extends DataView {
     get buffer() { return new ArrayBuffer(0); }
     get byteOffset() { return 0; }

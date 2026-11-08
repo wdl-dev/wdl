@@ -19,6 +19,7 @@ setupIntegrationSuite();
 
 const MULTI_ENTRY_TARGET = `
 import { WorkerEntrypoint } from "cloudflare:workers";
+const cancellations = new Map();
 export class Auth extends WorkerEntrypoint {
   async verifyToken(token) { return { ok: true, who: "auth", token }; }
   async whoami() { return { entrypoint: "Auth" }; }
@@ -32,6 +33,22 @@ export default class extends WorkerEntrypoint {
   async echo(payload) { return payload; }
   async caller() { return { callerNs: this.ctx.props.callerNs ?? null }; }
   async boom() { throw new Error("target-said-no"); }
+  async cancelReadable(stream) { await stream.cancel("argument cancelled"); }
+  async abortWritable(stream) { await stream.getWriter().abort("writer aborted"); }
+  async closeWritable(stream) { await stream.getWriter().close(); }
+  cancellationCount(id) { return cancellations.get(id) ?? 0; }
+  openReadable(id) {
+    const finished = Promise.withResolvers();
+    const timer = setTimeout(() => finished.resolve(), 10_000);
+    this.ctx.waitUntil(finished.promise.finally(() => clearTimeout(timer)));
+    return new ReadableStream({
+      start(controller) { controller.enqueue(Uint8Array.of(7)); },
+      cancel() {
+        cancellations.set(id, (cancellations.get(id) ?? 0) + 1);
+        finished.resolve();
+      },
+    });
+  }
   async fetch() { return new Response(JSON.stringify({ via: "default-fetch" }), {
     headers: { "content-type": "application/json" } }); }
 }
@@ -57,6 +74,74 @@ test("arbitrary-method RPC: env.X.myMethod(args) dispatches with structured args
   const body = await readIntegrationJson(res, 200, "arbitrary-method RPC");
   assert.equal(body.a, 5);
   assert.deepEqual(body.b, { nested: { list: [1, 2, 3] }, s: "hi" });
+});
+
+test("service RPC propagates idle stream cancellation and native writable termination", async () => {
+  const ns = uniqueNs("sbstream");
+  await deployAndPromote(ns, "target", { code: MULTI_ENTRY_TARGET });
+  await deployAndPromote(ns, "caller", {
+    code: workerFetchCallerSource(`
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      async function waitFor(callback) {
+        const deadline = Date.now() + 5000;
+        while (!(await callback())) {
+          if (Date.now() >= deadline) throw new Error("RPC cancellation was not observed");
+          await delay(10);
+        }
+      }
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("RPC stream probe timed out")), 10_000);
+      });
+      try {
+        const result = await Promise.race([timeout, (async () => {
+          let argumentCancellations = 0;
+          const source = new ReadableStream({
+            cancel() { argumentCancellations++; },
+          });
+          await env.T.cancelReadable(source);
+          await waitFor(() => argumentCancellations === 1);
+
+          const returned = await env.T.openReadable("returned");
+          const returnedReader = returned.getReader();
+          const prefix = Array.from((await returnedReader.read()).value);
+          await returnedReader.cancel("result cancelled");
+          returnedReader.releaseLock();
+          await waitFor(async () => await env.T.cancellationCount("returned") === 1);
+
+          const aborted = new IdentityTransformStream();
+          const abortedReader = aborted.readable.getReader();
+          const abortOutcome = abortedReader.read().then(() => false, () => true);
+          await env.T.abortWritable(aborted.writable);
+          const nativeAbortObserved = await abortOutcome;
+          abortedReader.releaseLock();
+
+          const closed = new IdentityTransformStream();
+          const closedReader = closed.readable.getReader();
+          const closeOutcome = closedReader.read();
+          await env.T.closeWritable(closed.writable);
+          const nativeCloseDone = (await closeOutcome).done;
+          closedReader.releaseLock();
+          return { argumentCancellations, prefix,
+            returnedCancellations: await env.T.cancellationCount("returned"),
+            nativeAbortObserved, nativeCloseDone };
+        })()]);
+        return Response.json(result);
+      } finally {
+        clearTimeout(timer);
+      }
+    `),
+    bindings: { T: { type: "service", service: "target" } },
+  });
+  const result = await readIntegrationJson(await gatewayFetch(ns, "/caller/"), 200);
+  // Forwarding native pumps may replace the reason with a disconnection error.
+  assert.deepEqual(result, {
+    argumentCancellations: 1,
+    prefix: [7],
+    returnedCancellations: 1,
+    nativeAbortObserved: true,
+    nativeCloseDone: true,
+  });
 });
 
 test("named entrypoint: binding threads through to the picked class", async () => {

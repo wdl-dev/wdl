@@ -53,6 +53,8 @@ const {
   "shared-redis": sharedRedisUrl,
 }));
 
+/** @typedef {InstanceType<typeof WorkerEnvBudgetError>} WorkerEnvBudgetErrorInstance */
+
 const envelopeEnv = {
   SECRET_ENVELOPE_LOCAL_KEY_B64: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
   SECRET_ENVELOPE_KID: "local:test:secret-envelope:v1",
@@ -139,7 +141,7 @@ test("worker env budget reports deploy version separately from retained source v
     }),
     (err) => {
       if (!(err instanceof WorkerEnvBudgetError)) return false;
-      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      const budgetErr = /** @type {WorkerEnvBudgetErrorInstance} */ (err);
       assert.match(budgetErr.message, /demo\/api@v7/);
       assert.equal(budgetErr.details.version, "v7");
       assert.equal(Object.hasOwn(budgetErr.details, "source_version"), false);
@@ -173,7 +175,7 @@ test("worker env budget counts required caller secret copies in service binding 
     }),
     (err) => {
       assert.equal(err instanceof WorkerEnvBudgetError, true);
-      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      assert.equal(/** @type {WorkerEnvBudgetErrorInstance} */ (err).code, "worker_env_too_large");
       return true;
     }
   );
@@ -199,7 +201,7 @@ test("worker env budget accounts for V8 two-byte strings on mixed non-Latin-1 en
     }),
     (err) => {
       if (!(err instanceof WorkerEnvBudgetError)) return false;
-      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      const budgetErr = /** @type {WorkerEnvBudgetErrorInstance} */ (err);
       assert.equal(budgetErr.code, "worker_env_too_large");
       assert.equal(budgetErr.details.env_bytes, estimatedBytes);
       return true;
@@ -261,7 +263,7 @@ test("worker env budget counts configured assets CDN base", () => {
     }),
     (err) => {
       assert.equal(err instanceof WorkerEnvBudgetError, true);
-      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      assert.equal(/** @type {WorkerEnvBudgetErrorInstance} */ (err).code, "worker_env_too_large");
       return true;
     }
   );
@@ -371,7 +373,7 @@ test("worker env budget checks every retained worker version", async () => {
     }),
     (err) => {
       assert.equal(err instanceof WorkerEnvBudgetError, true);
-      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      assert.equal(/** @type {WorkerEnvBudgetErrorInstance} */ (err).code, "worker_env_too_large");
       return true;
     }
   );
@@ -417,7 +419,7 @@ test("worker env budget preserves worker identity across a shared metadata pipel
     }),
     (err) => {
       if (!(err instanceof WorkerEnvBudgetError)) return false;
-      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      const budgetErr = /** @type {WorkerEnvBudgetErrorInstance} */ (err);
       assert.equal(budgetErr.details.worker, "jobs");
       assert.equal(budgetErr.details.source_version, "v4");
       return true;
@@ -458,7 +460,7 @@ test("worker env budget checks retained-version binding env injections", async (
     }),
     (err) => {
       assert.equal(err instanceof WorkerEnvBudgetError, true);
-      assert.equal(/** @type {WorkerEnvBudgetError} */ (err).code, "worker_env_too_large");
+      assert.equal(/** @type {WorkerEnvBudgetErrorInstance} */ (err).code, "worker_env_too_large");
       return true;
     }
   );
@@ -513,7 +515,7 @@ test("worker env budget estimates a source bundle under a future version string"
     }),
     (err) => {
       assert.equal(err instanceof WorkerEnvBudgetError, true);
-      const budgetErr = /** @type {WorkerEnvBudgetError} */ (err);
+      const budgetErr = /** @type {WorkerEnvBudgetErrorInstance} */ (err);
       assert.equal(budgetErr.code, "worker_env_too_large");
       assert.match(budgetErr.message, /demo\/api@v1/);
       assert.equal(budgetErr.details.source_version, "v1");

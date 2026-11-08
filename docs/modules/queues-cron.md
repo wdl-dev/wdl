@@ -136,10 +136,12 @@ than retried by scheduler.
 
 Control and scheduler use the same DST expectations, pinned by
 `tests/fixtures/cron-parity.json`. A fixed local time inside a spring-forward gap
-runs at the first valid time after the gap on that day. A repeated fixed local
-time during fall-back runs once, at its first occurrence; interval patterns can
-run in both occurrences of the repeated hour. These timezone rules do not change
-the scheduler's no-catch-up policy for missed slots during an outage.
+runs at the first valid time after the gap on that day. A fixed time before the
+gap is not repeated when the gap ends. A repeated fixed local time during
+fall-back runs once, at its first occurrence; interval patterns can run in both
+occurrences of the repeated hour. These timezone rules do not change the
+scheduler's no-catch-up policy for missed slots during an outage. In the
+day-of-week field, both `0L` and `7L` select the last Sunday of the month.
 
 Scheduler streams both cron and queue Runtime responses through a fixed 256 KiB body
 limit before JSON parsing. A response over that limit is a cron dispatch error or a

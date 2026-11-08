@@ -52,7 +52,7 @@ const bindLogLevel = createLogLevelBinder();
  * @typedef {import("../../../shared/s3-cleanup-lifecycle.js").S3CleanupIntent} S3CleanupIntent
  * @typedef {Record<string, unknown> & { S3_ACCESS_KEY_ID: string, S3_SECRET_ACCESS_KEY: string, S3_ENDPOINT: string, S3_BUCKET: string, S3_REGION?: string, LOG_LEVEL?: unknown, S3_CLEANUP_DB: CleanupDb }} S3CleanupEnv
  * @typedef {{ prepare(sql: string): { bind(...values: unknown[]): { run(): Promise<{ meta?: { changes?: number } }>, first(): Promise<Record<string, unknown> | null>, all(): Promise<{ results?: Record<string, unknown>[] }> } } }} CleanupDb
- * @typedef {{ aws: SigV4Client, endpoint: string, bucket: string }} S3Client
+ * @typedef {{ aws: InstanceType<typeof SigV4Client>, endpoint: string, bucket: string }} S3Client
  * @typedef {{ prefixIndex: number, continuationToken: string | null, pageCount: number, deletedCount: number }} CleanupCheckpoint
  * @typedef {{ id: string, source: Record<string, unknown> | null, prefixes: string[] | null, state: string, attempts: number, createdAt: number, updatedAt: number, nextAttemptAt: number | null, lastError: string | null, checkpoint: CleanupCheckpoint | null }} CleanupTask
  */

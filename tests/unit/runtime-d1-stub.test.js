@@ -49,8 +49,6 @@ const {
   D1_QUERY_RESPONSE_CONTENT_TYPE,
   D1_QUERY_RESULT_HEADERS,
 } = await loadD1QueryWire();
-globalThis.__encodeD1QueryRequest = encodeD1QueryRequest;
-globalThis.__decodeD1QueryResponse = decodeD1QueryResponse;
 
 /**
  * @typedef {object} MetricIncrementEntry
@@ -70,8 +68,14 @@ const D1_RUNTIME_STUB_TEST_STATE = {
   logs: [],
 };
 
-/** @type {typeof globalThis & { __d1RuntimeStubTestState?: D1RuntimeStubTestState }} */
+/** @type {typeof globalThis & {
+ *   __d1RuntimeStubTestState?: D1RuntimeStubTestState,
+ *   __encodeD1QueryRequest?: typeof encodeD1QueryRequest,
+ *   __decodeD1QueryResponse?: typeof decodeD1QueryResponse,
+ * }} */
 const d1RuntimeStubGlobal = globalThis;
+d1RuntimeStubGlobal.__encodeD1QueryRequest = encodeD1QueryRequest;
+d1RuntimeStubGlobal.__decodeD1QueryResponse = decodeD1QueryResponse;
 d1RuntimeStubGlobal.__d1RuntimeStubTestState = D1_RUNTIME_STUB_TEST_STATE;
 
 const ownerHintCacheSource = readRepositoryFile("runtime/_wdl-owner-hint-cache.js");

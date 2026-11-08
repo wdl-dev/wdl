@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import { open } from "node:fs/promises";
-import { Buffer } from "node:buffer";
+import { Buffer, transcode } from "node:buffer";
 import { constants, createBrotliCompress, gzipSync, gunzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import { throws } from "node:assert";
 import { promisify } from "node:util";
@@ -160,6 +160,19 @@ async function streamsProbe() {
   return { piped: piped.join(""), batched, composed: await collected };
 }
 
+async function transcodeProbe() {
+  const source = Buffer.from("!A\u00e9\u754c\ud83d\ude00?").subarray(1, -1);
+  const utf16 = transcode(source, "utf8", "utf16le");
+  return {
+    utf16: utf16.toString("hex"),
+    roundtrip: transcode(utf16, "utf16le", "utf8").toString(),
+    latin1: transcode(Buffer.from([65, 233]), "latin1", "utf8").toString("hex"),
+    source: source.toString(),
+    invalidEncoding: await errorCode(() => transcode(source, "base64", "utf8")),
+    oddUtf16: await errorCode(() => transcode(Buffer.from([65]), "utf16le", "utf8")),
+  };
+}
+
 async function compressionProbe() {
   const input = Buffer.alloc(1024 * 1024 + 17);
   for (let index = 0; index < input.length; index += 1) input[index] = index % 251;
@@ -200,6 +213,16 @@ async function compressionProbe() {
     throws(() => zstdCompressSync(input, { params: { [parameter]: 1 } }),
       /Unsupported Zstd compression parameter/);
   }
+  // Deterministic noise keeps Zstd's final frame larger than its output buffer.
+  const noise = Buffer.alloc(128 * 1024);
+  let seed = 0x12345678;
+  for (let index = 0; index < noise.length; index += 1) {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    noise[index] = seed & 0xff;
+  }
+  const zstdEncoded = zstdCompressSync(noise);
   return {
     inputBytes: input.length,
     webRoundtrip: Buffer.from(decoded).equals(input),
@@ -209,7 +232,7 @@ async function compressionProbe() {
     cancelledAfterRead: firstBytes > 0,
     overlappingBuffersRejected: true,
     stableBufferModesRejected: true,
-    zstdRoundtrip: zstdDecompressSync(zstdCompressSync(input)).equals(input),
+    zstdRoundtrip: zstdEncoded.length > 40 * 1024 && zstdDecompressSync(zstdEncoded).equals(noise),
     utf16Slice: Buffer.from([0xff, 0x41, 0, 0x42, 0, 0xac, 0x20, 0xee])
       .subarray(1, 7).toString("utf16le"),
   };
@@ -300,6 +323,7 @@ export default {
     if (path === "/fs") return Response.json(await filesystemProbe());
     if (path === "/streams") return Response.json(await streamsProbe());
     if (path === "/compression") return Response.json(await compressionProbe());
+    if (path === "/transcode") return Response.json(await transcodeProbe());
     if (path === "/stream-failures") return Response.json(await streamFailuresProbe());
     return new Response(null, { status: 404 });
   },

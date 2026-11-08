@@ -38,7 +38,7 @@ const env = {
 };
 
 /**
- * @typedef {ReturnType<import("../helpers/mocks/fake-redis.js").createFakeRedis>} TestFakeRedis
+ * @typedef {ReturnType<typeof createFakeRedis>} TestFakeRedis
  */
 
 /** @type {WeakMap<TestFakeRedis, unknown[][]>} */

@@ -251,9 +251,18 @@ retries; WDL does not silently claim the new native retry-control contract.
 Stock workerd can retry replayable native host-actor fetches after retryable failures
 that are not marked as delivered, including internally marked transient failures
 as well as disconnects. Facet fetches do not support that native retry path.
-Native JSRPC retries and userland `retryable` dispatch remain disabled. Experimental
-per-stub `retry` options are not a WDL tenant API; none of these mechanisms replace
-WDL owner fences, uncertain-result handling, or Workflows alarm retries.
+Native workerd honors per-stub retry policies and `retryable()` markers without an
+autogate. WDL's namespace facade does not forward the `retry` option, and its custom
+facet fetch/RPC dispatch does not interpret those markers. Native actor JSRPC replay
+still requires a replay-memory reservation that the stock server does not provide.
+None of these mechanisms replaces WDL owner fences, uncertain-result handling, or
+Workflows alarm retries. The experimental root-actor `onHibernate` hook does not run
+on WDL's tenant facets.
+
+Each native actor, including a tenant facet, can hold at most 32,768 accepted or
+outgoing non-hibernatable WebSockets. This limit applies to all compatibility dates
+and is separate from the 32,768 hibernatable-socket limit. It does not replace
+Gateway's message-count and byte budgets or guarantee process-wide memory capacity.
 
 A pending delete row stores an internal fence token with `in_flight=1`. The in-flight bit
 is a same-service rolling reader fence: an older do-runtime does not understand the token

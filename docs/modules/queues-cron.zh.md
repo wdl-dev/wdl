@@ -72,7 +72,7 @@ Cron 使用 wall-clock 分钟 slot：
 
 因此 cron 语义是 Cloudflare 风格的 best-effort scheduled event：分钟对齐、不 catch-up replay、允许 overlap，用户 handler 失败只作为 outcome 上报，不由 scheduler 重试。Scheduler 会在 JSON parsing 前以固定 256 KiB body limit 流式读取 cron 和 Queue Runtime response；超限 response 会成为 cron dispatch error 或 Queue retry-all transport failure，但已经取得的 HTTP 413 仍是权威状态，即使 diagnostic body 无法保留，多消息 Queue batch 仍拆分，单消息仍按终态处理。Tenant error text 不能让 Scheduler 无界缓冲 response。
 
-Control 与 scheduler 使用相同的 DST 预期，由 `tests/fixtures/cron-parity.json` 固定。落入春季跳时区间的固定本地时间，会在当天跳时后的第一个有效时间触发；秋季回拨时重复出现的固定本地时间只在第一次出现时触发，interval pattern 则可以在重复小时的两次出现中触发。这些时区规则不改变 scheduler 对故障期间错过 slot 的不补发策略。
+Control 与 scheduler 使用相同的 DST 预期，由 `tests/fixtures/cron-parity.json` 固定。落入春季跳时区间的固定本地时间，会在当天跳时后的第一个有效时间触发；跳时区间之前的固定时间不会在跳时结束后重复触发。秋季回拨时重复出现的固定本地时间只在第一次出现时触发，interval pattern 则可以在重复小时的两次出现中触发。这些时区规则不改变 scheduler 对故障期间错过 slot 的不补发策略。Day-of-week 字段中的 `0L` 和 `7L` 均表示当月最后一个星期日。
 
 Queue dispatch 是 stream-driven，不是 wall-clock driven：
 
