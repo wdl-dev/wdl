@@ -2,9 +2,12 @@
 
 ## Unreleased
 
-- Updated workerd and Workers types to `1.20261108.1` and `5.20261108.1`, raising the maximum compatibility date to `2026-11-15`. Includes SQLite 3.54.1, native GC/response-cancellation fixes, Rust-backed buffer transcoding, and corrected Zstd final-frame flushing. No WDL state migration is required.
-- Native RPC stream cancellation now reaches the source, and abandoned native writable streams abort their sinks. Durable Objects now enforce a separate 32,768 non-hibernatable WebSocket limit for all compatibility dates. Added coverage for Node version reporting, `tracing.withActiveSpan()`, and binding-stream cleanup without changing static worker flags.
-- Refreshed Node tooling and Rust dependencies, including TypeScript `7.0.2`, OpenAI `7.53.0`, and Croner `4.0.3`. Fixed Scheduler handling of last-Sunday schedules and duplicate occurrences after a DST gap.
+## wdl.20261108.1 - 2026-11-09
+
+- Updated workerd and Workers types to `1.20261108.1` and `5.20261108.1`, raising the maximum compatibility date to `2026-11-15`. Includes SQLite 3.54.1, native GC/response-cancellation fixes, Rust-backed buffer transcoding, and Zstd flushing fixes. Static worker flags are unchanged; no WDL state migration is required.
+- Native RPC readable cancellation now reaches the source, and abandoned native writable streams abort their sinks. Durable Objects enforce a separate 32,768 non-hibernatable WebSocket limit across compatibility dates.
+- Added native `tracing.withActiveSpan()` and the `nodejs_process_version_24` version-reporting opt-in.
+- Refreshed Node tooling and Rust dependencies, including TypeScript `7.0.2`, the OpenAI SDK test dependency `7.53.0`, and Croner `4.0.3`. Fixed Scheduler last-Sunday scheduling and duplicate occurrences after a DST gap.
 
 ## wdl.20261103.1 - 2026-11-03
 
