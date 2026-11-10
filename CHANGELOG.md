@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## wdl.20261110.1 - 2026-11-11
+
 - Updated workerd and Workers types to `1.20261110.1` and `5.20261110.1`, raising the maximum compatibility date to `2026-11-17`. Includes module-loading crash fixes, stdio buffer safety, RPC cancellation cleanup, and Node BlockList and integer-conversion fixes. No WDL state migration is required.
 - Dynamic Workers explicitly retain the legacy module registry, including at newer compatibility dates, to preserve WDL wrapper semantics. Incoming `Request.signal` defaults on at compatibility date `2026-11-17`; static worker flags remain unchanged.
 - Refreshed the Distroless base image, OpenAI SDK and OXC test tooling, and Rust dependency patches.
