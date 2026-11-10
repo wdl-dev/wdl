@@ -159,7 +159,11 @@ an oversized stream PUT cancels its source without storing a value.
 Worker-module integration also runs `test-workers/workerd-compat/config.capnp` in
 a separate workerd process inside the container. It checks console formatting
 exceptions and sustained short-lived native-wrapper allocation without forced GC.
-It also verifies byte-stream terminal-state reentry across completed request
+It also checks cyclic module loading, recovery after failed linking, stdio buffer
+ownership during JavaScript reentry, Node BlockList address matching, and native
+integer conversion boundaries. These cases run in the isolated test process so a
+native crash fails the gate without taking down the shared integration runtime.
+The stream tests verify byte-stream terminal-state reentry across completed request
 contexts without enabling experimental stream implementations.
 An abort after a response body starts being pulled must reject that read while a
 subsequent request remains healthy.

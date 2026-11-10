@@ -121,12 +121,12 @@ function deepFreeze(obj) {
   return Object.freeze(obj);
 }
 
-// Loaded workers may declare an older compatibilityDate than the platform
-// workers. Keep enhanced error serialization as a floor only before the date
-// where workerd made it the default; workerd owns later flag compatibility.
+// The injected wrapper is the native main module, so date defaults must not
+// enable a registry that exposes the wrong tenant import.meta.main identity.
+// Older dates also need an explicit enhanced-error-serialization floor.
 /** @param {string} compatibilityDate */
-function platformFloorCompatFlags(compatibilityDate) {
-  const out = [];
+function platformRequiredCompatFlags(compatibilityDate) {
+  const out = ["legacy_module_registry"];
   if (compatibilityDate < ENHANCED_ERROR_SERIALIZATION_DEFAULT_DATE) {
     out.push(ENHANCED_ERROR_SERIALIZATION_FLAG);
   }
@@ -138,7 +138,7 @@ function platformFloorCompatFlags(compatibilityDate) {
 // control/bundle.js#validateCompatibilityFlags), so a throw here only fires
 // if Redis bytes got corrupted or were written out-of-band — a failure
 // loud enough to surface in cold-load logs, not one that silently drops
-// the user's flag list and leaves only the platform floor.
+// the user's flag list and leaves only the platform requirements.
 /** @param {unknown} userFlags @param {string} compatibilityDate */
 function mergeCompatFlags(userFlags, compatibilityDate) {
   if (userFlags !== undefined && !Array.isArray(userFlags)) {
@@ -171,7 +171,7 @@ function mergeCompatFlags(userFlags, compatibilityDate) {
     }
     out.push(f);
   }
-  for (const f of platformFloorCompatFlags(compatibilityDate)) {
+  for (const f of platformRequiredCompatFlags(compatibilityDate)) {
     if (!out.includes(f)) out.push(f);
   }
   return out;

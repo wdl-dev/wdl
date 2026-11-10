@@ -1012,8 +1012,9 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("offpeak_location_hint"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_zstd_snapshot"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("r2_binding_jsrpc"));
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("rpc_dispose_cancels_call"));
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("nodejs_process_version_24"), false);
-  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 42);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 43);
   // The new module registry graduated upstream, but WDL's generated wrapper is
   // the actual loader main module and cannot preserve tenant import.meta.main.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("new_module_registry"), false);

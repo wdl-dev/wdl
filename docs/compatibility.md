@@ -66,14 +66,25 @@ retain the selected span. It does not end the span or add span export to WDL.
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-11-15`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-11-17`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 
-`enable_request_signal` and `new_module_registry` default on from compatibility
-date `2026-11-17`, beyond the bundled maximum. Earlier dates still need an explicit
-request-signal opt-in. WDL continues to reject explicit `new_module_registry`;
-this does not change its legacy-registry wrapper identity contract.
+Incoming `Request.signal` defaults on from compatibility date `2026-11-17` unless
+`disable_request_signal` is set; earlier dates need `enable_request_signal`.
+This does not guarantee disconnect propagation through every proxy or wrapper.
+Although upstream also enables `new_module_registry` at that date, WDL explicitly
+adds `legacy_module_registry` to every loaded Worker without changing stored
+metadata. User-runtime, system-runtime and do-runtime share this policy because
+the injected main wrapper cannot preserve tenant `import.meta.main`. Explicit
+`new_module_registry` remains rejected; unrelated date defaults are unaffected.
+Native `import.meta.url`, `import.meta.resolve`, and `import.meta.main` are not
+provided at any supported date; build tools may still transform these expressions.
+
+Native integer conversions up to 32 bits truncate fractions before range checks,
+including at older compatibility dates. This affects APIs such as `Blob.slice()`;
+64-bit stream length conversions retain their existing checks. WDL does not add
+a separate integer-coercion layer.
 
 `auto_grpc_convert` is non-experimental and accepted as compatibility metadata. It
 does not add Cloudflare's edge gRPC conversion service to WDL.
@@ -115,8 +126,8 @@ and closure back to the source, including failures while canceling the source.
 sets `cacheForceRevalidate`. Synthesis from `cf.cacheTtl` is unchanged: forwarding a
 `no-store` request through another service-binding fetch can re-synthesize
 `cacheControl: "no-store"` from its `cacheTtl: -1`. This does not add a CDN cache to
-WDL. Both default on from compatibility date `2026-11-17`, beyond the bundled
-maximum; neither is enabled on WDL's static workers.
+WDL. Both default on from compatibility date `2026-11-17`; neither is enabled on
+WDL's static workers.
 
 Node.js TLS behavior follows the bundled workerd binary. Starting with WDL's
 2026-07-01 workerd pin, workers whose compatibility date is at least 2026-06-16 get

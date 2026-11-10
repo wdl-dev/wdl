@@ -212,8 +212,9 @@ output capture, or fixture loading.
   structured JSON log is the platform source of truth.
 - Bundled workerd restores async response-body `ReadableStream.cancel()` when an
   observed disconnect drops the native response pump. Cleanup is best-effort and can
-  be skipped during context teardown. `request.signal` requires `enable_request_signal`;
-  do not assume disconnect propagation through every proxy or wrapper. Keep independent
+  be skipped during context teardown. Incoming `request.signal` defaults on at
+  compatibility date `2026-11-17`; earlier dates require `enable_request_signal`.
+  Do not assume disconnect propagation through every proxy or wrapper. Keep independent
   stream deadlines and idle cleanup.
 - Forwarding WebSocket `101` responses requires preserving `response.webSocket`; use the
   shared response helper instead of wrapping with `new Response(body, init)`.

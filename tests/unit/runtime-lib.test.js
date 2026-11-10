@@ -466,7 +466,8 @@ test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date p
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, [...compatibilityFlags, "enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, [...compatibilityFlags, "legacy_module_registry", "enhanced_error_serialization"]);
+  assert.deepEqual(code.meta.compatibilityFlags, compatibilityFlags);
   assert.deepEqual(/** @type {any} */ (code.meta.bindings), { KV: { type: "kv", id: "x" } });
   assert.deepEqual(code.meta.vars, { G: "hi" });
   assert.ok(Object.isFrozen(code.meta), "meta must be frozen");
@@ -475,7 +476,7 @@ test("bundleToWorkerCode: compatibilityFlags merge user-declared with old-date p
   assert.throws(() => { /** @type {any} */ (code.meta.bindings).KV.id = "mutated"; }, TypeError);
 });
 
-test("bundleToWorkerCode: default compatibilityDate does not inject defaulted platform flag", () => {
+test("bundleToWorkerCode: default compatibilityDate requires only the legacy module registry", () => {
   const code = bundleToWorkerCode(
     mkBundle(
       { mainModule: "w.js", modules: { "w.js": { type: "module" } } },
@@ -483,10 +484,10 @@ test("bundleToWorkerCode: default compatibilityDate does not inject defaulted pl
     )
   );
   assert.equal(code.compatibilityDate, "2026-04-24");
-  assert.deepEqual(code.compatibilityFlags, []);
+  assert.deepEqual(code.compatibilityFlags, ["legacy_module_registry"]);
 });
 
-test("bundleToWorkerCode: old compatibilityDate absent flags → floor only", () => {
+test("bundleToWorkerCode: old compatibilityDate without flags uses platform requirements", () => {
   const code = bundleToWorkerCode(
     mkBundle(
       {
@@ -497,7 +498,7 @@ test("bundleToWorkerCode: old compatibilityDate absent flags → floor only", ()
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, ["legacy_module_registry", "enhanced_error_serialization"]);
 });
 
 test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup", () => {
@@ -512,7 +513,30 @@ test("bundleToWorkerCode: compatibilityFlags already includes floor → no dup",
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat"]);
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "nodejs_compat", "legacy_module_registry"]);
+});
+
+test("bundleToWorkerCode: legacy registry survives the native date default without overriding other flags", () => {
+  for (const compatibilityDate of ["2026-11-16", "2026-11-17", "2026-11-18"]) {
+    for (const explicitLegacy of [false, true]) {
+      const compatibilityFlags = ["enable_request_signal", ...(explicitLegacy ? ["legacy_module_registry"] : [])];
+      const code = bundleToWorkerCode(mkBundle({
+        mainModule: "w.js",
+        compatibilityDate,
+        compatibilityFlags,
+        modules: { "w.js": { type: "module" } },
+      }, { "w.js": enc.encode("export default {};") }));
+      assert.equal(code.compatibilityDate, compatibilityDate);
+      assert.deepEqual(code.compatibilityFlags, ["enable_request_signal", "legacy_module_registry"]);
+      assert.deepEqual(code.meta.compatibilityFlags, compatibilityFlags);
+    }
+    assert.throws(() => bundleToWorkerCode(mkBundle({
+      mainModule: "w.js",
+      compatibilityDate,
+      compatibilityFlags: ["legacy_module_registry", "new_module_registry"],
+      modules: { "w.js": { type: "module" } },
+    }, { "w.js": enc.encode("export default {};") })), /unsupported WDL flag "new_module_registry"/);
+  }
 });
 
 test("bundleToWorkerCode: legacy error serialization fails closed", () => {
@@ -552,7 +576,7 @@ test("bundleToWorkerCode: leaves redundant positive flags to workerd", () => {
       { "w.js": enc.encode("x") }
     )
   );
-  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization"]);
+  assert.deepEqual(code.compatibilityFlags, ["enhanced_error_serialization", "legacy_module_registry"]);
 });
 
 test("bundleToWorkerCode: throws (doesn't silently drop) on malformed compatibilityFlags in bundle bytes", () => {

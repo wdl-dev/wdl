@@ -38,9 +38,13 @@ WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary �
 
 `ctx.tracing.withActiveSpan(span, callback, ...args)` 在指定 active span 下调用 callback，并原样返回结果，包括保持 Promise identity。Callback 返回或抛错后恢复 caller 的 active span，异步 continuation 则保留所选 span。它不会结束该 span，也不会为 WDL 增加 span export。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-15`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-17`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
-`enable_request_signal` 与 `new_module_registry` 从 compatibility date `2026-11-17` 起默认启用，超过 bundled maximum。更早日期仍需显式 opt-in 才有 incoming request signal。WDL 继续拒绝显式 `new_module_registry`，legacy-registry wrapper identity 合同不变。
+Incoming `Request.signal` 从 compatibility date `2026-11-17` 起默认启用，除非设置 `disable_request_signal`；更早日期需要 `enable_request_signal`。这不保证断线信号贯穿所有 proxy 或 wrapper。虽然上游也在该日期默认启用 `new_module_registry`，WDL 会为每个 loaded Worker 显式加入 `legacy_module_registry`，而不修改持久化 metadata。User-runtime、system-runtime 和 do-runtime 共用这一策略，因为注入的 main wrapper 无法保持 tenant `import.meta.main`。显式 `new_module_registry` 仍会被拒绝；其他按日期启用的行为不受影响。
+
+在所有受支持的日期下，WDL 都不提供原生 `import.meta.url`、`import.meta.resolve` 和 `import.meta.main`；构建工具仍可转换这些表达式。
+
+原生不超过 32 位的整数转换会先截断小数再检查范围，较早 compatibility date 也如此，例如 `Blob.slice()`；64 位 stream length 转换保留原有检查。WDL 不另加整数转换模拟层。
 
 `auto_grpc_convert` 是 non-experimental flag，可以作为 compatibility metadata 使用，但不会为 WDL 增加 Cloudflare edge gRPC conversion service。
 
@@ -56,7 +60,7 @@ WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary �
 
 Bundled workerd 同时接受 compact WebAssembly import-section 编码，无需 opt-in。WDL 不改写 Wasm module 字节，直接转发给 workerd。
 
-`pipe_to_backward_propagation` 是允许使用的 non-experimental 显式 opt-in，使 `pipeTo()` 和 `pipeThrough()` 将 JavaScript-backed destination 的错误和关闭反向传播给 source，并处理取消 source 时的失败。`cache_option_preserves_cache_control` 同样允许使用，它阻止调用方 `fetch()` 的 cache option 自动生成 `cf.cacheControl`，而 `no-cache` 仍设置 `cacheForceRevalidate`。从 `cf.cacheTtl` 合成的行为不变：`no-store` 请求再经过一次 service-binding fetch 时，其 `cacheTtl: -1` 仍可能重新生成 `cacheControl: "no-store"`。这不会为 WDL 增加 CDN cache。两者都从 compatibility date `2026-11-17` 开始默认启用，超出当前 bundled maximum；WDL static worker 均未启用它们。
+`pipe_to_backward_propagation` 是允许使用的 non-experimental 显式 opt-in，使 `pipeTo()` 和 `pipeThrough()` 将 JavaScript-backed destination 的错误和关闭反向传播给 source，并处理取消 source 时的失败。`cache_option_preserves_cache_control` 同样允许使用，它阻止调用方 `fetch()` 的 cache option 自动生成 `cf.cacheControl`，而 `no-cache` 仍设置 `cacheForceRevalidate`。从 `cf.cacheTtl` 合成的行为不变：`no-store` 请求再经过一次 service-binding fetch 时，其 `cacheTtl: -1` 仍可能重新生成 `cacheControl: "no-store"`。这不会为 WDL 增加 CDN cache。两者都从 compatibility date `2026-11-17` 开始默认启用；WDL static worker 均未启用它们。
 
 Node.js TLS 行为跟随 bundled workerd binary。从 WDL 的 2026-07-01 workerd pin 开始，compatibility date 不早于 2026-06-16 的 worker 会拿到 `throw_on_not_implemented_tls_options`：`node:tls` 中尚未实现的选项（例如 `checkServerIdentity`）会从“静默忽略”变为抛 `ERR_OPTION_NOT_IMPLEMENTED`。另外，workerd 的 `servername` / expected-certificate-hostname 行为变化不受任何 compatibility flag 门控，因此所有日期的证书 hostname 校验都跟随 bundled workerd 行为。
 

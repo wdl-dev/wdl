@@ -110,6 +110,8 @@ R2 integration 还会在 workerd 容器内运行 `test-workers/r2-lifetime/confi
 
 Worker-module integration 还会在容器内的独立 workerd 进程中运行 `test-workers/workerd-compat/config.capnp`，验证 console formatting exception，以及不强制 GC 时持续分配短命 native wrapper 的回收行为。它还会在不启用实验性流实现的情况下，验证跨已完成 request context 的 byte-stream 终态重入；响应 body 开始被拉取后 abort 必须拒绝该读取，但后续请求仍应正常。这个仅供本地测试的 fixture 保护进程存活，不向生产 runtime 增加测试 hook，也不进入生产镜像。
 
+该 fixture 还验证循环 module loading、link 失败后的恢复、JavaScript 重入期间的 stdio buffer ownership、Node BlockList 地址匹配和原生整数转换边界。这些 case 都在独立测试进程运行，原生崩溃会使门禁失败，而不会终止共享的集成 runtime。
+
 HTTP-to-RPC pipe probe 通过 TCP 读取运行中 user-runtime 的 `/_healthz`，检查完整传输与单次 close，包括 `preventClose` 路径。Integration runner 同时检查捕获的 native diagnostics：重复 stream `end()` 可能只记录内部错误，即使断言与进程退出状态都成功。
 
 独立的 `gc` service 验证三类 native cycle 的回收：AsyncLocalStorage store 与 Response、背压状态下 TransformStream 的排队 chunk 与 stream，以及 ReadableStream.values iterator 与 reader。每个 case 创建 40 个小对象环，最多进行 12 轮强制 GC，每轮之间通过 scheduler 让出一个执行轮次，并断言所有注册对象均已完成 finalization。只有这个本地测试 config 启用 V8 的 `--expose-gc`：hook 对整个进程可见，但只有 `gc.js` 调用它。lifecycle 和 stream-reentry 测试不强制 GC，以保留依赖分配压力触发回收的验证。fixture 和 GC hook 均不进入生产 config 或镜像。

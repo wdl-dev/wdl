@@ -285,6 +285,39 @@ test("bundled workerd native Node boundaries preserve request isolation and key 
   });
 });
 
+test("dynamic workers preserve the legacy registry independently of incoming request signals", async () => {
+  const ns = uniqueNs("workerd-registry");
+  const handler = `export default {
+    fetch() {
+      return Response.json({
+        newRegistry: Cloudflare.compatibilityFlags.new_module_registry,
+        requestSignal: Cloudflare.compatibilityFlags.enable_request_signal,
+        main: typeof import.meta.main,
+        resolve: typeof import.meta.resolve,
+      });
+    },
+  };`;
+  for (const host of [false, true]) {
+    const name = host ? "host" : "plain";
+    await deployAndPromote(ns, name, {
+      code: host ? `
+        import { WorkflowEntrypoint } from "cloudflare:workers";
+        export class Flow extends WorkflowEntrypoint { async run() { return null; } }
+        ${handler}
+      ` : handler,
+      compatibilityDate: "2026-04-24",
+      compatibilityFlags: ["enable_request_signal"],
+      ...(host ? { workflows: [{ name: "flow", binding: "FLOW", className: "Flow" }] } : {}),
+    });
+    assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, `/${name}`), 200), {
+      newRegistry: false,
+      requestSignal: true,
+      main: "undefined",
+      resolve: "undefined",
+    }, name);
+  }
+});
+
 test("bundled workerd Temporal is opt-in at an older compatibility date", async () => {
   const ns = uniqueNs("workerd-temporal");
   for (const enabled of [false, true]) {

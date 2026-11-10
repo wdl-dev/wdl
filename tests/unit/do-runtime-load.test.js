@@ -231,7 +231,7 @@ test("DO runtime load: applies the host-binding wrapper before the alarm wrapper
   /** @type {any} */ (globalThis).__doLoadResponses.push(jsonLoadResponse(200, {
     bundle: {
       meta: { bindings: { ROOM: { type: "do", className: "Room" } } },
-      compatibilityFlags: ["nodejs_compat", "delete_all_deletes_alarm"],
+      compatibilityFlags: ["nodejs_compat", "legacy_module_registry", "delete_all_deletes_alarm"],
       mainModule: "worker.js",
       modules: {
         "worker.js": "export class Room {}; export default {};",
@@ -250,7 +250,7 @@ test("DO runtime load: applies the host-binding wrapper before the alarm wrapper
   }, invoke(), "req-wrapper");
 
   assert.equal(loaded.mainModule, "_wdl-do-runtime-wrapper.js");
-  assert.deepEqual(loaded.compatibilityFlags, ["nodejs_compat", "delete_all_preserves_alarm"]);
+  assert.deepEqual(loaded.compatibilityFlags, ["nodejs_compat", "legacy_module_registry", "delete_all_preserves_alarm"]);
   assert.doesNotMatch(loaded.modules["_wdl-wrapper.js"], /__wdlRunWithRequestContext/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /function withoutInternalEnv/);
   assert.match(loaded.modules["_wdl-do-alarm-shim.js"], /export function wrapDurableObjectClass/);

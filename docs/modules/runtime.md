@@ -505,7 +505,10 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
   `streams_disable_constructors` deny policy at deploy; runtime rejects retained metadata
   containing either class. The new module registry graduated upstream, but WDL keeps it
   disabled because every dynamic Worker runs through `_wdl-wrapper.js`, which would make
-  tenant `import.meta.main` false. WDL also requires Fetcher RPC for generated binding
+  tenant `import.meta.main` false. The shared loader explicitly adds
+  `legacy_module_registry` at every compatibility date, including dates where upstream
+  defaults to the new registry; stored metadata and other date defaults are unchanged.
+  This also applies to do-runtime. WDL requires Fetcher RPC for generated binding
   facades. Static host workers omit the irrevocable-stub flag. Disable-style flags such
   as `no_*` are not part of the experimental mirror unless WDL explicitly rejects them
   or upstream marks the enable flag itself experimental.
@@ -537,9 +540,11 @@ advancing request clock; it remains one aggregate rather than a per-stage CPU pr
 - Bundled workerd restores an async response stream's `cancel()` callback when an
   observed client disconnect drops the native response pump. Cleanup is still
   best-effort: context teardown or the absence of an incoming request can prevent it.
-  Incoming `request.signal` requires the `enable_request_signal` opt-in and is not a
-  guarantee of disconnect propagation through every intermediary. Streaming and SSE
-  workers should retain independent deadlines, idle limits, or application close paths.
+  Incoming `request.signal` defaults on from compatibility date `2026-11-17` unless
+  `disable_request_signal` is set; earlier dates require `enable_request_signal`.
+  It does not guarantee disconnect propagation through every intermediary. Streaming
+  and SSE workers should retain independent deadlines, idle limits, or application
+  close paths.
 - workerd upgrades can still change default or compatibility-flagged runtime
   surfaces; review the exposed surface, not only the loader/abort path.
 
