@@ -30,6 +30,7 @@ test("native workerd preserves isolate and stream lifetimes", () => {
 });
 
 const WORKERD_NODE_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node.js");
+const WORKERD_STDIO_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/stdio.js");
 const WORKERD_NODE_IO_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/node-io.js");
 const WORKERD_NATIVE_API_WORKER = readRepositoryModuleSource("test-workers/workerd-compat/src/native-apis.js");
 const WORKERD_COMPAT_WORKER = readFileSync(
@@ -266,6 +267,18 @@ test("bundled workerd native Node boundaries preserve request isolation and key 
     pkcs8Encrypted: true,
     sec1Unencrypted: true,
   });
+  assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/crypto-interop"), 200), {
+    importedDh: true,
+    lateTag: true,
+    badTagRejected: true,
+    missingTagRejected: true,
+    webCryptoRoundTrip: true,
+    exportRejected: true,
+    extractabilityRetained: true,
+    escalationRejected: true,
+    invalidSizeRejected: true,
+    algorithmMismatchRejected: true,
+  });
   assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe/url"), 200), {
     ascii: "xn--bcher-kva.example",
     unicode: "b\u00fccher.example",
@@ -315,6 +328,25 @@ test("dynamic workers preserve the legacy registry independently of incoming req
       main: "undefined",
       resolve: "undefined",
     }, name);
+  }
+});
+
+test("bundled workerd initializes stdio during a request and reuses it across requests", async () => {
+  const ns = uniqueNs("workerd-stdio");
+  await deployAndPromote(ns, "probe", {
+    code: WORKERD_STDIO_WORKER,
+    compatibilityDate: "2026-04-24",
+    compatibilityFlags: ["nodejs_compat"],
+  });
+  for (let i = 0; i < 2; i++) {
+    assert.deepEqual(await readIntegrationJson(await gatewayFetch(ns, "/probe"), 200), {
+      calls: i + 1,
+      reused: true,
+      moduleIdentity: true,
+      streamIdentity: true,
+      consoleIdentity: true,
+      customOutput: "custom-output\n",
+    });
   }
 });
 

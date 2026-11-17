@@ -43,6 +43,14 @@ network services retain outbound connection pools for their service lifetime;
 public-only and internal network services retain their distinct address filters.
 This does not change WDL's immutable loader identity or host-binding ownership.
 
+After an eligible reused-connection failure before response headers, the native
+HTTP client may resend bodyless idempotent requests, including empty PUT/DELETE
+and WebSocket GET upgrades. The first attempt may already have executed; no
+application frames are replayed by this handshake retry. JavaScript retry counts
+are not wire-attempt limits. WDL keeps its deadlines and owner fences, which do
+not deduplicate requests or roll back completed mutations. Ordinary DO/RPC and
+D1 internal envelopes use POST and are outside this added native resend policy.
+
 The upstream native `CodeCacheStore` is not connected by the standalone server;
 WDL does not gain a process-wide bundle compilation cache from it. Existing live
 Worker reuse and builtin module caches remain separate mechanisms.
@@ -51,8 +59,9 @@ workerd config wiring has a few non-obvious constraints:
 
 - `workerd serve` takes config and service binding arguments as separate argv tokens;
   do not collapse them into colon-separated strings.
-- Cap'n Proto `external = ... http` is for HTTP/TLS-capable peers. Plain TCP peers such
-  as Redis belong behind a `network` service and `connect()`.
+- Cap'n Proto `external.http` and `external.https` are for HTTP-capable peers;
+  `external.tcp` supports `connect()` but not `fetch()`. WDL's Redis connections
+  use a `network` service and `connect()`.
 - HTTPS fetches through a `network` service require
   `tlsOptions = (trustBrowserCas = true)`, and runtime images must include
   `ca-certificates`.
@@ -602,6 +611,9 @@ admission release paths, timers, or request-context cleanup.
   snapshots reject a stale initial upgrade and do not reload an inactive pinned version
   after backend loss; they do not add an active-version lookup to ordinary Runtime calls.
 - Workflow replay cache is advisory only.
+- A pending Promise whose creating request has ended rejects when awaited from
+  another request under the default cross-request resolution policy. This does
+  not make request-owned in-flight work safe to retain in global caches.
 - Runtime is not the control-plane authorization boundary.
 - Service-binding cold loads do not evict siblings, but their pinned historical versions
   can themselves be evicted by an active-version cold load. A later call reloads the

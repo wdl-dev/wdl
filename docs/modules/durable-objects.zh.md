@@ -92,6 +92,8 @@ Bundled workerd 为其 native alarm scheduler 暴露 `ctx.abort(reason, { retryA
 
 Stock workerd 可以在可重试失败未被标记为已投递时重试可重放的 native host-actor fetch，包括内部标记的 transient failure 和断线；facet fetch 不支持这条原生 retry 路径。Native workerd 无需 autogate 即会使用 per-stub retry policy 和 `retryable()` 标记。WDL namespace facade 不转发 `retry` option，自定义 facet fetch/RPC dispatch 也不解释这些标记。Native actor JSRPC replay 仍需要 stock server 未提供的 replay-memory reservation。这些机制都不替代 WDL owner fence、uncertain-result 处理或 Workflows alarm retry。Experimental 的 root-actor `onHibernate` hook 不会在 WDL tenant facet 上运行。
 
+独立的 [native HTTP resend 策略](runtime.zh.md#当前实现) 可能在收到 101 前向同一 endpoint 重发无 body 的 WebSocket handshake。Owner validation 仍会执行，但不会对 handshake 的副作用去重。
+
 每个 native actor（包括 tenant facet）最多持有 32,768 个已接受或出站的 non-hibernatable WebSocket。该限制适用于所有 compatibility date，与 32,768 个 hibernatable socket 的上限分别计数。它不替代 Gateway 的 message-count/byte budget，也不保证 process-wide memory capacity。
 
 Pending delete row 会保存 internal fence token 并固定 `in_flight=1`。该 bit 是 same-service rolling reader fence：旧 do-runtime 虽不识别 token prefix，但会跳过 `getAlarm()` repair，并因原 backend token 与 fence token 不匹配而忽略 delivery，因此不会把 tombstone 当作 tenant alarm 执行。混部期间旧 mutator 仍可能把 fence token 作为一次无效 backend CAS 发出；当前 reader 会在删除前统一解开该 token。
@@ -223,4 +225,6 @@ do-runtime 围绕 actor residency 选择、owner resolution、session-policy fen
 - Cached WebSocket owner 只有返回合法、可信的 same-shard hint 或窄的 pre-dispatch ownership race 时才可以触发一次 router rediscovery，因为最终 101 仍由新解析出的 owner endpoint 建立；broad ownership error、malformed/wrong-shard control response 或 router handoff 后的 direct failure 会返回净化后的终态 error。
 - 无可信标记的 ordinary fetch/RPC direct failure 只有安全的 `GET`/`HEAD` request 会 fall back 到 router。非幂等 method 和 RPC 在 outcome 可能未知时返回 `owner_unavailable`。只有明确、可信的 stale-owner/owner-race response 对所有 method 都可重试一次，因为它证明 dispatch 未进入 tenant code；ordinary invoke owner hint 会被净化而不会被跟随。
 - Renamed/deleted migrations 延后。
+- 租户可在自己创建的子 facet 回调父对象的原生 RPC handler 中调用 `abort()`、`delete()`，或用 `clone()` 覆盖该子 facet，终止整个 do-runtime 进程，并中断同进程承载的其他对象（[workerd #8285](https://github.com/cloudflare/workerd/pull/8285)）。WDL ownership fence 不会阻止这一原生 teardown 故障；普通 host-actor facet retirement 不走这条 callback 路径。
+- 在 `blockConcurrencyWhile()` 内创建的同一个原生 JSRPC callback 被重复调用时，可能在首次调用之后卡住；通过 WDL Service Binding 也可触发（[workerd #8423](https://github.com/cloudflare/workerd/pull/8423)）。这与 WDL 基于 JSON 的 DO RPC transport 是不同路径。
 - 长 handler 仍需要用户自己注意；lease-budget watchdog 保护平台 ownership 并缩窄 failover race，不 fence 每一次 storage call 或最终 SQLite commit point。

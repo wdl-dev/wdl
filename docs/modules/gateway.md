@@ -156,6 +156,9 @@ whether a route changed.
   an unobserved restart at the same sequence. Transport failures leave healthy sessions
   registered and retry with bounded backoff; malformed or regressed authoritative state
   closes affected sessions with `1011`.
+- Backend HTTP forwarding inherits the
+  [native resend policy](runtime.md#current-implementation); one Gateway fetch
+  can produce multiple wire attempts, including a bodyless WebSocket handshake.
 - Membership-gate reads restart when that gate changes. Once the gate is warm, a cold
   route or pattern projection read is fenced by its namespace or host plus the global
   reset generation: invalidation of that key or a full reset discards the reply, while

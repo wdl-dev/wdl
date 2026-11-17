@@ -1,5 +1,5 @@
 /*
- * The experimental flags mirror workerd v1.20261110.1
+ * The experimental flags mirror workerd v1.20261116.1
  * src/workerd/io/compatibility-date.capnp. Refresh them on every workerd pin
  * bump from an upstream source checkout:
  *
@@ -11,7 +11,7 @@
  * upstream mirror data.
  */
 
-export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20261110.1";
+export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS_SOURCE_VERSION = "1.20261116.1";
 
 // WDL supports one forward-only dynamic-worker compatibility surface. Static
 // platform workers keep their independently pinned workerd service dates.
@@ -50,6 +50,7 @@ export const WORKERD_EXPERIMENTAL_COMPAT_FLAGS = Object.freeze([
   "enable_web_file_system",
   "experimental",
   "expose_draining_reader",
+  "expose_serialization_test_class",
   "increase_websocket_message_size",
   "js_rpc",
   "kv_direct_binding",

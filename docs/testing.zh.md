@@ -112,6 +112,8 @@ Worker-module integration 还会在容器内的独立 workerd 进程中运行 `t
 
 该 fixture 还验证循环 module loading、link 失败后的恢复、JavaScript 重入期间的 stdio buffer ownership、Node BlockList 地址匹配和原生整数转换边界。这些 case 都在独立测试进程运行，原生崩溃会使门禁失败，而不会终止共享的集成 runtime。
 
+同一 fixture 验证 orphaned cross-request Promise 会在有界调用内拒绝，以及过长的 native exception metadata 在到达 WDL tail worker 前已经满足 UTF-8 和字节上限。部署的 Node probe 覆盖首次 request 的 stdio 初始化与复用、导入公钥的 DH、延迟设置 GCM tag，以及保留不可导出属性的 KeyObject-to-CryptoKey 转换和相应拒绝路径。
+
 HTTP-to-RPC pipe probe 通过 TCP 读取运行中 user-runtime 的 `/_healthz`，检查完整传输与单次 close，包括 `preventClose` 路径。Integration runner 同时检查捕获的 native diagnostics：重复 stream `end()` 可能只记录内部错误，即使断言与进程退出状态都成功。
 
 独立的 `gc` service 验证三类 native cycle 的回收：AsyncLocalStorage store 与 Response、背压状态下 TransformStream 的排队 chunk 与 stream，以及 ReadableStream.values iterator 与 reader。每个 case 创建 40 个小对象环，最多进行 12 轮强制 GC，每轮之间通过 scheduler 让出一个执行轮次，并断言所有注册对象均已完成 finalization。只有这个本地测试 config 启用 V8 的 `--expose-gc`：hook 对整个进程可见，但只有 `gc.js` 调用它。lifecycle 和 stream-reentry 测试不强制 GC，以保留依赖分配压力触发回收的验证。fixture 和 GC hook 均不进入生产 config 或镜像。

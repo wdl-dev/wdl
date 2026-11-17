@@ -1,5 +1,9 @@
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
-import { generateKeyPairSync } from "node:crypto";
+import {
+  createCipheriv, createDecipheriv, createPublicKey, createSecretKey,
+  diffieHellman, generateKeyPairSync, KeyObject,
+} from "node:crypto";
+import { Buffer } from "node:buffer";
 import { BoundSocket } from "node:net";
 import { domainToASCII, domainToUnicode, format } from "node:url";
 
@@ -65,6 +69,49 @@ function urlProbe() {
     ipv6: format(new URL("http://user:pass@[::1]:8080/path?q=1#part"), {
       auth: false, fragment: false, search: false, unicode: true,
     }),
+  };
+}
+
+async function cryptoInteropProbe() {
+  const first = generateKeyPairSync("x25519");
+  const second = generateKeyPairSync("x25519");
+  const imported = createPublicKey({
+    key: second.publicKey.export({ type: "spki", format: "der" }),
+    type: "spki", format: "der",
+  });
+  const key = Buffer.alloc(16, 7);
+  const iv = Buffer.alloc(12, 2);
+  const cipher = createCipheriv("aes-128-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(Buffer.from("crypto-probe")), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const decipher = createDecipheriv("aes-128-gcm", key, iv);
+  const decrypted = decipher.update(encrypted);
+  decipher.setAuthTag(tag);
+  const wrongTag = Buffer.from(tag);
+  wrongTag[0] ^= 1;
+  const bad = createDecipheriv("aes-128-gcm", key, iv);
+  bad.update(encrypted);
+  bad.setAuthTag(wrongTag);
+  const missing = createDecipheriv("aes-128-gcm", key, iv);
+  missing.update(encrypted);
+  const converted = createSecretKey(key).toCryptoKey("AES-GCM", false, ["encrypt", "decrypt"]);
+  const sealed = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, converted, key);
+  const roundTrip = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, converted, sealed);
+  const original = await crypto.subtle.importKey("raw", key, "AES-GCM", false, ["encrypt"]);
+  const wrapped = KeyObject.from(original);
+  return {
+    importedDh: diffieHellman({ privateKey: first.privateKey, publicKey: imported }).equals(
+      diffieHellman({ privateKey: second.privateKey, publicKey: first.publicKey })
+    ),
+    lateTag: Buffer.concat([decrypted, decipher.final()]).toString() === "crypto-probe",
+    badTagRejected: !attempt(() => bad.final()).returned,
+    missingTagRejected: !attempt(() => missing.final()).returned,
+    webCryptoRoundTrip: Buffer.from(roundTrip).equals(key),
+    exportRejected: await crypto.subtle.exportKey("raw", converted).then(() => false, () => true),
+    extractabilityRetained: wrapped.toCryptoKey("AES-GCM", false, ["encrypt"]).extractable === false,
+    escalationRejected: !attempt(() => wrapped.toCryptoKey("AES-GCM", true, ["encrypt"])).returned,
+    invalidSizeRejected: !attempt(() => createSecretKey(Buffer.alloc(15)).toCryptoKey("AES-GCM", false, ["encrypt"])).returned,
+    algorithmMismatchRejected: !attempt(() => generateKeyPairSync("ed25519").publicKey.toCryptoKey("X25519", true, [])).returned,
   };
 }
 
@@ -137,6 +184,7 @@ export default {
       case "/capture": return Response.json(captureResource());
       case "/check": return Response.json(checkResource());
       case "/crypto": return Response.json(keyExportProbe());
+      case "/crypto-interop": return Response.json(await cryptoInteropProbe());
       case "/url": return Response.json(urlProbe());
       case "/rejection-reentry": return Response.json(await rejectionReentryProbe());
       case "/bound-socket": return Response.json(boundSocketProbe());

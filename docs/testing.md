@@ -163,6 +163,11 @@ It also checks cyclic module loading, recovery after failed linking, stdio buffe
 ownership during JavaScript reentry, Node BlockList address matching, and native
 integer conversion boundaries. These cases run in the isolated test process so a
 native crash fails the gate without taking down the shared integration runtime.
+The same fixture checks that an orphaned cross-request Promise rejects within a
+bounded call and that long native exception metadata is UTF-8-safe and bounded
+before reaching WDL's tail worker. Deployed Node probes cover first-request stdio
+initialization and reuse, imported-key DH, late GCM tags and non-extractable
+KeyObject-to-CryptoKey conversion, including rejection paths.
 The stream tests verify byte-stream terminal-state reentry across completed request
 contexts without enabling experimental stream implementations.
 An abort after a response body starts being pulled must reject that read while a

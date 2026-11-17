@@ -849,7 +849,7 @@ test("prepareBundle: compatibilityFlags preserved", () => {
 });
 
 test("prepareBundle: experimental workerd compatibility flags are rejected", () => {
-  for (const flag of ["unsafe_module", "wasm_memory_discard", "auto_inject_python_workers", "r2_binding_jsrpc"]) {
+  for (const flag of ["unsafe_module", "wasm_memory_discard", "auto_inject_python_workers", "r2_binding_jsrpc", "expose_serialization_test_class"]) {
     assert.throws(
       () => prepareBundle(
         "w.js",
@@ -1013,8 +1013,9 @@ test("workerd experimental compat flag mirror matches pinned workerd source vers
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("python_zstd_snapshot"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("r2_binding_jsrpc"));
   assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("rpc_dispose_cancels_call"));
+  assert.ok(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("expose_serialization_test_class"));
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("nodejs_process_version_24"), false);
-  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 43);
+  assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.length, 44);
   // The new module registry graduated upstream, but WDL's generated wrapper is
   // the actual loader main module and cannot preserve tenant import.meta.main.
   assert.equal(WORKERD_EXPERIMENTAL_COMPAT_FLAGS.includes("new_module_registry"), false);

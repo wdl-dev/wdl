@@ -19,10 +19,10 @@ the offline [migration procedure](#deployment--rollout-notes).
 
 workerd provides the user-code execution environment, `WorkflowEntrypoint` class shape,
 module loading, and the ability for runtime to invoke a workflow class in a frozen
-worker version. It does not provide a reusable local workflow engine for WDL. WDL
-supplies the engine externally in workflows: DB 2 persistence, leases, ready/due
-scheduling, step replay, sleeps, waits, event buffering, lifecycle transitions,
-retention, and dispatch back into runtime.
+worker version. Its optional bundled SQLite/actor-backed workflow engine is not
+configured by WDL. WDL supplies its own engine externally in workflows: DB 2
+persistence, leases, ready/due scheduling, step replay, sleeps, waits, event
+buffering, lifecycle transitions, retention, and dispatch back into runtime.
 
 ## Interfaces
 

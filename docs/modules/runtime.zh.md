@@ -28,7 +28,9 @@ Bundled workerd 使用 Rust server 和 Hyper transport。External HTTP 与 netwo
 
 Standalone server 尚未接入上游原生 `CodeCacheStore`，WDL 不会因此自动获得进程级 bundle 编译缓存。现有 live Worker 复用和 builtin module cache 是独立机制。
 
-workerd config wiring 有几条不明显的约束：`workerd serve` 的 config 和 service binding 参数必须是分开的 argv token，不要压成 colon-separated string；Cap'n Proto 的 `external = ... http` 用于 HTTP/TLS-capable peer，Redis 这种 plain TCP peer 应放在 `network` service 后面并用 `connect()`；通过 `network` service 做 HTTPS fetch 需要 `tlsOptions = (trustBrowserCas = true)`，runtime image 必须带 `ca-certificates`；workerd embedded module name 不能包含 `..`，因此共享嵌入模块使用 `shared-redis` 这类扁平名称；部分 support source 会以两个名字使用：普通 workerd module 用 capnp 扁平名，generated loaded-worker module 用 `.js` module 名；例如 D1 会把同一个 `shared/d1-data-field.js` 源码作为 `shared-d1-data-field` 提供给 workerd module，同时作为 `_wdl-d1-data-field.js` 注入 tenant WorkerCode；user-runtime 同时保留 platform plumbing 用的 `internal-network` 和 tenant outbound 用的 `public-network`，loaded user worker 只能拿到 `public-network`，platform wrapper 保留自己需要的 private reach。
+workerd config wiring 有几条不明显的约束：`workerd serve` 的 config 和 service binding 参数必须是分开的 argv token，不要压成 colon-separated string；Cap'n Proto 的 `external.http` 和 `external.https` 用于 HTTP-capable peer，`external.tcp` 支持 `connect()` 但不支持 `fetch()`；WDL 的 Redis 连接使用 `network` service 和 `connect()`；通过 `network` service 做 HTTPS fetch 需要 `tlsOptions = (trustBrowserCas = true)`，runtime image 必须带 `ca-certificates`；workerd embedded module name 不能包含 `..`，因此共享嵌入模块使用 `shared-redis` 这类扁平名称；部分 support source 会以两个名字使用：普通 workerd module 用 capnp 扁平名，generated loaded-worker module 用 `.js` module 名；例如 D1 会把同一个 `shared/d1-data-field.js` 源码作为 `shared-d1-data-field` 提供给 workerd module，同时作为 `_wdl-d1-data-field.js` 注入 tenant WorkerCode；user-runtime 同时保留 platform plumbing 用的 `internal-network` 和 tenant outbound 用的 `public-network`，loaded user worker 只能拿到 `public-network`，platform wrapper 保留自己需要的 private reach。
+
+复用连接在 response headers 返回前发生符合条件的失败时，native HTTP client 可能重发无 body 的幂等请求，包括空 PUT/DELETE 和 WebSocket GET upgrade。第一次请求可能已经执行；该 handshake retry 不会重放应用 frame。JavaScript retry count 不等于 wire attempt 上限。WDL 保留 deadline 和 owner fence，但它们不提供请求去重，也不能回滚已完成的 mutation。普通 DO/RPC 和 D1 内部 envelope 使用 POST，不属于这条新增 native resend 策略。
 
 ## 接口
 
@@ -190,5 +192,6 @@ RPC readable cancellation 也会传播到 idle origin；receiver 丢弃未正常
 - Active-version cold-load eviction 是异步的，不会与 Gateway cache invalidation 协调。在 bundled workerd 中，`abortIsolate()` 会移除 historical loader cache entry，但不会中止 outstanding call。已经 admission 到前一个 immutable version 的 request 或 WebSocket 可以自然 drain，并让该 isolate 保留到调用结束或 container recycle。
 - Promote 的短暂 stale-route window 内，普通请求仍可能被 admission 到前一个 immutable version 并在那里完成。Gateway WebSocket lifecycle snapshot 会拒绝 stale initial upgrade，并在 backend loss 后避免重新加载已非 active 的 pinned version；它不会给普通 Runtime call 增加 active-version lookup。
 - Workflow replay cache 只是 advisory。
+- 默认跨请求 resolution 策略下，创建者 request 已结束的 pending Promise 在另一个 request 中被 await 时会拒绝；这不代表 request-owned 的在途工作可以安全保存在全局 cache 中。
 - Runtime 不是 control-plane 授权边界。
 - Service-binding cold load 不会驱逐 sibling，但它固定的 historical version 自身仍可能被 active-version cold load 驱逐。后续调用在 cache miss 时重新加载同一个 pinned version。Sibling eviction 未覆盖的 isolate 保留和 process memory 增长仍以 container recycle 作为 backstop。

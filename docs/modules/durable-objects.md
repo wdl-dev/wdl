@@ -259,6 +259,10 @@ None of these mechanisms replaces WDL owner fences, uncertain-result handling, o
 Workflows alarm retries. The experimental root-actor `onHibernate` hook does not run
 on WDL's tenant facets.
 
+The separate [native HTTP resend policy](runtime.md#current-implementation) can
+repeat a bodyless WebSocket handshake to the same endpoint before a 101 arrives.
+Owner validation still runs, but does not deduplicate handshake side effects.
+
 Each native actor, including a tenant facet, can hold at most 32,768 accepted or
 outgoing non-hibernatable WebSockets. This limit applies to all compatibility dates
 and is separate from the 32,768 hibernatable-socket limit. It does not replace
@@ -706,6 +710,16 @@ logs do not measure the lifetime of backend WebSocket recovery after the initial
   remains retryable once for every method because it proves dispatch did not reach tenant
   code. Ordinary invoke owner hints are sanitized rather than followed.
 - Renamed/deleted migrations are deferred.
+- Tenant code can terminate the entire do-runtime process by aborting or deleting
+  a child facet, or cloning over it, during that child's RPC callback into its
+  parent ([workerd #8285](https://github.com/cloudflare/workerd/pull/8285)).
+  This can interrupt other objects hosted in the same process. WDL ownership
+  fences do not prevent this native teardown failure; ordinary host-actor facet
+  retirement does not use this callback path.
+- Repeated invocation of the same native JSRPC callback created inside
+  `blockConcurrencyWhile()` can stall after its first call, including through WDL
+  Service Bindings ([workerd #8423](https://github.com/cloudflare/workerd/pull/8423)).
+  This is distinct from WDL's JSON-based DO RPC transport.
 - Long handlers still need user-level care; lease-budget watchdogs protect platform
   ownership and narrow failover races, not every storage call or the final SQLite
   commit point.

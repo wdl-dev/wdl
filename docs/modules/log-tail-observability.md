@@ -284,6 +284,12 @@ Tail identity rules:
   generic JavaScript own-key discovery independent of object width.
 - For Wasm bundles opting into `wasm_source_url_support`, forwarded console
   `error_info[].stack` retains named `.wasm` module frames.
+- Native uncaught-exception conversion caps each name/message/stack metadata
+  field at 4 KiB of UTF-8 and may omit the stack. This happens before WDL's own
+  tail budgets; it is not a cap on every console argument or JS-visible Error.
+- A custom `node:console` Console formats values into its supplied streams.
+  Its output need not reach native tail or preserve severity and positional
+  `error_info`; ordinary global/default console keeps the native logging path.
 - `scheduled()` and `queue()` console events are JSRPC events without a request shape, so
   their console tail events omit `worker_id` and `request_id` instead of inventing
   `"unknown"` sentinels.

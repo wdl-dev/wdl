@@ -57,6 +57,13 @@ Recognized `node:net` read/write failures expose Node-style `code`, `errno`, and
 `syscall` fields; unrecognized failures retain the platform error. The public
 `cloudflare:sockets` error surface is unchanged.
 
+Node stdio initializes on first access. A known upstream limitation can leave
+`process.stdout`, `process.stderr`, and dependent Node modules unusable in that
+isolate if descriptor fields on `Object.prototype` interfere with initialization,
+even after the properties are removed. Ordinary initialization and later request
+reuse work; WDL does not add an eager-initialization workaround. See
+[workerd #8430](https://github.com/cloudflare/workerd/issues/8430).
+
 `ctx.tracing.withActiveSpan(span, callback, ...args)` invokes the callback with
 that active span and preserves its result, including Promise identity. It restores
 the caller's active span after return or throw, while asynchronous continuations
@@ -66,7 +73,7 @@ retain the selected span. It does not end the span or add span export to WDL.
 opt-in at an earlier valid compatibility date. It keeps listener exceptions from
 escaping `dispatchEvent()` and allows later listeners to run. Its default is tied to
 a worker compatibility date of `2026-09-15` or later unless explicitly disabled, not
-the calendar date. The bundled workerd maximum is `2026-11-17`; Control also rejects
+the calendar date. The bundled workerd maximum is `2026-11-23`; Control also rejects
 dates later than the current UTC date. WDL's static workers use `2026-04-24` without
 this opt-in.
 

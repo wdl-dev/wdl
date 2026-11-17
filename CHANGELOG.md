@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Updated workerd and Workers types to `1.20261116.1` and `5.20261116.1`, raising the maximum compatibility date to `2026-11-23`. Includes native lifecycle, stream, SQLite and DOMException fixes, Node crypto/Console updates, and already-due timer scheduling fixes. Static worker dates are unchanged; upstream autogate retirements take effect without configuration changes. No WDL state migration is required.
+- Native HTTP can resend bodyless idempotent requests after eligible reused-connection failures, including WebSocket handshakes. Uncaught-exception metadata is bounded to 4 KiB per field and may omit stacks; existing WDL deadlines and ownership fences remain necessary.
+- Refreshed the Distroless base image and compatible Node/Rust dependencies, and removed the redundant ESLint Minimatch override. Control rejects malformed cron expressions while retaining the default JS/Rust DST policy.
+- Known upstream process-crash risk: a tenant can terminate the entire do-runtime process, affecting other objects hosted there, by aborting or deleting a child facet, or cloning over it, during a child-to-parent RPC callback ([#8285](https://github.com/cloudflare/workerd/pull/8285)).
+- Other known upstream limitations affect lazy stdio initialization ([#8430](https://github.com/cloudflare/workerd/issues/8430)) and repeated callbacks under `blockConcurrencyWhile()` ([#8423](https://github.com/cloudflare/workerd/pull/8423)).
+
 ## wdl.20261110.1 - 2026-11-11
 
 - Updated workerd and Workers types to `1.20261110.1` and `5.20261110.1`, raising the maximum compatibility date to `2026-11-17`. Includes module-loading crash fixes, stdio buffer safety, RPC cancellation cleanup, and Node BlockList and integer-conversion fixes. No WDL state migration is required.

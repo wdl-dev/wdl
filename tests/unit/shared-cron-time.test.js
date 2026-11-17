@@ -33,6 +33,9 @@ test("nextFireMs: respects timezone — 09:00 Shanghai = 01:00 UTC", () => {
 
 test("nextFireMs: invalid cron throws", () => {
   assert.throws(() => nextFireMs("not a cron", "UTC", 0));
+  for (const expression of ["3* * * * *", "0 0 * JANFEB *", "0 0 * * SUN6"]) {
+    assert.throws(() => nextFireMs(expression, "UTC", 0), expression);
+  }
 });
 
 test("nextFireMs: rejects non-5-field cron syntax", () => {

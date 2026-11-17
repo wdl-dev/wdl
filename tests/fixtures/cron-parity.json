@@ -21,6 +21,13 @@
     "nextMs": 1780876800000
   },
   {
+    "id": "dow-dom-or-past-month-end",
+    "cron": "0 0 31 2 MON",
+    "timezone": "UTC",
+    "afterMs": 1769904000000,
+    "nextMs": 1769990400000
+  },
+  {
     "id": "new-york-spring-forward",
     "cron": "30 2 * * *",
     "timezone": "America/New_York",

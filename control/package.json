@@ -6,6 +6,6 @@
   "type": "module",
   "dependencies": {
     "@wdl-dev/aws-sigv4": "^3.0.4",
-    "croner": "^11.0.0"
+    "croner": "^11.0.1"
   }
 }

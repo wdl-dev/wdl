@@ -219,7 +219,8 @@ output capture, or fixture loading.
 - Forwarding WebSocket `101` responses requires preserving `response.webSocket`; use the
   shared response helper instead of wrapping with `new Response(body, init)`.
 - workerd/capnp wiring traps apply to every tier's `*.capnp`, not just runtime: `workerd
-  serve` takes space-separated args; `external` is HTTP/TLS-only so plain TCP (Redis) goes
-  through a `network` service plus `connect()`; `network` HTTPS fetch needs `tlsOptions =
+  serve` takes space-separated args; `external.http`/`https` serve HTTP peers and
+  `external.tcp` supports only `connect()`; WDL Redis uses a `network` service plus
+  `connect()`; `network` HTTPS fetch needs `tlsOptions =
   (trustBrowserCas = true)` plus `ca-certificates`; embedded module names cannot contain
   `..` (hence flat names like `shared-redis`). Details live in `docs/modules/runtime.md`.

@@ -3,10 +3,23 @@
 // https://opensource.org/licenses/Apache-2.0
 // Narrowed from workerd's streams-terminal-state regression.
 
-import { deepStrictEqual, rejects, strictEqual } from "node:assert";
+import { deepStrictEqual, match, rejects, strictEqual } from "node:assert";
 
 let session;
 let abortedResponses = 0;
+let orphaned;
+
+export const orphanedPromiseRejects = {
+  async test(_controller, env) {
+    const signal = AbortSignal.timeout(5_000);
+    await rejects(
+      env.SELF.fetch("https://streams.test/orphan-create", { signal }),
+      /hung and would never generate a response/
+    );
+    const response = await env.SELF.fetch("https://streams.test/orphan-await", { signal });
+    match(await response.text(), /created by a request that has since ended/);
+  },
+};
 
 export const abortDuringResponse = {
   async test(_controller, env) {
@@ -40,6 +53,22 @@ export const terminalReentry = {
 export default {
   async fetch(request, _env, ctx) {
     const pathname = new URL(request.url).pathname;
+    if (pathname === "/orphan-create") {
+      orphaned = Promise.withResolvers();
+      await new Promise(() => {});
+      throw new Error("unreachable orphan creator");
+    }
+    if (pathname === "/orphan-await") {
+      try {
+        orphaned.resolve("late");
+        await orphaned.promise;
+        return new Response("unexpected settlement");
+      } catch (error) {
+        return new Response(error.message);
+      } finally {
+        orphaned = undefined;
+      }
+    }
     if (pathname === "/abort-response") {
       return new Response(new ReadableStream({
         pull(controller) {

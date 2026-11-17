@@ -15,6 +15,25 @@ const config :Workerd.Config = (
       modules = [(name = "streams.js", esModule = embed "streams.js")],
       bindings = [(name = "SELF", service = "streams")],
     )),
+    (name = "diagnostics", worker = (
+      compatibilityDate = "2026-04-24",
+      compatibilityFlags = ["nodejs_compat"],
+      modules = [(name = "diagnostics.js", esModule = embed "diagnostics.js")],
+      bindings = [
+        (name = "SOURCE", service = "diagnostics-source"),
+        (name = "SINK", service = "diagnostics-sink"),
+      ],
+    )),
+    (name = "diagnostics-source", worker = (
+      compatibilityDate = "2026-04-24",
+      # A 4096-byte cut splits this three-byte UTF-8 code point.
+      modules = [(name = "worker.js", esModule = "export default { fetch() { const error = new Error('\\u4e2d'.repeat(2000)); error.name = 'LongError'; throw error; } };")],
+      tails = ["diagnostics-sink"],
+    )),
+    (name = "diagnostics-sink", worker = (
+      compatibilityDate = "2026-04-24",
+      modules = [(name = "worker.js", esModule = "let last = null; export default { tail(events) { last = events[0]?.exceptions[0] ?? null; }, fetch() { return Response.json(last); } };")],
+    )),
     (name = "gc", worker = (
       compatibilityDate = "2026-04-24",
       compatibilityFlags = ["nodejs_compat"],

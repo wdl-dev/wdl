@@ -36,9 +36,11 @@ WDL 通常不保证 workerd 降级。作为 best-effort 参考，目标 binary �
 
 启用完整 Node process surface 后，`process.version` 和 `process.versions.node` 默认报告 Node `22.23.4`。Non-experimental 的 `nodejs_process_version_24` opt-in 改为报告 `24.22.2`，对应 negative flag 为 `no_nodejs_process_version_24`。它的默认启用日期是 `2026-11-24`，超过 bundled maximum。这些只是 compatibility identifier，不代表单独的 Node runtime，也不保证完整 Node 24 API。WDL static worker 保持原有 flags。被识别的 `node:net` read/write failure 提供 Node 风格的 `code`、`errno` 和 `syscall` 字段；未被识别的 failure 保留原平台错误。公开的 `cloudflare:sockets` error surface 不变。
 
+Node stdio 在首次访问时初始化。已知上游限制：如果 `Object.prototype` 上的 descriptor 字段干扰了初始化，该 isolate 的 `process.stdout`、`process.stderr` 及依赖它们的 Node module 可能持续不可用，即使随后移除这些 property。普通初始化及后续 request 复用正常；WDL 不增加 eager-initialization workaround。见 [workerd #8430](https://github.com/cloudflare/workerd/issues/8430)。
+
 `ctx.tracing.withActiveSpan(span, callback, ...args)` 在指定 active span 下调用 callback，并原样返回结果，包括保持 Promise identity。Callback 返回或抛错后恢复 caller 的 active span，异步 continuation 则保留所选 span。它不会结束该 span，也不会为 WDL 增加 span export。
 
-`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-17`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
+`spec_compliant_dispatch_exceptions` 是 non-experimental flag，允许在较早的合法 compatibility date 下显式 opt-in。它阻止 listener exception 从 `dispatchEvent()` 传播给 caller，并允许后续 listener 继续执行。它在 worker compatibility date 不早于 `2026-09-15` 且未显式禁用时默认启用，不会随日历日期自动切换。Bundled workerd 的最大日期是 `2026-11-23`；Control 仍拒绝晚于当前 UTC 日期的值。WDL static worker 使用 `2026-04-24`，未显式启用该 flag。
 
 Incoming `Request.signal` 从 compatibility date `2026-11-17` 起默认启用，除非设置 `disable_request_signal`；更早日期需要 `enable_request_signal`。这不保证断线信号贯穿所有 proxy 或 wrapper。虽然上游也在该日期默认启用 `new_module_registry`，WDL 会为每个 loaded Worker 显式加入 `legacy_module_registry`，而不修改持久化 metadata。User-runtime、system-runtime 和 do-runtime 共用这一策略，因为注入的 main wrapper 无法保持 tenant `import.meta.main`。显式 `new_module_registry` 仍会被拒绝；其他按日期启用的行为不受影响。
 

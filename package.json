@@ -36,24 +36,19 @@
     "build:third-party-licenses": "node scripts/generate-third-party-license-bundles.mjs"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20261110.1",
+    "@cloudflare/workers-types": "5.20261116.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
-    "eslint": "^10.14.0",
+    "eslint": "^10.15.0",
     "globals": "^17.14.0",
-    "knip": "^6.44.2",
-    "openai": "^7.55.0",
+    "knip": "^6.45.1",
+    "openai": "^7.57.0",
     "oxc-parser": "^0.158.0",
     "typescript": "^7.0.2",
     "yaml": "^2.9.1"
   },
   "dependencies": {
-    "workerd": "1.20261110.1"
-  },
-  "overrides": {
-    "eslint": {
-      "minimatch": "^11.0.5"
-    }
+    "workerd": "1.20261116.1"
   }
 }

@@ -10,7 +10,7 @@ Workflow engine 是独立 axum 服务 `workflows`，监听 `:9120`。Runtime 通
 
 新部署在专用 DB 2 中初始化 schema 3。现有 schema-2 state 需要执行离线[迁移流程](#部署--rollout-注意事项)。
 
-workerd 提供用户代码执行环境、`WorkflowEntrypoint` class shape、module loading，以及让 runtime 在 frozen worker version 中调用 workflow class 的能力。它不提供 WDL 可复用的本地 workflow engine。WDL 在 workflows 中补齐外部 engine：DB 2 persistence、leases、ready/due scheduling、step replay、sleep、wait、event buffering、lifecycle transition、retention，以及 dispatch 回 runtime。
+workerd 提供用户代码执行环境、`WorkflowEntrypoint` class shape、module loading，以及让 runtime 在 frozen worker version 中调用 workflow class 的能力。其可选的 bundled SQLite/actor-backed workflow engine 未被 WDL 配置或使用。WDL 在 workflows 中提供自有的外部 engine：DB 2 persistence、leases、ready/due scheduling、step replay、sleep、wait、event buffering、lifecycle transition、retention，以及 dispatch 回 runtime。
 
 ## 接口
 
